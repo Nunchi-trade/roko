@@ -4611,6 +4611,7 @@ dependencies = [
  "chrono",
  "parking_lot",
  "proptest",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",
@@ -4668,7 +4669,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "roko-index"
+version = "0.1.0"
+dependencies = [
+ "roko-core",
+ "serde",
+]
+
+[[package]]
+name = "roko-lang-go"
+version = "0.1.0"
+dependencies = [
+ "roko-core",
+]
+
+[[package]]
 name = "roko-lang-rust"
+version = "0.1.0"
+dependencies = [
+ "roko-core",
+]
+
+[[package]]
+name = "roko-lang-typescript"
 version = "0.1.0"
 dependencies = [
  "roko-core",
@@ -4734,6 +4757,7 @@ dependencies = [
  "roko-fs",
  "roko-gate",
  "roko-std",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

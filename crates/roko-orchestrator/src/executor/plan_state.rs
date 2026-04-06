@@ -89,14 +89,14 @@ impl PlanState {
 
     /// Create a plan state with a given priority.
     #[must_use]
-    pub fn with_priority(mut self, priority: u32) -> Self {
+    pub const fn with_priority(mut self, priority: u32) -> Self {
         self.priority = priority;
         self
     }
 
     /// Whether this plan is in a terminal phase.
     #[must_use]
-    pub fn is_terminal(&self) -> bool {
+    pub const fn is_terminal(&self) -> bool {
         self.current_phase.is_terminal()
     }
 

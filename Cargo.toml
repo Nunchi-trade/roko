@@ -50,6 +50,11 @@ members = [
 
     # Language providers — trait impls for specific languages/build systems.
     "crates/roko-lang-rust",
+    "crates/roko-lang-typescript",
+    "crates/roko-lang-go",
+
+    # Code intelligence — parsing, symbol graphs, PageRank, HDC fingerprints.
+    "crates/roko-index",
 ]
 
 [workspace.package]

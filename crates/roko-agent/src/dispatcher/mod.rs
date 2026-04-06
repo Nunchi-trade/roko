@@ -37,7 +37,9 @@ use roko_core::tool::{
 };
 use roko_core::ToolPermissions;
 
+pub mod alert;
 pub mod cancel;
+pub mod emit_metric;
 pub mod parallel;
 pub mod timeout;
 pub mod truncate;

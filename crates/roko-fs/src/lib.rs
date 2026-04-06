@@ -21,17 +21,21 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod archive;
+pub mod bandit;
 pub mod file_substrate;
 pub mod gc;
 pub mod layout;
 pub mod metrics;
+pub mod pointer;
 pub mod tool_audit;
 pub mod trace_sink;
 
 pub use archive::{ArchiveEntry, ArchiveKind, ArchiveStats, Archiver};
+pub use bandit::{ArmSnapshot, BanditStore};
 pub use file_substrate::FileSubstrate;
 pub use gc::{GcCandidate, GcEngine, GcReport, RetentionPolicy};
 pub use layout::{LayoutVersion, RokoLayout};
 pub use metrics::MetricsLog;
+pub use pointer::PointerStore;
 pub use tool_audit::ToolAuditLog;
 pub use trace_sink::JsonlTraceSink;

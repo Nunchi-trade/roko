@@ -132,6 +132,7 @@ pub fn build_for_rung(
     let wd = working_dir.into();
     let mut builder = GateEnvBuilder::new(wd).build_system_name(build_system);
 
+    #[allow(clippy::match_same_arms)]
     match rung {
         // Compile: suppress warnings for speed
         0 => {
@@ -153,7 +154,7 @@ pub fn build_for_rung(
                 builder = builder.env("RUST_BACKTRACE", "1");
             }
         }
-        // Symbol: no special env
+        // Symbol: no special env (intentionally distinct from wildcard)
         3 => {}
         // Generated test: backtraces + no retries
         4 => {

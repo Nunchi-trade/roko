@@ -8,6 +8,7 @@
 pub mod health;
 pub mod histograms;
 pub mod metrics;
+pub mod scrub;
 
 pub use health::{
     AlwaysUpProbe, DegradedReason, HealthStatus, NamedProbe, Probe, ProbeRegistry, ReadinessStatus,
@@ -17,3 +18,4 @@ pub use metrics::{
     register_standard_metrics, Counter, Gauge, LabelSet, MetricKind, MetricRegistry,
     MetricSnapshot, STANDARD_METRICS,
 };
+pub use scrub::{LogScrubber, REDACTED};

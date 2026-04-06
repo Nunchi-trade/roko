@@ -18,6 +18,15 @@
 //! [`ErrorKind`] discriminant suitable for metrics labels and retry tables.
 //! [`RokoError::is_transient`] provides a first-cut classification for retry
 //! policies (see §41.6 for the full policy layer).
+//!
+//! # Submodules
+//!
+//! - [`retry`] — [`RetryPolicy`](retry::RetryPolicy) and
+//!   [`CircuitBreaker`](retry::CircuitBreaker) for transient-error handling.
+//! - [`rpc`] — JSON-RPC error code mapping via [`RpcError`](rpc::RpcError).
+
+pub mod retry;
+pub mod rpc;
 
 use thiserror::Error;
 
@@ -282,18 +291,38 @@ impl RokoError {
 
     /// Indicates whether retrying this error could succeed.
     ///
-    /// This is a stub for §41.6 — the full retry policy table lives in
-    /// `roko-core::error::retry::RetryPolicy` (separate wave).
-    ///
     /// - **Transient**: `Timeout`, `RateLimited`, `Io`, `Transport`, `Chain`,
-    ///   `Substrate`, `Agent` — retry may succeed under a backoff policy.
+    ///   `Substrate`, `Agent` -- retry may succeed under a backoff policy.
     /// - **Permanent**: `NotFound`, `Rejected`, `Invalid`, `User`,
     ///   `PermissionDenied`, `BudgetExceeded`, `BodyEncode`, `BodyDecode`,
-    ///   `Json`, `Config`, `Planning`, `Gate`, `Tool`, `Cancelled` — retry
+    ///   `Json`, `Config`, `Planning`, `Gate`, `Tool`, `Cancelled` -- retry
     ///   will not succeed without caller intervention.
     #[must_use]
     pub const fn is_transient(&self) -> bool {
         self.kind().is_transient()
+    }
+
+    /// Returns the recommended retry policy for this error, or `None` if the
+    /// error is permanent and should not be retried.
+    ///
+    /// Transient errors each get a tuned policy:
+    /// - `RateLimited`: aggressive backoff (longer base, 5 attempts)
+    /// - `Timeout`: moderate backoff (3 attempts)
+    /// - `Io`, `Transport`, `Chain`, `Substrate`: standard backoff (3 attempts)
+    /// - `Agent`: standard backoff (3 attempts)
+    #[must_use]
+    pub fn retry_policy(&self) -> Option<retry::RetryPolicy> {
+        self.kind().retry_policy()
+    }
+
+    /// Maps this error to a log level string suitable for structured logging.
+    ///
+    /// - `"error"` -- permanent failures, permission denied, budget exceeded
+    /// - `"warn"`  -- transient failures that will be retried
+    /// - `"info"`  -- cancellations, user errors (expected flow)
+    #[must_use]
+    pub const fn log_level(&self) -> &'static str {
+        self.kind().log_level()
     }
 }
 
@@ -384,7 +413,7 @@ impl ErrorKind {
     #[must_use]
     pub const fn is_transient(&self) -> bool {
         match self {
-            // Transient — retry under backoff may succeed.
+            // Transient -- retry under backoff may succeed.
             Self::Timeout
             | Self::RateLimited
             | Self::Io
@@ -393,7 +422,7 @@ impl ErrorKind {
             | Self::Substrate
             | Self::Agent => true,
 
-            // Permanent — caller must change input or give up.
+            // Permanent -- caller must change input or give up.
             Self::NotFound
             | Self::Rejected
             | Self::Invalid
@@ -408,6 +437,57 @@ impl ErrorKind {
             | Self::Gate
             | Self::Tool
             | Self::Cancelled => false,
+        }
+    }
+
+    /// Returns the recommended [`RetryPolicy`](retry::RetryPolicy) for this
+    /// error kind, or `None` if the error is permanent.
+    #[must_use]
+    pub fn retry_policy(&self) -> Option<retry::RetryPolicy> {
+        if !self.is_transient() {
+            return None;
+        }
+        Some(match self {
+            // Rate limits: longer base delay, more attempts.
+            Self::RateLimited => retry::RetryPolicy::new(5, 2_000, 60_000, true),
+            // Timeouts: moderate.
+            Self::Timeout => retry::RetryPolicy::new(3, 1_000, 30_000, true),
+            // Everything else transient: standard.
+            _ => retry::RetryPolicy::new(3, 500, 15_000, true),
+        })
+    }
+
+    /// Maps this error kind to a log level string.
+    ///
+    /// - `"error"` -- permanent failures that indicate bugs or hard stops
+    /// - `"warn"`  -- transient failures that will be retried
+    /// - `"info"`  -- cancellations, user errors (expected control flow)
+    #[must_use]
+    pub const fn log_level(&self) -> &'static str {
+        match self {
+            // Expected flow -- user-initiated or informational.
+            Self::Cancelled | Self::User => "info",
+            // Transient -- will be retried, warn operators.
+            Self::Timeout
+            | Self::RateLimited
+            | Self::Io
+            | Self::Transport
+            | Self::Chain
+            | Self::Substrate
+            | Self::Agent => "warn",
+            // Permanent -- something is wrong and needs attention.
+            Self::NotFound
+            | Self::Rejected
+            | Self::Invalid
+            | Self::PermissionDenied
+            | Self::BudgetExceeded
+            | Self::BodyEncode
+            | Self::BodyDecode
+            | Self::Json
+            | Self::Config
+            | Self::Planning
+            | Self::Gate
+            | Self::Tool => "error",
         }
     }
 }
@@ -644,5 +724,103 @@ mod tests {
             let back: ErrorKind = serde_json::from_str(&s).expect("deserialize");
             assert_eq!(back, kind);
         }
+    }
+
+    // §41.6 — retry_policy tests
+
+    #[test]
+    fn retry_policy_returns_none_for_permanent_errors() {
+        let permanent = [
+            ErrorKind::NotFound,
+            ErrorKind::Rejected,
+            ErrorKind::Invalid,
+            ErrorKind::User,
+            ErrorKind::PermissionDenied,
+            ErrorKind::BudgetExceeded,
+            ErrorKind::BodyEncode,
+            ErrorKind::BodyDecode,
+            ErrorKind::Json,
+            ErrorKind::Config,
+            ErrorKind::Planning,
+            ErrorKind::Gate,
+            ErrorKind::Tool,
+            ErrorKind::Cancelled,
+        ];
+        for kind in permanent {
+            assert!(
+                kind.retry_policy().is_none(),
+                "{kind:?} should have no retry policy"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_policy_returns_some_for_transient_errors() {
+        let transient = [
+            ErrorKind::Timeout,
+            ErrorKind::RateLimited,
+            ErrorKind::Io,
+            ErrorKind::Transport,
+            ErrorKind::Chain,
+            ErrorKind::Substrate,
+            ErrorKind::Agent,
+        ];
+        for kind in transient {
+            assert!(
+                kind.retry_policy().is_some(),
+                "{kind:?} should have a retry policy"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_policy_rate_limited_has_higher_attempts() {
+        let rl = ErrorKind::RateLimited.retry_policy().unwrap();
+        let io = ErrorKind::Io.retry_policy().unwrap();
+        assert!(
+            rl.max_attempts() > io.max_attempts(),
+            "rate-limited should have more attempts than io"
+        );
+    }
+
+    #[test]
+    fn retry_policy_via_roko_error() {
+        let err = RokoError::timeout("compile", 5_000);
+        assert!(err.retry_policy().is_some());
+
+        let err = RokoError::user("bad input");
+        assert!(err.retry_policy().is_none());
+    }
+
+    // §41.6 — log_level tests
+
+    #[test]
+    fn log_level_classifies_all_kinds() {
+        // Transient -> warn
+        assert_eq!(ErrorKind::Timeout.log_level(), "warn");
+        assert_eq!(ErrorKind::RateLimited.log_level(), "warn");
+        assert_eq!(ErrorKind::Io.log_level(), "warn");
+        assert_eq!(ErrorKind::Transport.log_level(), "warn");
+        assert_eq!(ErrorKind::Chain.log_level(), "warn");
+        assert_eq!(ErrorKind::Substrate.log_level(), "warn");
+        assert_eq!(ErrorKind::Agent.log_level(), "warn");
+
+        // Expected flow -> info
+        assert_eq!(ErrorKind::Cancelled.log_level(), "info");
+        assert_eq!(ErrorKind::User.log_level(), "info");
+
+        // Permanent -> error
+        assert_eq!(ErrorKind::NotFound.log_level(), "error");
+        assert_eq!(ErrorKind::Rejected.log_level(), "error");
+        assert_eq!(ErrorKind::BudgetExceeded.log_level(), "error");
+        assert_eq!(ErrorKind::Config.log_level(), "error");
+        assert_eq!(ErrorKind::PermissionDenied.log_level(), "error");
+    }
+
+    #[test]
+    fn log_level_via_roko_error() {
+        assert_eq!(RokoError::timeout("x", 1).log_level(), "warn");
+        assert_eq!(RokoError::cancelled("ctrl-c").log_level(), "info");
+        assert_eq!(RokoError::invalid("bad").log_level(), "error");
     }
 }

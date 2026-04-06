@@ -14,24 +14,32 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+pub mod artifact_store;
 pub mod clippy_gate;
 pub mod compile;
 pub mod diff_gate;
+pub mod env_builder;
+pub mod feedback;
 pub mod gate_pipeline;
 pub mod generated_test_gate;
 pub mod integration_gate;
 pub mod llm_judge_gate;
 pub mod payload;
 pub mod property_test_gate;
+pub mod ratchet;
 pub mod rung_selector;
 pub mod shell;
 pub mod symbol_gate;
 pub mod test_gate;
 pub mod verify_chain_gate;
 
+pub use artifact_store::ArtifactStore;
 pub use clippy_gate::ClippyGate;
 pub use compile::CompileGate;
 pub use diff_gate::{analyze_diff, DiffAnalysis, DiffGate, DiffPayload};
+pub use env_builder::{build_for_rung, GateEnv, GateEnvBuilder};
+pub use feedback::{feedback_for_agent, GateFeedback, Severity};
 pub use payload::{BuildSystem, GatePayload, TestSelector};
+pub use ratchet::GateRatchet;
 pub use shell::ShellGate;
 pub use test_gate::{parse_test_counts, TestGate};

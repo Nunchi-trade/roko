@@ -177,6 +177,8 @@ mod tests {
         for k in [
             Kind::ProcessSpawn,
             Kind::GateVerdict,
+            Kind::ToolInvocation,
+            Kind::ToolHealthDegraded,
             Kind::Custom("x.y".into()),
         ] {
             let json = serde_json::to_string(&k).unwrap();

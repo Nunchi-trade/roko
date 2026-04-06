@@ -1,0 +1,2612 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mirage-rs · roko · mainnet fork</title>
+<style>
+  :root {
+    --bg0: #05060d;
+    --bg1: #0a0b16;
+    --bg2: #121425;
+    --surface: rgba(18, 20, 37, 0.78);
+    --surface-elevated: rgba(28, 31, 52, 0.95);
+    --border: rgba(124, 111, 247, 0.18);
+    --border-strong: rgba(124, 111, 247, 0.4);
+    --text: #e6e8f0;
+    --text-dim: #8b8fa8;
+    --text-faint: #4f5370;
+    --accent: #7c6ff7;
+    --accent-bright: #a594ff;
+    --green: #4ade80;
+    --green-glow: rgba(74, 222, 128, 0.5);
+    --red: #f87171;
+    --red-glow: rgba(248, 113, 113, 0.5);
+    --blue: #60a5fa;
+    --blue-glow: rgba(96, 165, 250, 0.5);
+    --orange: #fb923c;
+    --yellow: #fbbf24;
+    --yellow-glow: rgba(251, 191, 36, 0.55);
+    --pink: #f472b6;
+    --cyan: #22d3ee;
+    --cyan-glow: rgba(34, 211, 238, 0.5);
+    --purple: #c084fc;
+    --mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', 'Fira Code', Consolas, monospace;
+    --display: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  }
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    background:
+      radial-gradient(ellipse 900px 600px at 10% -10%, rgba(124, 111, 247, 0.12), transparent 60%),
+      radial-gradient(ellipse 1200px 800px at 100% 100%, rgba(34, 211, 238, 0.08), transparent 60%),
+      linear-gradient(180deg, var(--bg0) 0%, var(--bg1) 45%, var(--bg0) 100%);
+    background-attachment: fixed;
+    color: var(--text);
+    font-family: var(--display);
+    font-size: 13px;
+    line-height: 1.5;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+  a { color: var(--accent-bright); text-decoration: none; }
+  code, .mono { font-family: var(--mono); font-size: 11.5px; }
+
+  /* === HEADER === */
+  header {
+    position: sticky; top: 0; z-index: 50;
+    backdrop-filter: blur(16px) saturate(140%);
+    -webkit-backdrop-filter: blur(16px) saturate(140%);
+    background: rgba(5, 6, 13, 0.78);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 24px;
+    display: flex; align-items: center; gap: 20px; flex-wrap: wrap;
+  }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .brand-logo {
+    width: 32px; height: 32px; border-radius: 8px;
+    background: linear-gradient(135deg, #7c6ff7 0%, #22d3ee 60%, #4ade80 100%);
+    position: relative;
+    box-shadow: 0 0 22px rgba(124, 111, 247, 0.55);
+    animation: logo-pulse 3.2s ease-in-out infinite;
+  }
+  .brand-logo::after { content: ''; position: absolute; inset: 4px; border-radius: 5px; background: var(--bg0); }
+  .brand-logo::before {
+    content: 'M'; position: absolute; inset: 0; z-index: 2;
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--mono); font-weight: 800; font-size: 15px;
+    background: linear-gradient(135deg, #a594ff, #22d3ee 70%);
+    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  @keyframes logo-pulse {
+    0%, 100% { box-shadow: 0 0 22px rgba(124, 111, 247, 0.55); }
+    50% { box-shadow: 0 0 34px rgba(124, 111, 247, 0.8), 0 0 54px rgba(34, 211, 238, 0.35); }
+  }
+  .brand-text { display: flex; flex-direction: column; line-height: 1.15; }
+  .brand-title {
+    font-family: var(--mono); font-weight: 700; font-size: 14px;
+    background: linear-gradient(135deg, #a594ff 0%, #22d3ee 50%, #4ade80 100%);
+    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .brand-sub {
+    color: var(--text-faint); font-size: 9.5px; font-family: var(--mono);
+    text-transform: uppercase; letter-spacing: 0.14em;
+  }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 10px; border-radius: 99px;
+    background: rgba(124, 111, 247, 0.08);
+    border: 1px solid var(--border-strong);
+    color: var(--text-dim);
+    font-family: var(--mono); font-size: 10px;
+    text-transform: uppercase; letter-spacing: 0.08em;
+  }
+  .chip .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--red); }
+  .chip.ok { color: var(--green); border-color: rgba(74, 222, 128, 0.35); background: rgba(74, 222, 128, 0.08); }
+  .chip.ok .dot { background: var(--green); box-shadow: 0 0 10px var(--green-glow); animation: pulse-dot 1.8s ease-in-out infinite; }
+  .chip.warn { color: var(--yellow); border-color: rgba(251, 191, 36, 0.35); background: rgba(251, 191, 36, 0.08); }
+  .chip.warn .dot { background: var(--yellow); box-shadow: 0 0 10px var(--yellow-glow); }
+  .chip.err { color: var(--red); border-color: rgba(248, 113, 113, 0.4); background: rgba(248, 113, 113, 0.08); }
+  .chip.err .dot { background: var(--red); box-shadow: 0 0 10px var(--red-glow); }
+  @keyframes pulse-dot {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.4); opacity: 0.6; }
+  }
+  .conn { flex: 1 1 320px; max-width: 480px; display: flex; gap: 8px; }
+  .conn input {
+    flex: 1; background: rgba(0, 0, 0, 0.32); border: 1px solid var(--border);
+    color: var(--text); font-family: var(--mono); font-size: 12px;
+    padding: 6px 10px; border-radius: 6px; outline: none; transition: all 0.18s ease;
+  }
+  .conn input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(124, 111, 247, 0.16); }
+  .btn {
+    background: linear-gradient(135deg, var(--accent) 0%, #6451f0 100%);
+    color: #fff; border: none; cursor: pointer;
+    font-family: var(--mono); font-weight: 600; font-size: 11px; letter-spacing: 0.02em;
+    padding: 6px 14px; border-radius: 6px; transition: all 0.18s ease;
+    box-shadow: 0 4px 14px rgba(124, 111, 247, 0.3);
+  }
+  .btn:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(124, 111, 247, 0.45); }
+  .btn.sm { padding: 5px 11px; font-size: 10.5px; }
+  .btn.ghost { background: transparent; border: 1px solid var(--border-strong); color: var(--text-dim); box-shadow: none; }
+  .btn.ghost:hover { color: var(--text); border-color: var(--accent); background: rgba(124, 111, 247, 0.08); }
+  .header-actions { display: flex; align-items: center; gap: 8px; }
+
+  main { max-width: 1720px; margin: 0 auto; padding: 20px 24px 60px; }
+
+  /* === HERO STATS === */
+  .hero-stats {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 12px; margin-bottom: 20px;
+  }
+  .hero-card {
+    position: relative; background: var(--surface);
+    border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px 14px; overflow: hidden;
+    transition: all 0.25s ease;
+  }
+  .hero-card::before {
+    content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
+    opacity: 0.5;
+  }
+  .hero-card:hover { border-color: var(--border-strong); transform: translateY(-2px); }
+  .hero-label {
+    font-family: var(--mono); font-size: 9px; color: var(--text-faint);
+    text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 5px;
+  }
+  .hero-value {
+    font-family: var(--mono); font-weight: 700; font-size: 19px; color: var(--text);
+    display: flex; align-items: baseline; gap: 5px; font-variant-numeric: tabular-nums;
+  }
+  .hero-value .unit { font-size: 10px; color: var(--text-faint); font-weight: 500; }
+  .hero-delta { font-family: var(--mono); font-size: 10px; margin-top: 3px; }
+  .hero-delta.up { color: var(--green); } .hero-delta.down { color: var(--red); } .hero-delta.neutral { color: var(--text-faint); }
+  .hero-spark { position: absolute; bottom: 0; left: 0; right: 0; height: 26px; opacity: 0.45; pointer-events: none; }
+
+  /* === MAIN 3-COLUMN === */
+  .dash-grid {
+    display: grid; grid-template-columns: 280px 1fr 340px; gap: 12px; margin-bottom: 20px;
+  }
+  @media (max-width: 1280px) { .dash-grid { grid-template-columns: 1fr; } }
+  .panel {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; overflow: hidden;
+    display: flex; flex-direction: column; backdrop-filter: blur(8px);
+  }
+  .panel-head {
+    padding: 10px 14px; display: flex; align-items: center; justify-content: space-between;
+    border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, rgba(124, 111, 247, 0.04) 0%, transparent 100%);
+  }
+  .panel-title {
+    font-family: var(--mono); font-weight: 600; font-size: 10px;
+    text-transform: uppercase; letter-spacing: 0.11em; color: var(--text);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .panel-title .icon {
+    width: 5px; height: 5px; border-radius: 50%; background: var(--accent);
+    box-shadow: 0 0 8px var(--accent); animation: pulse-dot 2.4s ease-in-out infinite;
+  }
+  .panel-meta { font-family: var(--mono); font-size: 9.5px; color: var(--text-faint); }
+
+  /* === BLOCK STREAM === */
+  .block-stream { padding: 6px; overflow-y: auto; max-height: 560px; }
+  .block-stream::-webkit-scrollbar { width: 5px; }
+  .block-stream::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
+  .block-row {
+    padding: 8px 10px; border-radius: 6px; margin-bottom: 3px;
+    border: 1px solid transparent; font-family: var(--mono); font-size: 10.5px;
+    display: grid; grid-template-columns: 1fr auto; gap: 6px; align-items: center;
+    transition: all 0.3s ease; cursor: pointer;
+    animation: slide-in-top 0.4s cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  @keyframes slide-in-top {
+    0% { opacity: 0; transform: translateY(-6px); }
+    100% { opacity: 1; transform: translateY(0); }
+  }
+  .block-row.fresh {
+    background: linear-gradient(90deg, rgba(34, 211, 238, 0.16) 0%, rgba(124, 111, 247, 0.06) 100%);
+    border-color: var(--cyan); box-shadow: 0 0 18px rgba(34, 211, 238, 0.15);
+  }
+  .block-row.selected { border-color: var(--accent); background: rgba(124, 111, 247, 0.12); }
+  .block-row:hover { background: rgba(124, 111, 247, 0.08); }
+  .block-head { display: flex; gap: 8px; align-items: center; }
+  .block-num { color: var(--accent-bright); font-weight: 600; }
+  .block-hash { color: var(--text-dim); font-size: 9.5px; }
+  .block-metrics { display: flex; gap: 8px; font-size: 9.5px; color: var(--text-faint); }
+  .block-metrics .tx { color: var(--yellow); font-weight: 600; }
+  .block-metrics .gas { color: var(--cyan); font-weight: 600; }
+  .block-metrics .fee { color: var(--orange); font-weight: 600; }
+  .sat-bar { height: 3px; background: var(--border); border-radius: 2px; margin-top: 4px; overflow: hidden; grid-column: 1/-1; }
+  .sat-bar > div { height: 100%; background: linear-gradient(90deg, var(--green), var(--yellow), var(--red)); transition: width 0.4s ease; }
+
+  /* === PHEROMONE CANVAS === */
+  .phero-canvas-wrap {
+    position: relative; aspect-ratio: 16/10;
+    background: radial-gradient(ellipse at center, rgba(124, 111, 247, 0.04) 0%, transparent 70%);
+  }
+  canvas { display: block; width: 100%; height: 100%; }
+  .phero-legend {
+    position: absolute; top: 12px; left: 12px;
+    display: flex; gap: 10px; font-family: var(--mono); font-size: 10px;
+  }
+  .legend-item {
+    padding: 4px 10px; border-radius: 99px;
+    background: rgba(0, 0, 0, 0.55); backdrop-filter: blur(8px);
+    border: 1px solid var(--border); display: flex; align-items: center; gap: 6px;
+  }
+  .legend-dot { width: 7px; height: 7px; border-radius: 50%; }
+  .legend-item.threat { color: var(--red); }
+  .legend-item.threat .legend-dot { background: var(--red); box-shadow: 0 0 8px var(--red-glow); }
+  .legend-item.opp { color: var(--green); }
+  .legend-item.opp .legend-dot { background: var(--green); box-shadow: 0 0 8px var(--green-glow); }
+  .legend-item.wisdom { color: var(--yellow); }
+  .legend-item.wisdom .legend-dot { background: var(--yellow); box-shadow: 0 0 8px var(--yellow-glow); }
+  .phero-hud {
+    position: absolute; bottom: 12px; right: 12px;
+    display: flex; gap: 10px;
+    font-family: var(--mono); font-size: 10px; color: var(--text-dim);
+    background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(8px);
+    border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px;
+  }
+  .phero-hud .kv { display: flex; gap: 4px; }
+  .phero-hud .kv b { color: var(--text); font-weight: 600; }
+
+  /* === AGENT LOG === */
+  .agent-log {
+    padding: 6px 8px; overflow-y: auto; max-height: 560px;
+    display: flex; flex-direction: column-reverse;
+  }
+  .agent-log::-webkit-scrollbar { width: 5px; }
+  .agent-log::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
+  .agent-entry {
+    padding: 7px 9px; border-radius: 5px; margin-bottom: 3px;
+    font-family: var(--mono); font-size: 10px; line-height: 1.4;
+    border-left: 2px solid var(--border-strong);
+    animation: slide-in-right 0.35s cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  @keyframes slide-in-right {
+    0% { opacity: 0; transform: translateX(10px); }
+    100% { opacity: 1; transform: translateX(0); }
+  }
+  .agent-entry.observe { border-left-color: var(--blue); }
+  .agent-entry.act { border-left-color: var(--accent); background: rgba(124, 111, 247, 0.05); }
+  .agent-entry.threat { border-left-color: var(--red); background: rgba(248, 113, 113, 0.05); }
+  .agent-entry.opp, .agent-entry.opportunity { border-left-color: var(--green); background: rgba(74, 222, 128, 0.05); }
+  .agent-entry.wisdom { border-left-color: var(--yellow); background: rgba(251, 191, 36, 0.04); }
+  .agent-entry.confirm { border-left-color: var(--green); }
+  .agent-entry.challenge { border-left-color: var(--red); }
+  .agent-entry .ts { color: var(--text-faint); font-size: 9px; }
+  .agent-entry .author { color: var(--accent-bright); font-weight: 600; font-size: 9.5px; }
+  .agent-entry .msg { color: var(--text); display: block; margin-top: 2px; }
+
+  /* === INSIGHT GRAPH (centerpiece) === */
+  .insight-wrap { display: grid; grid-template-columns: 1fr 360px; gap: 12px; margin-bottom: 20px; }
+  @media (max-width: 1280px) { .insight-wrap { grid-template-columns: 1fr; } }
+  .insight-graph-wrap { position: relative; height: 460px; background: radial-gradient(ellipse at center, rgba(34, 211, 238, 0.03) 0%, transparent 70%); }
+  .graph-hud {
+    position: absolute; top: 12px; right: 12px;
+    font-family: var(--mono); font-size: 10px; color: var(--text-dim);
+    background: rgba(0, 0, 0, 0.62); backdrop-filter: blur(8px);
+    border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px;
+    display: flex; gap: 12px;
+  }
+  .graph-legend {
+    position: absolute; bottom: 12px; left: 12px; display: flex; gap: 10px;
+    font-family: var(--mono); font-size: 10px;
+    background: rgba(0, 0, 0, 0.55); backdrop-filter: blur(8px);
+    border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px; flex-wrap: wrap;
+  }
+  .graph-legend > span { display: flex; align-items: center; gap: 5px; }
+  .graph-hint {
+    position: absolute; bottom: 12px; right: 12px;
+    font-family: var(--mono); font-size: 9.5px; color: var(--text-faint);
+    background: rgba(0, 0, 0, 0.4); border-radius: 6px; padding: 4px 8px;
+  }
+  .node-tooltip {
+    position: absolute; pointer-events: none; z-index: 40;
+    background: var(--surface-elevated); border: 1px solid var(--border-strong); border-radius: 8px;
+    padding: 8px 12px; font-family: var(--mono); font-size: 10.5px;
+    max-width: 340px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    display: none; line-height: 1.45;
+  }
+  .node-tooltip .nt-kind { color: var(--accent-bright); font-weight: 600; margin-bottom: 3px; font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em; }
+  .node-tooltip .nt-content { color: var(--text); margin-bottom: 4px; }
+  .node-tooltip .nt-meta { color: var(--text-faint); font-size: 9.5px; display: flex; gap: 10px; }
+
+  /* Insight detail side panel */
+  .detail-panel { padding: 14px; height: 460px; overflow-y: auto; }
+  .detail-panel::-webkit-scrollbar { width: 5px; }
+  .detail-panel::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
+  .detail-empty {
+    display: flex; align-items: center; justify-content: center; height: 100%;
+    color: var(--text-faint); font-family: var(--mono); font-size: 11px; text-align: center;
+    padding: 40px;
+  }
+  .detail-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+  .detail-title { font-family: var(--mono); font-weight: 600; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-dim); }
+  .detail-close { cursor: pointer; color: var(--text-faint); font-size: 14px; padding: 2px 6px; }
+  .detail-close:hover { color: var(--red); }
+  .detail-content {
+    font-family: var(--display); font-size: 13px; color: var(--text); line-height: 1.5;
+    padding: 10px 12px; border-radius: 6px; background: rgba(124, 111, 247, 0.06); border: 1px solid var(--border); margin-bottom: 12px;
+  }
+  .detail-kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-family: var(--mono); font-size: 10.5px; margin-bottom: 14px; }
+  .detail-kv .k { color: var(--text-faint); }
+  .detail-kv .v { color: var(--text); }
+  .detail-kv .v.green { color: var(--green); }
+  .detail-kv .v.red { color: var(--red); }
+  .detail-actions { display: flex; gap: 6px; margin-bottom: 12px; }
+  .detail-similar-title { font-family: var(--mono); font-size: 9.5px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 6px; }
+  .similar-row {
+    padding: 7px 9px; border-radius: 5px; margin-bottom: 3px;
+    border: 1px solid var(--border); cursor: pointer;
+    font-family: var(--mono); font-size: 10.5px;
+    transition: all 0.2s ease;
+  }
+  .similar-row:hover { border-color: var(--accent); background: rgba(124, 111, 247, 0.08); }
+  .similar-row .sim-head { display: flex; justify-content: space-between; margin-bottom: 3px; font-size: 9.5px; color: var(--text-faint); }
+  .similar-row .sim-content { color: var(--text); font-size: 10.5px; }
+  .similar-row .sim-score { color: var(--cyan); font-weight: 600; }
+
+  /* === PHEROMONE SUMMARY CARDS === */
+  .phero-summary-grid {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; padding: 12px;
+  }
+  .phero-summary-card {
+    position: relative; border-radius: 8px; padding: 10px 12px; overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  .phero-summary-card.threat { background: rgba(248, 113, 113, 0.06); border-color: rgba(248, 113, 113, 0.25); }
+  .phero-summary-card.opportunity { background: rgba(74, 222, 128, 0.06); border-color: rgba(74, 222, 128, 0.25); }
+  .phero-summary-card.wisdom { background: rgba(251, 191, 36, 0.06); border-color: rgba(251, 191, 36, 0.25); }
+  .phero-summary-kind {
+    font-family: var(--mono); font-size: 9px; text-transform: uppercase; letter-spacing: 0.1em;
+    margin-bottom: 6px; font-weight: 600;
+  }
+  .phero-summary-card.threat .phero-summary-kind { color: var(--red); }
+  .phero-summary-card.opportunity .phero-summary-kind { color: var(--green); }
+  .phero-summary-card.wisdom .phero-summary-kind { color: var(--yellow); }
+  .phero-summary-stat {
+    font-family: var(--mono); font-size: 10px; color: var(--text-dim); margin-bottom: 2px;
+    display: flex; justify-content: space-between;
+  }
+  .phero-summary-stat b { color: var(--text); font-weight: 600; }
+
+  /* === HEATMAP === */
+  .heatmap-wrap {
+    position: relative; height: 120px;
+    background: radial-gradient(ellipse at center, rgba(124, 111, 247, 0.03) 0%, transparent 70%);
+  }
+  .heatmap-hud {
+    position: absolute; top: 8px; right: 12px;
+    font-family: var(--mono); font-size: 10px; color: var(--text-dim);
+    display: flex; gap: 10px;
+  }
+  .heatmap-hud b { color: var(--text); }
+
+  /* === AGENT TOPOLOGY === */
+  .topo-graph-wrap {
+    position: relative; height: 400px;
+    background: radial-gradient(ellipse at center, rgba(124, 111, 247, 0.03) 0%, transparent 70%);
+  }
+  .topo-hud {
+    position: absolute; top: 12px; right: 12px;
+    font-family: var(--mono); font-size: 10px; color: var(--text-dim);
+    background: rgba(0, 0, 0, 0.62); backdrop-filter: blur(8px);
+    border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px;
+    display: flex; gap: 12px;
+  }
+  .topo-legend {
+    position: absolute; bottom: 12px; left: 12px; display: flex; gap: 10px;
+    font-family: var(--mono); font-size: 10px;
+    background: rgba(0, 0, 0, 0.55); backdrop-filter: blur(8px);
+    border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px;
+  }
+  .topo-legend > span { display: flex; align-items: center; gap: 5px; }
+  .topo-tooltip {
+    position: absolute; pointer-events: none; z-index: 40;
+    background: var(--surface-elevated); border: 1px solid var(--border-strong); border-radius: 8px;
+    padding: 8px 12px; font-family: var(--mono); font-size: 10.5px;
+    max-width: 300px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    display: none; line-height: 1.45;
+  }
+
+  /* === KINDS TABLE === */
+  .kinds-table {
+    width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 10px;
+  }
+  .kinds-table th {
+    text-align: left; padding: 6px 8px; font-size: 9px; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--text-faint); border-bottom: 1px solid var(--border);
+    font-weight: 600;
+  }
+  .kinds-table td {
+    padding: 5px 8px; color: var(--text-dim); border-bottom: 1px solid rgba(124, 111, 247, 0.06);
+  }
+  .kinds-table tr:hover td { background: rgba(124, 111, 247, 0.04); }
+  .search-results .sr-item {
+    padding: 8px 10px; border-bottom: 1px solid var(--border); cursor: pointer;
+    transition: background 0.15s;
+  }
+  .search-results .sr-item:hover { background: rgba(124, 111, 247, 0.06); }
+  .sr-head { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; }
+  .sr-badge {
+    display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 9px;
+    font-family: var(--mono); font-weight: 600; text-transform: uppercase;
+  }
+  .sr-badge.insight { background: rgba(165,148,255,0.15); color: var(--accent-bright); }
+  .sr-badge.heuristic { background: rgba(34,211,238,0.15); color: var(--cyan); }
+  .sr-badge.warning { background: rgba(251,191,36,0.15); color: var(--yellow); }
+  .sr-badge.causal_link { background: rgba(244,114,182,0.15); color: var(--pink); }
+  .sr-badge.strategy_fragment { background: rgba(96,165,250,0.15); color: var(--blue); }
+  .sr-badge.anti_knowledge { background: rgba(248,113,113,0.15); color: var(--red); }
+  .sr-score { font-family: var(--mono); font-size: 10px; color: var(--text-dim); }
+  .sr-bar { width: 50px; height: 4px; border-radius: 2px; background: var(--bg2); display: inline-block; vertical-align: middle; margin-left: 4px; }
+  .sr-bar-fill { height: 100%; border-radius: 2px; background: var(--accent); }
+  .sr-content { font-size: 11.5px; color: var(--text-dim); line-height: 1.4; }
+  .sr-meta { font-family: var(--mono); font-size: 9.5px; color: var(--text-faint); margin-top: 2px; }
+  .kinds-table .kind-name { color: var(--text); font-weight: 600; }
+
+  /* === PERFORMANCE METRICS === */
+  .metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .metric-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 11px 13px; position: relative; overflow: hidden; }
+  .metric-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  .metric-name { font-family: var(--mono); font-size: 9px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.1em; }
+  .metric-now { font-family: var(--mono); font-weight: 600; font-size: 13px; color: var(--text); font-variant-numeric: tabular-nums; }
+  .metric-now .unit { font-size: 10px; color: var(--text-faint); font-weight: 500; margin-left: 2px; }
+  .metric-sparkline { width: 100%; height: 40px; }
+  .metric-footer { display: flex; justify-content: space-between; margin-top: 4px; font-family: var(--mono); font-size: 9px; color: var(--text-faint); }
+
+  /* === KNOWLEDGE GROWTH TIMELINE === */
+  .growth-wrap { height: 100px; position: relative; background: radial-gradient(ellipse at center, rgba(124, 111, 247, 0.03) 0%, transparent 70%); }
+  .growth-hud { position: absolute; top: 8px; right: 12px; font-family: var(--mono); font-size: 10px; color: var(--text-dim); display: flex; gap: 10px; }
+  .growth-hud b { color: var(--text); }
+
+  /* === CONTROLS === */
+  .controls-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 20px; }
+  @media (max-width: 1100px) { .controls-grid { grid-template-columns: 1fr; } }
+  .ctrl-panel { padding: 12px; }
+  .ctrl-panel label {
+    display: block; font-family: var(--mono); font-size: 9px;
+    color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 5px;
+  }
+  .ctrl-panel input, .ctrl-panel select, .ctrl-panel textarea {
+    width: 100%; background: rgba(0, 0, 0, 0.28); border: 1px solid var(--border);
+    color: var(--text); font-family: var(--mono); font-size: 11px;
+    padding: 6px 10px; border-radius: 5px; outline: none; margin-bottom: 9px;
+  }
+  .ctrl-panel textarea { resize: vertical; min-height: 54px; }
+  .ctrl-panel input:focus, .ctrl-panel select:focus, .ctrl-panel textarea:focus { border-color: var(--accent); }
+  .ctrl-row { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+  .ctrl-btn-row { display: flex; gap: 6px; margin-top: 4px; }
+
+  /* === LOG === */
+  .log-view {
+    padding: 10px 14px; max-height: 220px; overflow-y: auto;
+    font-family: var(--mono); font-size: 10px;
+  }
+  .log-view::-webkit-scrollbar { width: 5px; }
+  .log-view::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
+  .log-line { display: grid; grid-template-columns: auto auto 1fr; gap: 10px; padding: 2px 0; }
+  .log-line .ts { color: var(--text-faint); }
+  .log-line .lv { font-weight: 600; min-width: 54px; }
+  .log-line .lv.info { color: var(--blue); }
+  .log-line .lv.warn { color: var(--yellow); }
+  .log-line .lv.err { color: var(--red); }
+  .log-line .lv.ok { color: var(--green); }
+  .log-line .lv.sub { color: var(--cyan); }
+  .log-line .msg { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; }
+
+  /* === TOASTS === */
+  .toasts { position: fixed; bottom: 20px; right: 20px; display: flex; flex-direction: column; gap: 8px; z-index: 100; pointer-events: none; }
+  .toast {
+    padding: 9px 14px; border-radius: 8px;
+    background: var(--surface-elevated); border: 1px solid var(--border-strong);
+    font-family: var(--mono); font-size: 10.5px; color: var(--text);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    animation: toast-in 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  .toast.ok { border-left: 3px solid var(--green); }
+  .toast.warn { border-left: 3px solid var(--yellow); }
+  .toast.err { border-left: 3px solid var(--red); }
+  .toast.info { border-left: 3px solid var(--blue); }
+  @keyframes toast-in { 0% { opacity: 0; transform: translateX(20px); } 100% { opacity: 1; transform: translateX(0); } }
+
+  .section-title {
+    font-family: var(--mono); font-weight: 600; font-size: 10px;
+    text-transform: uppercase; letter-spacing: 0.11em; color: var(--text-dim);
+    margin-bottom: 10px; display: flex; align-items: center; gap: 10px;
+  }
+  .section-title::before, .section-title::after {
+    content: ''; flex: 1; height: 1px;
+    background: linear-gradient(90deg, transparent, var(--border-strong), transparent);
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <div class="brand-logo"></div>
+    <div class="brand-text">
+      <span class="brand-title">MIRAGE-RS · ROKO AGENTS · MAINNET FORK</span>
+      <span class="brand-sub">real chain · stigmergy · knowledge-graph · interactive</span>
+    </div>
+  </div>
+  <div class="conn">
+    <input id="rpc-url" type="text" value="http://127.0.0.1:8545" spellcheck="false">
+    <button id="btn-reconnect" class="btn sm">RECONNECT</button>
+  </div>
+  <div class="header-actions">
+    <span id="conn-chip" class="chip err"><span class="dot"></span><span id="conn-label">CONNECTING…</span></span>
+    <span id="fork-chip" class="chip"><span class="dot"></span>fork · mainnet</span>
+    <span id="agents-chip" class="chip"><span class="dot"></span>0 agents</span>
+    <button id="btn-ws" class="btn ghost sm">WS LIVE</button>
+    <button id="btn-clear" class="btn ghost sm">RESET</button>
+  </div>
+</header>
+
+<main>
+
+  <!-- === HERO STATS === -->
+  <div class="hero-stats">
+    <div class="hero-card">
+      <div class="hero-label">Chain Tip (mirage fork)</div>
+      <div class="hero-value"><span id="h-block">—</span><span class="unit">#</span></div>
+      <div class="hero-delta neutral" id="h-block-delta">probing…</div>
+      <canvas class="hero-spark" data-spark="block"></canvas>
+    </div>
+    <div class="hero-card">
+      <div class="hero-label">Gas · base fee</div>
+      <div class="hero-value"><span id="h-fee">—</span><span class="unit">gwei</span></div>
+      <div class="hero-delta neutral" id="h-fee-delta">—</div>
+      <canvas class="hero-spark" data-spark="fee"></canvas>
+    </div>
+    <div class="hero-card">
+      <div class="hero-label">Saturation · last block</div>
+      <div class="hero-value"><span id="h-sat">—</span><span class="unit">%</span></div>
+      <div class="hero-delta neutral" id="h-sat-delta">—</div>
+      <canvas class="hero-spark" data-spark="sat"></canvas>
+    </div>
+    <div class="hero-card">
+      <div class="hero-label">Insights on-chain</div>
+      <div class="hero-value"><span id="h-insights">0</span></div>
+      <div class="hero-delta neutral" id="h-insights-delta">—</div>
+      <canvas class="hero-spark" data-spark="insights"></canvas>
+    </div>
+    <div class="hero-card">
+      <div class="hero-label">Live Pheromones</div>
+      <div class="hero-value"><span id="h-phero">0</span></div>
+      <div class="hero-delta neutral" id="h-phero-delta">—</div>
+      <canvas class="hero-spark" data-spark="phero"></canvas>
+    </div>
+    <div class="hero-card">
+      <div class="hero-label">Cache Hit Rate</div>
+      <div class="hero-value"><span id="h-cache">—</span><span class="unit">%</span></div>
+      <div class="hero-delta neutral" id="h-cache-delta">—</div>
+      <canvas class="hero-spark" data-spark="cache"></canvas>
+    </div>
+  </div>
+
+  <!-- === KNOWLEDGE GROWTH TIMELINE === -->
+  <div class="panel" style="margin-bottom:20px">
+    <div class="panel-head">
+      <div class="panel-title"><span class="icon"></span>Knowledge Accumulation · last 60s</div>
+      <div class="panel-meta" id="growth-meta">waiting for data…</div>
+    </div>
+    <div class="growth-wrap">
+      <canvas id="growth-canvas"></canvas>
+      <div class="growth-hud">
+        <span>insights <b id="growth-i" style="color:var(--accent-bright)">0</b></span>
+        <span>confirms <b id="growth-c" style="color:var(--green)">0</b></span>
+        <span>challenges <b id="growth-ch" style="color:var(--red)">0</b></span>
+        <span>pheromones <b id="growth-p" style="color:var(--orange)">0</b></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- === MAIN 3-COL === -->
+  <div class="dash-grid">
+    <!-- LEFT: REAL Blocks -->
+    <div class="panel">
+      <div class="panel-head">
+        <div class="panel-title"><span class="icon"></span>Real Mainnet Blocks</div>
+        <div class="panel-meta" id="block-meta">idle</div>
+      </div>
+      <div class="block-stream" id="block-stream"></div>
+    </div>
+
+    <!-- CENTER: Pheromone Field -->
+    <div class="panel">
+      <div class="panel-head">
+        <div class="panel-title"><span class="icon"></span>Pheromone Field · agents drop signals, they decay</div>
+        <div class="panel-meta" id="phero-meta">3 zones · threats fade in 30s · opps 45s · wisdom 90s</div>
+      </div>
+      <div class="phero-canvas-wrap">
+        <canvas id="phero-canvas"></canvas>
+        <div class="phero-legend">
+          <div class="legend-item threat"><span class="legend-dot"></span>THREAT · <span id="phero-c-threat">0</span></div>
+          <div class="legend-item opp"><span class="legend-dot"></span>OPPORTUNITY · <span id="phero-c-opp">0</span></div>
+          <div class="legend-item wisdom"><span class="legend-dot"></span>WISDOM · <span id="phero-c-wisdom">0</span></div>
+        </div>
+        <div class="phero-hud">
+          <span class="kv">particles <b id="phero-particles">0</b></span>
+          <span class="kv">fps <b id="phero-fps">0</b></span>
+          <span class="kv">Σintensity <b id="phero-intensity">0.00</b></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT: Multi-agent log -->
+    <div class="panel">
+      <div class="panel-head">
+        <div class="panel-title"><span class="icon"></span>Agent Activity · roko-*</div>
+        <div class="panel-meta" id="agent-meta">watching…</div>
+      </div>
+      <div class="agent-log" id="agent-log"></div>
+    </div>
+  </div>
+
+  <!-- === PHEROMONE SUMMARY === -->
+  <div class="panel" style="margin-bottom:20px">
+    <div class="panel-head">
+      <div class="panel-title"><span class="icon"></span>Pheromone Summary · per-kind stats</div>
+      <div class="panel-meta" id="phero-summary-meta">loading…</div>
+    </div>
+    <div class="phero-summary-grid" id="phero-summary-grid">
+      <div class="phero-summary-card threat">
+        <div class="phero-summary-kind">Threat</div>
+        <div class="phero-summary-stat"><span>count</span><b id="ps-threat-count">0</b></div>
+        <div class="phero-summary-stat"><span>total intensity</span><b id="ps-threat-total">0.00</b></div>
+        <div class="phero-summary-stat"><span>avg intensity</span><b id="ps-threat-avg">0.00</b></div>
+      </div>
+      <div class="phero-summary-card opportunity">
+        <div class="phero-summary-kind">Opportunity</div>
+        <div class="phero-summary-stat"><span>count</span><b id="ps-opp-count">0</b></div>
+        <div class="phero-summary-stat"><span>total intensity</span><b id="ps-opp-total">0.00</b></div>
+        <div class="phero-summary-stat"><span>avg intensity</span><b id="ps-opp-avg">0.00</b></div>
+      </div>
+      <div class="phero-summary-card wisdom">
+        <div class="phero-summary-kind">Wisdom</div>
+        <div class="phero-summary-stat"><span>count</span><b id="ps-wisdom-count">0</b></div>
+        <div class="phero-summary-stat"><span>total intensity</span><b id="ps-wisdom-total">0.00</b></div>
+        <div class="phero-summary-stat"><span>avg intensity</span><b id="ps-wisdom-avg">0.00</b></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- === PHEROMONE HEATMAP TIMELINE === -->
+  <div class="panel" style="margin-bottom:20px">
+    <div class="panel-head">
+      <div class="panel-title"><span class="icon"></span>Pheromone Heatmap · 5-min buckets · last hour</div>
+      <div class="panel-meta" id="heatmap-meta">loading…</div>
+    </div>
+    <div class="heatmap-wrap">
+      <canvas id="heatmap-canvas"></canvas>
+      <div class="heatmap-hud">
+        <span>threat <b id="hm-threat" style="color:var(--red)">0</b></span>
+        <span>opp <b id="hm-opp" style="color:var(--green)">0</b></span>
+        <span>wisdom <b id="hm-wisdom" style="color:var(--yellow)">0</b></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- === INSIGHT GRAPH + DETAIL === -->
+  <div class="insight-wrap">
+    <div class="panel">
+      <div class="panel-head">
+        <div class="panel-title"><span class="icon"></span>Insight Knowledge Graph · HDC proximity · click nodes</div>
+        <div class="panel-meta" id="graph-meta">0 nodes · 0 edges</div>
+      </div>
+      <div class="insight-graph-wrap">
+        <canvas id="graph-canvas"></canvas>
+        <div class="graph-hud">
+          <span>nodes <b id="g-nodes" style="color:var(--text)">0</b></span>
+          <span>edges <b id="g-edges" style="color:var(--text)">0</b></span>
+          <span>conf <b id="g-conf" style="color:var(--green)">0</b></span>
+          <span>chall <b id="g-chall" style="color:var(--red)">0</b></span>
+        </div>
+        <div class="graph-legend">
+          <span style="color:var(--accent-bright)">● Insight</span>
+          <span style="color:var(--cyan)">● Heuristic</span>
+          <span style="color:var(--yellow)">● Warning</span>
+          <span style="color:var(--pink)">● CausalLink</span>
+          <span style="color:var(--blue)">● Strategy</span>
+          <span style="color:var(--purple)">--- enabled_by</span>
+          <span style="color:var(--cyan)">— hdc</span>
+        </div>
+        <div class="graph-hint" id="graph-hint">click node → similar insights · hover → HDC neighbors</div>
+        <div class="node-tooltip" id="node-tooltip"></div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-head">
+        <div class="panel-title"><span class="icon"></span>Insight Detail</div>
+        <div class="panel-meta" id="detail-meta">click a node</div>
+      </div>
+      <div class="detail-panel" id="detail-panel">
+        <div class="detail-empty">click any node in the knowledge graph to see its content, similar insights (via HDC), and confirm/challenge actions</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- === AGENT TOPOLOGY GRAPH === -->
+  <div class="panel" style="margin-bottom:20px">
+    <div class="panel-head">
+      <div class="panel-title"><span class="icon"></span>Agent Topology · confirm/challenge network</div>
+      <div class="panel-meta" id="topo-meta">loading…</div>
+    </div>
+    <div class="topo-graph-wrap">
+      <canvas id="topo-canvas"></canvas>
+      <div class="topo-hud">
+        <span>agents <b id="t-agents" style="color:var(--text)">0</b></span>
+        <span>links <b id="t-links" style="color:var(--text)">0</b></span>
+      </div>
+      <div class="topo-legend">
+        <span style="color:var(--green)">— confirmed</span>
+        <span style="color:var(--red)">--- challenged</span>
+        <span style="color:var(--accent-bright)">● agent</span>
+      </div>
+      <div class="topo-tooltip" id="topo-tooltip"></div>
+    </div>
+  </div>
+
+  <!-- === AGENT LEADERBOARD === -->
+  <div class="panel" style="margin-bottom:20px">
+    <div class="panel-head">
+      <div class="panel-title"><span class="icon"></span>Agent Leaderboard · ranked by activity</div>
+      <div class="panel-meta" id="leaderboard-meta">loading…</div>
+    </div>
+    <div style="overflow-x:auto">
+      <table class="kinds-table" style="width:100%">
+        <thead><tr><th>Agent</th><th>Posts</th><th>Confirms</th><th>Challenges</th><th>Weight</th></tr></thead>
+        <tbody id="leaderboard-tbody"><tr><td colspan="5" style="color:var(--text-faint)">loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- === PERFORMANCE METRICS === -->
+  <div class="section-title">performance · mirage fork</div>
+  <div class="metrics-grid">
+    <div class="metric-card">
+      <div class="metric-head"><span class="metric-name">RPC calls</span><span class="metric-now"><span id="m-rpc">0</span><span class="unit">/s</span></span></div>
+      <canvas class="metric-sparkline" data-metric="rpc"></canvas>
+      <div class="metric-footer"><span>total <span id="m-rpc-total">0</span></span><span id="m-rpc-latency">p50 —</span></div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-head"><span class="metric-name">Knowledge Search (REST)</span><span class="metric-now"><span id="m-search">—</span><span class="unit">ms</span></span></div>
+      <canvas class="metric-sparkline" data-metric="search"></canvas>
+      <div class="metric-footer"><span>HDC top-k</span><span id="m-search-count">— hits</span></div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-head"><span class="metric-name">Base-fee mainnet</span><span class="metric-now"><span id="m-fee">—</span><span class="unit">gwei</span></span></div>
+      <canvas class="metric-sparkline" data-metric="fee"></canvas>
+      <div class="metric-footer"><span id="m-fee-trend">—</span><span id="m-fee-range">— low / — high</span></div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-head"><span class="metric-name">Block Saturation</span><span class="metric-now"><span id="m-sat">—</span><span class="unit">%</span></span></div>
+      <canvas class="metric-sparkline" data-metric="sat"></canvas>
+      <div class="metric-footer"><span id="m-sat-avg">avg —</span><span id="m-sat-max">max —</span></div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-head"><span class="metric-name">Mirage Cache</span><span class="metric-now"><span id="m-cache">—</span><span class="unit">%</span></span></div>
+      <canvas class="metric-sparkline" data-metric="cache"></canvas>
+      <div class="metric-footer"><span id="m-cache-entries">— entries</span><span id="m-cache-dirty">— dirty</span></div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-head"><span class="metric-name">Agent Posts · last min</span><span class="metric-now"><span id="m-posts">0</span><span class="unit">/min</span></span></div>
+      <canvas class="metric-sparkline" data-metric="posts"></canvas>
+      <div class="metric-footer"><span id="m-authors">— authors</span><span id="m-kinds">—</span></div>
+    </div>
+    <!-- Knowledge Kinds reference card -->
+    <div class="metric-card" style="grid-column: span 2">
+      <div class="metric-head"><span class="metric-name">Knowledge Kinds Reference</span><span class="metric-now" id="kinds-total-label">—</span></div>
+      <div style="overflow-y:auto; max-height:160px;">
+        <table class="kinds-table" id="kinds-table">
+          <thead><tr><th>Kind</th><th>Type</th><th>Half-life</th><th>Reward</th><th>Count</th></tr></thead>
+          <tbody id="kinds-tbody"><tr><td colspan="5" style="color:var(--text-faint)">loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- === CONTROLS === -->
+  <div class="section-title">manual interactions · real chain</div>
+  <div class="controls-grid">
+    <div class="panel ctrl-panel">
+      <div class="panel-title" style="margin-bottom:10px">Post Insight · chain_postInsight</div>
+      <label>Kind</label>
+      <select id="ins-kind">
+        <option value="insight">insight</option>
+        <option value="heuristic">heuristic</option>
+        <option value="warning">warning</option>
+        <option value="causal_link">causal_link</option>
+        <option value="strategy_fragment">strategy_fragment</option>
+      </select>
+      <div class="ctrl-row">
+        <div><label>Author</label><input id="ins-author" type="text" value="human-operator"></div>
+        <div><label>Stake (wei)</label><input id="ins-stake" type="text" value="0"></div>
+      </div>
+      <label>Content</label>
+      <textarea id="ins-content" placeholder="describe what you observed on chain…"></textarea>
+      <button class="btn" id="btn-post">POST INSIGHT</button>
+    </div>
+
+    <div class="panel ctrl-panel">
+      <div class="panel-title" style="margin-bottom:10px">Deposit Pheromone · chain_depositPheromone</div>
+      <div class="ctrl-row">
+        <div><label>Kind</label>
+          <select id="ph-kind">
+            <option value="threat">threat</option>
+            <option value="opportunity">opportunity</option>
+            <option value="wisdom">wisdom</option>
+          </select>
+        </div>
+        <div><label>Intensity <span id="ph-int-label">1.00</span></label><input id="ph-intensity" type="range" min="0" max="100" value="100"></div>
+      </div>
+      <label>Content (HDC-projected)</label>
+      <textarea id="ph-content" placeholder="e.g. gas spike detected on mainnet"></textarea>
+      <div class="ctrl-btn-row">
+        <button class="btn" id="btn-deposit">DEPOSIT</button>
+        <button class="btn ghost" id="btn-decay">APPLY DECAY</button>
+      </div>
+    </div>
+
+    <div class="panel ctrl-panel">
+      <div class="panel-title" style="margin-bottom:10px">Semantic Search · REST /api/knowledge/search</div>
+      <label>Query (free text → HDC vector)</label>
+      <input id="qu-query" type="text" placeholder="e.g. gas congestion">
+      <div class="ctrl-row">
+        <div><label>K (top-k)</label><input id="qu-k" type="number" value="8" min="1" max="30"></div>
+        <div><label>Kind filter</label>
+          <select id="qu-kind">
+            <option value="">any</option>
+            <option value="insight">insight</option>
+            <option value="heuristic">heuristic</option>
+            <option value="warning">warning</option>
+            <option value="causal_link">causal_link</option>
+            <option value="strategy_fragment">strategy_fragment</option>
+          </select>
+        </div>
+      </div>
+      <button class="btn" id="btn-search">SEARCH</button>
+      <div id="search-results" class="search-results" style="max-height:320px;overflow-y:auto;margin-top:8px"></div>
+    </div>
+  </div>
+
+  <!-- === RPC LOG === -->
+  <div class="panel" style="margin-bottom:20px">
+    <div class="panel-head">
+      <div class="panel-title"><span class="icon"></span>RPC Trace · chain_* + eth_* + REST /api/*</div>
+      <div class="panel-meta"><button id="btn-clear-log" class="btn ghost sm">CLEAR</button></div>
+    </div>
+    <div class="log-view" id="log-view"></div>
+  </div>
+
+</main>
+
+<div class="toasts" id="toasts"></div>
+
+<script>
+/* ================================================================
+   REAL-DATA MIRAGE + ROKO DASHBOARD
+   Zero mock data. All visualization comes from REST API + JSON-RPC.
+   Read-only polling uses GET /api/* endpoints.
+   Mutations use JSON-RPC (chain_postInsight, chain_depositPheromone, etc).
+   ================================================================ */
+
+var state = {
+  rpcUrl: 'http://127.0.0.1:8545',
+  wsUrl: null,
+  connected: false,
+  wsLive: false,
+  ws: null,
+  // chain data
+  blocks: [],          // ObservedBlock[]: {number, hash, timestamp, gasUsed, gasLimit, baseFeeGwei, txCount, saturation, fresh}
+  insights: new Map(), // id -> {id, kind, content, author, conf, chall, weight, createdAt, similarity, score, state}
+  pheromones: [],      // particle system entries
+  agentLog: [],        // {ts, type, author, msg}
+  requestLog: [],      // {ts, lv, msg}
+  selectedBlock: null,
+  selectedNode: null,
+  hoveredNode: null,
+  // growth timeline
+  growthSeries: [],    // {t, insights, pheromones, confirms, challenges}
+  // per-author tracking for agent chip
+  seenAuthors: new Set(),
+  // counters
+  rpc: { total: 0, prev: 0 },
+  cache: { hitPct: 0 },
+  // series for sparklines
+  series: { block:[], fee:[], sat:[], insights:[], phero:[], cache:[], rpc:[], search:[], posts:[] },
+  // pollers
+  pollers: { chain: null, blocks: null, heatmap: null, topo: null, kinds: null, edges: null, entries: null, summary: null },
+  confirmsCount: 0,
+  challengesCount: 0,
+  postsLastMin: [],
+  // topology data
+  topoNodes: [],
+  topoEdges: [],
+  // heatmap data
+  heatmapBuckets: [],
+  // kinds data
+  kindsData: null,
+};
+
+/* ---------- JSON-RPC ---------- */
+var rpcId = 1;
+async function rpc(method, params) {
+  if (params === undefined) params = {};
+  state.rpc.total++;
+  var t0 = performance.now();
+  try {
+    var r = await fetch(state.rpcUrl, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({jsonrpc:'2.0', id: rpcId++, method: method, params: params}),
+    });
+    var j = await r.json();
+    var ms = Math.round(performance.now() - t0);
+    if (j.error) { logReq('err', method + ' → ' + j.error.code + ': ' + j.error.message); throw new Error(j.error.message); }
+    logReq('ok', method + ' ' + ms + 'ms');
+    return {result: j.result, ms: ms};
+  } catch (e) {
+    logReq('err', method + ' FAIL: ' + e.message);
+    throw e;
+  }
+}
+
+/* ---------- REST API helper ---------- */
+async function api(path) {
+  var url = state.rpcUrl + '/api' + path;
+  var t0 = performance.now();
+  var res = await fetch(url);
+  var data = await res.json();
+  var ms = performance.now() - t0;
+  logReq('ok', 'GET /api' + path + ' ' + Math.round(ms) + 'ms');
+  return { data: data, ms: ms };
+}
+
+/* ---------- Logging ---------- */
+function logReq(lv, msg) {
+  state.requestLog.push({ts: Date.now(), lv: lv, msg: msg});
+  if (state.requestLog.length > 200) state.requestLog.shift();
+  renderLog();
+}
+function logAgent(type, author, msg) {
+  state.agentLog.push({ts: Date.now(), type: type, author: author, msg: msg});
+  if (state.agentLog.length > 120) state.agentLog.shift();
+  renderAgent();
+}
+function toast(kind, msg) {
+  var el = document.createElement('div');
+  el.className = 'toast ' + kind;
+  el.textContent = msg;
+  document.getElementById('toasts').appendChild(el);
+  setTimeout(function() { el.remove(); }, 3400);
+}
+var fmtTs = function(ms) { return new Date(ms).toLocaleTimeString('en-US', {hour12:false}); };
+var shortHash = function(h) {
+  if (!h) return '';
+  var s = h.startsWith('insight:') ? h.slice(8) : h;
+  return s.length > 14 ? s.slice(0,8) + '…' + s.slice(-4) : s;
+};
+var parseHexU64 = function(s) { if (!s) return 0; var h = s.startsWith('0x') ? s.slice(2) : s; return parseInt(h, 16); };
+var parseHexBig = function(s) { if (!s) return 0n; var h = s.startsWith('0x') ? s.slice(2) : s; return BigInt('0x'+h); };
+var weiToGwei = function(wei) { return Number(wei) / 1e9; };
+
+/* ---------- Block polling (still JSON-RPC: eth_*) ---------- */
+async function pollBlock() {
+  try {
+    var result = await rpc('eth_getBlockByNumber', ['latest', false]);
+    var blk = result.result;
+    if (!blk) return;
+    var num = parseHexU64(blk.number);
+    var b = {
+      number: num,
+      hash: blk.hash,
+      timestamp: parseHexU64(blk.timestamp),
+      gasUsed: parseHexU64(blk.gasUsed),
+      gasLimit: parseHexU64(blk.gasLimit),
+      baseFeeGwei: blk.baseFeePerGas ? weiToGwei(parseHexBig(blk.baseFeePerGas)) : 0,
+      txCount: Array.isArray(blk.transactions) ? blk.transactions.length : 0,
+      fresh: true,
+    };
+    b.saturation = b.gasLimit > 0 ? (b.gasUsed / b.gasLimit) * 100 : 0;
+    var last = state.blocks[state.blocks.length - 1];
+    if (!last || last.number !== b.number) {
+      state.blocks.forEach(function(x) { x.fresh = false; });
+      state.blocks.push(b);
+      if (state.blocks.length > 60) state.blocks.shift();
+      renderBlocks();
+      updateHero();
+    }
+  } catch (e) { /* ignore */ }
+}
+
+/* ---------- Chain polling — REST API ---------- */
+async function pollChain() {
+  try {
+    // GET /api/stats — replaces chain_stats
+    var statsRes = await api('/stats');
+    var stats = statsRes.data;
+    if (stats) {
+      var prev = state.insightsTotalPrev || 0;
+      var insightsTotal = stats.insights ? stats.insights.total : 0;
+      var pheroTotal = stats.pheromones ? stats.pheromones.total : 0;
+      state.insightsTotalPrev = insightsTotal;
+      state.chainInsightsTotal = insightsTotal;
+      state.chainPheromonesTotal = pheroTotal;
+      document.getElementById('h-insights').textContent = insightsTotal;
+      document.getElementById('h-insights-delta').textContent = '+' + (insightsTotal - prev) + '/poll';
+      document.getElementById('h-phero').textContent = pheroTotal;
+      if (stats.pheromones) {
+        document.getElementById('phero-meta').textContent =
+          pheroTotal + ' live · threat:' + (stats.pheromones.threat || 0) +
+          ' opp:' + (stats.pheromones.opportunity || 0) +
+          ' wisdom:' + (stats.pheromones.wisdom || 0);
+      }
+    }
+    // GET /api/knowledge/search — replaces chain_searchInsights for polling
+    var searchQueries = [
+      'gas saturation base fee congestion spike',
+      'whale transfer large ETH move',
+      'DEX swap uniswap sushiswap curve liquidity',
+      'lending aave compound borrow supply',
+      'stablecoin USDC USDT DAI velocity',
+      'MEV sandwich priority tip flashbot',
+      'bridge cross-chain arbitrum optimism L2',
+      'NFT marketplace opensea ERC721',
+      'contract deploy upgrade proxy',
+      'threat opportunity wisdom convergence pattern',
+    ];
+    var sq = searchQueries[state.rpc.total % searchQueries.length];
+    var searchRes = await api('/knowledge/search?q=' + encodeURIComponent(sq) + '&k=30');
+    var searchData = searchRes.data;
+    if (searchData && searchData.results) {
+      var totalConf = 0, totalChall = 0;
+      for (var i = 0; i < searchData.results.length; i++) {
+        totalConf += searchData.results[i].confirmations || 0;
+        totalChall += searchData.results[i].challenges || 0;
+      }
+      state.observedConfirms = Math.max(state.observedConfirms || 0, totalConf);
+      state.observedChallenges = Math.max(state.observedChallenges || 0, totalChall);
+      state.confirmsCount = Math.max(state.confirmsCount, state.observedConfirms);
+      state.challengesCount = Math.max(state.challengesCount, state.observedChallenges);
+
+      for (var si = 0; si < searchData.results.length; si++) {
+        var hit = searchData.results[si];
+        var id = (hit.id || '').replace(/^insight:/, '');
+        if (!id) continue;
+        var existing = state.insights.get(id);
+        var row = {
+          id: id, kind: hit.kind || 'insight', content: hit.content || '',
+          author: existing ? existing.author : null, conf: hit.confirmations || 0,
+          chall: hit.challenges || 0, weight: hit.weight || 1.0, createdAt: Date.now(),
+          similarity: hit.similarity || 0, score: hit.score || 0, state: hit.state,
+        };
+        if (!existing) {
+          state.insights.set(id, row);
+          addInsightNode(id, row.kind, row.content);
+          // Fetch author in background via JSON-RPC (mutation-adjacent)
+          (function(capturedRow, capturedId) {
+            rpc('chain_getInsight', {id: 'insight:' + capturedId}).then(function(res) {
+              var full = res.result;
+              if (full && full.author) {
+                capturedRow.author = full.author;
+                state.seenAuthors.add(full.author);
+                var n = graphNodes.find(function(x) { return x.id === capturedId; });
+                if (n) n.author = full.author;
+                logAgent('observe', full.author, capturedRow.content.slice(0, 80));
+              }
+            }).catch(function() {});
+          })(row, id);
+        } else {
+          var confDelta = row.conf - existing.conf;
+          var challDelta = row.chall - existing.chall;
+          if (confDelta > 0) {
+            state.confirmsCount += confDelta;
+            if (existing.author) logAgent('confirm', 'chain', existing.author + "'s insight confirmed (+" + confDelta + ')');
+          }
+          if (challDelta > 0) {
+            state.challengesCount += challDelta;
+            if (existing.author) logAgent('challenge', 'chain', existing.author + "'s insight challenged (+" + challDelta + ')');
+          }
+          existing.conf = row.conf; existing.chall = row.chall; existing.weight = row.weight;
+          var gn = graphNodes.find(function(x) { return x.id === id; });
+          if (gn) { gn.conf = row.conf; gn.chall = row.chall; gn.pulse = Math.max(gn.pulse, 0.6); }
+        }
+      }
+      // Search metric
+      document.getElementById('m-search').textContent = Math.round(searchRes.ms);
+      document.getElementById('m-search-count').textContent = searchData.results.length + ' hits';
+      pushSeries('search', searchRes.ms);
+    }
+
+    // GET /api/pheromones — fetch all kinds, re-inject particles for alive chain pheromones
+    var pheroRes = await api('/pheromones?limit=200&sort=deposited_at&order=desc');
+    var pheroData = pheroRes.data;
+    if (pheroData && pheroData.pheromones) {
+      // Build set of chain IDs that currently have a LIVE particle (pulse > 0.02)
+      var liveParticles = new Set();
+      for (var lp = 0; lp < state.pheromones.length; lp++) {
+        if (state.pheromones[lp].chainId && state.pheromones[lp].pulse > 0.02) {
+          liveParticles.add(state.pheromones[lp].chainId);
+        }
+      }
+      for (var pi = 0; pi < pheroData.pheromones.length; pi++) {
+        var h = pheroData.pheromones[pi];
+        if (liveParticles.has(h.id)) {
+          // Update decay projections on existing live particles
+          var existingP = state.pheromones.find(function(p) { return p.chainId === h.id; });
+          if (existingP && h.decay_projection) {
+            existingP.decayProjection = h.decay_projection;
+          }
+          continue;
+        }
+        // Particle either doesn't exist or died — re-inject with real chain intensity
+        depositPheromoneParticle(h.kind, '#' + h.id, h.intensity || 0.7, h.id);
+        var newP = state.pheromones[state.pheromones.length - 1];
+        if (newP) {
+          newP.decayProjection = h.decay_projection || null;
+          // Use longer visual half-life so particles stay visible between polls
+          newP.halfLife = Math.max(P_HALFLIFE[h.kind] || 60, 45);
+        }
+      }
+    }
+  } catch (e) { /* ignore */ }
+}
+
+/* ---------- Poll knowledge entries via REST ---------- */
+async function pollEntries() {
+  try {
+    var res = await api('/knowledge/entries?limit=200&sort=created_at&order=desc');
+    var data = res.data;
+    if (data && data.entries) {
+      for (var i = 0; i < data.entries.length; i++) {
+        var entry = data.entries[i];
+        var id = (entry.id || '').replace(/^insight:/, '');
+        if (!id) continue;
+        var existing = state.insights.get(id);
+        if (!existing) {
+          var row = {
+            id: id, kind: entry.kind || 'insight', content: entry.content || '',
+            author: entry.author || null, conf: entry.confirmations || 0,
+            chall: entry.challenges || 0, weight: entry.weight || 1.0, createdAt: Date.now(),
+            similarity: 0, score: 0, state: entry.state,
+          };
+          state.insights.set(id, row);
+          addInsightNode(id, row.kind, row.content, { author: entry.author });
+          if (entry.author) state.seenAuthors.add(entry.author);
+        } else {
+          existing.conf = entry.confirmations || existing.conf;
+          existing.chall = entry.challenges || existing.chall;
+          existing.weight = entry.weight || existing.weight;
+          if (entry.author && !existing.author) {
+            existing.author = entry.author;
+            state.seenAuthors.add(entry.author);
+          }
+          var gn = graphNodes.find(function(x) { return x.id === id; });
+          if (gn) {
+            gn.conf = existing.conf; gn.chall = existing.chall;
+            if (entry.author) gn.author = entry.author;
+          }
+        }
+      }
+    }
+  } catch (e) { /* ignore */ }
+}
+
+/* ---------- Poll knowledge edges via REST ---------- */
+async function pollEdges() {
+  try {
+    var res = await api('/knowledge/edges?similarity_threshold=0.4&max_hdc_edges_per_node=5&include_enabled_by=true&include_hdc=true');
+    var data = res.data;
+    if (data && data.edges) {
+      // Remove old REST-sourced edges, keep user-interaction edges (hdc from click)
+      for (var i = graphEdges.length - 1; i >= 0; i--) {
+        if (graphEdges[i].source === 'rest') graphEdges.splice(i, 1);
+      }
+      for (var ei = 0; ei < data.edges.length; ei++) {
+        var e = data.edges[ei];
+        var fromId = (e.from || '').replace(/^insight:/, '');
+        var toId = (e.to || '').replace(/^insight:/, '');
+        if (!fromId || !toId || fromId === toId) continue;
+        var fromNode = graphNodes.find(function(n) { return n.id === fromId; });
+        var toNode = graphNodes.find(function(n) { return n.id === toId; });
+        if (!fromNode || !toNode) continue;
+        var already = graphEdges.find(function(x) {
+          return (x.from === fromId && x.to === toId) || (x.from === toId && x.to === fromId);
+        });
+        if (already) continue;
+        var kind = e.type === 'enabled_by' ? 'enabled_by' : 'hdc';
+        graphEdges.push({ from: fromId, to: toId, kind: kind, similarity: e.similarity || 0, source: 'rest' });
+      }
+      while (graphEdges.length > 500) graphEdges.shift();
+    }
+  } catch (e) { /* ignore */ }
+}
+
+/* ---------- Poll pheromone summary via REST ---------- */
+async function pollPheroSummary() {
+  try {
+    var res = await api('/pheromones/summary');
+    var data = res.data;
+    if (data) {
+      var kinds = ['threat', 'opportunity', 'wisdom'];
+      var prefixes = ['ps-threat', 'ps-opp', 'ps-wisdom'];
+      for (var i = 0; i < kinds.length; i++) {
+        var kd = (data.by_kind || {})[kinds[i]] || {};
+        var pfx = prefixes[i];
+        document.getElementById(pfx + '-count').textContent = kd.count || 0;
+        document.getElementById(pfx + '-total').textContent = (kd.total_intensity || 0).toFixed(2);
+        document.getElementById(pfx + '-avg').textContent = (kd.avg_intensity || 0).toFixed(2);
+      }
+      document.getElementById('phero-summary-meta').textContent =
+        'updated ' + fmtTs(Date.now()) + ' · ' + Math.round(res.ms) + 'ms';
+    }
+  } catch (e) { /* ignore */ }
+}
+
+/* ---------- Poll pheromone heatmap via REST ---------- */
+var heatmapCanvas = document.getElementById('heatmap-canvas');
+var heatmapCtx = heatmapCanvas.getContext('2d');
+var heatmapW = 0, heatmapH = 0;
+
+async function pollHeatmap() {
+  try {
+    var since = Math.floor(Date.now() / 1000) - 3600;
+    var res = await api('/pheromones/heatmap?bucket_seconds=300&since=' + since);
+    var data = res.data;
+    if (data && data.buckets) {
+      state.heatmapBuckets = data.buckets;
+      document.getElementById('heatmap-meta').textContent =
+        data.buckets.length + ' buckets · ' + Math.round(res.ms) + 'ms';
+      // Update hud totals
+      var tT = 0, tO = 0, tW = 0;
+      for (var i = 0; i < data.buckets.length; i++) {
+        tT += data.buckets[i].threat || 0;
+        tO += data.buckets[i].opportunity || 0;
+        tW += data.buckets[i].wisdom || 0;
+      }
+      document.getElementById('hm-threat').textContent = tT;
+      document.getElementById('hm-opp').textContent = tO;
+      document.getElementById('hm-wisdom').textContent = tW;
+    }
+  } catch (e) { /* ignore */ }
+}
+
+function drawHeatmap() {
+  var w = heatmapCanvas.clientWidth, h = heatmapCanvas.clientHeight;
+  if (heatmapW !== w || heatmapH !== h) { var d = resizeCanvas(heatmapCanvas); heatmapW = d.w; heatmapH = d.h; }
+  heatmapCtx.clearRect(0, 0, w, h);
+  var buckets = state.heatmapBuckets;
+  if (!buckets || buckets.length === 0) {
+    heatmapCtx.fillStyle = 'rgba(79,83,112,0.4)';
+    heatmapCtx.font = '11px monospace';
+    heatmapCtx.textAlign = 'center';
+    heatmapCtx.fillText('waiting for heatmap data…', w / 2, h / 2);
+    return;
+  }
+  // Find max per-bucket total for scaling
+  var maxVal = 1;
+  for (var i = 0; i < buckets.length; i++) {
+    var total = (buckets[i].threat || 0) + (buckets[i].opportunity || 0) + (buckets[i].wisdom || 0);
+    if (total > maxVal) maxVal = total;
+  }
+  var barW = Math.max(4, (w - 20) / buckets.length - 2);
+  var gap = 2;
+  var baseX = 10;
+  // Grid lines
+  heatmapCtx.strokeStyle = 'rgba(124,111,247,0.04)';
+  heatmapCtx.lineWidth = 1;
+  for (var gy = 0; gy < 4; gy++) {
+    var yLine = h - (gy / 3) * (h - 20) - 10;
+    heatmapCtx.beginPath(); heatmapCtx.moveTo(0, yLine); heatmapCtx.lineTo(w, yLine); heatmapCtx.stroke();
+  }
+  for (var bi = 0; bi < buckets.length; bi++) {
+    var bk = buckets[bi];
+    var x = baseX + bi * (barW + gap);
+    var threat = bk.threat || 0;
+    var opp = bk.opportunity || 0;
+    var wisdom = bk.wisdom || 0;
+    var total = threat + opp + wisdom;
+    var scale = (h - 20) / maxVal;
+    // Stacked bars: wisdom bottom, opportunity middle, threat top
+    var y = h - 10;
+    // Wisdom
+    if (wisdom > 0) {
+      var wH = wisdom * scale;
+      heatmapCtx.fillStyle = 'rgba(251,191,36,0.7)';
+      heatmapCtx.fillRect(x, y - wH, barW, wH);
+      y -= wH;
+    }
+    // Opportunity
+    if (opp > 0) {
+      var oH = opp * scale;
+      heatmapCtx.fillStyle = 'rgba(74,222,128,0.7)';
+      heatmapCtx.fillRect(x, y - oH, barW, oH);
+      y -= oH;
+    }
+    // Threat
+    if (threat > 0) {
+      var tH = threat * scale;
+      heatmapCtx.fillStyle = 'rgba(248,113,113,0.7)';
+      heatmapCtx.fillRect(x, y - tH, barW, tH);
+    }
+  }
+  // Time labels
+  if (buckets.length > 0) {
+    heatmapCtx.fillStyle = 'rgba(79,83,112,0.6)';
+    heatmapCtx.font = '9px monospace';
+    heatmapCtx.textAlign = 'center';
+    // First and last
+    if (buckets[0].timestamp) {
+      heatmapCtx.fillText(fmtTs(buckets[0].timestamp * 1000), baseX + barW / 2, h - 1);
+    }
+    if (buckets.length > 1 && buckets[buckets.length - 1].timestamp) {
+      var lastX = baseX + (buckets.length - 1) * (barW + gap) + barW / 2;
+      heatmapCtx.fillText(fmtTs(buckets[buckets.length - 1].timestamp * 1000), lastX, h - 1);
+    }
+  }
+}
+
+/* ---------- Poll agent topology via REST ---------- */
+var topoCanvas = document.getElementById('topo-canvas');
+var topoCtx = topoCanvas.getContext('2d');
+var topoW = 0, topoH = 0;
+
+async function pollTopology() {
+  try {
+    var res = await api('/agents/topology');
+    var data = res.data;
+    if (data) {
+      // Preserve positions of existing nodes
+      var oldPositions = {};
+      for (var i = 0; i < state.topoNodes.length; i++) {
+        oldPositions[state.topoNodes[i].id] = { x: state.topoNodes[i].x, y: state.topoNodes[i].y, vx: state.topoNodes[i].vx, vy: state.topoNodes[i].vy };
+      }
+      var nodes = data.nodes || [];
+      var edges = data.edges || [];
+      var w = topoCanvas.clientWidth || 600;
+      var h = topoCanvas.clientHeight || 400;
+      state.topoNodes = [];
+      for (var ni = 0; ni < nodes.length; ni++) {
+        var n = nodes[ni];
+        var old = oldPositions[n.id || n.address];
+        state.topoNodes.push({
+          id: n.id || n.address,
+          address: n.address,
+          insightsPosted: n.insights_posted || 0,
+          confirmationsGiven: n.confirmations_given || 0,
+          challengesGiven: n.challenges_given || 0,
+          totalWeight: n.total_weight || 0,
+          x: old ? old.x : w / 2 + (Math.random() - 0.5) * 200,
+          y: old ? old.y : h / 2 + (Math.random() - 0.5) * 200,
+          vx: old ? old.vx : 0,
+          vy: old ? old.vy : 0,
+        });
+      }
+      state.topoEdges = [];
+      for (var ei = 0; ei < edges.length; ei++) {
+        var e = edges[ei];
+        state.topoEdges.push({
+          from: e.from,
+          to: e.to,
+          weight: e.weight || 1,
+          type: e.type || 'confirmed',
+        });
+      }
+      document.getElementById('t-agents').textContent = state.topoNodes.length;
+      document.getElementById('t-links').textContent = state.topoEdges.length;
+      document.getElementById('topo-meta').textContent =
+        state.topoNodes.length + ' agents · ' + state.topoEdges.length + ' links · ' + Math.round(res.ms) + 'ms';
+      // Update leaderboard table
+      var sorted = state.topoNodes.slice().sort(function(a, b) {
+        return (b.insightsPosted + b.confirmationsGiven) - (a.insightsPosted + a.confirmationsGiven);
+      });
+      var lb = document.getElementById('leaderboard-tbody');
+      if (lb) {
+        lb.innerHTML = '';
+        for (var li = 0; li < sorted.length; li++) {
+          var ag = sorted[li];
+          var tr = document.createElement('tr');
+          tr.innerHTML =
+            '<td class="kind-name">' + ag.id + '</td>' +
+            '<td style="color:var(--accent-bright);font-weight:600">' + ag.insightsPosted + '</td>' +
+            '<td style="color:var(--green)">' + ag.confirmationsGiven + '</td>' +
+            '<td style="color:var(--red)">' + ag.challengesGiven + '</td>' +
+            '<td style="color:var(--text)">' + (ag.totalWeight || 0).toFixed(1) + '</td>';
+          lb.appendChild(tr);
+        }
+        document.getElementById('leaderboard-meta').textContent =
+          sorted.length + ' agents · updated ' + fmtTs(Date.now());
+      }
+    }
+  } catch (e) { /* ignore */ }
+}
+
+function drawTopology(dt) {
+  var w = topoCanvas.clientWidth, h = topoCanvas.clientHeight;
+  if (topoW !== w || topoH !== h) { var d = resizeCanvas(topoCanvas); topoW = d.w; topoH = d.h; }
+  topoCtx.clearRect(0, 0, w, h);
+  var nodes = state.topoNodes;
+  var edges = state.topoEdges;
+  if (nodes.length === 0) {
+    topoCtx.fillStyle = 'rgba(79,83,112,0.4)';
+    topoCtx.font = '11px monospace';
+    topoCtx.textAlign = 'center';
+    topoCtx.fillText('waiting for agent topology…', w / 2, h / 2);
+    return;
+  }
+
+  // Physics: repulsion between all nodes
+  for (var i = 0; i < nodes.length; i++) {
+    var n = nodes[i];
+    n.vx *= 0.82; n.vy *= 0.82;
+    for (var j = 0; j < nodes.length; j++) {
+      if (i === j) continue;
+      var m = nodes[j];
+      var dx = n.x - m.x, dy = n.y - m.y, d2 = dx * dx + dy * dy + 1;
+      var f = 3000 / d2;
+      var dist = Math.sqrt(d2);
+      n.vx += (dx / dist) * f * 0.02;
+      n.vy += (dy / dist) * f * 0.02;
+    }
+    // Center gravity
+    n.vx += (w / 2 - n.x) * 0.002;
+    n.vy += (h / 2 - n.y) * 0.002;
+  }
+  // Edge spring forces
+  for (var ei = 0; ei < edges.length; ei++) {
+    var e = edges[ei];
+    var a = nodes.find(function(x) { return x.id === e.from; });
+    var b = nodes.find(function(x) { return x.id === e.to; });
+    if (!a || !b) continue;
+    var dx = b.x - a.x, dy = b.y - a.y, dist = Math.sqrt(dx * dx + dy * dy) + 0.01;
+    var target = 120;
+    var strength = 0.015;
+    var f = (dist - target) * strength;
+    var fx = (dx / dist) * f, fy = (dy / dist) * f;
+    a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy;
+  }
+  // Update positions
+  for (var ui = 0; ui < nodes.length; ui++) {
+    nodes[ui].x += nodes[ui].vx;
+    nodes[ui].y += nodes[ui].vy;
+    nodes[ui].x = Math.max(30, Math.min(w - 30, nodes[ui].x));
+    nodes[ui].y = Math.max(30, Math.min(h - 30, nodes[ui].y));
+  }
+
+  // Grid
+  topoCtx.strokeStyle = 'rgba(124,111,247,0.03)';
+  topoCtx.lineWidth = 1;
+  for (var gx = 0; gx <= w; gx += 50) { topoCtx.beginPath(); topoCtx.moveTo(gx, 0); topoCtx.lineTo(gx, h); topoCtx.stroke(); }
+  for (var gy = 0; gy <= h; gy += 50) { topoCtx.beginPath(); topoCtx.moveTo(0, gy); topoCtx.lineTo(w, gy); topoCtx.stroke(); }
+
+  // Draw edges
+  for (var dei = 0; dei < edges.length; dei++) {
+    var de = edges[dei];
+    var na = nodes.find(function(x) { return x.id === de.from; });
+    var nb = nodes.find(function(x) { return x.id === de.to; });
+    if (!na || !nb) continue;
+    if (de.type === 'challenged') {
+      topoCtx.strokeStyle = 'rgba(248,113,113,' + Math.min(0.7, 0.2 + de.weight * 0.1) + ')';
+      topoCtx.lineWidth = Math.min(3, 1 + de.weight * 0.3);
+      topoCtx.setLineDash([4, 3]);
+    } else {
+      topoCtx.strokeStyle = 'rgba(74,222,128,' + Math.min(0.7, 0.2 + de.weight * 0.1) + ')';
+      topoCtx.lineWidth = Math.min(3, 1 + de.weight * 0.3);
+      topoCtx.setLineDash([]);
+    }
+    topoCtx.beginPath(); topoCtx.moveTo(na.x, na.y); topoCtx.lineTo(nb.x, nb.y); topoCtx.stroke();
+    topoCtx.setLineDash([]);
+  }
+
+  // Draw nodes
+  var maxPosts = 1;
+  for (var mi = 0; mi < nodes.length; mi++) {
+    if (nodes[mi].insightsPosted > maxPosts) maxPosts = nodes[mi].insightsPosted;
+  }
+  for (var ni = 0; ni < nodes.length; ni++) {
+    var nd = nodes[ni];
+    var r = 6 + Math.min(16, (nd.insightsPosted / maxPosts) * 14);
+    var activity = nd.confirmationsGiven + nd.challengesGiven;
+    var hue = activity > 0 ? Math.min(200, 120 + activity * 10) : 260;
+    // Glow
+    var g = topoCtx.createRadialGradient(nd.x, nd.y, 0, nd.x, nd.y, r * 3);
+    g.addColorStop(0, 'hsla(' + hue + ', 72%, 62%, 0.5)');
+    g.addColorStop(0.4, 'hsla(' + hue + ', 72%, 62%, 0.15)');
+    g.addColorStop(1, 'hsla(' + hue + ', 72%, 62%, 0)');
+    topoCtx.fillStyle = g;
+    topoCtx.beginPath(); topoCtx.arc(nd.x, nd.y, r * 3, 0, Math.PI * 2); topoCtx.fill();
+    // Core
+    topoCtx.fillStyle = 'hsla(' + hue + ', 72%, 62%, 1)';
+    topoCtx.beginPath(); topoCtx.arc(nd.x, nd.y, r, 0, Math.PI * 2); topoCtx.fill();
+    // Label
+    topoCtx.fillStyle = 'rgba(230,232,240,0.7)';
+    topoCtx.font = '9px monospace';
+    topoCtx.textAlign = 'center';
+    var label = (nd.id || '').length > 12 ? (nd.id || '').slice(0, 10) + '…' : (nd.id || '');
+    topoCtx.fillText(label, nd.x, nd.y + r + 12);
+  }
+}
+
+// Topology tooltip
+topoCanvas.addEventListener('mousemove', function(ev) {
+  var rect = topoCanvas.getBoundingClientRect();
+  var mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
+  var tt = document.getElementById('topo-tooltip');
+  var found = null;
+  for (var i = 0; i < state.topoNodes.length; i++) {
+    var n = state.topoNodes[i];
+    var dx = n.x - mx, dy = n.y - my;
+    if (dx * dx + dy * dy < 20 * 20) { found = n; break; }
+  }
+  if (found) {
+    tt.style.display = 'block';
+    tt.style.left = (ev.offsetX + 14) + 'px';
+    tt.style.top = (ev.offsetY + 14) + 'px';
+    tt.innerHTML =
+      '<div style="color:var(--accent-bright);font-weight:600;font-size:9px;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px">' + (found.id || '') + '</div>' +
+      '<div style="color:var(--text-faint);font-size:9.5px;display:flex;gap:10px">' +
+      '<span>posted <b style="color:var(--text)">' + found.insightsPosted + '</b></span>' +
+      '<span>confirmed <b style="color:var(--green)">' + found.confirmationsGiven + '</b></span>' +
+      '<span>challenged <b style="color:var(--red)">' + found.challengesGiven + '</b></span>' +
+      '<span>weight <b style="color:var(--text)">' + (found.totalWeight || 0).toFixed(2) + '</b></span>' +
+      '</div>';
+    topoCanvas.style.cursor = 'pointer';
+  } else {
+    tt.style.display = 'none';
+    topoCanvas.style.cursor = 'default';
+  }
+});
+
+/* ---------- Poll knowledge kinds via REST ---------- */
+async function pollKinds() {
+  try {
+    var res = await api('/knowledge/kinds');
+    var data = res.data;
+    if (data) {
+      state.kindsData = data;
+      var tbody = document.getElementById('kinds-tbody');
+      tbody.innerHTML = '';
+      var allKinds = [];
+      if (data.knowledge_kinds) {
+        for (var i = 0; i < data.knowledge_kinds.length; i++) {
+          allKinds.push({ row: data.knowledge_kinds[i], type: 'knowledge' });
+        }
+      }
+      if (data.pheromone_kinds) {
+        for (var i = 0; i < data.pheromone_kinds.length; i++) {
+          allKinds.push({ row: data.pheromone_kinds[i], type: 'pheromone' });
+        }
+      }
+      var totalCount = 0;
+      for (var ki = 0; ki < allKinds.length; ki++) {
+        var k = allKinds[ki];
+        var r = k.row;
+        var tr = document.createElement('tr');
+        var count = r.count || 0;
+        totalCount += count;
+        var hlSecs = r.default_half_life_seconds || 0;
+        var hlLabel = hlSecs >= 86400 ? (hlSecs / 86400).toFixed(0) + 'd'
+                    : hlSecs >= 3600 ? (hlSecs / 3600).toFixed(0) + 'h'
+                    : hlSecs >= 60 ? (hlSecs / 60).toFixed(0) + 'm'
+                    : hlSecs > 0 ? hlSecs + 's' : '—';
+        var reward = r.base_reward_wei ? (Number(r.base_reward_wei) / 1e18).toFixed(6) : '—';
+        tr.innerHTML =
+          '<td class="kind-name">' + (r.name || '—') + '</td>' +
+          '<td>' + k.type + '</td>' +
+          '<td>' + hlLabel + '</td>' +
+          '<td>' + reward + '</td>' +
+          '<td style="color:var(--text);font-weight:600">' + count + '</td>';
+        tbody.appendChild(tr);
+      }
+      document.getElementById('kinds-total-label').innerHTML = totalCount + '<span class="unit"> entries</span>';
+    }
+  } catch (e) { /* ignore */ }
+}
+
+/* ---------- Block rendering ---------- */
+function renderBlocks() {
+  var el = document.getElementById('block-stream');
+  var frag = document.createDocumentFragment();
+  for (var i = state.blocks.length - 1; i >= 0 && i >= state.blocks.length - 40; i--) {
+    var b = state.blocks[i];
+    var row = document.createElement('div');
+    var selected = state.selectedBlock === b.number;
+    row.className = 'block-row' + (b.fresh ? ' fresh' : '') + (selected ? ' selected' : '');
+    (function(bNum) {
+      row.onclick = function() { state.selectedBlock = (state.selectedBlock === bNum) ? null : bNum; renderBlocks(); };
+    })(b.number);
+    var satColor = b.saturation > 90 ? 'var(--red)' : b.saturation > 60 ? 'var(--yellow)' : 'var(--green)';
+    row.innerHTML =
+      '<div class="block-head">' +
+        '<span class="block-num">#' + b.number.toLocaleString() + '</span>' +
+        '<span class="block-hash mono">' + shortHash(b.hash) + '</span>' +
+      '</div>' +
+      '<div class="block-metrics">' +
+        '<span>tx <span class="tx">' + b.txCount + '</span></span>' +
+        '<span>gas <span class="gas">' + (b.gasUsed/1e6).toFixed(1) + 'M</span></span>' +
+        '<span>fee <span class="fee">' + b.baseFeeGwei.toFixed(1) + '</span></span>' +
+      '</div>' +
+      '<div class="sat-bar"><div style="width:' + b.saturation + '%; background:' + satColor + '"></div></div>';
+    frag.appendChild(row);
+  }
+  el.innerHTML = '';
+  el.appendChild(frag);
+  var bps = blocksPerSec();
+  document.getElementById('block-meta').textContent = state.blocks.length + ' · ' + bps.toFixed(1) + ' bps';
+}
+function blocksPerSec() {
+  var last = state.blocks.slice(-10);
+  if (last.length < 2) return 0;
+  var dt = (last[last.length - 1].timestamp - last[0].timestamp);
+  return dt > 0 ? (last.length - 1) / dt : 0;
+}
+
+/* ---------- Agent log ---------- */
+function renderAgent() {
+  var el = document.getElementById('agent-log');
+  var frag = document.createDocumentFragment();
+  for (var i = state.agentLog.length - 1; i >= 0 && i >= state.agentLog.length - 40; i--) {
+    var e = state.agentLog[i];
+    var row = document.createElement('div');
+    row.className = 'agent-entry ' + e.type;
+    row.innerHTML = '<span class="ts mono">' + fmtTs(e.ts) + '</span> <span class="author">' + e.author + '</span><span class="msg">' + e.msg + '</span>';
+    frag.appendChild(row);
+  }
+  el.innerHTML = ''; el.appendChild(frag);
+  var agentCount = Math.max(state.seenAuthors.size, state.topoNodes.length);
+  document.getElementById('agent-meta').textContent = agentCount + ' agents · ' + state.agentLog.length + ' events';
+  document.getElementById('agents-chip').innerHTML = '<span class="dot"></span>' + agentCount + ' agents';
+}
+
+function renderLog() {
+  var el = document.getElementById('log-view');
+  var frag = document.createDocumentFragment();
+  for (var i = state.requestLog.length - 1; i >= 0 && i >= state.requestLog.length - 40; i--) {
+    var r = state.requestLog[i];
+    var row = document.createElement('div');
+    row.className = 'log-line';
+    row.innerHTML = '<span class="ts">' + fmtTs(r.ts) + '</span><span class="lv ' + r.lv + '">' + r.lv.toUpperCase() + '</span><span class="msg">' + r.msg + '</span>';
+    frag.appendChild(row);
+  }
+  el.innerHTML = ''; el.appendChild(frag);
+}
+
+/* ---------- Pheromone particle system ---------- */
+var pheroCanvas = document.getElementById('phero-canvas');
+var pheroCtx = pheroCanvas.getContext('2d');
+var P_COLORS = {
+  threat: {r:248,g:113,b:113}, opportunity: {r:74,g:222,b:128}, wisdom: {r:251,g:191,b:36},
+};
+var P_HALFLIFE = { threat: 60, opportunity: 90, wisdom: 180 };
+var pheroW=0, pheroH=0;
+
+function resizeCanvas(c) {
+  var rect = c.getBoundingClientRect();
+  var dpr = window.devicePixelRatio || 1;
+  c.width = rect.width * dpr; c.height = rect.height * dpr;
+  var ctx = c.getContext('2d'); ctx.scale(dpr, dpr);
+  return {w: rect.width, h: rect.height};
+}
+
+function depositPheromoneParticle(kind, content, intensity, chainId) {
+  if (chainId === undefined) chainId = null;
+  var w = pheroCanvas.clientWidth, h = pheroCanvas.clientHeight;
+  var regions = {
+    threat: {cx: w * 0.22, cy: h * 0.30, r: Math.min(w, h) * 0.15},
+    opportunity: {cx: w * 0.78, cy: h * 0.30, r: Math.min(w, h) * 0.15},
+    wisdom: {cx: w * 0.50, cy: h * 0.75, r: Math.min(w, h) * 0.15},
+  };
+  var region = regions[kind] || {cx: w/2, cy: h/2, r: Math.min(w, h) * 0.2};
+  var seed = chainId ? chainId : content.length;
+  var angle = ((seed * 2654435761) % 1000) / 1000 * Math.PI * 2;
+  var radius = (((seed * 40499) % 1000) / 1000) * region.r;
+  var x = region.cx + Math.cos(angle) * radius;
+  var y = region.cy + Math.sin(angle) * radius;
+  state.pheromones.push({
+    chainId: chainId, kind: kind, content: content, intensity: intensity,
+    x: x, y: y, anchorX: x, anchorY: y,
+    vx: 0, vy: 0,
+    age: 0, deposited: Date.now(),
+    halfLife: P_HALFLIFE[kind] || 60, pulse: 1,
+    decayProjection: null,
+  });
+  if (state.pheromones.length > 400) state.pheromones.shift();
+}
+
+var pheroFps=60, frames=0, lastFpsT=performance.now();
+function drawPheromones(dt) {
+  var w = pheroCanvas.clientWidth, h = pheroCanvas.clientHeight;
+  if (pheroW !== w || pheroH !== h) { var d = resizeCanvas(pheroCanvas); pheroW=d.w; pheroH=d.h; }
+  pheroCtx.clearRect(0,0,w,h);
+
+  // Draw semantic zones
+  var zoneR = Math.min(w, h) * 0.18;
+  var zones = [
+    {kind: 'threat', label: 'THREAT', x: w*0.22, y: h*0.30, c: '#f87171'},
+    {kind: 'opportunity', label: 'OPPORTUNITY', x: w*0.78, y: h*0.30, c: '#4ade80'},
+    {kind: 'wisdom', label: 'WISDOM', x: w*0.50, y: h*0.75, c: '#fbbf24'},
+  ];
+  var zoneCount = {threat: 0, opportunity: 0, wisdom: 0};
+  for (var zi = 0; zi < state.pheromones.length; zi++) zoneCount[state.pheromones[zi].kind] = (zoneCount[state.pheromones[zi].kind] || 0) + 1;
+  for (var zj = 0; zj < zones.length; zj++) {
+    var z = zones[zj];
+    if (zoneCount[z.kind] === 0) continue;
+    pheroCtx.fillStyle = z.c + '18';
+    pheroCtx.font = '9px monospace';
+    pheroCtx.textAlign = 'center';
+    pheroCtx.fillText(z.label, z.x, z.y - zoneR - 6);
+  }
+
+  // Grid
+  pheroCtx.strokeStyle = 'rgba(124,111,247,0.03)';
+  pheroCtx.lineWidth = 1;
+  for (var gx = 0; gx <= w; gx += 40) { pheroCtx.beginPath(); pheroCtx.moveTo(gx,0); pheroCtx.lineTo(gx,h); pheroCtx.stroke(); }
+  for (var gy = 0; gy <= h; gy += 40) { pheroCtx.beginPath(); pheroCtx.moveTo(0,gy); pheroCtx.lineTo(w,gy); pheroCtx.stroke(); }
+
+  state.pheromones = state.pheromones.filter(function(p) { return p.pulse > 0.01 || p.age < 120; });
+  var totalI = 0;
+  for (var pi = 0; pi < state.pheromones.length; pi++) {
+    var p = state.pheromones[pi];
+    p.age += dt / 1000;
+    var weight = p.intensity * Math.pow(0.5, p.age / p.halfLife);
+    p.pulse = weight;
+    // Spring back to anchor
+    var dx = p.anchorX - p.x, dy = p.anchorY - p.y;
+    p.vx = (p.vx + dx * 0.02) * 0.82;
+    p.vy = (p.vy + dy * 0.02) * 0.82;
+    // Same-kind repulsion
+    for (var pj = 0; pj < state.pheromones.length; pj++) {
+      var o = state.pheromones[pj];
+      if (o === p || o.kind !== p.kind) continue;
+      var dx2 = p.x - o.x, dy2 = p.y - o.y;
+      var d2 = dx2*dx2 + dy2*dy2 + 1;
+      if (d2 < 400) {
+        p.vx += (dx2 / Math.sqrt(d2)) * 0.15;
+        p.vy += (dy2 / Math.sqrt(d2)) * 0.15;
+      }
+    }
+    p.x += p.vx; p.y += p.vy;
+    if (p.x < 0 || p.x > w) p.vx *= -0.5;
+    if (p.y < 0 || p.y > h) p.vy *= -0.5;
+    totalI += weight;
+    var c = P_COLORS[p.kind]; if (!c) continue;
+    var r = 4 + weight * 18;
+    var g = pheroCtx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r*3);
+    g.addColorStop(0, 'rgba(' + c.r + ',' + c.g + ',' + c.b + ',' + (weight*0.55) + ')');
+    g.addColorStop(0.4, 'rgba(' + c.r + ',' + c.g + ',' + c.b + ',' + (weight*0.22) + ')');
+    g.addColorStop(1, 'rgba(' + c.r + ',' + c.g + ',' + c.b + ',0)');
+    pheroCtx.fillStyle = g;
+    pheroCtx.beginPath(); pheroCtx.arc(p.x, p.y, r*3, 0, Math.PI*2); pheroCtx.fill();
+    pheroCtx.fillStyle = 'rgba(' + c.r + ',' + c.g + ',' + c.b + ',' + Math.min(1, weight*1.5) + ')';
+    pheroCtx.beginPath(); pheroCtx.arc(p.x, p.y, r*0.4, 0, Math.PI*2); pheroCtx.fill();
+
+    // Decay forecast overlay — draw projected intensity curve arc
+    if (p.decayProjection && weight > 0.05) {
+      var dp = p.decayProjection;
+      // Small arc showing decay forecast: 3 ticks at 1h, 4h, 24h
+      var arcR = r * 2.5;
+      var projections = [
+        { t: '1h', val: dp.in_1h || 0, angle: -Math.PI * 0.6 },
+        { t: '4h', val: dp.in_4h || 0, angle: -Math.PI * 0.3 },
+        { t: '24h', val: dp.in_24h || 0, angle: 0 },
+      ];
+      for (var dpi = 0; dpi < projections.length; dpi++) {
+        var proj = projections[dpi];
+        var projAlpha = Math.min(0.6, (proj.val / p.intensity) * 0.5);
+        if (projAlpha < 0.02) continue;
+        var px = p.x + Math.cos(proj.angle) * arcR;
+        var py = p.y + Math.sin(proj.angle) * arcR;
+        // Tiny dot
+        pheroCtx.fillStyle = 'rgba(' + c.r + ',' + c.g + ',' + c.b + ',' + projAlpha + ')';
+        pheroCtx.beginPath(); pheroCtx.arc(px, py, 1.5, 0, Math.PI * 2); pheroCtx.fill();
+        // Connecting line
+        pheroCtx.strokeStyle = 'rgba(' + c.r + ',' + c.g + ',' + c.b + ',' + (projAlpha * 0.4) + ')';
+        pheroCtx.lineWidth = 0.5;
+        pheroCtx.beginPath(); pheroCtx.moveTo(p.x, p.y); pheroCtx.lineTo(px, py); pheroCtx.stroke();
+      }
+    }
+  }
+  // Cluster lines
+  for (var ci = 0; ci < state.pheromones.length; ci++) {
+    var a = state.pheromones[ci];
+    for (var cj = ci+1; cj < state.pheromones.length; cj++) {
+      var b = state.pheromones[cj];
+      if (a.kind !== b.kind) continue;
+      var cdx = a.x-b.x, cdy = a.y-b.y, cd = Math.sqrt(cdx*cdx+cdy*cdy);
+      if (cd < 80) {
+        var cc = P_COLORS[a.kind];
+        var alpha = (1-cd/80) * Math.min(a.pulse, b.pulse) * 0.2;
+        pheroCtx.strokeStyle = 'rgba(' + cc.r + ',' + cc.g + ',' + cc.b + ',' + alpha + ')';
+        pheroCtx.lineWidth = 1;
+        pheroCtx.beginPath(); pheroCtx.moveTo(a.x,a.y); pheroCtx.lineTo(b.x,b.y); pheroCtx.stroke();
+      }
+    }
+  }
+  frames++;
+  var tN = performance.now();
+  if (tN - lastFpsT > 500) { pheroFps = Math.round(frames*1000/(tN-lastFpsT)); frames=0; lastFpsT = tN; }
+  document.getElementById('phero-particles').textContent = state.pheromones.length;
+  document.getElementById('phero-fps').textContent = pheroFps;
+  document.getElementById('phero-intensity').textContent = state.pheromones.length ? (totalI/state.pheromones.length).toFixed(2) : '0.00';
+  var counts = {threat: 0, opportunity: 0, wisdom: 0};
+  for (var cki = 0; cki < state.pheromones.length; cki++) { if (counts[state.pheromones[cki].kind] !== undefined) counts[state.pheromones[cki].kind]++; }
+  document.getElementById('phero-c-threat').textContent = counts.threat;
+  document.getElementById('phero-c-opp').textContent = counts.opportunity;
+  document.getElementById('phero-c-wisdom').textContent = counts.wisdom;
+}
+
+/* ---------- Insight graph ---------- */
+var graphCanvas = document.getElementById('graph-canvas');
+var graphCtx = graphCanvas.getContext('2d');
+var I_COLORS = {
+  insight: {r:165,g:148,b:255}, heuristic: {r:34,g:211,b:238},
+  warning: {r:251,g:191,b:36}, causal_link: {r:244,g:114,b:182},
+  strategy_fragment: {r:96,g:165,b:250}, anti_knowledge: {r:248,g:113,b:113},
+};
+var graphW=0, graphH=0;
+var graphNodes = [];
+var graphEdges = [];
+var hdcHighlights = new Set();
+
+function addInsightNode(id, kind, content, opts) {
+  if (!opts) opts = {};
+  if (graphNodes.find(function(n) { return n.id === id; })) return;
+  var w = graphCanvas.clientWidth, h = graphCanvas.clientHeight;
+  var node = {
+    id: id, kind: kind, content: content||'',
+    x: w/2 + (Math.random()-0.5)*120,
+    y: h/2 + (Math.random()-0.5)*120,
+    vx:0, vy:0, r:5, conf:0, chall:0, age:0, pulse:1,
+  };
+  // Merge opts
+  for (var k in opts) { if (opts.hasOwnProperty(k)) node[k] = opts[k]; }
+  graphNodes.push(node);
+  if (graphNodes.length > 200) {
+    var old = graphNodes.shift();
+    for (var i = graphEdges.length-1; i >= 0; i--) if (graphEdges[i].from===old.id || graphEdges[i].to===old.id) graphEdges.splice(i,1);
+  }
+}
+
+function drawGraph(dt) {
+  var w = graphCanvas.clientWidth, h = graphCanvas.clientHeight;
+  if (graphW !== w || graphH !== h) { var d = resizeCanvas(graphCanvas); graphW=d.w; graphH=d.h; }
+  graphCtx.clearRect(0,0,w,h);
+
+  // Physics
+  for (var i = 0; i < graphNodes.length; i++) {
+    var n = graphNodes[i];
+    n.vx *= 0.82; n.vy *= 0.82;
+    for (var j = 0; j < graphNodes.length; j++) {
+      var m = graphNodes[j];
+      if (n===m) continue;
+      var dx = n.x-m.x, dy = n.y-m.y, d2 = dx*dx+dy*dy+1;
+      var f = 1800/d2;
+      n.vx += (dx/Math.sqrt(d2))*f*0.02;
+      n.vy += (dy/Math.sqrt(d2))*f*0.02;
+    }
+    n.vx += (w/2 - n.x)*0.0015;
+    n.vy += (h/2 - n.y)*0.0015;
+    n.age += dt;
+    n.pulse = Math.max(0, n.pulse - dt*0.0008);
+  }
+  for (var ei = 0; ei < graphEdges.length; ei++) {
+    var e = graphEdges[ei];
+    var a = graphNodes.find(function(x) { return x.id === e.from; });
+    var b = graphNodes.find(function(x) { return x.id === e.to; });
+    if (!a || !b) continue;
+    var dx = b.x-a.x, dy = b.y-a.y, edist = Math.sqrt(dx*dx+dy*dy)+0.01;
+    var target = e.kind === 'hdc' ? 70 : e.kind === 'enabled_by' ? 90 : 100;
+    var strength = e.kind === 'hdc' ? 0.028 : e.kind === 'enabled_by' ? 0.02 : 0.012;
+    var ef = (edist-target)*strength;
+    var efx = (dx/edist)*ef, efy = (dy/edist)*ef;
+    a.vx += efx; a.vy += efy; b.vx -= efx; b.vy -= efy;
+  }
+  // Gravity well
+  if (state.selectedNode && hdcHighlights.size > 1) {
+    var anchor = graphNodes.find(function(x) { return x.id === state.selectedNode; });
+    if (anchor) {
+      hdcHighlights.forEach(function(id) {
+        if (id === state.selectedNode) return;
+        var n = graphNodes.find(function(x) { return x.id === id; });
+        if (!n) return;
+        var dx = anchor.x - n.x, dy = anchor.y - n.y;
+        var d = Math.sqrt(dx*dx + dy*dy) + 0.01;
+        n.vx += (dx/d) * 0.15;
+        n.vy += (dy/d) * 0.15;
+      });
+    }
+  }
+  for (var ui = 0; ui < graphNodes.length; ui++) {
+    graphNodes[ui].x += graphNodes[ui].vx; graphNodes[ui].y += graphNodes[ui].vy;
+    graphNodes[ui].x = Math.max(20, Math.min(w-20, graphNodes[ui].x));
+    graphNodes[ui].y = Math.max(20, Math.min(h-20, graphNodes[ui].y));
+  }
+
+  // Edges
+  for (var dei = 0; dei < graphEdges.length; dei++) {
+    var de = graphEdges[dei];
+    var da = graphNodes.find(function(x) { return x.id === de.from; });
+    var db = graphNodes.find(function(x) { return x.id === de.to; });
+    if (!da||!db) continue;
+    if (de.kind === 'hdc') {
+      graphCtx.strokeStyle = 'rgba(34,211,238,0.4)';
+      graphCtx.lineWidth = 1.8; graphCtx.setLineDash([]);
+    } else if (de.kind === 'enabled_by') {
+      graphCtx.strokeStyle = 'rgba(192,132,252,0.45)';
+      graphCtx.lineWidth = 1.4; graphCtx.setLineDash([5,4]);
+    } else if (de.kind === 'proximity') {
+      graphCtx.strokeStyle = 'rgba(124,111,247,0.18)';
+      graphCtx.lineWidth = 1; graphCtx.setLineDash([]);
+    } else if (de.kind === 'challenge') {
+      graphCtx.strokeStyle = 'rgba(248,113,113,0.5)';
+      graphCtx.lineWidth = 1.3; graphCtx.setLineDash([4,3]);
+    } else if (de.kind === 'confirm') {
+      graphCtx.strokeStyle = 'rgba(74,222,128,0.45)';
+      graphCtx.lineWidth = 1.5; graphCtx.setLineDash([]);
+    } else {
+      graphCtx.strokeStyle = 'rgba(124,111,247,0.18)';
+      graphCtx.lineWidth = 1; graphCtx.setLineDash([]);
+    }
+    graphCtx.beginPath(); graphCtx.moveTo(da.x,da.y); graphCtx.lineTo(db.x,db.y); graphCtx.stroke();
+    graphCtx.setLineDash([]);
+  }
+
+  // Per-author ring colors
+  var authorColor = function(author) {
+    if (!author) return null;
+    var h = 0;
+    for (var i = 0; i < author.length; i++) h = ((h<<5) - h + author.charCodeAt(i)) | 0;
+    var hue = Math.abs(h) % 360;
+    return 'hsl(' + hue + ', 72%, 62%)';
+  };
+
+  // Nodes
+  var isFiltering = hdcHighlights.size > 0 || state.selectedNode || state.hoveredNode;
+  for (var ni = 0; ni < graphNodes.length; ni++) {
+    var n = graphNodes[ni];
+    var c = I_COLORS[n.kind] || I_COLORS.insight;
+    var r = 5 + Math.min(18, n.conf * 1.6);
+    var dim = isFiltering && !hdcHighlights.has(n.id) && n.id !== state.selectedNode && n.id !== state.hoveredNode;
+    var alpha = dim ? 0.2 : 1.0;
+    var g = graphCtx.createRadialGradient(n.x, n.y, 0, n.x, n.y, r*4);
+    g.addColorStop(0, 'rgba(' + c.r + ',' + c.g + ',' + c.b + ',' + ((0.5+n.pulse*0.5)*alpha) + ')');
+    g.addColorStop(0.4, 'rgba(' + c.r + ',' + c.g + ',' + c.b + ',' + (0.2*alpha) + ')');
+    g.addColorStop(1, 'rgba(' + c.r + ',' + c.g + ',' + c.b + ',0)');
+    graphCtx.fillStyle = g;
+    graphCtx.beginPath(); graphCtx.arc(n.x, n.y, r*4, 0, Math.PI*2); graphCtx.fill();
+    graphCtx.fillStyle = 'rgba(' + c.r + ',' + c.g + ',' + c.b + ',' + alpha + ')';
+    graphCtx.beginPath(); graphCtx.arc(n.x, n.y, r, 0, Math.PI*2); graphCtx.fill();
+    // Author ring
+    var ac = authorColor(n.author);
+    if (ac) {
+      graphCtx.strokeStyle = ac;
+      graphCtx.globalAlpha = alpha * 0.75;
+      graphCtx.lineWidth = 2;
+      graphCtx.beginPath(); graphCtx.arc(n.x, n.y, r + 2.5, 0, Math.PI*2); graphCtx.stroke();
+      graphCtx.globalAlpha = 1;
+    }
+    if (n.chall > 0) {
+      graphCtx.strokeStyle = 'rgba(248,113,113,' + (0.8*alpha) + ')';
+      graphCtx.lineWidth = 1.5; graphCtx.setLineDash([3,3]);
+      graphCtx.beginPath(); graphCtx.arc(n.x, n.y, r+3, 0, Math.PI*2); graphCtx.stroke();
+      graphCtx.setLineDash([]);
+    }
+    if (n.id === state.selectedNode) {
+      graphCtx.strokeStyle = 'rgba(255,255,255,0.9)';
+      graphCtx.lineWidth = 2;
+      graphCtx.beginPath(); graphCtx.arc(n.x, n.y, r+6, 0, Math.PI*2); graphCtx.stroke();
+    }
+  }
+  document.getElementById('g-nodes').textContent = graphNodes.length;
+  document.getElementById('g-edges').textContent = graphEdges.length;
+  document.getElementById('g-conf').textContent = state.confirmsCount;
+  document.getElementById('g-chall').textContent = state.challengesCount;
+  document.getElementById('graph-meta').textContent = graphNodes.length + ' nodes · ' + graphEdges.length + ' edges';
+}
+
+/* --- Graph interaction --- */
+function canvasToNode(ev) {
+  var rect = graphCanvas.getBoundingClientRect();
+  var x = ev.clientX - rect.left, y = ev.clientY - rect.top;
+  for (var i = 0; i < graphNodes.length; i++) {
+    var n = graphNodes[i];
+    var dx = n.x - x, dy = n.y - y;
+    if (dx*dx + dy*dy < 15*15) return n;
+  }
+  return null;
+}
+graphCanvas.addEventListener('mousemove', function(ev) {
+  var n = canvasToNode(ev);
+  var tt = document.getElementById('node-tooltip');
+  if (n) {
+    state.hoveredNode = n.id;
+    var ins = state.insights.get(n.id);
+    tt.style.display = 'block';
+    tt.style.left = (ev.offsetX + 14) + 'px';
+    tt.style.top = (ev.offsetY + 14) + 'px';
+    tt.innerHTML =
+      '<div class="nt-kind">' + n.kind + '</div>' +
+      '<div class="nt-content">' + (n.content || '(no content)') + '</div>' +
+      '<div class="nt-meta">' +
+        '<span>conf <b style="color:var(--green)">' + n.conf + '</b></span>' +
+        '<span>chall <b style="color:var(--red)">' + n.chall + '</b></span>' +
+        (ins ? '<span>w <b>' + (ins.weight||1).toFixed(2) + '</b></span>' : '') +
+      '</div>';
+    graphCanvas.style.cursor = 'pointer';
+  } else {
+    state.hoveredNode = null;
+    tt.style.display = 'none';
+    graphCanvas.style.cursor = 'default';
+  }
+});
+graphCanvas.addEventListener('click', async function(ev) {
+  var n = canvasToNode(ev);
+  if (!n) { state.selectedNode = null; hdcHighlights.clear(); renderDetail(null); return; }
+  state.selectedNode = n.id;
+  await openDetail(n);
+});
+
+async function openDetail(node) {
+  var ins = state.insights.get(node.id);
+  renderDetail(node, ins);
+  // Query HDC-similar via REST API
+  var query = (node.content || '').slice(0, 200);
+  if (!query) return;
+  try {
+    var res = await api('/knowledge/search?q=' + encodeURIComponent(query) + '&k=8');
+    var result = res.data;
+    if (!result || !result.results) return;
+    var similar = result.results.filter(function(h) {
+      var rid = (h.id || '').replace(/^insight:/, '');
+      return rid && rid !== node.id;
+    });
+    // Highlight in graph
+    hdcHighlights.clear();
+    hdcHighlights.add(node.id);
+    for (var i = 0; i < similar.length; i++) {
+      var rid = (similar[i].id || '').replace(/^insight:/, '');
+      hdcHighlights.add(rid);
+    }
+    // Draw temporary HDC edges (user-interaction, not REST-sourced)
+    for (var ei = graphEdges.length-1; ei >= 0; ei--) {
+      if (graphEdges[ei].kind === 'hdc' && graphEdges[ei].source !== 'rest') graphEdges.splice(ei,1);
+    }
+    for (var si = 0; si < Math.min(5, similar.length); si++) {
+      var srid = (similar[si].id || '').replace(/^insight:/, '');
+      if (graphNodes.find(function(x) { return x.id === srid; })) {
+        graphEdges.push({from: node.id, to: srid, kind: 'hdc', source: 'click'});
+      }
+    }
+    // Render side panel similars
+    var simContainer = document.getElementById('detail-similar-list');
+    if (simContainer) {
+      simContainer.innerHTML = '';
+      for (var di = 0; di < Math.min(8, similar.length); di++) {
+        var h = similar[di];
+        var div = document.createElement('div');
+        div.className = 'similar-row';
+        var drid = (h.id || '').replace(/^insight:/, '');
+        (function(capturedRid) {
+          div.onclick = function() {
+            var target = graphNodes.find(function(x) { return x.id === capturedRid; });
+            if (target) { state.selectedNode = capturedRid; openDetail(target); }
+          };
+        })(drid);
+        div.innerHTML =
+          '<div class="sim-head"><span>' + h.kind + '</span><span class="sim-score">' + ((h.similarity||0)*100).toFixed(1) + '%</span></div>' +
+          '<div class="sim-content">' + (h.content||'').slice(0,120) + '</div>';
+        simContainer.appendChild(div);
+      }
+    }
+  } catch (e) { /* ignore */ }
+}
+
+function renderDetail(node, ins) {
+  var panel = document.getElementById('detail-panel');
+  var meta = document.getElementById('detail-meta');
+  if (!node) {
+    panel.innerHTML = '<div class="detail-empty">click any node in the knowledge graph to see its content, similar insights (via HDC), and confirm/challenge actions</div>';
+    meta.textContent = 'click a node';
+    return;
+  }
+  meta.textContent = node.kind.replace('_', ' ');
+  var id = node.id;
+  panel.innerHTML =
+    '<div class="detail-head">' +
+      '<span class="detail-title">' + node.kind.replace('_', ' ') + '</span>' +
+      '<span class="detail-close" onclick="state.selectedNode=null; hdcHighlights.clear(); renderDetail(null);">✕</span>' +
+    '</div>' +
+    '<div class="detail-content">' + (node.content || '(no content)') + '</div>' +
+    '<div class="detail-kv">' +
+      '<span class="k">id</span><span class="v mono">' + id + '</span>' +
+      '<span class="k">author</span><span class="v">' + (ins ? ins.author || 'chain' : 'chain') + '</span>' +
+      '<span class="k">confirmations</span><span class="v green">' + node.conf + '</span>' +
+      '<span class="k">challenges</span><span class="v red">' + node.chall + '</span>' +
+      '<span class="k">weight</span><span class="v">' + (ins ? (ins.weight || 1).toFixed(3) : '1.000') + '</span>' +
+      '<span class="k">state</span><span class="v">' + (ins ? ins.state || 'active' : 'active') + '</span>' +
+    '</div>' +
+    '<div class="detail-actions">' +
+      '<button class="btn sm" onclick="doConfirm(\'' + id + '\')">CONFIRM</button>' +
+      '<button class="btn ghost sm" onclick="doChallenge(\'' + id + '\')">CHALLENGE</button>' +
+    '</div>' +
+    '<div class="detail-similar-title">HDC-similar insights</div>' +
+    '<div id="detail-similar-list"></div>';
+}
+
+async function doConfirm(id) {
+  try {
+    await rpc('chain_confirmInsight', {id: 'insight:' + id, confirmer: 'human-operator'});
+    toast('ok', 'confirmed');
+    var n = graphNodes.find(function(x) { return x.id === id; }); if (n) { n.conf++; n.pulse = 1; }
+    state.confirmsCount++;
+  } catch(e) { toast('err', 'confirm failed: ' + e.message); }
+}
+async function doChallenge(id) {
+  try {
+    await rpc('chain_challengeInsight', {id: 'insight:' + id, challenger: 'human-operator'});
+    toast('warn', 'challenged');
+    var n = graphNodes.find(function(x) { return x.id === id; }); if (n) { n.chall++; n.pulse = 1; }
+    state.challengesCount++;
+  } catch(e) { toast('err', 'challenge failed: ' + e.message); }
+}
+window.doConfirm = doConfirm;
+window.doChallenge = doChallenge;
+window.renderDetail = renderDetail;
+window.state = state;
+window.hdcHighlights = hdcHighlights;
+
+/* ---------- Growth timeline ---------- */
+var growthCanvas = document.getElementById('growth-canvas');
+var growthCtx = growthCanvas.getContext('2d');
+var growthW=0, growthH=0;
+function drawGrowth() {
+  var w = growthCanvas.clientWidth, h = growthCanvas.clientHeight;
+  if (growthW !== w || growthH !== h) { var d = resizeCanvas(growthCanvas); growthW=d.w; growthH=d.h; }
+  growthCtx.clearRect(0,0,w,h);
+  var series = state.growthSeries;
+  if (series.length < 2) return;
+  var max = 1;
+  for (var i = 0; i < series.length; i++) {
+    var sv = Math.max(series[i].insights, series[i].pheromones, series[i].confirms, series[i].challenges);
+    if (sv > max) max = sv;
+  }
+  var step = w / (series.length - 1);
+  var plot = function(key, color, fill) {
+    growthCtx.strokeStyle = color; growthCtx.lineWidth = 1.6;
+    growthCtx.beginPath();
+    for (var i = 0; i < series.length; i++) {
+      var x = i * step; var y = h - (series[i][key]/max) * (h - 12) - 6;
+      if (i === 0) growthCtx.moveTo(x, y); else growthCtx.lineTo(x, y);
+    }
+    growthCtx.stroke();
+    if (fill) {
+      growthCtx.lineTo(w, h); growthCtx.lineTo(0, h); growthCtx.closePath();
+      growthCtx.fillStyle = color + '22'; growthCtx.fill();
+    }
+  };
+  plot('insights', '#a594ff', true);
+  plot('pheromones', '#fb923c', false);
+  plot('confirms', '#4ade80', false);
+  plot('challenges', '#f87171', false);
+  document.getElementById('growth-i').textContent = series[series.length-1].insights;
+  document.getElementById('growth-p').textContent = series[series.length-1].pheromones;
+  document.getElementById('growth-c').textContent = series[series.length-1].confirms;
+  document.getElementById('growth-ch').textContent = series[series.length-1].challenges;
+}
+
+/* ---------- Sparklines ---------- */
+function sparkDraw(canvas, data, color) {
+  if (!canvas || !data) return;
+  var rect = canvas.getBoundingClientRect();
+  var dpr = window.devicePixelRatio || 1;
+  canvas.width = rect.width * dpr; canvas.height = rect.height * dpr;
+  var ctx = canvas.getContext('2d'); ctx.scale(dpr, dpr);
+  var w = rect.width, h = rect.height;
+  ctx.clearRect(0,0,w,h);
+  if (data.length < 2) return;
+  var max = Math.max.apply(null, data.concat([1]));
+  var min = Math.min.apply(null, data.concat([0]));
+  var range = max - min || 1;
+  var step = w / (data.length - 1);
+  ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.beginPath();
+  for (var i = 0; i < data.length; i++) {
+    var x = i*step, y = h - ((data[i]-min)/range)*(h-4) - 2;
+    if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  }
+  ctx.stroke();
+  ctx.lineTo(w,h); ctx.lineTo(0,h); ctx.closePath();
+  ctx.fillStyle = color + '33'; ctx.fill();
+}
+function pushSeries(key, v) { var s = state.series[key]; s.push(v); if (s.length > 60) s.shift(); }
+
+/* ---------- Hero update ---------- */
+function updateHero() {
+  var latest = state.blocks[state.blocks.length - 1];
+  if (latest) {
+    document.getElementById('h-block').textContent = latest.number.toLocaleString();
+    document.getElementById('h-block-delta').textContent = '+' + blocksPerSec().toFixed(2) + ' bps';
+    document.getElementById('h-fee').textContent = latest.baseFeeGwei.toFixed(2);
+    document.getElementById('h-sat').textContent = latest.saturation.toFixed(1);
+    var rec = state.blocks.slice(-5);
+    if (rec.length >= 2) {
+      var delta = rec[rec.length-1].baseFeeGwei - rec[0].baseFeeGwei;
+      var el = document.getElementById('h-fee-delta');
+      el.textContent = (delta >= 0 ? '+' : '') + delta.toFixed(2) + ' gwei';
+      el.className = 'hero-delta ' + (delta > 0.5 ? 'up' : delta < -0.5 ? 'down' : 'neutral');
+    }
+    document.getElementById('h-sat-delta').textContent = latest.saturation > 80 ? 'congested' : latest.saturation > 50 ? 'moderate' : 'healthy';
+    document.getElementById('h-sat-delta').className = 'hero-delta ' + (latest.saturation > 80 ? 'down' : 'up');
+  }
+}
+
+/* ---------- Metric tick (1Hz) ---------- */
+async function metricTick() {
+  var latest = state.blocks[state.blocks.length - 1];
+  var rps = state.rpc.total - state.rpc.prev; state.rpc.prev = state.rpc.total;
+  var cacheHit = 100; var cacheEntries = 0; var dirty = 0;
+  try {
+    var res = await rpc('mirage_status', []);
+    var s = res.result;
+    if (s) {
+      cacheHit = (s.cache_hit_rate || s.cacheHitRate || 1) * 100;
+      cacheEntries = s.cache_entries || s.cacheEntries || 0;
+      dirty = s.dirty_slots || s.dirtySlots || 0;
+    }
+  } catch(e) {}
+
+  var hInsights = state.chainInsightsTotal != null ? state.chainInsightsTotal : state.insights.size;
+  var hPhero = state.chainPheromonesTotal != null ? state.chainPheromonesTotal : state.pheromones.length;
+
+  pushSeries('block', latest ? latest.number : 0);
+  pushSeries('fee', latest ? latest.baseFeeGwei : 0);
+  pushSeries('sat', latest ? latest.saturation : 0);
+  pushSeries('insights', hInsights);
+  pushSeries('phero', hPhero);
+  pushSeries('cache', cacheHit);
+  pushSeries('rpc', rps);
+
+  state.growthSeries.push({t: Date.now(), insights: hInsights, pheromones: hPhero, confirms: state.confirmsCount, challenges: state.challengesCount});
+  if (state.growthSeries.length > 60) state.growthSeries.shift();
+
+  document.getElementById('h-cache').textContent = cacheHit.toFixed(1);
+  document.getElementById('h-cache-delta').textContent = cacheHit > 90 ? 'healthy' : 'degraded';
+
+  document.getElementById('m-rpc').textContent = rps;
+  document.getElementById('m-rpc-total').textContent = state.rpc.total;
+  document.getElementById('m-fee').textContent = (latest ? latest.baseFeeGwei : 0).toFixed(2);
+  document.getElementById('m-sat').textContent = (latest ? latest.saturation : 0).toFixed(1);
+  document.getElementById('m-cache').textContent = cacheHit.toFixed(0);
+  document.getElementById('m-cache-entries').textContent = cacheEntries.toLocaleString() + ' entries';
+  document.getElementById('m-cache-dirty').textContent = dirty + ' dirty';
+  var fees = state.blocks.map(function(b) { return b.baseFeeGwei; }).filter(function(x) { return x > 0; });
+  if (fees.length) {
+    document.getElementById('m-fee-range').textContent = Math.min.apply(null, fees).toFixed(1) + ' lo / ' + Math.max.apply(null, fees).toFixed(1) + ' hi';
+  }
+  var sats = state.blocks.map(function(b) { return b.saturation; }).filter(function(x) { return x > 0; });
+  if (sats.length) {
+    var avg = sats.reduce(function(a,b) { return a+b; }, 0) / sats.length;
+    document.getElementById('m-sat-avg').textContent = 'avg ' + avg.toFixed(1) + '%';
+    document.getElementById('m-sat-max').textContent = 'max ' + Math.max.apply(null, sats).toFixed(1) + '%';
+  }
+  var nowT = Date.now();
+  state.postsLastMin = state.postsLastMin.filter(function(t) { return nowT - t < 60000; });
+  document.getElementById('m-posts').textContent = state.postsLastMin.length;
+  pushSeries('posts', state.postsLastMin.length);
+  document.getElementById('m-authors').textContent = state.seenAuthors.size + ' authors';
+
+  document.querySelectorAll('[data-spark]').forEach(function(c) {
+    var key = c.dataset.spark;
+    var colors = {block:'#a594ff',fee:'#fb923c',sat:'#f87171',insights:'#7c6ff7',phero:'#fb923c',cache:'#4ade80'};
+    sparkDraw(c, state.series[key], colors[key]);
+  });
+  document.querySelectorAll('[data-metric]').forEach(function(c) {
+    var key = c.dataset.metric;
+    var colors = {rpc:'#22d3ee',search:'#a594ff',fee:'#fb923c',sat:'#f87171',cache:'#4ade80',posts:'#f472b6'};
+    sparkDraw(c, state.series[key], colors[key]);
+  });
+  drawGrowth();
+}
+
+/* ---------- Animation loop ---------- */
+var lastT = performance.now();
+function frame() {
+  var t = performance.now(); var dt = Math.min(100, t - lastT); lastT = t;
+  drawPheromones(dt); drawGraph(dt); drawHeatmap(); drawTopology(dt);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ---------- Connect ---------- */
+async function connect() {
+  var chip = document.getElementById('conn-chip');
+  try {
+    await rpc('eth_blockNumber');
+    state.connected = true;
+    chip.className = 'chip ok';
+    document.getElementById('conn-label').textContent = 'CONNECTED';
+    // Fork status
+    try {
+      var vRes = await rpc('chain_version');
+      var v = vRes.result;
+      if (v) logAgent('observe', 'mirage', 'chain surface ' + (v.rpcVersion || v.schemaVersion || 'v1') + ' · ' + (v.mirageVersion || ''));
+    } catch(e) {}
+    try {
+      var sRes = await rpc('mirage_status', []);
+      var s = sRes.result;
+      if (s) {
+        document.getElementById('fork-chip').innerHTML = '<span class="dot"></span>fork · ' + (s.mode || 'live') + ' · tip ' + (s.block_number || s.blockNumber || '');
+      }
+    } catch(e) {}
+    // Clear old pollers
+    if (state.pollers.chain) clearInterval(state.pollers.chain);
+    if (state.pollers.blocks) clearInterval(state.pollers.blocks);
+    if (state.pollers.heatmap) clearInterval(state.pollers.heatmap);
+    if (state.pollers.topo) clearInterval(state.pollers.topo);
+    if (state.pollers.kinds) clearInterval(state.pollers.kinds);
+    if (state.pollers.edges) clearInterval(state.pollers.edges);
+    if (state.pollers.entries) clearInterval(state.pollers.entries);
+    if (state.pollers.summary) clearInterval(state.pollers.summary);
+    // Start polling
+    state.pollers.blocks = setInterval(pollBlock, 1000);
+    state.pollers.chain = setInterval(pollChain, 1500);
+    state.pollers.heatmap = setInterval(pollHeatmap, 8000);
+    state.pollers.topo = setInterval(pollTopology, 3000);
+    state.pollers.kinds = setInterval(pollKinds, 8000);
+    state.pollers.edges = setInterval(pollEdges, 3000);
+    state.pollers.entries = setInterval(pollEntries, 3000);
+    state.pollers.summary = setInterval(pollPheroSummary, 2000);
+    // Immediate kick
+    pollBlock(); pollChain();
+    pollHeatmap(); pollTopology(); pollKinds(); pollEdges(); pollEntries(); pollPheroSummary();
+    // Auto-connect WebSocket for real-time streaming
+    setTimeout(function() { if (!state.wsLive) toggleWs(); }, 500);
+    toast('ok', 'connected to mirage');
+  } catch (e) {
+    state.connected = false;
+    chip.className = 'chip err';
+    document.getElementById('conn-label').textContent = 'OFFLINE';
+    toast('err', 'connect failed — retrying…');
+    setTimeout(connect, 5000);
+  }
+}
+
+/* ---------- WS live stream — new /api/ws endpoint ---------- */
+async function toggleWs() {
+  if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+    state.ws.close(); state.ws = null; state.wsLive = false;
+    document.getElementById('btn-ws').textContent = 'WS LIVE';
+    toast('info', 'WS closed');
+    return;
+  }
+  var wsBase = state.rpcUrl.replace(/^http:\/\//, 'ws://').replace(/^https:\/\//, 'wss://');
+  // Strip trailing slash if present
+  wsBase = wsBase.replace(/\/$/, '');
+  var wsUrl = wsBase + '/api/ws?pheromones=true&insights=true';
+  try {
+    var ws = new WebSocket(wsUrl); state.ws = ws;
+    ws.onopen = function() {
+      state.wsLive = true;
+      document.getElementById('btn-ws').textContent = 'WS OPEN';
+      toast('ok', 'WS · connected to /api/ws');
+      logAgent('act', 'ws', 'connected to /api/ws?pheromones=true&insights=true');
+    };
+    ws.onmessage = function(ev) {
+      try {
+        var msg = JSON.parse(ev.data);
+        // Handle new WS protocol
+        if (msg.type === 'connected') {
+          logReq('sub', 'WS connected: ' + JSON.stringify(msg));
+          return;
+        }
+        if (msg.type === 'lagged') {
+          logReq('warn', 'WS lagged: channel=' + msg.channel + ' missed=' + msg.missed);
+          toast('warn', 'WS lagged on ' + msg.channel + ': missed ' + msg.missed + ' events');
+          return;
+        }
+        // Channel-based messages
+        if (msg.channel === 'pheromone' && msg.data) {
+          var p = msg.data;
+          var kind = (p.kind || '').toLowerCase();
+          var content = p.content || ('pheromone #' + (p.id || '?'));
+          depositPheromoneParticle(kind, content, p.intensity || 0.7, p.id);
+          if (p.decay_projection) {
+            var newP = state.pheromones[state.pheromones.length - 1];
+            if (newP) newP.decayProjection = p.decay_projection;
+          }
+          // WS pheromone events don't carry author — show kind + id + intensity
+          logAgent(kind, 'pheromone', kind + ' #' + (p.id || '?') + ' deposited (i=' + (p.intensity||0).toFixed(2) + ')');
+        } else if (msg.channel === 'insight' && msg.data) {
+          var e = msg.data;
+          // The WS insight event has "type" (posted/confirmed/challenged/stateTransition/decayed)
+          // and "kind" (insight/heuristic/warning/etc for posted events)
+          var eventType = (e.type || 'posted').toString().toLowerCase();
+          if (eventType === 'posted') {
+            var id = (e.id || '').replace(/^insight:/, '');
+            if (id && !state.insights.has(id)) {
+              var insKind = e.kind || 'insight';
+              var content = e.content || '';
+              var author = e.author || 'chain';
+              state.insights.set(id, {id: id, kind: insKind, content: content, author: author, conf:0, chall:0, weight:1.0, createdAt:Date.now()});
+              state.seenAuthors.add(author);
+              addInsightNode(id, insKind, content);
+              logAgent(insKind, author, content.slice(0, 90));
+              state.postsLastMin.push(Date.now());
+            }
+          } else if (eventType === 'confirmed') {
+            var id = (e.id || '').replace(/^insight:/, '');
+            var by = e.by || 'chain';
+            var n = graphNodes.find(function(x) { return x.id===id; }); if (n) { n.conf++; n.pulse=1; }
+            state.confirmsCount++;
+            state.seenAuthors.add(by);
+            logAgent('confirm', by, 'confirmed insight ' + id.slice(0, 12) + '…');
+          } else if (eventType === 'challenged') {
+            var id = (e.id || '').replace(/^insight:/, '');
+            var by = e.by || 'chain';
+            var n = graphNodes.find(function(x) { return x.id===id; }); if (n) { n.chall++; n.pulse=1; }
+            state.challengesCount++;
+            state.seenAuthors.add(by);
+            logAgent('challenge', by, 'challenged insight ' + id.slice(0, 12) + '…');
+          } else if (eventType === 'statetransition') {
+            logAgent('observe', 'chain', 'insight ' + (e.id||'').slice(0,12) + '… state: ' + (e.from||'?') + ' → ' + (e.to||'?'));
+          }
+        }
+        // Also handle legacy JSON-RPC format for backwards compatibility
+        if (msg.method === 'chain_pheromoneEvent' && msg.params) {
+          var lp = msg.params.result || msg.params;
+          var lkind = (lp.kind || '').toLowerCase();
+          var lcontent = lp.content || ('pheromone #' + (lp.id || '?'));
+          depositPheromoneParticle(lkind, lcontent, lp.intensity || 0.7, lp.id);
+          logAgent(lkind, 'ws', lkind + ' deposited (i=' + (lp.intensity||0).toFixed(2) + ')');
+        } else if (msg.method === 'chain_insightEvent' && msg.params) {
+          var le = msg.params.result || msg.params;
+          var lvariant = (le.kind || le.event || 'posted').toString().toLowerCase();
+          if (lvariant === 'posted') {
+            var lid = (le.id || '').replace(/^insight:/, '');
+            if (lid && !state.insights.has(lid)) {
+              var linsKind = le.insightKind || le.kind || 'insight';
+              var lcontent2 = le.content || '';
+              var lauthor = le.author || 'chain';
+              state.insights.set(lid, {id: lid, kind: linsKind, content: lcontent2, author: lauthor, conf:0, chall:0, weight:1.0, createdAt:Date.now()});
+              state.seenAuthors.add(lauthor);
+              addInsightNode(lid, linsKind, lcontent2);
+              logAgent('observe', lauthor, lcontent2.slice(0, 80));
+              state.postsLastMin.push(Date.now());
+            }
+          } else if (lvariant === 'confirmed') {
+            var lid2 = (le.id || '').replace(/^insight:/, '');
+            var ln = graphNodes.find(function(x) { return x.id===lid2; }); if (ln) { ln.conf++; ln.pulse=1; }
+            state.confirmsCount++;
+          } else if (lvariant === 'challenged') {
+            var lid3 = (le.id || '').replace(/^insight:/, '');
+            var ln2 = graphNodes.find(function(x) { return x.id===lid3; }); if (ln2) { ln2.chall++; ln2.pulse=1; }
+            state.challengesCount++;
+          }
+        } else if (msg.result && msg.result.subscriptionId) {
+          logReq('sub', 'subscribed: ' + msg.result.subscriptionId);
+        }
+      } catch(parseErr) {}
+    };
+    ws.onerror = function() { logReq('err', 'WS error'); };
+    ws.onclose = function() {
+      state.wsLive = false; state.ws = null;
+      document.getElementById('btn-ws').textContent = 'WS LIVE';
+    };
+  } catch (e) { toast('err', 'WS: ' + e.message); }
+}
+
+/* ---------- UI wiring ---------- */
+document.getElementById('btn-reconnect').onclick = function() { state.rpcUrl = document.getElementById('rpc-url').value.trim(); connect(); };
+document.getElementById('btn-ws').onclick = toggleWs;
+document.getElementById('btn-clear').onclick = function() {
+  state.blocks = []; state.insights.clear(); state.pheromones.length = 0;
+  graphNodes.length = 0; graphEdges.length = 0; hdcHighlights.clear();
+  state.selectedNode = null; state.confirmsCount = 0; state.challengesCount = 0;
+  state.agentLog = []; state.growthSeries = []; state.seenAuthors.clear();
+  state.topoNodes = []; state.topoEdges = []; state.heatmapBuckets = [];
+  renderBlocks(); renderAgent(); renderDetail(null);
+  toast('info', 'cleared');
+};
+document.getElementById('btn-clear-log').onclick = function() { state.requestLog = []; renderLog(); };
+document.getElementById('ph-intensity').oninput = function(e) { document.getElementById('ph-int-label').textContent = (e.target.value/100).toFixed(2); };
+
+document.getElementById('btn-post').onclick = async function() {
+  var kind = document.getElementById('ins-kind').value;
+  var author = document.getElementById('ins-author').value;
+  var content = document.getElementById('ins-content').value;
+  if (!content) { toast('warn', 'enter content'); return; }
+  try {
+    var res = await rpc('chain_postInsight', {author: author, kind: kind, content: content, stakeWei: 0});
+    var result = res.result;
+    if (result) {
+      toast('ok', result.outcome);
+      var id = (result.id || '').replace(/^insight:/, '');
+      state.insights.set(id, {id: id, kind: kind, content: content, author: author, conf:0, chall:0, weight:1.0});
+      state.seenAuthors.add(author);
+      addInsightNode(id, kind, content);
+      state.postsLastMin.push(Date.now());
+      logAgent('observe', author, content.slice(0,80));
+    }
+  } catch(e) { toast('err', e.message); }
+};
+document.getElementById('btn-deposit').onclick = async function() {
+  var kind = document.getElementById('ph-kind').value;
+  var content = document.getElementById('ph-content').value;
+  var intensity = parseFloat(document.getElementById('ph-intensity').value) / 100;
+  if (!content) { toast('warn', 'enter content'); return; }
+  try {
+    var res = await rpc('chain_depositPheromone', {kind: kind, content: content, intensity: intensity});
+    var result = res.result;
+    if (result) {
+      toast('ok', kind + ' deposited');
+      depositPheromoneParticle(kind, content, intensity, result.id);
+      logAgent(kind, 'human-operator', content.slice(0,80));
+    }
+  } catch(e) { toast('err', e.message); }
+};
+document.getElementById('btn-decay').onclick = async function() {
+  try { var res = await rpc('chain_applyDecay', {}); toast('ok', (res.result ? res.result.prunedCount || 0 : 0) + ' pruned'); } catch(e) { toast('err', e.message); }
+};
+document.getElementById('btn-search').onclick = async function() {
+  var query = document.getElementById('qu-query').value;
+  var k = parseInt(document.getElementById('qu-k').value) || 8;
+  var kind = document.getElementById('qu-kind').value || '';
+  if (!query) { toast('warn', 'enter query'); return; }
+  try {
+    var path = '/knowledge/search?q=' + encodeURIComponent(query) + '&k=' + k;
+    if (kind) path += '&kind=' + encodeURIComponent(kind);
+    var res = await api(path);
+    var result = res.data;
+    if (!result || !result.results) return;
+    hdcHighlights.clear();
+    var highlighted = 0;
+    var container = document.getElementById('search-results');
+    container.innerHTML = '';
+    for (var i = 0; i < result.results.length; i++) {
+      var hit = result.results[i];
+      var rid = (hit.id || '').replace(/^insight:/, '');
+      if (rid && graphNodes.find(function(x) { return x.id === rid; })) {
+        hdcHighlights.add(rid); highlighted++;
+      }
+      var div = document.createElement('div');
+      div.className = 'sr-item';
+      div.dataset.id = rid;
+      var scorePct = Math.round((hit.score || 0) * 100);
+      div.innerHTML =
+        '<div class="sr-head">' +
+          '<span class="sr-badge ' + (hit.kind || 'insight') + '">' + (hit.kind || '—') + '</span>' +
+          '<span class="sr-score">' + (hit.similarity || 0).toFixed(3) + ' sim</span>' +
+          '<span class="sr-bar"><span class="sr-bar-fill" style="width:' + scorePct + '%"></span></span>' +
+          '<span class="sr-score" style="color:var(--text)">' + scorePct + '%</span>' +
+        '</div>' +
+        '<div class="sr-content">' + (hit.content || '').slice(0, 140) + '</div>' +
+        '<div class="sr-meta">' +
+          (hit.author || '?') + ' · ' + (hit.confirmations || 0) + ' conf · ' +
+          (hit.state || '—') + ' · w=' + (hit.weight || 0).toFixed(2) +
+        '</div>';
+      div.onclick = (function(capturedId) {
+        return function() {
+          var gn = graphNodes.find(function(x) { return x.id === capturedId; });
+          if (gn) { state.selectedNode = gn; openDetail(gn); }
+        };
+      })(rid);
+      container.appendChild(div);
+    }
+    toast('info', result.results.length + ' hits · ' + highlighted + ' in graph · ' + Math.round(res.ms) + 'ms');
+    logAgent('observe', 'search', 'query="' + query + '" → ' + result.results.length + ' hits');
+  } catch(e) { toast('err', e.message); }
+};
+
+/* ---------- Boot ---------- */
+logReq('info', 'dashboard init · connecting to real mirage fork · REST API + JSON-RPC');
+connect();
+setInterval(metricTick, 1000);
+window.addEventListener('resize', function() { pheroW=0; graphW=0; growthW=0; heatmapW=0; topoW=0; });
+</script>
+</body>
+</html>

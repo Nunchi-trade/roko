@@ -22,6 +22,7 @@ roko-gate = { path = "../crates/roko-gate" }
 roko-compose = { path = "../crates/roko-compose" }
 roko-agent = { path = "../crates/roko-agent" }
 async-trait = "0.1"
+serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tempfile = { workspace = true }

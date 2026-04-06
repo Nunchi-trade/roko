@@ -1,0 +1,16 @@
+[package]
+name = "roko-lang-typescript"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "TypeScript/JavaScript language provider and build systems (npm/pnpm/yarn) for roko-core traits."
+
+[lints]
+workspace = true
+
+[dependencies]
+roko-core = { path = "../roko-core" }
+
+[dev-dependencies]

@@ -1,22 +1,69 @@
 //! `roko` binary entrypoint.
 //!
-//! See [`roko_cli`] for the lib-side description. The binary exposes four
-//! subcommands — `init`, `run`, `status`, and `replay` — and reads its
-//! agent/gate config from `./roko.toml`.
+//! See [`roko_cli`] for the lib-side description. The binary exposes
+//! subcommands (`init`, `run`, `status`, `replay`, `config`, `inject`,
+//! `plan`) plus top-level flags for mode selection (`--headless`,
+//! `--role`, `--model`, `--effort`, `--json`, `--quiet`, `--resume`,
+//! `--repo`, and a positional `[prompt]` for one-shot mode).
 
 #![allow(clippy::too_many_lines)]
 
 use anyhow::{anyhow, Context as _, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use roko_cli::{
-    config_cmd, load_layered, run_init_wizard, run_once, Config, EditTarget, Source, WizardInputs,
+    config_cmd, load_layered, run_init_wizard, run_once, Config, EditTarget, InjectKind,
+    InjectRequest, OneshotMode, PipeMode, Plan, PlanSummary, ReplMode, SessionStatus,
+    Source, WizardInputs, DaemonMode,
 };
-use roko_core::{Context, ContentHash, Kind, Query, Substrate};
+use roko_core::{ContentHash, Context, Kind, Query, Substrate};
 use roko_fs::FileSubstrate;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-/// Minimum CLI for the Roko universal loop.
+// -----------------------------------------------------------------------
+// Exit codes
+// -----------------------------------------------------------------------
+
+/// Successful execution.
+const EXIT_SUCCESS: i32 = 0;
+/// Agent or gate failure (logical error in the build).
+const EXIT_AGENT_FAILURE: i32 = 1;
+/// System error (I/O, config, infrastructure).
+const EXIT_SYSTEM_ERROR: i32 = 2;
+
+// -----------------------------------------------------------------------
+// Effort level
+// -----------------------------------------------------------------------
+
+/// Reasoning effort level for the agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Effort {
+    /// Minimal reasoning — fast, cheap.
+    Low,
+    /// Balanced reasoning (default).
+    Medium,
+    /// Thorough reasoning.
+    High,
+    /// Maximum reasoning — slowest, most expensive.
+    Max,
+}
+
+impl std::fmt::Display for Effort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Low => write!(f, "low"),
+            Self::Medium => write!(f, "medium"),
+            Self::High => write!(f, "high"),
+            Self::Max => write!(f, "max"),
+        }
+    }
+}
+
+// -----------------------------------------------------------------------
+// CLI structure
+// -----------------------------------------------------------------------
+
+/// Minimal CLI for the Roko universal loop.
 #[derive(Debug, Parser)]
 #[command(name = "roko", version, about = "Minimal CLI for the Roko universal loop")]
 struct Cli {
@@ -24,8 +71,44 @@ struct Cli {
     #[arg(long, global = true)]
     config: Option<PathBuf>,
 
+    /// Set the agent role / persona.
+    #[arg(long, global = true)]
+    role: Option<String>,
+
+    /// Set the model name (passed to the agent backend).
+    #[arg(long, global = true)]
+    model: Option<String>,
+
+    /// Set the repository / working directory root.
+    #[arg(long, global = true)]
+    repo: Option<PathBuf>,
+
+    /// Resume a previous session by ID.
+    #[arg(long, global = true)]
+    resume: Option<String>,
+
+    /// Set reasoning effort level.
+    #[arg(long, global = true, value_enum)]
+    effort: Option<Effort>,
+
+    /// Emit JSON output instead of human-readable text.
+    #[arg(long, global = true)]
+    json: bool,
+
+    /// Suppress non-essential output.
+    #[arg(long, global = true)]
+    quiet: bool,
+
+    /// Run as a headless daemon (background service).
+    #[arg(long, global = true)]
+    headless: bool,
+
+    /// One-shot mode: execute this prompt and exit.
+    #[arg(global = false)]
+    prompt: Option<String>,
+
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -35,7 +118,7 @@ enum Command {
         /// Directory to initialize (default: current dir).
         path: Option<PathBuf>,
     },
-    /// Seed a prompt and run the universal loop (compose → agent → gate → persist).
+    /// Seed a prompt and run the universal loop (compose -> agent -> gate -> persist).
     Run {
         /// The user prompt text.
         prompt: String,
@@ -43,7 +126,7 @@ enum Command {
         #[arg(long)]
         workdir: Option<PathBuf>,
     },
-    /// Print signal counts by kind, most recent episode, and gate pass/fail counts.
+    /// Print signal counts, most recent episode, and gate pass/fail.
     Status {
         /// Directory containing `.roko/` (default: cwd).
         #[arg(long)]
@@ -61,6 +144,56 @@ enum Command {
     Config {
         #[command(subcommand)]
         cmd: ConfigCmd,
+    },
+    /// Inject a signal into a running session.
+    Inject {
+        /// Target session ID.
+        session: String,
+        /// Kind of signal to inject (directive, abort, context).
+        #[arg(long, default_value = "directive")]
+        kind: String,
+        /// Payload text.
+        payload: String,
+        /// Working directory (to locate the daemon socket).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Manage plans (list, show, create).
+    Plan {
+        #[command(subcommand)]
+        cmd: PlanCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PlanCmd {
+    /// List all plans in the workspace.
+    List {
+        /// Working directory.
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Show details of a specific plan.
+    Show {
+        /// Plan ID.
+        plan_id: String,
+        /// Working directory.
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Create a new plan.
+    Create {
+        /// Plan ID.
+        plan_id: String,
+        /// Plan title.
+        #[arg(long)]
+        title: String,
+        /// Plan description.
+        #[arg(long, default_value = "")]
+        description: String,
+        /// Working directory.
+        #[arg(long)]
+        workdir: Option<PathBuf>,
     },
 }
 
@@ -136,16 +269,170 @@ enum ConfigCmd {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
     let cli = Cli::parse();
-    match cli.command {
-        Command::Init { path } => cmd_init(path).await,
-        Command::Run { prompt, workdir } => cmd_run(cli.config, workdir, prompt).await,
-        Command::Status { workdir } => cmd_status(workdir).await,
+    let code = match dispatch(cli).await {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            EXIT_SYSTEM_ERROR
+        }
+    };
+    std::process::exit(code);
+}
+
+async fn dispatch(mut cli: Cli) -> Result<i32> {
+    // If there is an explicit subcommand, handle it.
+    if let Some(command) = cli.command.take() {
+        return dispatch_subcommand(command, &cli).await;
+    }
+
+    // Headless daemon mode.
+    if cli.headless {
+        return Ok(cmd_headless(&cli));
+    }
+
+    // One-shot mode: positional prompt argument.
+    if let Some(prompt) = &cli.prompt {
+        return cmd_oneshot(&cli, prompt).await;
+    }
+
+    // Pipe mode: stdin is not a TTY and no prompt argument.
+    if !roko_cli::stdin_is_tty() {
+        return cmd_pipe(&cli).await;
+    }
+
+    // REPL mode: stdin is a TTY and no prompt argument.
+    cmd_repl(&cli)
+}
+
+async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
+    match command {
+        Command::Init { path } => {
+            cmd_init(path).await?;
+            Ok(EXIT_SUCCESS)
+        }
+        Command::Run { prompt, workdir } => cmd_run(cli, workdir, prompt).await,
+        Command::Status { workdir } => {
+            cmd_status(cli, workdir).await?;
+            Ok(EXIT_SUCCESS)
+        }
         Command::Replay { hash, workdir } => cmd_replay(workdir, hash).await,
-        Command::Config { cmd } => dispatch_config(cmd),
+        Command::Config { cmd } => {
+            dispatch_config(cmd)?;
+            Ok(EXIT_SUCCESS)
+        }
+        Command::Inject {
+            session,
+            kind,
+            payload,
+            workdir,
+        } => cmd_inject(cli, session, &kind, payload, workdir),
+        Command::Plan { cmd } => cmd_plan(cli, cmd),
     }
 }
+
+// -----------------------------------------------------------------------
+// Mode handlers
+// -----------------------------------------------------------------------
+
+fn cmd_repl(cli: &Cli) -> Result<i32> {
+    let session_id = cli
+        .resume
+        .clone()
+        .unwrap_or_else(|| format!("repl-{}", std::process::id()));
+    let mut repl = ReplMode::new(session_id);
+
+    let _commands = repl
+        .run(&mut std::io::stdin().lock(), &mut std::io::stdout().lock())
+        .map_err(|e| anyhow!("repl I/O error: {e}"))?;
+
+    Ok(EXIT_SUCCESS)
+}
+
+async fn cmd_oneshot(cli: &Cli, prompt: &str) -> Result<i32> {
+    let mode = OneshotMode::new(prompt.to_string())
+        .with_json(cli.json)
+        .with_quiet(cli.quiet);
+
+    let workdir = resolve_workdir(cli);
+    let config = resolve_config(cli)?;
+
+    let report = run_once(&workdir, &config, &mode.prepare().prompt).await?;
+    let result = mode.format_result(
+        report.overall_success(),
+        &format!(
+            "episode={} signals={}",
+            report.episode_id, report.total_signals
+        ),
+    );
+    if !result.summary.is_empty() {
+        println!("{}", result.summary);
+    }
+    Ok(result.exit_code)
+}
+
+async fn cmd_pipe(cli: &Cli) -> Result<i32> {
+    let pipe = PipeMode::new()
+        .with_json(cli.json)
+        .with_quiet(cli.quiet);
+
+    let input = pipe
+        .read_input(&mut std::io::stdin().lock())
+        .map_err(|e| anyhow!("read stdin: {e}"))?;
+
+    if input.text.is_empty() {
+        if !cli.quiet {
+            eprintln!("no input received on stdin");
+        }
+        return Ok(EXIT_SYSTEM_ERROR);
+    }
+
+    if input.truncated && !cli.quiet {
+        eprintln!(
+            "warning: stdin input truncated at {} bytes",
+            input.bytes_read
+        );
+    }
+
+    // Dispatch the piped text as a one-shot prompt.
+    cmd_oneshot(cli, &input.text).await
+}
+
+fn cmd_headless(cli: &Cli) -> i32 {
+    let session_id = cli
+        .resume
+        .clone()
+        .unwrap_or_else(|| format!("daemon-{}", std::process::id()));
+    let workdir = resolve_workdir(cli);
+    let mut daemon = DaemonMode::with_workdir(&workdir, session_id);
+
+    daemon.start();
+    let status = daemon.status_summary();
+
+    if cli.json {
+        println!(
+            r#"{{"session":"{}","state":"{}","pid":{},"socket":"{}"}}"#,
+            status.session_id,
+            status.state,
+            status.pid,
+            status.socket_path.display(),
+        );
+    } else if !cli.quiet {
+        println!("{status}");
+    }
+
+    // In a real implementation this would block on a socket listener.
+    // For now, report that the daemon started and exit cleanly.
+    daemon.stop();
+    daemon.mark_stopped();
+
+    EXIT_SUCCESS
+}
+
+// -----------------------------------------------------------------------
+// Subcommand handlers
+// -----------------------------------------------------------------------
 
 fn dispatch_config(cmd: ConfigCmd) -> Result<()> {
     match cmd {
@@ -171,12 +458,13 @@ fn dispatch_config(cmd: ConfigCmd) -> Result<()> {
                 inputs.agent_args = Some(vec!["run".into(), m.clone()]);
             }
             if non_interactive {
-                // Require all answers up-front.
                 if inputs.agent_command.is_none() {
                     return Err(anyhow!("--non-interactive requires --agent"));
                 }
                 inputs.token_budget.get_or_insert(8000);
-                inputs.role.get_or_insert_with(|| "You are a Roko agent.".into());
+                inputs
+                    .role
+                    .get_or_insert_with(|| "You are a Roko agent.".into());
                 inputs.enable_gates.get_or_insert(false);
                 inputs.yes = true;
                 if inputs.agent_args.is_none() {
@@ -194,14 +482,23 @@ fn dispatch_config(cmd: ConfigCmd) -> Result<()> {
             let wd = workdir.unwrap_or_else(|| PathBuf::from("."));
             config_cmd::cmd_path(&wd)
         }
-        ConfigCmd::Edit { global, project, workdir } => {
+        ConfigCmd::Edit {
+            global,
+            project,
+            workdir,
+        } => {
             let wd = workdir.unwrap_or_else(|| PathBuf::from("."));
             let target = edit_target(global, project);
             config_cmd::cmd_edit(&wd, target)
         }
-        ConfigCmd::Set { key, value, global: _, project, workdir } => {
+        ConfigCmd::Set {
+            key,
+            value,
+            global: _,
+            project,
+            workdir,
+        } => {
             let wd = workdir.unwrap_or_else(|| PathBuf::from("."));
-            // Default for `set` is global unless --project is passed.
             let target = if project {
                 EditTarget::Project
             } else {
@@ -222,6 +519,123 @@ const fn edit_target(global: bool, project: bool) -> EditTarget {
     }
 }
 
+fn cmd_inject(
+    cli: &Cli,
+    session: String,
+    kind_str: &str,
+    payload: String,
+    workdir: Option<PathBuf>,
+) -> Result<i32> {
+    let kind = InjectKind::parse(kind_str).map_err(|e| anyhow!("{e}"))?;
+    let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+    let request = InjectRequest::new(session, kind, payload, wd);
+
+    request.validate().map_err(|e| anyhow!("{e}"))?;
+
+    if cli.json {
+        println!(
+            r#"{{"status":"queued","kind":"{}","session":"{}","bytes":{}}}"#,
+            request.kind,
+            request.session_id,
+            request.payload.len(),
+        );
+    } else if !cli.quiet {
+        println!("{}", request.summary());
+    }
+
+    Ok(EXIT_SUCCESS)
+}
+
+fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
+    match cmd {
+        PlanCmd::List { workdir } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            let files = roko_cli::plan::list_plan_files(&wd)
+                .map_err(|e| anyhow!("list plans: {e}"))?;
+            let summaries: Vec<PlanSummary> = files
+                .iter()
+                .map(|p| {
+                    let id = p
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    PlanSummary {
+                        id,
+                        title: "(unloaded)".into(),
+                        task_count: 0,
+                        completed: false,
+                    }
+                })
+                .collect();
+
+            if cli.json {
+                println!("{}", roko_cli::plan::format_plan_list_json(&summaries));
+            } else {
+                println!("{}", roko_cli::plan::format_plan_list(&summaries));
+            }
+            Ok(EXIT_SUCCESS)
+        }
+        PlanCmd::Show { plan_id, workdir } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            let plans_dir = roko_cli::plan::plans_dir(&wd);
+            let path = plans_dir.join(format!("{plan_id}.toml"));
+            if path.exists() {
+                println!("plan file: {}", path.display());
+            } else {
+                let alt = plans_dir.join(format!("{plan_id}.json"));
+                if !alt.exists() {
+                    eprintln!("plan '{plan_id}' not found");
+                    return Ok(EXIT_AGENT_FAILURE);
+                }
+                println!("plan file: {}", alt.display());
+            }
+            Ok(EXIT_SUCCESS)
+        }
+        PlanCmd::Create {
+            plan_id,
+            title,
+            description,
+            workdir,
+        } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            let plan = Plan::new(plan_id.clone(), title, description);
+            plan.validate()
+                .map_err(|errs| anyhow!("plan validation failed: {}", errs.join("; ")))?;
+
+            let plans_dir = roko_cli::plan::plans_dir(&wd);
+            std::fs::create_dir_all(&plans_dir)
+                .map_err(|e| anyhow!("create plans dir: {e}"))?;
+            let path = plans_dir.join(format!("{plan_id}.toml"));
+
+            // Write a minimal plan skeleton.
+            let content = format!(
+                "# Plan: {}\n# {}\n\n[plan]\nid = \"{}\"\ntitle = \"{}\"\ntasks = []\n",
+                plan.title,
+                plan.description,
+                plan.id,
+                plan.title,
+            );
+            std::fs::write(&path, content)
+                .map_err(|e| anyhow!("write plan: {e}"))?;
+
+            if cli.json {
+                println!(
+                    r#"{{"created":"{}","path":"{}"}}"#,
+                    plan_id,
+                    path.display()
+                );
+            } else if !cli.quiet {
+                println!("created plan '{}' at {}", plan_id, path.display());
+            }
+            Ok(EXIT_SUCCESS)
+        }
+    }
+}
+
+// -----------------------------------------------------------------------
+// Existing subcommand handlers (init, run, status, replay)
+// -----------------------------------------------------------------------
+
 async fn cmd_init(path: Option<PathBuf>) -> Result<()> {
     let target = path.unwrap_or_else(|| PathBuf::from("."));
     tokio::fs::create_dir_all(&target)
@@ -232,7 +646,6 @@ async fn cmd_init(path: Option<PathBuf>) -> Result<()> {
         .await
         .with_context(|| format!("create {}", roko_dir.display()))?;
 
-    // Touch signals.jsonl so FileSubstrate replays cleanly on first open.
     let signals_path = roko_dir.join("signals.jsonl");
     if !signals_path.exists() {
         tokio::fs::write(&signals_path, b"")
@@ -240,10 +653,12 @@ async fn cmd_init(path: Option<PathBuf>) -> Result<()> {
             .with_context(|| format!("create {}", signals_path.display()))?;
     }
 
-    // Write a default roko.toml if missing.
     let config_path = target.join("roko.toml");
     if config_path.exists() {
-        println!("{} already exists; leaving untouched.", config_path.display());
+        println!(
+            "{} already exists; leaving untouched.",
+            config_path.display()
+        );
     } else {
         let default = Config::default().to_toml()?;
         tokio::fs::write(&config_path, default)
@@ -256,59 +671,58 @@ async fn cmd_init(path: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_run(
-    config_path: Option<PathBuf>,
-    workdir: Option<PathBuf>,
-    prompt: String,
-) -> Result<()> {
-    let workdir = workdir.unwrap_or_else(|| PathBuf::from("."));
-    // Explicit --config overrides everything; otherwise use layered loading.
-    let config = if let Some(p) = config_path {
-        Config::from_file(&p)?
-    } else {
-        let resolved = load_layered(&workdir)?;
-        // First-run hint: no config anywhere AND we're falling back to `cat`.
-        let fully_default = resolved.sources.agent_command == Source::Default
-            && resolved.sources.prompt_token_budget == Source::Default;
-        if fully_default && resolved.config.agent.command == "cat" {
-            println!(
-                "no config found — using built-in `cat` agent. run `roko config init` to set up a model."
-            );
-        }
-        resolved.config
-    };
+async fn cmd_run(cli: &Cli, workdir: Option<PathBuf>, prompt: String) -> Result<i32> {
+    let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
+    let config = resolve_config_for_workdir(cli, &workdir)?;
 
-    println!(
-        "running agent `{}` with {} gate(s)",
-        config.agent.command,
-        config.gates.len()
-    );
+    if !cli.quiet {
+        println!(
+            "running agent `{}` with {} gate(s)",
+            config.agent.command,
+            config.gates.len()
+        );
+    }
     let report = run_once(&workdir, &config, &prompt).await?;
 
-    println!("---");
-    println!("agent        : {} (success={})", config.agent.command, report.agent_success);
-    println!("prompt_id    : {}", report.prompt_id);
-    println!("agent_output : {}", report.agent_output_id);
-    if report.gate_verdicts.is_empty() {
-        println!("gates        : (none configured)");
-    } else {
-        println!("gates:");
-        for (name, ok) in &report.gate_verdicts {
-            let marker = if *ok { "PASS" } else { "FAIL" };
-            println!("  [{marker}] {name}");
+    if cli.json {
+        println!(
+            r#"{{"success":{},"episode":"{}","prompt":"{}","agent_output":"{}","signals":{}}}"#,
+            report.overall_success(),
+            report.episode_id,
+            report.prompt_id,
+            report.agent_output_id,
+            report.total_signals,
+        );
+    } else if !cli.quiet {
+        println!("---");
+        println!(
+            "agent        : {} (success={})",
+            config.agent.command, report.agent_success
+        );
+        println!("prompt_id    : {}", report.prompt_id);
+        println!("agent_output : {}", report.agent_output_id);
+        if report.gate_verdicts.is_empty() {
+            println!("gates        : (none configured)");
+        } else {
+            println!("gates:");
+            for (name, ok) in &report.gate_verdicts {
+                let marker = if *ok { "PASS" } else { "FAIL" };
+                println!("  [{marker}] {name}");
+            }
         }
+        println!("episode      : {}", report.episode_id);
+        println!("signals      : {}", report.total_signals);
     }
-    println!("episode      : {}", report.episode_id);
-    println!("signals      : {}", report.total_signals);
 
-    if !report.overall_success() {
-        std::process::exit(1);
+    if report.overall_success() {
+        Ok(EXIT_SUCCESS)
+    } else {
+        Ok(EXIT_AGENT_FAILURE)
     }
-    Ok(())
 }
 
-async fn cmd_status(workdir: Option<PathBuf>) -> Result<()> {
-    let workdir = workdir.unwrap_or_else(|| PathBuf::from("."));
+async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>) -> Result<()> {
+    let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
     let substrate = FileSubstrate::open(workdir.join(".roko"))
         .await
         .map_err(|e| anyhow!("open substrate: {e}"))?;
@@ -318,6 +732,24 @@ async fn cmd_status(workdir: Option<PathBuf>) -> Result<()> {
         .query(&Query::all(), &ctx)
         .await
         .map_err(|e| anyhow!("query: {e}"))?;
+
+    if cli.json {
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for sig in &all {
+            *counts.entry(sig.kind.to_string()).or_default() += 1;
+        }
+        let episode_count = counts.get("episode").copied().unwrap_or(0);
+        let status = SessionStatus {
+            session_id: cli.resume.clone(),
+            workdir: workdir.clone(),
+            daemon_running: false,
+            signal_count: Some(all.len()),
+            episode_count: Some(episode_count),
+            last_episode_passed: None,
+        };
+        println!("{}", status.display_json());
+        return Ok(());
+    }
 
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for sig in &all {
@@ -333,7 +765,6 @@ async fn cmd_status(workdir: Option<PathBuf>) -> Result<()> {
         }
     }
 
-    // Most recent episode.
     let mut episodes = substrate
         .query(&Query::of_kind(Kind::Episode), &ctx)
         .await
@@ -342,7 +773,11 @@ async fn cmd_status(workdir: Option<PathBuf>) -> Result<()> {
     println!();
     match episodes.first() {
         Some(ep) => {
-            println!("most recent episode: {} (passed={})", ep.id, ep.tag("passed").unwrap_or("?"));
+            println!(
+                "most recent episode: {} (passed={})",
+                ep.id,
+                ep.tag("passed").unwrap_or("?")
+            );
             println!(
                 "  gates passed={} failed={}",
                 ep.tag("gates_passed").unwrap_or("0"),
@@ -352,19 +787,24 @@ async fn cmd_status(workdir: Option<PathBuf>) -> Result<()> {
         None => println!("most recent episode: (none)"),
     }
 
-    // Gate verdict pass/fail rollup.
     let verdicts = substrate
         .query(&Query::of_kind(Kind::GateVerdict), &ctx)
         .await
         .map_err(|e| anyhow!("query verdicts: {e}"))?;
-    let passed = verdicts.iter().filter(|v| v.tag("passed") == Some("true")).count();
-    let failed = verdicts.iter().filter(|v| v.tag("passed") == Some("false")).count();
+    let passed = verdicts
+        .iter()
+        .filter(|v| v.tag("passed") == Some("true"))
+        .count();
+    let failed = verdicts
+        .iter()
+        .filter(|v| v.tag("passed") == Some("false"))
+        .count();
     println!("gate verdicts: {passed} pass / {failed} fail");
 
     Ok(())
 }
 
-async fn cmd_replay(workdir: Option<PathBuf>, hash: String) -> Result<()> {
+async fn cmd_replay(workdir: Option<PathBuf>, hash: String) -> Result<i32> {
     let workdir = workdir.unwrap_or_else(|| PathBuf::from("."));
     let substrate = FileSubstrate::open(workdir.join(".roko"))
         .await
@@ -372,7 +812,6 @@ async fn cmd_replay(workdir: Option<PathBuf>, hash: String) -> Result<()> {
     let start = ContentHash::from_hex(&hash)
         .ok_or_else(|| anyhow!("invalid hash (expected 64 hex chars): {hash}"))?;
 
-    // Breadth-first walk of the lineage DAG.
     let mut visited = std::collections::HashSet::new();
     let mut queue = vec![(start, 0usize)];
     let mut printed = 0usize;
@@ -382,7 +821,10 @@ async fn cmd_replay(workdir: Option<PathBuf>, hash: String) -> Result<()> {
         }
         let indent = "  ".repeat(depth);
         if let Some(sig) = substrate.get(&id).await.map_err(|e| anyhow!("get: {e}"))? {
-            println!("{indent}{} {}  (author={})", sig.kind, sig.id, sig.provenance.author);
+            println!(
+                "{indent}{} {}  (author={})",
+                sig.kind, sig.id, sig.provenance.author
+            );
             for parent in &sig.lineage {
                 queue.push((*parent, depth + 1));
             }
@@ -393,7 +835,238 @@ async fn cmd_replay(workdir: Option<PathBuf>, hash: String) -> Result<()> {
     }
     if printed == 0 {
         println!("signal {hash} not found in substrate");
-        std::process::exit(1);
+        return Ok(EXIT_AGENT_FAILURE);
     }
-    Ok(())
+    Ok(EXIT_SUCCESS)
+}
+
+// -----------------------------------------------------------------------
+// Helpers
+// -----------------------------------------------------------------------
+
+/// Resolve the working directory from CLI flags.
+fn resolve_workdir(cli: &Cli) -> PathBuf {
+    cli.repo.clone().unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Resolve the config, applying CLI overrides for --role, --model, --effort.
+fn resolve_config(cli: &Cli) -> Result<Config> {
+    let workdir = resolve_workdir(cli);
+    resolve_config_for_workdir(cli, &workdir)
+}
+
+/// Resolve config from a specific workdir, applying CLI overrides.
+fn resolve_config_for_workdir(cli: &Cli, workdir: &Path) -> Result<Config> {
+    let mut config = if let Some(p) = &cli.config {
+        Config::from_file(p)?
+    } else {
+        let resolved = load_layered(workdir)?;
+        let fully_default = resolved.sources.agent_command == Source::Default
+            && resolved.sources.prompt_token_budget == Source::Default;
+        if fully_default && resolved.config.agent.command == "cat" && !cli.quiet {
+            println!(
+                "no config found — using built-in `cat` agent. run `roko config init` to set up a model."
+            );
+        }
+        resolved.config
+    };
+
+    // Apply CLI overrides.
+    if let Some(role) = &cli.role {
+        config.prompt.role.clone_from(role);
+    }
+    if let Some(model) = &cli.model {
+        // Insert the model as the first arg if not already present.
+        if !config.agent.args.contains(model) {
+            config.agent.args.insert(0, model.clone());
+        }
+    }
+    if let Some(effort) = &cli.effort {
+        // Map effort to token budget multiplier.
+        let budget = match effort {
+            Effort::Low => 4_000,
+            Effort::Medium => 10_000,
+            Effort::High => 32_000,
+            Effort::Max => 100_000,
+        };
+        config.prompt.token_budget = budget;
+    }
+
+    Ok(config)
+}
+
+// -----------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn cli_parses_no_args() {
+        // With no args and no subcommand, cli.prompt and cli.command are None.
+        let cli = Cli::try_parse_from(["roko"]).unwrap();
+        assert!(cli.command.is_none());
+        assert!(cli.prompt.is_none());
+        assert!(!cli.json);
+        assert!(!cli.quiet);
+        assert!(!cli.headless);
+    }
+
+    #[test]
+    fn cli_parses_global_flags() {
+        let cli = Cli::try_parse_from([
+            "roko",
+            "--role",
+            "engineer",
+            "--model",
+            "gpt-4",
+            "--repo",
+            "/tmp/proj",
+            "--effort",
+            "high",
+            "--json",
+            "--quiet",
+            "--headless",
+        ])
+        .unwrap();
+        assert_eq!(cli.role.as_deref(), Some("engineer"));
+        assert_eq!(cli.model.as_deref(), Some("gpt-4"));
+        assert_eq!(cli.repo, Some(PathBuf::from("/tmp/proj")));
+        assert_eq!(cli.effort, Some(Effort::High));
+        assert!(cli.json);
+        assert!(cli.quiet);
+        assert!(cli.headless);
+    }
+
+    #[test]
+    fn cli_parses_positional_prompt() {
+        let cli = Cli::try_parse_from(["roko", "fix the bug"]).unwrap();
+        assert_eq!(cli.prompt.as_deref(), Some("fix the bug"));
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn cli_parses_run_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "run", "do something"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Run { .. })));
+    }
+
+    #[test]
+    fn cli_parses_init_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "init", "/tmp/project"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Init { .. })));
+    }
+
+    #[test]
+    fn cli_parses_status_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "status"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Status { .. })));
+    }
+
+    #[test]
+    fn cli_parses_inject_subcommand() {
+        let cli = Cli::try_parse_from([
+            "roko",
+            "inject",
+            "session-1",
+            "stop doing that",
+            "--kind",
+            "directive",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Some(Command::Inject { .. })));
+    }
+
+    #[test]
+    fn cli_parses_plan_list() {
+        let cli = Cli::try_parse_from(["roko", "plan", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Plan {
+                cmd: PlanCmd::List { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_parses_plan_create() {
+        let cli = Cli::try_parse_from([
+            "roko",
+            "plan",
+            "create",
+            "my-plan",
+            "--title",
+            "My Plan",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Plan {
+                cmd: PlanCmd::Create { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_parses_resume_flag() {
+        let cli = Cli::try_parse_from(["roko", "--resume", "sess-42"]).unwrap();
+        assert_eq!(cli.resume.as_deref(), Some("sess-42"));
+    }
+
+    #[test]
+    fn effort_display() {
+        assert_eq!(Effort::Low.to_string(), "low");
+        assert_eq!(Effort::Medium.to_string(), "medium");
+        assert_eq!(Effort::High.to_string(), "high");
+        assert_eq!(Effort::Max.to_string(), "max");
+    }
+
+    #[test]
+    fn effort_value_enum_all_variants() {
+        // Ensure all four variants parse.
+        for name in &["low", "medium", "high", "max"] {
+            let cli =
+                Cli::try_parse_from(["roko", "--effort", name]).unwrap();
+            assert!(cli.effort.is_some());
+        }
+    }
+
+    #[test]
+    fn exit_code_constants() {
+        assert_eq!(EXIT_SUCCESS, 0);
+        assert_eq!(EXIT_AGENT_FAILURE, 1);
+        assert_eq!(EXIT_SYSTEM_ERROR, 2);
+    }
+
+    #[test]
+    fn resolve_workdir_uses_repo_flag() {
+        let cli = Cli::try_parse_from(["roko", "--repo", "/custom"]).unwrap();
+        assert_eq!(resolve_workdir(&cli), PathBuf::from("/custom"));
+    }
+
+    #[test]
+    fn resolve_workdir_defaults_to_cwd() {
+        let cli = Cli::try_parse_from(["roko"]).unwrap();
+        assert_eq!(resolve_workdir(&cli), PathBuf::from("."));
+    }
+
+    #[test]
+    fn cli_parses_config_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "config", "show"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Config {
+                cmd: ConfigCmd::Show { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_parses_replay_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "replay", "abcd1234"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Replay { .. })));
+    }
 }

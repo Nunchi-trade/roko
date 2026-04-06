@@ -1,0 +1,17 @@
+[package]
+name = "roko-index"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Code intelligence: source parsing, symbol graphs, PageRank scoring, and HDC fingerprints."
+
+[lints]
+workspace = true
+
+[dependencies]
+roko-core = { path = "../roko-core" }
+serde = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]

@@ -8,13 +8,20 @@
 //! Additional backends (`OnePasswordStore`, `VaultStore`, `AwsSecretsManagerStore`)
 //! are later waves (§43.4–43.6) and live behind opt-in features.
 
+pub mod audit;
 pub mod env;
 pub mod file;
 pub mod namespace;
+pub mod resolve;
 
+pub use audit::{AuditAction, AuditEntry, SecretAuditLog};
 pub use env::EnvVarStore;
 pub use file::FileStore;
 pub use namespace::{Namespace, WellKnownNamespaces};
+pub use resolve::{
+    EnvProvider, FileProvider, ResolverConfig, SecretProvider, SecretResolver, SecretSource,
+    SecretValue,
+};
 
 use crate::error::Result;
 

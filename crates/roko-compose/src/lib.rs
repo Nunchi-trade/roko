@@ -20,6 +20,7 @@ pub mod budget;
 pub mod conventions;
 pub mod enrichment;
 pub mod prompt;
+pub mod prompt_hints;
 pub mod scorer;
 pub mod system_prompt_builder;
 pub mod templates;
@@ -31,6 +32,7 @@ pub use prompt::{
     estimate_tokens, CacheLayer, ContextStrategy, Placement, PromptBuild,
     PromptComposer, PromptSection, SectionPriority,
 };
+pub use prompt_hints::prompt_hints_for;
 pub use scorer::SectionScorer;
 pub use system_prompt_builder::SystemPromptBuilder;
 pub use templates::{

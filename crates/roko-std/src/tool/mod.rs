@@ -32,9 +32,12 @@
 //! of §36.9 in spirit.
 
 pub mod builtin;
+pub mod expand_pointer;
 pub mod handlers;
+pub mod mock_dispatcher;
 pub mod registry;
 
 pub use builtin::{ROKO_BUILTIN_TOOLS, TOOL_COUNT};
 pub use handlers::{handler_for, HandlerRegistry};
+pub use mock_dispatcher::MockToolDispatcher;
 pub use registry::StaticToolRegistry;

@@ -121,11 +121,37 @@ pub const THREAT_THRESHOLD: f32 = 0.7;
 pub const OPPORTUNITY_THRESHOLD: f32 = 0.6;
 /// Keywords that flag an existing insight as potentially flawed.
 pub const ANTI_PATTERN_KEYWORDS: &[&str] = &["WRONG", "BUG", "INCORRECT"];
+/// Topic keywords for richer, category-aware reactions.
+const TOPIC_DEX: &[&str] = &["swap", "uniswap", "sushi", "curve", "router", "dex", "liquidity"];
+const TOPIC_LENDING: &[&str] = &["aave", "lending", "borrow", "supply", "compound", "repay"];
+const TOPIC_MEV: &[&str] = &["mev", "sandwich", "priority", "tip", "flashbot", "bundle"];
+const TOPIC_GAS: &[&str] = &["gas", "base fee", "congestion", "saturation", "gwei"];
+const TOPIC_WHALE: &[&str] = &["whale", "large", "transfer", "eth moved"];
+const TOPIC_STABLE: &[&str] = &["stablecoin", "usdt", "usdc", "dai", "stable"];
+const TOPIC_BRIDGE: &[&str] = &["bridge", "cross-chain", "arbitrum", "optimism", "l2"];
+const TOPIC_NFT: &[&str] = &["nft", "erc721", "erc1155", "marketplace", "opensea"];
 
 fn content_contains_anti_pattern(content: &str) -> bool {
     ANTI_PATTERN_KEYWORDS
         .iter()
         .any(|kw| content.contains(kw))
+}
+
+fn content_matches_topic(content: &str, keywords: &[&str]) -> bool {
+    let lower = content.to_lowercase();
+    keywords.iter().any(|kw| lower.contains(kw))
+}
+
+fn classify_topic(content: &str) -> &'static str {
+    if content_matches_topic(content, TOPIC_DEX) { return "dex"; }
+    if content_matches_topic(content, TOPIC_LENDING) { return "lending"; }
+    if content_matches_topic(content, TOPIC_MEV) { return "mev"; }
+    if content_matches_topic(content, TOPIC_WHALE) { return "whale"; }
+    if content_matches_topic(content, TOPIC_STABLE) { return "stablecoin"; }
+    if content_matches_topic(content, TOPIC_BRIDGE) { return "bridge"; }
+    if content_matches_topic(content, TOPIC_NFT) { return "nft"; }
+    if content_matches_topic(content, TOPIC_GAS) { return "gas"; }
+    "general"
 }
 
 fn find_warning_for_threat(insights: &[InsightHit]) -> Option<&InsightHit> {
@@ -248,19 +274,131 @@ pub fn decide(
         }
     }
 
-    // Rule 5: wisdom summary pheromone — only when there are fresh observations
-    // (count varies; the content includes counts so the chain's HDC-dedup
-    // layer will collapse most repeats anyway).
+    // Rule 6: topic-aware synthesis — when multiple insights share a topic, synthesize.
+    {
+        let mut topic_counts: std::collections::HashMap<&str, Vec<&InsightHit>> =
+            std::collections::HashMap::new();
+        for i in insights {
+            let topic = classify_topic(&i.content);
+            topic_counts.entry(topic).or_default().push(i);
+        }
+        for (topic, hits) in &topic_counts {
+            if hits.len() >= 3 && *topic != "general" {
+                // Synthesize a higher-level heuristic from converging signals.
+                let snippet: Vec<&str> = hits.iter().take(3).map(|h| {
+                    let end = h.content.len().min(40);
+                    &h.content[..end]
+                }).collect();
+                let content = format!(
+                    "[{watcher_id}] convergence detected: {} signals on \"{}\": {}…",
+                    hits.len(), topic, snippet.join(" | ")
+                );
+                out.push(Reaction::post_insight(
+                    "heuristic",
+                    content,
+                    format!("{} insights converging on topic '{}'", hits.len(), topic),
+                ));
+                // Also deposit an opportunity if the convergence is strong.
+                if hits.len() >= 5 {
+                    out.push(Reaction::deposit_pheromone(
+                        "opportunity",
+                        format!(
+                            "[{watcher_id}] strong {} convergence: {} signals aligning",
+                            topic, hits.len()
+                        ),
+                        0.7,
+                        format!("topic convergence: {} × {}", topic, hits.len()),
+                    ));
+                }
+            }
+        }
+    }
+
+    // Rule 7: cross-reference — if pheromones and insights share a topic, post causal_link.
+    for p in pheromones {
+        let p_topic = classify_topic(&format!("{:?}", p.kind));
+        for i in insights.iter().take(10) {
+            let i_topic = classify_topic(&i.content);
+            if p_topic != "general" && p_topic == i_topic && i.similarity >= 0.45 {
+                let content = format!(
+                    "[{watcher_id}] cross-signal: {} pheromone #{} correlates with insight {} (topic: {}, sim={:.2})",
+                    p.kind, p.id, i.id, p_topic, i.similarity
+                );
+                out.push(Reaction::post_insight(
+                    "causal_link",
+                    content,
+                    format!("pheromone-insight correlation on topic '{}'", p_topic),
+                ));
+                break; // one cross-ref per pheromone
+            }
+        }
+    }
+
+    // Rule 8: opportunity from declining threats — if we see many low-intensity threats
+    // (decaying), the danger has passed and that's an opportunity.
+    {
+        let low_threats: Vec<&PheromoneHit> = pheromones
+            .iter()
+            .filter(|p| p.kind == "threat" && p.intensity > 0.1 && p.intensity < 0.4)
+            .collect();
+        if low_threats.len() >= 3 {
+            let avg_int: f32 =
+                low_threats.iter().map(|p| p.intensity).sum::<f32>() / low_threats.len() as f32;
+            let content = format!(
+                "[{watcher_id}] threat decay window: {} fading threats (avg intensity {:.2}) — recovery opportunity",
+                low_threats.len(), avg_int
+            );
+            out.push(Reaction::deposit_pheromone(
+                "opportunity",
+                content,
+                0.65,
+                format!("{} decaying threats → opportunity", low_threats.len()),
+            ));
+        }
+    }
+
+    // Rule 9: contrarian challenge — if every recent insight is the same kind,
+    // challenge the weakest one (by weight) to inject diversity.
+    if insights.len() >= 5 {
+        let first_kind = &insights[0].kind;
+        let all_same = insights.iter().take(8).all(|i| i.kind == *first_kind);
+        if all_same {
+            if let Some(weakest) = insights.iter().min_by(|a, b| {
+                a.weight.partial_cmp(&b.weight).unwrap_or(std::cmp::Ordering::Equal)
+            }) {
+                if weakest.confirmations >= 1 {
+                    out.push(Reaction::challenge_insight(
+                        weakest.id.clone(),
+                        format!(
+                            "diversity challenge: {} consecutive '{}' insights — testing weakest (w={:.2})",
+                            insights.len().min(8), first_kind, weakest.weight
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
+    // Rule 5: wisdom summary — richer context from what we observed.
     if pheromones.len() + insights.len() >= 3 {
+        let threat_count = pheromones.iter().filter(|p| p.kind == "threat").count();
+        let opp_count = pheromones.iter().filter(|p| p.kind == "opportunity").count();
+        let confirmed = insights.iter().filter(|i| i.confirmations >= 2).count();
+        let top_topic = {
+            let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+            for i in insights {
+                *counts.entry(classify_topic(&i.content)).or_default() += 1;
+            }
+            counts.into_iter().max_by_key(|(_, v)| *v).map(|(k, _)| k).unwrap_or("general")
+        };
         let content = format!(
-            "[{watcher_id}] poll summary: {} pheromones, {} insights observed",
-            pheromones.len(),
-            insights.len()
+            "[{watcher_id}] wisdom: {} pheromones ({} threats, {} opps), {} insights ({} confirmed), dominant topic: {}",
+            pheromones.len(), threat_count, opp_count, insights.len(), confirmed, top_topic
         );
         out.push(Reaction::deposit_pheromone(
             "wisdom",
             content,
-            0.25,
+            0.25 + (confirmed as f32 * 0.05).min(0.25), // more confirmed = stronger wisdom
             "periodic chain-state summary".to_string(),
         ));
     }
