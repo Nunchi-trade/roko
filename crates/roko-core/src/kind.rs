@@ -80,6 +80,10 @@ pub enum Kind {
     Metric,
     /// An experiment result (A/B test outcome).
     ExperimentResult,
+    /// A tool invocation record (per-call metrics).
+    ToolInvocation,
+    /// A tool's health has degraded past an alert threshold.
+    ToolHealthDegraded,
 
     // ─── Chain participation (Phase 8+) ──────────────────────────────────
     /// A chain insight (shared knowledge).
@@ -128,6 +132,8 @@ impl Kind {
             Self::Skill => "skill",
             Self::Metric => "metric",
             Self::ExperimentResult => "experiment_result",
+            Self::ToolInvocation => "tool_invocation",
+            Self::ToolHealthDegraded => "tool_health_degraded",
             Self::Insight => "insight",
             Self::Pheromone => "pheromone",
             Self::Bounty => "bounty",
