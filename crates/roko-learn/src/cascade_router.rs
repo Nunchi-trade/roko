@@ -1,0 +1,645 @@
+//! Three-stage cascade router for model selection (section 13.8-13.11).
+//!
+//! The cascade combines three routing strategies, automatically transitioning
+//! as observation count grows:
+//!
+//! | Stage | Name | Observations | Strategy |
+//! |-------|------|-------------|----------|
+//! | 1 | Static | < 50 | Hardcoded role -> model table |
+//! | 2 | Confidence | 50 - 200 | Empirical pass rates + confidence interval |
+//! | 3 | UCB1 | > 200 | Full `LinUCB` contextual bandit |
+//!
+//! # [`CascadeModel`]
+//!
+//! The router returns a [`CascadeModel`] containing a primary model,
+//! an optional fallback model, and a latency SLA in milliseconds.
+//!
+//! # Thread safety
+//!
+//! The cascade wraps a [`LinUCBRouter`] and an additional
+//! [`parking_lot::Mutex`] for confidence-stage statistics.
+
+use parking_lot::Mutex;
+use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+use crate::model_router::{LinUCBRouter, RoutingContext, COLD_START_THRESHOLD};
+
+// ─── CascadeStage ───────────────────────────────────────────────────────────
+
+/// Which routing stage is currently active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CascadeStage {
+    /// Stage 1: hardcoded role -> model table (< 50 observations).
+    Static,
+    /// Stage 2: empirical pass rates with confidence interval (50-200 observations).
+    Confidence,
+    /// Stage 3: full `LinUCB` contextual bandit (> 200 observations).
+    Ucb,
+}
+
+impl CascadeStage {
+    /// Human-readable label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Static => "static",
+            Self::Confidence => "confidence",
+            Self::Ucb => "ucb",
+        }
+    }
+}
+
+impl std::fmt::Display for CascadeStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+// ─── CascadeModel ───────────────────────────────────────────────────────────
+
+/// Routing recommendation from the cascade.
+#[derive(Debug, Clone)]
+pub struct CascadeModel {
+    /// Primary model to use.
+    pub primary: ModelSpec,
+    /// Fallback model if the primary fails or times out.
+    pub fallback: Option<ModelSpec>,
+    /// Latency SLA in milliseconds.
+    pub latency_sla_ms: u64,
+    /// Which cascade stage produced this recommendation.
+    pub stage: CascadeStage,
+}
+
+// ─── Confidence-stage stats ─────────────────────────────────────────────────
+
+/// Threshold for transitioning from Confidence to UCB stage.
+const CONFIDENCE_TO_UCB_THRESHOLD: u64 = 200;
+
+/// Per-model observation record for the confidence stage.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct ModelStats {
+    /// Number of trials (selections) for this model.
+    trials: u64,
+    /// Number of successes (gate passes).
+    successes: u64,
+}
+
+impl ModelStats {
+    /// Empirical pass rate.
+    #[allow(clippy::cast_precision_loss)]
+    fn pass_rate(&self) -> f64 {
+        if self.trials == 0 {
+            0.0
+        } else {
+            self.successes as f64 / self.trials as f64
+        }
+    }
+
+    /// Width of the 95% Wilson confidence interval (approximate).
+    ///
+    /// Uses a normal approximation: `1.96 * sqrt(p * (1-p) / n)`.
+    /// Returns `f64::INFINITY` for zero trials.
+    #[allow(clippy::cast_precision_loss)]
+    fn confidence_width(&self) -> f64 {
+        if self.trials == 0 {
+            return f64::INFINITY;
+        }
+        let p = self.pass_rate();
+        let n = self.trials as f64;
+        1.96 * (p * (1.0 - p) / n).sqrt()
+    }
+
+    /// Upper confidence bound on the pass rate.
+    fn upper_bound(&self) -> f64 {
+        (self.pass_rate() + self.confidence_width()).min(1.0)
+    }
+}
+
+// ─── Static role -> model table ─────────────────────────────────────────────
+
+/// Build the default static role-to-model mapping.
+///
+/// Fast-tier roles get haiku, Standard-tier roles get sonnet,
+/// Premium-tier roles get opus.
+fn default_role_model_table() -> HashMap<AgentRole, String> {
+    let mut table = HashMap::new();
+    let all_roles: Vec<AgentRole> = std::iter::once(AgentRole::Conductor)
+        .chain(AgentRole::ALL_AGENTS.iter().copied())
+        .collect();
+    for role in all_roles {
+        let slug = match role.model_tier() {
+            ModelTier::Fast => "claude-haiku-3-5",
+            ModelTier::Premium => "claude-opus-4",
+            // Standard and forward-compat
+            _ => "claude-sonnet-4-5",
+        };
+        table.insert(role, slug.to_string());
+    }
+    table
+}
+
+/// Default latency SLA for a model tier (milliseconds).
+const fn default_latency_sla(tier: ModelTier) -> u64 {
+    match tier {
+        ModelTier::Fast => 10_000,
+        ModelTier::Premium => 120_000,
+        // Standard and forward-compat
+        _ => 30_000,
+    }
+}
+
+/// Map a model slug to an approximate tier for SLA purposes.
+fn slug_to_tier(slug: &str) -> ModelTier {
+    if slug.contains("haiku") {
+        ModelTier::Fast
+    } else if slug.contains("opus") || slug.contains("premium") {
+        ModelTier::Premium
+    } else {
+        ModelTier::Standard
+    }
+}
+
+/// Determine the fallback model slug for a given primary tier.
+fn fallback_for_tier(tier: ModelTier) -> Option<String> {
+    match tier {
+        ModelTier::Fast => None, // no fallback below fast
+        ModelTier::Standard => Some("claude-haiku-3-5".to_string()),
+        // Premium and forward-compat: fall back to sonnet
+        _ => Some("claude-sonnet-4-5".to_string()),
+    }
+}
+
+// ─── CascadeRouter ──────────────────────────────────────────────────────────
+
+/// Three-stage cascade router: Static -> Confidence -> UCB.
+///
+/// Thread-safe: wrap in `Arc` for shared access.
+pub struct CascadeRouter {
+    /// The `LinUCB` router used for stage 3 (and observations from all stages).
+    linucb: LinUCBRouter,
+    /// Per-model statistics for the confidence stage.
+    confidence_stats: Mutex<HashMap<String, ModelStats>>,
+    /// Static role -> model table for stage 1.
+    role_table: HashMap<AgentRole, String>,
+    /// Ordered list of model slugs (arms available to the router).
+    model_slugs: Vec<String>,
+}
+
+impl CascadeRouter {
+    /// Create a cascade router with the given model slugs.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `model_slugs` is empty.
+    pub fn new(model_slugs: Vec<String>) -> Self {
+        assert!(!model_slugs.is_empty(), "CascadeRouter: need at least one model");
+        Self {
+            linucb: LinUCBRouter::new(model_slugs.clone()),
+            confidence_stats: Mutex::new(HashMap::new()),
+            role_table: default_role_model_table(),
+            model_slugs,
+        }
+    }
+
+    /// Override the static role table (builder pattern).
+    #[must_use]
+    pub fn with_role_table(mut self, table: HashMap<AgentRole, String>) -> Self {
+        self.role_table = table;
+        self
+    }
+
+    /// Override the `LinUCB` router (builder pattern, for injecting pre-trained state).
+    #[must_use]
+    pub fn with_linucb(mut self, linucb: LinUCBRouter) -> Self {
+        self.linucb = linucb;
+        self
+    }
+
+    /// Determine the current cascade stage based on total observations.
+    #[must_use]
+    pub fn current_stage(&self) -> CascadeStage {
+        stage_for_observations(self.linucb.total_observations())
+    }
+
+    /// Total observations recorded across all stages.
+    #[must_use]
+    pub fn total_observations(&self) -> u64 {
+        self.linucb.total_observations()
+    }
+
+    /// Route a context through the cascade, returning a recommendation.
+    pub fn route(&self, ctx: &RoutingContext) -> CascadeModel {
+        match self.current_stage() {
+            CascadeStage::Static => self.route_static(ctx),
+            CascadeStage::Confidence => self.route_confidence(ctx),
+            CascadeStage::Ucb => self.route_ucb(ctx),
+        }
+    }
+
+    /// Record an observation (updates both confidence stats and `LinUCB`).
+    pub fn record_observation(
+        &self,
+        ctx: &RoutingContext,
+        model_slug: &str,
+        reward: f64,
+        success: bool,
+    ) {
+        // Update confidence stats.
+        let mut stats = self.confidence_stats.lock();
+        let entry = stats.entry(model_slug.to_string()).or_default();
+        entry.trials += 1;
+        if success {
+            entry.successes += 1;
+        }
+        drop(stats);
+
+        // Update LinUCB (always, so it's ready when stage transitions).
+        self.linucb.update(ctx, model_slug, reward);
+    }
+
+    /// Access the underlying `LinUCB` router (for introspection / persistence).
+    pub const fn linucb(&self) -> &LinUCBRouter {
+        &self.linucb
+    }
+
+    /// Snapshot of confidence-stage statistics.
+    pub fn confidence_snapshot(&self) -> HashMap<String, (u64, u64)> {
+        self.confidence_stats
+            .lock()
+            .iter()
+            .map(|(k, v)| (k.clone(), (v.trials, v.successes)))
+            .collect()
+    }
+
+    // ── Internal routing per stage ──────────────────────────────────────
+
+    fn route_static(&self, ctx: &RoutingContext) -> CascadeModel {
+        let slug = self
+            .role_table
+            .get(&ctx.role)
+            .cloned()
+            .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
+
+        let tier = slug_to_tier(&slug);
+        let fallback = fallback_for_tier(tier).map(ModelSpec::from_slug);
+
+        CascadeModel {
+            primary: ModelSpec::from_slug(&slug),
+            fallback,
+            latency_sla_ms: default_latency_sla(tier),
+            stage: CascadeStage::Static,
+        }
+    }
+
+    fn route_confidence(&self, ctx: &RoutingContext) -> CascadeModel {
+        let stats = self.confidence_stats.lock();
+
+        // Find the model with the highest upper confidence bound on pass rate.
+        let mut best_slug = self
+            .role_table
+            .get(&ctx.role)
+            .cloned()
+            .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
+        let mut best_ucb = f64::NEG_INFINITY;
+
+        for slug in &self.model_slugs {
+            let s = stats.get(slug).cloned().unwrap_or_default();
+            let ucb = s.upper_bound();
+            if ucb > best_ucb {
+                best_ucb = ucb;
+                best_slug.clone_from(slug);
+            }
+        }
+
+        drop(stats);
+
+        let tier = slug_to_tier(&best_slug);
+        let fallback = fallback_for_tier(tier).map(ModelSpec::from_slug);
+
+        CascadeModel {
+            primary: ModelSpec::from_slug(&best_slug),
+            fallback,
+            latency_sla_ms: default_latency_sla(tier),
+            stage: CascadeStage::Confidence,
+        }
+    }
+
+    fn route_ucb(&self, ctx: &RoutingContext) -> CascadeModel {
+        let model = self.linucb.select_model(ctx);
+        let tier = slug_to_tier(&model.slug);
+        let fallback = fallback_for_tier(tier).map(ModelSpec::from_slug);
+
+        CascadeModel {
+            primary: model,
+            fallback,
+            latency_sla_ms: default_latency_sla(tier),
+            stage: CascadeStage::Ucb,
+        }
+    }
+}
+
+/// Determine the cascade stage from observation count.
+const fn stage_for_observations(obs: u64) -> CascadeStage {
+    if obs < COLD_START_THRESHOLD {
+        CascadeStage::Static
+    } else if obs < CONFIDENCE_TO_UCB_THRESHOLD {
+        CascadeStage::Confidence
+    } else {
+        CascadeStage::Ucb
+    }
+}
+
+// ─── Tests ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use roko_core::task::{TaskCategory, TaskComplexityBand};
+
+    fn test_slugs() -> Vec<String> {
+        vec![
+            "claude-haiku-3-5".to_string(),
+            "claude-sonnet-4-5".to_string(),
+            "claude-opus-4".to_string(),
+        ]
+    }
+
+    fn default_ctx() -> RoutingContext {
+        RoutingContext {
+            task_category: TaskCategory::Implementation,
+            complexity: TaskComplexityBand::Standard,
+            iteration: 0,
+            role: AgentRole::Implementer,
+            crate_familiarity: 0.5,
+            has_prior_failure: false,
+        }
+    }
+
+    // ── Test 1: starts in Static stage ──────────────────────────────────
+
+    #[test]
+    fn starts_in_static_stage() {
+        let cascade = CascadeRouter::new(test_slugs());
+        assert_eq!(cascade.current_stage(), CascadeStage::Static);
+    }
+
+    // ── Test 2: static stage uses role table ────────────────────────────
+
+    #[test]
+    fn static_stage_uses_role_table() {
+        let cascade = CascadeRouter::new(test_slugs());
+        let ctx = default_ctx();
+        let result = cascade.route(&ctx);
+
+        // Implementer has Standard tier -> sonnet
+        assert_eq!(result.stage, CascadeStage::Static);
+        assert_eq!(result.primary.slug, "claude-sonnet-4-5");
+    }
+
+    // ── Test 3: static stage gives correct fallback ─────────────────────
+
+    #[test]
+    fn static_stage_fallback_for_standard() {
+        let cascade = CascadeRouter::new(test_slugs());
+        let ctx = default_ctx();
+        let result = cascade.route(&ctx);
+
+        assert!(result.fallback.is_some());
+        assert_eq!(result.fallback.as_ref().unwrap().slug, "claude-haiku-3-5");
+    }
+
+    // ── Test 4: fast tier has no fallback ────────────────────────────────
+
+    #[test]
+    fn fast_tier_no_fallback() {
+        let cascade = CascadeRouter::new(test_slugs());
+        let mut ctx = default_ctx();
+        ctx.role = AgentRole::Conductor; // Fast tier
+
+        let result = cascade.route(&ctx);
+        assert!(result.fallback.is_none());
+    }
+
+    // ── Test 5: transitions to Confidence at 50 observations ────────────
+
+    #[test]
+    fn transitions_to_confidence_stage() {
+        let cascade = CascadeRouter::new(test_slugs());
+        let ctx = default_ctx();
+
+        // Feed 50 observations to cross the threshold.
+        for _ in 0..50 {
+            cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.8, true);
+        }
+
+        assert_eq!(cascade.current_stage(), CascadeStage::Confidence);
+        let result = cascade.route(&ctx);
+        assert_eq!(result.stage, CascadeStage::Confidence);
+    }
+
+    // ── Test 6: transitions to UCB at 200 observations ──────────────────
+
+    #[test]
+    fn transitions_to_ucb_stage() {
+        let cascade = CascadeRouter::new(test_slugs());
+        let ctx = default_ctx();
+
+        // Feed 200 observations.
+        for _ in 0..200 {
+            cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.8, true);
+        }
+
+        assert_eq!(cascade.current_stage(), CascadeStage::Ucb);
+        let result = cascade.route(&ctx);
+        assert_eq!(result.stage, CascadeStage::Ucb);
+    }
+
+    // ── Test 7: confidence stage prefers high-success model ─────────────
+
+    #[test]
+    fn confidence_stage_prefers_high_success_model() {
+        let cascade = CascadeRouter::new(test_slugs());
+        let ctx = default_ctx();
+
+        // Build up observations: sonnet mostly succeeds, haiku mostly fails.
+        for i in 0..80 {
+            if i < 25 {
+                cascade.record_observation(&ctx, "claude-haiku-3-5", 0.2, false);
+            } else if i < 50 {
+                cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.9, true);
+            } else if i < 65 {
+                cascade.record_observation(&ctx, "claude-haiku-3-5", 0.2, false);
+            } else {
+                cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.9, true);
+            }
+        }
+
+        assert_eq!(cascade.current_stage(), CascadeStage::Confidence);
+
+        let result = cascade.route(&ctx);
+        // Sonnet should have higher upper bound than haiku
+        // (sonnet: 25/25 = 100%, haiku: 0/40 = 0%)
+        assert_eq!(
+            result.primary.slug, "claude-sonnet-4-5",
+            "confidence stage should prefer the high-pass-rate model"
+        );
+    }
+
+    // ── Test 8: stage labels are correct ────────────────────────────────
+
+    #[test]
+    fn stage_labels() {
+        assert_eq!(CascadeStage::Static.label(), "static");
+        assert_eq!(CascadeStage::Confidence.label(), "confidence");
+        assert_eq!(CascadeStage::Ucb.label(), "ucb");
+    }
+
+    // ── Test 9: observation count is consistent ─────────────────────────
+
+    #[test]
+    fn observation_count_tracks_correctly() {
+        let cascade = CascadeRouter::new(test_slugs());
+        let ctx = default_ctx();
+
+        assert_eq!(cascade.total_observations(), 0);
+
+        cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.8, true);
+        cascade.record_observation(&ctx, "claude-haiku-3-5", 0.3, false);
+        cascade.record_observation(&ctx, "claude-opus-4", 0.9, true);
+
+        assert_eq!(cascade.total_observations(), 3);
+    }
+
+    // ── Test 10: confidence snapshot tracks trials ──────────────────────
+
+    #[test]
+    fn confidence_snapshot_accurate() {
+        let cascade = CascadeRouter::new(test_slugs());
+        let ctx = default_ctx();
+
+        cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.8, true);
+        cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.5, false);
+        cascade.record_observation(&ctx, "claude-haiku-3-5", 0.9, true);
+
+        let snap = cascade.confidence_snapshot();
+        assert_eq!(snap.get("claude-sonnet-4-5"), Some(&(2, 1)));
+        assert_eq!(snap.get("claude-haiku-3-5"), Some(&(1, 1)));
+    }
+
+    // ── Test 11: latency SLA varies by tier ─────────────────────────────
+
+    #[test]
+    fn latency_sla_by_tier() {
+        let cascade = CascadeRouter::new(test_slugs());
+
+        let mut ctx = default_ctx();
+        ctx.role = AgentRole::Conductor; // Fast
+        let fast = cascade.route(&ctx);
+
+        ctx.role = AgentRole::Implementer; // Standard
+        let standard = cascade.route(&ctx);
+
+        ctx.role = AgentRole::Architect; // Premium
+        let premium = cascade.route(&ctx);
+
+        assert!(fast.latency_sla_ms < standard.latency_sla_ms);
+        assert!(standard.latency_sla_ms < premium.latency_sla_ms);
+    }
+
+    // ── Test 12: stage_for_observations boundaries ──────────────────────
+
+    #[test]
+    fn stage_boundaries() {
+        assert_eq!(stage_for_observations(0), CascadeStage::Static);
+        assert_eq!(stage_for_observations(49), CascadeStage::Static);
+        assert_eq!(stage_for_observations(50), CascadeStage::Confidence);
+        assert_eq!(stage_for_observations(199), CascadeStage::Confidence);
+        assert_eq!(stage_for_observations(200), CascadeStage::Ucb);
+        assert_eq!(stage_for_observations(1000), CascadeStage::Ucb);
+    }
+
+    // ── Test 13: model_stats pass_rate computation ──────────────────────
+
+    #[test]
+    fn model_stats_pass_rate() {
+        let mut s = ModelStats::default();
+        assert!((s.pass_rate() - 0.0).abs() < f64::EPSILON);
+
+        s.trials = 10;
+        s.successes = 7;
+        assert!((s.pass_rate() - 0.7).abs() < f64::EPSILON);
+    }
+
+    // ── Test 14: confidence width shrinks with more data ────────────────
+
+    #[test]
+    fn confidence_width_shrinks() {
+        let s10 = ModelStats { trials: 10, successes: 7 };
+        let s100 = ModelStats { trials: 100, successes: 70 };
+        let s1000 = ModelStats { trials: 1000, successes: 700 };
+
+        assert!(s10.confidence_width() > s100.confidence_width());
+        assert!(s100.confidence_width() > s1000.confidence_width());
+    }
+
+    // ── Test 15: premium role uses opus in static stage ─────────────────
+
+    #[test]
+    fn premium_role_gets_opus() {
+        let cascade = CascadeRouter::new(test_slugs());
+        let mut ctx = default_ctx();
+        ctx.role = AgentRole::Architect; // Premium tier
+
+        let result = cascade.route(&ctx);
+        assert_eq!(result.primary.slug, "claude-opus-4");
+        // Premium fallback is sonnet
+        assert_eq!(result.fallback.as_ref().unwrap().slug, "claude-sonnet-4-5");
+    }
+
+    // ── Test 16: display impl for CascadeStage ──────────────────────────
+
+    #[test]
+    fn cascade_stage_display() {
+        assert_eq!(format!("{}", CascadeStage::Static), "static");
+        assert_eq!(format!("{}", CascadeStage::Ucb), "ucb");
+    }
+
+    // ── Test 17: custom role table ──────────────────────────────────────
+
+    #[test]
+    fn custom_role_table() {
+        let mut table = HashMap::new();
+        table.insert(AgentRole::Implementer, "gpt-5".to_string());
+
+        let cascade = CascadeRouter::new(test_slugs()).with_role_table(table);
+        let ctx = default_ctx();
+        let result = cascade.route(&ctx);
+
+        assert_eq!(result.primary.slug, "gpt-5");
+    }
+
+    // ── Test 18: UCB stage uses linucb selection ────────────────────────
+
+    #[test]
+    fn ucb_stage_uses_trained_linucb() {
+        let cascade = CascadeRouter::new(test_slugs());
+        let ctx = default_ctx();
+
+        // Train haiku as the best arm with many observations.
+        for _ in 0..250 {
+            cascade.record_observation(&ctx, "claude-haiku-3-5", 1.0, true);
+            // Give some data to other arms too so LinUCB has seen them.
+            if cascade.total_observations() % 10 == 0 {
+                cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.1, false);
+                cascade.record_observation(&ctx, "claude-opus-4", 0.1, false);
+            }
+        }
+
+        assert_eq!(cascade.current_stage(), CascadeStage::Ucb);
+        let result = cascade.route(&ctx);
+        // LinUCB should prefer the highly-rewarded arm
+        assert_eq!(result.primary.slug, "claude-haiku-3-5");
+    }
+}

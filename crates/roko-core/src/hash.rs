@@ -32,9 +32,10 @@ impl ContentHash {
     /// Hex-encoded representation (64 chars).
     #[must_use]
     pub fn to_hex(&self) -> String {
+        use std::fmt::Write;
         let mut s = String::with_capacity(64);
         for byte in self.0 {
-            s.push_str(&format!("{byte:02x}"));
+            let _ = write!(s, "{byte:02x}");
         }
         s
     }
@@ -73,7 +74,7 @@ impl fmt::Display for ContentHash {
     }
 }
 
-fn hex_digit(b: u8) -> Option<u8> {
+const fn hex_digit(b: u8) -> Option<u8> {
     match b {
         b'0'..=b'9' => Some(b - b'0'),
         b'a'..=b'f' => Some(b - b'a' + 10),
@@ -82,14 +83,15 @@ fn hex_digit(b: u8) -> Option<u8> {
     }
 }
 
-/// Serde support: render ContentHash as a hex string rather than a byte array.
+/// Serde support: render `ContentHash` as a hex string rather than a byte array.
 mod hex_bytes {
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S: Serializer>(bytes: &[u8; 32], s: S) -> Result<S::Ok, S::Error> {
+        use std::fmt::Write;
         let mut hex = String::with_capacity(64);
         for byte in bytes {
-            hex.push_str(&format!("{byte:02x}"));
+            let _ = write!(hex, "{byte:02x}");
         }
         s.serialize_str(&hex)
     }

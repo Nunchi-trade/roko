@@ -68,21 +68,15 @@ impl ToolHandler for Handler {
         };
         let mut working = original;
         for (idx, edit) in edits.iter().enumerate() {
-            let old_string = match edit.get("old_string").and_then(serde_json::Value::as_str) {
-                Some(s) => s,
-                None => {
-                    return ToolResult::Err(ToolError::SchemaInvalid(format!(
-                        "multi_edit: edits[{idx}].old_string is required"
-                    )));
-                }
+            let Some(old_string) = edit.get("old_string").and_then(serde_json::Value::as_str) else {
+                return ToolResult::Err(ToolError::SchemaInvalid(format!(
+                    "multi_edit: edits[{idx}].old_string is required"
+                )));
             };
-            let new_string = match edit.get("new_string").and_then(serde_json::Value::as_str) {
-                Some(s) => s,
-                None => {
-                    return ToolResult::Err(ToolError::SchemaInvalid(format!(
-                        "multi_edit: edits[{idx}].new_string is required"
-                    )));
-                }
+            let Some(new_string) = edit.get("new_string").and_then(serde_json::Value::as_str) else {
+                return ToolResult::Err(ToolError::SchemaInvalid(format!(
+                    "multi_edit: edits[{idx}].new_string is required"
+                )));
             };
             let replace_all = edit
                 .get("replace_all")

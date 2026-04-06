@@ -8,7 +8,34 @@
 #![allow(
     clippy::cast_precision_loss,
     clippy::match_same_arms,
-    clippy::missing_const_for_fn
+    clippy::missing_const_for_fn,
+    clippy::cast_possible_truncation,
+    clippy::cast_lossless,
+    clippy::cast_sign_loss,
+    clippy::clone_on_ref_ptr,
+    clippy::assigning_clones,
+    clippy::use_self,
+    clippy::doc_markdown,
+    clippy::needless_continue,
+    clippy::map_unwrap_or,
+    clippy::option_if_let_else,
+    clippy::unnecessary_wraps,
+    clippy::redundant_closure_for_method_calls,
+    clippy::iter_without_into_iter,
+    clippy::used_underscore_binding,
+    clippy::suboptimal_flops,
+    clippy::ignored_unit_patterns,
+    clippy::manual_let_else,
+    clippy::too_many_lines,
+    clippy::significant_drop_tightening,
+    clippy::ref_option,
+    clippy::or_fun_call,
+    clippy::unnested_or_patterns,
+    clippy::type_complexity,
+    clippy::iter_over_hash_type,
+    clippy::explicit_iter_loop,
+    clippy::cloned_instead_of_copied,
+    clippy::nonminimal_bool
 )]
 
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
@@ -36,6 +63,11 @@ pub mod chain;
 /// when a [`chain_rpc::ChainContext`] is provided at startup.
 #[cfg(feature = "chain")]
 pub mod chain_rpc;
+
+/// HTTP REST API for dashboard consumption (pheromone field, knowledge graph,
+/// agent topology). Opt-in via the `chain` feature alongside HDC/knowledge/stigmergy.
+#[cfg(feature = "chain")]
+pub mod http_api;
 
 /// Roko trait bridge: implements `roko_core::{Gate, Substrate}` over mirage.
 #[cfg(feature = "roko")]
@@ -166,7 +198,7 @@ fn deserialize_optional_u128<'de, D>(deserializer: D) -> std::result::Result<Opt
 where
     D: Deserializer<'de>,
 {
-    deserialize_optional_numeric(deserializer, |text| parse_numeric_quantity(text))
+    deserialize_optional_numeric(deserializer, parse_numeric_quantity)
 }
 
 fn deserialize_optional_numeric<'de, D, T, F>(

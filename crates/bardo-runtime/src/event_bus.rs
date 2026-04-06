@@ -49,6 +49,7 @@ use std::{
     },
     time::{SystemTime, UNIX_EPOCH},
 };
+use parking_lot::Mutex;
 
 use tokio::sync::broadcast;
 use tracing::trace;
@@ -67,7 +68,7 @@ pub struct Envelope<E> {
 /// Shared interior state backing both [`EventBus`] and [`BusSender`].
 struct Shared<E> {
     tx: broadcast::Sender<Envelope<E>>,
-    ring: std::sync::Mutex<VecDeque<Envelope<E>>>,
+    ring: Mutex<VecDeque<Envelope<E>>>,
     seq: AtomicU64,
     capacity: usize,
 }
@@ -82,7 +83,7 @@ impl<E: Clone + Send + Sync + 'static> Shared<E> {
 
         // Append to replay ring (short lock).
         {
-            let mut ring = self.ring.lock().expect("ring lock poisoned");
+            let mut ring = self.ring.lock();
             if ring.len() >= self.capacity {
                 ring.pop_front();
             }
@@ -111,7 +112,7 @@ impl<E: Clone + Send + Sync + 'static> EventBus<E> {
         Self {
             shared: Arc::new(Shared {
                 tx,
-                ring: std::sync::Mutex::new(VecDeque::with_capacity(capacity)),
+                ring: Mutex::new(VecDeque::with_capacity(capacity)),
                 seq: AtomicU64::new(0),
                 capacity,
             }),
@@ -139,7 +140,6 @@ impl<E: Clone + Send + Sync + 'static> EventBus<E> {
         self.shared
             .ring
             .lock()
-            .expect("ring lock poisoned")
             .iter()
             .filter(|e| e.seq >= after_seq)
             .cloned()
@@ -153,7 +153,7 @@ impl<E: Clone + Send + Sync + 'static> EventBus<E> {
 
     /// Returns the current number of events in the replay ring.
     pub fn ring_len(&self) -> usize {
-        self.shared.ring.lock().expect("ring lock poisoned").len()
+        self.shared.ring.lock().len()
     }
 
     /// Returns the capacity of the event bus.
@@ -188,6 +188,7 @@ impl<E: Clone + Send + Sync + 'static> BusSender<E> {
     }
 }
 
+#[allow(clippy::cast_possible_truncation)]
 fn current_ts_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

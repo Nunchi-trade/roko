@@ -283,8 +283,8 @@ impl Substrate for ChainSubstrate {
         Ok(self.state.read().signals.is_empty())
     }
 
-    fn name(&self) -> &str {
-        &self.name
+    fn name(&self) -> &'static str {
+        "chain-substrate"
     }
 }
 

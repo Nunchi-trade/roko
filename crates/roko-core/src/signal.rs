@@ -172,7 +172,7 @@ impl SignalBuilder {
 
     /// Set the signal's decay function.
     #[must_use]
-    pub fn decay(mut self, decay: Decay) -> Self {
+    pub const fn decay(mut self, decay: Decay) -> Self {
         self.decay = decay;
         self
     }
@@ -186,14 +186,14 @@ impl SignalBuilder {
 
     /// Set the signal's score.
     #[must_use]
-    pub fn score(mut self, score: Score) -> Self {
+    pub const fn score(mut self, score: Score) -> Self {
         self.score = score;
         self
     }
 
     /// Pin the signal's creation time (mostly useful for tests).
     #[must_use]
-    pub fn created_at_ms(mut self, t: i64) -> Self {
+    pub const fn created_at_ms(mut self, t: i64) -> Self {
         self.created_at_ms = Some(t);
         self
     }

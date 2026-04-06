@@ -73,21 +73,21 @@ impl Query {
 
     /// Filter to signals created at/after this Unix-ms timestamp.
     #[must_use]
-    pub fn since(mut self, ms: i64) -> Self {
+    pub const fn since(mut self, ms: i64) -> Self {
         self.since_ms = Some(ms);
         self
     }
 
     /// Filter to signals created at/before this Unix-ms timestamp.
     #[must_use]
-    pub fn until(mut self, ms: i64) -> Self {
+    pub const fn until(mut self, ms: i64) -> Self {
         self.until_ms = Some(ms);
         self
     }
 
     /// Filter to signals whose effective weight exceeds this threshold (decay applied).
     #[must_use]
-    pub fn with_min_weight(mut self, w: f32) -> Self {
+    pub const fn with_min_weight(mut self, w: f32) -> Self {
         self.min_weight = Some(w);
         self
     }
@@ -101,7 +101,7 @@ impl Query {
 
     /// Cap the number of returned results.
     #[must_use]
-    pub fn limit(mut self, n: usize) -> Self {
+    pub const fn limit(mut self, n: usize) -> Self {
         self.limit = Some(n);
         self
     }
@@ -150,22 +150,22 @@ impl Budget {
 
     /// Set an output byte-size cap.
     #[must_use]
-    pub fn with_max_bytes(mut self, n: usize) -> Self {
+    pub const fn with_max_bytes(mut self, n: usize) -> Self {
         self.max_bytes = Some(n);
         self
     }
 
     /// Set a wall-clock millisecond cap.
     #[must_use]
-    pub fn with_max_wall_ms(mut self, ms: u64) -> Self {
+    pub const fn with_max_wall_ms(mut self, ms: u64) -> Self {
         self.max_wall_ms = Some(ms);
         self
     }
 
     /// Estimate token count from byte length (~4 bytes/token).
     #[must_use]
-    pub fn estimate_tokens(bytes: usize) -> usize {
-        (bytes + 3) / 4
+    pub const fn estimate_tokens(bytes: usize) -> usize {
+        bytes.div_ceil(4)
     }
 }
 

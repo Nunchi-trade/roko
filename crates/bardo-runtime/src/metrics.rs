@@ -7,7 +7,7 @@
 //! # Design
 //!
 //! - Generic over any `M: Serialize` metric type.
-//! - Thread-safe: uses `std::sync::Mutex` for the file handle.
+//! - Thread-safe: uses `parking_lot::Mutex` for the file handle.
 //! - Crash-safe: every `record()` call flushes to disk.
 //! - Zero dependencies on mori domain types.
 
@@ -15,8 +15,8 @@ use std::{
     fs::{File, OpenOptions},
     io::{BufWriter, Write},
     path::{Path, PathBuf},
-    sync::Mutex,
 };
+use parking_lot::Mutex;
 
 use chrono::Utc;
 use serde::Serialize;
@@ -35,7 +35,7 @@ pub enum MetricError {
 
 /// A timestamped metric envelope, written as a single JSONL line.
 #[derive(Debug, Serialize)]
-struct MetricLine<'a, M: Serialize> {
+struct MetricLine<'a, M> {
     /// ISO 8601 timestamp.
     ts: String,
     /// The metric payload.
@@ -78,9 +78,10 @@ impl MetricRecorder {
         };
         let json = serde_json::to_string(&line)?;
 
-        let mut writer = self.writer.lock().expect("metric writer lock poisoned");
+        let mut writer = self.writer.lock();
         writeln!(writer, "{json}")?;
         writer.flush()?;
+        drop(writer);
         Ok(())
     }
 
@@ -94,7 +95,7 @@ impl std::fmt::Debug for MetricRecorder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MetricRecorder")
             .field("path", &self.path)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

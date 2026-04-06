@@ -87,15 +87,15 @@ pub fn run_init_wizard(target: Option<PathBuf>, inputs: &WizardInputs) -> Result
 
     let layer = ConfigLayer {
         agent: Some(AgentLayer {
-            command: Some(agent_command.clone()),
-            args: Some(agent_args.clone()),
+            command: Some(agent_command),
+            args: Some(agent_args),
             timeout_ms: None,
             env: None,
             clean_output: None,
         }),
         prompt: Some(PromptLayer {
             token_budget: Some(token_budget),
-            role: Some(role.clone()),
+            role: Some(role),
             files: None,
         }),
         gates,
@@ -160,17 +160,15 @@ pub fn cmd_path(workdir: &Path) -> Result<()> {
 pub fn cmd_edit(workdir: &Path, which: EditTarget) -> Result<()> {
     let resolved = load_layered(workdir)?;
     let path = match which {
-        EditTarget::Global => resolved.paths.global.clone(),
+        EditTarget::Global => resolved.paths.global,
         EditTarget::Project => resolved
             .paths
             .project
-            .clone()
             .unwrap_or_else(|| workdir.join("roko.toml")),
         EditTarget::Auto => resolved
             .paths
             .project
-            .clone()
-            .unwrap_or_else(|| resolved.paths.global.clone()),
+            .unwrap_or(resolved.paths.global),
     };
 
     if let Some(parent) = path.parent() {
@@ -198,16 +196,11 @@ pub fn cmd_edit(workdir: &Path, which: EditTarget) -> Result<()> {
 pub fn cmd_set(workdir: &Path, target: EditTarget, key: &str, value: &str) -> Result<()> {
     let resolved = load_layered(workdir)?;
     let path = match target {
-        EditTarget::Global => resolved.paths.global.clone(),
+        EditTarget::Global | EditTarget::Auto => resolved.paths.global,
         EditTarget::Project => resolved
             .paths
             .project
-            .clone()
             .unwrap_or_else(|| workdir.join("roko.toml")),
-        EditTarget::Auto => resolved
-            .paths
-            .global
-            .clone(),
     };
 
     let mut layer = if path.exists() {

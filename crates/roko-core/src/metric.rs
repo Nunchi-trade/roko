@@ -1,4 +1,4 @@
-//! TaskMetric — the raw data foundation for Roko's continuous-tuning loops.
+//! `TaskMetric` — the raw data foundation for Roko's continuous-tuning loops.
 //!
 //! Every gate verdict produces one [`TaskMetric`] record. Records are appended
 //! to `.roko/runs/{run_id}/metrics.jsonl` by the persistence layer
@@ -81,7 +81,8 @@ impl From<String> for ConfigHash {
 fn hex_prefix(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
-        s.push_str(&format!("{b:02x}"));
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02x}");
     }
     s
 }
@@ -137,7 +138,7 @@ fn canonical_json(v: &serde_json::Value) -> String {
     s
 }
 
-/// One record per gate execution. Serialized as a line of JSONL.
+/// One record per gate execution. Serialized as a line of `JSONL`.
 ///
 /// Mirrors §1.1 of `roko-continuous-tuning.md`. All five tuning loops
 /// slice this table by `config_hash` (the join key) + some subset of
@@ -149,7 +150,7 @@ pub struct TaskMetric {
     pub timestamp: String,
     /// Git SHA of the Roko binary that produced this record.
     pub run_id: String,
-    /// The join key — which RokoConfig produced this record.
+    /// The join key — which `RokoConfig` produced this record.
     pub config_hash: ConfigHash,
     /// Plan this task belongs to (e.g. `"46-reputation-engine"`).
     pub plan_id: String,
@@ -283,6 +284,7 @@ pub struct Headlines {
 ///
 /// Returns a [`Headlines`] with zeros in all fields if `records` is empty.
 #[must_use]
+#[allow(clippy::cast_precision_loss)]
 pub fn compute_headlines(records: &[TaskMetric]) -> Headlines {
     if records.is_empty() {
         return Headlines {

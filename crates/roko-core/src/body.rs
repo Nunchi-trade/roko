@@ -11,7 +11,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 ///
 /// Bodies are tagged: consumers can tell at runtime whether the body is
 /// structured JSON, raw bytes, text, or absent.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "format", content = "data", rename_all = "snake_case")]
 pub enum Body {
     /// Empty body — the signal is purely a marker (its kind and tags carry meaning).
@@ -147,7 +147,7 @@ mod base64_bytes {
     fn encode_base64(bytes: &[u8]) -> String {
         const CHARS: &[u8; 64] =
             b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+        let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
         let chunks = bytes.chunks_exact(3);
         let remainder = chunks.remainder();
         for chunk in chunks {
@@ -178,7 +178,7 @@ mod base64_bytes {
     }
 
     fn decode_base64(s: &str) -> Result<Vec<u8>, String> {
-        fn val(b: u8) -> Option<u8> {
+        const fn val(b: u8) -> Option<u8> {
             match b {
                 b'A'..=b'Z' => Some(b - b'A'),
                 b'a'..=b'z' => Some(b - b'a' + 26),

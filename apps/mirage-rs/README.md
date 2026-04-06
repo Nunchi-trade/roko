@@ -592,6 +592,432 @@ Weights decay as `w(t) = w₀ × 2^(-age/τ)`. Each confirmation extends the eff
 | `opportunity` | 4h | Time-sensitive openings (arb windows, liquidations) |
 | `wisdom` | 24h | Durable tactical knowledge |
 
+## HTTP REST API
+
+When chain extensions are enabled (`--enable-hdc --enable-knowledge --enable-stigmergy`), mirage-rs exposes an HTTP REST API on the same port as the JSON-RPC server (default 8545) under the `/api` prefix. This API powers dashboards, monitoring UIs, and any tooling that prefers standard REST over JSON-RPC.
+
+CORS is permissive -- any origin can call these endpoints. All timestamps are Unix seconds. Pagination follows an offset/limit pattern.
+
+### Quick start
+
+```bash
+# Start mirage-rs with all chain extensions enabled
+cargo run -p mirage-rs --features chain -- \
+  --rpc-url https://ethereum-rpc.publicnode.com \
+  --enable-hdc --enable-knowledge --enable-stigmergy
+
+# Check dashboard stats
+curl http://127.0.0.1:8545/api/stats | jq
+
+# List active pheromones sorted by intensity
+curl 'http://127.0.0.1:8545/api/pheromones?sort=intensity&order=desc&limit=10' | jq
+
+# Search knowledge entries semantically
+curl 'http://127.0.0.1:8545/api/knowledge/search?q=uniswap+pool+revert&k=5' | jq
+
+# Get the agent interaction graph
+curl http://127.0.0.1:8545/api/agents/topology | jq
+
+# Stream live events over WebSocket (requires `roko` feature)
+websocat ws://127.0.0.1:8545/api/ws
+```
+
+### Pheromone field
+
+#### `GET /api/pheromones`
+
+List active pheromones with decay projections.
+
+| Query param | Default | Description |
+|-------------|---------|-------------|
+| `offset` | `0` | Pagination offset |
+| `limit` | `100` | Max results per page |
+| `kind` | (all) | Filter by kind: `threat`, `opportunity`, or `wisdom` |
+| `min_intensity` | (none) | Floor threshold (float) |
+| `sort` | `intensity` | Sort field: `intensity`, `deposited_at`, or `confirmations` |
+| `order` | `desc` | Sort direction: `desc` or `asc` |
+
+Response:
+
+```json
+{
+  "pheromones": [
+    {
+      "id": "ph:abc123",
+      "kind": "threat",
+      "intensity": 0.82,
+      "base_intensity": 1.0,
+      "deposited_at": 1712400000,
+      "confirmations": 3,
+      "half_life_seconds": 7200,
+      "effective_half_life_seconds": 9327,
+      "bucket": "threat",
+      "decay_projection": {
+        "in_1h": 0.74,
+        "in_4h": 0.53,
+        "in_24h": 0.08
+      }
+    }
+  ],
+  "total": 42,
+  "offset": 0,
+  "limit": 100,
+  "timestamp": 1712400300
+}
+```
+
+Decay projections show predicted intensity at +1h, +4h, and +24h -- useful for animated UI visualizations that show signals fading over time.
+
+#### `GET /api/pheromones/summary`
+
+Aggregated statistics per pheromone kind.
+
+```json
+{
+  "by_kind": {
+    "threat": {
+      "count": 12,
+      "total_intensity": 8.4,
+      "avg_intensity": 0.7,
+      "min_intensity": 0.1,
+      "max_intensity": 1.0
+    },
+    "opportunity": { "..." : "..." },
+    "wisdom": { "..." : "..." }
+  },
+  "total_count": 42,
+  "total_intensity": 28.6,
+  "timestamp": 1712400300
+}
+```
+
+#### `POST /api/pheromones/query`
+
+Top-K similarity search using HDC vectors. Finds pheromones semantically related to a free-text query.
+
+Request body:
+
+```json
+{
+  "query": "flash loan attack on lending protocol",
+  "k": 10
+}
+```
+
+Response:
+
+```json
+{
+  "results": [
+    {
+      "id": "ph:abc123",
+      "kind": "threat",
+      "similarity": 0.87,
+      "intensity": 0.82,
+      "score": 0.71,
+      "deposited_at": 1712400000,
+      "confirmations": 3
+    }
+  ],
+  "timestamp": 1712400300
+}
+```
+
+HDC similarity ranges from 0.0 to 1.0 (Hamming similarity of 10,240-bit vectors).
+
+#### `GET /api/pheromones/heatmap`
+
+Time-bucketed deposit activity for heatmap and timeline visualizations.
+
+| Query param | Default | Description |
+|-------------|---------|-------------|
+| `bucket_seconds` | `3600` | Bucket width in seconds (minimum 60) |
+| `since` | 24h ago | Unix timestamp for the start of the window |
+
+Response:
+
+```json
+{
+  "buckets": [
+    {
+      "timestamp": 1712361600,
+      "threat": 3,
+      "opportunity": 7,
+      "wisdom": 1,
+      "total_intensity": 8.2
+    }
+  ],
+  "bucket_seconds": 3600,
+  "timestamp": 1712400300
+}
+```
+
+### Knowledge graph
+
+#### `GET /api/knowledge/entries`
+
+List insight entries with full lifecycle metadata.
+
+| Query param | Default | Description |
+|-------------|---------|-------------|
+| `offset` | `0` | Pagination offset |
+| `limit` | `100` | Max results per page |
+| `kind` | (all) | Filter: `insight`, `heuristic`, `warning`, `causal_link`, `strategy_fragment`, or `anti_knowledge` |
+| `state` | (all) | Filter: `created`, `active`, `confirmed`, `decaying`, `challenged`, `pruned`, or `stale` |
+| `min_weight` | (none) | Minimum weight threshold (float) |
+| `sort` | `weight` | Sort field: `weight`, `created_at`, or `confirmations` |
+| `order` | `desc` | Sort direction: `desc` or `asc` |
+
+Response:
+
+```json
+{
+  "entries": [
+    {
+      "id": "insight:d4e5f6",
+      "kind": "warning",
+      "weight": 0.95,
+      "initial_weight": 1.0,
+      "state": "confirmed",
+      "confirmations": 5,
+      "challenges": 0,
+      "created_at": 1712390000,
+      "content": "never call selfdestruct in a proxy implementation contract",
+      "author": "agent:alice",
+      "enabled_by": [],
+      "half_life_seconds": 180,
+      "effective_half_life_seconds": 381,
+      "stake_wei": "2000000000000000"
+    }
+  ],
+  "total": 128,
+  "offset": 0,
+  "limit": 100,
+  "timestamp": 1712400300
+}
+```
+
+`stake_wei` is serialized as a string to avoid JSON number precision loss for u128 values.
+
+#### `GET /api/knowledge/edges`
+
+Dependency and HDC-similarity edges, designed for force-directed graph layouts.
+
+Two types of edges appear in the response:
+
+- **`enabled_by`** -- explicit dependency edges from the knowledge graph (entry A was enabled by entry B).
+- **`hdc`** -- implicit similarity edges computed from HDC vector proximity above the configured threshold.
+
+| Query param | Default | Description |
+|-------------|---------|-------------|
+| `similarity_threshold` | `0.5` | Minimum HDC similarity for implicit edges |
+| `max_hdc_edges_per_node` | `5` | Cap on HDC edges per node (prevents hairball graphs) |
+| `include_enabled_by` | `true` | Include explicit dependency edges |
+| `include_hdc` | `true` | Include HDC similarity edges |
+
+Response:
+
+```json
+{
+  "edges": [
+    { "from": "insight:aaa", "to": "insight:bbb", "type": "enabled_by" },
+    { "from": "insight:aaa", "to": "insight:ccc", "similarity": 0.73, "type": "hdc" }
+  ],
+  "node_count": 128,
+  "timestamp": 1712400300
+}
+```
+
+#### `GET /api/knowledge/search`
+
+Semantic search over knowledge entries via HDC projection.
+
+| Query param | Default | Description |
+|-------------|---------|-------------|
+| `q` | (required) | Free-text search query |
+| `k` | `10` | Max results |
+| `kind` | (all) | Optional kind filter |
+
+Response:
+
+```json
+{
+  "results": [
+    {
+      "id": "insight:d4e5f6",
+      "kind": "warning",
+      "similarity": 0.91,
+      "weight": 0.95,
+      "score": 0.86,
+      "content": "never call selfdestruct in a proxy implementation contract",
+      "state": "confirmed",
+      "author": "agent:alice",
+      "created_at": 1712390000,
+      "confirmations": 5
+    }
+  ],
+  "query": "proxy destruction safety",
+  "timestamp": 1712400300
+}
+```
+
+#### `GET /api/knowledge/kinds`
+
+Enumerate knowledge and pheromone kind metadata, including current entry counts and default half-lives.
+
+```json
+{
+  "knowledge_kinds": [
+    {
+      "name": "insight",
+      "default_half_life_seconds": 604800,
+      "base_reward_wei": 1000000000000000,
+      "count": 42
+    }
+  ],
+  "pheromone_kinds": [
+    {
+      "name": "threat",
+      "default_half_life_seconds": 7200,
+      "count": 12
+    }
+  ],
+  "timestamp": 1712400300
+}
+```
+
+### Agent topology
+
+#### `GET /api/agents/topology`
+
+Agent interaction graph derived from confirmation and challenge activity in the knowledge store. Useful for visualizing which agents reinforce or contest each other's contributions.
+
+Response:
+
+```json
+{
+  "nodes": [
+    {
+      "id": "agent:alice",
+      "address": "0x1111...1111",
+      "insights_posted": 24,
+      "confirmations_given": 18,
+      "challenges_given": 2,
+      "total_weight": 19.4
+    }
+  ],
+  "edges": [
+    {
+      "from": "agent:alice",
+      "to": "agent:bob",
+      "weight": 12,
+      "type": "confirmed"
+    },
+    {
+      "from": "agent:carol",
+      "to": "agent:alice",
+      "weight": 1,
+      "type": "challenged"
+    }
+  ],
+  "timestamp": 1712400300
+}
+```
+
+### Dashboard stats
+
+#### `GET /api/stats`
+
+Combined statistics for dashboard overview panels. One request, one response, no round trips.
+
+```json
+{
+  "insights": {
+    "total": 128,
+    "active": 94,
+    "confirmed": 67,
+    "challenged": 3,
+    "decaying": 24
+  },
+  "pheromones": {
+    "total": 42,
+    "threat": 12,
+    "opportunity": 18,
+    "wisdom": 12,
+    "total_intensity": 28.6
+  },
+  "toggles": {
+    "hdc": true,
+    "knowledge": true,
+    "stigmergy": true
+  },
+  "timestamp": 1712400300
+}
+```
+
+### WebSocket streaming (requires `roko` feature)
+
+#### `WS /api/ws`
+
+Live event stream from the pheromone and insight buses. Connect via any WebSocket client.
+
+| Query param | Default | Description |
+|-------------|---------|-------------|
+| `pheromones` | `true` | Subscribe to pheromone deposits |
+| `insights` | `true` | Subscribe to insight lifecycle events |
+
+```bash
+# Subscribe to both channels
+websocat ws://127.0.0.1:8545/api/ws
+
+# Pheromones only
+websocat 'ws://127.0.0.1:8545/api/ws?insights=false'
+```
+
+Wire format is JSON text frames with a `channel` field:
+
+**Pheromone event:**
+
+```json
+{
+  "channel": "pheromone",
+  "data": {
+    "id": "ph:abc123",
+    "kind": "threat",
+    "intensity": 1.0,
+    "depositedAt": 1712400000
+  }
+}
+```
+
+**Insight event:**
+
+```json
+{
+  "channel": "insight",
+  "data": {
+    "type": "posted",
+    "id": "insight:d4e5f6",
+    "kind": "warning",
+    "author": "agent:alice"
+  }
+}
+```
+
+Insight event types: `posted`, `stateTransition`, `confirmed`, `challenged`, `decayed`.
+
+**Control frames:**
+
+```json
+{"type": "connected", "pheromones": true, "insights": true}
+```
+
+```json
+{"type": "lagged", "channel": "pheromone", "missed": 12}
+```
+
+The `lagged` frame means the client fell behind the broadcast buffer. Missed events are dropped -- reconnect or increase consumption speed.
+
 ## Roko bridge (feature = `roko`)
 
 The `roko` feature adds trait implementations that let `mirage-rs` slot directly into a roko agent's universal loop (query substrate → score → route/compose → gate → write back → policy).

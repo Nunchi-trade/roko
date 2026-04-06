@@ -1,5 +1,23 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless,
+    clippy::doc_markdown,
+    clippy::unreadable_literal,
+    clippy::significant_drop_tightening,
+    clippy::too_many_lines,
+    clippy::missing_const_for_fn,
+    clippy::option_if_let_else,
+    clippy::manual_let_else,
+    clippy::similar_names,
+    clippy::struct_excessive_bools,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::uninlined_format_args
+)]
 
 //! `roko-chain-watcher` binary entry point.
 //!

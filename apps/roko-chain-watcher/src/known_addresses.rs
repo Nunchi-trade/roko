@@ -20,6 +20,7 @@ pub enum ContractCategory {
 }
 
 impl ContractCategory {
+    #[allow(dead_code)]
     pub fn label(&self) -> &'static str {
         match self {
             Self::DexRouter => "DEX",

@@ -1360,10 +1360,10 @@ fn account_diff_from_dirty_change(
         .flatten();
 
     let before_code = before.and_then(|b| b.code.clone());
-    let new_code = if after.code != before_code {
-        after.code.clone()
-    } else {
+    let new_code = if after.code == before_code {
         None
+    } else {
+        after.code.clone()
     };
 
     let info_changed = new_balance.is_some() || new_nonce.is_some() || new_code.is_some();
@@ -2113,6 +2113,7 @@ fn compute_domain_separator(contract: Address, chain_id: u64, code_hash: B256) -
     keccak256(encoded)
 }
 
+#[allow(dead_code)]
 fn synthetic_create_address(from: Address, nonce: u64) -> Address {
     let mut bytes = Vec::with_capacity(28);
     bytes.extend_from_slice(from.as_slice());

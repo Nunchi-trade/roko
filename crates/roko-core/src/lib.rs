@@ -38,6 +38,7 @@
 
 pub mod agent;
 pub mod body;
+pub mod build;
 pub mod config;
 pub mod conductor;
 pub mod context;
@@ -45,10 +46,13 @@ pub mod decay;
 pub mod error;
 pub mod hash;
 pub mod kind;
+pub mod language;
 pub mod loop_tick;
 pub mod metric;
 pub mod obs;
 pub mod phase;
+pub mod polyglot;
+pub mod project;
 pub mod provenance;
 pub mod query;
 pub mod score;
@@ -64,15 +68,22 @@ pub use agent::{
     AgentBackend, AgentRole, ModelSpec, ModelTier, ReasoningEffort, ToolPermissions, TurnBudget,
 };
 pub use body::Body;
+pub use build::{BuildCommand, BuildSystem};
 pub use conductor::ConductorDecision;
 pub use context::Context;
 pub use decay::Decay;
 pub use error::{RokoError, Result};
 pub use hash::ContentHash;
 pub use kind::Kind;
+pub use language::{Import, ImportKind, LanguageProvider, Symbol, SymbolKind, Visibility};
 pub use loop_tick::{loop_tick, TickOutcome};
 pub use metric::{compute_headlines, ConfigHash, Headlines, TaskMetric};
-pub use phase::{valid_transitions, FailureKind, PhaseKind, PlanPhase};
+pub use phase::{is_monotonic_progression, valid_transitions, FailureKind, PhaseKind, PlanPhase};
+pub use polyglot::{detect_polyglot, PolyglotProject};
+pub use project::{
+    detect_from_files, detect_from_files_with_cargo_toml, DetectedBuildSystem, Language,
+    ProjectInfo,
+};
 pub use provenance::Provenance;
 pub use query::{Budget, Query};
 pub use score::Score;

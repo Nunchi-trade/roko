@@ -19,6 +19,7 @@ use std::collections::HashMap;
 #[derive(Default)]
 pub struct MemorySubstrate {
     store: RwLock<HashMap<ContentHash, Signal>>,
+    #[allow(dead_code)]
     name: String,
 }
 
@@ -70,6 +71,7 @@ impl Substrate for MemorySubstrate {
         Ok(self.store.read().get(id).cloned())
     }
 
+    #[allow(clippy::significant_drop_tightening)]
     async fn query(&self, q: &Query, ctx: &Context) -> Result<Vec<Signal>> {
         let store = self.store.read();
         let mut matching: Vec<Signal> = store
@@ -77,6 +79,7 @@ impl Substrate for MemorySubstrate {
             .filter(|s| matches_query(s, q, ctx))
             .cloned()
             .collect();
+        drop(store);
 
         // Sort by effective weight descending (newest/highest-score first).
         matching.sort_by(|a, b| {
@@ -103,12 +106,8 @@ impl Substrate for MemorySubstrate {
         Ok(self.store.read().len())
     }
 
-    fn name(&self) -> &str {
-        if self.name.is_empty() {
-            "memory"
-        } else {
-            &self.name
-        }
+    fn name(&self) -> &'static str {
+        "memory"
     }
 }
 

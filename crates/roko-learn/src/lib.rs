@@ -12,14 +12,24 @@
 //! - [`skill_library`] — structured skills agents can invoke
 //! - [`context_pack_cache`] — cached composed prompts keyed by task fingerprint
 //! - [`pattern_discovery`] — mining episodes for recurring shapes
+//! - [`provider_health`] — per-provider circuit breaker for LLM routing
 
 #![deny(missing_docs)]
 #![allow(clippy::module_name_repetitions)]
 
 pub mod bandits;
+pub mod baseline;
+pub mod cascade_router;
 pub mod context_pack_cache;
+pub mod costs_db;
+pub mod efficiency;
 pub mod episode_logger;
+pub mod hdc_clustering;
+pub mod model_router;
 pub mod pattern_discovery;
 pub mod playbook;
 pub mod playbook_rules;
+pub mod provider_health;
+pub mod regression;
 pub mod skill_library;
+pub mod task_metric;

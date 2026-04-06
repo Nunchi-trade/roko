@@ -109,7 +109,7 @@ pub async fn start_rpc_server(
         chain_subs: None,
     })
     .map_err(|error| MirageError::Unsupported(error.to_string()))?;
-    finish_start_rpc_server(address, module, local_state).await
+    finish_start_rpc_server(address, module, local_state, None).await
 }
 
 /// Starts a JSON-RPC server with an attached chain substrate.
@@ -136,6 +136,14 @@ pub async fn start_rpc_server_with_chain(
             _ => None,
         }
     };
+    let api_router = {
+        let api_state = crate::http_api::ApiState {
+            chain: chain.clone(),
+            #[cfg(feature = "roko")]
+            subs: chain_subs.clone(),
+        };
+        Some(crate::http_api::build_router(api_state))
+    };
     let module = build_rpc_module(ServerContext {
         state: Arc::clone(&local_state),
         shutdown,
@@ -144,13 +152,14 @@ pub async fn start_rpc_server_with_chain(
         chain_subs,
     })
     .map_err(|error| MirageError::Unsupported(error.to_string()))?;
-    finish_start_rpc_server(address, module, local_state).await
+    finish_start_rpc_server(address, module, local_state, api_router).await
 }
 
 async fn finish_start_rpc_server(
     address: SocketAddr,
     module: RpcModule<ServerContext>,
     local_state: Arc<RwLock<MirageState>>,
+    api_router: Option<Router>,
 ) -> Result<(SocketAddr, ServerHandle)> {
     let (stop_handle, server_handle) = jsonrpsee::server::stop_channel();
     let rpc_service = ServerBuilder::default()
@@ -177,13 +186,16 @@ async fn finish_start_rpc_server(
     let local_addr = listener
         .local_addr()
         .map_err(|_| MirageError::BindFailed(address.port()))?;
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/health", get(health_handler))
         .route("/events/{stream_id}", get(event_ws_handler))
         .route("/events/{stream_id}", delete(unsubscribe_event_handler))
         .fallback_service(rpc_fallback)
-        .layer(CorsLayer::permissive())
         .with_state(local_state);
+    if let Some(api) = api_router {
+        app = app.nest("/api", api);
+    }
+    let app = app.layer(CorsLayer::permissive());
     let shutdown_handle = server_handle.clone();
     tokio::spawn(async move {
         if let Err(error) = axum::serve(listener, app.into_make_service())

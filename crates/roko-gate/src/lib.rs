@@ -23,6 +23,7 @@ pub mod integration_gate;
 pub mod llm_judge_gate;
 pub mod payload;
 pub mod property_test_gate;
+pub mod rung_selector;
 pub mod shell;
 pub mod symbol_gate;
 pub mod test_gate;

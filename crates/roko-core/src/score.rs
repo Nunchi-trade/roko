@@ -52,14 +52,14 @@ impl Score {
         reputation: 1.0,
     };
 
-    /// Construct a Score; values are clamped to their respective valid ranges.
+    /// Construct a `Score`; values are clamped to their respective valid ranges.
     #[must_use]
-    pub fn new(confidence: f32, novelty: f32, utility: f32, reputation: f32) -> Self {
+    pub const fn new(confidence: f32, novelty: f32, utility: f32, reputation: f32) -> Self {
         Self {
             confidence: confidence.clamp(0.0, 1.0),
             novelty: novelty.clamp(0.0, 1.0),
-            utility: utility.max(0.0),
-            reputation: reputation.max(0.0),
+            utility: if utility > 0.0 { utility } else { 0.0 },
+            reputation: if reputation > 0.0 { reputation } else { 0.0 },
         }
     }
 
@@ -83,7 +83,7 @@ impl Score {
 
     /// Compute a score from a confidence value alone, using neutral reputation.
     #[must_use]
-    pub fn from_confidence(confidence: f32) -> Self {
+    pub const fn from_confidence(confidence: f32) -> Self {
         Self::new(confidence, 0.0, 0.0, 1.0)
     }
 }

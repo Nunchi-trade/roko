@@ -25,7 +25,7 @@ pub struct TestCount {
 }
 
 impl TestCount {
-    /// Construct a new TestCount.
+    /// Construct a new `TestCount`.
     #[must_use]
     pub const fn new(passed: u32, failed: u32, ignored: u32) -> Self {
         Self { passed, failed, ignored }
@@ -98,7 +98,7 @@ impl Verdict {
 
     /// Override the verdict's numeric score (clamped to `[0..1]`).
     #[must_use]
-    pub fn with_score(mut self, score: f32) -> Self {
+    pub const fn with_score(mut self, score: f32) -> Self {
         self.score = score.clamp(0.0, 1.0);
         self
     }
@@ -112,14 +112,14 @@ impl Verdict {
 
     /// Record how long the gate took (milliseconds).
     #[must_use]
-    pub fn with_duration(mut self, ms: u64) -> Self {
+    pub const fn with_duration(mut self, ms: u64) -> Self {
         self.duration_ms = ms;
         self
     }
 
     /// Attach structured test counts (populated by test gates).
     #[must_use]
-    pub fn with_test_count(mut self, tc: TestCount) -> Self {
+    pub const fn with_test_count(mut self, tc: TestCount) -> Self {
         self.test_count = Some(tc);
         self
     }
@@ -176,7 +176,7 @@ impl Selection {
 
     /// Set the router's confidence in this selection (clamped to `[0..1]`).
     #[must_use]
-    pub fn with_confidence(mut self, c: f32) -> Self {
+    pub const fn with_confidence(mut self, c: f32) -> Self {
         self.confidence = c.clamp(0.0, 1.0);
         self
     }
@@ -209,7 +209,7 @@ pub struct Outcome {
 impl Outcome {
     /// A successful outcome with full reward (1.0).
     #[must_use]
-    pub fn success(selection: Selection) -> Self {
+    pub const fn success(selection: Selection) -> Self {
         Self {
             selection,
             success: true,
@@ -221,7 +221,7 @@ impl Outcome {
 
     /// A failure outcome with zero reward.
     #[must_use]
-    pub fn failure(selection: Selection) -> Self {
+    pub const fn failure(selection: Selection) -> Self {
         Self {
             selection,
             success: false,
@@ -233,21 +233,21 @@ impl Outcome {
 
     /// Set the reward value (scalar feedback for bandit learning).
     #[must_use]
-    pub fn with_reward(mut self, r: f32) -> Self {
+    pub const fn with_reward(mut self, r: f32) -> Self {
         self.reward = r;
         self
     }
 
     /// Attach a cost metric (for cost-aware bandits).
     #[must_use]
-    pub fn with_cost(mut self, c: f32) -> Self {
+    pub const fn with_cost(mut self, c: f32) -> Self {
         self.cost = Some(c);
         self
     }
 
     /// Attach observed latency in milliseconds.
     #[must_use]
-    pub fn with_latency(mut self, ms: u64) -> Self {
+    pub const fn with_latency(mut self, ms: u64) -> Self {
         self.latency_ms = Some(ms);
         self
     }

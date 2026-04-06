@@ -69,7 +69,7 @@ impl MetricsLog {
     /// Disable fsync-on-append for higher throughput. Use only when you
     /// can tolerate losing the last batch of records on process death.
     #[must_use]
-    pub fn without_fsync(mut self) -> Self {
+    pub const fn without_fsync(mut self) -> Self {
         self.fsync = false;
         self
     }
@@ -149,15 +149,12 @@ impl MetricsLog {
             if line.trim().is_empty() {
                 continue;
             }
-            match TaskMetric::from_jsonl(&line) {
-                Ok(m) => out.push(m),
-                Err(_) => {
-                    // Partial or corrupt line — skip. This is the
-                    // crash-recovery contract: worst case we lose the
-                    // last in-flight record.
-                    continue;
-                }
+            if let Ok(m) = TaskMetric::from_jsonl(&line) {
+                out.push(m);
             }
+            // else: Partial or corrupt line — skip. This is the
+            // crash-recovery contract: worst case we lose the
+            // last in-flight record.
         }
         Ok(out)
     }

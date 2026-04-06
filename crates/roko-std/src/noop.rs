@@ -1,9 +1,9 @@
-//! NoOp implementations of all six traits.
+//! `NoOp` implementations of all six traits.
 //!
 //! These are the "do nothing sensibly" defaults. They let you build a full
 //! `RokoAgent` with placeholder impls, then swap in real ones incrementally.
 //!
-//! Anti-pattern: never define a trait without a NoOp impl — tests and bring-up
+//! Anti-pattern: never define a trait without a `NoOp` impl — tests and bring-up
 //! code should never block on missing implementations.
 
 use async_trait::async_trait;
@@ -19,7 +19,7 @@ impl Scorer for NoOpScorer {
     fn score(&self, _s: &Signal, _ctx: &Context) -> Score {
         Score::NEUTRAL
     }
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "noop_scorer"
     }
 }
@@ -28,6 +28,7 @@ impl Scorer for NoOpScorer {
 #[derive(Debug, Clone, Default)]
 pub struct NoOpGate;
 #[async_trait]
+#[allow(clippy::unnecessary_literal_bound)]
 impl Gate for NoOpGate {
     async fn verify(&self, _s: &Signal, _ctx: &Context) -> Verdict {
         Verdict::pass("noop_gate")
@@ -40,6 +41,7 @@ impl Gate for NoOpGate {
 /// A router that always selects the first candidate (if any).
 #[derive(Debug, Clone, Default)]
 pub struct NoOpRouter;
+#[allow(clippy::unnecessary_literal_bound)]
 impl Router for NoOpRouter {
     fn select(&self, candidates: &[Signal], _ctx: &Context) -> Option<Selection> {
         candidates
@@ -56,6 +58,7 @@ impl Router for NoOpRouter {
 /// If given no inputs, returns an empty signal.
 #[derive(Debug, Clone, Default)]
 pub struct NoOpComposer;
+#[allow(clippy::unnecessary_literal_bound)]
 impl Composer for NoOpComposer {
     fn compose(
         &self,
@@ -78,6 +81,7 @@ impl Composer for NoOpComposer {
 /// A policy that emits no signals.
 #[derive(Debug, Clone, Default)]
 pub struct NoOpPolicy;
+#[allow(clippy::unnecessary_literal_bound)]
 impl Policy for NoOpPolicy {
     fn decide(&self, _stream: &[Signal], _ctx: &Context) -> Vec<Signal> {
         Vec::new()

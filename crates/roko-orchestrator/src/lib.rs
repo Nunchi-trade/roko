@@ -13,12 +13,19 @@
 #![deny(missing_docs)]
 
 pub mod dag;
+pub mod event_log;
 pub mod plan_discovery;
+pub mod progress;
 pub mod safety;
 pub mod worktree;
 
 pub use dag::{DagConfig, DagError, DagStats, ExecutionWave, UnifiedTaskDag};
+pub use event_log::{EventEntry, EventKind, EventLog, EventLogSnapshot, IntegrityError};
 pub use plan_discovery::{
     discover_plans, parse_frontmatter, rank_plans, validate_frontmatter, DiscoveryError, PlanInfo,
     PlanFrontmatter, ValidationError,
+};
+pub use progress::{
+    publish_error, validate_enrichment, ErrorEvent, ProgressError, ProgressTracker,
+    ValidationError as EnrichmentValidationError,
 };

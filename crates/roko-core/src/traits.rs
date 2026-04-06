@@ -57,7 +57,7 @@ pub trait Substrate: Send + Sync {
     }
 
     /// Human-readable name for logging/debugging.
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "unnamed_substrate"
     }
 }
@@ -80,7 +80,7 @@ pub trait Scorer: Send + Sync {
     fn score(&self, signal: &Signal, ctx: &Context) -> Score;
 
     /// Human-readable name.
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "unnamed_scorer"
     }
 }

@@ -47,7 +47,7 @@ impl TickOutcome {
 
     /// Did this tick do any work (query returned candidates)?
     #[must_use]
-    pub fn did_work(&self) -> bool {
+    pub const fn did_work(&self) -> bool {
         self.candidates_examined > 0
     }
 }
@@ -66,6 +66,7 @@ impl TickOutcome {
 ///
 /// Propagates errors from the substrate and composer. Gate failures are
 /// *not* errors — they return a failing [`Verdict`] in the outcome.
+#[allow(clippy::similar_names, clippy::too_many_arguments)]
 pub async fn loop_tick(
     substrate: &dyn Substrate,
     scorer: &dyn Scorer,
@@ -129,7 +130,7 @@ pub async fn loop_tick(
         written.push(id);
 
         // Policy sees the new signal and may produce reactions.
-        let reactions = policy.decide(&[composed.clone()], ctx);
+        let reactions = policy.decide(std::slice::from_ref(&composed), ctx);
         for r in reactions {
             let id = substrate.put(r.clone()).await?;
             written.push(id);

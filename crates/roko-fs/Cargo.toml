@@ -22,3 +22,4 @@ chrono = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 tempfile = { workspace = true }
+filetime = "0.2"

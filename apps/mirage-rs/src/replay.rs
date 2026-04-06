@@ -828,7 +828,7 @@ impl SpeculativeExecutor {
         dirty.demote_protocols_to_slot_only = state.db.dirty.demote_protocols_to_slot_only;
         for (address, account) in &state.db.dirty.accounts {
             let mut storage = HashMap::new();
-            for (slot, _) in &account.storage {
+            for slot in account.storage.keys() {
                 if let Some(value) = cow.read(*address, *slot) {
                     storage.insert(*slot, value);
                 }
@@ -879,7 +879,7 @@ impl MultiVersionStore {
     #[must_use]
     pub fn re_execution_count(&self) -> usize {
         let mut tx_incarnations = HashMap::<usize, usize>::new();
-        for entry in self.versions.iter() {
+        for entry in &self.versions {
             for version in entry.value() {
                 tx_incarnations
                     .entry(version.tx_index)

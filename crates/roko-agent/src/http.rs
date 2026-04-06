@@ -88,7 +88,7 @@ impl ReqwestPoster {
 
     /// Wrap an existing `reqwest::Client` (useful when pooling is desired).
     #[must_use]
-    pub fn with_client(client: reqwest::Client) -> Self {
+    pub const fn with_client(client: reqwest::Client) -> Self {
         Self { client }
     }
 }

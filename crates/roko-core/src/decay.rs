@@ -53,6 +53,7 @@ impl Decay {
     ///
     /// Clamped to `[0.0, 1.0]`. Negative ages (clock skew) return `1.0`.
     #[must_use]
+    #[allow(clippy::cast_precision_loss)]
     pub fn apply(&self, age_ms: i64) -> f32 {
         if age_ms <= 0 {
             return 1.0;

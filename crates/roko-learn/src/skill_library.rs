@@ -32,6 +32,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -81,6 +82,39 @@ pub struct Skill {
     /// Number of times [`SkillLibrary::record_use`] has been called.
     #[serde(default)]
     pub usage_count: u64,
+
+    // ── Voyager-style extraction fields (§16.3.2-16.3.4) ───────────
+
+    /// Longer description (1-2 sentences) of the skill's purpose.
+    #[serde(default)]
+    pub description: String,
+    /// Plan identifier where this skill was first extracted.
+    #[serde(default)]
+    pub plan_id: String,
+    /// Files touched in the originating task.
+    #[serde(default)]
+    pub files: Vec<String>,
+    /// Numbered-step recipe extracted from a successful episode (≤750 chars).
+    #[serde(default)]
+    pub pattern: String,
+    /// Eval score from the originating episode, in `[0.0, 1.0]`.
+    #[serde(default)]
+    pub score: f64,
+    /// When the skill was first extracted.
+    #[serde(default)]
+    pub first_seen: Option<DateTime<Utc>>,
+    /// When the skill was last injected into a prompt.
+    #[serde(default)]
+    pub last_matched: Option<DateTime<Utc>>,
+    /// How many prompts have had this skill injected.
+    #[serde(default)]
+    pub match_count: u32,
+    /// Of those injections, how many led to a gate pass.
+    #[serde(default)]
+    pub validated_count: u32,
+    /// Task category for dedup (skills sharing ≥70% tags + same category are duplicates).
+    #[serde(default)]
+    pub task_category: String,
 }
 
 impl Skill {
@@ -100,6 +134,16 @@ impl Skill {
             tags: Vec::new(),
             success_rate: 0.0,
             usage_count: 0,
+            description: String::new(),
+            plan_id: String::new(),
+            files: Vec::new(),
+            pattern: String::new(),
+            score: 0.0,
+            first_seen: None,
+            last_matched: None,
+            match_count: 0,
+            validated_count: 0,
+            task_category: String::new(),
         }
     }
 
@@ -139,6 +183,106 @@ impl Skill {
         self.tags = tags.into_iter().map(Into::into).collect();
         self
     }
+}
+
+/// Structured query for [`SkillLibrary::select`].
+#[derive(Debug, Clone, Default)]
+pub struct SkillQuery {
+    /// Tags to match against skill tags (used in scoring).
+    pub tags: Vec<String>,
+    /// Optional category filter — only skills in this category are considered.
+    pub category: Option<String>,
+    /// File paths that hint at relevance (each match adds +0.2 to relevance).
+    pub files_hint: Vec<String>,
+}
+
+/// Produces the `pattern` text from an [`Episode`](crate::episode_logger::Episode).
+///
+/// The default [`TemplatePatternGenerator`] uses a simple string template;
+/// a v2 LLM-backed generator can replace it for richer step-by-step recipes.
+pub trait PatternGenerator: Send + Sync {
+    /// Generate a recipe string from episode metadata.
+    fn generate(&self, episode: &crate::episode_logger::Episode) -> String;
+}
+
+/// Simple template-based [`PatternGenerator`] — no LLM calls, suitable for
+/// offline use. Produces a 4-line recipe from episode `extra` fields.
+pub struct TemplatePatternGenerator;
+
+impl PatternGenerator for TemplatePatternGenerator {
+    fn generate(&self, episode: &crate::episode_logger::Episode) -> String {
+        let files = episode
+            .extra
+            .get("files")
+            .and_then(serde_json::Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        let role = episode
+            .extra
+            .get("role")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(&episode.agent_id);
+        let model = episode
+            .extra
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        let tags = episode
+            .extra
+            .get("task_tags")
+            .and_then(serde_json::Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        let reflection = episode
+            .extra
+            .get("verbal_reflection")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("not captured");
+
+        format!(
+            "1. Edit files: {files}\n\
+             2. Agent role: {role} using {model}\n\
+             3. Tags: {tags}\n\
+             4. Approach summary: {reflection}"
+        )
+    }
+}
+
+/// Maximum pattern length in characters (~250 tokens at 3 chars/token).
+const MAX_PATTERN_CHARS: usize = 750;
+
+/// Extract a string from `episode.extra[key]`, defaulting to `""`.
+fn extra_str(episode: &crate::episode_logger::Episode, key: &str) -> String {
+    episode
+        .extra
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Extract a `Vec<String>` from `episode.extra[key]` (expects a JSON array of strings).
+fn extra_strings(episode: &crate::episode_logger::Episode, key: &str) -> Vec<String> {
+    episode
+        .extra
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// In-memory, JSON-backed registry of [`Skill`] records.
@@ -246,6 +390,269 @@ impl SkillLibrary {
     /// On-disk path backing this library.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    // ── Voyager-style extraction & selection (§16.3.2-16.3.4) ──────
+
+    /// Extract a skill from a successful episode that passed gates on the
+    /// first attempt (Voyager discipline). Returns `None` if the episode
+    /// does not qualify or a near-duplicate skill already exists.
+    ///
+    /// Extraction criteria (§16.3.2):
+    /// 1. `episode.success == true`
+    /// 2. `extra["iteration"] == 1` (first-attempt success)
+    /// 3. `extra["complexity_band"]` in `["standard", "complex"]`
+    /// 4. No existing skill shares ≥70% tag overlap AND same `task_category`
+    #[allow(clippy::too_many_lines)]
+    pub async fn extract(
+        &self,
+        episode: &crate::episode_logger::Episode,
+        generator: &dyn PatternGenerator,
+    ) -> Option<Skill> {
+        if !Self::episode_qualifies(episode) {
+            return None;
+        }
+
+        // Generate and bound pattern text
+        let pattern = generator.generate(episode);
+        if pattern.is_empty() {
+            return None;
+        }
+        let pattern = if pattern.len() > MAX_PATTERN_CHARS {
+            pattern[..MAX_PATTERN_CHARS].to_string()
+        } else {
+            pattern
+        };
+
+        let tags = extra_strings(episode, "task_tags");
+        let category = extra_str(episode, "task_category");
+
+        // Dedup: no existing skill with ≥70% tag overlap AND same category
+        if self.is_duplicate(&tags, &category) {
+            return None;
+        }
+
+        let skill = Self::build_skill_from_episode(episode, pattern, tags, category);
+
+        // Register (reject on name collision)
+        {
+            let mut guard = self.skills.write();
+            if guard.contains_key(&skill.name) {
+                return None;
+            }
+            guard.insert(skill.name.clone(), skill.clone());
+        }
+        self.persist().await.ok()?;
+        Some(skill)
+    }
+
+    /// Check whether an episode qualifies for skill extraction (§16.3.2).
+    fn episode_qualifies(episode: &crate::episode_logger::Episode) -> bool {
+        if !episode.success {
+            return false;
+        }
+        let iteration = episode
+            .extra
+            .get("iteration")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(1);
+        if iteration != 1 {
+            return false;
+        }
+        let band = episode
+            .extra
+            .get("complexity_band")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("standard");
+        band == "standard" || band == "complex"
+    }
+
+    /// Check whether `tags`/`category` would be a near-duplicate of an existing skill.
+    #[allow(clippy::cast_precision_loss)]
+    #[allow(clippy::significant_drop_tightening)]
+    fn is_duplicate(&self, tags: &[String], category: &str) -> bool {
+        if category.is_empty() || tags.is_empty() {
+            return false;
+        }
+        let guard = self.skills.read();
+        for existing in guard.values() {
+            if existing.task_category == category {
+                let overlap = tags.iter().filter(|t| existing.tags.contains(t)).count();
+                let denom = tags.len().max(1);
+                if overlap as f64 / denom as f64 >= 0.7 {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Assemble a [`Skill`] from episode metadata.
+    fn build_skill_from_episode(
+        episode: &crate::episode_logger::Episode,
+        pattern: String,
+        tags: Vec<String>,
+        category: String,
+    ) -> Skill {
+        let files = extra_strings(episode, "files");
+        let plan_id = extra_str(episode, "plan_id");
+        let eval_score = episode
+            .extra
+            .get("score")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0);
+
+        let name = format!("skill_{}", episode.id);
+        let mut skill = Skill::new(&name, &episode.task_id, pattern.clone());
+        skill.description.clone_from(&episode.task_id);
+        skill.tags = tags;
+        skill.plan_id = plan_id;
+        skill.files = files;
+        skill.pattern = pattern;
+        skill.score = eval_score;
+        skill.first_seen = Some(Utc::now());
+        skill.task_category = category;
+        skill
+    }
+
+    /// Retrieve the top-`limit` skills matching `query`, scored by:
+    ///
+    /// ```text
+    /// tag_overlap = |query.tags ∩ skill.tags| / max(|query.tags|, 1)
+    /// file_hint   = 0.2 if any files_hint matches skill.files, else 0.0
+    /// relevance   = tag_overlap + file_hint
+    /// final       = skill.score × relevance × (1 + 0.1 × √validated_count)
+    /// ```
+    ///
+    /// An empty query (no tags, no category, no `files_hint`) returns an
+    /// empty `Vec`. Ties are broken by `name` lexicographic ascending.
+    #[allow(clippy::cast_precision_loss, clippy::significant_drop_tightening)]
+    pub fn select(&self, query: &SkillQuery, limit: usize) -> Vec<Skill> {
+        if query.tags.is_empty() && query.category.is_none() && query.files_hint.is_empty() {
+            return Vec::new();
+        }
+
+        let guard = self.skills.read();
+        let mut scored: Vec<(f64, &Skill)> = guard
+            .values()
+            .filter(|skill| {
+                if let Some(ref cat) = query.category {
+                    if !skill.task_category.is_empty() && skill.task_category != *cat {
+                        return false;
+                    }
+                }
+                true
+            })
+            .filter_map(|skill| {
+                let tag_overlap = if query.tags.is_empty() {
+                    0.0
+                } else {
+                    let overlap = query.tags.iter().filter(|t| skill.tags.contains(t)).count();
+                    overlap as f64 / query.tags.len().max(1) as f64
+                };
+
+                let file_hint =
+                    if query.files_hint.iter().any(|f| skill.files.contains(f)) {
+                        0.2
+                    } else {
+                        0.0
+                    };
+
+                let relevance = tag_overlap + file_hint;
+                if relevance <= 0.0 {
+                    return None;
+                }
+
+                let validated_bonus =
+                    0.1_f64.mul_add(f64::from(skill.validated_count).sqrt(), 1.0);
+                let final_score = skill.score * relevance * validated_bonus;
+
+                Some((final_score, skill))
+            })
+            .collect();
+
+        // Deterministic: score desc, name asc for tie-breaking
+        scored.sort_by(|(sa, a), (sb, b)| {
+            sb.partial_cmp(sa)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+
+        scored
+            .into_iter()
+            .take(limit)
+            .map(|(_, s)| s.clone())
+            .collect()
+    }
+
+    /// Record that a skill was injected into a prompt and whether the
+    /// subsequent gate check passed. Increments `match_count` (always) and
+    /// `validated_count` (if `gate_passed`), and updates `last_matched`.
+    #[allow(clippy::significant_drop_tightening)]
+    pub async fn record_outcome(
+        &self,
+        skill_name: &str,
+        gate_passed: bool,
+    ) -> Result<(), SkillLibraryError> {
+        {
+            let mut guard = self.skills.write();
+            let Some(skill) = guard.get_mut(skill_name) else {
+                return Err(SkillLibraryError::NotFound(skill_name.to_string()));
+            };
+            skill.match_count = skill.match_count.saturating_add(1);
+            if gate_passed {
+                skill.validated_count = skill.validated_count.saturating_add(1);
+            }
+            skill.last_matched = Some(Utc::now());
+        }
+        self.persist().await
+    }
+
+    /// Remove skills not matched (or seen) within `days`. Keeps at least
+    /// 10 skills regardless — the newest by `first_seen` survive.
+    ///
+    /// Returns the number of skills pruned.
+    #[allow(clippy::significant_drop_tightening)]
+    pub async fn prune_stale(&self, days: u32) -> usize {
+        let cutoff = Utc::now() - chrono::Duration::days(i64::from(days));
+        let mut pruned = 0;
+        {
+            let mut guard = self.skills.write();
+            let total = guard.len();
+
+            // Collect stale skills (last activity before cutoff)
+            let mut stale: Vec<(String, DateTime<Utc>)> = guard
+                .iter()
+                .filter(|(_, s)| {
+                    let last_active = s
+                        .last_matched
+                        .or(s.first_seen)
+                        .unwrap_or_else(|| cutoff - chrono::Duration::seconds(1));
+                    last_active < cutoff
+                })
+                .map(|(name, s)| {
+                    let ts = s.first_seen.unwrap_or(cutoff);
+                    (name.clone(), ts)
+                })
+                .collect();
+
+            // Sort oldest-first so we remove the oldest ones
+            stale.sort_by_key(|(_, ts)| *ts);
+
+            // Never drop below 10 total skills
+            let max_removable = total.saturating_sub(10);
+            let to_remove = stale.len().min(max_removable);
+
+            for (name, _) in stale.into_iter().take(to_remove) {
+                guard.remove(&name);
+                pruned += 1;
+            }
+        }
+        if pruned > 0 {
+            let _ = self.persist().await;
+        }
+        pruned
     }
 
     /// Serialize the in-memory map to the on-disk file atomically.
@@ -513,5 +920,269 @@ mod tests {
         assert_eq!(skill.tags, vec!["x"]);
         assert_eq!(skill.example_inputs, vec!["q"]);
         assert_eq!(skill.example_outputs, vec!["r"]);
+    }
+
+    // ── Voyager extraction / selection tests (§16.3.2-16.3.4) ──────
+
+    fn make_episode(
+        task_id: &str,
+        success: bool,
+        iteration: u64,
+        band: &str,
+        tags: &[&str],
+        category: &str,
+    ) -> crate::episode_logger::Episode {
+        let mut ep = crate::episode_logger::Episode::new("test-agent", task_id);
+        ep.success = success;
+        ep.extra
+            .insert("iteration".into(), serde_json::json!(iteration));
+        ep.extra
+            .insert("complexity_band".into(), serde_json::json!(band));
+        ep.extra
+            .insert("task_tags".into(), serde_json::json!(tags));
+        ep.extra
+            .insert("task_category".into(), serde_json::json!(category));
+        ep.extra
+            .insert("files".into(), serde_json::json!(["src/main.rs"]));
+        ep.extra
+            .insert("role".into(), serde_json::json!("implementer"));
+        ep.extra
+            .insert("model".into(), serde_json::json!("claude-4"));
+        ep.extra
+            .insert("verbal_reflection".into(), serde_json::json!("worked well"));
+        ep.extra
+            .insert("score".into(), serde_json::json!(0.9));
+        ep
+    }
+
+    #[tokio::test]
+    async fn extract_from_successful_episode() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("skills.json");
+        let library = SkillLibrary::new(&path).await.unwrap();
+        let pg = TemplatePatternGenerator;
+
+        let ep = make_episode("task-1", true, 1, "standard", &["rust", "async"], "backend");
+        let skill = library.extract(&ep, &pg).await;
+        assert!(skill.is_some());
+        let skill = skill.unwrap();
+        assert!(skill.name.starts_with("skill_"));
+        assert!(!skill.pattern.is_empty());
+        assert_eq!(skill.tags, vec!["rust", "async"]);
+        assert_eq!(skill.task_category, "backend");
+        assert!((skill.score - 0.9).abs() < f64::EPSILON);
+        assert!(skill.first_seen.is_some());
+        assert_eq!(library.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn extract_rejects_non_success() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("skills.json");
+        let library = SkillLibrary::new(&path).await.unwrap();
+        let pg = TemplatePatternGenerator;
+
+        let ep = make_episode("task-1", false, 1, "standard", &["rust"], "backend");
+        assert!(library.extract(&ep, &pg).await.is_none());
+        assert_eq!(library.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn extract_rejects_iteration_gt_1() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("skills.json");
+        let library = SkillLibrary::new(&path).await.unwrap();
+        let pg = TemplatePatternGenerator;
+
+        let ep = make_episode("task-1", true, 2, "standard", &["rust"], "backend");
+        assert!(library.extract(&ep, &pg).await.is_none());
+        assert_eq!(library.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn extract_rejects_trivial_complexity() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("skills.json");
+        let library = SkillLibrary::new(&path).await.unwrap();
+        let pg = TemplatePatternGenerator;
+
+        let ep = make_episode("task-1", true, 1, "trivial", &["rust"], "backend");
+        assert!(library.extract(&ep, &pg).await.is_none());
+
+        let ep2 = make_episode("task-2", true, 1, "simple", &["rust"], "backend");
+        assert!(library.extract(&ep2, &pg).await.is_none());
+        assert_eq!(library.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn extract_dedup_by_tag_overlap() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("skills.json");
+        let library = SkillLibrary::new(&path).await.unwrap();
+        let pg = TemplatePatternGenerator;
+
+        // First extraction succeeds
+        let ep1 = make_episode(
+            "task-1", true, 1, "standard",
+            &["rust", "async", "tokio"], "backend",
+        );
+        assert!(library.extract(&ep1, &pg).await.is_some());
+
+        // 2/3 tags overlap = 66.7% < 70% — should succeed
+        let mut ep2 = make_episode(
+            "task-2", true, 1, "standard",
+            &["rust", "async", "serde"], "backend",
+        );
+        ep2.id = "ep_dedup_test_002".into();
+        assert!(library.extract(&ep2, &pg).await.is_some());
+        assert_eq!(library.len(), 2);
+
+        // 3/3 tags overlap = 100% ≥ 70% + same category — rejected
+        let mut ep3 = make_episode(
+            "task-3", true, 1, "standard",
+            &["rust", "async", "tokio"], "backend",
+        );
+        ep3.id = "ep_dedup_test_003".into();
+        assert!(library.extract(&ep3, &pg).await.is_none());
+        assert_eq!(library.len(), 2);
+
+        // Same tags but different category — should succeed (dedup requires
+        // BOTH tag overlap ≥70% AND same category)
+        let mut ep4 = make_episode(
+            "task-4", true, 1, "standard",
+            &["rust", "async", "tokio"], "frontend",
+        );
+        ep4.id = "ep_dedup_test_004".into();
+        assert!(library.extract(&ep4, &pg).await.is_some());
+        assert_eq!(library.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn select_scoring_formula() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("skills.json");
+        let library = SkillLibrary::new(&path).await.unwrap();
+
+        // High score + validated
+        let mut s1 = Skill::new("skill_a", "sum-a", "tmpl-a");
+        s1.tags = vec!["rust".into(), "async".into()];
+        s1.score = 0.9;
+        s1.validated_count = 4; // bonus = 1 + 0.1*2 = 1.2
+        s1.task_category = "backend".into();
+        s1.files = vec!["src/main.rs".into()];
+        library.register(&s1).await.unwrap();
+
+        // Lower score, zero validated
+        let mut s2 = Skill::new("skill_b", "sum-b", "tmpl-b");
+        s2.tags = vec!["rust".into(), "async".into()];
+        s2.score = 0.8;
+        s2.validated_count = 0; // bonus = 1.0
+        s2.task_category = "backend".into();
+        library.register(&s2).await.unwrap();
+
+        let query = SkillQuery {
+            tags: vec!["rust".into(), "async".into()],
+            category: None,
+            files_hint: vec!["src/main.rs".into()],
+        };
+
+        let results = library.select(&query, 2);
+        assert_eq!(results.len(), 2);
+        // s1: 0.9 * (1.0+0.2) * 1.2 = 1.296
+        // s2: 0.8 * 1.0 * 1.0 = 0.8
+        assert_eq!(results[0].name, "skill_a");
+        assert_eq!(results[1].name, "skill_b");
+    }
+
+    #[tokio::test]
+    async fn select_empty_query_returns_empty() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("skills.json");
+        let library = SkillLibrary::new(&path).await.unwrap();
+
+        let mut s = Skill::new("s", "sum", "tmpl");
+        s.tags = vec!["rust".into()];
+        s.score = 0.9;
+        library.register(&s).await.unwrap();
+
+        assert!(library.select(&SkillQuery::default(), 10).is_empty());
+    }
+
+    #[tokio::test]
+    async fn select_limit_caps_output() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("skills.json");
+        let library = SkillLibrary::new(&path).await.unwrap();
+
+        for i in 0..5 {
+            let mut s = Skill::new(format!("sk_{i}"), "sum", "tmpl");
+            s.tags = vec!["rust".into()];
+            s.score = 0.9;
+            library.register(&s).await.unwrap();
+        }
+
+        let query = SkillQuery {
+            tags: vec!["rust".into()],
+            ..Default::default()
+        };
+        assert_eq!(library.select(&query, 2).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn record_outcome_updates_counters() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("skills.json");
+        let library = SkillLibrary::new(&path).await.unwrap();
+        library
+            .register(&Skill::new("sk", "sum", "tmpl"))
+            .await
+            .unwrap();
+
+        library.record_outcome("sk", true).await.unwrap();
+        library.record_outcome("sk", false).await.unwrap();
+        library.record_outcome("sk", true).await.unwrap();
+
+        let s = library.get("sk").unwrap();
+        assert_eq!(s.match_count, 3);
+        assert_eq!(s.validated_count, 2);
+        assert!(s.last_matched.is_some());
+    }
+
+    #[tokio::test]
+    async fn prune_stale_removes_old_keeps_minimum() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("skills.json");
+        let library = SkillLibrary::new(&path).await.unwrap();
+
+        // Register 12 skills all with old first_seen, no last_matched
+        let old_time = Utc::now() - chrono::Duration::days(90);
+        for i in 0..12u32 {
+            let mut s = Skill::new(format!("skill_{i:02}"), "sum", "tmpl");
+            s.first_seen = Some(old_time + chrono::Duration::hours(i64::from(i)));
+            library.register(&s).await.unwrap();
+        }
+        assert_eq!(library.len(), 12);
+
+        // All 12 are stale (>60 days) but keep at least 10
+        let pruned = library.prune_stale(60).await;
+        assert_eq!(pruned, 2);
+        assert_eq!(library.len(), 10);
+
+        // The two oldest (skill_00, skill_01) were removed
+        assert!(library.get("skill_00").is_none());
+        assert!(library.get("skill_01").is_none());
+        assert!(library.get("skill_02").is_some());
+    }
+
+    #[tokio::test]
+    async fn template_pattern_generator_produces_nonempty() {
+        let pg = TemplatePatternGenerator;
+        let ep = make_episode("task-1", true, 1, "standard", &["rust"], "backend");
+        let pattern = pg.generate(&ep);
+        assert!(!pattern.is_empty());
+        assert!(pattern.contains("Edit files:"));
+        assert!(pattern.contains("Agent role:"));
+        assert!(pattern.contains("Tags:"));
+        assert!(pattern.contains("Approach summary:"));
     }
 }

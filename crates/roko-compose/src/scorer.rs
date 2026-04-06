@@ -59,12 +59,14 @@ impl Scorer for SectionScorer {
         } else if age_ms >= self.staleness_window_ms {
             0.0
         } else {
+            #[allow(clippy::cast_precision_loss)]
             let t = (age_ms - self.recency_window_ms) as f32
                 / (self.staleness_window_ms - self.recency_window_ms) as f32;
             1.0 - t
         };
 
         // Utility ← content size inverse (shorter content = higher utility-per-token)
+        #[allow(clippy::cast_precision_loss)]
         let len = section.content.len().max(1) as f32;
         let utility = (1000.0 / len).min(10.0);
 
@@ -78,7 +80,7 @@ impl Scorer for SectionScorer {
         Score::new(confidence, novelty, utility, reputation)
     }
 
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "section_scorer"
     }
 }

@@ -30,12 +30,12 @@ use std::path::PathBuf;
 ///     .body(Body::from_json(&payload).unwrap())
 ///     .build();
 /// ```
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatePayload {
     /// Directory to run the gate in (the repo root or a worktree).
     pub working_dir: PathBuf,
 
-    /// Optional CARGO_TARGET_DIR override (for shared-cache setups).
+    /// Optional `CARGO_TARGET_DIR` override (for shared-cache setups).
     pub target_dir: Option<PathBuf>,
 
     /// Additional environment variables to set for the gate's subprocess.
@@ -57,7 +57,7 @@ impl GatePayload {
         }
     }
 
-    /// Set the CARGO_TARGET_DIR override.
+    /// Set the `CARGO_TARGET_DIR` override.
     #[must_use]
     pub fn with_target_dir(mut self, target: impl Into<PathBuf>) -> Self {
         self.target_dir = Some(target.into());
@@ -101,7 +101,8 @@ pub enum BuildSystem {
 impl BuildSystem {
     /// The default "check" command for this build system (args after the program).
     #[must_use]
-    pub fn check_args(self) -> &'static [&'static str] {
+    #[allow(clippy::match_same_arms)]
+    pub const fn check_args(self) -> &'static [&'static str] {
         match self {
             Self::Cargo => &["check", "--workspace", "--all-targets"],
             Self::Npm => &["run", "build"],
@@ -117,7 +118,8 @@ impl BuildSystem {
     /// For Cargo, prefers plain `cargo test` (nextest support is added by
     /// extra-args / config; detection of nextest at build-time ships with §10.5).
     #[must_use]
-    pub fn test_args(self) -> &'static [&'static str] {
+    #[allow(clippy::match_same_arms)]
+    pub const fn test_args(self) -> &'static [&'static str] {
         match self {
             Self::Cargo => &["test", "--workspace"],
             Self::Npm => &["test"],
@@ -134,7 +136,7 @@ impl BuildSystem {
     /// -- -D warnings`. Callers that want a softer lint (warnings → warnings)
     /// can append their own args via the gate's `with_extra_args`.
     #[must_use]
-    pub fn lint_args(self) -> &'static [&'static str] {
+    pub const fn lint_args(self) -> &'static [&'static str] {
         match self {
             Self::Cargo => &["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"],
             Self::Npm => &["run", "lint"],
@@ -164,7 +166,7 @@ impl BuildSystem {
 /// Which tests the `TestGate` should run.
 ///
 /// Mirrors Mori's `TestSelector` (see
-/// `apps/mori/src/orchestrator/gates.rs`) and the §10.5 TestGate spec.
+/// `apps/mori/src/orchestrator/gates.rs`) and the §10.5 `TestGate` spec.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "mode", content = "data")]
 #[non_exhaustive]
@@ -182,15 +184,15 @@ pub enum TestSelector {
 impl TestSelector {
     /// Extra arguments to append to `test_args` for this selector.
     #[must_use]
+    #[allow(clippy::match_same_arms)]
     pub fn extra_args(&self, build: BuildSystem) -> Vec<String> {
         match (self, build) {
-            (Self::All, _) => Vec::new(),
+            (Self::All | Self::AffectedOnly, _) => Vec::new(),
             (Self::Quick, BuildSystem::Cargo) => vec!["--lib".into()],
             (Self::Quick, BuildSystem::Npm) => vec!["--".into(), "--testPathIgnorePatterns".into(), "integration".into()],
             (Self::Quick, BuildSystem::Go) => vec!["-short".into()],
             (Self::Quick, BuildSystem::Python) => vec!["-m".into(), "pytest".into(), "-m".into(), "not integration".into()],
             (Self::Quick, _) => Vec::new(),
-            (Self::Patterns(ps), BuildSystem::Cargo) => ps.clone(),
             (Self::Patterns(ps), BuildSystem::Npm) => {
                 let mut v = vec!["--".into()];
                 v.extend(ps.clone());
@@ -209,7 +211,6 @@ impl TestSelector {
                 v
             }
             (Self::Patterns(ps), _) => ps.clone(),
-            (Self::AffectedOnly, _) => Vec::new(),
         }
     }
 }

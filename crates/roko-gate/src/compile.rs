@@ -50,13 +50,14 @@ impl CompileGate {
 
     /// Override the timeout in milliseconds.
     #[must_use]
-    pub fn with_timeout_ms(mut self, ms: u64) -> Self {
+    pub const fn with_timeout_ms(mut self, ms: u64) -> Self {
         self.timeout_ms = ms;
         self
     }
 }
 
 #[async_trait]
+#[allow(clippy::cast_possible_truncation)]
 impl Gate for CompileGate {
     async fn verify(&self, signal: &Signal, _ctx: &Context) -> Verdict {
         let started = Instant::now();

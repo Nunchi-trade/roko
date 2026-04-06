@@ -74,13 +74,35 @@ impl ToolRelevanceScorer for KeywordOverlapScorer {
             return 0.0;
         }
         let haystack = format!("{} {}", tool.name, tool.description).to_lowercase();
-        let mut hits = 0_usize;
+
+        // Direct keyword overlap (original terms → haystack).
+        let mut direct_hits = 0_usize;
         for term in &task_terms {
-            if haystack.contains(term) {
-                hits += 1;
+            if haystack.contains(term.as_str()) {
+                direct_hits += 1;
             }
         }
-        hits as f32 / task_terms.len() as f32
+        let base = direct_hits as f32 / task_terms.len() as f32;
+
+        // Expansion bonus: programming-activity synonyms → tool keywords.
+        // Bridges the vocabulary gap between high-level task descriptions
+        // ("implement a parser") and low-level tool descriptions ("Read a
+        // UTF-8 file") — the day-one fallback for §36.77 until an
+        // embedding-backed scorer lands via roko-index.
+        let expansions = expand_terms(&task_terms);
+        let bonus = if expansions.is_empty() {
+            0.0
+        } else {
+            let mut expansion_hits = 0_usize;
+            for term in &expansions {
+                if haystack.contains(term.as_str()) {
+                    expansion_hits += 1;
+                }
+            }
+            EXPANSION_WEIGHT * expansion_hits as f32 / expansions.len() as f32
+        };
+
+        (base + bonus).min(1.0)
     }
 
     fn name(&self) -> &str {
@@ -94,6 +116,97 @@ fn normalize_terms(text: &str) -> Vec<String> {
         .filter(|w| w.len() >= 3) // skip stopword-length tokens
         .map(std::string::ToString::to_string)
         .collect()
+}
+
+// ─── Task-description preprocessing (§36.77) ────────────────────────────
+
+/// Dampening weight for expansion-term hits relative to direct matches.
+///
+/// A value of 0.3 means expansion matches contribute at most 30% of the
+/// total score — direct keyword overlap always dominates.
+const EXPANSION_WEIGHT: f32 = 0.3;
+
+/// Programming-activity triggers → tool-description keywords.
+///
+/// When a task description contains a trigger word (left column), the
+/// scorer treats the corresponding keywords (right column) as weak
+/// matches, boosting tools whose `name + description` contain them.
+///
+/// This bridges the vocabulary gap between high-level task descriptions
+/// ("implement a parser") and low-level tool descriptions ("Read a UTF-8
+/// file"), enabling progressive discovery without an embedding model.
+const TASK_EXPANSIONS: &[(&[&str], &[&str])] = &[
+    // Implementation / creation → file read + write + edit
+    (
+        &[
+            "implement", "create", "build", "develop", "add", "code",
+            "program",
+        ],
+        &[
+            "read", "file", "write", "edit", "replace", "string",
+            "contents",
+        ],
+    ),
+    // Fixing / debugging → search + edit + execute
+    (
+        &["fix", "debug", "repair", "resolve", "diagnose"],
+        &[
+            "read", "file", "edit", "replace", "search", "contents",
+            "string", "execute", "command",
+        ],
+    ),
+    // Testing → run + execute
+    (
+        &["test", "verify", "validate"],
+        &[
+            "run", "test", "execute", "shell", "command", "file", "read",
+            "suite",
+        ],
+    ),
+    // Refactoring → read + edit + search
+    (
+        &["refactor", "rename", "restructure", "reorganize", "extract"],
+        &[
+            "read", "file", "edit", "replace", "string", "write",
+            "contents", "search",
+        ],
+    ),
+    // Searching / investigating → search tools
+    (
+        &["locate", "investigate", "analyze", "explore"],
+        &[
+            "search", "file", "contents", "read", "pattern", "matching",
+            "directory",
+        ],
+    ),
+    // Common CS/software nouns that imply file I/O
+    (
+        &[
+            "parser", "compiler", "module", "function", "class", "struct",
+            "component", "service", "handler", "endpoint", "schema",
+            "config",
+        ],
+        &["read", "file", "write", "edit", "contents", "string"],
+    ),
+];
+
+/// Collect expansion terms triggered by the normalized task terms.
+///
+/// Returns only NEW terms not already present in `task_terms`, deduplicated.
+fn expand_terms(task_terms: &[String]) -> Vec<String> {
+    let mut expansions = Vec::new();
+    for (triggers, targets) in TASK_EXPANSIONS {
+        let triggered = task_terms.iter().any(|t| triggers.contains(&t.as_str()));
+        if triggered {
+            for &target in *targets {
+                let s = target.to_string();
+                if !task_terms.contains(&s) && !expansions.contains(&s) {
+                    expansions.push(s);
+                }
+            }
+        }
+    }
+    expansions
 }
 
 #[cfg(test)]
@@ -182,5 +295,55 @@ mod tests {
     #[test]
     fn name_is_stable() {
         assert_eq!(KeywordOverlapScorer.name(), "keyword_overlap");
+    }
+
+    // ── §36.77 expansion tests ──────────────────────────────────────────
+
+    #[test]
+    fn expansion_boosts_implementation_tools() {
+        let s = KeywordOverlapScorer;
+        let edit = def("edit_file", "Replace an exact string in a file with a new string");
+        let bash = def("bash", "Execute a shell command via bash -c and return its output");
+        let edit_score = s.score("implement a parser", &edit);
+        let bash_score = s.score("implement a parser", &bash);
+        assert!(
+            edit_score > bash_score,
+            "edit_file ({edit_score}) should score higher than bash ({bash_score}) \
+             for 'implement a parser' due to expansion"
+        );
+        assert!(edit_score > 0.0, "expansion should produce a nonzero score");
+    }
+
+    #[test]
+    fn expansion_preserves_direct_match_ranking() {
+        let s = KeywordOverlapScorer;
+        let tools = all();
+        let ranked = s.rank("grep for pattern in files", &tools);
+        assert_eq!(
+            ranked[0].name, "grep",
+            "direct keyword match must still dominate over expansion"
+        );
+    }
+
+    #[test]
+    fn expand_terms_returns_new_terms_only() {
+        // "read" is already a direct term; it should NOT appear in expansions.
+        let terms = vec!["implement".to_string(), "read".to_string()];
+        let expanded = expand_terms(&terms);
+        assert!(
+            !expanded.contains(&"read".to_string()),
+            "expansion must not duplicate terms already in the task"
+        );
+        assert!(
+            expanded.contains(&"edit".to_string()),
+            "'implement' should expand to include 'edit'"
+        );
+    }
+
+    #[test]
+    fn no_expansion_for_non_trigger_terms() {
+        let terms = vec!["xyz".to_string(), "qwerty".to_string()];
+        let expanded = expand_terms(&terms);
+        assert!(expanded.is_empty(), "non-trigger terms should produce no expansion");
     }
 }

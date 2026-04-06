@@ -46,7 +46,7 @@ impl ResourceAccount {
     }
 
     /// Record token usage.
-    pub fn record_tokens(&mut self, input: u64, output: u64) {
+    pub const fn record_tokens(&mut self, input: u64, output: u64) {
         self.tokens.used += input + output;
     }
 
@@ -56,7 +56,7 @@ impl ResourceAccount {
     }
 
     /// Whether the token budget is exceeded.
-    pub fn tokens_exceeded(&self) -> bool {
+    pub const fn tokens_exceeded(&self) -> bool {
         self.tokens.used > self.tokens.limit
     }
 
@@ -68,8 +68,7 @@ impl ResourceAccount {
     /// Whether the time budget is exceeded.
     pub fn time_exceeded(&self) -> bool {
         self.started_at
-            .map(|s| s.elapsed() > self.time_limit)
-            .unwrap_or(false)
+            .is_some_and(|s| s.elapsed() > self.time_limit)
     }
 
     /// Whether any budget is exceeded.
@@ -77,7 +76,8 @@ impl ResourceAccount {
         self.tokens_exceeded() || self.cost_exceeded() || self.time_exceeded()
     }
 
-    /// Token utilisation as a fraction (0.0–1.0).
+    /// Token utilisation as a fraction (0.0 to 1.0).
+    #[allow(clippy::cast_precision_loss)]
     pub fn token_utilisation(&self) -> f64 {
         if self.tokens.limit == 0 { return 0.0; }
         self.tokens.used as f64 / self.tokens.limit as f64
@@ -97,7 +97,7 @@ impl ResourceAccount {
     }
 
     /// Remaining token budget.
-    pub fn tokens_remaining(&self) -> u64 {
+    pub const fn tokens_remaining(&self) -> u64 {
         self.tokens.limit.saturating_sub(self.tokens.used)
     }
 

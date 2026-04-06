@@ -33,13 +33,13 @@ use serde::{Deserialize, Serialize};
 pub enum AgentBackend {
     /// Anthropic's `claude` CLI (stream-json protocol).
     Claude,
-    /// OpenAI's `codex` CLI (JSON-RPC app-server protocol).
+    /// `OpenAI`'s `codex` CLI (JSON-RPC app-server protocol).
     Codex,
     /// Cursor's `cursor-agent` CLI (ACP JSON-RPC protocol).
     Cursor,
-    /// Local Ollama server (OpenAI-compatible HTTP).
+    /// Local Ollama server (`OpenAI`-compatible HTTP).
     Ollama,
-    /// Raw OpenAI HTTP API (no CLI).
+    /// Raw `OpenAI` HTTP API (no CLI).
     OpenAi,
 }
 
@@ -100,24 +100,19 @@ fn is_cursor_slug(slug: &str) -> bool {
 /// Concrete backends map this to their native flag (e.g. Codex's
 /// `reasoning_effort`, Claude's `--effort`). Backends that don't support
 /// it silently ignore.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum ReasoningEffort {
     /// Minimal thinking, fastest turn (validators, watchers).
     Low,
     /// Default.
+    #[default]
     Medium,
     /// Thorough analysis (architects, critics).
     High,
     /// Max budget (saturates at whatever the backend supports).
     Max,
-}
-
-impl Default for ReasoningEffort {
-    fn default() -> Self {
-        Self::Medium
-    }
 }
 
 /// A fully-resolved model specification: slug + inferred backend + effort.
@@ -146,7 +141,7 @@ impl ModelSpec {
 
     /// Set the reasoning effort.
     #[must_use]
-    pub fn with_effort(mut self, effort: ReasoningEffort) -> Self {
+    pub const fn with_effort(mut self, effort: ReasoningEffort) -> Self {
         self.effort = effort;
         self
     }
@@ -165,7 +160,7 @@ impl ModelSpec {
 
 /// Capability tier a role routes to by default.
 ///
-/// Concrete model selection happens via the model router (LinUCB bandit
+/// Concrete model selection happens via the model router (`LinUCB` bandit
 /// in `roko-learn`), but every role has a default tier so routing has a
 /// reasonable starting point before learning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -210,7 +205,7 @@ impl TurnBudget {
 
     /// Set the multiplier (for tier escalation).
     #[must_use]
-    pub fn with_multiplier(mut self, m: f32) -> Self {
+    pub const fn with_multiplier(mut self, m: f32) -> Self {
         self.multiplier = m;
         self
     }
@@ -223,6 +218,7 @@ impl TurnBudget {
 /// Mirrors the per-role permission matrix in `mori-agents/03`. Roles with
 /// `write=false` run with `--dangerously-skip-permissions` still enforcing
 /// read-only; roles with `exec=false` cannot spawn subprocesses.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ToolPermissions {
     /// Can read files in the worktree.
@@ -268,15 +264,15 @@ impl ToolPermissions {
 /// Every distinct persona an LLM-backed agent can assume.
 ///
 /// Grouped by responsibility:
-/// - **Orchestration**: Conductor, PlanLifecycleManager, PrePlanner
-/// - **Planning**: Strategist, Architect
-/// - **Implementation**: Implementer, AutoFixer, Refactorer, MergeResolver
-/// - **Review**: Auditor, Critic, QuickReviewer, Scribe
-/// - **Research**: Researcher, PatternExtractor, ErrorDiagnoser
-/// - **Validation**: IntegrationTester, TerminalValidator, GolemLifecycleTester,
-///   CrossSystemTester, FullLoopValidator, SnapshotComparator, DocVerifier,
-///   DependencyValidator, RegressionDetector, SpecDriftDetector
-/// - **Observability**: PerformanceSentinel, CoverageTracker
+/// - **Orchestration**: `Conductor`, `PlanLifecycleManager`, `PrePlanner`
+/// - **Planning**: `Strategist`, `Architect`
+/// - **Implementation**: `Implementer`, `AutoFixer`, `Refactorer`, `MergeResolver`
+/// - **Review**: `Auditor`, `Critic`, `QuickReviewer`, `Scribe`
+/// - **Research**: `Researcher`, `PatternExtractor`, `ErrorDiagnoser`
+/// - **Validation**: `IntegrationTester`, `TerminalValidator`, `GolemLifecycleTester`,
+///   `CrossSystemTester`, `FullLoopValidator`, `SnapshotComparator`, `DocVerifier`,
+///   `DependencyValidator`, `RegressionDetector`, `SpecDriftDetector`
+/// - **Observability**: `PerformanceSentinel`, `CoverageTracker`
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
@@ -342,7 +338,7 @@ pub enum AgentRole {
 impl AgentRole {
     /// Every role except Conductor — the Conductor is a meta-watcher,
     /// not a working agent.
-    pub const ALL_AGENTS: [AgentRole; 27] = [
+    pub const ALL_AGENTS: [Self; 27] = [
         Self::Strategist,
         Self::Implementer,
         Self::Architect,

@@ -1,5 +1,7 @@
 //! Prompt assembly: compose typed sections into a final prompt under a token budget.
 
+use std::fmt::Write as _;
+
 use roko_core::{
     error::{Result, RokoError},
     Body, Budget, Composer, Context, Kind, Provenance, Scorer, Signal,
@@ -12,19 +14,20 @@ use serde::{Deserialize, Serialize};
 /// but fast — adequate for budget accounting. Real tokenization would
 /// require calling the provider tokenizer (unavailable offline).
 #[must_use]
-pub fn estimate_tokens(text: &str) -> usize {
-    (text.len() + 3) / 4
+pub const fn estimate_tokens(text: &str) -> usize {
+    text.len().div_ceil(4)
 }
 
 // ─── Section payload ───────────────────────────────────────────────────────
 
 /// Priority of a prompt section. Higher priorities survive budget pressure.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SectionPriority {
     /// Drop first under pressure (fluff, historical context).
     Low = 0,
     /// Keep if possible (conventions, hints).
+    #[default]
     Normal = 1,
     /// Essential to the task (the actual task, acceptance criteria).
     High = 2,
@@ -32,17 +35,11 @@ pub enum SectionPriority {
     Critical = 3,
 }
 
-impl Default for SectionPriority {
-    fn default() -> Self {
-        Self::Normal
-    }
-}
-
 /// Which cache layer this section belongs to, in an LLM prefix-cache model.
 ///
 /// Sections with `CacheLayer::Static` should be identical across runs so
 /// prefix caching wins; `CacheLayer::Dynamic` sections change per-request.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheLayer {
     /// Role definition, coding standards — stable across runs (cache-win).
@@ -50,15 +47,10 @@ pub enum CacheLayer {
     /// Per-plan / per-session content (workspace map, recent learnings).
     Session = 1,
     /// Per-task content (the actual task, dynamic context).
+    #[default]
     Task = 2,
     /// Per-iteration (error digest, last attempt).
     Dynamic = 3,
-}
-
-impl Default for CacheLayer {
-    fn default() -> Self {
-        Self::Task
-    }
 }
 
 /// Where in the final prompt the section should be placed.
@@ -66,27 +58,22 @@ impl Default for CacheLayer {
 /// U-shaped attention (Start/End) defeats "Lost in the Middle" effects for
 /// large context windows. Use `Start` for role/instructions and `End` for
 /// the current task.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Placement {
     /// Place near the top (role prompt, critical instructions).
     Start,
     /// Middle — most vulnerable to attention loss.
+    #[default]
     Middle,
     /// Place near the bottom (current task, recent errors).
     End,
 }
 
-impl Default for Placement {
-    fn default() -> Self {
-        Self::Middle
-    }
-}
-
 /// A single labeled fragment of a prompt.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptSection {
-    /// Human-readable label (e.g. "role", "task", "workspace_map").
+    /// Human-readable label (e.g. "role", "task", "`workspace_map`").
     pub name: String,
     /// The section's text content.
     pub content: String,
@@ -119,21 +106,21 @@ impl PromptSection {
 
     /// Set the priority.
     #[must_use]
-    pub fn with_priority(mut self, p: SectionPriority) -> Self {
+    pub const fn with_priority(mut self, p: SectionPriority) -> Self {
         self.priority = p;
         self
     }
 
     /// Set the cache layer.
     #[must_use]
-    pub fn with_cache_layer(mut self, l: CacheLayer) -> Self {
+    pub const fn with_cache_layer(mut self, l: CacheLayer) -> Self {
         self.cache_layer = l;
         self
     }
 
     /// Set the placement.
     #[must_use]
-    pub fn with_placement(mut self, p: Placement) -> Self {
+    pub const fn with_placement(mut self, p: Placement) -> Self {
         self.placement = p;
         self
     }
@@ -141,7 +128,7 @@ impl PromptSection {
     /// Attach a per-section hard token cap. The composer will truncate
     /// content to fit before inclusion.
     #[must_use]
-    pub fn with_hard_cap(mut self, tokens: usize) -> Self {
+    pub const fn with_hard_cap(mut self, tokens: usize) -> Self {
         self.hard_cap = Some(tokens);
         self
     }
@@ -175,7 +162,7 @@ impl PromptSection {
             }
             let dropped = current - cap;
             let mut truncated = self.content[..boundary].to_string();
-            truncated.push_str(&format!("…[truncated {dropped} tokens]"));
+            let _ = write!(truncated, "…[truncated {dropped} tokens]");
             self.content = truncated;
         }
         self
@@ -207,7 +194,7 @@ impl PromptSection {
     }
 }
 
-fn priority_tag(p: SectionPriority) -> &'static str {
+const fn priority_tag(p: SectionPriority) -> &'static str {
     match p {
         SectionPriority::Low => "low",
         SectionPriority::Normal => "normal",
@@ -216,7 +203,7 @@ fn priority_tag(p: SectionPriority) -> &'static str {
     }
 }
 
-fn cache_tag(l: CacheLayer) -> &'static str {
+const fn cache_tag(l: CacheLayer) -> &'static str {
     match l {
         CacheLayer::System => "system",
         CacheLayer::Session => "session",
@@ -234,11 +221,11 @@ fn cache_tag(l: CacheLayer) -> &'static str {
 ///
 /// 1. Decode all input sections from signal bodies.
 /// 2. Drop any that don't decode (provenance-tainted or wrong kind).
-/// 3. Sort by cache_layer ASC (cache-wins first) then priority DESC.
+/// 3. Sort by `cache_layer` ASC (cache-wins first) then priority DESC.
 /// 4. Greedily include sections until budget is exhausted — but NEVER drop
 ///    `Critical` priority sections (that's a contract violation).
 /// 5. Order the kept sections by placement (Start → Middle → End), ties
-///    broken by cache_layer order.
+///    broken by `cache_layer` order.
 /// 6. Concatenate with section headers, wrap in a `Signal<Kind::Prompt>`.
 ///
 /// # Budget
@@ -270,7 +257,7 @@ impl PromptComposer {
 
     /// Don't emit section headers in the output (pure concatenation).
     #[must_use]
-    pub fn without_headers(mut self) -> Self {
+    pub const fn without_headers(mut self) -> Self {
         self.include_headers = false;
         self
     }
@@ -294,15 +281,11 @@ impl Composer for PromptComposer {
         // Decode sections; skip anything that doesn't parse. Enforce any
         // per-section hard cap at decode time so downstream accounting
         // reflects the actual bytes that will land in the prompt.
-        let mut sections: Vec<(PromptSection, &Signal)> = signals
+        // Split critical sections out — they MUST be included.
+        let (critical, optional): (Vec<_>, Vec<_>) = signals
             .iter()
             .filter_map(|s| PromptSection::from_signal(s).ok().map(|p| (p, s)))
             .map(|(p, s)| (p.enforce_hard_cap(), s))
-            .collect();
-
-        // Split critical sections out — they MUST be included.
-        let (critical, optional): (Vec<_>, Vec<_>) = sections
-            .drain(..)
             .partition(|(p, _)| p.priority == SectionPriority::Critical);
 
         let critical_tokens: usize = critical.iter().map(|(s, _)| s.estimated_tokens()).sum();
@@ -328,12 +311,10 @@ impl Composer for PromptComposer {
         // Greedy inclusion: take optional sections until we'd exceed budget.
         let remaining_tokens = budget
             .max_tokens
-            .map(|m| m.saturating_sub(critical_tokens))
-            .unwrap_or(usize::MAX);
+            .map_or(usize::MAX, |m| m.saturating_sub(critical_tokens));
         let remaining_signals = budget
             .max_signals
-            .map(|m| m.saturating_sub(critical.len()))
-            .unwrap_or(usize::MAX);
+            .map_or(usize::MAX, |m| m.saturating_sub(critical.len()));
 
         let mut kept: Vec<(PromptSection, &Signal)> = critical;
         let mut token_total = critical_tokens;
@@ -369,8 +350,8 @@ impl Composer for PromptComposer {
             .body(Body::text(prompt_text))
             .provenance(Provenance::trusted(&self.name))
             .lineage(lineage)
-            .tag("sections", &kept.len().to_string())
-            .tag("tokens", &token_total.to_string())
+            .tag("sections", kept.len().to_string())
+            .tag("tokens", token_total.to_string())
             .build();
         Ok(sig)
     }
@@ -385,10 +366,11 @@ impl Composer for PromptComposer {
 /// Mirrors Mori's `context_strategy` field on `PromptBuild` — a recorded
 /// note of how the prompt was assembled so downstream observability can
 /// attribute success/failure to strategy choice.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextStrategy {
     /// Full budget allotted, all sections considered.
+    #[default]
     Full,
     /// Complexity-trimmed (PRD/research/decomposition dropped for simple tasks).
     Trimmed,
@@ -398,19 +380,13 @@ pub enum ContextStrategy {
     Minimal,
 }
 
-impl Default for ContextStrategy {
-    fn default() -> Self {
-        Self::Full
-    }
-}
-
 /// The output of a prompt assembly: the text plus metadata about how
 /// it was assembled.
 ///
 /// Matches Mori's `PromptBuild` in `apps/mori/src/orchestrator/prompts/assembly.rs`.
 /// Used by agent spawners to attach the prompt to a turn while recording
 /// metadata for observability (cache hit rate, playbook retrieval count, etc.).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptBuild {
     /// The assembled prompt text.
     pub prompt: String,
@@ -447,28 +423,28 @@ impl PromptBuild {
 
     /// Set the context strategy used.
     #[must_use]
-    pub fn with_strategy(mut self, s: ContextStrategy) -> Self {
+    pub const fn with_strategy(mut self, s: ContextStrategy) -> Self {
         self.context_strategy = s;
         self
     }
 
     /// Mark whether the prefix cache hit.
     #[must_use]
-    pub fn with_cache_hit(mut self, hit: bool) -> Self {
+    pub const fn with_cache_hit(mut self, hit: bool) -> Self {
         self.cache_hit = hit;
         self
     }
 
     /// Record how many playbook episodes were injected.
     #[must_use]
-    pub fn with_playbook_hits(mut self, n: usize) -> Self {
+    pub const fn with_playbook_hits(mut self, n: usize) -> Self {
         self.playbook_hits = n;
         self
     }
 
     /// Record kept/dropped section counts.
     #[must_use]
-    pub fn with_section_counts(mut self, kept: usize, dropped: usize) -> Self {
+    pub const fn with_section_counts(mut self, kept: usize, dropped: usize) -> Self {
         self.sections_kept = kept;
         self.sections_dropped = dropped;
         self
@@ -481,7 +457,7 @@ fn critical_count(kept: &[(PromptSection, &Signal)]) -> usize {
         .count()
 }
 
-fn placement_order(p: Placement) -> u8 {
+const fn placement_order(p: Placement) -> u8 {
     match p {
         Placement::Start => 0,
         Placement::Middle => 1,

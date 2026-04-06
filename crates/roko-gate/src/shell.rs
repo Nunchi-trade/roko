@@ -40,7 +40,7 @@ impl ShellGate {
 
     /// Override the timeout in milliseconds (default: 5 minutes).
     #[must_use]
-    pub fn with_timeout_ms(mut self, ms: u64) -> Self {
+    pub const fn with_timeout_ms(mut self, ms: u64) -> Self {
         self.timeout_ms = ms;
         self
     }
@@ -75,6 +75,7 @@ impl Gate for ShellGate {
 
         let output_future = async { cmd.output().await };
         let result = timeout(Duration::from_millis(self.timeout_ms), output_future).await;
+        #[allow(clippy::cast_possible_truncation)]
         let elapsed = started.elapsed().as_millis() as u64;
 
         match result {

@@ -23,7 +23,7 @@ impl Scorer for PriorityScorer {
         };
         Score::new(confidence, 0.0, 0.0, 1.0)
     }
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "priority_scorer"
     }
 }

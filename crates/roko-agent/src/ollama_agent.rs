@@ -69,7 +69,7 @@ impl OllamaAgent {
 
     /// Override the per-turn timeout in milliseconds.
     #[must_use]
-    pub fn with_timeout_ms(mut self, ms: u64) -> Self {
+    pub const fn with_timeout_ms(mut self, ms: u64) -> Self {
         self.timeout_ms = ms;
         self
     }
@@ -88,7 +88,7 @@ impl OllamaAgent {
 
     /// Configured timeout in milliseconds.
     #[must_use]
-    pub fn timeout_ms(&self) -> u64 {
+    pub const fn timeout_ms(&self) -> u64 {
         self.timeout_ms
     }
 
@@ -108,7 +108,7 @@ impl OllamaAgent {
                 Err(e) => {
                     return self.failure_signal(
                         input,
-                        format!("input body not readable as text or json: {e}"),
+                        &format!("input body not readable as text or json: {e}"),
                         started,
                     );
                 }
@@ -129,7 +129,7 @@ impl OllamaAgent {
             Err(e) => {
                 return self.failure_signal(
                     input,
-                    format!("failed to serialize request: {e}"),
+                    &format!("failed to serialize request: {e}"),
                     started,
                 );
             }
@@ -144,7 +144,7 @@ impl OllamaAgent {
             Err(e) => {
                 return self.failure_signal(
                     input,
-                    format!("http error: {e}"),
+                    &format!("http error: {e}"),
                     started,
                 );
             }
@@ -155,7 +155,7 @@ impl OllamaAgent {
             Err(e) => {
                 return self.failure_signal(
                     input,
-                    format!("failed to parse ollama response: {e}"),
+                    &format!("failed to parse ollama response: {e}"),
                     started,
                 );
             }
@@ -166,15 +166,15 @@ impl OllamaAgent {
         if content.is_empty() {
             return self.failure_signal(
                 input,
-                "ollama returned empty assistant content".to_string(),
+                "ollama returned empty assistant content",
                 started,
             );
         }
 
-        let wall_ms = started.elapsed().as_millis() as u64;
+        let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         let output = input
-            .derive(Kind::AgentOutput, Body::text(content.clone()))
+            .derive(Kind::AgentOutput, Body::text(content))
             .provenance(Provenance::agent(&self.name))
             .tag("agent", &self.name)
             .tag("model", &self.model)
@@ -190,10 +190,10 @@ impl OllamaAgent {
         AgentResult::ok(output).with_usage(usage)
     }
 
-    fn failure_signal(&self, input: &Signal, reason: String, started: Instant) -> AgentResult {
-        let wall_ms = started.elapsed().as_millis() as u64;
+    fn failure_signal(&self, input: &Signal, reason: &str, started: Instant) -> AgentResult {
+        let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let output = input
-            .derive(Kind::AgentOutput, Body::text(&reason))
+            .derive(Kind::AgentOutput, Body::text(reason))
             .provenance(Provenance::agent(&self.name))
             .tag("agent", &self.name)
             .tag("model", &self.model)

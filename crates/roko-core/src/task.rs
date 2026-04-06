@@ -16,11 +16,12 @@ use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 ///
 /// Single source of truth for plan lifecycle — the state machine in
 /// §12.1 of the parity checklist transitions a plan through these values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum PlanStatus {
     /// Plan has not yet been picked up for execution.
+    #[default]
     Pending,
     /// Agents are currently editing files.
     Implementing,
@@ -38,12 +39,6 @@ pub enum PlanStatus {
     Complete,
     /// Terminally failed (circuit breaker tripped or retries exhausted).
     Failed,
-}
-
-impl Default for PlanStatus {
-    fn default() -> Self {
-        Self::Pending
-    }
 }
 
 impl PlanStatus {
@@ -279,7 +274,7 @@ impl TaskContextWeight {
 /// is either required for basic execution (`id`, `title`, `files`,
 /// `depends_on`) or a routing/context hint that tunes how the prompt is
 /// assembled and which model tier is selected.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Task {
     /// Stable identifier unique within the plan (e.g. `"t3"`).
     pub id: String,
@@ -438,7 +433,7 @@ const fn default_exclusive_files() -> bool {
 /// Plan-level metadata stored in `[meta]` header of `tasks.toml`.
 ///
 /// Mirrors `apps/mori/src/orchestrator/tasks.rs::TaskMeta`.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskMeta {
     /// Plan base name (e.g. `"46-reputation-engine"`).
     #[serde(default)]

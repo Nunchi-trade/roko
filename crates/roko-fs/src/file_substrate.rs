@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 
 /// A substrate that persists signals to a JSONL log on disk.
 ///
-/// Thread-safety: reads go through a `parking_lot::RwLock`-protected HashMap
+/// Thread-safety: reads go through a `parking_lot::RwLock`-protected `HashMap`
 /// (no blocking). Writes serialize through a tokio `Mutex` around the log
 /// file, so concurrent `put`s are appended in order.
 pub struct FileSubstrate {
@@ -24,7 +24,8 @@ pub struct FileSubstrate {
     index: RwLock<HashMap<ContentHash, Signal>>,
     /// Serializes writes to the log file.
     log_writer: Mutex<File>,
-    /// Human-readable name.
+    /// Human-readable name (kept for Debug / logging).
+    #[allow(dead_code)]
     name: String,
 }
 
@@ -248,8 +249,8 @@ impl Substrate for FileSubstrate {
         Ok(self.index.read().len())
     }
 
-    fn name(&self) -> &str {
-        &self.name
+    fn name(&self) -> &'static str {
+        "file_substrate"
     }
 }
 

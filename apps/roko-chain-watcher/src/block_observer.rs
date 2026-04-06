@@ -55,6 +55,7 @@ impl ObservedBlock {
 }
 
 /// A large ERC-20 / ETH transfer detected in a block.
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct LargeTransfer {
     pub tx_hash: String,
@@ -208,7 +209,8 @@ impl BlockObserver {
         }))
     }
 
-    /// Extract large ETH transfers from a full block (requires fetch_full_txs=true).
+    /// Extract large ETH transfers from a full block (requires `fetch_full_txs=true`).
+    #[allow(dead_code)]
     pub async fn large_transfers(&self, n: u64, min_eth: f64) -> Result<Vec<LargeTransfer>> {
         if !self.fetch_full_txs {
             return Ok(Vec::new());

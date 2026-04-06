@@ -40,7 +40,7 @@ impl MockAgent {
 
     /// Pre-set usage metrics that the mock will report.
     #[must_use]
-    pub fn with_usage(mut self, usage: Usage) -> Self {
+    pub const fn with_usage(mut self, usage: Usage) -> Self {
         self.usage = usage;
         self
     }

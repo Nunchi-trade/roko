@@ -50,7 +50,7 @@ impl ExecAgent {
 
     /// Override the subprocess timeout in milliseconds (default 2 minutes).
     #[must_use]
-    pub fn with_timeout_ms(mut self, ms: u64) -> Self {
+    pub const fn with_timeout_ms(mut self, ms: u64) -> Self {
         self.timeout_ms = ms;
         self
     }
@@ -85,6 +85,7 @@ impl ExecAgent {
 }
 
 #[async_trait]
+#[allow(clippy::too_many_lines)]
 impl Agent for ExecAgent {
     async fn run(&self, input: &Signal, _ctx: &Context) -> AgentResult {
         let started = Instant::now();
@@ -97,7 +98,7 @@ impl Agent for ExecAgent {
                     Err(e) => {
                         return self.failure_signal(
                             input,
-                            format!("input body not readable as text or json: {e}"),
+                            &format!("input body not readable as text or json: {e}"),
                             started,
                         );
                     }
@@ -121,7 +122,7 @@ impl Agent for ExecAgent {
             Err(e) => {
                 return self.failure_signal(
                     input,
-                    format!("spawn failed: {e}"),
+                    &format!("spawn failed: {e}"),
                     started,
                 );
             }
@@ -132,7 +133,7 @@ impl Agent for ExecAgent {
             if let Err(e) = stdin.write_all(prompt_text.as_bytes()).await {
                 return self.failure_signal(
                     input,
-                    format!("stdin write failed: {e}"),
+                    &format!("stdin write failed: {e}"),
                     started,
                 );
             }
@@ -150,14 +151,14 @@ impl Agent for ExecAgent {
             Ok(Err(e)) => {
                 return self.failure_signal(
                     input,
-                    format!("wait failed: {e}"),
+                    &format!("wait failed: {e}"),
                     started,
                 );
             }
             Err(_) => {
                 return self.failure_signal(
                     input,
-                    format!("timed out after {} ms", self.timeout_ms),
+                    &format!("timed out after {} ms", self.timeout_ms),
                     started,
                 );
             }
@@ -165,7 +166,7 @@ impl Agent for ExecAgent {
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        let wall_ms = started.elapsed().as_millis() as u64;
+        let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         if !output.status.success() {
             let code = output
@@ -174,7 +175,7 @@ impl Agent for ExecAgent {
                 .map_or_else(|| "signal".into(), |c| c.to_string());
             return self.failure_signal(
                 input,
-                format!("exit {code}: {}", first_line(&stderr)),
+                &format!("exit {code}: {}", first_line(&stderr)),
                 started,
             );
         }
@@ -202,8 +203,8 @@ impl Agent for ExecAgent {
         AgentResult::ok(out_signal)
             .with_trace(trace)
             .with_usage(Usage {
-                input_tokens: (prompt_text.len() / 4) as u32,
-                output_tokens: (stdout.len() / 4) as u32,
+                input_tokens: u32::try_from(prompt_text.len() / 4).unwrap_or(u32::MAX),
+                output_tokens: u32::try_from(stdout.len() / 4).unwrap_or(u32::MAX),
                 wall_ms,
                 ..Default::default()
             })
@@ -220,10 +221,10 @@ impl Agent for ExecAgent {
 }
 
 impl ExecAgent {
-    fn failure_signal(&self, input: &Signal, reason: String, started: Instant) -> AgentResult {
-        let wall_ms = started.elapsed().as_millis() as u64;
+    fn failure_signal(&self, input: &Signal, reason: &str, started: Instant) -> AgentResult {
+        let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let output = input
-            .derive(Kind::AgentOutput, Body::text(&reason))
+            .derive(Kind::AgentOutput, Body::text(reason))
             .provenance(Provenance::agent(&self.name))
             .tag("agent", &self.name)
             .tag("failed", "true")

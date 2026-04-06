@@ -44,6 +44,7 @@ enum ContentBlock {
 
 /// Usage block returned by Anthropic.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[allow(clippy::struct_field_names)]
 struct ApiUsage {
     #[serde(default)]
     input_tokens: u32,
@@ -141,7 +142,7 @@ impl ClaudeAgent {
 
     /// Override the per-request timeout in milliseconds (default 120 s).
     #[must_use]
-    pub fn with_timeout_ms(mut self, ms: u64) -> Self {
+    pub const fn with_timeout_ms(mut self, ms: u64) -> Self {
         self.timeout_ms = ms;
         self
     }
@@ -168,7 +169,7 @@ impl ClaudeAgent {
 
     /// Override the `max_tokens` limit sent on each request.
     #[must_use]
-    pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
+    pub const fn with_max_tokens(mut self, max_tokens: u32) -> Self {
         self.max_tokens = max_tokens;
         self
     }
@@ -210,10 +211,10 @@ impl ClaudeAgent {
         ]
     }
 
-    fn fail(&self, input: &Signal, reason: String, started: Instant) -> AgentResult {
+    fn fail(&self, input: &Signal, reason: &str, started: Instant) -> AgentResult {
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let output = input
-            .derive(Kind::AgentOutput, Body::text(&reason))
+            .derive(Kind::AgentOutput, Body::text(reason))
             .provenance(Provenance::agent(&self.name))
             .tag("agent", &self.name)
             .tag("failed", "true")
@@ -234,7 +235,7 @@ impl Agent for ClaudeAgent {
                 Err(e) => {
                     return self.fail(
                         input,
-                        format!("input body not readable as text or json: {e}"),
+                        &format!("input body not readable as text or json: {e}"),
                         started,
                     );
                 }
@@ -249,7 +250,7 @@ impl Agent for ClaudeAgent {
         let body = match serde_json::to_string(&req) {
             Ok(s) => s,
             Err(e) => {
-                return self.fail(input, format!("serialize request failed: {e}"), started);
+                return self.fail(input, &format!("serialize request failed: {e}"), started);
             }
         };
 
@@ -267,18 +268,18 @@ impl Agent for ClaudeAgent {
                     Some(code) => format!("http {code}: {}", e.message),
                     None => format!("transport error: {}", e.message),
                 };
-                return self.fail(input, reason, started);
+                return self.fail(input, &reason, started);
             }
         };
 
         if response_text.trim().is_empty() {
-            return self.fail(input, "empty response body".to_owned(), started);
+            return self.fail(input, "empty response body", started);
         }
 
         let parsed: MessagesResponse = match serde_json::from_str(&response_text) {
             Ok(p) => p,
             Err(e) => {
-                return self.fail(input, format!("malformed response JSON: {e}"), started);
+                return self.fail(input, &format!("malformed response JSON: {e}"), started);
             }
         };
 
@@ -295,7 +296,7 @@ impl Agent for ClaudeAgent {
         if combined.is_empty() {
             return self.fail(
                 input,
-                "response contained no text content blocks".to_owned(),
+                "response contained no text content blocks",
                 started,
             );
         }

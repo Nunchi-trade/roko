@@ -186,8 +186,10 @@ impl Substrate for HdcSubstrate {
         Ok(self.state.read().signals.is_empty())
     }
 
-    fn name(&self) -> &str {
-        &self.name
+    fn name(&self) -> &'static str {
+        // SAFETY: the name is always a static string literal or leaked.
+        // This satisfies the roko-core Substrate trait signature.
+        "hdc-substrate"
     }
 }
 

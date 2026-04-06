@@ -190,6 +190,10 @@ pub struct Episode {
     /// Optional short failure reason (hashed, never raw output).
     #[serde(default)]
     pub failure_reason: Option<String>,
+    /// Mark this episode as a headline — headline episodes are never
+    /// pruned by [`EpisodeLogger::compact`], regardless of age or count.
+    #[serde(default)]
+    pub headline: bool,
     /// Forward-compat extension bag. Must serialize to ≤
     /// [`MAX_EXTRA_BYTES`].
     #[serde(default)]
@@ -217,6 +221,7 @@ impl Episode {
             usage: Usage::default(),
             success: false,
             failure_reason: None,
+            headline: false,
             extra: HashMap::new(),
         }
     }
@@ -403,6 +408,132 @@ impl EpisodeLogger {
         }
         Ok(out)
     }
+
+    /// Run age-based and size-based retention, pruning oldest episodes
+    /// first while preserving those marked as [`Episode::headline`].
+    ///
+    /// The compaction is atomic: survivors are written to a temporary
+    /// `.compacting` sibling, fsynced, then renamed over the original
+    /// file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LoggerError::Io`] on filesystem failure or
+    /// [`LoggerError::Serde`] if a surviving episode cannot be
+    /// re-serialized.
+    pub async fn compact(
+        &self,
+        now: DateTime<Utc>,
+        policy: &RetentionPolicy,
+    ) -> Result<CompactStats, LoggerError> {
+        let _gate = self.inner.write_gate.lock().await;
+
+        let episodes = Self::read_all_lossy(&self.inner.path).await?;
+        let before = episodes.len();
+
+        let age_cutoff = now - chrono::Duration::days(i64::from(policy.max_age_days));
+
+        // Phase 1: age-based pruning — drop episodes older than cutoff
+        // unless they are headlines.
+        let mut survivors: Vec<Episode> = episodes
+            .into_iter()
+            .filter(|ep| ep.headline || ep.timestamp >= age_cutoff)
+            .collect();
+
+        // Phase 2: size-based pruning — if still over max_episodes, drop
+        // the oldest non-headline episodes first.
+        if survivors.len() > policy.max_episodes {
+            // Partition into headlines (always kept) and normals.
+            let (headlines, mut normals): (Vec<Episode>, Vec<Episode>) =
+                survivors.into_iter().partition(|ep| ep.headline);
+
+            // Sort normals by timestamp descending so we can truncate the
+            // tail (oldest).
+            normals.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+
+            let keep_normals = policy.max_episodes.saturating_sub(headlines.len());
+            normals.truncate(keep_normals);
+
+            // Recombine and sort by timestamp ascending (original write
+            // order) for the rewritten file.
+            survivors = headlines.into_iter().chain(normals).collect();
+            survivors.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        }
+
+        let after = survivors.len();
+        let removed = before.saturating_sub(after);
+
+        // Write survivors to a temporary sibling.
+        let compacting_path = self.inner.path.with_extension("compacting");
+        {
+            let mut file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&compacting_path)
+                .await?;
+            for ep in &survivors {
+                let mut line = serde_json::to_string(ep)?;
+                line.push('\n');
+                file.write_all(line.as_bytes()).await?;
+            }
+            file.flush().await?;
+            file.sync_all().await?;
+        }
+
+        // Compute bytes reclaimed.
+        let original_size = tokio::fs::metadata(&self.inner.path)
+            .await
+            .map_or(0, |m| m.len());
+        let new_size = tokio::fs::metadata(&compacting_path)
+            .await
+            .map_or(0, |m| m.len());
+        let bytes_reclaimed = original_size.saturating_sub(new_size);
+
+        // Atomic rename over the original.
+        tokio::fs::rename(&compacting_path, &self.inner.path).await?;
+
+        Ok(CompactStats {
+            before,
+            after,
+            removed,
+            bytes_reclaimed,
+        })
+    }
+}
+
+/// Age-based + size-based retention configuration.
+///
+/// Used by [`EpisodeLogger::compact`] to decide which episodes to keep.
+#[derive(Debug, Clone)]
+pub struct RetentionPolicy {
+    /// Maximum number of episodes retained after compaction.
+    pub max_episodes: usize,
+    /// Maximum age in days — episodes older than this are pruned (unless
+    /// marked as [`Episode::headline`]).
+    pub max_age_days: u32,
+}
+
+impl Default for RetentionPolicy {
+    fn default() -> Self {
+        Self {
+            max_episodes: 200,
+            max_age_days: 90,
+        }
+    }
+}
+
+/// Statistics returned by [`EpisodeLogger::compact`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactStats {
+    /// Number of episodes before compaction.
+    pub before: usize,
+    /// Number of episodes after compaction.
+    pub after: usize,
+    /// Number of episodes removed.
+    pub removed: usize,
+    /// Approximate bytes reclaimed on disk.
+    pub bytes_reclaimed: u64,
 }
 
 #[cfg(test)]
@@ -602,5 +733,217 @@ mod tests {
         assert!(a.id.starts_with("ep_"));
         assert!(b.id.starts_with("ep_"));
         assert_ne!(a.id, b.id);
+    }
+
+    // ---- Retention / GC tests (§16.1.3) ----
+
+    /// Helper: build an episode with a specific timestamp.
+    fn episode_at(agent: &str, task: &str, ts: DateTime<Utc>) -> Episode {
+        let mut ep = sample(agent, task, true);
+        ep.timestamp = ts;
+        // Re-derive id so it's unique per timestamp.
+        ep.id = format!("ep_{agent}_{task}_{}", ts.timestamp());
+        ep
+    }
+
+    #[tokio::test]
+    async fn compact_size_exactly_n() {
+        // Exactly max_episodes → nothing pruned.
+        let (_dir, path) = tmp_log();
+        let logger = EpisodeLogger::new(&path);
+        let now = Utc::now();
+        let policy = RetentionPolicy {
+            max_episodes: 5,
+            max_age_days: 365,
+        };
+        for i in 0..5u32 {
+            let ep = episode_at("a", &format!("t{i}"), now - chrono::Duration::hours(i64::from(i)));
+            logger.append(&ep).await.unwrap();
+        }
+        let stats = logger.compact(now, &policy).await.unwrap();
+        assert_eq!(stats.before, 5);
+        assert_eq!(stats.after, 5);
+        assert_eq!(stats.removed, 0);
+        let remaining = EpisodeLogger::read_all(&path).await.unwrap();
+        assert_eq!(remaining.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn compact_size_n_plus_one() {
+        // max_episodes + 1 → oldest one pruned.
+        let (_dir, path) = tmp_log();
+        let logger = EpisodeLogger::new(&path);
+        let now = Utc::now();
+        let policy = RetentionPolicy {
+            max_episodes: 5,
+            max_age_days: 365,
+        };
+        for i in 0..6u32 {
+            let ep = episode_at("a", &format!("t{i}"), now - chrono::Duration::hours(i64::from(5 - i)));
+            logger.append(&ep).await.unwrap();
+        }
+        let stats = logger.compact(now, &policy).await.unwrap();
+        assert_eq!(stats.before, 6);
+        assert_eq!(stats.after, 5);
+        assert_eq!(stats.removed, 1);
+        let remaining = EpisodeLogger::read_all(&path).await.unwrap();
+        assert_eq!(remaining.len(), 5);
+        // The oldest episode (t0, earliest timestamp) should be gone.
+        // Episodes were appended in ascending timestamp order (5-i hours ago),
+        // so t0 is the oldest.
+        assert!(remaining.iter().all(|ep| ep.task_id != "t0"));
+    }
+
+    #[tokio::test]
+    async fn compact_size_n_minus_one() {
+        // max_episodes - 1 → nothing pruned.
+        let (_dir, path) = tmp_log();
+        let logger = EpisodeLogger::new(&path);
+        let now = Utc::now();
+        let policy = RetentionPolicy {
+            max_episodes: 5,
+            max_age_days: 365,
+        };
+        for i in 0..4u32 {
+            let ep = episode_at("a", &format!("t{i}"), now - chrono::Duration::hours(i64::from(i)));
+            logger.append(&ep).await.unwrap();
+        }
+        let stats = logger.compact(now, &policy).await.unwrap();
+        assert_eq!(stats.before, 4);
+        assert_eq!(stats.after, 4);
+        assert_eq!(stats.removed, 0);
+    }
+
+    #[tokio::test]
+    async fn compact_age_prunes_old_episodes() {
+        let (_dir, path) = tmp_log();
+        let logger = EpisodeLogger::new(&path);
+        let now = Utc::now();
+        let policy = RetentionPolicy {
+            max_episodes: 1000,
+            max_age_days: 30,
+        };
+        // 3 recent, 2 old (> 30 days).
+        for i in 0..3u32 {
+            let ep = episode_at("a", &format!("recent-{i}"), now - chrono::Duration::days(i64::from(i)));
+            logger.append(&ep).await.unwrap();
+        }
+        for i in 0..2u32 {
+            let ep = episode_at("a", &format!("old-{i}"), now - chrono::Duration::days(31 + i64::from(i)));
+            logger.append(&ep).await.unwrap();
+        }
+        let stats = logger.compact(now, &policy).await.unwrap();
+        assert_eq!(stats.before, 5);
+        assert_eq!(stats.after, 3);
+        assert_eq!(stats.removed, 2);
+        let remaining = EpisodeLogger::read_all(&path).await.unwrap();
+        assert!(remaining.iter().all(|ep| ep.task_id.starts_with("recent-")));
+    }
+
+    #[tokio::test]
+    async fn compact_preserves_headlines() {
+        let (_dir, path) = tmp_log();
+        let logger = EpisodeLogger::new(&path);
+        let now = Utc::now();
+        let policy = RetentionPolicy {
+            max_episodes: 2,
+            max_age_days: 10,
+        };
+        // 1 headline that is old (would be pruned by age) and 3 normals.
+        let mut headline_ep = episode_at("a", "headline-old", now - chrono::Duration::days(100));
+        headline_ep.headline = true;
+        logger.append(&headline_ep).await.unwrap();
+        for i in 0..3u32 {
+            let ep = episode_at("a", &format!("normal-{i}"), now - chrono::Duration::hours(i64::from(i)));
+            logger.append(&ep).await.unwrap();
+        }
+        let stats = logger.compact(now, &policy).await.unwrap();
+        // Headline survives age and size pruning. max_episodes=2 means
+        // 1 headline + at most 1 normal (the most recent one).
+        assert_eq!(stats.before, 4);
+        assert_eq!(stats.after, 2);
+        let remaining = EpisodeLogger::read_all(&path).await.unwrap();
+        assert_eq!(remaining.len(), 2);
+        assert!(remaining.iter().any(|ep| ep.task_id == "headline-old"));
+        // The kept normal should be the most recent one (normal-0,
+        // which is 0 hours ago).
+        assert!(remaining.iter().any(|ep| ep.task_id == "normal-0"));
+    }
+
+    #[tokio::test]
+    async fn compact_combined_age_and_size() {
+        // Age removes some, then size cap removes more.
+        let (_dir, path) = tmp_log();
+        let logger = EpisodeLogger::new(&path);
+        let now = Utc::now();
+        let policy = RetentionPolicy {
+            max_episodes: 3,
+            max_age_days: 30,
+        };
+        // 2 old episodes (pruned by age).
+        for i in 0..2u32 {
+            let ep = episode_at("a", &format!("old-{i}"), now - chrono::Duration::days(60 + i64::from(i)));
+            logger.append(&ep).await.unwrap();
+        }
+        // 5 recent episodes → after age pruning only 5 remain, then
+        // size cap prunes to 3.
+        for i in 0..5u32 {
+            let ep = episode_at("a", &format!("recent-{i}"), now - chrono::Duration::hours(i64::from(i)));
+            logger.append(&ep).await.unwrap();
+        }
+        let stats = logger.compact(now, &policy).await.unwrap();
+        assert_eq!(stats.before, 7);
+        assert_eq!(stats.after, 3);
+        assert_eq!(stats.removed, 4);
+        let remaining = EpisodeLogger::read_all(&path).await.unwrap();
+        assert_eq!(remaining.len(), 3);
+        // Should have the 3 most-recent episodes.
+        let ids: Vec<&str> = remaining.iter().map(|ep| ep.task_id.as_str()).collect();
+        assert!(ids.contains(&"recent-0"));
+        assert!(ids.contains(&"recent-1"));
+        assert!(ids.contains(&"recent-2"));
+    }
+
+    #[tokio::test]
+    async fn compact_empty_log() {
+        let (_dir, path) = tmp_log();
+        let logger = EpisodeLogger::new(&path);
+        let now = Utc::now();
+        let policy = RetentionPolicy::default();
+        // Compact on a non-existent file should succeed gracefully.
+        let stats = logger.compact(now, &policy).await.unwrap();
+        assert_eq!(stats.before, 0);
+        assert_eq!(stats.after, 0);
+        assert_eq!(stats.removed, 0);
+    }
+
+    #[tokio::test]
+    async fn compact_preserves_write_order() {
+        let (_dir, path) = tmp_log();
+        let logger = EpisodeLogger::new(&path);
+        let now = Utc::now();
+        let policy = RetentionPolicy {
+            max_episodes: 3,
+            max_age_days: 365,
+        };
+        // Write 5 episodes with ascending timestamps.
+        for i in 0..5u32 {
+            let ep = episode_at("a", &format!("t{i}"), now - chrono::Duration::hours(i64::from(4 - i)));
+            logger.append(&ep).await.unwrap();
+        }
+        logger.compact(now, &policy).await.unwrap();
+        let remaining = EpisodeLogger::read_all(&path).await.unwrap();
+        assert_eq!(remaining.len(), 3);
+        // Should be in ascending timestamp order (most recent 3).
+        for pair in remaining.windows(2) {
+            assert!(pair[0].timestamp <= pair[1].timestamp);
+        }
+    }
+
+    #[tokio::test]
+    async fn retention_policy_defaults() {
+        let policy = RetentionPolicy::default();
+        assert_eq!(policy.max_episodes, 200);
+        assert_eq!(policy.max_age_days, 90);
     }
 }

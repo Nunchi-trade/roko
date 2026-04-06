@@ -107,7 +107,7 @@ pub struct ProcessHandle {
 
 impl ProcessHandle {
     /// The OS-level PID, if available.
-    pub fn os_pid(&self) -> Option<u32> {
+    pub const fn os_pid(&self) -> Option<u32> {
         self.os_pid
     }
 
@@ -122,16 +122,19 @@ impl ProcessHandle {
     }
 
     /// Take stdout from the child. Can only be called once.
+    #[allow(clippy::missing_const_for_fn)] // &mut Child is not const-compatible
     pub fn take_stdout(&mut self) -> Option<tokio::process::ChildStdout> {
         self.child.stdout.take()
     }
 
     /// Take stderr from the child. Can only be called once.
+    #[allow(clippy::missing_const_for_fn)] // &mut Child is not const-compatible
     pub fn take_stderr(&mut self) -> Option<tokio::process::ChildStderr> {
         self.child.stderr.take()
     }
 
     /// Take stdin from the child. Can only be called once.
+    #[allow(clippy::missing_const_for_fn)] // &mut Child is not const-compatible
     pub fn take_stdin(&mut self) -> Option<tokio::process::ChildStdin> {
         self.child.stdin.take()
     }
@@ -177,7 +180,7 @@ impl ProcessHandle {
     }
 
     /// The cancellation token associated with this process.
-    pub fn cancel_token(&self) -> &CancelToken {
+    pub const fn cancel_token(&self) -> &CancelToken {
         &self.cancel
     }
 }
@@ -188,7 +191,7 @@ impl fmt::Debug for ProcessHandle {
             .field("id", &self.id)
             .field("label", &self.label)
             .field("os_pid", &self.os_pid)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

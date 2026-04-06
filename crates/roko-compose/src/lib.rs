@@ -15,11 +15,25 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+pub mod agents_md;
+pub mod budget;
+pub mod conventions;
+pub mod enrichment;
 pub mod prompt;
 pub mod scorer;
+pub mod system_prompt_builder;
+pub mod templates;
 
+pub use agents_md::AgentsMd;
+pub use budget::{adjusted_budget_for, AdjustedBudget, Complexity};
+pub use conventions::{detect_conventions, ProjectConventions};
 pub use prompt::{
     estimate_tokens, CacheLayer, ContextStrategy, Placement, PromptBuild,
     PromptComposer, PromptSection, SectionPriority,
 };
 pub use scorer::SectionScorer;
+pub use system_prompt_builder::SystemPromptBuilder;
+pub use templates::{
+    PromptAssembler, PromptBudget, budget_for,
+    QuickFixInput, QuickFixTemplate, QuickReviewerInput, QuickReviewerTemplate,
+};

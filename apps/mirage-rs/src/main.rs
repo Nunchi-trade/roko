@@ -1,6 +1,10 @@
 //! `mirage-rs` binary entrypoint.
 
-#![allow(clippy::redundant_pub_crate)]
+#![allow(
+    clippy::redundant_pub_crate,
+    clippy::doc_markdown,
+    clippy::too_many_lines
+)]
 
 use std::{fs, path::PathBuf, sync::Arc, time::Duration};
 
@@ -161,6 +165,7 @@ fn main() {
         cli.upstream_burst,
     ));
 
+    #[allow(clippy::expect_used)]
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -218,9 +223,20 @@ async fn run(cli: Cli, upstream: Arc<UpstreamRpc>) -> anyhow::Result<()> {
             stigmergy: cli.enable_stigmergy,
         };
         if toggles.any_enabled() {
-            let chain_ctx = std::sync::Arc::new(parking_lot::RwLock::new(
-                mirage_rs::chain_rpc::ChainContext::with_hnsw(toggles, cli.chain_hnsw_threshold),
-            ));
+            let chain_ctx = {
+                let mut ctx =
+                    mirage_rs::chain_rpc::ChainContext::with_hnsw(toggles, cli.chain_hnsw_threshold);
+                // Install subscription buses so WebSocket streaming (/api/ws) and
+                // JSON-RPC chain_subscribe* methods are available.
+                #[cfg(feature = "roko")]
+                {
+                    ctx.set_buses(
+                        std::sync::Arc::new(mirage_rs::roko_bridge::PheromoneBus::new()),
+                        std::sync::Arc::new(mirage_rs::roko_bridge::InsightBus::new()),
+                    );
+                }
+                std::sync::Arc::new(parking_lot::RwLock::new(ctx))
+            };
             tracing::info!(
                 hdc = toggles.hdc,
                 knowledge = toggles.knowledge,

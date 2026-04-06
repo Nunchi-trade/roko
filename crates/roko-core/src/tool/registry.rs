@@ -10,6 +10,7 @@
 //!   used in tests and as a fallback for ad-hoc dispatcher setup.
 
 use super::def::ToolDef;
+use super::relevance::{KeywordOverlapScorer, ToolRelevanceScorer};
 use super::role_allowlist::role_allowlist;
 use crate::error::{Result, RokoError};
 use crate::AgentRole;
@@ -49,6 +50,28 @@ pub trait ToolRegistry: Send + Sync {
     /// override to honor per-role overrides from config.
     fn for_role(&self, role: AgentRole) -> Vec<&ToolDef> {
         role_allowlist(role, self.all())
+    }
+
+    /// Return the top-`limit` tools that `role` may call, ranked by
+    /// relevance to a task description (§36.78).
+    ///
+    /// Combines [`Self::for_role`] (permission filtering) with
+    /// [`KeywordOverlapScorer`] (relevance ranking) to implement
+    /// progressive tool discovery: `role_allowlist(role) ∩
+    /// top_n_by_relevance(tools, task_ctx, limit)`.
+    ///
+    /// Callers can override this method to substitute an embedding-backed
+    /// scorer once `roko-index` lands (§36.77).
+    fn for_call(&self, role: AgentRole, task_ctx: &str, limit: usize) -> Vec<&ToolDef> {
+        let allowed = self.for_role(role);
+        let scorer = KeywordOverlapScorer;
+        let mut scored: Vec<(f32, &ToolDef)> = allowed
+            .into_iter()
+            .map(|t| (scorer.score(task_ctx, t), t))
+            .collect();
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit);
+        scored.into_iter().map(|(_, t)| t).collect()
     }
 }
 
@@ -161,5 +184,66 @@ mod tests {
         assert_eq!(r.push(read_file()), 1);
         assert_eq!(r.push(bash()), 2);
         assert_eq!(r.all().len(), 2);
+    }
+
+    // ── §36.78 for_call tests ───────────────────────────────────────────
+
+    /// Realistic 16-tool registry matching the built-in menu.
+    fn sixteen_builtins() -> VecToolRegistry {
+        VecToolRegistry::from_tools(vec![
+            ToolDef::new("read_file", "Read the contents of a UTF-8 file from the worktree", ToolCategory::Read, ToolPermission::read_only()),
+            ToolDef::new("write_file", "Write the provided content to a file in the worktree creating or overwriting", ToolCategory::Write, ToolPermission::writes()),
+            ToolDef::new("edit_file", "Replace an exact string in a file with a new string", ToolCategory::Write, ToolPermission::writes()),
+            ToolDef::new("multi_edit", "Apply multiple exact-string replacements to a single file atomically", ToolCategory::Write, ToolPermission::writes()),
+            ToolDef::new("glob", "Find files in the worktree matching a glob pattern", ToolCategory::Read, ToolPermission::read_only()),
+            ToolDef::new("grep", "Search file contents for a literal-substring or simple pattern matching", ToolCategory::Read, ToolPermission::read_only()),
+            ToolDef::new("bash", "Execute a shell command via bash -c and return its output", ToolCategory::Exec, ToolPermission::executes()),
+            ToolDef::new("ls", "List the contents of a directory in the worktree", ToolCategory::Read, ToolPermission::read_only()),
+            ToolDef::new("web_fetch", "Fetch a URL over HTTPS and return the body", ToolCategory::Network, ToolPermission::networked()),
+            ToolDef::new("web_search", "Query a configured web search provider and return top results", ToolCategory::Network, ToolPermission::networked()),
+            ToolDef::new("notebook_edit", "Edit insert or delete a cell in a Jupyter notebook", ToolCategory::Notebook, ToolPermission::writes()),
+            ToolDef::new("todo_write", "Manage the agent per-turn todo list", ToolCategory::Meta, ToolPermission::default()),
+            ToolDef::new("task", "Launch a specialized sub-agent to handle a focused task", ToolCategory::Meta, ToolPermission::writes()),
+            ToolDef::new("exit_plan_mode", "Exit plan-mode and submit the drafted plan for approval", ToolCategory::Meta, ToolPermission::default()),
+            ToolDef::new("apply_patch", "Apply a unified-diff patch to a single file in the worktree", ToolCategory::Write, ToolPermission::writes()),
+            ToolDef::new("run_tests", "Run the project test suite or a filtered subset and report results", ToolCategory::Exec, ToolPermission::executes()),
+        ])
+    }
+
+    #[test]
+    fn for_call_implementer_task_returns_read_and_edit() {
+        let r = sixteen_builtins();
+        let result = r.for_call(AgentRole::Implementer, "implement a parser", 5);
+        let names: Vec<&str> = result.iter().map(|t| t.name.as_str()).collect();
+        assert!(
+            names.contains(&"read_file"),
+            "read_file should be in top 5 for 'implement a parser'; got: {names:?}"
+        );
+        assert!(
+            names.contains(&"edit_file"),
+            "edit_file should be in top 5 for 'implement a parser'; got: {names:?}"
+        );
+        assert_eq!(result.len(), 5, "should return exactly 5 tools");
+    }
+
+    #[test]
+    fn for_call_respects_role_filtering() {
+        let r = sixteen_builtins();
+        // Auditor is read-only → should never see write tools.
+        let result = r.for_call(AgentRole::Auditor, "implement a parser", 10);
+        for tool in &result {
+            assert!(
+                !tool.permission.write,
+                "auditor should not see write-capable tool '{}' via for_call",
+                tool.name
+            );
+        }
+    }
+
+    #[test]
+    fn for_call_with_zero_limit_returns_empty() {
+        let r = sixteen_builtins();
+        let result = r.for_call(AgentRole::Implementer, "anything", 0);
+        assert!(result.is_empty(), "limit=0 must return empty");
     }
 }

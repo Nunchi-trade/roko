@@ -1,26 +1,35 @@
-//! Worktree manager — wraps `git worktree add/remove/list` so the
+//! Worktree manager — wraps `git worktree add/remove/list/prune` so the
 //! orchestrator can give each live plan its own isolated working
 //! directory (parity §15).
 //!
-//! The manager is intentionally small: it shells out to the `git` binary
-//! via [`tokio::process::Command`] and tracks active worktrees in an
-//! in-memory map guarded by a [`parking_lot::Mutex`]. All git operations
-//! are fallible and surface as [`WorktreeError`]. No `crate::*`
-//! cross-imports, no hidden filesystem reads — everything the caller
-//! needs is a parameter.
+//! The manager shells out to the `git` binary via [`tokio::process::Command`]
+//! and tracks active worktrees in an in-memory map guarded by a
+//! [`parking_lot::Mutex`]. All git operations are fallible and surface as
+//! [`WorktreeError`].
 //!
-//! The manager does **not** persist state to disk, reclaim budget, or
-//! perform health checks — those live in higher-level subsystems that
-//! compose over this module (see parity §15.3–§15.8).
+//! ## Shipped features
+//!
+//! - §15.1–§15.2 Create / remove worktrees
+//! - §15.3 Ephemeral branch naming ([`format_branch_name`])
+//! - §15.4 Extended config: `max_live` budget, `idle_ttl`
+//! - §15.5 Health checks ([`WorktreeHealth`])
+//! - §15.6 Budget enforcement + idle reclamation
+//! - §15.7 Stale lock detection ([`WorktreeManager::clear_stale_locks`])
+//! - §15.8 Force-remove (via [`WorktreeManager::remove`])
+//! - §15.9 Prune stale git metadata ([`WorktreeManager::prune`])
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::process::Command;
+
+/// Locks older than this are considered stale (§15.7).
+const STALE_LOCK_SECS: u64 = 300;
 
 /// Configuration handed to [`WorktreeManager::new`].
 #[derive(Debug, Clone)]
@@ -35,6 +44,12 @@ pub struct WorktreeConfig {
     /// Directory under which new worktrees are materialised. Each
     /// worktree lives at `<worktrees_root>/<id>`.
     pub worktrees_root: PathBuf,
+    /// Maximum simultaneously live worktrees. `None` = unlimited (§15.6).
+    pub max_live: Option<usize>,
+    /// After this duration without a [`WorktreeManager::touch`] call,
+    /// a worktree becomes a candidate for [`WorktreeManager::reclaim_idle`]
+    /// (§15.4).
+    pub idle_ttl: Duration,
 }
 
 /// A live worktree tracked by the manager.
@@ -48,6 +63,22 @@ pub struct WorktreeHandle {
     pub branch: String,
     /// Unix epoch milliseconds at which the handle was created.
     pub created_at_ms: i64,
+    /// Unix epoch milliseconds of last activity. Updated by
+    /// [`WorktreeManager::touch`].
+    pub last_active_ms: i64,
+}
+
+/// Health of a tracked worktree (§15.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorktreeHealth {
+    /// Path exists and the expected branch is checked out.
+    Ok,
+    /// Worktree directory is missing from disk.
+    Missing,
+    /// A stale `.git/index.lock` was found (> 5 minutes old).
+    StaleLock,
+    /// HEAD is not on the expected branch (detached or switched).
+    Detached,
 }
 
 /// Errors returned by [`WorktreeManager`].
@@ -73,9 +104,26 @@ pub enum WorktreeError {
     /// Supplied identifier failed validation (empty, path separator, …).
     #[error("invalid worktree id: {0}")]
     InvalidId(String),
+    /// Creating a new worktree would exceed [`WorktreeConfig::max_live`]
+    /// (§15.6).
+    #[error("max live worktrees reached ({max})")]
+    BudgetExhausted {
+        /// The configured cap.
+        max: usize,
+    },
     /// Local filesystem error while preparing or removing a worktree.
     #[error("io error: {0}")]
     IoError(#[from] std::io::Error),
+}
+
+/// Derive the canonical branch name for a plan (§15.3).
+///
+/// Convention: `roko/plan/<plan_id>`. This keeps all roko-managed
+/// branches under a single ref namespace, making cleanup and
+/// enumeration straightforward.
+#[must_use]
+pub fn format_branch_name(plan_id: &str) -> String {
+    format!("roko/plan/{plan_id}")
 }
 
 /// Manages the lifecycle of per-plan git worktrees.
@@ -111,8 +159,9 @@ impl WorktreeManager {
     /// Create a worktree for `id` checked out onto `branch`.
     ///
     /// `branch` is created from [`WorktreeConfig::base_branch`] if it
-    /// does not already exist. Rejects duplicate ids and invalid id
-    /// strings (empty, containing `/`, `\`, NUL, or leading `.`).
+    /// does not already exist. Rejects duplicate ids, invalid id
+    /// strings (empty, containing `/`, `\`, NUL, or leading `.`), and
+    /// requests that would exceed [`WorktreeConfig::max_live`].
     pub async fn create(&self, id: &str, branch: &str) -> Result<WorktreeHandle, WorktreeError> {
         validate_id(id)?;
 
@@ -121,6 +170,12 @@ impl WorktreeManager {
             let guard = self.active.lock();
             if guard.contains_key(id) {
                 return Err(WorktreeError::AlreadyExists(id.to_string()));
+            }
+            // §15.6 — enforce budget before touching git.
+            if let Some(max) = self.config.max_live {
+                if guard.len() >= max {
+                    return Err(WorktreeError::BudgetExhausted { max });
+                }
             }
         }
 
@@ -154,11 +209,13 @@ impl WorktreeManager {
             });
         }
 
+        let now_ms = chrono::Utc::now().timestamp_millis();
         let handle = WorktreeHandle {
             id: id.to_string(),
             path,
             branch: branch.to_string(),
-            created_at_ms: chrono::Utc::now().timestamp_millis(),
+            created_at_ms: now_ms,
+            last_active_ms: now_ms,
         };
 
         let conflict = {
@@ -180,6 +237,13 @@ impl WorktreeManager {
         }
 
         Ok(handle)
+    }
+
+    /// Convenience: create a worktree using the canonical branch naming
+    /// convention (`roko/plan/<plan_id>`). §15.3
+    pub async fn create_for_plan(&self, plan_id: &str) -> Result<WorktreeHandle, WorktreeError> {
+        let branch = format_branch_name(plan_id);
+        self.create(plan_id, &branch).await
     }
 
     /// Remove the worktree tracked under `id`. Errors if `id` isn't
@@ -213,6 +277,143 @@ impl WorktreeManager {
         };
         out.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(out)
+    }
+
+    /// Bump the last-active timestamp for `id` (§15.4).
+    ///
+    /// Called by the orchestrator when agents write to a worktree so
+    /// idle-time reclamation skips actively-used worktrees.
+    pub fn touch(&self, id: &str) {
+        let mut guard = self.active.lock();
+        if let Some(handle) = guard.get_mut(id) {
+            handle.last_active_ms = chrono::Utc::now().timestamp_millis();
+        }
+    }
+
+    /// Probe the health of the worktree tracked under `id` (§15.5).
+    ///
+    /// Returns [`WorktreeHealth::Ok`] when the directory exists and the
+    /// expected branch is checked out; other variants describe the
+    /// specific failure mode.
+    pub async fn check_health(&self, id: &str) -> Result<WorktreeHealth, WorktreeError> {
+        let handle = {
+            let guard = self.active.lock();
+            guard
+                .get(id)
+                .cloned()
+                .ok_or_else(|| WorktreeError::NotFound(id.to_string()))?
+        };
+
+        if !handle.path.exists() {
+            return Ok(WorktreeHealth::Missing);
+        }
+
+        // Check for a stale index.lock in the worktree's gitdir.
+        if let Some(gitdir) = read_gitdir(&handle.path) {
+            let lock = gitdir.join("index.lock");
+            if lock.exists() && is_stale_lock(&lock) {
+                return Ok(WorktreeHealth::StaleLock);
+            }
+        }
+
+        // Verify the expected branch is checked out.
+        let output = Command::new("git")
+            .current_dir(&handle.path)
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .output()
+            .await?;
+
+        if output.status.success() {
+            let current = String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .to_string();
+            if current != handle.branch {
+                return Ok(WorktreeHealth::Detached);
+            }
+        }
+
+        Ok(WorktreeHealth::Ok)
+    }
+
+    /// Evict worktrees whose `last_active_ms` is older than
+    /// [`WorktreeConfig::idle_ttl`], oldest first. Returns the ids
+    /// that were successfully reclaimed (§15.6).
+    pub async fn reclaim_idle(&self) -> Result<Vec<String>, WorktreeError> {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let ttl_ms = i64::try_from(self.config.idle_ttl.as_millis()).unwrap_or(i64::MAX);
+
+        let stale_ids: Vec<String> = {
+            let mut candidates: Vec<_> = self
+                .active
+                .lock()
+                .values()
+                .filter(|h| (now_ms - h.last_active_ms) > ttl_ms)
+                .map(|h| (h.id.clone(), h.last_active_ms))
+                .collect();
+            // Evict oldest first.
+            candidates.sort_by_key(|(_, ts)| *ts);
+            candidates.into_iter().map(|(id, _)| id).collect()
+        };
+
+        let mut removed = Vec::new();
+        for id in stale_ids {
+            if self.remove(&id).await.is_ok() {
+                removed.push(id);
+            }
+        }
+
+        Ok(removed)
+    }
+
+    /// Remove stale `.git/index.lock` files (older than 5 minutes)
+    /// across the main repo and all git-tracked worktrees (§15.7).
+    pub fn clear_stale_locks(&self) -> Result<Vec<PathBuf>, WorktreeError> {
+        let mut cleared = Vec::new();
+
+        // Main repo lock.
+        let main_lock = self.config.repo_root.join(".git").join("index.lock");
+        if main_lock.exists()
+            && is_stale_lock(&main_lock)
+            && std::fs::remove_file(&main_lock).is_ok()
+        {
+            cleared.push(main_lock);
+        }
+
+        // Per-worktree locks stored under .git/worktrees/<name>/index.lock.
+        let wt_meta_dir = self.config.repo_root.join(".git").join("worktrees");
+        if wt_meta_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&wt_meta_dir) {
+                for entry in entries.flatten() {
+                    let lock = entry.path().join("index.lock");
+                    if lock.exists()
+                        && is_stale_lock(&lock)
+                        && std::fs::remove_file(&lock).is_ok()
+                    {
+                        cleared.push(lock);
+                    }
+                }
+            }
+        }
+
+        Ok(cleared)
+    }
+
+    /// Run `git worktree prune` to clean up stale git worktree metadata
+    /// that no longer corresponds to on-disk directories (§15.9).
+    pub async fn prune(&self) -> Result<String, WorktreeError> {
+        let output = Command::new("git")
+            .current_dir(&self.config.repo_root)
+            .args(["worktree", "prune"])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            return Err(WorktreeError::GitFailed {
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            });
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
     async fn git_remove(&self, path: &Path) -> Result<(), WorktreeError> {
@@ -264,6 +465,42 @@ fn validate_id(id: &str) -> Result<(), WorktreeError> {
     Ok(())
 }
 
+/// Read the `gitdir:` pointer from a worktree's `.git` file.
+///
+/// In a worktree `.git` is a regular file (not a directory) containing
+/// a single line like `gitdir: /repo/.git/worktrees/<name>`. Returns
+/// `None` if the file is missing, is a directory, or is unparseable.
+fn read_gitdir(worktree_path: &Path) -> Option<PathBuf> {
+    let git_file = worktree_path.join(".git");
+    if git_file.is_dir() {
+        // Main repo — the gitdir is the .git directory itself.
+        return Some(git_file);
+    }
+    let content = std::fs::read_to_string(&git_file).ok()?;
+    let path_str = content.trim().strip_prefix("gitdir: ")?;
+    let p = PathBuf::from(path_str);
+    if p.is_absolute() {
+        Some(p)
+    } else {
+        Some(worktree_path.join(p))
+    }
+}
+
+/// A lock file is considered stale when its mtime is ≥ [`STALE_LOCK_SECS`]
+/// seconds in the past.
+fn is_stale_lock(path: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    let Ok(modified) = meta.modified() else {
+        return false;
+    };
+    std::time::SystemTime::now()
+        .duration_since(modified)
+        .map(|age| age.as_secs() >= STALE_LOCK_SECS)
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     //! Tests below each spin up a throwaway git repo in a
@@ -274,9 +511,13 @@ mod tests {
 
     #![allow(clippy::unwrap_used)]
 
-    use super::{validate_id, WorktreeConfig, WorktreeError, WorktreeManager};
+    use super::{
+        format_branch_name, validate_id, WorktreeConfig, WorktreeError, WorktreeHealth,
+        WorktreeManager,
+    };
     use std::path::Path;
     use std::process::Command as StdCommand;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     fn git_available() -> bool {
@@ -336,9 +577,33 @@ mod tests {
             repo_root,
             base_branch: "main".to_string(),
             worktrees_root,
+            max_live: None,
+            idle_ttl: Duration::from_secs(3600),
         });
         Some((tmp, mgr))
     }
+
+    fn make_manager_with_budget(max_live: usize) -> Option<(TempDir, WorktreeManager)> {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return None;
+        }
+        let tmp = TempDir::new().unwrap();
+        let repo_root = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).unwrap();
+        init_repo(&repo_root);
+        let worktrees_root = tmp.path().join("worktrees");
+        let mgr = WorktreeManager::new(WorktreeConfig {
+            repo_root,
+            base_branch: "main".to_string(),
+            worktrees_root,
+            max_live: Some(max_live),
+            idle_ttl: Duration::from_secs(3600),
+        });
+        Some((tmp, mgr))
+    }
+
+    // ── Existing tests (§15.1–§15.2, §15.8) ──
 
     #[tokio::test]
     async fn create_worktree_materialises_directory() {
@@ -422,6 +687,8 @@ mod tests {
             repo_root: tmp.path().join("repo"),
             base_branch: "main".to_string(),
             worktrees_root: tmp.path().join("worktrees"),
+            max_live: None,
+            idle_ttl: Duration::from_secs(3600),
         });
         let p = mgr.path_for("06-foxtrot");
         assert_eq!(p, tmp.path().join("worktrees").join("06-foxtrot"));
@@ -437,6 +704,8 @@ mod tests {
             repo_root: tmp.path().join("repo"),
             base_branch: "main".to_string(),
             worktrees_root: tmp.path().join("worktrees"),
+            max_live: None,
+            idle_ttl: Duration::from_secs(3600),
         });
         // Neither repo nor worktrees_root exists — but we never reach
         // git because validate_id rejects these inputs first.
@@ -475,5 +744,143 @@ mod tests {
         ] {
             validate_id(good).unwrap();
         }
+    }
+
+    // ── New tests (§15.3–§15.7, §15.9) ──
+
+    #[test]
+    fn format_branch_name_uses_convention() {
+        assert_eq!(format_branch_name("01-alpha"), "roko/plan/01-alpha");
+        assert_eq!(format_branch_name("fix_typo"), "roko/plan/fix_typo");
+    }
+
+    #[tokio::test]
+    async fn create_for_plan_uses_canonical_branch() {
+        let Some((_tmp, mgr)) = make_manager() else {
+            return;
+        };
+        let handle = mgr.create_for_plan("07-golf").await.unwrap();
+        assert_eq!(handle.branch, "roko/plan/07-golf");
+        assert_eq!(handle.id, "07-golf");
+        assert!(handle.path.exists());
+    }
+
+    #[tokio::test]
+    async fn budget_exhausted_when_max_live_reached() {
+        let Some((_tmp, mgr)) = make_manager_with_budget(1) else {
+            return;
+        };
+        mgr.create("a", "feature/a").await.unwrap();
+        let err = mgr.create("b", "feature/b").await.unwrap_err();
+        assert!(matches!(err, WorktreeError::BudgetExhausted { max: 1 }));
+        // Original still intact.
+        assert_eq!(mgr.list().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn touch_updates_last_active() {
+        let Some((_tmp, mgr)) = make_manager() else {
+            return;
+        };
+        let h = mgr.create("08-hotel", "feature/hotel").await.unwrap();
+        let before = h.last_active_ms;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        mgr.touch("08-hotel");
+        let listed = mgr.list().unwrap();
+        let after = listed[0].last_active_ms;
+        assert!(after > before, "touch should bump last_active_ms");
+    }
+
+    #[tokio::test]
+    async fn check_health_ok_for_live_worktree() {
+        let Some((_tmp, mgr)) = make_manager() else {
+            return;
+        };
+        mgr.create("09-india", "feature/india").await.unwrap();
+        let health = mgr.check_health("09-india").await.unwrap();
+        assert_eq!(health, WorktreeHealth::Ok);
+    }
+
+    #[tokio::test]
+    async fn check_health_missing_when_dir_deleted() {
+        let Some((_tmp, mgr)) = make_manager() else {
+            return;
+        };
+        let h = mgr.create("10-juliet", "feature/juliet").await.unwrap();
+        std::fs::remove_dir_all(&h.path).unwrap();
+        let health = mgr.check_health("10-juliet").await.unwrap();
+        assert_eq!(health, WorktreeHealth::Missing);
+    }
+
+    #[tokio::test]
+    async fn reclaim_idle_evicts_stale_worktrees() {
+        if !git_available() {
+            return;
+        }
+        let tmp = TempDir::new().unwrap();
+        let repo_root = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).unwrap();
+        init_repo(&repo_root);
+        // idle_ttl = 0 so every worktree is immediately reclaimable.
+        let mgr = WorktreeManager::new(WorktreeConfig {
+            repo_root,
+            base_branch: "main".to_string(),
+            worktrees_root: tmp.path().join("worktrees"),
+            max_live: None,
+            idle_ttl: Duration::ZERO,
+        });
+        mgr.create("11-kilo", "feature/kilo").await.unwrap();
+        mgr.create("12-lima", "feature/lima").await.unwrap();
+        // Small sleep so timestamps are in the past.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let evicted = mgr.reclaim_idle().await.unwrap();
+        assert_eq!(evicted.len(), 2);
+        assert!(mgr.list().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn clear_stale_locks_removes_old_lock_files() {
+        let Some((tmp, mgr)) = make_manager() else {
+            return;
+        };
+        mgr.create("13-mike", "feature/mike").await.unwrap();
+
+        // Plant a stale lock in the git worktrees metadata dir.
+        let repo_root = tmp.path().join("repo");
+        let lock_dir = repo_root
+            .join(".git")
+            .join("worktrees")
+            .join("13-mike");
+        assert!(lock_dir.exists(), "git should have created worktree metadata");
+        let lock_path = lock_dir.join("index.lock");
+        std::fs::write(&lock_path, "").unwrap();
+
+        // Backdate the lock to epoch so it appears stale (> 5 min).
+        std::fs::File::options()
+            .write(true)
+            .open(&lock_path)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_accessed(std::time::SystemTime::UNIX_EPOCH)
+                    .set_modified(std::time::SystemTime::UNIX_EPOCH),
+            )
+            .unwrap();
+
+        let cleared = mgr.clear_stale_locks().unwrap();
+        assert!(
+            cleared.contains(&lock_path),
+            "stale lock should be cleared"
+        );
+        assert!(!lock_path.exists(), "lock file should be deleted");
+    }
+
+    #[tokio::test]
+    async fn prune_runs_without_error() {
+        let Some((_tmp, mgr)) = make_manager() else {
+            return;
+        };
+        let result = mgr.prune().await;
+        assert!(result.is_ok());
     }
 }

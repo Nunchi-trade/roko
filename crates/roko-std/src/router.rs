@@ -1,6 +1,6 @@
 //! Simple routers that need no learning state.
 //!
-//! These routers are the building blocks; adaptive bandit routers (LinUCB,
+//! These routers are the building blocks; adaptive bandit routers (`LinUCB`,
 //! Thompson sampling) live in `roko-learn`.
 
 use parking_lot::Mutex;
@@ -11,6 +11,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Default)]
 pub struct FirstRouter;
 
+#[allow(clippy::unnecessary_literal_bound)]
 impl Router for FirstRouter {
     fn select(&self, candidates: &[Signal], _ctx: &Context) -> Option<Selection> {
         candidates.first().map(|s| Selection::new(s.id, self.name()))
@@ -34,6 +35,7 @@ impl HighestScoreRouter {
     }
 }
 
+#[allow(clippy::unnecessary_literal_bound)]
 impl Router for HighestScoreRouter {
     fn select(&self, candidates: &[Signal], ctx: &Context) -> Option<Selection> {
         candidates
@@ -66,6 +68,7 @@ impl RoundRobinRouter {
     }
 }
 
+#[allow(clippy::unnecessary_literal_bound)]
 impl Router for RoundRobinRouter {
     fn select(&self, candidates: &[Signal], _ctx: &Context) -> Option<Selection> {
         if candidates.is_empty() {
@@ -74,6 +77,7 @@ impl Router for RoundRobinRouter {
         let mut counter = self.counter.lock();
         let idx = *counter % candidates.len();
         *counter = counter.wrapping_add(1);
+        drop(counter);
         Some(Selection::new(candidates[idx].id, self.name()))
     }
     fn feedback(&self, _outcome: &Outcome) {}

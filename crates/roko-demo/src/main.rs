@@ -1,5 +1,11 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
+#![allow(
+    clippy::doc_markdown,
+    clippy::ignored_unit_patterns,
+    clippy::needless_borrows_for_generic_args,
+    clippy::ptr_arg
+)]
 
 //! The `roko-demo` binary.
 

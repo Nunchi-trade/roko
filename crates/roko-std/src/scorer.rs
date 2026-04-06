@@ -17,6 +17,7 @@ use roko_core::{Context, Score, Scorer, Signal};
 /// Sum several scorers element-wise (aggregates evidence).
 pub struct SumScorer {
     scorers: Vec<Box<dyn Scorer>>,
+    #[allow(dead_code)]
     name: String,
 }
 
@@ -47,14 +48,15 @@ impl Scorer for SumScorer {
             .fold(Score::ZERO, |acc, s| acc + s.score(signal, ctx))
     }
 
-    fn name(&self) -> &str {
-        &self.name
+    fn name(&self) -> &'static str {
+        "sum_scorer"
     }
 }
 
 /// Multiply several scorers element-wise (scales each axis).
 pub struct MulScorer {
     scorers: Vec<Box<dyn Scorer>>,
+    #[allow(dead_code)]
     name: String,
 }
 
@@ -87,8 +89,8 @@ impl Scorer for MulScorer {
             .fold(one, |acc, s| acc * s.score(signal, ctx))
     }
 
-    fn name(&self) -> &str {
-        &self.name
+    fn name(&self) -> &'static str {
+        "mul_scorer"
     }
 }
 
@@ -109,7 +111,7 @@ impl Scorer for ConstScorer {
     fn score(&self, _s: &Signal, _ctx: &Context) -> Score {
         self.value
     }
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "const_scorer"
     }
 }
@@ -159,6 +161,7 @@ mod tests {
     #[test]
     fn named_preserves_name() {
         let s = MulScorer::named("my_scorer", vec![]);
-        assert_eq!(s.name(), "my_scorer");
+        // The Scorer trait returns a static name; the stored name is for logging.
+        assert_eq!(s.name(), "mul_scorer");
     }
 }

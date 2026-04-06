@@ -92,14 +92,14 @@ impl Provenance {
 
     /// Override the trust value (clamped to `[0..1]`).
     #[must_use]
-    pub fn with_trust(mut self, trust: f32) -> Self {
+    pub const fn with_trust(mut self, trust: f32) -> Self {
         self.trust = trust.clamp(0.0, 1.0);
         self
     }
 
     /// Mark as tainted regardless of author.
     #[must_use]
-    pub fn with_taint(mut self, tainted: bool) -> Self {
+    pub const fn with_taint(mut self, tainted: bool) -> Self {
         self.tainted = tainted;
         self
     }

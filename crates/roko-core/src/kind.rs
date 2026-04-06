@@ -90,7 +90,7 @@ pub enum Kind {
     Bounty,
     /// An on-chain transaction.
     Transaction,
-    /// A service offering (OaaS marketplace).
+    /// A service offering (`OaaS` marketplace).
     Service,
     /// A prediction claim (for predictive foraging).
     Prediction,

@@ -25,7 +25,7 @@ pub struct AgentResult {
 impl AgentResult {
     /// Construct a successful result with just an output signal.
     #[must_use]
-    pub fn ok(output: Signal) -> Self {
+    pub const fn ok(output: Signal) -> Self {
         Self {
             output,
             trace: Vec::new(),
@@ -36,7 +36,7 @@ impl AgentResult {
 
     /// Construct a failed result with an output signal describing the failure.
     #[must_use]
-    pub fn fail(output: Signal) -> Self {
+    pub const fn fail(output: Signal) -> Self {
         Self {
             output,
             trace: Vec::new(),
@@ -54,7 +54,7 @@ impl AgentResult {
 
     /// Attach usage metrics.
     #[must_use]
-    pub fn with_usage(mut self, usage: Usage) -> Self {
+    pub const fn with_usage(mut self, usage: Usage) -> Self {
         self.usage = usage;
         self
     }

@@ -3,7 +3,7 @@
 //! This crate provides:
 //!
 //! - [`MemorySubstrate`] — an in-memory `Substrate` for tests and ephemeral state
-//! - **NoOp impls** of all six traits (useful as defaults and testing scaffolds)
+//! - **`NoOp` impls** of all six traits (useful as defaults and testing scaffolds)
 //! - **Composite scorers** — `SumScorer`, `MulScorer`, `ConstScorer`
 //! - **Simple routers** — `FirstRouter`, `HighestScoreRouter`, `RoundRobinRouter`
 //!

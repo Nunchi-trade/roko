@@ -80,7 +80,7 @@ impl ToolCall {
 /// file, a diff, a rendered image) without inflating the main `content`
 /// string. Translators that don't support side-channel artifacts flatten
 /// them into the content payload.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Artifact {
     /// Logical name (filename, id, label).
     pub name: String,
@@ -106,7 +106,7 @@ impl Artifact {
 /// a text payload plus zero or more artifacts. `is_structured` signals
 /// that `content` is a JSON document (the translator may pass it through
 /// without re-wrapping).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "status")]
 pub enum ToolResult {
     /// Successful execution with a textual payload and optional artifacts.

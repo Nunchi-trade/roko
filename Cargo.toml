@@ -38,12 +38,18 @@ members = [
     # directory. Reads its agent/gate config from ./roko.toml.
     "crates/roko-cli",
 
+    # Conductor — reactive intelligence layer: watchers, circuit breaker, interventions.
+    "crates/roko-conductor",
+
     # Learning subsystems — episodes, playbooks, skills, caches, pattern discovery.
     "crates/roko-learn",
 
     # Demo environment orchestrator — deploys contracts from roko/contracts/,
     # seeds fixtures, spawns a clade of agents per declarative scenario manifest.
     "crates/roko-demo",
+
+    # Language providers — trait impls for specific languages/build systems.
+    "crates/roko-lang-rust",
 ]
 
 [workspace.package]

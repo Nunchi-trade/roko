@@ -411,7 +411,7 @@ impl ScenarioRunner {
             .unwrap_or_else(|| self.state.read().fork.clone());
         let template = Arc::new(baseline);
         let storage_baseline = Arc::new(storage_baseline_from_fork(template.as_ref()));
-        let tasks = set.scenarios.iter().cloned().map(|scenario| {
+        let tasks = set.scenarios.clone().into_iter().map(|scenario| {
             let template = Arc::clone(&template);
             let storage_baseline = Arc::clone(&storage_baseline);
             tokio::task::spawn_blocking(move || {
@@ -462,7 +462,7 @@ fn fork_from_template_and_cow(template: &ForkState, cow: &CowState) -> ForkState
     dirty.demote_protocols_to_slot_only = template.db.dirty.demote_protocols_to_slot_only;
     for (address, account) in &template.db.dirty.accounts {
         let mut storage = HashMap::new();
-        for (slot, _) in &account.storage {
+        for slot in account.storage.keys() {
             if let Some(value) = cow.read(*address, *slot) {
                 storage.insert(*slot, value);
             }

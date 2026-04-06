@@ -563,6 +563,7 @@ impl UpstreamRpc {
         Ok(Box::pin(heads))
     }
 
+    #[allow(clippy::disallowed_methods)] // blocking retry loop — no async runtime
     fn call(&self, method: &str, params: Value) -> Result<Value> {
         {
             let mut stats = self.stats.write();
@@ -634,6 +635,7 @@ impl UpstreamRpc {
         }
     }
 
+    #[allow(clippy::disallowed_methods)] // blocking rate-limit sleep
     fn enforce_rate_limit(&self) {
         if self.requests_per_second == 0 {
             return;
@@ -661,6 +663,7 @@ impl UpstreamRpc {
         }
     }
 
+    #[allow(clippy::disallowed_methods)] // blocking mock delay
     fn maybe_delay_mock(&self) {
         let delay = self.mock.read().delay;
         if !delay.is_zero() {

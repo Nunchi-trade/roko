@@ -199,13 +199,11 @@ fn dispatch_config(cmd: ConfigCmd) -> Result<()> {
             let target = edit_target(global, project);
             config_cmd::cmd_edit(&wd, target)
         }
-        ConfigCmd::Set { key, value, global, project, workdir } => {
+        ConfigCmd::Set { key, value, global: _, project, workdir } => {
             let wd = workdir.unwrap_or_else(|| PathBuf::from("."));
             // Default for `set` is global unless --project is passed.
             let target = if project {
                 EditTarget::Project
-            } else if global {
-                EditTarget::Global
             } else {
                 EditTarget::Global
             };
@@ -214,7 +212,7 @@ fn dispatch_config(cmd: ConfigCmd) -> Result<()> {
     }
 }
 
-fn edit_target(global: bool, project: bool) -> EditTarget {
+const fn edit_target(global: bool, project: bool) -> EditTarget {
     if global {
         EditTarget::Global
     } else if project {

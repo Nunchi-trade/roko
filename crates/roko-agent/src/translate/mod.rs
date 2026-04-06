@@ -219,4 +219,84 @@ mod tests {
         let e = TranslatorError::UnsupportedFormat(ToolFormat::ReActText);
         assert!(e.to_string().contains("ReActText"));
     }
+
+    // ── Enum round-trip tests (SLOT A0 requirement) ──────────────────
+
+    #[test]
+    fn rendered_tools_json_array_round_trip() {
+        let inner = serde_json::json!([{"type": "function", "function": {"name": "read_file"}}]);
+        let rt = RenderedTools::JsonArray(inner.clone());
+        match rt {
+            RenderedTools::JsonArray(v) => assert_eq!(v, inner),
+            other => panic!("expected JsonArray, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rendered_tools_cli_flag_round_trip() {
+        let csv = "Read,Edit,Bash".to_string();
+        let rt = RenderedTools::CliFlag(csv.clone());
+        match rt {
+            RenderedTools::CliFlag(s) => assert_eq!(s, csv),
+            other => panic!("expected CliFlag, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rendered_tools_system_prompt_block_round_trip() {
+        let block = "You have access to:\n### read_file\n".to_string();
+        let rt = RenderedTools::SystemPromptBlock(block.clone());
+        match rt {
+            RenderedTools::SystemPromptBlock(s) => assert_eq!(s, block),
+            other => panic!("expected SystemPromptBlock, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rendered_results_json_messages_round_trip() {
+        let msgs = serde_json::json!([{"role": "tool", "content": "ok"}]);
+        let rr = RenderedResults::JsonMessages(msgs.clone());
+        match rr {
+            RenderedResults::JsonMessages(v) => assert_eq!(v, msgs),
+            other => panic!("expected JsonMessages, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rendered_results_text_block_round_trip() {
+        let obs = "Observation: file contents here\n\n".to_string();
+        let rr = RenderedResults::TextBlock(obs.clone());
+        match rr {
+            RenderedResults::TextBlock(s) => assert_eq!(s, obs),
+            other => panic!("expected TextBlock, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rendered_results_handled_by_backend_round_trip() {
+        let rr = RenderedResults::HandledByBackend;
+        assert!(
+            matches!(rr, RenderedResults::HandledByBackend),
+            "expected HandledByBackend"
+        );
+    }
+
+    #[test]
+    fn backend_response_clone_preserves_variant() {
+        let original = BackendResponse::Json(serde_json::json!({"test": true}));
+        let cloned = original.clone();
+        match (&original, &cloned) {
+            (BackendResponse::Json(a), BackendResponse::Json(b)) => assert_eq!(a, b),
+            _ => panic!("clone changed variant"),
+        }
+    }
+
+    #[test]
+    fn translator_error_eq_same_variants() {
+        let a = TranslatorError::Malformed("x".into());
+        let b = TranslatorError::Malformed("x".into());
+        assert_eq!(a, b);
+        let c = TranslatorError::Malformed("y".into());
+        assert_ne!(a, c);
+    }
 }

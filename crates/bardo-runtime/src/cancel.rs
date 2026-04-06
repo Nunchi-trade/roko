@@ -61,6 +61,7 @@ impl CancelToken {
     /// Create a child token. The child is cancelled when:
     /// - The parent is cancelled, OR
     /// - The child itself is cancelled directly.
+    #[must_use]
     pub fn child(&self) -> Self {
         Self {
             inner: Arc::new(CancelInner {
@@ -96,6 +97,12 @@ impl CancelToken {
     /// Wait until this token (or any ancestor) is cancelled.
     ///
     /// Returns immediately if already cancelled.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal notify list is empty (impossible in practice
+    /// since `self` is always included).
+    #[allow(clippy::expect_used)]
     pub async fn cancelled(&self) {
         if self.is_cancelled() {
             return;
@@ -122,8 +129,8 @@ impl CancelToken {
                 }
                 2 => {
                     tokio::select! {
-                        _ = notifies[0].notified() => {}
-                        _ = notifies[1].notified() => {}
+                        () = notifies[0].notified() => {}
+                        () = notifies[1].notified() => {}
                     }
                 }
                 _ => {
@@ -132,8 +139,8 @@ impl CancelToken {
                     let self_notify = notifies[0].notified();
                     let root_notify = notifies.last().expect("non-empty").notified();
                     tokio::select! {
-                        _ = self_notify => {}
-                        _ = root_notify => {}
+                        () = self_notify => {}
+                        () = root_notify => {}
                     }
                 }
             }

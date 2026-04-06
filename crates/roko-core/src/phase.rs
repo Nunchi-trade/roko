@@ -3,7 +3,7 @@
 //! This is the executor's view of a plan's lifecycle — finer-grained than
 //! the TOML-serialized [`PlanStatus`](crate::task::PlanStatus). A plan
 //! flows through phases like Implementing → Gating → Verifying → Reviewing
-//! → Merging → Complete, with back-edges to AutoFixing / RegeneratingVerify
+//! → Merging → Complete, with back-edges to `AutoFixing` / `RegeneratingVerify`
 //! / Failed.
 //!
 //! The [`valid_transitions`] table enforces the contract from
@@ -127,7 +127,7 @@ pub enum PhaseKind {
     Reviewing,
     /// Scribe finalizing docs.
     DocRevision,
-    /// AutoFixer patching errors after gate failure.
+    /// `AutoFixer` patching errors after gate failure.
     AutoFixing,
     /// Regenerating verify-chain script after convergence detection.
     RegeneratingVerify,
@@ -166,7 +166,7 @@ pub enum PlanPhase {
     Reviewing,
     /// Scribe finalizing docs.
     DocRevision,
-    /// AutoFixer patching errors after gate failure.
+    /// `AutoFixer` patching errors after gate failure.
     AutoFixing,
     /// Regenerating verify-chain script after convergence detection.
     RegeneratingVerify,
@@ -186,7 +186,7 @@ pub enum PlanPhase {
 }
 
 impl PlanPhase {
-    /// Discriminant-only view (drops the FailureKind payload).
+    /// Discriminant-only view (drops the `FailureKind` payload).
     #[must_use]
     pub const fn kind(&self) -> PhaseKind {
         match self {
@@ -228,7 +228,8 @@ impl PlanPhase {
 /// This is a pure, data-driven table. Any phase not listed here has no
 /// valid successors (it's either terminal or a bug).
 #[must_use]
-pub fn valid_transitions(from: PhaseKind) -> &'static [PhaseKind] {
+#[allow(clippy::match_same_arms)] // arms intentionally spelled out for doc clarity
+pub const fn valid_transitions(from: PhaseKind) -> &'static [PhaseKind] {
     use PhaseKind::{
         AutoFixing, Complete, DocRevision, Done, Enriching, Failed, Gating, Implementing, Merging,
         Queued, RegeneratingVerify, Reviewing, Skipped, Verifying,
@@ -248,6 +249,17 @@ pub fn valid_transitions(from: PhaseKind) -> &'static [PhaseKind] {
         // Terminal — no transitions.
         Complete | Failed | Skipped => &[],
     }
+}
+
+/// Check whether transitioning from `from` to `to` is a valid monotonic
+/// progression according to the [`valid_transitions`] table.
+///
+/// Returns `true` when `to` appears in `valid_transitions(from.kind())`.
+/// This is a convenience wrapper for use by progress-enforcement code
+/// outside `roko-core` (e.g. `roko-orchestrator::progress`).
+#[must_use]
+pub fn is_monotonic_progression(from: &PlanPhase, to: &PlanPhase) -> bool {
+    valid_transitions(from.kind()).contains(&to.kind())
 }
 
 #[cfg(test)]
