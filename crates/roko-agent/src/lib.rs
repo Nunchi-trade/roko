@@ -48,4 +48,5 @@ pub use exec::ExecAgent;
 pub use mock::MockAgent;
 pub use multi_pool::MultiAgentPool;
 pub use pool::{AgentInstanceId, AgentPool};
+pub use safety::SafetyLayer;
 pub use usage::Usage;

@@ -37,6 +37,8 @@ use roko_core::tool::{
 };
 use roko_core::ToolPermissions;
 
+use crate::safety::SafetyLayer;
+
 pub mod alert;
 pub mod cancel;
 pub mod emit_metric;
@@ -74,11 +76,12 @@ where
     }
 }
 
-/// Dispatches [`ToolCall`]s through validation → authorization → handler.
+/// Dispatches [`ToolCall`]s through validation → safety → authorization → handler.
 pub struct ToolDispatcher {
     registry: Arc<dyn ToolRegistry>,
     resolver: Arc<dyn HandlerResolver>,
     max_result_bytes: usize,
+    safety: Option<SafetyLayer>,
 }
 
 impl ToolDispatcher {
@@ -86,7 +89,7 @@ impl ToolDispatcher {
     /// handler resolver.
     #[must_use]
     pub fn new(registry: Arc<dyn ToolRegistry>, resolver: Arc<dyn HandlerResolver>) -> Self {
-        Self { registry, resolver, max_result_bytes: DEFAULT_MAX_RESULT_BYTES }
+        Self { registry, resolver, max_result_bytes: DEFAULT_MAX_RESULT_BYTES, safety: None }
     }
 
     /// Override the default result-byte cap.
@@ -94,6 +97,20 @@ impl ToolDispatcher {
     pub const fn with_max_result_bytes(mut self, n: usize) -> Self {
         self.max_result_bytes = n;
         self
+    }
+
+    /// Attach a [`SafetyLayer`] so every dispatched call passes through
+    /// pre-execution safety checks and post-execution output scrubbing.
+    #[must_use]
+    pub fn with_safety(mut self, layer: SafetyLayer) -> Self {
+        self.safety = Some(layer);
+        self
+    }
+
+    /// Returns the configured safety layer, if any.
+    #[must_use]
+    pub const fn safety(&self) -> Option<&SafetyLayer> {
+        self.safety.as_ref()
     }
 
     /// Configured cap on content bytes for a single `Ok` result.
@@ -135,6 +152,13 @@ impl ToolDispatcher {
                 call.name, def.permission, role_perms
             )));
         }
+        // 3b. Safety checks — if a SafetyLayer is attached, run all
+        //     pre-execution policies. First failure short-circuits.
+        if let Some(ref safety) = self.safety {
+            if let Err(e) = safety.check_pre_execution(&call, ctx) {
+                return ToolResult::err(e);
+            }
+        }
         // 4. Resolve handler.
         let Some(handler) = self.resolver.resolve(&call.name) else {
             return ToolResult::err(ToolError::Other(format!("no handler: {}", call.name)));
@@ -149,7 +173,12 @@ impl ToolDispatcher {
             }
         };
         // 6. Truncate oversized output.
-        truncate_result(result, self.max_result_bytes)
+        let result = truncate_result(result, self.max_result_bytes);
+        // 7. Scrub secrets from output.
+        if let Some(ref safety) = self.safety {
+            return safety.scrub_output(result);
+        }
+        result
     }
 
     /// Dispatch a batch of tool calls, grouping by concurrency policy.
@@ -190,6 +219,7 @@ impl std::fmt::Debug for ToolDispatcher {
             .field("max_result_bytes", &self.max_result_bytes)
             .field("registry", &"Arc<dyn ToolRegistry>")
             .field("resolver", &"Arc<dyn HandlerResolver>")
+            .field("safety", &self.safety.is_some())
             .finish()
     }
 }

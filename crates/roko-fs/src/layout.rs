@@ -10,6 +10,7 @@
 //!     {plan_id}/
 //!   runs/           # per-run metrics, traces, snapshots
 //!     {run_id}/
+//!   state/          # orchestrator snapshots, event logs, session state
 //!   config/         # config.toml, presets
 //!   cache/          # cargo-target, context-pack-cache
 //! ```
@@ -28,7 +29,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum LayoutVersion {
     /// Initial layout: `runtime/`, `memory/`, `plans/`, `runs/`,
-    /// `config/`, `cache/`.
+    /// `state/`, `config/`, `cache/`.
     V1 = 1,
 }
 
@@ -119,6 +120,12 @@ impl RokoLayout {
         self.root.join("runs")
     }
 
+    /// `.roko/state/` — orchestrator snapshots, event logs, session state.
+    #[must_use]
+    pub fn state_dir(&self) -> PathBuf {
+        self.root.join("state")
+    }
+
     /// `.roko/config/` — config.toml, presets.
     #[must_use]
     pub fn config_dir(&self) -> PathBuf {
@@ -193,6 +200,30 @@ impl RokoLayout {
         self.cache_dir().join("context-pack-cache")
     }
 
+    /// `.roko/state/executor.json` — executor snapshot for crash recovery.
+    #[must_use]
+    pub fn executor_snapshot(&self) -> PathBuf {
+        self.state_dir().join("executor.json")
+    }
+
+    /// `.roko/state/events.json` — event log snapshot for crash recovery.
+    #[must_use]
+    pub fn event_log_snapshot(&self) -> PathBuf {
+        self.state_dir().join("events.json")
+    }
+
+    /// `.roko/state/sessions/` — per-session directories.
+    #[must_use]
+    pub fn sessions_dir(&self) -> PathBuf {
+        self.state_dir().join("sessions")
+    }
+
+    /// `.roko/state/sessions/{session_id}/` — one session's state.
+    #[must_use]
+    pub fn session_dir(&self, session_id: &str) -> PathBuf {
+        self.sessions_dir().join(session_id)
+    }
+
     /// `.roko/runtime/roko.pid` — the PID file for the running process.
     #[must_use]
     pub fn pid_file(&self) -> PathBuf {
@@ -215,6 +246,7 @@ impl RokoLayout {
             self.memory_dir(),
             self.plans_dir(),
             self.runs_dir(),
+            self.state_dir(),
             self.config_dir(),
             self.cache_dir(),
         ]
@@ -281,14 +313,15 @@ mod tests {
     }
 
     #[test]
-    fn top_level_dirs_returns_six() {
+    fn top_level_dirs_returns_seven() {
         let layout = RokoLayout::new("/tmp/.roko");
         let dirs = layout.top_level_dirs();
-        assert_eq!(dirs.len(), 6);
+        assert_eq!(dirs.len(), 7);
         assert!(dirs.contains(&PathBuf::from("/tmp/.roko/runtime")));
         assert!(dirs.contains(&PathBuf::from("/tmp/.roko/memory")));
         assert!(dirs.contains(&PathBuf::from("/tmp/.roko/plans")));
         assert!(dirs.contains(&PathBuf::from("/tmp/.roko/runs")));
+        assert!(dirs.contains(&PathBuf::from("/tmp/.roko/state")));
         assert!(dirs.contains(&PathBuf::from("/tmp/.roko/config")));
         assert!(dirs.contains(&PathBuf::from("/tmp/.roko/cache")));
     }

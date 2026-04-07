@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 
 /// Successful execution.
 const EXIT_SUCCESS: i32 = 0;
+const EXIT_FAILURE: i32 = 1;
 /// Agent or gate failure (logical error in the build).
 const EXIT_AGENT_FAILURE: i32 = 1;
 /// System error (I/O, config, infrastructure).
@@ -195,6 +196,17 @@ enum PlanCmd {
         #[arg(long)]
         workdir: Option<PathBuf>,
     },
+    /// Run a plan directory through the orchestration loop.
+    Run {
+        /// Path to the plans directory.
+        plans_dir: PathBuf,
+        /// Working directory (repo root). Defaults to current directory.
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+        /// Resume from a saved snapshot.
+        #[arg(long)]
+        resume: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -328,7 +340,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             payload,
             workdir,
         } => cmd_inject(cli, session, &kind, payload, workdir),
-        Command::Plan { cmd } => cmd_plan(cli, cmd),
+        Command::Plan { cmd } => cmd_plan(cli, cmd).await,
     }
 }
 
@@ -546,7 +558,7 @@ fn cmd_inject(
     Ok(EXIT_SUCCESS)
 }
 
-fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
+async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
     match cmd {
         PlanCmd::List { workdir } => {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
@@ -628,6 +640,66 @@ fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 println!("created plan '{}' at {}", plan_id, path.display());
             }
             Ok(EXIT_SUCCESS)
+        }
+        PlanCmd::Run { plans_dir, workdir, resume } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            let config = load_layered(&wd)?.config;
+
+            let mut runner = if let Some(snap_path) = resume {
+                let exec_json = std::fs::read_to_string(&snap_path)
+                    .map_err(|e| anyhow!("read snapshot: {e}"))?;
+                // Try to load the event log from alongside the executor snapshot.
+                let events_path = snap_path.with_file_name("events.json");
+                if events_path.exists() {
+                    let log_json = std::fs::read_to_string(&events_path)
+                        .map_err(|e| anyhow!("read event log: {e}"))?;
+                    roko_cli::PlanRunner::from_snapshots(
+                        &exec_json, &log_json, &wd, config,
+                    )?
+                } else {
+                    roko_cli::PlanRunner::from_snapshot(&exec_json, &wd, config)?
+                }
+            } else {
+                roko_cli::PlanRunner::from_plans_dir(&plans_dir, &wd, config)?
+            };
+
+            let report = runner.run_all().await?;
+
+            // State is auto-saved during and after the run.
+            let snap_path = wd.join(".roko").join("state").join("executor.json");
+
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                    "succeeded": report.all_succeeded(),
+                    "total_agent_calls": report.total_agent_calls,
+                    "total_gate_runs": report.total_gate_runs,
+                    "plans": report.plans.iter().map(|p| serde_json::json!({
+                        "plan_id": p.plan_id,
+                        "succeeded": p.succeeded,
+                        "agent_calls": p.agent_calls,
+                    })).collect::<Vec<_>>(),
+                })).unwrap_or_default());
+            } else if !cli.quiet {
+                println!("Orchestration complete:");
+                for p in &report.plans {
+                    let status = if p.succeeded { "✓" } else { "✗" };
+                    println!(
+                        "  {status} {} — {} agent calls, {} gate results",
+                        p.plan_id,
+                        p.agent_calls,
+                        p.gate_results.len()
+                    );
+                }
+                println!(
+                    "\nTotal: {} agent calls, {} gate runs. Overall: {}",
+                    report.total_agent_calls,
+                    report.total_gate_runs,
+                    if report.all_succeeded() { "SUCCESS" } else { "FAILED" }
+                );
+                println!("Snapshot saved to {}", snap_path.display());
+            }
+
+            Ok(if report.all_succeeded() { EXIT_SUCCESS } else { EXIT_FAILURE })
         }
     }
 }

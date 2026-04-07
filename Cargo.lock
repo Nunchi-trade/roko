@@ -4566,6 +4566,7 @@ dependencies = [
  "roko-core",
  "roko-fs",
  "roko-gate",
+ "roko-orchestrator",
  "roko-std",
  "serde",
  "serde_json",

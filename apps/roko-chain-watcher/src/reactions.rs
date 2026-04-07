@@ -560,7 +560,12 @@ mod tests {
 
     #[test]
     fn summary_pheromone_deposited_when_observations_exist() {
-        let phs = vec![pheromone(1, "wisdom", 0.2)];
+        // The summary rule fires when pheromones.len() + insights.len() >= 3
+        let phs = vec![
+            pheromone(1, "wisdom", 0.2),
+            pheromone(2, "threat", 0.5),
+            pheromone(3, "opportunity", 0.3),
+        ];
         let reactions = decide(&phs, &[], "watcher-a");
         assert!(reactions.iter().any(|r| {
             r.kind == ReactionKind::DepositPheromone
