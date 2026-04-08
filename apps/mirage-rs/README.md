@@ -598,29 +598,189 @@ When chain extensions are enabled (`--enable-hdc --enable-knowledge --enable-sti
 
 CORS is permissive -- any origin can call these endpoints. All timestamps are Unix seconds. Pagination follows an offset/limit pattern.
 
+### Architecture
+
+```
+                          +-----------+
+                          |  Client   |
+                          | (curl/UI) |
+                          +-----+-----+
+                                |
+                    HTTP :8545  |  WS :8545
+                                v
+                    +-----------+-----------+
+                    |    axum Router        |
+                    |  /api/* REST routes   |
+                    |  /api/ws  WebSocket   |
+                    |  /*       JSON-RPC    |
+                    +-----------+-----------+
+                                |
+                    +-----------+-----------+
+                    |    Handler Layer      |
+                    | pheromone / knowledge |
+                    | agent / topology / ws |
+                    +-----------+-----------+
+                                |
+                    +-----------+-----------+
+                    |    ChainContext       |
+                    | (parking_lot RwLock)  |
+                    +-----------+-----------+
+                       /        |        \
+              +-------+   +----+----+   +--------+
+              |Pheromone|  |Knowledge|  |Agent    |
+              |Field    |  |Store    |  |Registry |
+              +---------+  +---------+  +---------+
+```
+
+All REST handlers read from or write to `ChainContext` via a shared `Arc<RwLock>`. The WebSocket endpoint subscribes to internal broadcast buses (`PheromoneBus`, `InsightBus`) and forwards events as JSON frames.
+
 ### Quick start
 
 ```bash
-# Start mirage-rs with all chain extensions enabled
+# 1. Start mirage-rs with all chain extensions enabled
 cargo run -p mirage-rs --features chain -- \
   --rpc-url https://ethereum-rpc.publicnode.com \
   --enable-hdc --enable-knowledge --enable-stigmergy
 
-# Check dashboard stats
+# 2. Seed with demo data
+cargo run -p mirage-rs --features chain --example seed_chain_fixtures
+
+# 3. Check health
+curl http://127.0.0.1:8545/api/health | jq
+
+# 4. View aggregated stats
 curl http://127.0.0.1:8545/api/stats | jq
 
-# List active pheromones sorted by intensity
+# 5. List active pheromones sorted by intensity
 curl 'http://127.0.0.1:8545/api/pheromones?sort=intensity&order=desc&limit=10' | jq
 
-# Search knowledge entries semantically
+# 6. Search knowledge entries semantically
 curl 'http://127.0.0.1:8545/api/knowledge/search?q=uniswap+pool+revert&k=5' | jq
 
-# Get the agent interaction graph
+# 7. List registered agents
+curl http://127.0.0.1:8545/api/agents | jq
+
+# 8. Get the agent interaction graph
 curl http://127.0.0.1:8545/api/agents/topology | jq
 
-# Stream live events over WebSocket (requires `roko` feature)
+# 9. Stream live events over WebSocket (requires `roko` feature)
 websocat ws://127.0.0.1:8545/api/ws
 ```
+
+### Feature flags and API availability
+
+| Feature | CLI flags required | Endpoints enabled |
+|---------|-------------------|-------------------|
+| `chain` | `--enable-hdc --enable-knowledge --enable-stigmergy` | All `/api/*` REST endpoints |
+| `roko` | (implies `chain`) | Adds `/api/ws` WebSocket streaming |
+| `binary` | (default) | Enables the `mirage-rs` binary entrypoint |
+
+Individual chain toggles control subsystem availability at runtime:
+
+| Toggle | Controls | HTTP 503 if disabled |
+|--------|----------|---------------------|
+| `--enable-stigmergy` | Pheromone field endpoints | `POST /api/pheromones`, `POST /api/pheromones/query` |
+| `--enable-knowledge` | Knowledge store endpoints | All `/api/knowledge/*` endpoints |
+| `--enable-hdc` | HDC vector projections | Semantic search, pheromone query |
+
+### Endpoint summary
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/health` | Health check with subsystem status |
+| `GET` | `/api/stats` | Aggregated counts and intensities |
+| `GET` | `/api/pheromones` | List pheromones (paginated, filterable) |
+| `POST` | `/api/pheromones` | Deposit a new pheromone |
+| `GET` | `/api/pheromones/summary` | Per-kind intensity statistics |
+| `POST` | `/api/pheromones/query` | Semantic pheromone search via HDC |
+| `GET` | `/api/pheromones/heatmap` | Time-bucketed intensity heatmap |
+| `GET` | `/api/pheromones/{id}/projection` | Decay projection for one pheromone |
+| `GET` | `/api/knowledge/entries` | List insight entries (paginated, filterable) |
+| `POST` | `/api/knowledge/entries` | Post a new insight entry |
+| `POST` | `/api/knowledge/entries/{id}/confirm` | Confirm an insight |
+| `POST` | `/api/knowledge/entries/{id}/challenge` | Challenge an insight |
+| `POST` | `/api/knowledge/decay` | Trigger a decay sweep |
+| `GET` | `/api/knowledge/edges` | HDC similarity edges between entries |
+| `GET` | `/api/knowledge/search` | Semantic search over entries |
+| `GET` | `/api/knowledge/kinds` | List available knowledge kinds |
+| `GET` | `/api/agents` | List registered agents |
+| `POST` | `/api/agents` | Register a new agent |
+| `GET` | `/api/agents/topology` | Force-directed agent interaction graph |
+| `GET` | `/api/agents/{id}/trace` | Agent activity trace |
+| `GET` | `/api/agents/{id}/heartbeat` | Latest heartbeat for an agent |
+| `POST` | `/api/agents/{id}/heartbeat` | Send a heartbeat |
+| `GET` | `/api/agents/{id}/stats` | Aggregated stats for an agent |
+| `GET` | `/api/ws` | WebSocket streaming (requires `roko` feature) |
+
+---
+
+### Health and stats
+
+#### `GET /api/health`
+
+Health check with subsystem status and counts.
+
+```bash
+curl http://127.0.0.1:8545/api/health | jq
+```
+
+Response:
+
+```json
+{
+  "status": "ok",
+  "uptime_secs": 3600,
+  "chain": {
+    "toggles": {
+      "hdc": true,
+      "knowledge": true,
+      "stigmergy": true
+    },
+    "counts": {
+      "insights": 128,
+      "pheromones": 42,
+      "agents": 5
+    }
+  }
+}
+```
+
+#### `GET /api/stats`
+
+Combined statistics for dashboard overview panels. One request, one response, no round trips.
+
+```bash
+curl http://127.0.0.1:8545/api/stats | jq
+```
+
+Response:
+
+```json
+{
+  "insights": {
+    "total": 128,
+    "active": 94,
+    "confirmed": 67,
+    "challenged": 3,
+    "decaying": 24
+  },
+  "pheromones": {
+    "total": 42,
+    "threat": 12,
+    "opportunity": 18,
+    "wisdom": 12,
+    "total_intensity": 28.6
+  },
+  "toggles": {
+    "hdc": true,
+    "knowledge": true,
+    "stigmergy": true
+  },
+  "timestamp": 1712400300
+}
+```
+
+---
 
 ### Pheromone field
 
@@ -628,10 +788,14 @@ websocat ws://127.0.0.1:8545/api/ws
 
 List active pheromones with decay projections.
 
+```bash
+curl 'http://127.0.0.1:8545/api/pheromones?sort=intensity&order=desc&limit=10' | jq
+```
+
 | Query param | Default | Description |
 |-------------|---------|-------------|
 | `offset` | `0` | Pagination offset |
-| `limit` | `100` | Max results per page |
+| `limit` | `100` | Max results per page (capped at 500) |
 | `kind` | (all) | Filter by kind: `threat`, `opportunity`, or `wisdom` |
 | `min_intensity` | (none) | Floor threshold (float) |
 | `sort` | `intensity` | Sort field: `intensity`, `deposited_at`, or `confirmations` |
@@ -668,9 +832,52 @@ Response:
 
 Decay projections show predicted intensity at +1h, +4h, and +24h -- useful for animated UI visualizations that show signals fading over time.
 
+#### `POST /api/pheromones`
+
+Deposit a new pheromone into the field. The `content` text is projected into a 10,240-bit HDC vector for semantic search.
+
+```bash
+curl -X POST http://127.0.0.1:8545/api/pheromones \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "kind": "threat",
+    "content": "flash loan attack draining AAVE v3 WETH pool",
+    "intensity": 1.0,
+    "half_life_secs": 7200
+  }' | jq
+```
+
+Request body:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `kind` | string | yes | `"threat"`, `"opportunity"`, or `"wisdom"` |
+| `content` | string | yes | Text content (projected to HDC vector) |
+| `intensity` | float | yes | Initial intensity (0.0 - any positive) |
+| `half_life_secs` | integer | no | Custom half-life in seconds (defaults to kind default: threat=7200, opportunity=14400, wisdom=43200) |
+
+Response:
+
+```json
+{
+  "id": 7,
+  "kind": "threat",
+  "intensity": 1.0,
+  "deposited_at": 1712400000
+}
+```
+
+Returns HTTP 503 if stigmergy subsystem is disabled.
+
 #### `GET /api/pheromones/summary`
 
 Aggregated statistics per pheromone kind.
+
+```bash
+curl http://127.0.0.1:8545/api/pheromones/summary | jq
+```
+
+Response:
 
 ```json
 {
@@ -695,14 +902,18 @@ Aggregated statistics per pheromone kind.
 
 Top-K similarity search using HDC vectors. Finds pheromones semantically related to a free-text query.
 
+```bash
+curl -X POST http://127.0.0.1:8545/api/pheromones/query \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "flash loan attack on lending protocol", "k": 10}' | jq
+```
+
 Request body:
 
-```json
-{
-  "query": "flash loan attack on lending protocol",
-  "k": 10
-}
-```
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `query` | string | no | Free-text query (projected to HDC internally) |
+| `k` | integer | no | Max results (default 10, capped at 100) |
 
 Response:
 
@@ -723,11 +934,15 @@ Response:
 }
 ```
 
-HDC similarity ranges from 0.0 to 1.0 (Hamming similarity of 10,240-bit vectors).
+HDC similarity ranges from 0.0 to 1.0 (Hamming similarity of 10,240-bit vectors). The `score` field is `similarity * intensity`.
 
 #### `GET /api/pheromones/heatmap`
 
 Time-bucketed deposit activity for heatmap and timeline visualizations.
+
+```bash
+curl 'http://127.0.0.1:8545/api/pheromones/heatmap?bucket_seconds=3600&since=1712361600' | jq
+```
 
 | Query param | Default | Description |
 |-------------|---------|-------------|
@@ -752,16 +967,54 @@ Response:
 }
 ```
 
+#### `GET /api/pheromones/{id}/projection`
+
+Decay projection curve for a single pheromone, returning intensity at evenly spaced time points into the future. Useful for rendering per-pheromone decay sparklines.
+
+```bash
+curl 'http://127.0.0.1:8545/api/pheromones/7/projection?duration_secs=3600&points=60' | jq
+```
+
+| Query param | Default | Description |
+|-------------|---------|-------------|
+| `duration_secs` | `3600` | How far into the future to project |
+| `points` | `60` | Number of evenly spaced data points |
+
+Response:
+
+```json
+{
+  "id": 7,
+  "kind": "threat",
+  "base_intensity": 1.0,
+  "half_life_secs": 7200,
+  "effective_half_life_secs": 7200,
+  "points": [
+    { "offset_secs": 0, "intensity": 0.95 },
+    { "offset_secs": 60, "intensity": 0.94 },
+    { "offset_secs": 120, "intensity": 0.93 }
+  ]
+}
+```
+
+Returns HTTP 404 if the pheromone ID does not exist.
+
+---
+
 ### Knowledge graph
 
 #### `GET /api/knowledge/entries`
 
 List insight entries with full lifecycle metadata.
 
+```bash
+curl 'http://127.0.0.1:8545/api/knowledge/entries?kind=warning&sort=weight&limit=10' | jq
+```
+
 | Query param | Default | Description |
 |-------------|---------|-------------|
 | `offset` | `0` | Pagination offset |
-| `limit` | `100` | Max results per page |
+| `limit` | `100` | Max results per page (capped at 500) |
 | `kind` | (all) | Filter: `insight`, `heuristic`, `warning`, `causal_link`, `strategy_fragment`, or `anti_knowledge` |
 | `state` | (all) | Filter: `created`, `active`, `confirmed`, `decaying`, `challenged`, `pruned`, or `stale` |
 | `min_weight` | (none) | Minimum weight threshold (float) |
@@ -799,9 +1052,140 @@ Response:
 
 `stake_wei` is serialized as a string to avoid JSON number precision loss for u128 values.
 
+#### `POST /api/knowledge/entries`
+
+Post a new insight entry into the knowledge store. The `content` text is projected into a 10,240-bit HDC vector for semantic search and similarity edges.
+
+```bash
+curl -X POST http://127.0.0.1:8545/api/knowledge/entries \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "kind": "warning",
+    "content": "never call selfdestruct in a proxy implementation contract",
+    "author": "agent:alice",
+    "enabled_by": [],
+    "stake_wei": 2000000000000000
+  }' | jq
+```
+
+Request body:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `kind` | string | yes | `"insight"`, `"heuristic"`, `"warning"`, `"causal_link"`, `"strategy_fragment"`, or `"anti_knowledge"` |
+| `content` | string | yes | Text content (projected to HDC vector) |
+| `author` | string | no | Author identifier (e.g. `"agent:alice"`) |
+| `enabled_by` | string[] | no | Hex IDs of entries this insight depends on |
+| `stake_wei` | integer | no | Stake amount in wei (default 0) |
+
+Response:
+
+```json
+{
+  "id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+  "kind": "warning",
+  "state": "created",
+  "weight": 1.0,
+  "created_at": 1712400000
+}
+```
+
+Returns HTTP 503 if the knowledge subsystem is disabled.
+
+#### `POST /api/knowledge/entries/{id}/confirm`
+
+Confirm an existing insight entry. Confirmations extend the entry's effective half-life via `tau_eff = tau * (1 + sqrt(confirms) * 0.5)`.
+
+```bash
+curl -X POST http://127.0.0.1:8545/api/knowledge/entries/a1b2c3d4e5f6.../confirm \
+  -H 'Content-Type: application/json' \
+  -d '{"confirmer": "agent:bob", "stake_wei": 1000000000000000}' | jq
+```
+
+Request body:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `confirmer` | string | yes | Agent ID of the confirmer |
+| `stake_wei` | integer | no | Additional stake (default 0) |
+
+Response:
+
+```json
+{
+  "id": "a1b2c3d4...",
+  "confirmations": 6,
+  "new_state": "confirmed",
+  "effective_half_life_seconds": 420,
+  "timestamp": 1712400100
+}
+```
+
+Returns HTTP 404 if the entry does not exist, HTTP 409 if this confirmer already confirmed this entry.
+
+#### `POST /api/knowledge/entries/{id}/challenge`
+
+Challenge an existing insight entry. Challenges reduce the entry's weight and may transition it to the `challenged` state.
+
+```bash
+curl -X POST http://127.0.0.1:8545/api/knowledge/entries/a1b2c3d4e5f6.../challenge \
+  -H 'Content-Type: application/json' \
+  -d '{"challenger": "agent:carol", "stake_wei": 1000000000000000}' | jq
+```
+
+Request body:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `challenger` | string | yes | Agent ID of the challenger |
+| `stake_wei` | integer | no | Stake amount (default 0) |
+
+Response:
+
+```json
+{
+  "id": "a1b2c3d4...",
+  "challenges": 1,
+  "new_state": "challenged",
+  "timestamp": 1712400200
+}
+```
+
+Returns HTTP 404 if the entry does not exist, HTTP 409 if this challenger already challenged this entry.
+
+#### `POST /api/knowledge/decay`
+
+Trigger a manual decay sweep on the knowledge store. Entries below their minimum weight threshold are pruned.
+
+```bash
+curl -X POST http://127.0.0.1:8545/api/knowledge/decay \
+  -H 'Content-Type: application/json' \
+  -d '{}' | jq
+```
+
+Request body:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `now_secs` | integer | no | Override current time (useful for testing; defaults to wall clock) |
+
+Response:
+
+```json
+{
+  "pruned": 3,
+  "remaining": 125,
+  "timestamp": 1712400300
+}
+```
+
 #### `GET /api/knowledge/edges`
 
-Dependency and HDC-similarity edges, designed for force-directed graph layouts.
+Dependency and HDC-similarity edges, designed for force-directed graph layouts (d3.js/force-graph).
+
+```bash
+curl 'http://127.0.0.1:8545/api/knowledge/edges?similarity_threshold=0.6&max_hdc_edges_per_node=3' | jq
+```
 
 Two types of edges appear in the response:
 
@@ -832,10 +1216,14 @@ Response:
 
 Semantic search over knowledge entries via HDC projection.
 
+```bash
+curl 'http://127.0.0.1:8545/api/knowledge/search?q=proxy+destruction+safety&k=5' | jq
+```
+
 | Query param | Default | Description |
 |-------------|---------|-------------|
 | `q` | (required) | Free-text search query |
-| `k` | `10` | Max results |
+| `k` | `10` | Max results (capped at 100) |
 | `kind` | (all) | Optional kind filter |
 
 Response:
@@ -861,9 +1249,17 @@ Response:
 }
 ```
 
+Returns HTTP 503 if HDC or knowledge subsystem is disabled.
+
 #### `GET /api/knowledge/kinds`
 
 Enumerate knowledge and pheromone kind metadata, including current entry counts and default half-lives.
+
+```bash
+curl http://127.0.0.1:8545/api/knowledge/kinds | jq
+```
+
+Response:
 
 ```json
 {
@@ -886,11 +1282,82 @@ Enumerate knowledge and pheromone kind metadata, including current entry counts 
 }
 ```
 
-### Agent topology
+---
+
+### Agent registry
+
+#### `GET /api/agents`
+
+List all registered agents with summary stats.
+
+```bash
+curl http://127.0.0.1:8545/api/agents | jq
+```
+
+Response:
+
+```json
+{
+  "agents": [
+    {
+      "id": "agent:alice",
+      "role": "researcher",
+      "registered_at": 1712390000,
+      "last_heartbeat_block": 19500000,
+      "last_heartbeat_ts": 1712399000,
+      "stats": {
+        "confirmations_given": 18,
+        "challenges_given": 2,
+        "warnings_posted": 5,
+        "total_tokens": 150000,
+        "total_cost_usd": 4.50,
+        "tasks_completed": 12
+      }
+    }
+  ],
+  "total": 5,
+  "timestamp": 1712400300
+}
+```
+
+#### `POST /api/agents`
+
+Register a new agent in the registry.
+
+```bash
+curl -X POST http://127.0.0.1:8545/api/agents \
+  -H 'Content-Type: application/json' \
+  -d '{"id": "agent:alice", "pubkey": "0xabc123", "role": "researcher"}' | jq
+```
+
+Request body:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `id` | string | yes | Unique agent identifier |
+| `pubkey` | string | no | Public key or address (stored as bytes) |
+| `role` | string | yes | Agent role (e.g. `"researcher"`, `"validator"`, `"executor"`) |
+
+Response (success):
+
+```json
+{
+  "registered": true,
+  "agent_id": "agent:alice",
+  "role": "researcher",
+  "registered_at": 1712400000
+}
+```
+
+Returns HTTP 400 if `id` or `role` is empty, HTTP 409 if the agent is already registered.
 
 #### `GET /api/agents/topology`
 
-Agent interaction graph derived from confirmation and challenge activity in the knowledge store. Useful for visualizing which agents reinforce or contest each other's contributions.
+Agent interaction graph derived from confirmation and challenge activity in the knowledge store. Returns nodes and weighted edges suitable for d3.js force-directed layouts.
+
+```bash
+curl http://127.0.0.1:8545/api/agents/topology | jq
+```
 
 Response:
 
@@ -899,7 +1366,7 @@ Response:
   "nodes": [
     {
       "id": "agent:alice",
-      "address": "0x1111...1111",
+      "address": "0x616c696365",
       "insights_posted": 24,
       "confirmations_given": 18,
       "challenges_given": 2,
@@ -924,36 +1391,121 @@ Response:
 }
 ```
 
-### Dashboard stats
+#### `GET /api/agents/{id}/trace`
 
-#### `GET /api/stats`
+Activity trace for a single agent: recent confirmations, challenges, and insight posts.
 
-Combined statistics for dashboard overview panels. One request, one response, no round trips.
+```bash
+curl 'http://127.0.0.1:8545/api/agents/agent:alice/trace?limit=20&offset=0' | jq
+```
+
+| Query param | Default | Description |
+|-------------|---------|-------------|
+| `limit` | `10` | Max trace entries to return |
+| `offset` | `0` | Pagination offset |
+
+Response:
 
 ```json
 {
-  "insights": {
-    "total": 128,
-    "active": 94,
-    "confirmed": 67,
-    "challenged": 3,
-    "decaying": 24
-  },
-  "pheromones": {
-    "total": 42,
-    "threat": 12,
-    "opportunity": 18,
-    "wisdom": 12,
-    "total_intensity": 28.6
-  },
-  "toggles": {
-    "hdc": true,
-    "knowledge": true,
-    "stigmergy": true
-  },
-  "timestamp": 1712400300
+  "agent_id": "agent:alice",
+  "trace": [
+    {
+      "type": "confirmation",
+      "entry_id": "a1b2c3d4...",
+      "timestamp": 1712399500
+    },
+    {
+      "type": "post",
+      "entry_id": "d4e5f6a7...",
+      "kind": "warning",
+      "timestamp": 1712399000
+    }
+  ],
+  "total": 42,
+  "offset": 0,
+  "limit": 20
 }
 ```
+
+Returns HTTP 404 if the agent is not found.
+
+#### `GET /api/agents/{id}/heartbeat`
+
+Latest heartbeat data for a specific agent.
+
+```bash
+curl http://127.0.0.1:8545/api/agents/agent:alice/heartbeat | jq
+```
+
+Response:
+
+```json
+{
+  "agent_id": "agent:alice",
+  "last_heartbeat_block": 19500000,
+  "last_heartbeat_ts": 1712399000,
+  "alive": true
+}
+```
+
+Returns a JSON object with `"error": "agent not found"` if the agent is not registered.
+
+#### `POST /api/agents/{id}/heartbeat`
+
+Send a heartbeat from an agent. Optionally report token usage and cost.
+
+```bash
+curl -X POST http://127.0.0.1:8545/api/agents/agent:alice/heartbeat \
+  -H 'Content-Type: application/json' \
+  -d '{"tokens_used": 5000, "cost_usd": 0.15, "tasks_completed": 1}' | jq
+```
+
+Request body:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `tokens_used` | integer | no | Tokens consumed since last heartbeat (default 0) |
+| `cost_usd` | float | no | Cost in USD since last heartbeat (default 0.0) |
+| `tasks_completed` | integer | no | Tasks completed since last heartbeat (default 0) |
+
+Response:
+
+```json
+{
+  "ok": true,
+  "agent_id": "agent:alice",
+  "timestamp": 1712400100
+}
+```
+
+Returns HTTP 404 if the agent is not registered.
+
+#### `GET /api/agents/{id}/stats`
+
+Aggregated lifetime statistics for an agent.
+
+```bash
+curl http://127.0.0.1:8545/api/agents/agent:alice/stats | jq
+```
+
+Response:
+
+```json
+{
+  "agent_id": "agent:alice",
+  "confirmations_given": 18,
+  "challenges_given": 2,
+  "warnings_posted": 5,
+  "total_tokens": 150000,
+  "total_cost_usd": 4.50,
+  "tasks_completed": 12
+}
+```
+
+Returns a default zeroed stats object if the agent is not found.
+
+---
 
 ### WebSocket streaming (requires `roko` feature)
 
@@ -961,22 +1513,33 @@ Combined statistics for dashboard overview panels. One request, one response, no
 
 Live event stream from the pheromone and insight buses. Connect via any WebSocket client.
 
-| Query param | Default | Description |
-|-------------|---------|-------------|
-| `pheromones` | `true` | Subscribe to pheromone deposits |
-| `insights` | `true` | Subscribe to insight lifecycle events |
-
 ```bash
 # Subscribe to both channels
 websocat ws://127.0.0.1:8545/api/ws
 
 # Pheromones only
 websocat 'ws://127.0.0.1:8545/api/ws?insights=false'
+
+# Insights only
+websocat 'ws://127.0.0.1:8545/api/ws?pheromones=false'
 ```
 
-Wire format is JSON text frames with a `channel` field:
+| Query param | Default | Description |
+|-------------|---------|-------------|
+| `pheromones` | `true` | Subscribe to pheromone deposits |
+| `insights` | `true` | Subscribe to insight lifecycle events |
 
-**Pheromone event:**
+#### Wire format
+
+Each WebSocket text frame contains a JSON object with a `"channel"` field indicating the event source.
+
+**Connection acknowledgment** (sent immediately on connect):
+
+```json
+{"type": "connected", "pheromones": true, "insights": true}
+```
+
+**Pheromone event** (emitted on deposit):
 
 ```json
 {
@@ -990,7 +1553,7 @@ Wire format is JSON text frames with a `channel` field:
 }
 ```
 
-**Insight event:**
+**Insight event** (emitted on lifecycle transitions):
 
 ```json
 {
@@ -1006,11 +1569,7 @@ Wire format is JSON text frames with a `channel` field:
 
 Insight event types: `posted`, `stateTransition`, `confirmed`, `challenged`, `decayed`.
 
-**Control frames:**
-
-```json
-{"type": "connected", "pheromones": true, "insights": true}
-```
+**Lag warning** (client fell behind the broadcast buffer):
 
 ```json
 {"type": "lagged", "channel": "pheromone", "missed": 12}

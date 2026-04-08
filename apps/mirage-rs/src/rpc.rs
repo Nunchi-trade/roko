@@ -139,6 +139,8 @@ pub async fn start_rpc_server_with_chain(
     let api_router = {
         let api_state = crate::http_api::ApiState {
             chain: chain.clone(),
+            projection_cache: crate::http_api::ProjectionCache::new(4096),
+            started_at: std::time::Instant::now(),
             #[cfg(feature = "roko")]
             subs: chain_subs.clone(),
         };

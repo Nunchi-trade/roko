@@ -15,6 +15,7 @@
 //! ```
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::{
     extract::{
@@ -28,6 +29,11 @@ use serde::Deserialize;
 use super::ApiState;
 use crate::chain_rpc::{insight_event_to_json, pheromone_event_to_json};
 use crate::roko_bridge::{BackpressurePolicy, BroadcastSink, InsightEvent, PheromoneEvent};
+
+/// Interval between server-initiated pings.
+const PING_INTERVAL: Duration = Duration::from_secs(30);
+/// If no pong is received within this duration, the connection is considered dead.
+const PONG_TIMEOUT: Duration = Duration::from_secs(90);
 
 #[derive(Debug, Deserialize)]
 pub struct WsParams {
@@ -113,6 +119,11 @@ async fn handle_ws(mut socket: WebSocket, state: ApiState, params: WsParams) {
             .into(),
         ))
         .await;
+
+    // Heartbeat state.
+    let mut ping_interval = tokio::time::interval(PING_INTERVAL);
+    ping_interval.tick().await; // consume the immediate first tick
+    let mut last_pong = Instant::now();
 
     // Forward events from the buses to the WebSocket.
     loop {
@@ -209,12 +220,26 @@ async fn handle_ws(mut socket: WebSocket, state: ApiState, params: WsParams) {
                 }
             }
 
+            // Server-initiated ping / dead-connection check
+            _ = ping_interval.tick() => {
+                if last_pong.elapsed() > PONG_TIMEOUT {
+                    tracing::debug!("WebSocket client failed pong timeout, closing");
+                    break;
+                }
+                if socket.send(Message::Ping(vec![].into())).await.is_err() {
+                    break;
+                }
+            }
+
             // Client message or disconnect
             msg = socket.recv() => {
                 match msg {
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(Message::Ping(data))) => {
                         let _ = socket.send(Message::Pong(data)).await;
+                    }
+                    Some(Ok(Message::Pong(_))) => {
+                        last_pong = Instant::now();
                     }
                     _ => {} // ignore other messages
                 }

@@ -2,7 +2,14 @@
 //!
 //! Populates a running mirage-rs instance with ~50 `InsightEntry`s and 20
 //! pheromones via JSON-RPC, so the browser demo (§37.18) and the chain-watcher
-//! example have realistic `DeFi` content to slice against.
+//! example have realistic `DeFi` content to slice against. Then exercises every
+//! HTTP REST API endpoint as a verification pass.
+//!
+//! # Phases
+//!
+//! 1. **JSON-RPC seeding** — posts insights + deposits pheromones via JSON-RPC.
+//! 2. **REST API verification** — exercises every REST endpoint and prints a
+//!    verification report showing which endpoints responded successfully.
 //!
 //! # Prerequisites
 //!
@@ -435,7 +442,7 @@ async fn main() -> ExitCode {
         }
     }
 
-    println!("seed_chain_fixtures: done.");
+    println!("seed_chain_fixtures: phase 1 (JSON-RPC seeding) done.");
     println!(
         "  insights:   {insights_ok} accepted / {insights_err} failed  (of {})",
         DEMO_INSIGHTS.len()
@@ -444,12 +451,324 @@ async fn main() -> ExitCode {
         "  pheromones: {pheromones_ok} deposited / {pheromones_err} failed (of {})",
         DEMO_PHEROMONES.len()
     );
+    println!();
 
-    if insights_err > 0 || pheromones_err > 0 {
+    // -----------------------------------------------------------------------
+    // Phase 2: Exercise every HTTP REST API endpoint as a verification pass.
+    // -----------------------------------------------------------------------
+    println!("seed_chain_fixtures: phase 2 — REST API verification");
+    println!("  base url: {rpc_url}/api");
+    println!();
+
+    let base = format!("{rpc_url}/api");
+    let rest_errors = exercise_rest_api(&client, &base).await;
+
+    println!();
+    if insights_err > 0 || pheromones_err > 0 || rest_errors > 0 {
+        eprintln!(
+            "seed_chain_fixtures: completed with errors (rpc={}, rest={})",
+            insights_err + pheromones_err,
+            rest_errors
+        );
         ExitCode::from(1)
     } else {
+        println!("seed_chain_fixtures: all phases completed successfully.");
         ExitCode::SUCCESS
     }
+}
+
+/// Exercise every REST API endpoint and print a verification report.
+/// Returns the number of endpoint failures.
+async fn exercise_rest_api(client: &reqwest::Client, base: &str) -> usize {
+    let mut pass = 0usize;
+    let mut fail = 0usize;
+
+    // Helper closure results are collected into these counters.
+    macro_rules! check {
+        ($label:expr, $result:expr) => {
+            match $result {
+                Ok(body) => {
+                    println!("  [PASS] {}", $label);
+                    let _ = body; // suppress unused warning
+                    pass += 1;
+                }
+                Err(e) => {
+                    eprintln!("  [FAIL] {}: {}", $label, e);
+                    fail += 1;
+                }
+            }
+        };
+    }
+
+    // --- Health & Stats ---------------------------------------------------
+
+    check!(
+        "GET /api/health",
+        rest_get(client, &format!("{base}/health")).await
+    );
+
+    check!(
+        "GET /api/stats",
+        rest_get(client, &format!("{base}/stats")).await
+    );
+
+    // --- Pheromone Field --------------------------------------------------
+
+    // Deposit a pheromone via REST (distinct from JSON-RPC seeding above).
+    check!(
+        "POST /api/pheromones (deposit)",
+        rest_post(
+            client,
+            &format!("{base}/pheromones"),
+            json!({
+                "kind": "threat",
+                "content": "REST API test: flash loan detected on compound fork",
+                "intensity": 0.95,
+                "half_life_secs": 7200
+            }),
+        )
+        .await
+    );
+
+    // List pheromones.
+    let pheromone_list = rest_get(
+        client,
+        &format!("{base}/pheromones?sort=intensity&order=desc&limit=5"),
+    )
+    .await;
+    check!("GET /api/pheromones (list)", pheromone_list.as_ref().map(|v| v.clone()).map_err(|e| e.clone()));
+
+    // Extract a pheromone ID for the projection endpoint.
+    let pheromone_id: Option<u64> = pheromone_list
+        .ok()
+        .and_then(|v| v.get("pheromones")?.as_array()?.first()?.get("id")?.as_u64());
+
+    check!(
+        "GET /api/pheromones/summary",
+        rest_get(client, &format!("{base}/pheromones/summary")).await
+    );
+
+    check!(
+        "POST /api/pheromones/query (semantic search)",
+        rest_post(
+            client,
+            &format!("{base}/pheromones/query"),
+            json!({"query": "flash loan attack", "k": 5}),
+        )
+        .await
+    );
+
+    check!(
+        "GET /api/pheromones/heatmap",
+        rest_get(
+            client,
+            &format!("{base}/pheromones/heatmap?bucket_seconds=3600"),
+        )
+        .await
+    );
+
+    if let Some(pid) = pheromone_id {
+        check!(
+            &format!("GET /api/pheromones/{pid}/projection"),
+            rest_get(
+                client,
+                &format!("{base}/pheromones/{pid}/projection?duration_secs=3600&points=10"),
+            )
+            .await
+        );
+    } else {
+        eprintln!("  [SKIP] GET /api/pheromones/{{id}}/projection — no pheromone ID available");
+    }
+
+    // --- Knowledge Graph --------------------------------------------------
+
+    // Post an insight via REST.
+    let post_insight_resp = rest_post(
+        client,
+        &format!("{base}/knowledge/entries"),
+        json!({
+            "kind": "warning",
+            "content": "REST API test: never use delegatecall to untrusted contracts",
+            "author": "rest-verifier",
+            "enabled_by": [],
+            "stake_wei": 0
+        }),
+    )
+    .await;
+    check!("POST /api/knowledge/entries (post insight)", post_insight_resp.as_ref().map(|v| v.clone()).map_err(|e| e.clone()));
+
+    // Extract the insight ID for confirm/challenge.
+    let insight_id: Option<String> = post_insight_resp
+        .ok()
+        .and_then(|v| v.get("id")?.as_str().map(String::from));
+
+    // List entries.
+    check!(
+        "GET /api/knowledge/entries (list)",
+        rest_get(
+            client,
+            &format!("{base}/knowledge/entries?sort=weight&order=desc&limit=5"),
+        )
+        .await
+    );
+
+    // Confirm the insight we just posted.
+    if let Some(ref iid) = insight_id {
+        check!(
+            &format!("POST /api/knowledge/entries/{iid}/confirm"),
+            rest_post(
+                client,
+                &format!("{base}/knowledge/entries/{iid}/confirm"),
+                json!({"confirmer": "rest-verifier-bob", "stake_wei": 0}),
+            )
+            .await
+        );
+
+        check!(
+            &format!("POST /api/knowledge/entries/{iid}/challenge"),
+            rest_post(
+                client,
+                &format!("{base}/knowledge/entries/{iid}/challenge"),
+                json!({"challenger": "rest-verifier-carol", "stake_wei": 0}),
+            )
+            .await
+        );
+    } else {
+        eprintln!("  [SKIP] POST /api/knowledge/entries/{{id}}/confirm — no insight ID available");
+        eprintln!(
+            "  [SKIP] POST /api/knowledge/entries/{{id}}/challenge — no insight ID available"
+        );
+    }
+
+    // Trigger decay sweep.
+    check!(
+        "POST /api/knowledge/decay",
+        rest_post(
+            client,
+            &format!("{base}/knowledge/decay"),
+            json!({}),
+        )
+        .await
+    );
+
+    // Edges.
+    check!(
+        "GET /api/knowledge/edges",
+        rest_get(
+            client,
+            &format!("{base}/knowledge/edges?similarity_threshold=0.3"),
+        )
+        .await
+    );
+
+    // Semantic search.
+    check!(
+        "GET /api/knowledge/search",
+        rest_get(
+            client,
+            &format!("{base}/knowledge/search?q=delegatecall+proxy&k=5"),
+        )
+        .await
+    );
+
+    // Kinds.
+    check!(
+        "GET /api/knowledge/kinds",
+        rest_get(client, &format!("{base}/knowledge/kinds")).await
+    );
+
+    // --- Agent Registry ---------------------------------------------------
+
+    // Register agents via REST.
+    for (agent_id, role) in &[
+        ("rest-agent-alpha", "researcher"),
+        ("rest-agent-beta", "validator"),
+        ("rest-agent-gamma", "executor"),
+    ] {
+        check!(
+            &format!("POST /api/agents (register {agent_id})"),
+            rest_post(
+                client,
+                &format!("{base}/agents"),
+                json!({
+                    "id": agent_id,
+                    "pubkey": format!("0x{agent_id}"),
+                    "role": role,
+                }),
+            )
+            .await
+        );
+    }
+
+    // List agents.
+    check!(
+        "GET /api/agents (list)",
+        rest_get(client, &format!("{base}/agents")).await
+    );
+
+    // Heartbeat for each registered agent.
+    for (agent_id, tokens, cost, tasks) in &[
+        ("rest-agent-alpha", 5000u64, 0.15f64, 1u64),
+        ("rest-agent-beta", 3000, 0.09, 2),
+        ("rest-agent-gamma", 8000, 0.24, 3),
+    ] {
+        check!(
+            &format!("POST /api/agents/{agent_id}/heartbeat"),
+            rest_post(
+                client,
+                &format!("{base}/agents/{agent_id}/heartbeat"),
+                json!({
+                    "tokens_used": tokens,
+                    "cost_usd": cost,
+                    "tasks_completed": tasks,
+                }),
+            )
+            .await
+        );
+    }
+
+    // GET heartbeat for one agent.
+    check!(
+        "GET /api/agents/rest-agent-alpha/heartbeat",
+        rest_get(
+            client,
+            &format!("{base}/agents/rest-agent-alpha/heartbeat"),
+        )
+        .await
+    );
+
+    // GET stats for one agent.
+    check!(
+        "GET /api/agents/rest-agent-alpha/stats",
+        rest_get(
+            client,
+            &format!("{base}/agents/rest-agent-alpha/stats"),
+        )
+        .await
+    );
+
+    // GET trace for one agent.
+    check!(
+        "GET /api/agents/rest-agent-alpha/trace",
+        rest_get(
+            client,
+            &format!("{base}/agents/rest-agent-alpha/trace?limit=10"),
+        )
+        .await
+    );
+
+    // Topology.
+    check!(
+        "GET /api/agents/topology",
+        rest_get(client, &format!("{base}/agents/topology")).await
+    );
+
+    // --- Summary ----------------------------------------------------------
+
+    println!();
+    println!("  REST API verification: {pass} passed, {fail} failed (of {})", pass + fail);
+
+    fail
 }
 
 fn parse_rpc_url() -> String {
@@ -492,4 +811,53 @@ async fn call_rpc(
         return Err(format!("rpc error: {err}"));
     }
     Ok(body.get("result").cloned().unwrap_or(Value::Null))
+}
+
+// ---------------------------------------------------------------------------
+// REST API helpers
+// ---------------------------------------------------------------------------
+
+/// Perform a GET request to a REST endpoint, returning the parsed JSON body.
+async fn rest_get(client: &reqwest::Client, url: &str) -> Result<Value, String> {
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("http error: {e}"))?;
+    let status = resp.status();
+    let body: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("decode error: {e}"))?;
+    if !status.is_success() {
+        let msg = body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
+        return Err(format!("HTTP {}: {}", status.as_u16(), msg));
+    }
+    Ok(body)
+}
+
+/// Perform a POST request to a REST endpoint with a JSON body.
+async fn rest_post(client: &reqwest::Client, url: &str, body: Value) -> Result<Value, String> {
+    let resp = client
+        .post(url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("http error: {e}"))?;
+    let status = resp.status();
+    let resp_body: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("decode error: {e}"))?;
+    if !status.is_success() {
+        let msg = resp_body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
+        return Err(format!("HTTP {}: {}", status.as_u16(), msg));
+    }
+    Ok(resp_body)
 }

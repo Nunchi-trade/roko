@@ -2,12 +2,13 @@
 
 use axum::{
     Json,
-    extract::{Query, State},
+    extract::{Path, Query, State},
+    response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
 
-use super::{ApiState, now_secs};
-use crate::chain::{KnowledgeKind, KnowledgeState, PheromoneKind, projection::project_tokens};
+use super::{ApiError, ApiState, MAX_K, MAX_LIMIT, PaginatedResponse, now_secs, with_cache_control};
+use crate::chain::{KnowledgeKind, KnowledgeState, PheromoneKind, insight::InsightId};
 
 // ---------------------------------------------------------------------------
 // GET /api/knowledge/entries
@@ -52,22 +53,14 @@ pub struct EntryItem {
     pub stake_wei: String,
 }
 
-#[derive(Serialize)]
-pub struct EntryListResponse {
-    pub entries: Vec<EntryItem>,
-    pub total: usize,
-    pub offset: usize,
-    pub limit: usize,
-    pub timestamp: u64,
-}
-
 pub async fn list_entries(
     State(state): State<ApiState>,
     Query(filter): Query<EntryFilter>,
-) -> Json<EntryListResponse> {
+) -> impl IntoResponse {
     let now = now_secs();
     let chain = state.chain.read();
 
+    let limit = filter.limit.min(MAX_LIMIT);
     let kind_filter = filter.kind.as_deref().and_then(parse_knowledge_kind);
     let state_filter = filter.state.as_deref().and_then(parse_knowledge_state);
     let min_weight = filter.min_weight.unwrap_or(0.0);
@@ -123,16 +116,10 @@ pub async fn list_entries(
 
     let total = items.len();
     let offset = filter.offset;
-    let limit = filter.limit;
     let items: Vec<_> = items.into_iter().skip(offset).take(limit).collect();
+    let _ = now; // used by filter computations above
 
-    Json(EntryListResponse {
-        entries: items,
-        total,
-        offset,
-        limit,
-        timestamp: now,
-    })
+    with_cache_control(PaginatedResponse::new(items, total, offset, limit), 2)
 }
 
 // ---------------------------------------------------------------------------
@@ -161,17 +148,10 @@ pub struct Edge {
     pub edge_type: String,
 }
 
-#[derive(Serialize)]
-pub struct EdgeListResponse {
-    pub edges: Vec<Edge>,
-    pub node_count: usize,
-    pub timestamp: u64,
-}
-
 pub async fn list_edges(
     State(state): State<ApiState>,
     Query(filter): Query<EdgeFilter>,
-) -> Json<EdgeListResponse> {
+) -> impl IntoResponse {
     let now = now_secs();
     let chain = state.chain.read();
     let threshold = filter.similarity_threshold.unwrap_or(0.5);
@@ -180,7 +160,7 @@ pub async fn list_edges(
     let include_hdc = filter.include_hdc.unwrap_or(true);
 
     let entries: Vec<_> = chain.knowledge.entries().collect();
-    let node_count = entries.len();
+    let _node_count = entries.len();
     let mut edges = Vec::new();
 
     // Explicit dependency edges from enabled_by.
@@ -223,11 +203,9 @@ pub async fn list_edges(
         }
     }
 
-    Json(EdgeListResponse {
-        edges,
-        node_count,
-        timestamp: now,
-    })
+    let total = edges.len();
+    let _ = now;
+    with_cache_control(PaginatedResponse::new(edges, total, 0, total), 2)
 }
 
 // ---------------------------------------------------------------------------
@@ -275,9 +253,10 @@ pub async fn search_knowledge(
     Query(params): Query<SearchParams>,
 ) -> Json<SearchResponse> {
     let now = now_secs();
-    let vector = project_tokens(&params.q);
+    let vector = state.projection_cache.get_or_insert(&params.q);
     let chain = state.chain.read();
-    let hits = chain.knowledge.search(&vector, params.k);
+    let k = params.k.min(MAX_K);
+    let hits = chain.knowledge.search(&vector, k);
 
     let kind_filter = params.kind.as_deref().and_then(parse_knowledge_kind);
 
@@ -421,5 +400,299 @@ fn parse_knowledge_state(s: &str) -> Option<KnowledgeState> {
         "pruned" => Some(KnowledgeState::Pruned),
         "stale" => Some(KnowledgeState::Stale),
         _ => None,
+    }
+}
+
+/// Parses a 32-hex-char insight id, optionally prefixed with "insight:".
+fn parse_insight_id(s: &str) -> Result<InsightId, ApiError> {
+    let trimmed = s.strip_prefix("insight:").unwrap_or(s);
+    if trimmed.len() != 32 {
+        return Err(ApiError {
+            error: format!("insight id must be 32 hex chars (got {})", trimmed.len()),
+            code: 400,
+        });
+    }
+    let mut bytes = [0u8; 16];
+    for i in 0..16 {
+        let hi = hex_nibble(trimmed.as_bytes()[i * 2])?;
+        let lo = hex_nibble(trimmed.as_bytes()[i * 2 + 1])?;
+        bytes[i] = (hi << 4) | lo;
+    }
+    Ok(InsightId(bytes))
+}
+
+fn hex_nibble(byte: u8) -> Result<u8, ApiError> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(ApiError {
+            error: "invalid hex character in insight id".into(),
+            code: 400,
+        }),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/knowledge/entries — post a new insight
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct PostInsightRequest {
+    pub kind: String,
+    pub content: String,
+    #[serde(default)]
+    pub author: String,
+    #[serde(default)]
+    pub enabled_by: Vec<String>,
+    #[serde(default)]
+    pub stake_wei: u128,
+}
+
+/// `POST /api/knowledge/entries` — post a new insight entry.
+pub async fn post_insight(
+    State(state): State<ApiState>,
+    Json(req): Json<PostInsightRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let kind = parse_knowledge_kind(&req.kind).ok_or(ApiError {
+        error: format!("unknown knowledge kind: {}", req.kind),
+        code: 400,
+    })?;
+    if req.content.is_empty() {
+        return Err(ApiError {
+            error: "content must not be empty".into(),
+            code: 400,
+        });
+    }
+    let enabled_by: Result<Vec<InsightId>, _> =
+        req.enabled_by.iter().map(|s| parse_insight_id(s)).collect();
+    let enabled_by = enabled_by?;
+    let vector = state.projection_cache.get_or_insert(&req.content);
+    let author_bytes = req.author.into_bytes();
+    let now = now_secs();
+
+    let mut chain = state.chain.write();
+    if !chain.toggles.knowledge {
+        return Err(ApiError {
+            error: "knowledge subsystem is disabled".into(),
+            code: 503,
+        });
+    }
+
+    #[cfg(feature = "roko")]
+    let broadcast_author = author_bytes.clone();
+    #[cfg(feature = "roko")]
+    let broadcast_content = req.content.clone();
+
+    let outcome = chain.knowledge.post(
+        author_bytes,
+        kind,
+        req.content,
+        vector,
+        enabled_by,
+        now,
+        req.stake_wei,
+    );
+
+    let (outcome_str, id_hex, similarity) = match &outcome {
+        crate::chain::knowledge::PostOutcome::Accepted { id } => {
+            ("accepted", id.to_hex(), None)
+        }
+        crate::chain::knowledge::PostOutcome::Duplicate {
+            existing_id,
+            similarity,
+        } => ("duplicate", existing_id.to_hex(), Some(*similarity)),
+        crate::chain::knowledge::PostOutcome::ExactMatch { id } => {
+            ("exact_match", id.to_hex(), None)
+        }
+    };
+
+    #[cfg(feature = "roko")]
+    if matches!(outcome, crate::chain::knowledge::PostOutcome::Accepted { .. }) {
+        if let Some(bus) = &chain.insight_bus {
+            if let Ok(event_id) = parse_insight_id(&id_hex) {
+                bus.broadcast(crate::roko_bridge::InsightEvent::Posted {
+                    id: event_id,
+                    kind,
+                    content: broadcast_content,
+                    author: broadcast_author,
+                    created_at: now,
+                });
+            }
+        }
+    }
+
+    let mut resp = serde_json::json!({
+        "outcome": outcome_str,
+        "id": id_hex,
+    });
+    if let Some(sim) = similarity {
+        resp["similarity"] = serde_json::json!(sim);
+    }
+    Ok(Json(resp))
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/knowledge/entries/:id/confirm
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct ConfirmRequest {
+    pub confirmer: String,
+}
+
+/// `POST /api/knowledge/entries/:id/confirm` — confirm an insight entry.
+pub async fn confirm_entry(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    Json(req): Json<ConfirmRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let insight_id = parse_insight_id(&id)?;
+    let confirmer_bytes = req.confirmer.into_bytes();
+
+    let mut chain = state.chain.write();
+    if !chain.toggles.knowledge {
+        return Err(ApiError {
+            error: "knowledge subsystem is disabled".into(),
+            code: 503,
+        });
+    }
+
+    #[cfg(feature = "roko")]
+    let broadcast_confirmer = confirmer_bytes.clone();
+
+    chain
+        .knowledge
+        .confirm(insight_id, confirmer_bytes)
+        .map_err(knowledge_error_to_api)?;
+
+    #[cfg(feature = "roko")]
+    if let Some(bus) = &chain.insight_bus {
+        bus.broadcast(crate::roko_bridge::InsightEvent::Confirmed {
+            id: insight_id,
+            by: broadcast_confirmer,
+            at: now_secs(),
+        });
+    }
+
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/knowledge/entries/:id/challenge
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct ChallengeRequest {
+    pub challenger: String,
+}
+
+/// `POST /api/knowledge/entries/:id/challenge` — challenge an insight entry.
+pub async fn challenge_entry(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    Json(req): Json<ChallengeRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let insight_id = parse_insight_id(&id)?;
+    let challenger_bytes = req.challenger.into_bytes();
+
+    let mut chain = state.chain.write();
+    if !chain.toggles.knowledge {
+        return Err(ApiError {
+            error: "knowledge subsystem is disabled".into(),
+            code: 503,
+        });
+    }
+
+    #[cfg(feature = "roko")]
+    let broadcast_challenger = challenger_bytes.clone();
+
+    chain
+        .knowledge
+        .challenge(insight_id, challenger_bytes)
+        .map_err(knowledge_error_to_api)?;
+
+    #[cfg(feature = "roko")]
+    if let Some(bus) = &chain.insight_bus {
+        bus.broadcast(crate::roko_bridge::InsightEvent::Challenged {
+            id: insight_id,
+            by: broadcast_challenger,
+            at: now_secs(),
+        });
+    }
+
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/knowledge/decay — trigger decay sweep
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct DecayRequest {
+    pub now_secs: Option<u64>,
+}
+
+/// `POST /api/knowledge/decay` — trigger a decay sweep on the knowledge store.
+pub async fn trigger_decay(
+    State(state): State<ApiState>,
+    Json(req): Json<DecayRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let now = req.now_secs.unwrap_or_else(now_secs);
+
+    let mut chain = state.chain.write();
+    if !chain.toggles.knowledge {
+        return Err(ApiError {
+            error: "knowledge subsystem is disabled".into(),
+            code: 503,
+        });
+    }
+
+    let before = chain
+        .knowledge
+        .entries()
+        .filter(|e| {
+            !matches!(
+                e.state,
+                KnowledgeState::Pruned | KnowledgeState::Stale
+            )
+        })
+        .count();
+
+    chain.knowledge.apply_decay(now);
+
+    let after = chain
+        .knowledge
+        .entries()
+        .filter(|e| {
+            !matches!(
+                e.state,
+                KnowledgeState::Pruned | KnowledgeState::Stale
+            )
+        })
+        .count();
+
+    let pruned = before.saturating_sub(after);
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "pruned": pruned,
+        "remaining": after,
+        "timestamp": now,
+    })))
+}
+
+fn knowledge_error_to_api(e: crate::chain::KnowledgeError) -> ApiError {
+    match e {
+        crate::chain::KnowledgeError::NotFound(_) => ApiError {
+            error: e.to_string(),
+            code: 404,
+        },
+        crate::chain::KnowledgeError::DuplicateConfirmation(_)
+        | crate::chain::KnowledgeError::DuplicateChallenge(_)
+        | crate::chain::KnowledgeError::Immutable(_, _) => ApiError {
+            error: e.to_string(),
+            code: 409,
+        },
     }
 }
