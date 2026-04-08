@@ -6,7 +6,7 @@ import { state } from './state.js';
 import { rpc, api, apiPost, logReq, logAgent, toast, onRenderLog, onRenderAgent } from './api.js';
 import { pollBlock, pollChain, pollEntries, pollEdges, pollKinds, pollPheroSummary, pollHeatmap, pollTopology, pollAgentRegistry, pollLeaderboard, pollTasks } from './polling.js';
 import { sparkDraw, drawGrowth, drawHeatmap, metricTick, renderBlocks, renderAgent, renderLog } from './charts.js';
-import { drawPheromones, depositPheromoneParticle, resetPheroSize } from './pheromones.js';
+import { drawPheromones, depositPheromoneParticle, resetPheroSize, handlePheroMouseMove, handlePheroClick, handlePheroMouseLeave, handlePheroFilterClick } from './pheromones.js';
 import { drawGraph, canvasToNode, openDetail, renderDetail, addInsightNode, graphNodes, graphEdges, hdcHighlights, resetGraphSize } from './graph.js';
 import { drawTopology, resetTopoSize } from './topology.js';
 import { toggleWs } from './ws.js';
@@ -38,8 +38,11 @@ async function connect() {
       var statusRes = await rpc('mirage_status', []);
       var s = statusRes.result;
       if (s) {
-        document.getElementById('fork-chip').innerHTML = '<span class="dot"></span>FORK: ' + (s.fork_block || '?').toLocaleString();
-        if (s.fork_url) document.getElementById('fork-chip').title = s.fork_url;
+        var fb = s.forkBlock || s.fork_block || 0;
+        document.getElementById('fork-chip').innerHTML = '<span class="dot"></span>FORK: ' + (fb ? fb.toLocaleString() : '?');
+        document.getElementById('fork-chip').className = fb ? 'chip ok' : 'chip';
+        var fu = s.forkUrl || s.fork_url;
+        if (fu) document.getElementById('fork-chip').title = fu;
       }
     } catch(e2) {}
     // Initial data fetch
@@ -143,6 +146,13 @@ topoCanvas.addEventListener('mousemove', function(ev) {
     topoCanvas.style.cursor = 'default';
   }
 });
+
+/* ---------- Pheromone canvas event wiring ---------- */
+var pheroCanvas = document.getElementById('phero-canvas');
+pheroCanvas.addEventListener('mousemove', handlePheroMouseMove);
+pheroCanvas.addEventListener('click', handlePheroClick);
+pheroCanvas.addEventListener('mouseleave', handlePheroMouseLeave);
+document.getElementById('phero-filters').addEventListener('click', handlePheroFilterClick);
 
 /* ---------- UI wiring ---------- */
 document.getElementById('btn-reconnect').onclick = function() { state.rpcUrl = document.getElementById('rpc-url').value.trim(); connect(); };

@@ -73,7 +73,7 @@ export async function pollChain() {
       'threat opportunity wisdom convergence pattern',
     ];
     var sq = searchQueries[state.rpc.total % searchQueries.length];
-    var searchRes = await api('/knowledge/search?q=' + encodeURIComponent(sq) + '&k=30');
+    var searchRes = await api('/knowledge/search?q=' + encodeURIComponent(sq) + '&k=60');
     var searchData = searchRes.data;
     if (searchData && searchData.results) {
       var totalConf = 0, totalChall = 0;
@@ -174,7 +174,7 @@ export async function pollChain() {
 /* ---------- Poll knowledge entries via REST ---------- */
 export async function pollEntries() {
   try {
-    var res = await api('/knowledge/entries?limit=200&sort=created_at&order=desc');
+    var res = await api('/knowledge/entries?limit=400&sort=created_at&order=desc');
     var data = res.data;
     // Handle PaginatedResponse envelope: {items:[...], total, offset, limit, has_more}
     var entries = (data && data.items) || (data && data.entries) || [];
@@ -313,8 +313,8 @@ export async function pollTopology() {
         confirmationsGiven: n.confirmations_given || 0,
         challengesGiven: n.challenges_given || 0,
         totalWeight: n.total_weight || 0,
-        x: old ? old.x : w/2 + (Math.random()-0.5)*w*0.6,
-        y: old ? old.y : h/2 + (Math.random()-0.5)*h*0.6,
+        x: old ? old.x : w/2 + (Math.random()-0.5)*w*0.85,
+        y: old ? old.y : h/2 + (Math.random()-0.5)*h*0.85,
         vx: old ? old.vx : 0,
         vy: old ? old.vy : 0,
       });
@@ -370,6 +370,71 @@ export async function pollKinds() {
   } catch (e) { /* ignore */ }
 }
 
+/* ---------- Trace expand/collapse for agent registry ---------- */
+function toggleTraceRow(evt) {
+  var btn = evt.currentTarget;
+  var agentId = btn.dataset.agentId;
+  var tbody = document.getElementById('agent-reg-tbody');
+  var parentRow = btn.closest('tr');
+  var nextRow = parentRow.nextElementSibling;
+  if (nextRow && nextRow.classList.contains('trace-detail-row') && nextRow.dataset.traceFor === agentId) {
+    // Toggle visibility
+    if (nextRow.style.display === 'none') {
+      nextRow.style.display = '';
+      btn.textContent = 'HIDE';
+      fetchAndRenderTraces(agentId, nextRow);
+    } else {
+      nextRow.style.display = 'none';
+      btn.textContent = 'VIEW';
+    }
+    return;
+  }
+  // Create a new trace detail row
+  var tr = document.createElement('tr');
+  tr.className = 'trace-detail-row';
+  tr.dataset.traceFor = agentId;
+  var td = document.createElement('td');
+  td.colSpan = 9;
+  td.style.cssText = 'padding:8px 12px;background:rgba(255,255,255,0.02);border-left:2px solid var(--accent)';
+  td.innerHTML = '<span style="color:var(--text-faint)">loading traces…</span>';
+  tr.appendChild(td);
+  parentRow.after(tr);
+  btn.textContent = 'HIDE';
+  fetchAndRenderTraces(agentId, tr);
+}
+
+async function fetchAndRenderTraces(agentId, trRow) {
+  try {
+    var res = await api('/agents/' + encodeURIComponent(agentId) + '/trace?limit=10&offset=0');
+    var data = res.data;
+    var traces = (data && data.items) || [];
+    var td = trRow.children[0];
+    if (traces.length === 0) {
+      td.innerHTML = '<span style="color:var(--text-faint)">no traces recorded</span>';
+      return;
+    }
+    var phaseColors = { retrieve: 'var(--cyan)', reason: 'var(--yellow)', act: 'var(--green)', verify: 'var(--accent-bright)' };
+    var html = '<div style="font-size:12px;font-family:monospace;max-height:200px;overflow-y:auto">';
+    html += '<table style="width:100%;border-collapse:collapse"><thead><tr style="color:var(--text-dim);font-size:11px"><th style="text-align:left;padding:2px 6px">Cycle</th><th style="text-align:left;padding:2px 6px">Phase</th><th style="text-align:left;padding:2px 6px">Reads</th><th style="text-align:left;padding:2px 6px">Action</th><th style="text-align:left;padding:2px 6px">Reasoning</th></tr></thead><tbody>';
+    for (var i = traces.length - 1; i >= 0; i--) {
+      var t = traces[i];
+      var phase = t.phase || '?';
+      var color = phaseColors[phase] || 'var(--text)';
+      html += '<tr style="border-top:1px solid rgba(255,255,255,0.05)">';
+      html += '<td style="padding:3px 6px;color:var(--text-dim)">' + (t.cycle || 0) + '</td>';
+      html += '<td style="padding:3px 6px;color:' + color + ';font-weight:600;text-transform:uppercase">' + phase + '</td>';
+      html += '<td style="padding:3px 6px;color:var(--text-dim);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + ((t.reads || []).join(', ') || '—') + '</td>';
+      html += '<td style="padding:3px 6px;color:var(--text)">' + (t.action || '—') + '</td>';
+      html += '<td style="padding:3px 6px;color:var(--text-dim);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (t.reasoning || '—') + '</td>';
+      html += '</tr>';
+    }
+    html += '</tbody></table></div>';
+    td.innerHTML = html;
+  } catch (e) {
+    trRow.children[0].innerHTML = '<span style="color:var(--red)">failed to load traces</span>';
+  }
+}
+
 /* ---------- Poll agent registry via REST (diff-update) ---------- */
 var agentRegHash = '';
 export async function pollAgentRegistry() {
@@ -400,37 +465,82 @@ export async function pollAgentRegistry() {
     var tbody = document.getElementById('agent-reg-tbody');
     if (!tbody) return;
 
-    // Ensure correct number of rows
-    while (tbody.children.length > agents.length) tbody.removeChild(tbody.lastChild);
-    while (tbody.children.length < agents.length) {
-      var tr = document.createElement('tr');
-      for (var c = 0; c < 8; c++) tr.appendChild(document.createElement('td'));
-      tbody.appendChild(tr);
+    // Clear placeholder row (has colspan, not 9 separate tds)
+    if (tbody.children.length > 0 && tbody.children[0].children.length !== 9) {
+      tbody.innerHTML = '';
     }
+
+    // Build a set of existing agent rows (excluding trace-detail rows)
+    var existingRows = {};
+    for (var ei = 0; ei < tbody.children.length; ei++) {
+      var erow = tbody.children[ei];
+      if (erow.dataset && erow.dataset.agentId) existingRows[erow.dataset.agentId] = erow;
+    }
+    // Remove rows for agents no longer present, and trace rows
+    for (var ri = tbody.children.length - 1; ri >= 0; ri--) {
+      var rr = tbody.children[ri];
+      if (rr.classList.contains('trace-detail-row')) {
+        // keep if its agent still exists
+        var parentId = rr.dataset.traceFor;
+        if (!agents.find(function(x) { return (x.id || x.agent_id) === parentId; })) {
+          tbody.removeChild(rr);
+        }
+        continue;
+      }
+      var rowAgentId = rr.dataset && rr.dataset.agentId;
+      if (rowAgentId && !agents.find(function(x) { return (x.id || x.agent_id) === rowAgentId; })) {
+        // also remove its trace row if any
+        if (rr.nextSibling && rr.nextSibling.classList && rr.nextSibling.classList.contains('trace-detail-row')) {
+          tbody.removeChild(rr.nextSibling);
+        }
+        tbody.removeChild(rr);
+      }
+    }
+
     if (agents.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="8" style="color:var(--text-faint)">no agents registered</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="9" style="color:var(--text-faint)">no agents registered</td></tr>';
       return;
     }
     for (var i = 0; i < agents.length; i++) {
       var a = agents[i];
       var s = a.stats || {};
-      var row = tbody.children[i];
+      var agentId = a.id || a.agent_id || '?';
+      var row = existingRows[agentId];
+      if (!row) {
+        row = document.createElement('tr');
+        row.dataset.agentId = agentId;
+        for (var c = 0; c < 9; c++) row.appendChild(document.createElement('td'));
+        tbody.appendChild(row);
+      }
       var cells = row.children;
       var alive = a.is_alive !== false;
       var hbTs = a.last_heartbeat_ts || a.last_heartbeat || 0;
       var lastSeen = hbTs ? new Date(hbTs * 1000).toLocaleTimeString('en-US', {hour12: false}) : '—';
       var tokens = s.total_tokens || a.total_tokens || 0;
       var cost = s.total_cost_usd || a.total_cost_usd || 0;
-      cells[0].textContent = a.id || a.agent_id || '?';
-      cells[0].style.cssText = 'font-weight:600;color:var(--accent-bright)';
+      cells[0].textContent = agentId;
+      cells[0].style.cssText = 'font-weight:600;color:var(--accent-bright);cursor:pointer';
       cells[1].textContent = a.role || '—';
       cells[2].textContent = alive ? 'ALIVE' : 'OFFLINE';
       cells[2].style.color = alive ? 'var(--green)' : 'var(--red)';
-      cells[3].textContent = s.insights_posted || a.tasks_completed || 0;
-      cells[4].textContent = s.challenges_given || a.tasks_failed || 0;
+      cells[3].textContent = s.tasks_completed || 0;
+      cells[3].style.color = (s.tasks_completed || 0) > 0 ? 'var(--green)' : '';
+      cells[4].textContent = s.tasks_failed || 0;
+      cells[4].style.color = (s.tasks_failed || 0) > 0 ? 'var(--red)' : '';
       cells[5].textContent = tokens.toLocaleString();
       cells[6].textContent = '$' + cost.toFixed(4);
       cells[7].textContent = lastSeen;
+      // Traces column — show button to expand
+      if (!cells[8].querySelector('button')) {
+        var btn = document.createElement('button');
+        btn.className = 'btn ghost sm';
+        btn.textContent = 'VIEW';
+        btn.style.cssText = 'padding:2px 8px;font-size:11px';
+        btn.dataset.agentId = agentId;
+        btn.onclick = toggleTraceRow;
+        cells[8].innerHTML = '';
+        cells[8].appendChild(btn);
+      }
     }
   } catch (e) { /* ignore */ }
 }
@@ -443,16 +553,21 @@ export async function pollLeaderboard() {
     var data = res.data;
     if (!data || !data.nodes) return;
     var nodes = data.nodes.slice().sort(function(a, b) {
-      return (b.contribution_count || 0) - (a.contribution_count || 0);
+      return (b.insights_posted || 0) - (a.insights_posted || 0);
     });
 
-    var hash = nodes.map(function(n) { return n.id + (n.contribution_count || 0); }).join('|');
+    var hash = nodes.map(function(n) { return n.id + (n.insights_posted || 0); }).join('|');
     if (hash === leaderHash) return;
     leaderHash = hash;
 
     var tbody = document.getElementById('leaderboard-tbody');
     if (!tbody) return;
     document.getElementById('leaderboard-meta').textContent = nodes.length + ' agents';
+
+    // Clear placeholder row (has colspan, not 5 separate tds)
+    if (tbody.children.length > 0 && tbody.children[0].children.length !== 5) {
+      tbody.innerHTML = '';
+    }
 
     while (tbody.children.length > nodes.length) tbody.removeChild(tbody.lastChild);
     while (tbody.children.length < nodes.length) {
@@ -470,12 +585,12 @@ export async function pollLeaderboard() {
       var cells = row.children;
       cells[0].textContent = n.id;
       cells[0].style.cssText = 'font-weight:600;color:var(--accent-bright)';
-      cells[1].textContent = n.insightsPosted || n.contribution_count || 0;
-      cells[2].textContent = n.confirmationsGiven || 0;
+      cells[1].textContent = n.insights_posted || n.insightsPosted || 0;
+      cells[2].textContent = n.confirmations_given || n.confirmationsGiven || 0;
       cells[2].style.color = 'var(--green)';
-      cells[3].textContent = n.challengesGiven || 0;
+      cells[3].textContent = n.challenges_given || n.challengesGiven || 0;
       cells[3].style.color = 'var(--red)';
-      cells[4].textContent = (n.totalWeight || 0).toFixed(2);
+      cells[4].textContent = (n.total_weight || n.totalWeight || 0).toFixed(2);
     }
   } catch (e) { /* ignore */ }
 }
@@ -534,6 +649,11 @@ export async function pollTasks() {
 
     var tbody = document.getElementById('task-tbody');
     if (!tbody) return;
+
+    // Clear placeholder row (has colspan, not 8 separate tds)
+    if (tbody.children.length > 0 && tbody.children[0].children.length !== 8) {
+      tbody.innerHTML = '';
+    }
 
     while (tbody.children.length > tasks.length) tbody.removeChild(tbody.lastChild);
     while (tbody.children.length < tasks.length) {

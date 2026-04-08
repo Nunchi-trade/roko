@@ -243,8 +243,86 @@
     background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(8px);
     border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px;
   }
-  .phero-hud .kv { display: flex; gap: 4px; }
+  .phero-hud .kv { display: flex; gap: 4px; align-items: center; }
   .phero-hud .kv b { color: var(--text); font-weight: 600; }
+
+  /* Pheromone filter pills */
+  .phero-filters {
+    position: absolute; top: 12px; right: 12px;
+    display: flex; gap: 6px; z-index: 10;
+  }
+  .phero-filter-pill {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 4px 10px; border-radius: 99px;
+    background: rgba(0, 0, 0, 0.55); backdrop-filter: blur(8px);
+    border: 1px solid var(--border); cursor: pointer;
+    font-family: var(--mono); font-size: 9.5px; color: var(--text-dim);
+    transition: all 0.2s ease;
+  }
+  .phero-filter-pill:hover { border-color: var(--border-strong); }
+  .phero-filter-pill.active { color: var(--text); }
+  .phero-filter-pill:not(.active) { opacity: 0.4; }
+  .pill-dot { width: 7px; height: 7px; border-radius: 50%; }
+  .pill-dot.threat { background: var(--red); box-shadow: 0 0 6px var(--red-glow); }
+  .pill-dot.opp { background: var(--green); box-shadow: 0 0 6px var(--green-glow); }
+  .pill-dot.wisdom { background: var(--yellow); box-shadow: 0 0 6px var(--yellow-glow); }
+
+  /* Pheromone tooltip */
+  .phero-tooltip {
+    position: absolute; pointer-events: none; z-index: 40;
+    background: var(--surface-elevated); border: 1px solid var(--border-strong); border-radius: 8px;
+    padding: 10px 14px; font-family: var(--mono); font-size: 10.5px;
+    max-width: 360px; min-width: 200px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+    display: none; line-height: 1.5;
+  }
+  .phero-tooltip.pinned { pointer-events: auto; }
+  .phero-tooltip .pt-kind {
+    display: inline-block; padding: 1px 7px; border-radius: 4px;
+    font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em;
+    margin-bottom: 6px;
+  }
+  .phero-tooltip .pt-kind.threat { background: rgba(248,113,113,0.15); color: var(--red); }
+  .phero-tooltip .pt-kind.opportunity { background: rgba(74,222,128,0.15); color: var(--green); }
+  .phero-tooltip .pt-kind.wisdom { background: rgba(251,191,36,0.15); color: var(--yellow); }
+  .phero-tooltip .pt-content {
+    color: var(--text); margin-bottom: 8px; font-size: 11px; line-height: 1.45;
+    max-height: 60px; overflow: hidden;
+  }
+  .phero-tooltip .pt-bar-row {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
+  }
+  .phero-tooltip .pt-bar-label { color: var(--text-faint); font-size: 9px; min-width: 52px; }
+  .phero-tooltip .pt-bar-track {
+    flex: 1; height: 4px; background: var(--bg2); border-radius: 2px; overflow: hidden;
+  }
+  .phero-tooltip .pt-bar-fill { height: 100%; border-radius: 2px; transition: width 0.3s ease; }
+  .phero-tooltip .pt-bar-fill.threat { background: var(--red); }
+  .phero-tooltip .pt-bar-fill.opportunity { background: var(--green); }
+  .phero-tooltip .pt-bar-fill.wisdom { background: var(--yellow); }
+  .phero-tooltip .pt-bar-val { color: var(--text); font-size: 10px; min-width: 36px; text-align: right; }
+  .phero-tooltip .pt-meta {
+    color: var(--text-faint); font-size: 9.5px; display: flex; flex-wrap: wrap; gap: 8px;
+    padding-top: 6px; border-top: 1px solid var(--border);
+  }
+  .phero-tooltip .pt-meta b { color: var(--text-dim); }
+  .phero-tooltip .pt-decay {
+    margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border);
+    font-size: 9px; color: var(--text-faint);
+    display: flex; gap: 12px;
+  }
+  .phero-tooltip .pt-decay b { color: var(--text-dim); }
+  .phero-tooltip .pt-sparkline {
+    margin-top: 6px; height: 24px; width: 100%;
+    border-top: 1px solid var(--border); padding-top: 4px;
+  }
+
+  /* Pheromone mini intensity bars in HUD */
+  .phero-mini-bar {
+    display: inline-block; width: 3px; height: 12px; border-radius: 1px;
+    background: var(--bar-color, var(--text-faint)); opacity: 0.6;
+    vertical-align: middle; margin-right: 1px;
+    transition: height 0.3s ease;
+  }
 
   /* === AGENT LOG === */
   .agent-log {
@@ -277,7 +355,7 @@
   /* === INSIGHT GRAPH (centerpiece) === */
   .insight-wrap { display: grid; grid-template-columns: 1fr 360px; gap: 12px; margin-bottom: 20px; }
   @media (max-width: 1280px) { .insight-wrap { grid-template-columns: 1fr; } }
-  .insight-graph-wrap { position: relative; height: 460px; background: radial-gradient(ellipse at center, rgba(34, 211, 238, 0.03) 0%, transparent 70%); }
+  .insight-graph-wrap { position: relative; height: 700px; background: radial-gradient(ellipse at center, rgba(34, 211, 238, 0.03) 0%, transparent 70%); }
   .graph-hud {
     position: absolute; top: 12px; right: 12px;
     font-family: var(--mono); font-size: 10px; color: var(--text-dim);
@@ -309,7 +387,7 @@
   .node-tooltip .nt-meta { color: var(--text-faint); font-size: 9.5px; display: flex; gap: 10px; }
 
   /* Insight detail side panel */
-  .detail-panel { padding: 14px; height: 460px; overflow-y: auto; }
+  .detail-panel { padding: 14px; height: 700px; overflow-y: auto; }
   .detail-panel::-webkit-scrollbar { width: 5px; }
   .detail-panel::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
   .detail-empty {
@@ -381,7 +459,7 @@
 
   /* === AGENT TOPOLOGY === */
   .topo-graph-wrap {
-    position: relative; height: 400px;
+    position: relative; height: 600px;
     background: radial-gradient(ellipse at center, rgba(124, 111, 247, 0.03) 0%, transparent 70%);
   }
   .topo-hud {

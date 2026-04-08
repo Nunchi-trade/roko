@@ -8,7 +8,7 @@ use axum::{
 use serde::Deserialize;
 
 use super::{ApiError, ApiState, MAX_LIMIT, PaginatedResponse, now_secs, with_cache_control};
-use crate::chain::agent::AgentStats;
+use crate::chain::agent::{AgentStats, AgentTrace};
 
 /// Trace pagination query parameters.
 #[derive(Deserialize)]
@@ -239,5 +239,52 @@ pub async fn agent_heartbeat(
         "ok": true,
         "agent_id": id,
         "timestamp": now,
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/agents/:id/trace
+// ---------------------------------------------------------------------------
+
+/// `POST /api/agents/:id/trace` — record a cognitive trace for an agent.
+pub async fn post_agent_trace(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    Json(mut trace): Json<AgentTrace>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if trace.timestamp == 0 {
+        trace.timestamp = now_secs();
+    }
+    let mut chain = state.chain.write();
+    let ok = chain.agent_registry.add_trace(&id, trace);
+    if !ok {
+        return Err(ApiError {
+            error: format!("agent '{}' not found", id),
+            code: 404,
+        });
+    }
+
+    let _ = chain
+        .agent_bus
+        .send(crate::chain::AgentEvent::Trace {
+            agent_id: id.clone(),
+            trace: chain
+                .agent_registry
+                .get_traces(&id, 1, 0)
+                .and_then(|(t, _)| t.last().cloned())
+                .unwrap_or_else(|| crate::chain::agent::AgentTrace {
+                    cycle: 0,
+                    phase: crate::chain::agent::CognitivePhase::Act,
+                    reads: vec![],
+                    reasoning: String::new(),
+                    action: String::new(),
+                    action_id: String::new(),
+                    timestamp: now_secs(),
+                }),
+        });
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "agent_id": id,
     })))
 }

@@ -446,6 +446,19 @@ async fn trigger_decay(client: &Client, base: &str) {
     api_post(client, base, "/knowledge/decay", json!({})).await;
 }
 
+async fn post_trace(client: &Client, base: &str, agent_id: &str, cycle: u64, phase: &str, reads: &[&str], reasoning: &str, action: &str, action_id: &str) {
+    let path = format!("/agents/{}/trace", agent_id);
+    api_post(client, base, &path, json!({
+        "cycle": cycle,
+        "phase": phase,
+        "reads": reads,
+        "reasoning": reasoning,
+        "action": action,
+        "action_id": action_id,
+        "timestamp": 0
+    })).await;
+}
+
 // ---------------------------------------------------------------------------
 // Agent loop
 // ---------------------------------------------------------------------------
@@ -461,6 +474,16 @@ async fn agent_loop(client: Client, base: String, def: &'static AgentDef) {
         let tokens: u64 = rng.gen_range(100..2000);
         let cost: f64 = tokens as f64 * 0.00003; // ~$0.03 per 1K tokens
         heartbeat(&client, &base, def.id, tokens, cost).await;
+
+        // Post cognitive traces (Retrieve → Reason → Act → Verify)
+        let trace_reads: Vec<&str> = if !def.queries.is_empty() {
+            vec![def.queries[rng.gen_range(0..def.queries.len())]]
+        } else {
+            vec!["chain_state"]
+        };
+        let reasoning = format!("cycle {} analysis of {} domain signals", cycle, def.role);
+        post_trace(&client, &base, def.id, cycle, "retrieve", &trace_reads, &format!("scanning {} data sources", trace_reads.len()), "scan", &format!("scan:{}", cycle)).await;
+        post_trace(&client, &base, def.id, cycle, "reason", &trace_reads, &reasoning, "evaluate", &format!("eval:{}", cycle)).await;
 
         match def.kind {
             AgentKind::Watcher => {
@@ -478,14 +501,18 @@ async fn agent_loop(client: Client, base: String, def: &'static AgentDef) {
                     deposit_pheromone(&client, &base, kind, content, intensity).await;
                     eprintln!("[{}] {} deposited {} pheromone", chrono_now(), def.id, kind);
                 }
-                // Sometimes create a task (20% chance)
-                if rng.gen_range(0.0f32..1.0) < 0.2 {
+                // Create a task (50% chance)
+                if rng.gen_range(0.0f32..1.0) < 0.5 {
                     let tmpl = TASK_TEMPLATES[rng.gen_range(0..TASK_TEMPLATES.len())];
                     create_task(&client, &base, tmpl.0, tmpl.1, tmpl.2, tmpl.3, def.id, &["defi"]).await;
                     eprintln!("[{}] {} created task: {}", chrono_now(), def.id, tmpl.0);
                 }
             }
             AgentKind::Security => {
+                // Occasionally claim and complete a task
+                if rng.gen_range(0.0f32..1.0) < 0.3 {
+                    claim_and_complete_task(&client, &base, def.id).await;
+                }
                 if !def.insights.is_empty() {
                     let (kind, content) = def.insights[rng.gen_range(0..def.insights.len())];
                     let stake: u64 = rng.gen_range(5000..100000);
@@ -545,8 +572,8 @@ async fn agent_loop(client: Client, base: String, def: &'static AgentDef) {
                     post_insight(&client, &base, kind, content, def.id, &[], 0).await;
                 }
                 eprintln!("[{}] {} validated: {} confirmed, {} challenged", chrono_now(), def.id, confirmed, challenged);
-                // Try to claim and complete a task
-                if rng.gen_range(0.0f32..1.0) < 0.3 {
+                // Claim and complete a task (70% chance)
+                if rng.gen_range(0.0f32..1.0) < 0.7 {
                     claim_and_complete_task(&client, &base, def.id).await;
                 }
             }
@@ -586,6 +613,18 @@ async fn agent_loop(client: Client, base: String, def: &'static AgentDef) {
                 }
             }
         }
+
+        // Post act + verify traces
+        let action_name = match def.kind {
+            AgentKind::Watcher => "post_insight",
+            AgentKind::Security => "post_alert",
+            AgentKind::Strategy => "post_analysis",
+            AgentKind::Validator => "validate_entries",
+            AgentKind::Synthesizer => "synthesize",
+            AgentKind::Infra => "monitor_health",
+        };
+        post_trace(&client, &base, def.id, cycle, "act", &[], &format!("executing {}", action_name), action_name, &format!("{}:{}", action_name, cycle)).await;
+        post_trace(&client, &base, def.id, cycle, "verify", &[], &format!("verified {} outcome for cycle {}", action_name, cycle), "check_result", &format!("verify:{}", cycle)).await;
 
         // Sleep with jitter
         let jitter: u64 = rng.gen_range(0..def.pace_ms / 3);

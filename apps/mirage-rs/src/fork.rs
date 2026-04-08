@@ -937,6 +937,10 @@ pub struct ForkState {
     pub strict_balance: bool,
     /// Whether signatures should be verified.
     pub verify_signatures: bool,
+    /// Block number of the upstream chain at fork time.
+    pub fork_block: u64,
+    /// Upstream RPC URL used for the fork (if any).
+    pub fork_url: Option<String>,
 }
 
 impl Clone for ForkState {
@@ -968,6 +972,8 @@ impl Clone for ForkState {
             strict_nonce: self.strict_nonce,
             strict_balance: self.strict_balance,
             verify_signatures: self.verify_signatures,
+            fork_block: self.fork_block,
+            fork_url: self.fork_url.clone(),
         }
     }
 }
@@ -977,6 +983,8 @@ impl ForkState {
     #[must_use]
     pub fn new(db: HybridDB, local_block_number: u64, chain_id: u64) -> Self {
         Self {
+            fork_block: local_block_number,
+            fork_url: db.upstream.http_url(),
             db,
             local_block_number,
             chain_id,
@@ -1062,6 +1070,8 @@ impl ForkState {
             upstream_connected: self.db.upstream.has_http(),
             divergence_detected: false,
             mode,
+            fork_block: self.fork_block,
+            fork_url: self.fork_url.clone(),
         }
     }
 
@@ -1243,6 +1253,7 @@ impl MirageFork {
     pub async fn mine_block(&self) {
         with_state_write(&self.state(), |s| {
             s.fork.local_block_number = s.fork.local_block_number.saturating_add(1);
+            s.fork.timestamp = now_secs();
             let _ = s.new_heads_tx.send(NewHeadBroadcast {
                 number: s.fork.local_block_number,
                 timestamp: s.fork.timestamp,
@@ -2019,6 +2030,10 @@ pub struct MirageStatus {
     pub divergence_detected: bool,
     /// Current operating mode.
     pub mode: MirageMode,
+    /// Block number of the upstream chain at fork time.
+    pub fork_block: u64,
+    /// Upstream RPC URL used for the fork (if any).
+    pub fork_url: Option<String>,
 }
 
 /// Builds a synthetic `TransactionRequest` for tests and scenario helpers.

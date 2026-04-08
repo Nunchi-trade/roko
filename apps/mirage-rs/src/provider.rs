@@ -196,6 +196,12 @@ impl UpstreamRpc {
         self.http_url.is_some()
     }
 
+    /// Returns the configured HTTP upstream URL, if any.
+    #[must_use]
+    pub fn http_url(&self) -> Option<String> {
+        self.http_url.clone()
+    }
+
     /// Returns call counters.
     #[must_use]
     pub fn stats(&self) -> (u64, u64) {

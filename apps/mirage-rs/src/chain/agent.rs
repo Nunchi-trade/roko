@@ -33,6 +33,10 @@ pub struct AgentStats {
     pub warnings_posted: u64,
     /// Number of insights posted.
     pub insights_posted: u64,
+    /// Number of tasks completed successfully.
+    pub tasks_completed: u64,
+    /// Number of tasks that failed.
+    pub tasks_failed: u64,
     /// Number of cognitive cycles completed.
     pub delta_cycles: u64,
     /// Total cost in USD.
@@ -209,6 +213,8 @@ impl AgentRegistry {
             agent.stats.challenges_given += delta.challenges_given;
             agent.stats.warnings_posted += delta.warnings_posted;
             agent.stats.insights_posted += delta.insights_posted;
+            agent.stats.tasks_completed += delta.tasks_completed;
+            agent.stats.tasks_failed += delta.tasks_failed;
             agent.stats.delta_cycles += delta.delta_cycles;
             agent.stats.total_cost_usd += delta.total_cost_usd;
             agent.stats.total_tokens += delta.total_tokens;
@@ -281,6 +287,8 @@ mod tests {
             challenges_given: 2,
             warnings_posted: 1,
             insights_posted: 3,
+            tasks_completed: 4,
+            tasks_failed: 1,
             delta_cycles: 10,
             total_cost_usd: 0.5,
             total_tokens: 1000,

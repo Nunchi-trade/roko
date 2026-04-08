@@ -157,6 +157,22 @@ pub async fn start_rpc_server_with_chain(
     finish_start_rpc_server(address, module, local_state, api_router).await
 }
 
+/// Middleware that adds `Cache-Control: no-cache` headers to `/dashboard` responses.
+async fn dashboard_cache_control(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response<Body> {
+    let is_dashboard = request.uri().path().starts_with("/dashboard");
+    let mut response = next.run(request).await;
+    if is_dashboard {
+        response.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-cache, must-revalidate"),
+        );
+    }
+    response
+}
+
 async fn finish_start_rpc_server(
     address: SocketAddr,
     module: RpcModule<ServerContext>,
@@ -219,6 +235,8 @@ async fn finish_start_rpc_server(
         let serve_dir = tower_http::services::ServeDir::new(&dir)
             .append_index_html_on_directories(true);
         app = app.nest_service("/dashboard", serve_dir);
+        // Add no-cache middleware for dashboard static files
+        app = app.layer(axum::middleware::from_fn(dashboard_cache_control));
         tracing::info!("dashboard UI served at /dashboard from {dir}");
     }
     let app = app.layer(CorsLayer::permissive());
@@ -3994,6 +4012,8 @@ mod tests {
             challenges_given: 2,
             warnings_posted: 1,
             insights_posted: 3,
+            tasks_completed: 0,
+            tasks_failed: 0,
             delta_cycles: 10,
             total_cost_usd: 0.5,
             total_tokens: 1000,
@@ -4088,7 +4108,7 @@ mod tests {
             .json()
             .await
             .unwrap();
-        let agents = resp["agents"].as_array().unwrap();
+        let agents = resp["items"].as_array().unwrap();
         assert_eq!(agents.len(), 1);
         assert_eq!(agents[0]["id"], "agent-1");
         assert_eq!(agents[0]["role"], "researcher");
@@ -4103,7 +4123,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp["total"], 1);
-        assert_eq!(resp["traces"].as_array().unwrap().len(), 1);
+        assert_eq!(resp["items"].as_array().unwrap().len(), 1);
 
         // GET /api/agents/agent-1/heartbeat
         let resp: serde_json::Value = http

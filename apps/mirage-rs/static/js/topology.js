@@ -35,14 +35,14 @@ export function drawTopology(dt) {
       if (i === j) continue;
       var m = nodes[j];
       var dx = n.x - m.x, dy = n.y - m.y, d2 = dx * dx + dy * dy + 1;
-      var f = 3000 / d2;
+      var f = 18000 / d2;
       var dist = Math.sqrt(d2);
       n.vx += (dx / dist) * f * 0.02;
       n.vy += (dy / dist) * f * 0.02;
     }
-    // Center gravity
-    n.vx += (w / 2 - n.x) * 0.002;
-    n.vy += (h / 2 - n.y) * 0.002;
+    // Center gravity (weaker to allow more spread)
+    n.vx += (w / 2 - n.x) * 0.0008;
+    n.vy += (h / 2 - n.y) * 0.0008;
   }
   // Spring forces
   for (var ei = 0; ei < edges.length; ei++) {
@@ -51,7 +51,7 @@ export function drawTopology(dt) {
     var b = nodes.find(function(n) { return n.id === e.to; });
     if (!a || !b) continue;
     var dx = b.x - a.x, dy = b.y - a.y, dist = Math.sqrt(dx * dx + dy * dy) + 1;
-    var idealDist = 120;
+    var idealDist = 200;
     var force = (dist - idealDist) * 0.005;
     a.vx += (dx / dist) * force; a.vy += (dy / dist) * force;
     b.vx -= (dx / dist) * force; b.vy -= (dy / dist) * force;

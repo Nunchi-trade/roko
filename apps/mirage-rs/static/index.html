@@ -103,21 +103,23 @@
     <!-- CENTER: Pheromone Field -->
     <div class="panel">
       <div class="panel-head">
-        <div class="panel-title"><span class="icon"></span>Pheromone Field · agents drop signals, they decay</div>
-        <div class="panel-meta" id="phero-meta">3 zones · threats fade in 30s · opps 45s · wisdom 90s</div>
+        <div class="panel-title"><span class="icon"></span>Pheromone Field · force-directed · hover for detail</div>
+        <div class="panel-meta" id="phero-meta">force sim · kind clusters · decay ghosts</div>
       </div>
       <div class="phero-canvas-wrap">
         <canvas id="phero-canvas"></canvas>
-        <div class="phero-legend">
-          <div class="legend-item threat"><span class="legend-dot"></span>THREAT · <span id="phero-c-threat">0</span></div>
-          <div class="legend-item opp"><span class="legend-dot"></span>OPPORTUNITY · <span id="phero-c-opp">0</span></div>
-          <div class="legend-item wisdom"><span class="legend-dot"></span>WISDOM · <span id="phero-c-wisdom">0</span></div>
+        <div class="phero-filters" id="phero-filters">
+          <button class="phero-filter-pill active" data-kind="threat"><span class="pill-dot threat"></span>THREAT <span id="phero-c-threat">0</span></button>
+          <button class="phero-filter-pill active" data-kind="opportunity"><span class="pill-dot opp"></span>OPP <span id="phero-c-opp">0</span></button>
+          <button class="phero-filter-pill active" data-kind="wisdom"><span class="pill-dot wisdom"></span>WISDOM <span id="phero-c-wisdom">0</span></button>
         </div>
         <div class="phero-hud">
           <span class="kv">particles <b id="phero-particles">0</b></span>
-          <span class="kv">fps <b id="phero-fps">0</b></span>
+          <span class="kv"><span class="phero-mini-bar" id="phero-minibar-threat" style="--bar-color:var(--red)"></span><span class="phero-mini-bar" id="phero-minibar-opp" style="--bar-color:var(--green)"></span><span class="phero-mini-bar" id="phero-minibar-wisdom" style="--bar-color:var(--yellow)"></span></span>
           <span class="kv">Σintensity <b id="phero-intensity">0.00</b></span>
+          <span class="kv">fps <b id="phero-fps">0</b></span>
         </div>
+        <div class="phero-tooltip" id="phero-tooltip"></div>
       </div>
     </div>
 
@@ -139,8 +141,8 @@
     </div>
     <div style="overflow-x:auto">
       <table class="kinds-table" style="width:100%">
-        <thead><tr><th>Agent</th><th>Role</th><th>Status</th><th>Tasks OK</th><th>Tasks Fail</th><th>Tokens</th><th>Cost (USD)</th><th>Last Seen</th></tr></thead>
-        <tbody id="agent-reg-tbody"><tr><td colspan="8" style="color:var(--text-faint)">loading…</td></tr></tbody>
+        <thead><tr><th>Agent</th><th>Role</th><th>Status</th><th>Tasks OK</th><th>Tasks Fail</th><th>Tokens</th><th>Cost (USD)</th><th>Last Seen</th><th>Traces</th></tr></thead>
+        <tbody id="agent-reg-tbody"><tr><td colspan="9" style="color:var(--text-faint)">loading…</td></tr></tbody>
       </table>
     </div>
   </div>

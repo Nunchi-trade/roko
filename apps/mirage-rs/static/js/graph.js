@@ -25,7 +25,7 @@ export function addInsightNode(id, kind, content, opts) {
     x: w/2 + (Math.random()-0.5)*w*0.6, y: h/2 + (Math.random()-0.5)*h*0.6,
     vx: 0, vy: 0, radius: 6, pulse: 1, conf: 0, chall: 0, author: opts.author || null,
   });
-  while (graphNodes.length > 200) graphNodes.shift();
+  while (graphNodes.length > 400) graphNodes.shift();
   document.getElementById('graph-meta').textContent = graphNodes.length + ' nodes · ' + graphEdges.length + ' edges';
 }
 
@@ -52,16 +52,16 @@ export function drawGraph(dt) {
   // Physics
   for (var i=0; i<graphNodes.length; i++) {
     var n = graphNodes[i];
-    n.vx *= 0.9; n.vy *= 0.9;
+    n.vx *= 0.88; n.vy *= 0.88;
     for (var j=0; j<graphNodes.length; j++) {
       if (i===j) continue;
       var m = graphNodes[j];
       var dx = n.x-m.x, dy = n.y-m.y, d2 = dx*dx+dy*dy+1;
-      var f = 2000/d2;
+      var f = 8000/d2;
       var dist = Math.sqrt(d2);
       n.vx += (dx/dist)*f*0.02; n.vy += (dy/dist)*f*0.02;
     }
-    n.vx += (w/2-n.x)*0.001; n.vy += (h/2-n.y)*0.001;
+    n.vx += (w/2-n.x)*0.0005; n.vy += (h/2-n.y)*0.0005;
   }
   for (var ei=0; ei<graphEdges.length; ei++) {
     var e = graphEdges[ei];
@@ -69,7 +69,7 @@ export function drawGraph(dt) {
     var b = graphNodes.find(function(n) { return n.id === e.to; });
     if (!a || !b) continue;
     var dx = b.x-a.x, dy = b.y-a.y, dist = Math.sqrt(dx*dx+dy*dy)+1;
-    var idealDist = e.kind === 'hdc' ? 100 : 60;
+    var idealDist = e.kind === 'hdc' ? 160 : 100;
     var force = (dist - idealDist) * 0.003;
     a.vx += (dx/dist)*force; a.vy += (dy/dist)*force;
     b.vx -= (dx/dist)*force; b.vy -= (dy/dist)*force;

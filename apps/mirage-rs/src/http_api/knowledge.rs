@@ -479,6 +479,7 @@ pub async fn post_insight(
         });
     }
 
+    let broadcast_author_for_stats = author_bytes.clone();
     #[cfg(feature = "roko")]
     let broadcast_author = author_bytes.clone();
     #[cfg(feature = "roko")]
@@ -506,6 +507,18 @@ pub async fn post_insight(
             ("exact_match", id.to_hex(), None)
         }
     };
+
+    // Update author's insights_posted stat
+    if matches!(outcome, crate::chain::knowledge::PostOutcome::Accepted { .. }) {
+        let author_str = String::from_utf8_lossy(&broadcast_author_for_stats).into_owned();
+        chain.agent_registry.add_stats_delta(
+            &author_str,
+            &crate::chain::agent::AgentStats {
+                insights_posted: 1,
+                ..Default::default()
+            },
+        );
+    }
 
     #[cfg(feature = "roko")]
     if matches!(outcome, crate::chain::knowledge::PostOutcome::Accepted { .. }) {
@@ -548,6 +561,7 @@ pub async fn confirm_entry(
     Json(req): Json<ConfirmRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let insight_id = parse_insight_id(&id)?;
+    let confirmer_str = req.confirmer.clone();
     let confirmer_bytes = req.confirmer.into_bytes();
 
     let mut chain = state.chain.write();
@@ -565,6 +579,15 @@ pub async fn confirm_entry(
         .knowledge
         .confirm(insight_id, confirmer_bytes)
         .map_err(knowledge_error_to_api)?;
+
+    // Update confirmer's stats
+    chain.agent_registry.add_stats_delta(
+        &confirmer_str,
+        &crate::chain::agent::AgentStats {
+            confirmations_given: 1,
+            ..Default::default()
+        },
+    );
 
     #[cfg(feature = "roko")]
     if let Some(bus) = &chain.insight_bus {
@@ -594,6 +617,7 @@ pub async fn challenge_entry(
     Json(req): Json<ChallengeRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let insight_id = parse_insight_id(&id)?;
+    let challenger_str = req.challenger.clone();
     let challenger_bytes = req.challenger.into_bytes();
 
     let mut chain = state.chain.write();
@@ -611,6 +635,15 @@ pub async fn challenge_entry(
         .knowledge
         .challenge(insight_id, challenger_bytes)
         .map_err(knowledge_error_to_api)?;
+
+    // Update challenger's stats
+    chain.agent_registry.add_stats_delta(
+        &challenger_str,
+        &crate::chain::agent::AgentStats {
+            challenges_given: 1,
+            ..Default::default()
+        },
+    );
 
     #[cfg(feature = "roko")]
     if let Some(bus) = &chain.insight_bus {

@@ -8,6 +8,7 @@ use axum::{
 use serde::Deserialize;
 
 use super::{ApiError, ApiState, MAX_LIMIT, PaginatedResponse, now_secs, with_cache_control};
+use crate::chain::agent::AgentStats;
 use crate::chain::task::{TaskError, TaskPriority, TaskState};
 
 // ---------------------------------------------------------------------------
@@ -299,6 +300,13 @@ pub async fn complete_task(
         .and_then(|t| t.assignee.clone())
         .unwrap_or_default();
 
+    if !assignee.is_empty() {
+        chain.agent_registry.add_stats_delta(&assignee, &AgentStats {
+            tasks_completed: 1,
+            ..AgentStats::default()
+        });
+    }
+
     let _ = chain.task_bus.send(crate::chain::TaskEvent::Completed {
         id,
         assignee: assignee.clone(),
@@ -353,6 +361,13 @@ pub async fn fail_task(
         .task_store
         .fail(id, req.reason.clone(), now)
         .map_err(task_error_to_api)?;
+
+    if !assignee.is_empty() {
+        chain.agent_registry.add_stats_delta(&assignee, &AgentStats {
+            tasks_failed: 1,
+            ..AgentStats::default()
+        });
+    }
 
     let new_state = chain
         .task_store

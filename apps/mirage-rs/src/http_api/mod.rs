@@ -203,7 +203,7 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/agents/topology", get(topology::agent_topology))
         // Agent registry
         .route("/agents", get(agent::list_agents).post(agent::register_agent))
-        .route("/agents/{id}/trace", get(agent::get_agent_trace))
+        .route("/agents/{id}/trace", get(agent::get_agent_trace).post(agent::post_agent_trace))
         .route("/agents/{id}/heartbeat", get(agent::get_agent_heartbeat).post(agent::agent_heartbeat))
         .route("/agents/{id}/stats", get(agent::get_agent_stats))
         // Task tracking
