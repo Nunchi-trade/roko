@@ -372,7 +372,7 @@ async fn api_get(client: &Client, base: &str, path: &str) -> Option<Value> {
 }
 
 async fn register_agent(client: &Client, base: &str, id: &str, role: &str) {
-    api_post(client, base, "/agents", json!({"id": id, "pubkey": [], "role": role})).await;
+    api_post(client, base, "/agents", json!({"id": id, "pubkey": "", "role": role})).await;
 }
 
 async fn heartbeat(client: &Client, base: &str, id: &str, tokens: u64, cost: f64) {
