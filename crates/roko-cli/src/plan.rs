@@ -137,7 +137,10 @@ pub fn list_plan_files(workdir: &Path) -> std::io::Result<Vec<PathBuf>> {
     for entry in std::fs::read_dir(&dir)? {
         let entry = entry?;
         let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "toml" || ext == "json") {
+        if path
+            .extension()
+            .is_some_and(|ext| ext == "toml" || ext == "json")
+        {
             plans.push(path);
         }
     }

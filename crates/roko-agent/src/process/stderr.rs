@@ -289,10 +289,35 @@ fn looks_like_source_snippet(line: &str) -> bool {
     }
     // Lines starting with Rust syntax keywords/prefixes.
     [
-        "let ", "pub ", "fn ", "mod ", "#[", "if ", "match ", "return ", "use ", "impl ",
-        "struct ", "enum ", "trait ", "assert!(", "assert_eq!(", ".", "&& ", "|| ",
-        "message: format!(", "CapabilityTier::", "ToolError::", "check_capability(",
-        "cb.", "cms.", "router.", "self.", "ctx.", "def.", "crate::",
+        "let ",
+        "pub ",
+        "fn ",
+        "mod ",
+        "#[",
+        "if ",
+        "match ",
+        "return ",
+        "use ",
+        "impl ",
+        "struct ",
+        "enum ",
+        "trait ",
+        "assert!(",
+        "assert_eq!(",
+        ".",
+        "&& ",
+        "|| ",
+        "message: format!(",
+        "CapabilityTier::",
+        "ToolError::",
+        "check_capability(",
+        "cb.",
+        "cms.",
+        "router.",
+        "self.",
+        "ctx.",
+        "def.",
+        "crate::",
     ]
     .iter()
     .any(|prefix| trimmed.starts_with(prefix))
@@ -327,9 +352,7 @@ pub fn benign_stderr_warn_once(key: &'static str) -> bool {
     }
 
     // Insert returns true if the key was newly inserted.
-    warned_keys()
-        .lock()
-        .is_ok_and(|mut set| set.insert(key))
+    warned_keys().lock().is_ok_and(|mut set| set.insert(key))
 }
 
 #[cfg(test)]
@@ -341,7 +364,10 @@ mod tests {
         let line = "error: apply_patch verification failed: hunk 2 at line 50";
         let result = classify_benign_stderr(line);
         assert!(result.is_some());
-        assert_eq!(result.expect("classified").key, "codex-apply-patch-verification");
+        assert_eq!(
+            result.expect("classified").key,
+            "codex-apply-patch-verification"
+        );
     }
 
     #[test]
@@ -378,7 +404,10 @@ mod tests {
         let line = "WARN codex_protocol: Unknown model claude-test-999. This will use fallback model metadata.";
         let result = classify_benign_stderr(line);
         assert!(result.is_some());
-        assert_eq!(result.expect("classified").key, "codex-unknown-model-metadata");
+        assert_eq!(
+            result.expect("classified").key,
+            "codex-unknown-model-metadata"
+        );
     }
 
     #[test]
@@ -386,7 +415,10 @@ mod tests {
         let line = "WARN codex_protocol::openai_models: Model personality requested but model_messages is missing, falling back to base instructions. model=claude-sonnet-4-6";
         let result = classify_benign_stderr(line);
         assert!(result.is_some());
-        assert_eq!(result.expect("classified").key, "codex-missing-model-messages");
+        assert_eq!(
+            result.expect("classified").key,
+            "codex-missing-model-messages"
+        );
     }
 
     #[test]
@@ -402,7 +434,9 @@ mod tests {
         assert!(classify_benign_stderr("mod tests {").is_some());
         assert!(classify_benign_stderr("#[test]").is_some());
         assert!(classify_benign_stderr("assert_eq!(cms.width(), 128);").is_some());
-        assert!(classify_benign_stderr("router.update(RoutingDecision::Discard, false);").is_some());
+        assert!(
+            classify_benign_stderr("router.update(RoutingDecision::Discard, false);").is_some()
+        );
     }
 
     #[test]
@@ -425,7 +459,10 @@ mod tests {
         let line = "DeprecationWarning: pkg_resources is deprecated as an API";
         let result = classify_benign_stderr(line);
         assert!(result.is_some());
-        assert_eq!(result.expect("classified").key, "python-deprecation-warning");
+        assert_eq!(
+            result.expect("classified").key,
+            "python-deprecation-warning"
+        );
     }
 
     #[test]
@@ -459,10 +496,14 @@ mod tests {
 
     #[test]
     fn classify_codex_rollout_flush() {
-        let line = "WARN: failed to flush rollout recorder: failed to queue rollout flush: channel closed";
+        let line =
+            "WARN: failed to flush rollout recorder: failed to queue rollout flush: channel closed";
         let result = classify_benign_stderr(line);
         assert!(result.is_some());
-        assert_eq!(result.expect("classified").key, "codex-rollout-flush-channel-closed");
+        assert_eq!(
+            result.expect("classified").key,
+            "codex-rollout-flush-channel-closed"
+        );
     }
 
     #[test]

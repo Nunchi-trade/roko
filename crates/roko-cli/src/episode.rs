@@ -105,10 +105,18 @@ mod tests {
     fn record_run_summarises_verdicts() {
         let policy = EpisodePolicy::new();
         let prompt = Signal::builder(Kind::Prompt).body(Body::text("p")).build();
-        let out = Signal::builder(Kind::AgentOutput).body(Body::text("o")).build();
+        let out = Signal::builder(Kind::AgentOutput)
+            .body(Body::text("o"))
+            .build();
         let v1 = verdict_sig("g1", true);
         let v2 = verdict_sig("g2", false);
-        let ep = policy.record_run(&prompt, &out, true, &[v1.clone(), v2.clone()], &Context::at(42));
+        let ep = policy.record_run(
+            &prompt,
+            &out,
+            true,
+            &[v1.clone(), v2.clone()],
+            &Context::at(42),
+        );
         assert_eq!(ep.kind, Kind::Episode);
         assert_eq!(ep.tag("gates_passed"), Some("1"));
         assert_eq!(ep.tag("gates_failed"), Some("1"));
@@ -123,8 +131,16 @@ mod tests {
     fn overall_pass_when_agent_succeeds_and_no_gate_failures() {
         let policy = EpisodePolicy::new();
         let prompt = Signal::builder(Kind::Prompt).body(Body::text("p")).build();
-        let out = Signal::builder(Kind::AgentOutput).body(Body::text("o")).build();
-        let ep = policy.record_run(&prompt, &out, true, &[verdict_sig("g", true)], &Context::at(0));
+        let out = Signal::builder(Kind::AgentOutput)
+            .body(Body::text("o"))
+            .build();
+        let ep = policy.record_run(
+            &prompt,
+            &out,
+            true,
+            &[verdict_sig("g", true)],
+            &Context::at(0),
+        );
         assert_eq!(ep.tag("passed"), Some("true"));
     }
 }

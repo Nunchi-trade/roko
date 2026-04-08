@@ -25,16 +25,16 @@ pub mod worktree;
 pub use dag::{DagConfig, DagError, DagStats, ExecutionWave, UnifiedTaskDag};
 pub use event_log::{EventEntry, EventKind, EventLog, EventLogSnapshot, IntegrityError};
 pub use executor::{
-    ExecutorAction, ExecutorConfig, ExecutorEvent, ExecutorSnapshot, GateResult,
-    ParallelExecutor, PlanState, PlanStateMachine, TransitionError,
+    ExecutorAction, ExecutorConfig, ExecutorEvent, ExecutorSnapshot, GateResult, ParallelExecutor,
+    PlanState, PlanStateMachine, TransitionError,
 };
 pub use merge_queue::{MergeQueue, MergeRequest};
 pub use plan_discovery::{
-    discover_plans, parse_frontmatter, rank_plans, validate_frontmatter, DiscoveryError, PlanInfo,
-    PlanFrontmatter, ValidationError,
+    DiscoveryError, PlanFrontmatter, PlanInfo, ValidationError, discover_plans, parse_frontmatter,
+    rank_plans, validate_frontmatter,
 };
 pub use post_merge::{PostMergeCheck, PostMergeResult, PostMergeRunner};
 pub use progress::{
-    publish_error, validate_enrichment, ErrorEvent, ProgressError, ProgressTracker,
-    ValidationError as EnrichmentValidationError,
+    ErrorEvent, ProgressError, ProgressTracker, ValidationError as EnrichmentValidationError,
+    publish_error, validate_enrichment,
 };

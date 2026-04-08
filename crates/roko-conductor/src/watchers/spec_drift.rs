@@ -48,9 +48,10 @@ impl SpecDriftWatcher {
 impl Policy for SpecDriftWatcher {
     fn decide(&self, stream: &[Signal], _ctx: &Context) -> Vec<Signal> {
         // Find the most recent spec-drift metric.
-        let latest = stream.iter().rev().find(|s| {
-            s.kind == Kind::Metric && s.tag(METRIC_NAME_TAG) == Some(SPEC_DRIFT_METRIC)
-        });
+        let latest = stream
+            .iter()
+            .rev()
+            .find(|s| s.kind == Kind::Metric && s.tag(METRIC_NAME_TAG) == Some(SPEC_DRIFT_METRIC));
 
         let Some(signal) = latest else {
             return Vec::new();
@@ -62,17 +63,17 @@ impl Policy for SpecDriftWatcher {
             .unwrap_or(0.0);
 
         if drift > self.max_drift {
-            vec![Signal::builder(Kind::Custom(
-                "conductor.intervention".into(),
-            ))
-            .body(Body::text(format!(
-                "spec drift {drift:.1}% exceeds threshold {:.0}%",
-                self.max_drift * 100.0
-            )))
-            .tag("watcher", WATCHER_NAME)
-            .tag("severity", "warning")
-            .tag("drift", format!("{drift:.3}"))
-            .build()]
+            vec![
+                Signal::builder(Kind::Custom("conductor.intervention".into()))
+                    .body(Body::text(format!(
+                        "spec drift {drift:.1}% exceeds threshold {:.0}%",
+                        self.max_drift * 100.0
+                    )))
+                    .tag("watcher", WATCHER_NAME)
+                    .tag("severity", "warning")
+                    .tag("drift", format!("{drift:.3}"))
+                    .build(),
+            ]
         } else {
             Vec::new()
         }

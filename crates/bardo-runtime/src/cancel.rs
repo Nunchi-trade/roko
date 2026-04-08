@@ -22,8 +22,8 @@
 //! ```
 
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
 use tokio::sync::Notify;
@@ -198,7 +198,10 @@ mod tests {
         child.cancel();
 
         assert!(child.is_cancelled());
-        assert!(!parent.is_cancelled(), "child cancel must not propagate upward");
+        assert!(
+            !parent.is_cancelled(),
+            "child cancel must not propagate upward"
+        );
     }
 
     #[tokio::test]

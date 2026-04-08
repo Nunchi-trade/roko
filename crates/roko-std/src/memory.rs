@@ -9,7 +9,7 @@
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
-use roko_core::{error::Result, Context, ContentHash, Query, Signal, Substrate};
+use roko_core::{ContentHash, Context, Query, Signal, Substrate, error::Result};
 use std::collections::HashMap;
 
 /// An in-memory, concurrent signal substrate.
@@ -199,10 +199,7 @@ mod tests {
         sub.put(sig(Kind::Episode, "ep1", 0)).await.unwrap();
 
         let ctx = Context::at(0);
-        let tasks = sub
-            .query(&Query::of_kind(Kind::Task), &ctx)
-            .await
-            .unwrap();
+        let tasks = sub.query(&Query::of_kind(Kind::Task), &ctx).await.unwrap();
         assert_eq!(tasks.len(), 2);
         assert!(tasks.iter().all(|s| s.kind == Kind::Task));
     }

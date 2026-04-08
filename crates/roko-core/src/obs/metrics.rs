@@ -16,13 +16,13 @@
 //! ```
 
 use std::fmt::Write as _;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
-use crate::obs::histograms::{escape_help, format_f64, Histogram, HistogramSnapshot};
+use crate::obs::histograms::{Histogram, HistogramSnapshot, escape_help, format_f64};
 
 // ─── Primitives: Counter + Gauge ─────────────────────────────────────
 
@@ -499,15 +499,18 @@ fn get_or_insert_family<'a>(
 ) -> &'a mut Family {
     // Find-or-push; index-based so we can return a borrow that covers
     // both branches without lifetime juggling.
-    let idx = families.iter().position(|f| f.name == name).unwrap_or_else(|| {
-        families.push(Family {
-            name: name.to_string(),
-            help: help.to_string(),
-            kind,
-            entries: Vec::new(),
+    let idx = families
+        .iter()
+        .position(|f| f.name == name)
+        .unwrap_or_else(|| {
+            families.push(Family {
+                name: name.to_string(),
+                help: help.to_string(),
+                kind,
+                entries: Vec::new(),
+            });
+            families.len() - 1
         });
-        families.len() - 1
-    });
     &mut families[idx]
 }
 
@@ -837,12 +840,14 @@ mod tests {
         register_standard_metrics(&reg);
         assert_eq!(reg.family_count(), STANDARD_METRICS.len());
         // spot-check lookups
-        assert!(reg
-            .get_counter("roko_plans_total", &LabelSet::new())
-            .is_some());
-        assert!(reg
-            .get_histogram("roko_agent_duration_seconds", &LabelSet::new())
-            .is_some());
+        assert!(
+            reg.get_counter("roko_plans_total", &LabelSet::new())
+                .is_some()
+        );
+        assert!(
+            reg.get_histogram("roko_agent_duration_seconds", &LabelSet::new())
+                .is_some()
+        );
     }
 
     #[test]

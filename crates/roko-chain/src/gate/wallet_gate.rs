@@ -14,7 +14,7 @@
 //! will be added alongside the Permit2 helpers.
 
 use async_trait::async_trait;
-use roko_core::{traits::Gate, verdict::Verdict, Body, Context, Signal};
+use roko_core::{Body, Context, Signal, traits::Gate, verdict::Verdict};
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Instant;
@@ -247,8 +247,7 @@ impl Gate for WalletGate {
         let tx = match parse_tx_from_signal(input) {
             Ok(t) => t,
             Err(reason) => {
-                return Verdict::fail(self.name.clone(), reason)
-                    .with_duration(elapsed_ms(started));
+                return Verdict::fail(self.name.clone(), reason).with_duration(elapsed_ms(started));
             }
         };
 
@@ -265,9 +264,10 @@ impl Gate for WalletGate {
                 self.name.clone(),
                 format!("nonce gap: expected {expected}, got {got}"),
             ),
-            WalletCheck::Unsupported { reason } => {
-                Verdict::fail(self.name.clone(), format!("wallet check unsupported: {reason}"))
-            }
+            WalletCheck::Unsupported { reason } => Verdict::fail(
+                self.name.clone(),
+                format!("wallet check unsupported: {reason}"),
+            ),
         };
 
         if !verdict.passed {
@@ -309,7 +309,7 @@ impl Gate for WalletGate {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::{paired_mocks, MockChainClient, MockChainWallet};
+    use crate::{MockChainClient, MockChainWallet, paired_mocks};
     use roko_core::{Body, Context, Kind, Provenance, Signal};
 
     fn cfg() -> WalletGateConfig {
@@ -325,11 +325,7 @@ mod tests {
 
     fn make_gate(balance: u128) -> (WalletGate, MockChainWallet, MockChainClient) {
         let (client, wallet) = paired_mocks(balance);
-        let gate = WalletGate::new(
-            Arc::new(wallet.clone()),
-            Arc::new(client.clone()),
-            cfg(),
-        );
+        let gate = WalletGate::new(Arc::new(wallet.clone()), Arc::new(client.clone()), cfg());
         (gate, wallet, client)
     }
 
@@ -374,7 +370,10 @@ mod tests {
         let result = gate.check(700).await;
         assert!(matches!(
             result,
-            WalletCheck::InsufficientBalance { have: 1_000, need: 1_100 }
+            WalletCheck::InsufficientBalance {
+                have: 1_000,
+                need: 1_100
+            }
         ));
     }
 
@@ -468,7 +467,11 @@ mod tests {
         }));
         let verdict = gate.verify(&signal, &Context::now()).await;
         assert!(!verdict.passed);
-        assert!(verdict.reason.contains("body json does not match TxRequest"));
+        assert!(
+            verdict
+                .reason
+                .contains("body json does not match TxRequest")
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -513,12 +516,8 @@ mod tests {
     fn with_name_overrides() {
         let client = MockChainClient::local();
         let wallet = MockChainWallet::funded(0);
-        let gate = WalletGate::with_name(
-            Arc::new(wallet),
-            Arc::new(client),
-            cfg(),
-            "arb_wallet_gate",
-        );
+        let gate =
+            WalletGate::with_name(Arc::new(wallet), Arc::new(client), cfg(), "arb_wallet_gate");
         assert_eq!(gate.name(), "arb_wallet_gate");
     }
 }

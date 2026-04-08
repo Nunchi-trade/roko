@@ -227,7 +227,12 @@ pub struct PromptEfficiencyScore {
 
 impl PromptEfficiencyScore {
     /// Create a new efficiency score.
-    pub const fn new(signal_ratio: f64, budget_utilization: f64, cache_efficiency: f64, gate_passed: bool) -> Self {
+    pub const fn new(
+        signal_ratio: f64,
+        budget_utilization: f64,
+        cache_efficiency: f64,
+        gate_passed: bool,
+    ) -> Self {
         Self {
             signal_ratio: signal_ratio.clamp(0.0, 1.0),
             budget_utilization: budget_utilization.clamp(0.0, 1.0),
@@ -527,9 +532,31 @@ mod tests {
     #[test]
     fn efficiency_role_profile_single_role() {
         let events = vec![
-            make_test_event("Implementer", 0.50, 1000, 200, 300, 10000, 10, 5, true, true),
+            make_test_event(
+                "Implementer",
+                0.50,
+                1000,
+                200,
+                300,
+                10000,
+                10,
+                5,
+                true,
+                true,
+            ),
             make_test_event("Implementer", 0.30, 800, 150, 200, 8000, 10, 3, false, true),
-            make_test_event("Implementer", 0.70, 1200, 250, 400, 12000, 10, 7, true, false),
+            make_test_event(
+                "Implementer",
+                0.70,
+                1200,
+                250,
+                400,
+                12000,
+                10,
+                7,
+                true,
+                false,
+            ),
         ];
 
         let profiles = compute_role_profiles(&events);
@@ -572,9 +599,9 @@ mod tests {
 
     #[test]
     fn efficiency_role_profile_no_passes() {
-        let events = vec![
-            make_test_event("Impl", 0.50, 1000, 200, 0, 10000, 10, 5, false, false),
-        ];
+        let events = vec![make_test_event(
+            "Impl", 0.50, 1000, 200, 0, 10000, 10, 5, false, false,
+        )];
 
         let profiles = compute_role_profiles(&events);
         assert!((profiles[0].cost_per_pass).abs() < 1e-9);

@@ -21,11 +21,16 @@ pub const DESCRIPTION: &str = "Write the provided content to a file in the workt
 /// Build the [`ToolDef`] for `write_file`.
 #[must_use]
 pub fn tool_def() -> ToolDef {
-    ToolDef::new(NAME, DESCRIPTION, ToolCategory::Write, ToolPermission::writes())
-        .with_parameters(ToolSchema::any_object())
-        .with_concurrency(ToolConcurrency::Serial)
-        .with_idempotent(false)
-        .with_timeout_ms(30_000)
+    ToolDef::new(
+        NAME,
+        DESCRIPTION,
+        ToolCategory::Write,
+        ToolPermission::writes(),
+    )
+    .with_parameters(ToolSchema::any_object())
+    .with_concurrency(ToolConcurrency::Serial)
+    .with_idempotent(false)
+    .with_timeout_ms(30_000)
 }
 
 /// Handler for `write_file` (§36.15).
@@ -60,7 +65,11 @@ impl ToolHandler for Handler {
             }
         }
         match tokio::fs::write(&absolute, content.as_bytes()).await {
-            Ok(()) => ToolResult::text(format!("wrote {} bytes to {}", content.len(), absolute.display())),
+            Ok(()) => ToolResult::text(format!(
+                "wrote {} bytes to {}",
+                content.len(),
+                absolute.display()
+            )),
             Err(e) => ToolResult::Err(ToolError::Other(format!(
                 "write_file failed ({}): {e}",
                 absolute.display()

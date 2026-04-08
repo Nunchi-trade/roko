@@ -84,7 +84,6 @@ pub struct Skill {
     pub usage_count: u64,
 
     // ── Voyager-style extraction fields (§16.3.2-16.3.4) ───────────
-
     /// Longer description (1-2 sentences) of the skill's purpose.
     #[serde(default)]
     pub description: String,
@@ -353,11 +352,7 @@ impl SkillLibrary {
     ///
     /// Returns [`SkillLibraryError::NotFound`] if `name` is not registered.
     #[allow(clippy::significant_drop_tightening)]
-    pub async fn record_use(
-        &self,
-        name: &str,
-        success: bool,
-    ) -> Result<(), SkillLibraryError> {
+    pub async fn record_use(&self, name: &str, success: bool) -> Result<(), SkillLibraryError> {
         {
             let mut guard = self.skills.write();
             let Some(skill) = guard.get_mut(name) else {
@@ -370,8 +365,7 @@ impl SkillLibrary {
             // only beyond 2^53 which we clamp at below.
             #[allow(clippy::cast_precision_loss)]
             let prior_f = prior as f64;
-            skill.success_rate =
-                (skill.success_rate.mul_add(prior_f, outcome)) / (prior_f + 1.0);
+            skill.success_rate = (skill.success_rate.mul_add(prior_f, outcome)) / (prior_f + 1.0);
             skill.usage_count = prior.saturating_add(1);
         }
         self.persist().await
@@ -552,20 +546,18 @@ impl SkillLibrary {
                     overlap as f64 / query.tags.len().max(1) as f64
                 };
 
-                let file_hint =
-                    if query.files_hint.iter().any(|f| skill.files.contains(f)) {
-                        0.2
-                    } else {
-                        0.0
-                    };
+                let file_hint = if query.files_hint.iter().any(|f| skill.files.contains(f)) {
+                    0.2
+                } else {
+                    0.0
+                };
 
                 let relevance = tag_overlap + file_hint;
                 if relevance <= 0.0 {
                     return None;
                 }
 
-                let validated_bonus =
-                    0.1_f64.mul_add(f64::from(skill.validated_count).sqrt(), 1.0);
+                let validated_bonus = 0.1_f64.mul_add(f64::from(skill.validated_count).sqrt(), 1.0);
                 let final_score = skill.score * relevance * validated_bonus;
 
                 Some((final_score, skill))
@@ -850,11 +842,7 @@ mod tests {
         for i in 0..16 {
             let lib = Arc::clone(&library);
             handles.push(tokio::spawn(async move {
-                let s = Skill::new(
-                    format!("skill_{i:02}"),
-                    "summary",
-                    "template",
-                );
+                let s = Skill::new(format!("skill_{i:02}"), "summary", "template");
                 lib.register(&s).await
             }));
         }
@@ -938,8 +926,7 @@ mod tests {
             .insert("iteration".into(), serde_json::json!(iteration));
         ep.extra
             .insert("complexity_band".into(), serde_json::json!(band));
-        ep.extra
-            .insert("task_tags".into(), serde_json::json!(tags));
+        ep.extra.insert("task_tags".into(), serde_json::json!(tags));
         ep.extra
             .insert("task_category".into(), serde_json::json!(category));
         ep.extra
@@ -950,8 +937,7 @@ mod tests {
             .insert("model".into(), serde_json::json!("claude-4"));
         ep.extra
             .insert("verbal_reflection".into(), serde_json::json!("worked well"));
-        ep.extra
-            .insert("score".into(), serde_json::json!(0.9));
+        ep.extra.insert("score".into(), serde_json::json!(0.9));
         ep
     }
 
@@ -1023,15 +1009,23 @@ mod tests {
 
         // First extraction succeeds
         let ep1 = make_episode(
-            "task-1", true, 1, "standard",
-            &["rust", "async", "tokio"], "backend",
+            "task-1",
+            true,
+            1,
+            "standard",
+            &["rust", "async", "tokio"],
+            "backend",
         );
         assert!(library.extract(&ep1, &pg).await.is_some());
 
         // 2/3 tags overlap = 66.7% < 70% — should succeed
         let mut ep2 = make_episode(
-            "task-2", true, 1, "standard",
-            &["rust", "async", "serde"], "backend",
+            "task-2",
+            true,
+            1,
+            "standard",
+            &["rust", "async", "serde"],
+            "backend",
         );
         ep2.id = "ep_dedup_test_002".into();
         assert!(library.extract(&ep2, &pg).await.is_some());
@@ -1039,8 +1033,12 @@ mod tests {
 
         // 3/3 tags overlap = 100% ≥ 70% + same category — rejected
         let mut ep3 = make_episode(
-            "task-3", true, 1, "standard",
-            &["rust", "async", "tokio"], "backend",
+            "task-3",
+            true,
+            1,
+            "standard",
+            &["rust", "async", "tokio"],
+            "backend",
         );
         ep3.id = "ep_dedup_test_003".into();
         assert!(library.extract(&ep3, &pg).await.is_none());
@@ -1049,8 +1047,12 @@ mod tests {
         // Same tags but different category — should succeed (dedup requires
         // BOTH tag overlap ≥70% AND same category)
         let mut ep4 = make_episode(
-            "task-4", true, 1, "standard",
-            &["rust", "async", "tokio"], "frontend",
+            "task-4",
+            true,
+            1,
+            "standard",
+            &["rust", "async", "tokio"],
+            "frontend",
         );
         ep4.id = "ep_dedup_test_004".into();
         assert!(library.extract(&ep4, &pg).await.is_some());

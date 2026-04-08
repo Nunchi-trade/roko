@@ -63,25 +63,24 @@ impl Policy for CostOverrunWatcher {
             return Vec::new();
         };
 
-        let budget = latest_metric(stream, PLAN_BUDGET_METRIC)
-            .unwrap_or(self.default_budget);
+        let budget = latest_metric(stream, PLAN_BUDGET_METRIC).unwrap_or(self.default_budget);
 
         if budget <= 0.0 {
             return Vec::new();
         }
 
         if cost > budget {
-            vec![Signal::builder(Kind::Custom(
-                "conductor.intervention".into(),
-            ))
-            .body(Body::text(format!(
-                "plan cost ${cost:.2} exceeds budget ${budget:.2}"
-            )))
-            .tag("watcher", WATCHER_NAME)
-            .tag("severity", "warning")
-            .tag("cost", format!("{cost:.2}"))
-            .tag("budget", format!("{budget:.2}"))
-            .build()]
+            vec![
+                Signal::builder(Kind::Custom("conductor.intervention".into()))
+                    .body(Body::text(format!(
+                        "plan cost ${cost:.2} exceeds budget ${budget:.2}"
+                    )))
+                    .tag("watcher", WATCHER_NAME)
+                    .tag("severity", "warning")
+                    .tag("cost", format!("{cost:.2}"))
+                    .tag("budget", format!("{budget:.2}"))
+                    .build(),
+            ]
         } else {
             Vec::new()
         }

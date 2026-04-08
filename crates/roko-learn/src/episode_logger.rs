@@ -250,7 +250,10 @@ fn derive_id(agent_id: &str, task_id: &str, timestamp: DateTime<Utc>) -> String 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     agent_id.hash(&mut hasher);
     task_id.hash(&mut hasher);
-    timestamp.timestamp_nanos_opt().unwrap_or(0).hash(&mut hasher);
+    timestamp
+        .timestamp_nanos_opt()
+        .unwrap_or(0)
+        .hash(&mut hasher);
     format!("ep_{:016x}", hasher.finish())
 }
 
@@ -371,12 +374,11 @@ impl EpisodeLogger {
             if raw.trim().is_empty() {
                 continue;
             }
-            let episode: Episode = serde_json::from_str(raw).map_err(|source| {
-                LoggerError::Parse {
+            let episode: Episode =
+                serde_json::from_str(raw).map_err(|source| LoggerError::Parse {
                     line: idx + 1,
                     source,
-                }
-            })?;
+                })?;
             out.push(episode);
         }
         Ok(out)
@@ -685,10 +687,8 @@ mod tests {
         let logger = EpisodeLogger::new(&path);
         let mut ep = sample("a", "big", true);
         let big_string: String = "x".repeat(MAX_EXTRA_BYTES + 1);
-        ep.extra.insert(
-            "payload".to_string(),
-            serde_json::Value::String(big_string),
-        );
+        ep.extra
+            .insert("payload".to_string(), serde_json::Value::String(big_string));
         let err = logger.append(&ep).await.unwrap_err();
         match err {
             LoggerError::ExtraTooLarge { size, max } => {
@@ -757,7 +757,11 @@ mod tests {
             max_age_days: 365,
         };
         for i in 0..5u32 {
-            let ep = episode_at("a", &format!("t{i}"), now - chrono::Duration::hours(i64::from(i)));
+            let ep = episode_at(
+                "a",
+                &format!("t{i}"),
+                now - chrono::Duration::hours(i64::from(i)),
+            );
             logger.append(&ep).await.unwrap();
         }
         let stats = logger.compact(now, &policy).await.unwrap();
@@ -779,7 +783,11 @@ mod tests {
             max_age_days: 365,
         };
         for i in 0..6u32 {
-            let ep = episode_at("a", &format!("t{i}"), now - chrono::Duration::hours(i64::from(5 - i)));
+            let ep = episode_at(
+                "a",
+                &format!("t{i}"),
+                now - chrono::Duration::hours(i64::from(5 - i)),
+            );
             logger.append(&ep).await.unwrap();
         }
         let stats = logger.compact(now, &policy).await.unwrap();
@@ -805,7 +813,11 @@ mod tests {
             max_age_days: 365,
         };
         for i in 0..4u32 {
-            let ep = episode_at("a", &format!("t{i}"), now - chrono::Duration::hours(i64::from(i)));
+            let ep = episode_at(
+                "a",
+                &format!("t{i}"),
+                now - chrono::Duration::hours(i64::from(i)),
+            );
             logger.append(&ep).await.unwrap();
         }
         let stats = logger.compact(now, &policy).await.unwrap();
@@ -825,11 +837,19 @@ mod tests {
         };
         // 3 recent, 2 old (> 30 days).
         for i in 0..3u32 {
-            let ep = episode_at("a", &format!("recent-{i}"), now - chrono::Duration::days(i64::from(i)));
+            let ep = episode_at(
+                "a",
+                &format!("recent-{i}"),
+                now - chrono::Duration::days(i64::from(i)),
+            );
             logger.append(&ep).await.unwrap();
         }
         for i in 0..2u32 {
-            let ep = episode_at("a", &format!("old-{i}"), now - chrono::Duration::days(31 + i64::from(i)));
+            let ep = episode_at(
+                "a",
+                &format!("old-{i}"),
+                now - chrono::Duration::days(31 + i64::from(i)),
+            );
             logger.append(&ep).await.unwrap();
         }
         let stats = logger.compact(now, &policy).await.unwrap();
@@ -854,7 +874,11 @@ mod tests {
         headline_ep.headline = true;
         logger.append(&headline_ep).await.unwrap();
         for i in 0..3u32 {
-            let ep = episode_at("a", &format!("normal-{i}"), now - chrono::Duration::hours(i64::from(i)));
+            let ep = episode_at(
+                "a",
+                &format!("normal-{i}"),
+                now - chrono::Duration::hours(i64::from(i)),
+            );
             logger.append(&ep).await.unwrap();
         }
         let stats = logger.compact(now, &policy).await.unwrap();
@@ -882,13 +906,21 @@ mod tests {
         };
         // 2 old episodes (pruned by age).
         for i in 0..2u32 {
-            let ep = episode_at("a", &format!("old-{i}"), now - chrono::Duration::days(60 + i64::from(i)));
+            let ep = episode_at(
+                "a",
+                &format!("old-{i}"),
+                now - chrono::Duration::days(60 + i64::from(i)),
+            );
             logger.append(&ep).await.unwrap();
         }
         // 5 recent episodes → after age pruning only 5 remain, then
         // size cap prunes to 3.
         for i in 0..5u32 {
-            let ep = episode_at("a", &format!("recent-{i}"), now - chrono::Duration::hours(i64::from(i)));
+            let ep = episode_at(
+                "a",
+                &format!("recent-{i}"),
+                now - chrono::Duration::hours(i64::from(i)),
+            );
             logger.append(&ep).await.unwrap();
         }
         let stats = logger.compact(now, &policy).await.unwrap();
@@ -928,7 +960,11 @@ mod tests {
         };
         // Write 5 episodes with ascending timestamps.
         for i in 0..5u32 {
-            let ep = episode_at("a", &format!("t{i}"), now - chrono::Duration::hours(i64::from(4 - i)));
+            let ep = episode_at(
+                "a",
+                &format!("t{i}"),
+                now - chrono::Duration::hours(i64::from(4 - i)),
+            );
             logger.append(&ep).await.unwrap();
         }
         logger.compact(now, &policy).await.unwrap();

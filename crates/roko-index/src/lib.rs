@@ -17,7 +17,7 @@ pub mod symbol;
 
 // ─── Convenience re-exports ─────────────────────────────────────────────
 
-pub use graph::{build_graph, pagerank, EdgeKind, SymbolEdge, SymbolGraph};
-pub use hdc::{fingerprint_file, fingerprint_symbol, similarity, HdcFingerprint};
-pub use parser::{parse_source, SourceFile};
-pub use symbol::{find_symbol, SymbolId, SymbolRef};
+pub use graph::{EdgeKind, SymbolEdge, SymbolGraph, build_graph, pagerank};
+pub use hdc::{HdcFingerprint, fingerprint_file, fingerprint_symbol, similarity};
+pub use parser::{SourceFile, parse_source};
+pub use symbol::{SymbolId, SymbolRef, find_symbol};

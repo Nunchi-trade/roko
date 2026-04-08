@@ -20,11 +20,16 @@ pub const DESCRIPTION: &str = "Replace an exact string in a file with a new stri
 /// Build the [`ToolDef`] for `edit_file`.
 #[must_use]
 pub fn tool_def() -> ToolDef {
-    ToolDef::new(NAME, DESCRIPTION, ToolCategory::Write, ToolPermission::writes())
-        .with_parameters(ToolSchema::any_object())
-        .with_concurrency(ToolConcurrency::Serial)
-        .with_idempotent(false)
-        .with_timeout_ms(30_000)
+    ToolDef::new(
+        NAME,
+        DESCRIPTION,
+        ToolCategory::Write,
+        ToolPermission::writes(),
+    )
+    .with_parameters(ToolSchema::any_object())
+    .with_concurrency(ToolConcurrency::Serial)
+    .with_idempotent(false)
+    .with_timeout_ms(30_000)
 }
 
 /// Handler for `edit_file` (§36.16).
@@ -92,7 +97,9 @@ impl ToolHandler for Handler {
             existing.replacen(old_string.as_str(), &new_string, 1)
         };
         match tokio::fs::write(&absolute, replaced.as_bytes()).await {
-            Ok(()) => ToolResult::text(format!("edited {} ({count} match(es))", absolute.display())),
+            Ok(()) => {
+                ToolResult::text(format!("edited {} ({count} match(es))", absolute.display()))
+            }
             Err(e) => ToolResult::Err(ToolError::Other(format!(
                 "edit_file: failed to write {}: {e}",
                 absolute.display()

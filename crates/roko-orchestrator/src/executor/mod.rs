@@ -375,7 +375,9 @@ mod tests {
 
         let actions = ex.tick();
         assert_eq!(actions.len(), 1);
-        assert!(matches!(&actions[0], ExecutorAction::DispatchPlan { plan_id } if plan_id == "active"));
+        assert!(
+            matches!(&actions[0], ExecutorAction::DispatchPlan { plan_id } if plan_id == "active")
+        );
     }
 
     #[test]
@@ -546,7 +548,13 @@ mod tests {
         ex.apply_event("plan-42", &ExecutorEvent::EnrichmentDone)
             .unwrap();
         let actions = ex.tick();
-        assert!(matches!(&actions[0], ExecutorAction::SpawnAgent { role: roko_core::AgentRole::Implementer, .. }));
+        assert!(matches!(
+            &actions[0],
+            ExecutorAction::SpawnAgent {
+                role: roko_core::AgentRole::Implementer,
+                ..
+            }
+        ));
 
         // ImplementationDone -> Gating
         ex.apply_event("plan-42", &ExecutorEvent::ImplementationDone)
@@ -583,7 +591,10 @@ mod tests {
     fn plan_state_mut_allows_modification() {
         let mut ex = default_executor();
         ex.add_plan(PlanState::new("p"));
-        ex.plan_state_mut("p").unwrap().files_changed.push("a.rs".into());
+        ex.plan_state_mut("p")
+            .unwrap()
+            .files_changed
+            .push("a.rs".into());
         assert_eq!(ex.plan_state("p").unwrap().files_changed, vec!["a.rs"]);
     }
 

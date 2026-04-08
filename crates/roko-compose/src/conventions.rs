@@ -183,12 +183,7 @@ fn detect_naming(sources: &[&str]) -> NamingStyle {
                 .as_bytes()
                 .windows(2)
                 .any(|w| w[0].is_ascii_lowercase() && w[1].is_ascii_uppercase());
-            if has_lower_upper
-                && word
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_ascii_lowercase())
-            {
+            if has_lower_upper && word.chars().next().is_some_and(|c| c.is_ascii_lowercase()) {
                 camel_count += 1;
             }
         }
@@ -210,10 +205,9 @@ fn detect_naming(sources: &[&str]) -> NamingStyle {
 
 /// Detect error handling pattern from Cargo.toml and source.
 fn detect_error_pattern(cargo_toml: &str, sources: &[&str]) -> ErrorPattern {
-    let has_thiserror = cargo_toml.contains("thiserror")
-        || sources.iter().any(|s| s.contains("thiserror"));
-    let has_anyhow =
-        cargo_toml.contains("anyhow") || sources.iter().any(|s| s.contains("anyhow"));
+    let has_thiserror =
+        cargo_toml.contains("thiserror") || sources.iter().any(|s| s.contains("thiserror"));
+    let has_anyhow = cargo_toml.contains("anyhow") || sources.iter().any(|s| s.contains("anyhow"));
 
     match (has_thiserror, has_anyhow) {
         (true, true) => ErrorPattern::ThiserrorAndAnyhow,
@@ -370,7 +364,9 @@ serde = { version = "1", features = ["derive"] }
     #[test]
     fn extra_conventions_in_fragment() {
         let mut conventions = ProjectConventions::default();
-        conventions.extra.push("Always use Result, never panic".to_string());
+        conventions
+            .extra
+            .push("Always use Result, never panic".to_string());
         let fragment = conventions.to_prompt_fragment();
         assert!(fragment.contains("Always use Result, never panic"));
     }

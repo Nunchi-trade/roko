@@ -164,13 +164,9 @@ impl Gate for PropertyTestGate {
         let payload: GatePayload = match signal.body.as_json() {
             Ok(p) => p,
             Err(e) => {
-                let elapsed =
-                    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                return Verdict::fail(
-                    &self.name,
-                    format!("signal body is not a GatePayload: {e}"),
-                )
-                .with_duration(elapsed);
+                let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                return Verdict::fail(&self.name, format!("signal body is not a GatePayload: {e}"))
+                    .with_duration(elapsed);
             }
         };
 
@@ -208,18 +204,15 @@ impl Gate for PropertyTestGate {
             cmd.env(k, v);
         }
 
-        let output = match timeout(Duration::from_millis(self.timeout_ms), cmd.output()).await
-        {
+        let output = match timeout(Duration::from_millis(self.timeout_ms), cmd.output()).await {
             Ok(Ok(out)) => out,
             Ok(Err(e)) => {
-                let elapsed =
-                    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                 return Verdict::fail(&self.name, format!("spawn failed: {e}"))
                     .with_duration(elapsed);
             }
             Err(_) => {
-                let elapsed =
-                    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                 return Verdict::fail(
                     &self.name,
                     format!("timed out after {} ms", self.timeout_ms),
@@ -235,7 +228,9 @@ impl Gate for PropertyTestGate {
         let counts = parse_property_test_counts(&combined);
 
         let mut verdict = if output.status.success() {
-            Verdict::pass(&self.name).with_detail(combined).with_duration(elapsed)
+            Verdict::pass(&self.name)
+                .with_detail(combined)
+                .with_duration(elapsed)
         } else {
             let digest = extract_counterexample(&combined);
             let reason = digest
@@ -482,7 +477,8 @@ mod tests {
         let map: std::collections::HashMap<_, _> = env.into_iter().collect();
         assert_eq!(map.get("PROPTEST_CASES").map(String::as_str), Some("128"));
         assert_eq!(
-            map.get("PROPTEST_DISABLE_FAILURE_PERSISTENCE").map(String::as_str),
+            map.get("PROPTEST_DISABLE_FAILURE_PERSISTENCE")
+                .map(String::as_str),
             Some("1")
         );
         assert_eq!(
@@ -647,10 +643,17 @@ Falsifying example: test_never_exceeds(
         let gate = PropertyTestGate::cargo().with_prefix("   ");
         let dir = tempfile::tempdir().expect("tempdir");
         let payload = GatePayload::in_dir(dir.path());
-        let v = gate.verify(&payload_signal(&payload), &Context::at(0)).await;
+        let v = gate
+            .verify(&payload_signal(&payload), &Context::at(0))
+            .await;
         assert!(v.passed);
         assert_eq!(v.gate, "property_test:cargo");
-        assert!(v.detail.as_deref().unwrap_or("").contains("no property tests"));
+        assert!(
+            v.detail
+                .as_deref()
+                .unwrap_or("")
+                .contains("no property tests")
+        );
     }
 
     #[tokio::test]
@@ -677,7 +680,9 @@ Falsifying example: test_never_exceeds(
 
         let gate = PropertyTestGate::cargo().with_timeout_ms(1);
         let payload = GatePayload::in_dir(dir.path());
-        let v = gate.verify(&payload_signal(&payload), &Context::at(0)).await;
+        let v = gate
+            .verify(&payload_signal(&payload), &Context::at(0))
+            .await;
         assert!(!v.passed);
         // Either the timeout or a spawn failure is acceptable — both
         // are valid failure modes exercised by this path.

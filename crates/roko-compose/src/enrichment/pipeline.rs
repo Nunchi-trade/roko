@@ -19,7 +19,7 @@ use super::config::EnrichmentConfig;
 use super::inputs::step_dependency_paths;
 use super::outcome::{SkipReason, StepOutcome};
 use super::prompts::{self, StepInputs};
-use super::step::{EnrichStep, ALL_ORDERED};
+use super::step::{ALL_ORDERED, EnrichStep};
 use super::validate;
 
 /// The enrichment pipeline. Parameterized by an [`LlmClient`] implementation.
@@ -86,10 +86,7 @@ impl<C: LlmClient> EnrichmentPipeline<C> {
         if !step.needs_llm() {
             return match prompts::generate_without_llm(step, &inputs) {
                 Ok(content) => self.finalize_output(step, &output_file, &content, 0),
-                Err(e) => StepOutcome::Failed {
-                    step,
-                    message: e,
-                },
+                Err(e) => StepOutcome::Failed { step, message: e },
             };
         }
 
@@ -142,30 +139,27 @@ impl<C: LlmClient> EnrichmentPipeline<C> {
                 let (repair_sys, repair_user) =
                     prompts::build_repair_prompt(step, raw_output, &original_err);
 
-                match self.client.call(model, &repair_sys, &repair_user, 8192).await {
-                    Ok(repaired_raw) => {
-                        match validate::repair_toml_output(step, &repaired_raw) {
-                            Ok(repaired) => {
-                                self.finalize_output(step, output_file, &repaired, 2)
-                            }
-                            Err(repair_err) => StepOutcome::Failed {
-                                step,
-                                message: format!(
-                                    "TOML repair failed: {repair_err} (original: {original_err})"
-                                ),
-                            },
-                        }
-                    }
+                match self
+                    .client
+                    .call(model, &repair_sys, &repair_user, 8192)
+                    .await
+                {
+                    Ok(repaired_raw) => match validate::repair_toml_output(step, &repaired_raw) {
+                        Ok(repaired) => self.finalize_output(step, output_file, &repaired, 2),
+                        Err(repair_err) => StepOutcome::Failed {
+                            step,
+                            message: format!(
+                                "TOML repair failed: {repair_err} (original: {original_err})"
+                            ),
+                        },
+                    },
                     Err(e) => StepOutcome::Failed {
                         step,
                         message: format!("TOML repair LLM call failed: {e}"),
                     },
                 }
             }
-            Err(err) => StepOutcome::Failed {
-                step,
-                message: err,
-            },
+            Err(err) => StepOutcome::Failed { step, message: err },
         }
     }
 
@@ -361,7 +355,6 @@ mod tests {
         fn single_ok(response: &str) -> Self {
             Self::new(vec![Ok(response.to_string())])
         }
-
     }
 
     #[async_trait::async_trait]
@@ -446,8 +439,7 @@ mod tests {
         let plan_dir = setup_plan_dir(tmp.path(), "test-plan");
 
         // Pre-create the Prd output so it is fresh.
-        std::fs::write(plan_dir.join("prd-extract.md"), "# Existing PRD\n")
-            .expect("write output");
+        std::fs::write(plan_dir.join("prd-extract.md"), "# Existing PRD\n").expect("write output");
 
         let config = make_config(tmp.path());
         let client = MockLlmClient::single_ok("unused");
@@ -585,9 +577,7 @@ mod tests {
         config.force = true;
 
         let pipeline = EnrichmentPipeline::new(config, client);
-        let outcome = pipeline
-            .run_step(EnrichStep::Invariants, "test-plan")
-            .await;
+        let outcome = pipeline.run_step(EnrichStep::Invariants, "test-plan").await;
 
         assert!(
             outcome.is_failed(),
@@ -622,19 +612,15 @@ mod tests {
         );
 
         // LLM steps should fail.
-        let failed: Vec<_> = outcomes
-            .iter()
-            .filter(|o| o.is_failed())
-            .collect();
+        let failed: Vec<_> = outcomes.iter().filter(|o| o.is_failed()).collect();
         assert!(
             !failed.is_empty(),
             "LLM steps should fail when client errors"
         );
 
         // Total should be 13 (no panics, no short-circuits).
-        let total = generated.len()
-            + failed.len()
-            + outcomes.iter().filter(|o| o.is_skipped()).count();
+        let total =
+            generated.len() + failed.len() + outcomes.iter().filter(|o| o.is_skipped()).count();
         assert_eq!(total, 13);
     }
 
@@ -671,9 +657,7 @@ mod tests {
         config.force = true;
 
         let pipeline = EnrichmentPipeline::new(config, client);
-        let outcome = pipeline
-            .run_step(EnrichStep::Decompose, "test-plan")
-            .await;
+        let outcome = pipeline.run_step(EnrichStep::Decompose, "test-plan").await;
 
         match outcome {
             StepOutcome::Generated { llm_calls, .. } => {
@@ -783,9 +767,7 @@ mod tests {
             StepOutcome::Generated { step, .. } => {
                 assert_eq!(step, EnrichStep::Prd);
             }
-            other => panic!(
-                "expected Generated (stale output should regenerate), got {other:?}"
-            ),
+            other => panic!("expected Generated (stale output should regenerate), got {other:?}"),
         }
     }
 }

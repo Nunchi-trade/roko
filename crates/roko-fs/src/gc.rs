@@ -247,8 +247,7 @@ impl GcEngine {
             let excess = line_count - self.policy.max_episodes;
             let meta = tokio::fs::metadata(&path).await?;
             // Estimate: bytes proportional to excess fraction
-            let excess_bytes =
-                meta.len() * excess as u64 / std::cmp::max(line_count as u64, 1);
+            let excess_bytes = meta.len() * excess as u64 / std::cmp::max(line_count as u64, 1);
             report.candidates.push(GcCandidate {
                 path,
                 reason: format!(
@@ -458,14 +457,16 @@ mod tests {
 
         // Create a run directory.
         let run_dir = layout.run_dir("old-run");
-        tokio::fs::create_dir_all(&run_dir).await.expect("create run dir");
+        tokio::fs::create_dir_all(&run_dir)
+            .await
+            .expect("create run dir");
         tokio::fs::write(run_dir.join("metrics.jsonl"), "data\n")
             .await
             .expect("write metrics");
 
         // Set the directory modification time to 30 days ago.
-        let thirty_days_ago = std::time::SystemTime::now()
-            - std::time::Duration::from_secs(30 * 86_400);
+        let thirty_days_ago =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 86_400);
         let mtime = filetime::FileTime::from_system_time(thirty_days_ago);
         filetime::set_file_mtime(&run_dir, mtime).expect("set mtime");
 
@@ -485,7 +486,9 @@ mod tests {
         let (_tmp, layout) = setup().await;
 
         let run_dir = layout.run_dir("fresh-run");
-        tokio::fs::create_dir_all(&run_dir).await.expect("create run dir");
+        tokio::fs::create_dir_all(&run_dir)
+            .await
+            .expect("create run dir");
         tokio::fs::write(run_dir.join("data.txt"), "hello\n")
             .await
             .expect("write data");
@@ -509,13 +512,14 @@ mod tests {
         let (_tmp, layout) = setup().await;
 
         let run_dir = layout.run_dir("doomed-run");
-        tokio::fs::create_dir_all(&run_dir).await.expect("create run dir");
+        tokio::fs::create_dir_all(&run_dir)
+            .await
+            .expect("create run dir");
         tokio::fs::write(run_dir.join("metrics.jsonl"), "doomed\n")
             .await
             .expect("write");
 
-        let old_time = std::time::SystemTime::now()
-            - std::time::Duration::from_secs(15 * 86_400);
+        let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(15 * 86_400);
         let mtime = filetime::FileTime::from_system_time(old_time);
         filetime::set_file_mtime(&run_dir, mtime).expect("set mtime");
 
@@ -537,7 +541,9 @@ mod tests {
         let (_tmp, layout) = setup().await;
 
         let cache_dir = layout.context_pack_cache_dir();
-        tokio::fs::create_dir_all(&cache_dir).await.expect("create cache dir");
+        tokio::fs::create_dir_all(&cache_dir)
+            .await
+            .expect("create cache dir");
 
         // Create 10 cache files.
         for i in 0..10 {
@@ -566,7 +572,9 @@ mod tests {
         let (_tmp, layout) = setup().await;
 
         let cache_dir = layout.context_pack_cache_dir();
-        tokio::fs::create_dir_all(&cache_dir).await.expect("create cache dir");
+        tokio::fs::create_dir_all(&cache_dir)
+            .await
+            .expect("create cache dir");
 
         for i in 0..8 {
             tokio::fs::write(cache_dir.join(format!("pack-{i}.bin")), "data")

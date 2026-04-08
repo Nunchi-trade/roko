@@ -44,13 +44,15 @@ impl DaemonConfig {
     /// Compute the socket path for this daemon session.
     #[must_use]
     pub fn socket_path(&self) -> PathBuf {
-        self.runtime_dir.join(format!("roko-{}.sock", self.session_id))
+        self.runtime_dir
+            .join(format!("roko-{}.sock", self.session_id))
     }
 
     /// Compute the PID file path for this daemon session.
     #[must_use]
     pub fn pid_path(&self) -> PathBuf {
-        self.runtime_dir.join(format!("roko-{}.pid", self.session_id))
+        self.runtime_dir
+            .join(format!("roko-{}.pid", self.session_id))
     }
 }
 

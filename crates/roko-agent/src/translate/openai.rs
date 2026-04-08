@@ -50,10 +50,7 @@ impl Translator for OpenAiTranslator {
         RenderedTools::JsonArray(serde_json::Value::Array(arr))
     }
 
-    fn parse_calls(
-        &self,
-        response: &BackendResponse,
-    ) -> Result<Vec<ToolCall>, TranslatorError> {
+    fn parse_calls(&self, response: &BackendResponse) -> Result<Vec<ToolCall>, TranslatorError> {
         let BackendResponse::Json(json) = response else {
             return Err(TranslatorError::Malformed("expected json".into()));
         };
@@ -75,18 +72,14 @@ impl Translator for OpenAiTranslator {
             let name = call
                 .pointer("/function/name")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    TranslatorError::Malformed("missing function.name".into())
-                })?
+                .ok_or_else(|| TranslatorError::Malformed("missing function.name".into()))?
                 .to_string();
             let args_str = call
                 .pointer("/function/arguments")
                 .and_then(|v| v.as_str())
                 .unwrap_or("{}");
             let args: serde_json::Value = serde_json::from_str(args_str)
-                .map_err(|e| {
-                    TranslatorError::Malformed(format!("bad arguments json: {e}"))
-                })?;
+                .map_err(|e| TranslatorError::Malformed(format!("bad arguments json: {e}")))?;
             out.push(ToolCall::new(id, name, args));
         }
         Ok(out)
@@ -114,19 +107,18 @@ impl Translator for OpenAiTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roko_core::tool::{
-        ToolCategory, ToolError, ToolPermission, ToolSchema,
-    };
+    use roko_core::tool::{ToolCategory, ToolError, ToolPermission, ToolSchema};
 
     fn tool(name: &str, desc: &str) -> ToolDef {
-        ToolDef::new(name, desc, ToolCategory::Read, ToolPermission::read_only())
-            .with_parameters(ToolSchema::from_value(serde_json::json!({
+        ToolDef::new(name, desc, ToolCategory::Read, ToolPermission::read_only()).with_parameters(
+            ToolSchema::from_value(serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" }
                 },
                 "required": ["path"]
-            })))
+            })),
+        )
     }
 
     fn ok_text(s: &str) -> ToolResult {
@@ -396,12 +388,7 @@ mod tests {
 
     #[test]
     fn render_results_stringifies_err_variants() {
-        let call = ToolCall::at(
-            "call_err",
-            "bash",
-            serde_json::json!({}),
-            1_700_000_000_000,
-        );
+        let call = ToolCall::at("call_err", "bash", serde_json::json!({}), 1_700_000_000_000);
         let res = ToolResult::err(ToolError::Timeout { after_ms: 5_000 });
         let rendered = OpenAiTranslator.render_results(&[(call, res)]);
         let RenderedResults::JsonMessages(v) = rendered else {
@@ -428,9 +415,7 @@ mod tests {
     fn round_trip_one_call() {
         // 1. Render the tool catalog.
         let tools = [tool("read_file", "Read a UTF-8 file")];
-        let RenderedTools::JsonArray(rendered_tools) =
-            OpenAiTranslator.render_tools(&tools)
-        else {
+        let RenderedTools::JsonArray(rendered_tools) = OpenAiTranslator.render_tools(&tools) else {
             panic!("expected JsonArray");
         };
         assert_eq!(rendered_tools.as_array().map(Vec::len), Some(1));
@@ -461,9 +446,7 @@ mod tests {
 
         // 4. Render a result message set.
         let results = vec![(calls[0].clone(), ok_text("ok"))];
-        let RenderedResults::JsonMessages(msgs) =
-            OpenAiTranslator.render_results(&results)
-        else {
+        let RenderedResults::JsonMessages(msgs) = OpenAiTranslator.render_results(&results) else {
             panic!("expected JsonMessages");
         };
         let arr = msgs.as_array().expect("array");

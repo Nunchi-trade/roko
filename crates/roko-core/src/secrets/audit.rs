@@ -165,8 +165,20 @@ mod tests {
     #[test]
     fn record_and_retrieve_entries() {
         let log = SecretAuditLog::new();
-        log.record_access(make_entry("llm", "anthropic", "agent-1", 1000, AuditAction::Read));
-        log.record_access(make_entry("rpc", "alchemy", "agent-2", 2000, AuditAction::Write));
+        log.record_access(make_entry(
+            "llm",
+            "anthropic",
+            "agent-1",
+            1000,
+            AuditAction::Read,
+        ));
+        log.record_access(make_entry(
+            "rpc",
+            "alchemy",
+            "agent-2",
+            2000,
+            AuditAction::Write,
+        ));
         assert_eq!(log.len(), 2);
         let all = log.entries();
         assert_eq!(all.len(), 2);
@@ -229,7 +241,13 @@ mod tests {
     #[test]
     fn entry_records_accessor() {
         let log = SecretAuditLog::new();
-        log.record_access(make_entry("llm", "anthropic", "conductor", 1000, AuditAction::Read));
+        log.record_access(make_entry(
+            "llm",
+            "anthropic",
+            "conductor",
+            1000,
+            AuditAction::Read,
+        ));
         let entries = log.entries();
         assert_eq!(entries[0].accessor, "conductor");
     }
@@ -237,9 +255,11 @@ mod tests {
     #[test]
     fn entry_records_source() {
         let entry = AuditEntry::new(
-            "llm", "anthropic",
+            "llm",
+            "anthropic",
             SecretSource::Environment,
-            "agent-1", 1000,
+            "agent-1",
+            1000,
             AuditAction::Read,
         );
         assert_eq!(entry.source, SecretSource::Environment);
@@ -265,7 +285,13 @@ mod tests {
     #[test]
     fn delete_action_recorded() {
         let log = SecretAuditLog::new();
-        log.record_access(make_entry("llm", "anthropic", "admin", 500, AuditAction::Delete));
+        log.record_access(make_entry(
+            "llm",
+            "anthropic",
+            "admin",
+            500,
+            AuditAction::Delete,
+        ));
         let entries = log.entries();
         assert_eq!(entries[0].action, AuditAction::Delete);
     }

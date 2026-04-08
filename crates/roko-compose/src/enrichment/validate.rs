@@ -55,10 +55,7 @@ pub fn normalize_step_output(step: EnrichStep, content: &str) -> String {
 ///
 /// The caller must provide the repair text from the LLM (this function does
 /// not call the LLM itself — I/O at boundary only).
-pub fn repair_toml_output(
-    step: EnrichStep,
-    repaired_raw: &str,
-) -> Result<String, String> {
+pub fn repair_toml_output(step: EnrichStep, repaired_raw: &str) -> Result<String, String> {
     let normalized = normalize_step_output(step, repaired_raw);
     validate_step_output(step, &normalized)?;
     Ok(normalized)

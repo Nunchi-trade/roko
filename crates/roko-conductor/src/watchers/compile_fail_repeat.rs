@@ -78,23 +78,23 @@ impl Policy for CompileFailRepeatWatcher {
             return Vec::new();
         };
 
-        let all_same = tail[1..].iter().all(|s| {
-            diagnostic_key(s).as_deref() == Some(first_key.as_str())
-        });
+        let all_same = tail[1..]
+            .iter()
+            .all(|s| diagnostic_key(s).as_deref() == Some(first_key.as_str()));
 
         if all_same {
-            vec![Signal::builder(Kind::Custom(
-                "conductor.intervention".into(),
-            ))
-            .body(Body::text(format!(
-                "{} consecutive identical compile failures: {}",
-                self.max_failures,
-                truncate(&first_key, 100)
-            )))
-            .tag("watcher", WATCHER_NAME)
-            .tag("severity", "warning")
-            .tag("consecutive", self.max_failures.to_string())
-            .build()]
+            vec![
+                Signal::builder(Kind::Custom("conductor.intervention".into()))
+                    .body(Body::text(format!(
+                        "{} consecutive identical compile failures: {}",
+                        self.max_failures,
+                        truncate(&first_key, 100)
+                    )))
+                    .tag("watcher", WATCHER_NAME)
+                    .tag("severity", "warning")
+                    .tag("consecutive", self.max_failures.to_string())
+                    .build(),
+            ]
         } else {
             Vec::new()
         }
@@ -198,10 +198,7 @@ mod tests {
     #[test]
     fn custom_threshold() {
         let w = CompileFailRepeatWatcher::new(2);
-        let stream = vec![
-            compile_error("same"),
-            compile_error("same"),
-        ];
+        let stream = vec![compile_error("same"), compile_error("same")];
         let out = w.decide(&stream, &Context::at(0));
         assert_eq!(out.len(), 1);
     }

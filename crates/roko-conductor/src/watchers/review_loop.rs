@@ -66,8 +66,8 @@ impl Policy for ReviewLoopWatcher {
 
         for s in stream {
             // Only consider review signals.
-            let is_review = s.kind == Kind::AgentMessage
-                && s.tag(REVIEW_TAG_KEY) == Some(REVIEW_TAG_VALUE);
+            let is_review =
+                s.kind == Kind::AgentMessage && s.tag(REVIEW_TAG_KEY) == Some(REVIEW_TAG_VALUE);
             if !is_review {
                 continue;
             }
@@ -79,17 +79,17 @@ impl Policy for ReviewLoopWatcher {
         // Find the most repeated feedback.
         if let Some((feedback, count)) = counts.iter().max_by_key(|(_, c)| **c) {
             if *count >= self.max_cycles {
-                return vec![Signal::builder(Kind::Custom(
-                    "conductor.intervention".into(),
-                ))
-                .body(Body::text(format!(
-                    "review feedback repeated {count} times: {}",
-                    truncate(feedback, 80)
-                )))
-                .tag("watcher", WATCHER_NAME)
-                .tag("severity", "warning")
-                .tag("count", count.to_string())
-                .build()];
+                return vec![
+                    Signal::builder(Kind::Custom("conductor.intervention".into()))
+                        .body(Body::text(format!(
+                            "review feedback repeated {count} times: {}",
+                            truncate(feedback, 80)
+                        )))
+                        .tag("watcher", WATCHER_NAME)
+                        .tag("severity", "warning")
+                        .tag("count", count.to_string())
+                        .build(),
+                ];
             }
         }
 
@@ -174,20 +174,14 @@ mod tests {
     #[test]
     fn below_threshold_no_fire() {
         let w = ReviewLoopWatcher::new(3);
-        let stream = vec![
-            review_signal("same"),
-            review_signal("same"),
-        ];
+        let stream = vec![review_signal("same"), review_signal("same")];
         assert!(w.decide(&stream, &Context::at(0)).is_empty());
     }
 
     #[test]
     fn whitespace_trimmed() {
         let w = ReviewLoopWatcher::new(2);
-        let stream = vec![
-            review_signal("  fix it  "),
-            review_signal("fix it"),
-        ];
+        let stream = vec![review_signal("  fix it  "), review_signal("fix it")];
         let out = w.decide(&stream, &Context::at(0));
         assert_eq!(out.len(), 1);
     }

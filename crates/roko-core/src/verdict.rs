@@ -28,7 +28,11 @@ impl TestCount {
     /// Construct a new `TestCount`.
     #[must_use]
     pub const fn new(passed: u32, failed: u32, ignored: u32) -> Self {
-        Self { passed, failed, ignored }
+        Self {
+            passed,
+            failed,
+            ignored,
+        }
     }
 
     /// Total tests seen (passed + failed + ignored).
@@ -312,21 +316,22 @@ mod tests {
             .with_test_count(TestCount::new(40, 1, 2))
             .with_error_digest("E0599: no method `foo` on type `Bar`");
         assert_eq!(v.test_count, Some(TestCount::new(40, 1, 2)));
-        assert_eq!(v.error_digest.as_deref(), Some("E0599: no method `foo` on type `Bar`"));
+        assert_eq!(
+            v.error_digest.as_deref(),
+            Some("E0599: no method `foo` on type `Bar`")
+        );
     }
 
     #[test]
     fn is_mostly_passing_true_above_threshold() {
-        let v = Verdict::fail("test", "some failed")
-            .with_test_count(TestCount::new(95, 4, 1));
+        let v = Verdict::fail("test", "some failed").with_test_count(TestCount::new(95, 4, 1));
         // 100 total, 4 failed, 95/100 = 95% pass → mostly passing
         assert!(v.is_mostly_passing());
     }
 
     #[test]
     fn is_mostly_passing_false_when_few_tests() {
-        let v = Verdict::fail("test", "some failed")
-            .with_test_count(TestCount::new(18, 1, 0));
+        let v = Verdict::fail("test", "some failed").with_test_count(TestCount::new(18, 1, 0));
         // Total ≤ 20 → not mostly passing
         assert!(!v.is_mostly_passing());
     }
@@ -335,8 +340,8 @@ mod tests {
     fn is_mostly_passing_false_when_no_failures() {
         // Contract: a failed verdict with zero failures is degenerate;
         // only counts that show ≥1 failure are candidates.
-        let v = Verdict::fail("test", "spurious failure")
-            .with_test_count(TestCount::new(100, 0, 5));
+        let v =
+            Verdict::fail("test", "spurious failure").with_test_count(TestCount::new(100, 0, 5));
         assert!(!v.is_mostly_passing());
     }
 

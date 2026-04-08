@@ -2,10 +2,7 @@
 
 use std::collections::HashMap;
 
-use axum::{
-    Json,
-    extract::State,
-};
+use axum::{Json, extract::State};
 use serde::Serialize;
 
 use super::{ApiState, now_secs};
@@ -84,7 +81,9 @@ pub async fn agent_topology(State(state): State<ApiState>) -> Json<TopologyRespo
         // Confirmations: each confirmer has an edge → this author.
         for confirmer in &entry.confirmations {
             let confirmer_str = String::from_utf8_lossy(confirmer).into_owned();
-            *confirmations_given.entry(confirmer_str.clone()).or_default() += 1;
+            *confirmations_given
+                .entry(confirmer_str.clone())
+                .or_default() += 1;
             // Ensure confirmer shows up as a node too.
             agent_posts
                 .entry(confirmer_str.clone())
@@ -97,9 +96,7 @@ pub async fn agent_topology(State(state): State<ApiState>) -> Json<TopologyRespo
         // Challenges: each challenger has an edge → this author.
         for challenger in &entry.challenges {
             let challenger_str = String::from_utf8_lossy(challenger).into_owned();
-            *challenges_given
-                .entry(challenger_str.clone())
-                .or_default() += 1;
+            *challenges_given.entry(challenger_str.clone()).or_default() += 1;
             agent_posts
                 .entry(challenger_str.clone())
                 .or_insert_with(|| (hex_encode(challenger), 0, 0.0));

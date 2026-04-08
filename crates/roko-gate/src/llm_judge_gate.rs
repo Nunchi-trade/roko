@@ -197,12 +197,10 @@ impl Gate for LlmJudgeGate {
         let elapsed = |t: Instant| u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         let Some(payload) = Self::extract_payload(signal) else {
-            return Verdict::fail(&self.name, "no diff to judge")
-                .with_duration(elapsed(started));
+            return Verdict::fail(&self.name, "no diff to judge").with_duration(elapsed(started));
         };
         if payload.diff.is_empty() {
-            return Verdict::fail(&self.name, "no diff to judge")
-                .with_duration(elapsed(started));
+            return Verdict::fail(&self.name, "no diff to judge").with_duration(elapsed(started));
         }
 
         let prompt = Self::build_prompt(&payload, self.max_diff_bytes);
@@ -215,10 +213,7 @@ impl Gate for LlmJudgeGate {
                 } else {
                     Verdict::fail(
                         &self.name,
-                        format!(
-                            "score {score:.3} below threshold {:.3}",
-                            self.min_score
-                        ),
+                        format!("score {score:.3} below threshold {:.3}", self.min_score),
                     )
                     .with_score(score)
                     .with_error_digest(format!("judge score={score:.3}"))
@@ -256,7 +251,10 @@ mod tests {
 
     impl ConstOracle {
         fn new(score: f32) -> Arc<Self> {
-            Arc::new(Self { score, calls: AtomicUsize::new(0) })
+            Arc::new(Self {
+                score,
+                calls: AtomicUsize::new(0),
+            })
         }
     }
 
@@ -343,10 +341,7 @@ mod tests {
     async fn fails_when_score_below_threshold() {
         let gate = LlmJudgeGate::new(ConstOracle::new(0.4), 0.75);
         let v = gate
-            .verify(
-                &payload_signal("task", "+some change"),
-                &Context::at(0),
-            )
+            .verify(&payload_signal("task", "+some change"), &Context::at(0))
             .await;
         assert!(!v.passed);
         assert!(v.reason.contains("below threshold"));
@@ -382,16 +377,12 @@ mod tests {
     #[tokio::test]
     async fn empty_diff_fails_regardless_of_blocking() {
         let nb = LlmJudgeGate::new(ConstOracle::new(1.0), 0.5);
-        let v = nb
-            .verify(&payload_signal("t", ""), &Context::at(0))
-            .await;
+        let v = nb.verify(&payload_signal("t", ""), &Context::at(0)).await;
         assert!(!v.passed);
         assert_eq!(v.reason, "no diff to judge");
 
         let b = LlmJudgeGate::new(ConstOracle::new(1.0), 0.5).blocking();
-        let v = b
-            .verify(&payload_signal("t", ""), &Context::at(0))
-            .await;
+        let v = b.verify(&payload_signal("t", ""), &Context::at(0)).await;
         assert!(!v.passed);
         assert_eq!(v.reason, "no diff to judge");
     }
@@ -539,7 +530,9 @@ mod tests {
         // making pipeline duration aggregates drop its time. Every code
         // path (ok/fail, blocking/nonblocking, no-diff) must set it.
         let good = LlmJudgeGate::new(ConstOracle::new(0.9), 0.5);
-        let v = good.verify(&payload_signal("t", "some diff"), &Context::at(0)).await;
+        let v = good
+            .verify(&payload_signal("t", "some diff"), &Context::at(0))
+            .await;
         assert!(v.passed);
         // duration_ms may be 0 on a fast path, but the field must be
         // populated (present and non-sentinel). We assert the sentinel
@@ -547,7 +540,9 @@ mod tests {
         assert_ne!(v.duration_ms, u64::MAX);
 
         let bad = LlmJudgeGate::new(ConstOracle::new(0.1), 0.5);
-        let v = bad.verify(&payload_signal("t", "some diff"), &Context::at(0)).await;
+        let v = bad
+            .verify(&payload_signal("t", "some diff"), &Context::at(0))
+            .await;
         assert!(!v.passed);
         assert_ne!(v.duration_ms, u64::MAX);
 

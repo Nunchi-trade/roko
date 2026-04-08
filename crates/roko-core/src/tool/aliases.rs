@@ -36,22 +36,70 @@ pub struct ToolAlias {
 /// `web_search` → `notebook_edit` → `todo_write` → `task` →
 /// `exit_plan_mode` → `apply_patch` → `run_tests`.
 pub const ALIASES: &[ToolAlias] = &[
-    ToolAlias { canonical: "read_file", claude: Some("Read") },
-    ToolAlias { canonical: "write_file", claude: Some("Write") },
-    ToolAlias { canonical: "edit_file", claude: Some("Edit") },
-    ToolAlias { canonical: "multi_edit", claude: Some("MultiEdit") },
-    ToolAlias { canonical: "glob", claude: Some("Glob") },
-    ToolAlias { canonical: "grep", claude: Some("Grep") },
-    ToolAlias { canonical: "bash", claude: Some("Bash") },
-    ToolAlias { canonical: "ls", claude: None },
-    ToolAlias { canonical: "web_fetch", claude: Some("WebFetch") },
-    ToolAlias { canonical: "web_search", claude: Some("WebSearch") },
-    ToolAlias { canonical: "notebook_edit", claude: Some("NotebookEdit") },
-    ToolAlias { canonical: "todo_write", claude: Some("TodoWrite") },
-    ToolAlias { canonical: "task", claude: Some("Agent") },
-    ToolAlias { canonical: "exit_plan_mode", claude: Some("ExitPlanMode") },
-    ToolAlias { canonical: "apply_patch", claude: None },
-    ToolAlias { canonical: "run_tests", claude: None },
+    ToolAlias {
+        canonical: "read_file",
+        claude: Some("Read"),
+    },
+    ToolAlias {
+        canonical: "write_file",
+        claude: Some("Write"),
+    },
+    ToolAlias {
+        canonical: "edit_file",
+        claude: Some("Edit"),
+    },
+    ToolAlias {
+        canonical: "multi_edit",
+        claude: Some("MultiEdit"),
+    },
+    ToolAlias {
+        canonical: "glob",
+        claude: Some("Glob"),
+    },
+    ToolAlias {
+        canonical: "grep",
+        claude: Some("Grep"),
+    },
+    ToolAlias {
+        canonical: "bash",
+        claude: Some("Bash"),
+    },
+    ToolAlias {
+        canonical: "ls",
+        claude: None,
+    },
+    ToolAlias {
+        canonical: "web_fetch",
+        claude: Some("WebFetch"),
+    },
+    ToolAlias {
+        canonical: "web_search",
+        claude: Some("WebSearch"),
+    },
+    ToolAlias {
+        canonical: "notebook_edit",
+        claude: Some("NotebookEdit"),
+    },
+    ToolAlias {
+        canonical: "todo_write",
+        claude: Some("TodoWrite"),
+    },
+    ToolAlias {
+        canonical: "task",
+        claude: Some("Agent"),
+    },
+    ToolAlias {
+        canonical: "exit_plan_mode",
+        claude: Some("ExitPlanMode"),
+    },
+    ToolAlias {
+        canonical: "apply_patch",
+        claude: None,
+    },
+    ToolAlias {
+        canonical: "run_tests",
+        claude: None,
+    },
 ];
 
 // ─── Lookup helpers ───────────────────────────────────────────────────────
@@ -123,7 +171,11 @@ mod tests {
     fn canonical_names_are_unique() {
         let mut seen = HashSet::new();
         for a in ALIASES {
-            assert!(seen.insert(a.canonical), "duplicate canonical: {}", a.canonical);
+            assert!(
+                seen.insert(a.canonical),
+                "duplicate canonical: {}",
+                a.canonical
+            );
         }
     }
 

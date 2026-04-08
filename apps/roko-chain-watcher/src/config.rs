@@ -7,7 +7,10 @@ use clap::Parser;
 
 /// Command-line flags accepted by the watcher.
 #[derive(Clone, Debug, Parser)]
-#[command(name = "roko-chain-watcher", about = "Long-running roko agent: observes a mirage chain and posts insights")]
+#[command(
+    name = "roko-chain-watcher",
+    about = "Long-running roko agent: observes a mirage chain and posts insights"
+)]
 pub struct WatcherCli {
     /// `mirage-rs` JSON-RPC endpoint (HTTP).
     #[arg(long, default_value = "http://127.0.0.1:8545", env = "MIRAGE_RPC_URL")]
@@ -26,7 +29,11 @@ pub struct WatcherCli {
     pub poll_k: usize,
 
     /// Pheromone topic query (HDC search).
-    #[arg(long, default_value = "threat opportunity wisdom", env = "ROKO_WATCHER_QUERY")]
+    #[arg(
+        long,
+        default_value = "threat opportunity wisdom",
+        env = "ROKO_WATCHER_QUERY"
+    )]
     pub query: String,
 
     /// Dry-run mode — observe and log, don't post anything.

@@ -6,8 +6,8 @@
 //! file context, sibling task awareness for parallel execution, and per-task
 //! learning packs.
 
+use super::{PlanSlice, RolePromptTemplate, TaskEnhancements, format_enhancements, truncate};
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
-use super::{format_enhancements, truncate, PlanSlice, RolePromptTemplate, TaskEnhancements};
 
 /// A sibling task running in parallel — for file-exclusion awareness.
 #[derive(Clone, Debug)]
@@ -142,11 +142,14 @@ fn push_base_sections(sections: &mut Vec<PromptSection>, input: &TaskImplInput) 
     );
     // 6. cross_plan_context — Session / Normal / Middle / hard_cap 1k
     sections.push(
-        PromptSection::new("cross_plan_context", truncate(&input.cross_plan_context, 1_000))
-            .with_priority(SectionPriority::Normal)
-            .with_cache_layer(CacheLayer::Session)
-            .with_placement(Placement::Middle)
-            .with_hard_cap(1_000),
+        PromptSection::new(
+            "cross_plan_context",
+            truncate(&input.cross_plan_context, 1_000),
+        )
+        .with_priority(SectionPriority::Normal)
+        .with_cache_layer(CacheLayer::Session)
+        .with_placement(Placement::Middle)
+        .with_hard_cap(1_000),
     );
     // 7. ignored_tests — Session / Low / Middle / hard_cap 500
     if !input.ignored_tests.is_empty() {
@@ -257,7 +260,13 @@ fn format_siblings(siblings: &[SiblingTask]) -> String {
          These agents are working simultaneously. Do NOT touch their files:\n",
     );
     for s in siblings {
-        let _ = writeln!(out, "- {}: {} → files: {}", s.id, s.title, s.files.join(", "));
+        let _ = writeln!(
+            out,
+            "- {}: {} → files: {}",
+            s.id,
+            s.title,
+            s.files.join(", ")
+        );
     }
     out
 }

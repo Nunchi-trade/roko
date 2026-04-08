@@ -103,7 +103,9 @@ impl DiffGate {
     /// Construct a new diff gate.
     #[must_use]
     pub fn new() -> Self {
-        Self { name: "diff".into() }
+        Self {
+            name: "diff".into(),
+        }
     }
 }
 
@@ -185,7 +187,9 @@ pub fn analyze_diff(payload: &DiffPayload) -> DiffAnalysis {
         if line.starts_with("+++") || line.starts_with("---") || line.starts_with("@@") {
             continue;
         }
-        let Some(rest) = line.strip_prefix('+') else { continue };
+        let Some(rest) = line.strip_prefix('+') else {
+            continue;
+        };
         added = added.saturating_add(1);
         let trimmed = rest.trim();
         if trimmed.is_empty() || is_comment_line(trimmed) {

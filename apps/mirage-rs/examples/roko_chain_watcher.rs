@@ -27,30 +27,106 @@ use mirage_rs::roko_bridge::{
 
 /// A seed tuple for pheromones: (kind, label to project, intensity).
 const PHEROMONE_SEEDS: &[(PheromoneKind, &str, f32)] = &[
-    (PheromoneKind::Threat, "MEV sandwich on WETH/USDC 0.05%", 0.92),
-    (PheromoneKind::Threat, "Aave v3 liquidation cascade warming up", 0.88),
-    (PheromoneKind::Threat, "stETH/ETH curve pool depeg risk", 0.77),
-    (PheromoneKind::Threat, "Euler oracle manipulation on low-TVL pool", 0.79),
-    (PheromoneKind::Opportunity, "arbitrage UniV3 vs Sushi 0.4%", 0.65),
-    (PheromoneKind::Opportunity, "Curve 3pool imbalance 2.1%", 0.71),
-    (PheromoneKind::Opportunity, "just-in-time LP on whale swap", 0.80),
-    (PheromoneKind::Opportunity, "Pendle PT 12% APY, 30d to expiry", 0.69),
-    (PheromoneKind::Wisdom, "Permit2 saves 1 tx on first allowance", 0.62),
-    (PheromoneKind::Wisdom, "Arbitrum gas buffer 3x for L1 calldata", 0.58),
-    (PheromoneKind::Wisdom, "median 3 oracles beats any single feed", 0.60),
-    (PheromoneKind::Wisdom, "LRT positions: diversify across 3 protocols", 0.57),
+    (
+        PheromoneKind::Threat,
+        "MEV sandwich on WETH/USDC 0.05%",
+        0.92,
+    ),
+    (
+        PheromoneKind::Threat,
+        "Aave v3 liquidation cascade warming up",
+        0.88,
+    ),
+    (
+        PheromoneKind::Threat,
+        "stETH/ETH curve pool depeg risk",
+        0.77,
+    ),
+    (
+        PheromoneKind::Threat,
+        "Euler oracle manipulation on low-TVL pool",
+        0.79,
+    ),
+    (
+        PheromoneKind::Opportunity,
+        "arbitrage UniV3 vs Sushi 0.4%",
+        0.65,
+    ),
+    (
+        PheromoneKind::Opportunity,
+        "Curve 3pool imbalance 2.1%",
+        0.71,
+    ),
+    (
+        PheromoneKind::Opportunity,
+        "just-in-time LP on whale swap",
+        0.80,
+    ),
+    (
+        PheromoneKind::Opportunity,
+        "Pendle PT 12% APY, 30d to expiry",
+        0.69,
+    ),
+    (
+        PheromoneKind::Wisdom,
+        "Permit2 saves 1 tx on first allowance",
+        0.62,
+    ),
+    (
+        PheromoneKind::Wisdom,
+        "Arbitrum gas buffer 3x for L1 calldata",
+        0.58,
+    ),
+    (
+        PheromoneKind::Wisdom,
+        "median 3 oracles beats any single feed",
+        0.60,
+    ),
+    (
+        PheromoneKind::Wisdom,
+        "LRT positions: diversify across 3 protocols",
+        0.57,
+    ),
 ];
 
 /// Seed tuple for insight events: (kind, author, content).
 const INSIGHT_SEEDS: &[(KnowledgeKind, &str, &str)] = &[
-    (KnowledgeKind::Insight, "alice", "Uniswap v3 STF revert = insufficient allowance"),
-    (KnowledgeKind::Heuristic, "alice", "USDC balance reads cacheable for 12 seconds"),
+    (
+        KnowledgeKind::Insight,
+        "alice",
+        "Uniswap v3 STF revert = insufficient allowance",
+    ),
+    (
+        KnowledgeKind::Heuristic,
+        "alice",
+        "USDC balance reads cacheable for 12 seconds",
+    ),
     (KnowledgeKind::Warning, "bob", "LUSD peg drift observed"),
-    (KnowledgeKind::CausalLink, "bob", "ETH price -> Aave DAI borrow demand (r=0.68)"),
-    (KnowledgeKind::StrategyFragment, "carol", "detect arb: 5 quotes, pick top-2"),
-    (KnowledgeKind::Heuristic, "dave", "Curve 3pool TWAP stable over 15 blocks"),
-    (KnowledgeKind::Warning, "eve", "Euler manipulation possible at 100k depth"),
-    (KnowledgeKind::Insight, "grace", "EigenLayer validator count doubles / 40d"),
+    (
+        KnowledgeKind::CausalLink,
+        "bob",
+        "ETH price -> Aave DAI borrow demand (r=0.68)",
+    ),
+    (
+        KnowledgeKind::StrategyFragment,
+        "carol",
+        "detect arb: 5 quotes, pick top-2",
+    ),
+    (
+        KnowledgeKind::Heuristic,
+        "dave",
+        "Curve 3pool TWAP stable over 15 blocks",
+    ),
+    (
+        KnowledgeKind::Warning,
+        "eve",
+        "Euler manipulation possible at 100k depth",
+    ),
+    (
+        KnowledgeKind::Insight,
+        "grace",
+        "EigenLayer validator count doubles / 40d",
+    ),
 ];
 
 #[allow(
@@ -131,10 +207,22 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     // Synthetic new pheromones pushed during each tick.
     let tick_pheromones: [(PheromoneKind, &str, f32); 5] = [
         (PheromoneKind::Threat, "new rug on FRAX/DAI pool", 0.73),
-        (PheromoneKind::Opportunity, "fresh just-in-time LP window", 0.81),
-        (PheromoneKind::Wisdom, "set gas premium on basefee spike", 0.55),
+        (
+            PheromoneKind::Opportunity,
+            "fresh just-in-time LP window",
+            0.81,
+        ),
+        (
+            PheromoneKind::Wisdom,
+            "set gas premium on basefee spike",
+            0.55,
+        ),
         (PheromoneKind::Threat, "Pyth oracle deviation > 1.5%", 0.88),
-        (PheromoneKind::Opportunity, "cross-chain rate spread 0.8%", 0.66),
+        (
+            PheromoneKind::Opportunity,
+            "cross-chain rate spread 0.8%",
+            0.66,
+        ),
     ];
 
     for (tick, (kind, label, intensity)) in tick_pheromones.iter().enumerate() {
@@ -156,16 +244,9 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             at: now_secs,
         });
 
-        let new_pher: Vec<PheromoneEvent> = pher_sink
-            .events()
-            .into_iter()
-            .skip(last_pher_len)
-            .collect();
-        let new_ins: Vec<InsightEvent> = ins_sink
-            .events()
-            .into_iter()
-            .skip(last_ins_len)
-            .collect();
+        let new_pher: Vec<PheromoneEvent> =
+            pher_sink.events().into_iter().skip(last_pher_len).collect();
+        let new_ins: Vec<InsightEvent> = ins_sink.events().into_iter().skip(last_ins_len).collect();
         last_pher_len += new_pher.len();
         last_ins_len += new_ins.len();
 
@@ -200,7 +281,10 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  pheromone field: {} live entries", field.len());
     println!(
         "  pheromone sub #{pher_sub_id}: delivered={} dropped_oldest={} dropped_newest={} closed={}",
-        pher_stats.delivered, pher_stats.dropped_oldest, pher_stats.dropped_newest, pher_stats.closed
+        pher_stats.delivered,
+        pher_stats.dropped_oldest,
+        pher_stats.dropped_newest,
+        pher_stats.closed
     );
     println!(
         "  insight   sub #{ins_sub_id}: delivered={} dropped_oldest={} dropped_newest={} closed={}",
@@ -229,7 +313,9 @@ fn count_by_kind(events: &[PheromoneEvent]) -> (usize, usize, usize) {
 
 fn describe_insight(ev: &InsightEvent) -> String {
     match ev {
-        InsightEvent::Posted { id, kind, content, .. } => format!(
+        InsightEvent::Posted {
+            id, kind, content, ..
+        } => format!(
             "posted #{:02x}{:02x} ({:?}): {}",
             id.0[0], id.0[1], kind, content
         ),

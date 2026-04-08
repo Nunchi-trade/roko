@@ -24,5 +24,5 @@ pub use memory::MemorySubstrate;
 pub use noop::{NoOpComposer, NoOpGate, NoOpPolicy, NoOpRouter, NoOpScorer};
 pub use router::{FirstRouter, HighestScoreRouter, RoundRobinRouter};
 pub use scorer::{ConstScorer, MulScorer, SumScorer};
-pub use tool::{MockToolDispatcher, StaticToolRegistry, ROKO_BUILTIN_TOOLS, TOOL_COUNT};
+pub use tool::{MockToolDispatcher, ROKO_BUILTIN_TOOLS, StaticToolRegistry, TOOL_COUNT};
 pub use trace_sink::InMemoryTraceSink;

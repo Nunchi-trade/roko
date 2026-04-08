@@ -91,10 +91,7 @@ pub fn enforce_format(request: &mut serde_json::Value, config: &OllamaFormatConf
         .is_some_and(|a| !a.is_empty());
 
     if config.stream_override || has_tools {
-        obj.insert(
-            "stream".to_string(),
-            serde_json::Value::Bool(false),
-        );
+        obj.insert("stream".to_string(), serde_json::Value::Bool(false));
     }
 }
 
@@ -164,8 +161,7 @@ mod tests {
 
     #[test]
     fn config_with_schema_reports_has_schema() {
-        let cfg = OllamaFormatConfig::new()
-            .with_schema(json!({"type": "object"}));
+        let cfg = OllamaFormatConfig::new().with_schema(json!({"type": "object"}));
         assert!(cfg.has_schema());
     }
 

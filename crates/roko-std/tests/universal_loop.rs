@@ -6,8 +6,8 @@
 
 use async_trait::async_trait;
 use roko_core::{
-    loop_tick, Body, Budget, Composer, Context, Decay, Gate, Kind, Policy, Provenance, Query,
-    Result, Score, Scorer, Signal, Substrate, Verdict,
+    Body, Budget, Composer, Context, Decay, Gate, Kind, Policy, Provenance, Query, Result, Score,
+    Scorer, Signal, Substrate, Verdict, loop_tick,
 };
 use roko_std::{FirstRouter, MemorySubstrate, NoOpPolicy};
 use std::sync::Arc;
@@ -79,7 +79,9 @@ impl Policy for EpisodeLoggerPolicy {
                     .body(Body::text(format!("logged: {}", s.id.short())))
                     .provenance(Provenance::agent("episode_logger"))
                     .lineage([s.id])
-                    .decay(Decay::HalfLife { half_life_ms: 86_400_000 }) // 24h
+                    .decay(Decay::HalfLife {
+                        half_life_ms: 86_400_000,
+                    }) // 24h
                     .build()
             })
             .collect()
@@ -145,8 +147,7 @@ async fn universal_loop_processes_a_signal_end_to_end() {
     assert_eq!(outcome.emitted.len(), 1);
     assert_eq!(outcome.emitted[0].kind, Kind::Episode);
     assert_eq!(
-        outcome.emitted[0].lineage[0],
-        composed.id,
+        outcome.emitted[0].lineage[0], composed.id,
         "episode references composed signal"
     );
 

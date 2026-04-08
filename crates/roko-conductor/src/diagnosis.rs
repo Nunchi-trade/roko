@@ -549,10 +549,13 @@ mod tests {
 
     #[test]
     fn diagnose_type_mismatch() {
-        let results = engine().diagnose("error[E0308]: mismatched types\n  expected `u32`, found `&str`");
+        let results =
+            engine().diagnose("error[E0308]: mismatched types\n  expected `u32`, found `&str`");
         assert!(!results.is_empty());
         // The more specific E0308 pattern should appear.
-        let has_type_mismatch = results.iter().any(|r| r.category == ErrorCategory::TypeMismatch);
+        let has_type_mismatch = results
+            .iter()
+            .any(|r| r.category == ErrorCategory::TypeMismatch);
         assert!(has_type_mismatch, "should match TypeMismatch: {results:?}");
     }
 
@@ -566,28 +569,36 @@ mod tests {
     #[test]
     fn diagnose_borrow_checker() {
         let results = engine().diagnose("error[E0502]: cannot borrow `x` as mutable");
-        let has_borrow = results.iter().any(|r| r.category == ErrorCategory::BorrowCheckerError);
+        let has_borrow = results
+            .iter()
+            .any(|r| r.category == ErrorCategory::BorrowCheckerError);
         assert!(has_borrow);
     }
 
     #[test]
     fn diagnose_use_after_move() {
         let results = engine().diagnose("error[E0382]: use of moved value: `v`");
-        let has_borrow = results.iter().any(|r| r.category == ErrorCategory::BorrowCheckerError);
+        let has_borrow = results
+            .iter()
+            .any(|r| r.category == ErrorCategory::BorrowCheckerError);
         assert!(has_borrow);
     }
 
     #[test]
     fn diagnose_lifetime_error() {
         let results = engine().diagnose("error[E0106]: missing lifetime specifier");
-        let has_lt = results.iter().any(|r| r.category == ErrorCategory::LifetimeError);
+        let has_lt = results
+            .iter()
+            .any(|r| r.category == ErrorCategory::LifetimeError);
         assert!(has_lt);
     }
 
     #[test]
     fn diagnose_import_error() {
         let results = engine().diagnose("error[E0432]: unresolved import `foo::bar`");
-        let has_import = results.iter().any(|r| r.category == ErrorCategory::ImportError);
+        let has_import = results
+            .iter()
+            .any(|r| r.category == ErrorCategory::ImportError);
         assert!(has_import);
     }
 
@@ -597,14 +608,18 @@ mod tests {
     fn diagnose_test_failure() {
         let results = engine().diagnose("test result: FAILED. 2 passed; 1 failed; 0 ignored");
         assert!(!results.is_empty());
-        let has_test = results.iter().any(|r| r.category == ErrorCategory::TestFailure);
+        let has_test = results
+            .iter()
+            .any(|r| r.category == ErrorCategory::TestFailure);
         assert!(has_test);
     }
 
     #[test]
     fn diagnose_assertion_case_insensitive() {
         let results = engine().diagnose("Assertion Failed: expected 5, got 3");
-        let has_test = results.iter().any(|r| r.category == ErrorCategory::TestFailure);
+        let has_test = results
+            .iter()
+            .any(|r| r.category == ErrorCategory::TestFailure);
         assert!(has_test);
     }
 
@@ -613,14 +628,18 @@ mod tests {
     #[test]
     fn diagnose_git_conflict_markers() {
         let results = engine().diagnose("<<<<<<< HEAD\nfoo\n=======\nbar\n>>>>>>> branch");
-        let has_conflict = results.iter().any(|r| r.category == ErrorCategory::GitConflict);
+        let has_conflict = results
+            .iter()
+            .any(|r| r.category == ErrorCategory::GitConflict);
         assert!(has_conflict);
     }
 
     #[test]
     fn diagnose_merge_conflict_message() {
         let results = engine().diagnose("CONFLICT (content): Merge conflict in src/lib.rs");
-        let has_conflict = results.iter().any(|r| r.category == ErrorCategory::GitConflict);
+        let has_conflict = results
+            .iter()
+            .any(|r| r.category == ErrorCategory::GitConflict);
         assert!(has_conflict);
     }
 
@@ -629,7 +648,9 @@ mod tests {
     #[test]
     fn diagnose_rate_limit() {
         let results = engine().diagnose("Error: Rate limit exceeded. Please retry after 30s.");
-        let has_rl = results.iter().any(|r| r.category == ErrorCategory::LlmRateLimit);
+        let has_rl = results
+            .iter()
+            .any(|r| r.category == ErrorCategory::LlmRateLimit);
         assert!(has_rl);
     }
 
@@ -638,7 +659,10 @@ mod tests {
         let results = engine().diagnose("InvalidRequestError: context_length_exceeded");
         assert!(!results.is_empty());
         assert_eq!(results[0].category, ErrorCategory::LlmContextOverflow);
-        assert_eq!(results[0].suggested_intervention, SuggestedIntervention::ReduceContext);
+        assert_eq!(
+            results[0].suggested_intervention,
+            SuggestedIntervention::ReduceContext
+        );
     }
 
     // ---- File system ----
@@ -646,17 +670,27 @@ mod tests {
     #[test]
     fn diagnose_file_not_found() {
         let results = engine().diagnose("No such file or directory: /tmp/foo.rs");
-        let has_missing = results.iter().any(|r| r.category == ErrorCategory::MissingFile);
+        let has_missing = results
+            .iter()
+            .any(|r| r.category == ErrorCategory::MissingFile);
         assert!(has_missing);
     }
 
     #[test]
     fn diagnose_permission_denied() {
         let results = engine().diagnose("Permission denied (os error 13)");
-        let has_perm = results.iter().any(|r| r.category == ErrorCategory::PermissionDenied);
+        let has_perm = results
+            .iter()
+            .any(|r| r.category == ErrorCategory::PermissionDenied);
         assert!(has_perm);
-        assert_eq!(results.iter().find(|r| r.category == ErrorCategory::PermissionDenied)
-            .expect("should exist").suggested_intervention, SuggestedIntervention::AbortPlan);
+        assert_eq!(
+            results
+                .iter()
+                .find(|r| r.category == ErrorCategory::PermissionDenied)
+                .expect("should exist")
+                .suggested_intervention,
+            SuggestedIntervention::AbortPlan
+        );
     }
 
     // ---- Resource exhaustion ----
@@ -664,14 +698,18 @@ mod tests {
     #[test]
     fn diagnose_oom() {
         let results = engine().diagnose("fatal: Out of memory allocating 1073741824 bytes");
-        let has_oom = results.iter().any(|r| r.category == ErrorCategory::OomError);
+        let has_oom = results
+            .iter()
+            .any(|r| r.category == ErrorCategory::OomError);
         assert!(has_oom);
     }
 
     #[test]
     fn diagnose_disk_full() {
         let results = engine().diagnose("write error: No space left on device");
-        let has_disk = results.iter().any(|r| r.category == ErrorCategory::DiskFull);
+        let has_disk = results
+            .iter()
+            .any(|r| r.category == ErrorCategory::DiskFull);
         assert!(has_disk);
     }
 
@@ -680,14 +718,18 @@ mod tests {
     #[test]
     fn diagnose_segfault() {
         let results = engine().diagnose("Segmentation fault (core dumped)");
-        let has_crash = results.iter().any(|r| r.category == ErrorCategory::ProcessCrash);
+        let has_crash = results
+            .iter()
+            .any(|r| r.category == ErrorCategory::ProcessCrash);
         assert!(has_crash);
     }
 
     #[test]
     fn diagnose_panic() {
         let results = engine().diagnose("thread 'main' panicked at 'index out of bounds'");
-        let has_crash = results.iter().any(|r| r.category == ErrorCategory::ProcessCrash);
+        let has_crash = results
+            .iter()
+            .any(|r| r.category == ErrorCategory::ProcessCrash);
         assert!(has_crash);
     }
 
@@ -723,7 +765,9 @@ mod tests {
     #[test]
     fn specific_patterns_have_high_confidence() {
         let results = engine().diagnose("error[E0308]: mismatched types");
-        let type_match = results.iter().find(|r| r.category == ErrorCategory::TypeMismatch);
+        let type_match = results
+            .iter()
+            .find(|r| r.category == ErrorCategory::TypeMismatch);
         assert!(type_match.is_some());
         let tm = type_match.expect("should exist");
         assert!(tm.confidence >= 0.5, "confidence={}", tm.confidence);
@@ -734,10 +778,14 @@ mod tests {
         let results = engine().diagnose("error[E0308]: mismatched types in very long output with lots of noise that makes the match ratio smaller but still valid in context");
         if results.len() > 1 {
             for pair in results.windows(2) {
-                assert!(pair[0].confidence >= pair[1].confidence,
+                assert!(
+                    pair[0].confidence >= pair[1].confidence,
                     "{} ({}) should be >= {} ({})",
-                    pair[0].pattern_name, pair[0].confidence,
-                    pair[1].pattern_name, pair[1].confidence);
+                    pair[0].pattern_name,
+                    pair[0].confidence,
+                    pair[1].pattern_name,
+                    pair[1].confidence
+                );
             }
         }
     }
@@ -789,7 +837,11 @@ mod tests {
     fn multiple_matches_all_returned() {
         // This input should match both the generic compile error and the type mismatch.
         let results = engine().diagnose("error[E0308]: mismatched types");
-        assert!(results.len() >= 2, "expected multiple matches, got {}", results.len());
+        assert!(
+            results.len() >= 2,
+            "expected multiple matches, got {}",
+            results.len()
+        );
     }
 
     // ---- Network ----
@@ -797,14 +849,18 @@ mod tests {
     #[test]
     fn diagnose_network_errors() {
         let results = engine().diagnose("Connection refused (os error 111)");
-        let has_net = results.iter().any(|r| r.category == ErrorCategory::NetworkError);
+        let has_net = results
+            .iter()
+            .any(|r| r.category == ErrorCategory::NetworkError);
         assert!(has_net);
     }
 
     #[test]
     fn diagnose_dns_failure() {
         let results = engine().diagnose("Could not resolve host: api.example.com");
-        let has_net = results.iter().any(|r| r.category == ErrorCategory::NetworkError);
+        let has_net = results
+            .iter()
+            .any(|r| r.category == ErrorCategory::NetworkError);
         assert!(has_net);
     }
 
@@ -813,7 +869,9 @@ mod tests {
     #[test]
     fn diagnose_loop_detected() {
         let results = engine().diagnose("LOOP DETECTED: agent repeating same action 5 times");
-        let has_loop = results.iter().any(|r| r.category == ErrorCategory::LoopDetected);
+        let has_loop = results
+            .iter()
+            .any(|r| r.category == ErrorCategory::LoopDetected);
         assert!(has_loop);
     }
 
@@ -822,7 +880,9 @@ mod tests {
     #[test]
     fn diagnose_clippy_warning() {
         let results = engine().diagnose("warning: unused variable `x`");
-        let has_clippy = results.iter().any(|r| r.category == ErrorCategory::ClippyWarning);
+        let has_clippy = results
+            .iter()
+            .any(|r| r.category == ErrorCategory::ClippyWarning);
         assert!(has_clippy);
     }
 
@@ -831,7 +891,9 @@ mod tests {
     #[test]
     fn diagnose_dependency_missing() {
         let results = engine().diagnose("error: no matching package named `foo_crate` found");
-        let has_dep = results.iter().any(|r| r.category == ErrorCategory::DependencyError);
+        let has_dep = results
+            .iter()
+            .any(|r| r.category == ErrorCategory::DependencyError);
         assert!(has_dep);
     }
 }

@@ -51,13 +51,19 @@ impl ConductorDecision {
     /// Shorthand for a restart decision.
     #[must_use]
     pub fn restart(watcher: impl Into<String>, reason: impl Into<String>) -> Self {
-        Self::Restart { watcher: watcher.into(), reason: reason.into() }
+        Self::Restart {
+            watcher: watcher.into(),
+            reason: reason.into(),
+        }
     }
 
     /// Shorthand for a fail decision.
     #[must_use]
     pub fn fail(watcher: impl Into<String>, reason: FailureKind) -> Self {
-        Self::Fail { watcher: watcher.into(), reason }
+        Self::Fail {
+            watcher: watcher.into(),
+            reason,
+        }
     }
 
     /// True if this decision tears down current work.

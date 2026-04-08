@@ -140,8 +140,11 @@ impl Conductor {
         // Record failures in circuit breaker.
         if let ConductorDecision::Fail { watcher, reason } = &decision {
             if let Some(plan_id) = extract_plan_id(stream) {
-                self.circuit_breaker
-                    .record_failure(&plan_id, format!("{watcher}: {reason}"), ctx.now_ms);
+                self.circuit_breaker.record_failure(
+                    &plan_id,
+                    format!("{watcher}: {reason}"),
+                    ctx.now_ms,
+                );
             }
         }
 
@@ -241,12 +244,14 @@ mod tests {
     }
 
     fn plan_phase_stream(plan_id: &str) -> Vec<Signal> {
-        vec![Signal::builder(Kind::PlanPhase)
-            .body(Body::text("implementing"))
-            .tag(PLAN_ID_TAG, plan_id)
-            .tag("phase", "implementing")
-            .tag("phase_entered_ms", "0")
-            .build()]
+        vec![
+            Signal::builder(Kind::PlanPhase)
+                .body(Body::text("implementing"))
+                .tag(PLAN_ID_TAG, plan_id)
+                .tag("phase", "implementing")
+                .tag("phase_entered_ms", "0")
+                .build(),
+        ]
     }
 
     #[test]

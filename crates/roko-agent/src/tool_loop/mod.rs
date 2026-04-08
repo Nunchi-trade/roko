@@ -519,13 +519,15 @@ mod tests {
     // ─── Helpers ─────────────────────────────────────────────────────
 
     fn test_tools() -> Vec<ToolDef> {
-        vec![ToolDef::new(
-            "echo",
-            "echo args",
-            ToolCategory::Meta,
-            ToolPermission::read_only(),
-        )
-        .with_concurrency(ToolConcurrency::Parallel)]
+        vec![
+            ToolDef::new(
+                "echo",
+                "echo args",
+                ToolCategory::Meta,
+                ToolPermission::read_only(),
+            )
+            .with_concurrency(ToolConcurrency::Parallel),
+        ]
     }
 
     fn make_tool_loop(backend: Arc<dyn LlmBackend>, max_iterations: usize) -> ToolLoop {
@@ -634,8 +636,7 @@ mod tests {
         let translator: Arc<dyn Translator> = Arc::new(MockTranslator);
         let tl = ToolLoop::new(translator, dispatcher, backend).with_max_iterations(100);
 
-        let ctx =
-            ToolContext::testing("/tmp").with_cancel_token(cancel as Arc<dyn CancelToken>);
+        let ctx = ToolContext::testing("/tmp").with_cancel_token(cancel as Arc<dyn CancelToken>);
 
         let out = tl.run("system", "user", &test_tools(), &ctx).await;
 
@@ -754,9 +755,7 @@ mod tests {
 
     #[tokio::test]
     async fn debug_impl_does_not_panic() {
-        let backend = Arc::new(FinalAnswerBackend {
-            text: "x".into(),
-        });
+        let backend = Arc::new(FinalAnswerBackend { text: "x".into() });
         let tl = make_tool_loop(backend, 25);
         let s = format!("{tl:?}");
         assert!(s.contains("ToolLoop"));

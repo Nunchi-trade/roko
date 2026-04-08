@@ -32,8 +32,7 @@ pub use hdc_index::{HdcIndex, Hit, IndexedVector};
 pub use hnsw::{HnswBinaryIndex, HnswConfig};
 pub use insight::{InsightEntry, InsightId, KnowledgeKind, KnowledgeState};
 pub use knowledge::{
-    DUPLICATE_SIMILARITY_THRESHOLD, KnowledgeError, KnowledgeSnapshot, KnowledgeStore,
-    PostOutcome,
+    DUPLICATE_SIMILARITY_THRESHOLD, KnowledgeError, KnowledgeSnapshot, KnowledgeStore, PostOutcome,
 };
 pub use pheromone::{
     DECAY_BUCKETS, Pheromone, PheromoneField, PheromoneHit, PheromoneId, PheromoneKind,

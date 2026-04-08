@@ -138,7 +138,14 @@ impl BuildSystem {
     #[must_use]
     pub const fn lint_args(self) -> &'static [&'static str] {
         match self {
-            Self::Cargo => &["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"],
+            Self::Cargo => &[
+                "clippy",
+                "--workspace",
+                "--all-targets",
+                "--",
+                "-D",
+                "warnings",
+            ],
             Self::Npm => &["run", "lint"],
             Self::Go => &["vet", "./..."],
             Self::Python => &["-m", "ruff", "check", "."],
@@ -189,9 +196,18 @@ impl TestSelector {
         match (self, build) {
             (Self::All | Self::AffectedOnly, _) => Vec::new(),
             (Self::Quick, BuildSystem::Cargo) => vec!["--lib".into()],
-            (Self::Quick, BuildSystem::Npm) => vec!["--".into(), "--testPathIgnorePatterns".into(), "integration".into()],
+            (Self::Quick, BuildSystem::Npm) => vec![
+                "--".into(),
+                "--testPathIgnorePatterns".into(),
+                "integration".into(),
+            ],
             (Self::Quick, BuildSystem::Go) => vec!["-short".into()],
-            (Self::Quick, BuildSystem::Python) => vec!["-m".into(), "pytest".into(), "-m".into(), "not integration".into()],
+            (Self::Quick, BuildSystem::Python) => vec![
+                "-m".into(),
+                "pytest".into(),
+                "-m".into(),
+                "not integration".into(),
+            ],
             (Self::Quick, _) => Vec::new(),
             (Self::Patterns(ps), BuildSystem::Npm) => {
                 let mut v = vec!["--".into()];
@@ -226,7 +242,10 @@ mod tests {
             .with_env("RUST_LOG", "debug")
             .with_label("plan-42");
         assert_eq!(p.working_dir, PathBuf::from("/repo"));
-        assert_eq!(p.target_dir.as_deref(), Some(std::path::Path::new("/tmp/target")));
+        assert_eq!(
+            p.target_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/target"))
+        );
         assert_eq!(p.extra_env, vec![("RUST_LOG".into(), "debug".into())]);
         assert_eq!(p.label.as_deref(), Some("plan-42"));
     }

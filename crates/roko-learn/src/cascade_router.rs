@@ -24,7 +24,7 @@ use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::model_router::{LinUCBRouter, RoutingContext, COLD_START_THRESHOLD};
+use crate::model_router::{COLD_START_THRESHOLD, LinUCBRouter, RoutingContext};
 
 // ─── CascadeStage ───────────────────────────────────────────────────────────
 
@@ -194,7 +194,10 @@ impl CascadeRouter {
     ///
     /// Panics if `model_slugs` is empty.
     pub fn new(model_slugs: Vec<String>) -> Self {
-        assert!(!model_slugs.is_empty(), "CascadeRouter: need at least one model");
+        assert!(
+            !model_slugs.is_empty(),
+            "CascadeRouter: need at least one model"
+        );
         Self {
             linucb: LinUCBRouter::new(model_slugs.clone()),
             confidence_stats: Mutex::new(HashMap::new()),
@@ -576,9 +579,18 @@ mod tests {
 
     #[test]
     fn confidence_width_shrinks() {
-        let s10 = ModelStats { trials: 10, successes: 7 };
-        let s100 = ModelStats { trials: 100, successes: 70 };
-        let s1000 = ModelStats { trials: 1000, successes: 700 };
+        let s10 = ModelStats {
+            trials: 10,
+            successes: 7,
+        };
+        let s100 = ModelStats {
+            trials: 100,
+            successes: 70,
+        };
+        let s1000 = ModelStats {
+            trials: 1000,
+            successes: 700,
+        };
 
         assert!(s10.confidence_width() > s100.confidence_width());
         assert!(s100.confidence_width() > s1000.confidence_width());

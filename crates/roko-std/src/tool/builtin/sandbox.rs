@@ -42,14 +42,16 @@ pub fn require_within_worktree(worktree: &Path, rel: &str) -> Result<PathBuf, To
 
 /// Extract a required string field from a JSON arguments object.
 pub fn require_string(args: &serde_json::Value, key: &str) -> Result<String, ToolError> {
-    args.get(key).and_then(serde_json::Value::as_str).map_or_else(
-        || {
-            Err(ToolError::SchemaInvalid(format!(
-                "missing required string argument: {key}"
-            )))
-        },
-        |s| Ok(s.to_string()),
-    )
+    args.get(key)
+        .and_then(serde_json::Value::as_str)
+        .map_or_else(
+            || {
+                Err(ToolError::SchemaInvalid(format!(
+                    "missing required string argument: {key}"
+                )))
+            },
+            |s| Ok(s.to_string()),
+        )
 }
 
 /// Lexically normalize a path, collapsing `.` and `..` components.

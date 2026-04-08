@@ -113,37 +113,73 @@ impl ToolPermission {
     /// A tool that only needs read access (e.g. `read_file`, `grep`).
     #[must_use]
     pub const fn read_only() -> Self {
-        Self { read: true, write: false, exec: false, git: false, network: false }
+        Self {
+            read: true,
+            write: false,
+            exec: false,
+            git: false,
+            network: false,
+        }
     }
 
     /// A tool that needs read + write (e.g. `write_file`, `edit_file`).
     #[must_use]
     pub const fn writes() -> Self {
-        Self { read: true, write: true, exec: false, git: false, network: false }
+        Self {
+            read: true,
+            write: true,
+            exec: false,
+            git: false,
+            network: false,
+        }
     }
 
     /// A tool that needs read + exec (e.g. `bash`, `run_tests`).
     #[must_use]
     pub const fn executes() -> Self {
-        Self { read: true, write: false, exec: true, git: false, network: false }
+        Self {
+            read: true,
+            write: false,
+            exec: true,
+            git: false,
+            network: false,
+        }
     }
 
     /// A tool that needs read + write + exec (e.g. `multi_edit` + post-hook).
     #[must_use]
     pub const fn writes_and_executes() -> Self {
-        Self { read: true, write: true, exec: true, git: false, network: false }
+        Self {
+            read: true,
+            write: true,
+            exec: true,
+            git: false,
+            network: false,
+        }
     }
 
     /// A tool that needs git (e.g. branch protection, merge-resolver).
     #[must_use]
     pub const fn git_ops() -> Self {
-        Self { read: true, write: true, exec: true, git: true, network: false }
+        Self {
+            read: true,
+            write: true,
+            exec: true,
+            git: true,
+            network: false,
+        }
     }
 
     /// A tool that needs network access (e.g. `web_fetch`, `web_search`).
     #[must_use]
     pub const fn networked() -> Self {
-        Self { read: true, write: false, exec: false, git: false, network: true }
+        Self {
+            read: true,
+            write: false,
+            exec: false,
+            git: false,
+            network: true,
+        }
     }
 
     /// Check that every required flag on `self` is granted by `perms`.
@@ -383,11 +419,16 @@ mod tests {
     #[test]
     fn tool_def_builder_chaining() {
         let schema = ToolSchema::from_value(serde_json::json!({"type": "object"}));
-        let t = ToolDef::new("bash", "run a command", ToolCategory::Exec, ToolPermission::executes())
-            .with_parameters(schema.clone())
-            .with_timeout_ms(120_000)
-            .with_concurrency(ToolConcurrency::Serial)
-            .with_idempotent(false);
+        let t = ToolDef::new(
+            "bash",
+            "run a command",
+            ToolCategory::Exec,
+            ToolPermission::executes(),
+        )
+        .with_parameters(schema.clone())
+        .with_timeout_ms(120_000)
+        .with_concurrency(ToolConcurrency::Serial)
+        .with_idempotent(false);
         assert_eq!(t.parameters, schema);
         assert_eq!(t.timeout_ms, 120_000);
         assert_eq!(t.concurrency, ToolConcurrency::Serial);
@@ -395,8 +436,13 @@ mod tests {
 
     #[test]
     fn tool_def_serde_roundtrip() {
-        let t = ToolDef::new("glob", "glob matcher", ToolCategory::Read, ToolPermission::read_only())
-            .with_timeout_ms(5_000);
+        let t = ToolDef::new(
+            "glob",
+            "glob matcher",
+            ToolCategory::Read,
+            ToolPermission::read_only(),
+        )
+        .with_timeout_ms(5_000);
         let json = serde_json::to_string(&t).unwrap();
         let decoded: ToolDef = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, t);

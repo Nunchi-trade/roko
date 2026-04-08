@@ -154,7 +154,9 @@ impl GracefulShutdown {
     /// [`GracefulShutdown::draining`] each iteration.
     #[must_use]
     pub fn wait_started(&self) -> WaitStarted {
-        WaitStarted { inner: self.inner.clone() }
+        WaitStarted {
+            inner: self.inner.clone(),
+        }
     }
 
     /// Flip the drain flag and run all registered hooks concurrently
@@ -225,7 +227,9 @@ impl GracefulShutdown {
 
         let timed_out = total - drained;
         self.inner.drained_count.store(drained, Ordering::SeqCst);
-        self.inner.timed_out_count.store(timed_out, Ordering::SeqCst);
+        self.inner
+            .timed_out_count
+            .store(timed_out, Ordering::SeqCst);
         let elapsed_ms = duration_to_ms(start.elapsed());
 
         ShutdownReport {
@@ -309,7 +313,12 @@ where
         let _ = tx.send(());
     });
     let deadline = Instant::now() + timeout;
-    ScratchRecv { rx, deadline, ticker: None }.await
+    ScratchRecv {
+        rx,
+        deadline,
+        ticker: None,
+    }
+    .await
 }
 
 // ─── LeakSentinel (§42.14) ───────────────────────────────────────────────
@@ -471,11 +480,7 @@ impl Future for ScratchRecv {
 /// Wait for `expected` completions on `rx` bounded by `deadline`.
 ///
 /// Returns the number of completions observed.
-async fn drain_wait(
-    rx: std::sync::mpsc::Receiver<()>,
-    expected: u32,
-    deadline: Duration,
-) -> u32 {
+async fn drain_wait(rx: std::sync::mpsc::Receiver<()>, expected: u32, deadline: Duration) -> u32 {
     struct DrainWait {
         rx: std::sync::mpsc::Receiver<()>,
         expected: u32,

@@ -174,31 +174,46 @@ pub fn for_call_with_summary<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tool::{ToolCategory, ToolPermission};
     use crate::tool::registry::VecToolRegistry;
+    use crate::tool::{ToolCategory, ToolPermission};
 
     // ── Fixtures ─────────────────────────────────────────────────────────────
 
     fn td(name: &str, description: &str) -> ToolDef {
-        ToolDef::new(name, description, ToolCategory::Read, ToolPermission::read_only())
+        ToolDef::new(
+            name,
+            description,
+            ToolCategory::Read,
+            ToolPermission::read_only(),
+        )
     }
 
     /// Registry with 5 tools whose descriptions have clear keyword differentiation.
     fn five_tool_registry() -> VecToolRegistry {
         VecToolRegistry::from_tools(vec![
-            td("read_file", "Read a UTF-8 text file with optional line range"),
+            td(
+                "read_file",
+                "Read a UTF-8 text file with optional line range",
+            ),
             td("write_file", "Write or overwrite a text file"),
-            td("grep",      "Search file contents using regex pattern matching"),
-            td("bash",      "Execute a shell command and capture stdout stderr"),
+            td("grep", "Search file contents using regex pattern matching"),
+            td("bash", "Execute a shell command and capture stdout stderr"),
             td("web_fetch", "Fetch a URL over HTTPS and return the body"),
         ])
     }
 
     /// Registry with 16 tools (simulates full built-in menu).
     fn sixteen_tool_registry() -> VecToolRegistry {
-        VecToolRegistry::from_tools((0..16).map(|i| {
-            td(&format!("tool_{i}"), &format!("tool number {i} does something unique"))
-        }).collect())
+        VecToolRegistry::from_tools(
+            (0..16)
+                .map(|i| {
+                    td(
+                        &format!("tool_{i}"),
+                        &format!("tool number {i} does something unique"),
+                    )
+                })
+                .collect(),
+        )
     }
 
     // ── A minimal scorer that returns the same constant for every tool ────────
@@ -263,9 +278,9 @@ mod tests {
         let reg = five_tool_registry();
         // All scores will be 0.0 → stable order (rank uses partial_cmp which
         // yields Equal on ties, and sort_by is stable).
-        let first  = for_call(&reg, "", 5);
+        let first = for_call(&reg, "", 5);
         let second = for_call(&reg, "", 5);
-        let names_first:  Vec<&str> = first.iter().map(|t| t.name.as_str()).collect();
+        let names_first: Vec<&str> = first.iter().map(|t| t.name.as_str()).collect();
         let names_second: Vec<&str> = second.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(
             names_first, names_second,
@@ -324,12 +339,7 @@ mod tests {
     fn for_call_model_aware_handles_unknown_slug_gracefully() {
         let reg = sixteen_tool_registry();
         // unknown-model-xyz → unknown_default() profile: cap = 3
-        let results = for_call_model_aware(
-            &reg,
-            "do a task",
-            "nonexistent-model-xyz",
-            None,
-        );
+        let results = for_call_model_aware(&reg, "do a task", "nonexistent-model-xyz", None);
         // unknown_default cap is 3, so we must get ≤ 3
         assert!(
             results.len() <= 3,
@@ -369,9 +379,18 @@ mod tests {
             3,
         );
         // claude profile has cap=32, so effective_limit = min(3,32).max(1) = 3
-        assert_eq!(summary.total_in_registry, 5, "total must reflect registry size");
-        assert_eq!(summary.requested_limit, 3, "requested_limit must match argument");
-        assert_eq!(summary.effective_limit, 3, "effective_limit should be 3 (profile cap≫3)");
+        assert_eq!(
+            summary.total_in_registry, 5,
+            "total must reflect registry size"
+        );
+        assert_eq!(
+            summary.requested_limit, 3,
+            "requested_limit must match argument"
+        );
+        assert_eq!(
+            summary.effective_limit, 3,
+            "effective_limit should be 3 (profile cap≫3)"
+        );
         assert_eq!(
             summary.model_slug.as_deref(),
             Some("claude-sonnet-4-5"),
@@ -387,22 +406,19 @@ mod tests {
         let reg = sixteen_tool_registry();
         // requested_limit=10, qwen3 profile cap=5 → effective=5
         // total=16, selected=5 → dropped=11
-        let summary = for_call_with_summary(
-            &reg,
-            "search for patterns",
-            Some("qwen3-32b"),
-            10,
-        );
+        let summary = for_call_with_summary(&reg, "search for patterns", Some("qwen3-32b"), 10);
         assert_eq!(
             summary.effective_limit, 5,
             "qwen3 profile cap must clamp to 5"
         );
         assert_eq!(
-            summary.selected.len(), 5,
+            summary.selected.len(),
+            5,
             "exactly 5 tools should be selected"
         );
         assert_eq!(
-            summary.dropped_count(), 11,
+            summary.dropped_count(),
+            11,
             "16 - 5 = 11 tools should be dropped"
         );
     }

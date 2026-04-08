@@ -85,7 +85,11 @@ impl RetryPolicy {
             let hash = Self::jitter_hash(attempt);
             // factor in [0.5, 1.0)
             let factor = (f64::from(hash) / f64::from(u32::MAX)).mul_add(0.5, 0.5);
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                clippy::cast_precision_loss
+            )]
             let jittered = (capped as f64 * factor) as u64;
             jittered.max(1)
         } else {

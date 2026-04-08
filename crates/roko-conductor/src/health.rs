@@ -180,10 +180,7 @@ impl HealthMonitor {
     /// Run all checks and return results.
     #[must_use]
     pub fn check_all(&self, snapshot: &SystemSnapshot) -> Vec<HealthCheckResult> {
-        self.checks
-            .iter()
-            .map(|c| (c.check_fn)(snapshot))
-            .collect()
+        self.checks.iter().map(|c| (c.check_fn)(snapshot)).collect()
     }
 
     /// Compute the overall status (worst of all checks).
@@ -206,21 +203,14 @@ fn check_terminal_liveness(snapshot: &SystemSnapshot) -> HealthCheckResult {
 
     // If no agents are expected, skip.
     if snapshot.expected_agents == 0 {
-        return HealthCheckResult::healthy(
-            "terminal_liveness",
-            "no agents expected",
-            now,
-        );
+        return HealthCheckResult::healthy("terminal_liveness", "no agents expected", now);
     }
 
     // Check if active agents match expected.
     if snapshot.active_agents == 0 && snapshot.expected_agents > 0 {
         return HealthCheckResult::critical(
             "terminal_liveness",
-            format!(
-                "0/{} expected agents active",
-                snapshot.expected_agents
-            ),
+            format!("0/{} expected agents active", snapshot.expected_agents),
             now,
         );
     }
@@ -256,7 +246,10 @@ fn check_terminal_liveness(snapshot: &SystemSnapshot) -> HealthCheckResult {
 
     HealthCheckResult::healthy(
         "terminal_liveness",
-        format!("{}/{} agents active", snapshot.active_agents, snapshot.expected_agents),
+        format!(
+            "{}/{} agents active",
+            snapshot.active_agents, snapshot.expected_agents
+        ),
         now,
     )
 }

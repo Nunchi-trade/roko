@@ -87,9 +87,7 @@ impl MirageRpcClient {
             .with_context(|| format!("HTTP POST failed for method {method}"))?;
         let status = response.status();
         if !status.is_success() {
-            return Err(anyhow!(
-                "RPC call {method} returned HTTP {status}"
-            ));
+            return Err(anyhow!("RPC call {method} returned HTTP {status}"));
         }
         let envelope: RpcResponse<R> = response
             .json()
@@ -165,11 +163,7 @@ impl MirageRpcClient {
     }
 
     /// Queries the pheromone field for the top-k hits matching `query`.
-    pub async fn chain_query_pheromones(
-        &self,
-        query: &str,
-        k: usize,
-    ) -> Result<Vec<PheromoneHit>> {
+    pub async fn chain_query_pheromones(&self, query: &str, k: usize) -> Result<Vec<PheromoneHit>> {
         let params = json!({ "query": query, "k": k });
         let raw: JsonValue = self.send_rpc("chain_queryPheromones", params).await?;
         let results = raw

@@ -148,7 +148,10 @@ impl SymbolManifest {
     /// Construct an empty manifest for the given plan id.
     #[must_use]
     pub fn new(plan: impl Into<String>) -> Self {
-        Self { plan: plan.into(), expectations: Vec::new() }
+        Self {
+            plan: plan.into(),
+            expectations: Vec::new(),
+        }
     }
 
     /// Append one expectation.
@@ -181,7 +184,10 @@ impl SymbolGate {
     /// project's source directories, e.g. `["src", "crates"]`).
     #[must_use]
     pub fn new(source_roots: Vec<PathBuf>) -> Self {
-        Self { source_roots, name: "symbol".into() }
+        Self {
+            source_roots,
+            name: "symbol".into(),
+        }
     }
 
     /// Override the gate's display name.
@@ -255,11 +261,10 @@ impl Gate for SymbolGate {
 
         let elapsed = elapsed_ms(started);
         if mismatches.is_empty() {
-            let detail = format!(
-                "{} symbol expectation(s) met",
-                manifest.expectations.len()
-            );
-            Verdict::pass(&self.name).with_detail(detail).with_duration(elapsed)
+            let detail = format!("{} symbol expectation(s) met", manifest.expectations.len());
+            Verdict::pass(&self.name)
+                .with_detail(detail)
+                .with_duration(elapsed)
         } else {
             let count = mismatches.len();
             let digest = format!(
@@ -483,10 +488,7 @@ fn parse_visibility(line: &str) -> (Visibility, &str) {
     if let Some(rest) = line.strip_prefix("pub(in ") {
         // pub(in path::to::mod) — skip to close paren.
         if let Some(close) = rest.find(')') {
-            let after = rest
-                .get(close + 1..)
-                .unwrap_or("")
-                .trim_start();
+            let after = rest.get(close + 1..).unwrap_or("").trim_start();
             return (Visibility::PubCrate, after);
         }
         return (Visibility::PubCrate, rest);
@@ -580,12 +582,7 @@ mod tests {
         std::fs::write(path, body).expect("write source file");
     }
 
-    fn exp(
-        name: &str,
-        kind: SymbolKind,
-        vis: Visibility,
-        path: &str,
-    ) -> SymbolExpectation {
+    fn exp(name: &str, kind: SymbolKind, vis: Visibility, path: &str) -> SymbolExpectation {
         SymbolExpectation {
             name: name.into(),
             kind,
@@ -600,7 +597,9 @@ mod tests {
         let tmp = TempDir::new().expect("tempdir");
         let gate = SymbolGate::new(vec![tmp.path().to_path_buf()]);
         let manifest = SymbolManifest::new("plan-1");
-        let v = gate.verify(&manifest_signal(&manifest), &Context::at(0)).await;
+        let v = gate
+            .verify(&manifest_signal(&manifest), &Context::at(0))
+            .await;
         assert!(v.passed);
         assert_eq!(v.detail.as_deref(), Some("no symbol expectations"));
         assert_eq!(v.gate, "symbol");
@@ -628,7 +627,9 @@ mod tests {
                 Visibility::Pub,
                 "rate_limit",
             ));
-        let v = gate.verify(&manifest_signal(&manifest), &Context::at(0)).await;
+        let v = gate
+            .verify(&manifest_signal(&manifest), &Context::at(0))
+            .await;
         assert!(v.passed, "expected pass, got: {v:?}");
         assert!(v.detail.as_deref().unwrap_or("").contains("2 symbol"));
     }
@@ -644,7 +645,9 @@ mod tests {
             Visibility::Pub,
             "",
         ));
-        let v = gate.verify(&manifest_signal(&manifest), &Context::at(0)).await;
+        let v = gate
+            .verify(&manifest_signal(&manifest), &Context::at(0))
+            .await;
         assert!(!v.passed);
         let digest = v.error_digest.expect("digest present");
         assert!(digest.contains("MISSING:"), "digest: {digest}");
@@ -662,7 +665,9 @@ mod tests {
             Visibility::Pub,
             "m",
         ));
-        let v = gate.verify(&manifest_signal(&manifest), &Context::at(0)).await;
+        let v = gate
+            .verify(&manifest_signal(&manifest), &Context::at(0))
+            .await;
         assert!(!v.passed);
         let digest = v.error_digest.expect("digest");
         assert!(digest.contains("WRONG_VIS:"), "digest: {digest}");
@@ -681,7 +686,9 @@ mod tests {
             Visibility::Pub,
             "m",
         ));
-        let v = gate.verify(&manifest_signal(&manifest), &Context::at(0)).await;
+        let v = gate
+            .verify(&manifest_signal(&manifest), &Context::at(0))
+            .await;
         assert!(!v.passed);
         let digest = v.error_digest.expect("digest");
         assert!(digest.contains("WRONG_KIND:"), "digest: {digest}");
@@ -700,7 +707,9 @@ mod tests {
             Visibility::Pub,
             "time",
         ));
-        let v = gate.verify(&manifest_signal(&manifest), &Context::at(0)).await;
+        let v = gate
+            .verify(&manifest_signal(&manifest), &Context::at(0))
+            .await;
         assert!(!v.passed);
         let digest = v.error_digest.expect("digest");
         assert!(digest.contains("WRONG_PATH:"), "digest: {digest}");
@@ -720,7 +729,9 @@ mod tests {
             Visibility::Pub,
             "foo",
         ));
-        let v = gate.verify(&manifest_signal(&manifest), &Context::at(0)).await;
+        let v = gate
+            .verify(&manifest_signal(&manifest), &Context::at(0))
+            .await;
         assert!(!v.passed);
         let digest = v.error_digest.expect("digest");
         assert!(digest.contains("AMBIGUOUS:"), "digest: {digest}");
@@ -731,7 +742,11 @@ mod tests {
         let tmp = TempDir::new().expect("tempdir");
         // This won't parse as Rust, but the scanner is line-based and will
         // simply fail to match any items — treated as "no symbols".
-        write_file(tmp.path(), "broken.rs", "this is <<not>> valid rust ??? { {\n");
+        write_file(
+            tmp.path(),
+            "broken.rs",
+            "this is <<not>> valid rust ??? { {\n",
+        );
         write_file(tmp.path(), "good.rs", "pub struct Good {}\n");
         let gate = SymbolGate::new(vec![tmp.path().to_path_buf()]);
         let manifest = SymbolManifest::new("plan-8").with_expectation(exp(
@@ -740,7 +755,9 @@ mod tests {
             Visibility::Pub,
             "good",
         ));
-        let v = gate.verify(&manifest_signal(&manifest), &Context::at(0)).await;
+        let v = gate
+            .verify(&manifest_signal(&manifest), &Context::at(0))
+            .await;
         assert!(v.passed, "expected pass, got: {v:?}");
     }
 
@@ -756,7 +773,9 @@ mod tests {
             Visibility::Pub,
             "a",
         ));
-        let v = gate.verify(&manifest_signal(&manifest), &Context::at(0)).await;
+        let v = gate
+            .verify(&manifest_signal(&manifest), &Context::at(0))
+            .await;
         assert!(v.passed, "expected pass, got: {v:?}");
     }
 
@@ -769,7 +788,9 @@ mod tests {
             .with_expectation(exp("One", SymbolKind::Struct, Visibility::Pub, "m"))
             .with_expectation(exp("Two", SymbolKind::Enum, Visibility::Pub, "m"))
             .with_expectation(exp("Three", SymbolKind::Trait, Visibility::Pub, "m"));
-        let v = gate.verify(&manifest_signal(&manifest), &Context::at(0)).await;
+        let v = gate
+            .verify(&manifest_signal(&manifest), &Context::at(0))
+            .await;
         assert!(!v.passed);
         let digest = v.error_digest.expect("digest");
         // 3 unmet: 1 wrong-vis, 2 missing.
@@ -814,8 +835,7 @@ mod tests {
         let tmp2 = TempDir::new().expect("tempdir2");
         write_file(tmp1.path(), "a.rs", "pub struct A {}\n");
         write_file(tmp2.path(), "b.rs", "pub trait B {}\n");
-        let gate =
-            SymbolGate::new(vec![tmp1.path().to_path_buf(), tmp2.path().to_path_buf()]);
+        let gate = SymbolGate::new(vec![tmp1.path().to_path_buf(), tmp2.path().to_path_buf()]);
         let manifest = SymbolManifest::new("plan-12")
             .with_expectation(exp("A", SymbolKind::Struct, Visibility::Pub, "a"))
             .with_expectation(exp("B", SymbolKind::Trait, Visibility::Pub, "b"));
@@ -873,7 +893,9 @@ mod tests {
     async fn custom_name_appears_in_verdict() {
         let gate = SymbolGate::new(vec![]).with_name("my_symbol_gate");
         let manifest = SymbolManifest::new("plan-15");
-        let v = gate.verify(&manifest_signal(&manifest), &Context::at(0)).await;
+        let v = gate
+            .verify(&manifest_signal(&manifest), &Context::at(0))
+            .await;
         assert_eq!(v.gate, "my_symbol_gate");
     }
 
@@ -967,7 +989,9 @@ mod tests {
 
     #[test]
     fn symbol_kind_roundtrip() {
-        for kw in ["struct", "enum", "trait", "fn", "type", "const", "static", "mod"] {
+        for kw in [
+            "struct", "enum", "trait", "fn", "type", "const", "static", "mod",
+        ] {
             let k = SymbolKind::from_keyword(kw).expect("known");
             assert_eq!(k.as_str(), kw);
         }

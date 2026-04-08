@@ -52,12 +52,7 @@ impl CircuitBreaker {
     ///
     /// Returns `true` if this failure trips the circuit (i.e. the plan
     /// has now reached `max_failures`).
-    pub fn record_failure(
-        &self,
-        plan_id: &str,
-        reason: impl Into<String>,
-        now_ms: i64,
-    ) -> bool {
+    pub fn record_failure(&self, plan_id: &str, reason: impl Into<String>, now_ms: i64) -> bool {
         let mut entry = self.records.entry(plan_id.to_owned()).or_default();
         entry.count += 1;
         entry.last_failure_ms = Some(now_ms);

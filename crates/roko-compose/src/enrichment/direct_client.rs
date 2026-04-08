@@ -303,12 +303,7 @@ mod tests {
         let transport = MockDirectTransport::ok("Hello, world!", 50, 10);
         let client = DirectClient::new(transport);
 
-        let request = DirectRequest::simple(
-            "claude-sonnet-4-6",
-            "Be helpful.",
-            "Say hello.",
-            1024,
-        );
+        let request = DirectRequest::simple("claude-sonnet-4-6", "Be helpful.", "Say hello.", 1024);
         let resp = client.complete(request).await.expect("complete");
 
         assert_eq!(resp.content, "Hello, world!");
@@ -342,7 +337,10 @@ mod tests {
 
         assert!(result.is_err());
         assert!(
-            result.unwrap_err().to_string().contains("connection refused")
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("connection refused")
         );
     }
 
@@ -358,8 +356,7 @@ mod tests {
                 is_final: true,
             },
         ];
-        let transport = MockDirectTransport::ok("Hello, world!", 50, 10)
-            .with_stream_chunks(chunks);
+        let transport = MockDirectTransport::ok("Hello, world!", 50, 10).with_stream_chunks(chunks);
         let client = DirectClient::new(transport);
 
         let request = DirectRequest::simple("m", "s", "u", 100);
@@ -388,13 +385,9 @@ mod tests {
 
     #[tokio::test]
     async fn request_api_body_structure() {
-        let req = DirectRequest::simple(
-            "claude-sonnet-4-6",
-            "You are helpful.",
-            "What is 2+2?",
-            512,
-        )
-        .with_temperature(0.7);
+        let req =
+            DirectRequest::simple("claude-sonnet-4-6", "You are helpful.", "What is 2+2?", 512)
+                .with_temperature(0.7);
 
         let body = req.to_api_body();
 

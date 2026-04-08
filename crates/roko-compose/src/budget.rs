@@ -12,8 +12,8 @@
 //!
 //! Anti-pattern #8: **no `std::fs`**. All content arrives via parameters.
 
-use roko_core::AgentRole;
 use crate::templates::common::{PromptBudget, budget_for};
+use roko_core::AgentRole;
 
 /// Which complexity band the current plan/task falls into.
 ///
@@ -106,9 +106,9 @@ pub fn adjusted_budget_for(role: AgentRole, complexity: Complexity) -> AdjustedB
     //   Task    → tasks, file_context, enhancements
     //   Dynamic → reviews, error digest
     let cache_breaks = vec![
-        "conventions",    // end of System layer
-        "workspace_map",  // end of Session layer
-        "file_context",   // end of Task layer
+        "conventions",   // end of System layer
+        "workspace_map", // end of Session layer
+        "file_context",  // end of Task layer
     ];
 
     AdjustedBudget {
@@ -219,8 +219,15 @@ mod tests {
         let total = total_budget(&b);
         assert_eq!(
             total,
-            b.plan + b.workspace_map + b.prd2 + b.context + b.brief
-                + b.reviews + b.instructions + b.file_context + b.skills
+            b.plan
+                + b.workspace_map
+                + b.prd2
+                + b.context
+                + b.brief
+                + b.reviews
+                + b.instructions
+                + b.file_context
+                + b.skills
         );
     }
 

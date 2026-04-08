@@ -151,20 +151,14 @@ mod tests {
 
     #[test]
     fn wrap_empty_content() {
-        assert_eq!(
-            wrap_with_delimiters("", "json"),
-            "<|json|><|/json|>"
-        );
+        assert_eq!(wrap_with_delimiters("", "json"), "<|json|><|/json|>");
     }
 
     #[test]
     fn wrap_json_content() {
         let json = r#"{"key":"value","num":42}"#;
         let wrapped = wrap_with_delimiters(json, "json");
-        assert_eq!(
-            wrapped,
-            r#"<|json|>{"key":"value","num":42}<|/json|>"#
-        );
+        assert_eq!(wrapped, r#"<|json|>{"key":"value","num":42}<|/json|>"#);
     }
 
     #[test]

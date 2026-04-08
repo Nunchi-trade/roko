@@ -266,8 +266,7 @@ impl RokoLayout {
         }
         let version_path = self.version_file();
         if !version_path.exists() {
-            tokio::fs::write(&version_path, LayoutVersion::CURRENT.as_u32().to_string())
-                .await?;
+            tokio::fs::write(&version_path, LayoutVersion::CURRENT.as_u32().to_string()).await?;
         }
         Ok(())
     }
@@ -329,7 +328,10 @@ mod tests {
     #[test]
     fn plan_dir_is_under_plans() {
         let layout = RokoLayout::new("/p/.roko");
-        assert_eq!(layout.plan_dir("plan-42"), PathBuf::from("/p/.roko/plans/plan-42"));
+        assert_eq!(
+            layout.plan_dir("plan-42"),
+            PathBuf::from("/p/.roko/plans/plan-42")
+        );
     }
 
     #[test]
@@ -349,16 +351,28 @@ mod tests {
     #[test]
     fn memory_paths() {
         let layout = RokoLayout::new("/x/.roko");
-        assert_eq!(layout.episodes_path(), PathBuf::from("/x/.roko/memory/episodes.jsonl"));
-        assert_eq!(layout.playbook_path(), PathBuf::from("/x/.roko/memory/playbook.toml"));
+        assert_eq!(
+            layout.episodes_path(),
+            PathBuf::from("/x/.roko/memory/episodes.jsonl")
+        );
+        assert_eq!(
+            layout.playbook_path(),
+            PathBuf::from("/x/.roko/memory/playbook.toml")
+        );
         assert_eq!(layout.skills_dir(), PathBuf::from("/x/.roko/memory/skills"));
     }
 
     #[test]
     fn config_and_cache_paths() {
         let layout = RokoLayout::new("/c/.roko");
-        assert_eq!(layout.config_file(), PathBuf::from("/c/.roko/config/config.toml"));
-        assert_eq!(layout.cargo_target_dir(), PathBuf::from("/c/.roko/cache/cargo-target"));
+        assert_eq!(
+            layout.config_file(),
+            PathBuf::from("/c/.roko/config/config.toml")
+        );
+        assert_eq!(
+            layout.cargo_target_dir(),
+            PathBuf::from("/c/.roko/cache/cargo-target")
+        );
         assert_eq!(
             layout.context_pack_cache_dir(),
             PathBuf::from("/c/.roko/cache/context-pack-cache")
@@ -368,8 +382,14 @@ mod tests {
     #[test]
     fn runtime_paths() {
         let layout = RokoLayout::new("/r/.roko");
-        assert_eq!(layout.pid_file(), PathBuf::from("/r/.roko/runtime/roko.pid"));
-        assert_eq!(layout.lock_file(), PathBuf::from("/r/.roko/runtime/roko.lock"));
+        assert_eq!(
+            layout.pid_file(),
+            PathBuf::from("/r/.roko/runtime/roko.pid")
+        );
+        assert_eq!(
+            layout.lock_file(),
+            PathBuf::from("/r/.roko/runtime/roko.lock")
+        );
     }
 
     #[test]

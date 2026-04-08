@@ -4,8 +4,8 @@
 //! into a single template. The Critic is treated as a scribe-variant (same
 //! section set, different role identity).
 
+use super::{PlanSlice, RolePromptTemplate, truncate};
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
-use super::{truncate, PlanSlice, RolePromptTemplate};
 
 /// A source file snippet for the scribe to document.
 #[derive(Clone, Debug)]
@@ -208,7 +208,11 @@ fn format_snippets(snippets: &[FileSnippet]) -> String {
 
     let mut out = String::new();
     for snippet in snippets {
-        let _ = write!(out, "### {}\n```\n{}\n```\n\n", snippet.path, snippet.content);
+        let _ = write!(
+            out,
+            "### {}\n```\n{}\n```\n\n",
+            snippet.path, snippet.content
+        );
     }
     out
 }

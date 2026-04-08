@@ -27,7 +27,10 @@ use mirage_rs::{
     resources::{MirageMode, Profile, ResourceModel},
     roko_bridge::{ChainSubstrate, HdcSubstrate, SimulationGate},
 };
-use roko_core::{Body, Context, Kind, Provenance, Query, Score, Signal, traits::{Gate, Substrate}};
+use roko_core::{
+    Body, Context, Kind, Provenance, Query, Score, Signal,
+    traits::{Gate, Substrate},
+};
 
 fn build_fork() -> MirageFork {
     let upstream = Arc::new(UpstreamRpc::mock(1));
@@ -97,7 +100,10 @@ async fn full_golem_loop_plans_simulates_posts_retrieves() {
         .with_tag("text_query", "gas cost of cold account transfers")
         .limit(5);
     let retrieved = chain.query(&retrieval_query, &ctx).await.expect("query");
-    assert!(!retrieved.is_empty(), "semantic query should find the insight");
+    assert!(
+        !retrieved.is_empty(),
+        "semantic query should find the insight"
+    );
     assert_eq!(retrieved[0].id, insight.id);
     assert_eq!(
         retrieved[0].body.as_text().unwrap(),

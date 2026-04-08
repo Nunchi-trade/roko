@@ -763,8 +763,8 @@ fn register_chain_subscription_methods(
     module: &mut RpcModule<ServerContext>,
 ) -> std::result::Result<(), RegisterMethodError> {
     use crate::chain_rpc::{
-        handle_unsubscribe, insight_event_to_json, pheromone_event_to_json,
-        PHEROMONE_SUB_PREFIX, INSIGHT_SUB_PREFIX,
+        INSIGHT_SUB_PREFIX, PHEROMONE_SUB_PREFIX, handle_unsubscribe, insight_event_to_json,
+        pheromone_event_to_json,
     };
     use crate::roko_bridge::{BackpressurePolicy, InsightEvent, MpscSink, PheromoneEvent};
 

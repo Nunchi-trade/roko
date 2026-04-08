@@ -27,11 +27,16 @@ pub const DESCRIPTION: &str = "Apply a unified-diff patch to a single file in th
 /// Build the [`ToolDef`] for `apply_patch`.
 #[must_use]
 pub fn tool_def() -> ToolDef {
-    ToolDef::new(NAME, DESCRIPTION, ToolCategory::Write, ToolPermission::writes())
-        .with_parameters(ToolSchema::any_object())
-        .with_concurrency(ToolConcurrency::Serial)
-        .with_idempotent(false)
-        .with_timeout_ms(60_000)
+    ToolDef::new(
+        NAME,
+        DESCRIPTION,
+        ToolCategory::Write,
+        ToolPermission::writes(),
+    )
+    .with_parameters(ToolSchema::any_object())
+    .with_concurrency(ToolConcurrency::Serial)
+    .with_idempotent(false)
+    .with_timeout_ms(60_000)
 }
 
 /// Handler for `apply_patch` (§36.28).
@@ -112,7 +117,9 @@ fn parse_single_file_patch(diff: &str) -> Result<ParsedPatch, String> {
             let p = rest.trim_start_matches("b/").trim();
             if let Some(ref existing) = path {
                 if existing != p {
-                    return Err(format!("multi-file patch not supported (saw {existing} and {p})"));
+                    return Err(format!(
+                        "multi-file patch not supported (saw {existing} and {p})"
+                    ));
                 }
             } else {
                 path = Some(p.to_string());
@@ -129,7 +136,10 @@ fn parse_single_file_patch(diff: &str) -> Result<ParsedPatch, String> {
                 .next()
                 .and_then(|n| n.parse::<usize>().ok())
                 .ok_or_else(|| format!("malformed hunk header: {line}"))?;
-            let mut hunk = Hunk { old_start, lines: Vec::new() };
+            let mut hunk = Hunk {
+                old_start,
+                lines: Vec::new(),
+            };
             while let Some(peek) = lines.peek() {
                 if peek.starts_with("@@ ") || peek.starts_with("--- ") || peek.starts_with("+++ ") {
                     break;

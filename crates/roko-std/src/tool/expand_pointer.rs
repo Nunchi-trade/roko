@@ -25,8 +25,7 @@ use roko_core::tool::{
 pub const NAME: &str = "expand_pointer";
 
 /// Human-readable description sent to the LLM.
-pub const DESCRIPTION: &str =
-    "Retrieve the full content of a memory pointer by its ID. Use this when a tool result was truncated and you need the complete output.";
+pub const DESCRIPTION: &str = "Retrieve the full content of a memory pointer by its ID. Use this when a tool result was truncated and you need the complete output.";
 
 /// Build the [`ToolDef`] for `expand_pointer`.
 #[must_use]
@@ -75,11 +74,7 @@ impl ExpandPointerTool {
     /// Returns a [`ToolResult::Ok`] with the full content if the pointer
     /// exists, or a [`ToolResult::Err`] if the pointer ID is not found.
     #[must_use]
-    pub fn expand(
-        &self,
-        pointer_id: &str,
-        content_store: &HashMap<String, String>,
-    ) -> ToolResult {
+    pub fn expand(&self, pointer_id: &str, content_store: &HashMap<String, String>) -> ToolResult {
         content_store.get(pointer_id).map_or_else(
             || {
                 ToolResult::Err(ToolError::Other(format!(

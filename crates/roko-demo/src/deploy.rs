@@ -61,8 +61,8 @@ impl ContractArtifact {
         let raw: ForgeArtifact = serde_json::from_str(&text)
             .map_err(|e| anyhow::anyhow!("parse artifact {}: {e}", path.display()))?;
         let hex_str = raw.bytecode.object.trim_start_matches("0x");
-        let bytes = hex::decode(hex_str)
-            .map_err(|e| anyhow::anyhow!("decode bytecode for {name}: {e}"))?;
+        let bytes =
+            hex::decode(hex_str).map_err(|e| anyhow::anyhow!("decode bytecode for {name}: {e}"))?;
         if bytes.is_empty() {
             return Err(anyhow::anyhow!(
                 "empty bytecode for {name} (did you run `forge build`?)"
@@ -85,9 +85,7 @@ impl ContractArtifact {
                 if let Some(inputs) = item.get("inputs").and_then(|v| v.as_array()) {
                     return inputs
                         .iter()
-                        .filter_map(|i| {
-                            i.get("type").and_then(|t| t.as_str()).map(String::from)
-                        })
+                        .filter_map(|i| i.get("type").and_then(|t| t.as_str()).map(String::from))
                         .collect();
                 }
             }
@@ -99,7 +97,8 @@ impl ContractArtifact {
 /// Ensure `forge build` has produced artifacts; run it if out/ is empty.
 pub fn ensure_artifacts_built(contracts_dir: &Path) -> anyhow::Result<()> {
     let out = contracts_dir.join("out");
-    let needs_build = !out.exists() || std::fs::read_dir(&out).is_ok_and(|mut d| d.next().is_none());
+    let needs_build =
+        !out.exists() || std::fs::read_dir(&out).is_ok_and(|mut d| d.next().is_none());
     if !needs_build {
         return Ok(());
     }
@@ -153,10 +152,7 @@ pub async fn warmup_chain(rpc_url: &str) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("block_number probe: {e}"))?
         .json::<serde_json::Value>()
         .await?;
-    let hex = resp
-        .get("result")
-        .and_then(|v| v.as_str())
-        .unwrap_or("0x0");
+    let hex = resp.get("result").and_then(|v| v.as_str()).unwrap_or("0x0");
     let tip = u64::from_str_radix(hex.trim_start_matches("0x"), 16).unwrap_or(0);
     if tip == 0 {
         let _ = client
@@ -174,17 +170,13 @@ pub async fn warmup_chain(rpc_url: &str) -> anyhow::Result<()> {
 }
 
 /// Deploy the full suite in order.
-pub async fn deploy_suite(
-    ctx: &DeployCtx,
-    deploy: &DeployStep,
-) -> anyhow::Result<DeployedSuite> {
+pub async fn deploy_suite(ctx: &DeployCtx, deploy: &DeployStep) -> anyhow::Result<DeployedSuite> {
     warmup_chain(&ctx.rpc_url).await?;
     ensure_artifacts_built(&ctx.contracts_dir)?;
 
-    let wallet_entry = ctx
-        .wallets
-        .get(&deploy.sender_wallet)
-        .ok_or_else(|| anyhow::anyhow!("deploy sender wallet not found: {}", deploy.sender_wallet))?;
+    let wallet_entry = ctx.wallets.get(&deploy.sender_wallet).ok_or_else(|| {
+        anyhow::anyhow!("deploy sender wallet not found: {}", deploy.sender_wallet)
+    })?;
     let provider = wallet_provider(&ctx.rpc_url, wallet_entry)?;
     let signer_address = parse_signer_address(wallet_entry)?;
 

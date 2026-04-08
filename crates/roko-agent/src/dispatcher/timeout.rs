@@ -29,7 +29,9 @@ where
         Ok(res) => res,
         Err(_elapsed) => {
             let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-            ToolResult::err(ToolError::Timeout { after_ms: elapsed_ms })
+            ToolResult::err(ToolError::Timeout {
+                after_ms: elapsed_ms,
+            })
         }
     }
 }

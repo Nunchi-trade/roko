@@ -11,7 +11,7 @@ pub enum ContractCategory {
     LendingPool,
     Stablecoin,
     Weth,
-    Lst,        // liquid staking token
+    Lst, // liquid staking token
     NftMarket,
     Bridge,
     Mev,
@@ -47,7 +47,11 @@ pub struct KnownContract {
 /// Lookup a known address. Case-insensitive (normalizes to lowercase).
 pub fn lookup(addr: &str) -> Option<KnownContract> {
     let a = addr.trim().to_lowercase();
-    let key = if let Some(s) = a.strip_prefix("0x") { s } else { &a };
+    let key = if let Some(s) = a.strip_prefix("0x") {
+        s
+    } else {
+        &a
+    };
     KNOWN_ADDRESSES
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case(key))
@@ -70,65 +74,329 @@ pub fn decode_method_selector(input: &str) -> Option<&'static str> {
 /// `(address_hex_no_prefix, (name, category))` pairs — all lowercased.
 const KNOWN_ADDRESSES: &[(&str, KnownContract)] = &[
     // Uniswap
-    ("7a250d5630b4cf539739df2c5dacb4c659f2488d", KnownContract{ name: "Uniswap V2 Router", category: ContractCategory::DexRouter }),
-    ("e592427a0aece92de3edee1f18e0157c05861564", KnownContract{ name: "Uniswap V3 Router", category: ContractCategory::DexRouter }),
-    ("68b3465833fb72a70ecdf485e0e4c7bd8665fc45", KnownContract{ name: "Uniswap V3 Router 2", category: ContractCategory::DexRouter }),
-    ("ef1c6e67703c7bd7107eed8303fbe6ec2554bf6b", KnownContract{ name: "Uniswap Universal Router", category: ContractCategory::DexRouter }),
-    ("3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad", KnownContract{ name: "Uniswap Universal Router v1.2", category: ContractCategory::DexRouter }),
-    ("66a9893cc07d91d95644aedd05d03f95e1dba8af", KnownContract{ name: "Uniswap V4 Router", category: ContractCategory::DexRouter }),
+    (
+        "7a250d5630b4cf539739df2c5dacb4c659f2488d",
+        KnownContract {
+            name: "Uniswap V2 Router",
+            category: ContractCategory::DexRouter,
+        },
+    ),
+    (
+        "e592427a0aece92de3edee1f18e0157c05861564",
+        KnownContract {
+            name: "Uniswap V3 Router",
+            category: ContractCategory::DexRouter,
+        },
+    ),
+    (
+        "68b3465833fb72a70ecdf485e0e4c7bd8665fc45",
+        KnownContract {
+            name: "Uniswap V3 Router 2",
+            category: ContractCategory::DexRouter,
+        },
+    ),
+    (
+        "ef1c6e67703c7bd7107eed8303fbe6ec2554bf6b",
+        KnownContract {
+            name: "Uniswap Universal Router",
+            category: ContractCategory::DexRouter,
+        },
+    ),
+    (
+        "3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad",
+        KnownContract {
+            name: "Uniswap Universal Router v1.2",
+            category: ContractCategory::DexRouter,
+        },
+    ),
+    (
+        "66a9893cc07d91d95644aedd05d03f95e1dba8af",
+        KnownContract {
+            name: "Uniswap V4 Router",
+            category: ContractCategory::DexRouter,
+        },
+    ),
     // SushiSwap
-    ("d9e1ce17f2641f24ae83637ab66a2cca9c378b9f", KnownContract{ name: "SushiSwap V2 Router", category: ContractCategory::DexRouter }),
+    (
+        "d9e1ce17f2641f24ae83637ab66a2cca9c378b9f",
+        KnownContract {
+            name: "SushiSwap V2 Router",
+            category: ContractCategory::DexRouter,
+        },
+    ),
     // Curve
-    ("99a58482bd75cbab83b27ec03ca68ff489b5788f", KnownContract{ name: "Curve Router", category: ContractCategory::DexRouter }),
-    ("fa9a30350048b2bf66865ee20363067c66f67e58", KnownContract{ name: "Curve Router v1.2", category: ContractCategory::DexRouter }),
+    (
+        "99a58482bd75cbab83b27ec03ca68ff489b5788f",
+        KnownContract {
+            name: "Curve Router",
+            category: ContractCategory::DexRouter,
+        },
+    ),
+    (
+        "fa9a30350048b2bf66865ee20363067c66f67e58",
+        KnownContract {
+            name: "Curve Router v1.2",
+            category: ContractCategory::DexRouter,
+        },
+    ),
     // 1inch
-    ("1111111254eeb25477b68fb85ed929f73a960582", KnownContract{ name: "1inch Router v5", category: ContractCategory::DexRouter }),
-    ("111111125421ca6dc452d289314280a0f8842a65", KnownContract{ name: "1inch Router v6", category: ContractCategory::DexRouter }),
+    (
+        "1111111254eeb25477b68fb85ed929f73a960582",
+        KnownContract {
+            name: "1inch Router v5",
+            category: ContractCategory::DexRouter,
+        },
+    ),
+    (
+        "111111125421ca6dc452d289314280a0f8842a65",
+        KnownContract {
+            name: "1inch Router v6",
+            category: ContractCategory::DexRouter,
+        },
+    ),
     // 0x Exchange
-    ("def1c0ded9bec7f1a1670819833240f027b25eff", KnownContract{ name: "0x Exchange Proxy", category: ContractCategory::DexRouter }),
+    (
+        "def1c0ded9bec7f1a1670819833240f027b25eff",
+        KnownContract {
+            name: "0x Exchange Proxy",
+            category: ContractCategory::DexRouter,
+        },
+    ),
     // Paraswap
-    ("6a000f20005980200259b80c5102003040001068", KnownContract{ name: "ParaSwap V6", category: ContractCategory::DexRouter }),
+    (
+        "6a000f20005980200259b80c5102003040001068",
+        KnownContract {
+            name: "ParaSwap V6",
+            category: ContractCategory::DexRouter,
+        },
+    ),
     // Aave
-    ("87870bca3f3fd6335c3f4ce8392d69350b4fa4e2", KnownContract{ name: "Aave V3 Pool", category: ContractCategory::LendingPool }),
-    ("7d2768de32b0b80b7a3454c06bdac94a69ddc7a9", KnownContract{ name: "Aave V2 LendingPool", category: ContractCategory::LendingPool }),
+    (
+        "87870bca3f3fd6335c3f4ce8392d69350b4fa4e2",
+        KnownContract {
+            name: "Aave V3 Pool",
+            category: ContractCategory::LendingPool,
+        },
+    ),
+    (
+        "7d2768de32b0b80b7a3454c06bdac94a69ddc7a9",
+        KnownContract {
+            name: "Aave V2 LendingPool",
+            category: ContractCategory::LendingPool,
+        },
+    ),
     // Compound
-    ("4ddc2d193948926d02f9b1fe9e1daa0718270ed5", KnownContract{ name: "Compound cETH", category: ContractCategory::LendingPool }),
-    ("c3d688b66703497daa19211eedff47f25384cdc3", KnownContract{ name: "Compound Comet USDC", category: ContractCategory::LendingPool }),
+    (
+        "4ddc2d193948926d02f9b1fe9e1daa0718270ed5",
+        KnownContract {
+            name: "Compound cETH",
+            category: ContractCategory::LendingPool,
+        },
+    ),
+    (
+        "c3d688b66703497daa19211eedff47f25384cdc3",
+        KnownContract {
+            name: "Compound Comet USDC",
+            category: ContractCategory::LendingPool,
+        },
+    ),
     // Morpho
-    ("bbbbbbbbbb9cc5e90e3b3af64bdaf62c37eeffcb", KnownContract{ name: "Morpho Blue", category: ContractCategory::LendingPool }),
+    (
+        "bbbbbbbbbb9cc5e90e3b3af64bdaf62c37eeffcb",
+        KnownContract {
+            name: "Morpho Blue",
+            category: ContractCategory::LendingPool,
+        },
+    ),
     // Stablecoins (ERC-20 contracts)
-    ("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", KnownContract{ name: "USDC", category: ContractCategory::Stablecoin }),
-    ("dac17f958d2ee523a2206206994597c13d831ec7", KnownContract{ name: "USDT", category: ContractCategory::Stablecoin }),
-    ("6b175474e89094c44da98b954eedeac495271d0f", KnownContract{ name: "DAI", category: ContractCategory::Stablecoin }),
-    ("853d955acef822db058eb8505911ed77f175b99e", KnownContract{ name: "FRAX", category: ContractCategory::Stablecoin }),
-    ("4c9edd5852cd905f086c759e8383e09bff1e68b3", KnownContract{ name: "USDe", category: ContractCategory::Stablecoin }),
-    ("8292bb45bf1ee4d140127049757c2e0ff06317ed", KnownContract{ name: "RLUSD", category: ContractCategory::Stablecoin }),
+    (
+        "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        KnownContract {
+            name: "USDC",
+            category: ContractCategory::Stablecoin,
+        },
+    ),
+    (
+        "dac17f958d2ee523a2206206994597c13d831ec7",
+        KnownContract {
+            name: "USDT",
+            category: ContractCategory::Stablecoin,
+        },
+    ),
+    (
+        "6b175474e89094c44da98b954eedeac495271d0f",
+        KnownContract {
+            name: "DAI",
+            category: ContractCategory::Stablecoin,
+        },
+    ),
+    (
+        "853d955acef822db058eb8505911ed77f175b99e",
+        KnownContract {
+            name: "FRAX",
+            category: ContractCategory::Stablecoin,
+        },
+    ),
+    (
+        "4c9edd5852cd905f086c759e8383e09bff1e68b3",
+        KnownContract {
+            name: "USDe",
+            category: ContractCategory::Stablecoin,
+        },
+    ),
+    (
+        "8292bb45bf1ee4d140127049757c2e0ff06317ed",
+        KnownContract {
+            name: "RLUSD",
+            category: ContractCategory::Stablecoin,
+        },
+    ),
     // WETH
-    ("c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", KnownContract{ name: "WETH", category: ContractCategory::Weth }),
+    (
+        "c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        KnownContract {
+            name: "WETH",
+            category: ContractCategory::Weth,
+        },
+    ),
     // Liquid staking
-    ("ae7ab96520de3a18e5e111b5eaab095312d7fe84", KnownContract{ name: "Lido stETH", category: ContractCategory::Lst }),
-    ("7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0", KnownContract{ name: "Lido wstETH", category: ContractCategory::Lst }),
-    ("a35b1b31ce002fbf2058d22f30f95d405200a15b", KnownContract{ name: "ETHx", category: ContractCategory::Lst }),
-    ("ae78736cd615f374d3085123a210448e74fc6393", KnownContract{ name: "rETH (Rocket)", category: ContractCategory::Lst }),
+    (
+        "ae7ab96520de3a18e5e111b5eaab095312d7fe84",
+        KnownContract {
+            name: "Lido stETH",
+            category: ContractCategory::Lst,
+        },
+    ),
+    (
+        "7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0",
+        KnownContract {
+            name: "Lido wstETH",
+            category: ContractCategory::Lst,
+        },
+    ),
+    (
+        "a35b1b31ce002fbf2058d22f30f95d405200a15b",
+        KnownContract {
+            name: "ETHx",
+            category: ContractCategory::Lst,
+        },
+    ),
+    (
+        "ae78736cd615f374d3085123a210448e74fc6393",
+        KnownContract {
+            name: "rETH (Rocket)",
+            category: ContractCategory::Lst,
+        },
+    ),
     // Restaking
-    ("858646372cc42e1a627fce94aa7a7033e7cf075a", KnownContract{ name: "EigenLayer Strategy Manager", category: ContractCategory::Restaking }),
-    ("a1290d69c65a6fe4df752f95823fae25cb99e5a7", KnownContract{ name: "Renzo ezETH", category: ContractCategory::Restaking }),
-    ("e3cbd06d7dadb3f4e6557bab7edd924cd1489e8f", KnownContract{ name: "Kelp rsETH", category: ContractCategory::Restaking }),
+    (
+        "858646372cc42e1a627fce94aa7a7033e7cf075a",
+        KnownContract {
+            name: "EigenLayer Strategy Manager",
+            category: ContractCategory::Restaking,
+        },
+    ),
+    (
+        "a1290d69c65a6fe4df752f95823fae25cb99e5a7",
+        KnownContract {
+            name: "Renzo ezETH",
+            category: ContractCategory::Restaking,
+        },
+    ),
+    (
+        "e3cbd06d7dadb3f4e6557bab7edd924cd1489e8f",
+        KnownContract {
+            name: "Kelp rsETH",
+            category: ContractCategory::Restaking,
+        },
+    ),
     // NFT markets
-    ("00000000000000adc04c56bf30ac9d3c0aaf14dc", KnownContract{ name: "Seaport 1.5 (OpenSea)", category: ContractCategory::NftMarket }),
-    ("0000000000000068f116a894984e2db1123eb395", KnownContract{ name: "Seaport 1.6", category: ContractCategory::NftMarket }),
-    ("000000000000ad05ccc4f10045630fb830b95127", KnownContract{ name: "Blur Marketplace", category: ContractCategory::NftMarket }),
-    ("29469395eaf6f95920e59f858042f0e28d98a20b", KnownContract{ name: "Blur Pool", category: ContractCategory::NftMarket }),
+    (
+        "00000000000000adc04c56bf30ac9d3c0aaf14dc",
+        KnownContract {
+            name: "Seaport 1.5 (OpenSea)",
+            category: ContractCategory::NftMarket,
+        },
+    ),
+    (
+        "0000000000000068f116a894984e2db1123eb395",
+        KnownContract {
+            name: "Seaport 1.6",
+            category: ContractCategory::NftMarket,
+        },
+    ),
+    (
+        "000000000000ad05ccc4f10045630fb830b95127",
+        KnownContract {
+            name: "Blur Marketplace",
+            category: ContractCategory::NftMarket,
+        },
+    ),
+    (
+        "29469395eaf6f95920e59f858042f0e28d98a20b",
+        KnownContract {
+            name: "Blur Pool",
+            category: ContractCategory::NftMarket,
+        },
+    ),
     // Bridges
-    ("8315177ab297ba92a06054ce80a67ed4dbd7ed3a", KnownContract{ name: "Arbitrum Bridge", category: ContractCategory::Bridge }),
-    ("25ace71c97b33cc4729cf772ae268934f7ab5fa1", KnownContract{ name: "Optimism Bridge (L1)", category: ContractCategory::Bridge }),
-    ("a0c68c638235ee32657e8f720a23cec1bfc77c77", KnownContract{ name: "Polygon PoS Bridge", category: ContractCategory::Bridge }),
-    ("49048044d57e1c92a77f79988d21fa8faf74e97e", KnownContract{ name: "Base Bridge", category: ContractCategory::Bridge }),
+    (
+        "8315177ab297ba92a06054ce80a67ed4dbd7ed3a",
+        KnownContract {
+            name: "Arbitrum Bridge",
+            category: ContractCategory::Bridge,
+        },
+    ),
+    (
+        "25ace71c97b33cc4729cf772ae268934f7ab5fa1",
+        KnownContract {
+            name: "Optimism Bridge (L1)",
+            category: ContractCategory::Bridge,
+        },
+    ),
+    (
+        "a0c68c638235ee32657e8f720a23cec1bfc77c77",
+        KnownContract {
+            name: "Polygon PoS Bridge",
+            category: ContractCategory::Bridge,
+        },
+    ),
+    (
+        "49048044d57e1c92a77f79988d21fa8faf74e97e",
+        KnownContract {
+            name: "Base Bridge",
+            category: ContractCategory::Bridge,
+        },
+    ),
     // MEV builders / searchers (known addresses)
-    ("95222290dd7278aa3ddd389cc1e1d165cc4bafe5", KnownContract{ name: "beaverbuild (builder)", category: ContractCategory::Mev }),
-    ("1f9090aae28b8a3dceadf281b0f12828e676c326", KnownContract{ name: "rsync-builder", category: ContractCategory::Mev }),
-    ("dafea492d9c6733ae3d56b7ed1adb60692c98bc5", KnownContract{ name: "Flashbots Builder", category: ContractCategory::Mev }),
-    ("b646d87963da1fb9d192ddba775f24f33e857128", KnownContract{ name: "Titan Builder", category: ContractCategory::Mev }),
+    (
+        "95222290dd7278aa3ddd389cc1e1d165cc4bafe5",
+        KnownContract {
+            name: "beaverbuild (builder)",
+            category: ContractCategory::Mev,
+        },
+    ),
+    (
+        "1f9090aae28b8a3dceadf281b0f12828e676c326",
+        KnownContract {
+            name: "rsync-builder",
+            category: ContractCategory::Mev,
+        },
+    ),
+    (
+        "dafea492d9c6733ae3d56b7ed1adb60692c98bc5",
+        KnownContract {
+            name: "Flashbots Builder",
+            category: ContractCategory::Mev,
+        },
+    ),
+    (
+        "b646d87963da1fb9d192ddba775f24f33e857128",
+        KnownContract {
+            name: "Titan Builder",
+            category: ContractCategory::Mev,
+        },
+    ),
 ];
 
 /// `(4-byte hex, method_name)` pairs. Lowercase hex, no `0x`.

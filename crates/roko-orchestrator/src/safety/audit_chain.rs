@@ -332,7 +332,10 @@ mod tests {
             entry.resource = "r-MODIFIED".to_string();
         });
         assert!(mutated);
-        assert!(!chain.verify(), "tampering with middle entry must be detected");
+        assert!(
+            !chain.verify(),
+            "tampering with middle entry must be detected"
+        );
     }
 
     #[test]
@@ -534,9 +537,8 @@ mod tests {
     #[test]
     fn with_signature_is_hashed() {
         let chain = AuditChain::new();
-        let a = chain.append(
-            AuditEntry::new(GENESIS_PREV_HASH, "k", "a", "r").with_signature("s1"),
-        );
+        let a =
+            chain.append(AuditEntry::new(GENESIS_PREV_HASH, "k", "a", "r").with_signature("s1"));
         assert_eq!(a.signature.as_deref(), Some("s1"));
         assert!(chain.verify());
 

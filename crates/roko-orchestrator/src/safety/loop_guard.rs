@@ -120,8 +120,7 @@ impl Inner {
                 if span >= 0 {
                     let span_u64 = u64::try_from(span).unwrap_or(u64::MAX);
                     let unique_fps = {
-                        let mut fps: Vec<u64> =
-                            self.window.iter().map(|&(fp, _)| fp).collect();
+                        let mut fps: Vec<u64> = self.window.iter().map(|&(fp, _)| fp).collect();
                         fps.sort_unstable();
                         fps.dedup();
                         fps.len()
@@ -324,8 +323,14 @@ mod tests {
     #[test]
     fn same_fingerprint_for_equal_actions() {
         let guard = LoopGuard::new(cfg(100, 2, 10_000));
-        let a = Action { kind: "foo", arg: 1 };
-        let b = Action { kind: "foo", arg: 1 };
+        let a = Action {
+            kind: "foo",
+            arg: 1,
+        };
+        let b = Action {
+            kind: "foo",
+            arg: 1,
+        };
         assert_eq!(guard.record_at(&a, 0), LoopVerdict::Continue);
         assert_eq!(guard.record_at(&b, 1), LoopVerdict::RepeatLoop);
     }

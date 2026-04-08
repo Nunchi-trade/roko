@@ -41,14 +41,9 @@ impl Translator for ClaudeTranslator {
         RenderedTools::CliFlag(csv)
     }
 
-    fn parse_calls(
-        &self,
-        response: &BackendResponse,
-    ) -> Result<Vec<ToolCall>, TranslatorError> {
+    fn parse_calls(&self, response: &BackendResponse) -> Result<Vec<ToolCall>, TranslatorError> {
         let BackendResponse::StreamJson(events) = response else {
-            return Err(TranslatorError::Malformed(
-                "expected stream-json".into(),
-            ));
+            return Err(TranslatorError::Malformed("expected stream-json".into()));
         };
 
         let mut calls = Vec::new();
@@ -56,20 +51,17 @@ impl Translator for ClaudeTranslator {
             // Only consider `content_block_start` events — the CLI emits
             // other event kinds (message_start, content_block_delta, …)
             // that don't carry a tool_use block.
-            if event.get("type").and_then(serde_json::Value::as_str)
-                != Some("content_block_start")
+            if event.get("type").and_then(serde_json::Value::as_str) != Some("content_block_start")
             {
                 continue;
             }
             // Structural field: if present-and-declared a content block
             // but missing `content_block`, the stream is malformed.
-            let block = event.get("content_block").ok_or_else(|| {
-                TranslatorError::Malformed("missing content_block".into())
-            })?;
+            let block = event
+                .get("content_block")
+                .ok_or_else(|| TranslatorError::Malformed("missing content_block".into()))?;
             // Filter to tool_use blocks; `text` / `thinking` etc. are skipped.
-            if block.get("type").and_then(serde_json::Value::as_str)
-                != Some("tool_use")
-            {
+            if block.get("type").and_then(serde_json::Value::as_str) != Some("tool_use") {
                 continue;
             }
             // Lenient on optional fields: the LLM occasionally omits one

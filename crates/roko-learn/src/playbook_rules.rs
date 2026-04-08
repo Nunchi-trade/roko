@@ -267,11 +267,8 @@ impl PlaybookRules {
                 .then_with(|| cmp_opt_dt_desc(a.2, b.2))
         });
 
-        let selected_ids: Vec<String> = order
-            .into_iter()
-            .map(|(id, _, _)| id)
-            .take(limit)
-            .collect();
+        let selected_ids: Vec<String> =
+            order.into_iter().map(|(id, _, _)| id).take(limit).collect();
 
         // Acquire write lock to stamp last_applied and collect clones.
         let mut guard = self.rules.write();
@@ -422,7 +419,10 @@ type ClusterKey = (String, String);
 /// skipped because they cannot form a meaningful failure cluster.
 fn build_clusters(
     episodes: &[Episode],
-) -> (HashMap<ClusterKey, Vec<&Episode>>, HashMap<ClusterKey, usize>) {
+) -> (
+    HashMap<ClusterKey, Vec<&Episode>>,
+    HashMap<ClusterKey, usize>,
+) {
     let mut failed_map: HashMap<ClusterKey, Vec<&Episode>> = HashMap::new();
     let mut total_map: HashMap<ClusterKey, usize> = HashMap::new();
 
@@ -484,7 +484,11 @@ fn synthesize_from_clusters(
         }
 
         let rule_id = synthesize_rule_id(category, signature);
-        let cat_label = if category.is_empty() { "unknown" } else { category.as_str() };
+        let cat_label = if category.is_empty() {
+            "unknown"
+        } else {
+            category.as_str()
+        };
         let title = format!("{cat_label}: {signature}");
         let body = build_body(failed_episodes, config.max_body_tokens * 4);
         let triggers = build_triggers(failed_episodes);
@@ -668,10 +672,7 @@ fn synthesize_rule_id(category: &str, signature: &str) -> String {
 
 /// Compare two `Option<DateTime<Utc>>` in descending order (greater = earlier
 /// in the sorted list). `None` sorts last.
-fn cmp_opt_dt_desc(
-    a: Option<DateTime<Utc>>,
-    b: Option<DateTime<Utc>>,
-) -> std::cmp::Ordering {
+fn cmp_opt_dt_desc(a: Option<DateTime<Utc>>, b: Option<DateTime<Utc>>) -> std::cmp::Ordering {
     match (a, b) {
         (Some(a), Some(b)) => b.cmp(&a),
         (Some(_), None) => std::cmp::Ordering::Less,
@@ -756,18 +757,11 @@ mod tests {
     }
 
     /// Build a minimal failed episode for extraction tests.
-    fn failed_ep(
-        id: &str,
-        sig: &str,
-        category: &str,
-        failure_reason: &str,
-    ) -> Episode {
+    fn failed_ep(id: &str, sig: &str, category: &str, failure_reason: &str) -> Episode {
         let mut ep = Episode::new("agent", id);
         ep.id = id.to_string();
-        ep.gate_verdicts.push(
-            crate::episode_logger::GateVerdict::new("compile", false)
-                .with_signature(sig),
-        );
+        ep.gate_verdicts
+            .push(crate::episode_logger::GateVerdict::new("compile", false).with_signature(sig));
         ep.failure_reason = Some(failure_reason.to_string());
         ep.extra.insert(
             "category".to_string(),
@@ -781,10 +775,8 @@ mod tests {
     fn passing_ep(id: &str, sig: &str, category: &str) -> Episode {
         let mut ep = Episode::new("agent", id);
         ep.id = id.to_string();
-        ep.gate_verdicts.push(
-            crate::episode_logger::GateVerdict::new("compile", true)
-                .with_signature(sig),
-        );
+        ep.gate_verdicts
+            .push(crate::episode_logger::GateVerdict::new("compile", true).with_signature(sig));
         ep.extra.insert(
             "category".to_string(),
             serde_json::Value::String(category.to_string()),
@@ -797,8 +789,7 @@ mod tests {
     #[test]
     fn open_missing_file_yields_empty_store() {
         let dir = TempDir::new().expect("create tempdir");
-        let store = PlaybookRules::open(tmp_path(&dir, "missing.toml"))
-            .expect("open missing file");
+        let store = PlaybookRules::open(tmp_path(&dir, "missing.toml")).expect("open missing file");
         assert_eq!(store.count(), 0);
     }
 
@@ -976,7 +967,10 @@ mod tests {
 
         let ctx = default_ctx();
         let results = store.select(&ctx, 10);
-        assert!(results.is_empty(), "empty triggers must not match any context");
+        assert!(
+            results.is_empty(),
+            "empty triggers must not match any context"
+        );
     }
 
     // ── Test 9 ──────────────────────────────────────────────────────────────

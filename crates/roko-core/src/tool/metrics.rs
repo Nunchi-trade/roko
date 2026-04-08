@@ -257,11 +257,13 @@ pub fn compute_reward(outcome: &ToolOutcome, cfg: &RewardConfig) -> f32 {
     }
     let latency_norm = (outcome.latency_ms as f32 / cfg.latency_budget_ms as f32).clamp(0.0, 1.0);
     let cost_norm = (outcome.cost_usd / cfg.cost_budget_usd).clamp(0.0, 1.0);
-    let recovery_norm =
-        (f32::from(outcome.recovery_attempts) / f32::from(cfg.max_recovery_attempts)).clamp(0.0, 1.0);
+    let recovery_norm = (f32::from(outcome.recovery_attempts)
+        / f32::from(cfg.max_recovery_attempts))
+    .clamp(0.0, 1.0);
     let penalty = cfg.latency_weight.mul_add(
         latency_norm,
-        cfg.cost_weight.mul_add(cost_norm, cfg.recovery_weight * recovery_norm),
+        cfg.cost_weight
+            .mul_add(cost_norm, cfg.recovery_weight * recovery_norm),
     );
     (1.0 - penalty).clamp(0.0, 1.0)
 }
@@ -472,7 +474,10 @@ mod tests {
 
     #[test]
     fn metrics_samples_saturate_not_overflow() {
-        let mut m = ToolMetrics { samples: u32::MAX, ..ToolMetrics::empty() };
+        let mut m = ToolMetrics {
+            samples: u32::MAX,
+            ..ToolMetrics::empty()
+        };
         m.observe(false, false, true, true, true, 1.0);
         assert_eq!(m.samples, u32::MAX);
     }

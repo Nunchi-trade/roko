@@ -79,7 +79,10 @@ pub struct PathPolicy {
 
 impl Default for PathPolicy {
     fn default() -> Self {
-        Self { deny_symlinks: false, prevent_escapes: true }
+        Self {
+            deny_symlinks: false,
+            prevent_escapes: true,
+        }
     }
 }
 
@@ -148,7 +151,10 @@ pub fn canonicalize_with_policy(
         .strip_prefix(&canonical_worktree)
         .map_or_else(|_| canonical_joined.clone(), Path::to_path_buf);
 
-    Ok(CanonicalPath { absolute: canonical_joined, relative })
+    Ok(CanonicalPath {
+        absolute: canonical_joined,
+        relative,
+    })
 }
 
 /// Returns `true` iff `candidate` sits under `worktree`.
@@ -322,8 +328,8 @@ mod tests {
         let (_dir, root) = tempdir();
         std::fs::create_dir_all(root.join("src")).expect("mkdir");
         std::fs::write(root.join("src/lib.rs"), b"hi").expect("write");
-        let got = canonicalize_with_policy(&root, "src/lib.rs", &PathPolicy::default())
-            .expect("ok");
+        let got =
+            canonicalize_with_policy(&root, "src/lib.rs", &PathPolicy::default()).expect("ok");
         assert_eq!(got.absolute, root.join("src").join("lib.rs"));
         assert_eq!(got.relative, PathBuf::from("src").join("lib.rs"));
         assert!(!got.relative.is_absolute());
@@ -357,11 +363,14 @@ mod tests {
     #[test]
     fn prevent_escapes_false_allows_escape() {
         let (_dir, root) = tempdir();
-        let policy = PathPolicy { prevent_escapes: false, deny_symlinks: false };
+        let policy = PathPolicy {
+            prevent_escapes: false,
+            deny_symlinks: false,
+        };
         // `../outside.txt` would normally escape — with the policy
         // disabled we get a `CanonicalPath` back.
-        let got = canonicalize_with_policy(&root, "../outside.txt", &policy)
-            .expect("escape allowed");
+        let got =
+            canonicalize_with_policy(&root, "../outside.txt", &policy).expect("escape allowed");
         assert!(got.absolute.ends_with("outside.txt"));
     }
 
@@ -376,7 +385,10 @@ mod tests {
         // Create `link` -> `real` inside the worktree.
         symlink(&target_dir, root.join("link")).expect("symlink");
 
-        let strict = PathPolicy { deny_symlinks: true, prevent_escapes: true };
+        let strict = PathPolicy {
+            deny_symlinks: true,
+            prevent_escapes: true,
+        };
         // `link/file.txt` traverses a symlink component → should be rejected.
         // We bypass canonicalization's symlink resolution by asking for the
         // path that explicitly routes through `link`.
@@ -422,9 +434,11 @@ mod tests {
         let target = root.join("real.txt");
         std::fs::write(&target, b"hi").expect("write");
         symlink(&target, root.join("link.txt")).expect("symlink");
-        let lenient = PathPolicy { deny_symlinks: false, prevent_escapes: true };
-        let got =
-            canonicalize_with_policy(&root, "link.txt", &lenient).expect("symlink allowed");
+        let lenient = PathPolicy {
+            deny_symlinks: false,
+            prevent_escapes: true,
+        };
+        let got = canonicalize_with_policy(&root, "link.txt", &lenient).expect("symlink allowed");
         // canonicalize resolves the symlink to the target.
         assert_eq!(got.absolute, target);
     }

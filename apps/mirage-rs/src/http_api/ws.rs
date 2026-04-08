@@ -17,7 +17,10 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Query, State, WebSocketUpgrade, ws::{Message, WebSocket}},
+    extract::{
+        Query, State, WebSocketUpgrade,
+        ws::{Message, WebSocket},
+    },
     response::IntoResponse,
 };
 use serde::Deserialize;
@@ -69,10 +72,7 @@ async fn handle_ws(mut socket: WebSocket, state: ApiState, params: WsParams) {
     let mut pher_sub_id = None;
     if params.pheromones {
         let (sink, rx) = BroadcastSink::<PheromoneEvent>::new(256);
-        let id = subs.register_pheromone_sink(
-            Arc::new(sink),
-            BackpressurePolicy::DropOldest,
-        );
+        let id = subs.register_pheromone_sink(Arc::new(sink), BackpressurePolicy::DropOldest);
         pher_rx = Some(rx);
         pher_sub_id = Some(id);
     }
@@ -81,10 +81,7 @@ async fn handle_ws(mut socket: WebSocket, state: ApiState, params: WsParams) {
     let mut insi_sub_id = None;
     if params.insights {
         let (sink, rx) = BroadcastSink::<InsightEvent>::new(256);
-        let id = subs.register_insight_sink(
-            Arc::new(sink),
-            BackpressurePolicy::DropOldest,
-        );
+        let id = subs.register_insight_sink(Arc::new(sink), BackpressurePolicy::DropOldest);
         insi_rx = Some(rx);
         insi_sub_id = Some(id);
     }

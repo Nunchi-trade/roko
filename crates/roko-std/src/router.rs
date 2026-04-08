@@ -14,7 +14,9 @@ pub struct FirstRouter;
 #[allow(clippy::unnecessary_literal_bound)]
 impl Router for FirstRouter {
     fn select(&self, candidates: &[Signal], _ctx: &Context) -> Option<Selection> {
-        candidates.first().map(|s| Selection::new(s.id, self.name()))
+        candidates
+            .first()
+            .map(|s| Selection::new(s.id, self.name()))
     }
     fn feedback(&self, _outcome: &Outcome) {}
     fn name(&self) -> &str {

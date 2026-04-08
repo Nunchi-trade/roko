@@ -8,7 +8,7 @@
 //! This module mirrors `apps/mori/src/orchestrator/tasks.rs` for
 //! drop-in `.mori/plans/<plan>/tasks.toml` compatibility.
 
-use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 // ─── Status enums ─────────────────────────────────────────────────────────
 
@@ -496,7 +496,10 @@ impl GlobalTaskId {
     /// Construct from parts.
     #[must_use]
     pub fn new(plan: impl Into<String>, task: impl Into<String>) -> Self {
-        Self { plan: plan.into(), task: task.into() }
+        Self {
+            plan: plan.into(),
+            task: task.into(),
+        }
     }
 
     /// Parse a `"plan:task"` string back into a [`GlobalTaskId`].
@@ -507,7 +510,10 @@ impl GlobalTaskId {
         if plan.is_empty() || task.is_empty() {
             return None;
         }
-        Some(Self { plan: plan.to_string(), task: task.to_string() })
+        Some(Self {
+            plan: plan.to_string(),
+            task: task.to_string(),
+        })
     }
 }
 
@@ -584,9 +590,18 @@ mod tests {
 
     #[test]
     fn complexity_band_escalates_and_saturates() {
-        assert_eq!(TaskComplexityBand::Fast.escalate(), TaskComplexityBand::Standard);
-        assert_eq!(TaskComplexityBand::Standard.escalate(), TaskComplexityBand::Complex);
-        assert_eq!(TaskComplexityBand::Complex.escalate(), TaskComplexityBand::Complex);
+        assert_eq!(
+            TaskComplexityBand::Fast.escalate(),
+            TaskComplexityBand::Standard
+        );
+        assert_eq!(
+            TaskComplexityBand::Standard.escalate(),
+            TaskComplexityBand::Complex
+        );
+        assert_eq!(
+            TaskComplexityBand::Complex.escalate(),
+            TaskComplexityBand::Complex
+        );
     }
 
     #[test]

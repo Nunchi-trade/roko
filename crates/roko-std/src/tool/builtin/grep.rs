@@ -22,11 +22,16 @@ pub const DESCRIPTION: &str = "Search file contents for a literal-substring or s
 /// Build the [`ToolDef`] for `grep`.
 #[must_use]
 pub fn tool_def() -> ToolDef {
-    ToolDef::new(NAME, DESCRIPTION, ToolCategory::Read, ToolPermission::read_only())
-        .with_parameters(ToolSchema::any_object())
-        .with_concurrency(ToolConcurrency::Parallel)
-        .with_idempotent(true)
-        .with_timeout_ms(60_000)
+    ToolDef::new(
+        NAME,
+        DESCRIPTION,
+        ToolCategory::Read,
+        ToolPermission::read_only(),
+    )
+    .with_parameters(ToolSchema::any_object())
+    .with_concurrency(ToolConcurrency::Parallel)
+    .with_idempotent(true)
+    .with_timeout_ms(60_000)
 }
 
 /// Handler for `grep` (§36.19).
@@ -78,10 +83,9 @@ impl ToolHandler for Handler {
             }
         };
         let worktree_root = ctx.worktree().to_path_buf();
-        let result = tokio::task::spawn_blocking(move || {
-            search(&root, &worktree_root, &pattern, &mode)
-        })
-        .await;
+        let result =
+            tokio::task::spawn_blocking(move || search(&root, &worktree_root, &pattern, &mode))
+                .await;
         match result {
             Ok(Ok(output)) => ToolResult::text(output),
             Ok(Err(e)) => ToolResult::Err(ToolError::Other(format!("grep: {e}"))),
@@ -101,7 +105,8 @@ fn search(
     let mut files_matched: Vec<String> = Vec::new();
     let mut per_file_counts: Vec<(String, usize)> = Vec::new();
     while let Some(dir) = stack.pop() {
-        let rd = std::fs::read_dir(&dir).map_err(|e| format!("read_dir({}): {e}", dir.display()))?;
+        let rd =
+            std::fs::read_dir(&dir).map_err(|e| format!("read_dir({}): {e}", dir.display()))?;
         for entry in rd.flatten() {
             let path = entry.path();
             let Ok(meta) = entry.metadata() else { continue };
@@ -114,11 +119,15 @@ fn search(
                 continue;
             }
             // Skip files that look binary (naive: any null byte in first 1024 bytes).
-            let Ok(contents) = std::fs::read(&path) else { continue };
+            let Ok(contents) = std::fs::read(&path) else {
+                continue;
+            };
             if contents.iter().take(1024).any(|b| *b == 0) {
                 continue;
             }
-            let Ok(text) = std::str::from_utf8(&contents) else { continue };
+            let Ok(text) = std::str::from_utf8(&contents) else {
+                continue;
+            };
             let rel_path = path.strip_prefix(worktree_root).unwrap_or(&path);
             let rel_str = rel_path.to_string_lossy().replace('\\', "/");
             let mut count = 0usize;
@@ -151,7 +160,11 @@ fn search(
                 .collect::<Vec<_>>()
                 .join("\n")
         }
-        other => return Err(format!("unknown mode `{other}` (expected content|files_with_matches|count)")),
+        other => {
+            return Err(format!(
+                "unknown mode `{other}` (expected content|files_with_matches|count)"
+            ));
+        }
     };
     Ok(output)
 }

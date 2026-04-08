@@ -20,7 +20,7 @@
 
 use std::sync::Arc;
 
-use roko_core::tool::{format::profile_for_model, ToolFormat};
+use roko_core::tool::{ToolFormat, format::profile_for_model};
 
 use super::{ClaudeTranslator, OllamaTranslator, ReActTranslator, Translator};
 

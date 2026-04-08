@@ -221,7 +221,11 @@ impl HnswBinaryIndex {
         for l in (0..=level.min(self.max_level)).rev() {
             let candidates =
                 self.search_layer(node_idx, current_ep, self.config.ef_construction, l);
-            let m_max = if l == 0 { self.config.m_max_0 } else { self.config.m };
+            let m_max = if l == 0 {
+                self.config.m_max_0
+            } else {
+                self.config.m
+            };
             let selected = Self::select_neighbours(candidates, m_max);
             // Bidirectional links.
             for cand in &selected {
@@ -359,7 +363,10 @@ impl HnswBinaryIndex {
                         node: neighbour,
                         dist: -d,
                     });
-                    top_k.push(Nearest(Candidate { node: neighbour, dist: d }));
+                    top_k.push(Nearest(Candidate {
+                        node: neighbour,
+                        dist: d,
+                    }));
                     if top_k.len() > ef {
                         top_k.pop();
                     }

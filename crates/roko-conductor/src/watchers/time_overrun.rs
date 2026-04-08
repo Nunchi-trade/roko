@@ -96,18 +96,18 @@ impl Policy for TimeOverrunWatcher {
         let elapsed_secs = ((ctx.now_ms - entered_ms).max(0) / 1000) as u64;
 
         if elapsed_secs > timeout_secs {
-            vec![Signal::builder(Kind::Custom(
-                "conductor.intervention".into(),
-            ))
-            .body(Body::text(format!(
-                "phase {phase_str} exceeded timeout: {elapsed_secs}s > {timeout_secs}s"
-            )))
-            .tag("watcher", WATCHER_NAME)
-            .tag("severity", "warning")
-            .tag("phase", phase_str)
-            .tag("elapsed_secs", elapsed_secs.to_string())
-            .tag("timeout_secs", timeout_secs.to_string())
-            .build()]
+            vec![
+                Signal::builder(Kind::Custom("conductor.intervention".into()))
+                    .body(Body::text(format!(
+                        "phase {phase_str} exceeded timeout: {elapsed_secs}s > {timeout_secs}s"
+                    )))
+                    .tag("watcher", WATCHER_NAME)
+                    .tag("severity", "warning")
+                    .tag("phase", phase_str)
+                    .tag("elapsed_secs", elapsed_secs.to_string())
+                    .tag("timeout_secs", timeout_secs.to_string())
+                    .build(),
+            ]
         } else {
             Vec::new()
         }
@@ -195,9 +195,11 @@ mod tests {
     #[test]
     fn missing_phase_tag_no_fire() {
         let w = TimeOverrunWatcher::new();
-        let stream = vec![Signal::builder(Kind::PlanPhase)
-            .body(Body::text("no tags"))
-            .build()];
+        let stream = vec![
+            Signal::builder(Kind::PlanPhase)
+                .body(Body::text("no tags"))
+                .build(),
+        ];
         assert!(w.decide(&stream, &Context::at(999_000)).is_empty());
     }
 

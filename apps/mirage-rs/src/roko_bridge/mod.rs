@@ -29,8 +29,8 @@
 //! signature is satisfied with synchronous wrappers (locks held across a single
 //! method call are brief).
 
-mod hdc_substrate;
 mod chain_substrate;
+mod hdc_substrate;
 mod simulation_gate;
 mod subscription;
 
@@ -38,9 +38,9 @@ pub use chain_substrate::{ChainSubstrate, ChainSubstrateConfig};
 pub use hdc_substrate::HdcSubstrate;
 pub use simulation_gate::{SimulationGate, SimulationGateConfig};
 pub use subscription::{
-    BackpressurePolicy, BroadcastSink, InsightBus, InsightEvent, InsightSubscription,
-    MpscSink, PheromoneBus, PheromoneEvent, PheromoneSubscription, SinkError,
-    SubscriptionId, SubscriptionSink, SubscriptionStats, VecSink,
+    BackpressurePolicy, BroadcastSink, InsightBus, InsightEvent, InsightSubscription, MpscSink,
+    PheromoneBus, PheromoneEvent, PheromoneSubscription, SinkError, SubscriptionId,
+    SubscriptionSink, SubscriptionStats, VecSink,
 };
 
 use crate::chain::KnowledgeKind;
@@ -72,10 +72,7 @@ mod tests {
         assert_eq!(map_kind(&Kind::Skill), KnowledgeKind::Heuristic);
         assert_eq!(map_kind(&Kind::CompileDiagnostic), KnowledgeKind::Warning);
         assert_eq!(map_kind(&Kind::Task), KnowledgeKind::StrategyFragment);
-        assert_eq!(
-            map_kind(&Kind::ExperimentResult),
-            KnowledgeKind::CausalLink
-        );
+        assert_eq!(map_kind(&Kind::ExperimentResult), KnowledgeKind::CausalLink);
         assert_eq!(
             map_kind(&Kind::Custom("com.example.anti_insight".into())),
             KnowledgeKind::AntiKnowledge

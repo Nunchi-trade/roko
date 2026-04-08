@@ -94,11 +94,17 @@ impl Decay {
     // ─── Convenience constructors matching agent-chain pheromone half-lives ────
 
     /// THREAT pheromone half-life (2 hours).
-    pub const THREAT: Self = Self::HalfLife { half_life_ms: 7_200_000 };
+    pub const THREAT: Self = Self::HalfLife {
+        half_life_ms: 7_200_000,
+    };
     /// OPPORTUNITY pheromone half-life (4 hours).
-    pub const OPPORTUNITY: Self = Self::HalfLife { half_life_ms: 14_400_000 };
+    pub const OPPORTUNITY: Self = Self::HalfLife {
+        half_life_ms: 14_400_000,
+    };
     /// WISDOM pheromone half-life (24 hours).
-    pub const WISDOM: Self = Self::HalfLife { half_life_ms: 86_400_000 };
+    pub const WISDOM: Self = Self::HalfLife {
+        half_life_ms: 86_400_000,
+    };
 }
 
 #[cfg(test)]
@@ -138,7 +144,10 @@ mod tests {
 
     #[test]
     fn ebbinghaus_decays_exponentially() {
-        let d = Decay::Ebbinghaus { strength: 1.0, scale_ms: 1000 };
+        let d = Decay::Ebbinghaus {
+            strength: 1.0,
+            scale_ms: 1000,
+        };
         assert!((d.apply(0) - 1.0).abs() < 1e-6);
         // at age=scale, weight = 1/e ≈ 0.368
         assert!((d.apply(1000) - (-1.0_f32).exp()).abs() < 1e-6);
@@ -153,7 +162,7 @@ mod tests {
     #[test]
     fn is_alive_threshold() {
         let d = Decay::HalfLife { half_life_ms: 1000 };
-        assert!(d.is_alive(500, 0.5));   // weight ~0.707 > 0.5
+        assert!(d.is_alive(500, 0.5)); // weight ~0.707 > 0.5
         assert!(!d.is_alive(2500, 0.5)); // weight ~0.177 < 0.5
     }
 

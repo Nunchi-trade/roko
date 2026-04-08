@@ -69,17 +69,17 @@ impl Policy for TestFailureBudgetWatcher {
         let pass_rate = passed as f64 / total as f64;
 
         if pass_rate < self.min_pass_rate {
-            vec![Signal::builder(Kind::Custom(
-                "conductor.intervention".into(),
-            ))
-            .body(Body::text(format!(
-                "test pass rate {pass_rate:.1}% ({passed}/{total}) below threshold {:.0}%",
-                self.min_pass_rate * 100.0
-            )))
-            .tag("watcher", WATCHER_NAME)
-            .tag("severity", "warning")
-            .tag("pass_rate", format!("{pass_rate:.3}"))
-            .build()]
+            vec![
+                Signal::builder(Kind::Custom("conductor.intervention".into()))
+                    .body(Body::text(format!(
+                        "test pass rate {pass_rate:.1}% ({passed}/{total}) below threshold {:.0}%",
+                        self.min_pass_rate * 100.0
+                    )))
+                    .tag("watcher", WATCHER_NAME)
+                    .tag("severity", "warning")
+                    .tag("pass_rate", format!("{pass_rate:.3}"))
+                    .build(),
+            ]
         } else {
             Vec::new()
         }

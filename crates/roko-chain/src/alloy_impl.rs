@@ -161,10 +161,9 @@ impl ChainClient for AlloyChainClient {
         let addr = parse_hex_address(address)?;
         let slot_u = U256::from_str_radix(slot.trim_start_matches("0x"), 16)
             .map_err(|e| ChainError::Rpc(format!("invalid slot {slot}: {e}")))?;
-        let block_id = block.map_or(
-            BlockId::Number(BlockNumberOrTag::Latest),
-            |n| BlockId::Number(BlockNumberOrTag::Number(n)),
-        );
+        let block_id = block.map_or(BlockId::Number(BlockNumberOrTag::Latest), |n| {
+            BlockId::Number(BlockNumberOrTag::Number(n))
+        });
         let v = self
             .provider
             .get_storage_at(addr, slot_u)

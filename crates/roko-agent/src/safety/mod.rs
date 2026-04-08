@@ -117,11 +117,7 @@ impl SafetyLayer {
     ///
     /// Returns `Ok(())` if all policies pass; the first failure
     /// short-circuits and is returned as an `Err`.
-    pub fn check_pre_execution(
-        &self,
-        call: &ToolCall,
-        ctx: &ToolContext,
-    ) -> Result<(), ToolError> {
+    pub fn check_pre_execution(&self, call: &ToolCall, ctx: &ToolContext) -> Result<(), ToolError> {
         let name = call.name.as_str();
 
         // 1. Rate limit (applies to all tools).
@@ -173,9 +169,17 @@ impl SafetyLayer {
     #[must_use]
     pub fn scrub_output(&self, result: ToolResult) -> ToolResult {
         match result {
-            ToolResult::Ok { content, is_structured, artifacts } => {
+            ToolResult::Ok {
+                content,
+                is_structured,
+                artifacts,
+            } => {
                 let cleaned = scrub::scrub_secrets(&content, &self.scrub_policy);
-                ToolResult::Ok { content: cleaned, is_structured, artifacts }
+                ToolResult::Ok {
+                    content: cleaned,
+                    is_structured,
+                    artifacts,
+                }
             }
             err @ ToolResult::Err(_) => err,
         }
@@ -192,11 +196,7 @@ mod tests {
     }
 
     fn bash_call(cmd: &str) -> ToolCall {
-        ToolCall::new(
-            "test-id",
-            "bash",
-            serde_json::json!({ "command": cmd }),
-        )
+        ToolCall::new("test-id", "bash", serde_json::json!({ "command": cmd }))
     }
 
     #[test]
@@ -226,8 +226,9 @@ mod tests {
     #[test]
     fn safety_layer_scrubs_api_key() {
         let layer = SafetyLayer::with_defaults();
-        let result =
-            ToolResult::text("key is sk-ant-api03-abcdefghij1234567890abcdefghij1234567890abcdefghij1234567890abcdefghij1234-AAAAAA");
+        let result = ToolResult::text(
+            "key is sk-ant-api03-abcdefghij1234567890abcdefghij1234567890abcdefghij1234567890abcdefghij1234-AAAAAA",
+        );
         let scrubbed = layer.scrub_output(result);
         match scrubbed {
             ToolResult::Ok { content, .. } => {
@@ -250,11 +251,7 @@ mod tests {
         // Verify that non-filesystem tools pass through without errors.
         let layer = SafetyLayer::with_defaults();
         let ctx = test_ctx();
-        let call = ToolCall::new(
-            "test-id",
-            "exit_plan_mode",
-            serde_json::json!({}),
-        );
+        let call = ToolCall::new("test-id", "exit_plan_mode", serde_json::json!({}));
         // exit_plan_mode is not in any policy group; should pass all checks.
         assert!(layer.check_pre_execution(&call, &ctx).is_ok());
     }
@@ -275,12 +272,10 @@ mod tests {
     fn rate_limiter_eventually_blocks() {
         let mut layer = SafetyLayer::with_defaults();
         // Custom tight limit: 2 calls per window.
-        layer.rate_limiter = Some(Arc::new(RateLimiter::new(
-            rate_limit::RateLimitPolicy {
-                max_calls_per_window: 2,
-                window_duration: std::time::Duration::from_secs(60),
-            },
-        )));
+        layer.rate_limiter = Some(Arc::new(RateLimiter::new(rate_limit::RateLimitPolicy {
+            max_calls_per_window: 2,
+            window_duration: std::time::Duration::from_secs(60),
+        })));
         let ctx = test_ctx();
         let call = bash_call("echo hi");
         assert!(layer.check_pre_execution(&call, &ctx).is_ok());

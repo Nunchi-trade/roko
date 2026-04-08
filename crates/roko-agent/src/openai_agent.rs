@@ -22,7 +22,7 @@ use crate::http::{HttpPoster, ReqwestPoster};
 use crate::usage::Usage;
 use async_trait::async_trait;
 use roko_core::{Body, Context, Kind, Provenance, Signal};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::time::Instant;
 
 /// Default `OpenAI` base URL.
@@ -202,10 +202,7 @@ impl Agent for OpenAiAgent {
 
         // Pull usage if present.
         let (input_tokens, output_tokens) = parsed.get("usage").map_or((0, 0), |u| {
-            let p = u
-                .get("prompt_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
+            let p = u.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
             let c = u
                 .get("completion_tokens")
                 .and_then(Value::as_u64)
@@ -320,11 +317,7 @@ mod tests {
         Signal::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
-    fn agent_with(
-        api_key: &str,
-        model: &str,
-        poster: Box<dyn HttpPoster>,
-    ) -> OpenAiAgent {
+    fn agent_with(api_key: &str, model: &str, poster: Box<dyn HttpPoster>) -> OpenAiAgent {
         OpenAiAgent::new(api_key, model).with_poster(poster)
     }
 
@@ -393,12 +386,14 @@ mod tests {
         let agent = agent_with("sk-ok", "gpt-4o-mini", Box::new(mock));
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(!result.success);
-        assert!(result
-            .output
-            .body
-            .as_text()
-            .expect("text body")
-            .contains("429"));
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .expect("text body")
+                .contains("429")
+        );
     }
 
     #[tokio::test]
@@ -407,28 +402,33 @@ mod tests {
         let agent = agent_with("sk-test", "gpt-4o-mini", Box::new(mock));
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(!result.success);
-        assert!(result
-            .output
-            .body
-            .as_text()
-            .expect("text body")
-            .contains("malformed"));
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .expect("text body")
+                .contains("malformed")
+        );
     }
 
     #[tokio::test]
     async fn missing_choices_is_a_failure() {
-        let body = serde_json::json!({ "id": "x", "usage": {"prompt_tokens":0,"completion_tokens":0}})
-            .to_string();
+        let body =
+            serde_json::json!({ "id": "x", "usage": {"prompt_tokens":0,"completion_tokens":0}})
+                .to_string();
         let (mock, _) = MockPoster::ok(body);
         let agent = agent_with("sk-test", "gpt-4o-mini", Box::new(mock));
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(!result.success);
-        assert!(result
-            .output
-            .body
-            .as_text()
-            .expect("text body")
-            .contains("missing choices"));
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .expect("text body")
+                .contains("missing choices")
+        );
     }
 
     #[tokio::test]
@@ -503,12 +503,14 @@ mod tests {
         let agent = agent_with("sk-bad", "gpt-4o-mini", Box::new(mock));
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(!result.success);
-        assert!(result
-            .output
-            .body
-            .as_text()
-            .expect("text body")
-            .contains("invalid api key"));
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .expect("text body")
+                .contains("invalid api key")
+        );
     }
 
     #[tokio::test]
@@ -536,12 +538,14 @@ mod tests {
             .with_poster(Box::new(SlowPoster));
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(!result.success);
-        assert!(result
-            .output
-            .body
-            .as_text()
-            .expect("text body")
-            .contains("timed out"));
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .expect("text body")
+                .contains("timed out")
+        );
     }
 
     #[tokio::test]

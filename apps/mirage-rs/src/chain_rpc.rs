@@ -150,11 +150,7 @@ impl ChainContext {
     /// context. Useful when the buses must outlive the context (e.g. handed
     /// down from the RPC server entry point).
     #[cfg(feature = "roko")]
-    pub fn set_buses(
-        &mut self,
-        pheromone_bus: Arc<PheromoneBus>,
-        insight_bus: Arc<InsightBus>,
-    ) {
+    pub fn set_buses(&mut self, pheromone_bus: Arc<PheromoneBus>, insight_bus: Arc<InsightBus>) {
         self.pheromone_bus = Some(pheromone_bus);
         self.insight_bus = Some(insight_bus);
     }
@@ -198,7 +194,9 @@ fn rpc_err(code: i32, message: impl Into<String>) -> ErrorObjectOwned {
 fn disabled(subsystem: &str) -> ErrorObjectOwned {
     rpc_err(
         err_code::DISABLED,
-        format!("chain subsystem '{subsystem}' is disabled (set --enable-{subsystem} or override via toggles)"),
+        format!(
+            "chain subsystem '{subsystem}' is disabled (set --enable-{subsystem} or override via toggles)"
+        ),
     )
 }
 
@@ -327,7 +325,11 @@ pub fn handle_post_insight(
         return Err(disabled("knowledge"));
     }
     let kind = parse_kind(&params.kind)?;
-    let enabled_by: Result<Vec<_>, _> = params.enabled_by.iter().map(|s| parse_insight_id(s)).collect();
+    let enabled_by: Result<Vec<_>, _> = params
+        .enabled_by
+        .iter()
+        .map(|s| parse_insight_id(s))
+        .collect();
     let enabled_by = enabled_by?;
     let vector = project_tokens(&params.content);
     let author_bytes = params.author.into_bytes();
@@ -363,7 +365,10 @@ pub fn handle_post_insight(
             id: id.to_hex(),
             similarity: None,
         },
-        PostOutcome::Duplicate { existing_id, similarity } => PostInsightResult {
+        PostOutcome::Duplicate {
+            existing_id,
+            similarity,
+        } => PostInsightResult {
             outcome: "duplicate".into(),
             id: existing_id.to_hex(),
             similarity: Some(similarity),
@@ -480,7 +485,9 @@ pub fn handle_confirm_insight(
         .knowledge
         .confirm(id, confirmer_bytes)
         .map_err(|e| match e {
-            crate::chain::KnowledgeError::NotFound(_) => rpc_err(err_code::NOT_FOUND, e.to_string()),
+            crate::chain::KnowledgeError::NotFound(_) => {
+                rpc_err(err_code::NOT_FOUND, e.to_string())
+            }
             crate::chain::KnowledgeError::DuplicateConfirmation(_) => {
                 rpc_err(err_code::DUPLICATE, e.to_string())
             }
@@ -527,7 +534,9 @@ pub fn handle_challenge_insight(
         .knowledge
         .challenge(id, challenger_bytes)
         .map_err(|e| match e {
-            crate::chain::KnowledgeError::NotFound(_) => rpc_err(err_code::NOT_FOUND, e.to_string()),
+            crate::chain::KnowledgeError::NotFound(_) => {
+                rpc_err(err_code::NOT_FOUND, e.to_string())
+            }
             crate::chain::KnowledgeError::DuplicateChallenge(_) => {
                 rpc_err(err_code::DUPLICATE, e.to_string())
             }
@@ -821,10 +830,7 @@ impl SubscriptionManager {
     /// Constructs a manager whose buses are fresh (process-local) instances.
     /// Useful for tests and standalone invocations.
     pub fn with_fresh_buses() -> Self {
-        Self::new(
-            Arc::new(PheromoneBus::new()),
-            Arc::new(InsightBus::new()),
-        )
+        Self::new(Arc::new(PheromoneBus::new()), Arc::new(InsightBus::new()))
     }
 
     /// Returns the underlying pheromone bus.
@@ -1412,7 +1418,10 @@ mod tests {
         .unwrap();
         let results = search.get("results").and_then(|r| r.as_array()).unwrap();
         assert!(!results.is_empty());
-        assert_eq!(results[0]["content"], "uniswap v3 STF revert means insufficient allowance");
+        assert_eq!(
+            results[0]["content"],
+            "uniswap v3 STF revert means insufficient allowance"
+        );
     }
 
     #[test]
@@ -1475,11 +1484,7 @@ mod tests {
         .unwrap();
         assert!(dep.get("id").is_some());
 
-        let q = handle_query_pheromones(
-            &c,
-            json!({ "query": "rug in pool X", "k": 3 }),
-        )
-        .unwrap();
+        let q = handle_query_pheromones(&c, json!({ "query": "rug in pool X", "k": 3 })).unwrap();
         let results = q.get("results").and_then(|r| r.as_array()).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["kind"], "threat");
@@ -1568,8 +1573,8 @@ mod tests {
 
     #[test]
     fn method_schema_known_method_returns_schema() {
-        let s = handle_method_schema(json!({ "method": "chain_postInsight" }))
-            .expect("known method");
+        let s =
+            handle_method_schema(json!({ "method": "chain_postInsight" })).expect("known method");
         assert_eq!(s["method"], "chain_postInsight");
         assert_eq!(s["params"]["type"], "object");
         let required = s["params"]["required"].as_array().expect("required array");
@@ -1604,10 +1609,7 @@ mod tests {
                 "missing description for {name}"
             );
             assert!(schema["params"].is_object(), "missing params for {name}");
-            assert!(
-                !schema["result"].is_null(),
-                "missing result for {name}"
-            );
+            assert!(!schema["result"].is_null(), "missing result for {name}");
         }
     }
 
@@ -1623,14 +1625,12 @@ mod tests {
         //! payloads.
 
         use super::*;
-        use crate::roko_bridge::{
-            BackpressurePolicy, InsightEvent, PheromoneEvent, VecSink,
-        };
+        use crate::roko_bridge::{BackpressurePolicy, InsightEvent, PheromoneEvent, VecSink};
 
         fn ctx_with_subs() -> Arc<RwLock<ChainContext>> {
-            Arc::new(RwLock::new(ChainContext::new_with_subs(
-                ChainToggles::all(),
-            )))
+            Arc::new(RwLock::new(
+                ChainContext::new_with_subs(ChainToggles::all()),
+            ))
         }
 
         #[test]
@@ -1679,7 +1679,12 @@ mod tests {
             let events = sink.events();
             assert_eq!(events.len(), 1);
             match &events[0] {
-                InsightEvent::Posted { kind, content, author, .. } => {
+                InsightEvent::Posted {
+                    kind,
+                    content,
+                    author,
+                    ..
+                } => {
                     assert_eq!(*kind, KnowledgeKind::Insight);
                     assert_eq!(content, "rebalance before 18:00 UTC");
                     assert_eq!(author, b"alice");
@@ -1805,8 +1810,7 @@ mod tests {
         fn subscription_manager_register_unregister_pheromone() {
             let manager = SubscriptionManager::with_fresh_buses();
             let sink: Arc<VecSink<PheromoneEvent>> = Arc::new(VecSink::new());
-            let id = manager
-                .register_pheromone_sink(sink, BackpressurePolicy::DropOldest);
+            let id = manager.register_pheromone_sink(sink, BackpressurePolicy::DropOldest);
             assert!(id.starts_with(PHEROMONE_SUB_PREFIX));
             assert_eq!(manager.pheromones().len(), 1);
 
@@ -1820,8 +1824,7 @@ mod tests {
         fn subscription_manager_register_unregister_insight() {
             let manager = SubscriptionManager::with_fresh_buses();
             let sink: Arc<VecSink<InsightEvent>> = Arc::new(VecSink::new());
-            let id =
-                manager.register_insight_sink(sink, BackpressurePolicy::DropOldest);
+            let id = manager.register_insight_sink(sink, BackpressurePolicy::DropOldest);
             assert!(id.starts_with(INSIGHT_SUB_PREFIX));
             assert_eq!(manager.insights().len(), 1);
 
@@ -1836,8 +1839,8 @@ mod tests {
                 .expect_err("should error");
             assert_eq!(err.code(), err_code::NOT_FOUND);
 
-            let err2 = handle_unsubscribe(&manager, json!({}))
-                .expect_err("should error on missing field");
+            let err2 =
+                handle_unsubscribe(&manager, json!({})).expect_err("should error on missing field");
             assert_eq!(err2.code(), err_code::INVALID);
         }
 
@@ -1846,13 +1849,10 @@ mod tests {
             let manager = SubscriptionManager::with_fresh_buses();
             let p_sink: Arc<VecSink<PheromoneEvent>> = Arc::new(VecSink::new());
             let i_sink: Arc<VecSink<InsightEvent>> = Arc::new(VecSink::new());
-            let p_id =
-                manager.register_pheromone_sink(p_sink, BackpressurePolicy::DropOldest);
-            let i_id =
-                manager.register_insight_sink(i_sink, BackpressurePolicy::DropOldest);
+            let p_id = manager.register_pheromone_sink(p_sink, BackpressurePolicy::DropOldest);
+            let i_id = manager.register_insight_sink(i_sink, BackpressurePolicy::DropOldest);
 
-            let ok =
-                handle_unsubscribe(&manager, json!({"subscriptionId": p_id})).unwrap();
+            let ok = handle_unsubscribe(&manager, json!({"subscriptionId": p_id})).unwrap();
             assert_eq!(ok, json!({"ok": true}));
             assert_eq!(manager.pheromones().len(), 0);
             assert_eq!(manager.insights().len(), 1);

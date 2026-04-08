@@ -79,7 +79,11 @@ impl MemoryPointer {
             self.size_bytes,
             self.mime_type,
             self.preview,
-            if (self.preview.len() as u64) < self.size_bytes { "…" } else { "" },
+            if (self.preview.len() as u64) < self.size_bytes {
+                "…"
+            } else {
+                ""
+            },
         )
     }
 }
@@ -140,7 +144,13 @@ mod tests {
 
     #[test]
     fn memory_pointer_serde_roundtrip() {
-        let p = MemoryPointer::new("abc", "preview", 10_000, "application/json", 1_700_000_000_000);
+        let p = MemoryPointer::new(
+            "abc",
+            "preview",
+            10_000,
+            "application/json",
+            1_700_000_000_000,
+        );
         let json = serde_json::to_string(&p).unwrap();
         let decoded: MemoryPointer = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, p);

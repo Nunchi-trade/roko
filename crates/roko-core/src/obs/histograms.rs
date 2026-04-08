@@ -283,8 +283,11 @@ mod tests {
         assert!(out.contains(
             "roko_agent_duration_seconds_bucket{backend=\"claude\",role=\"coder\",le=\"+Inf\"} 1\n"
         ));
-        assert!(out
-            .contains("roko_agent_duration_seconds_count{backend=\"claude\",role=\"coder\"} 1\n"));
+        assert!(
+            out.contains(
+                "roko_agent_duration_seconds_count{backend=\"claude\",role=\"coder\"} 1\n"
+            )
+        );
     }
 
     #[test]

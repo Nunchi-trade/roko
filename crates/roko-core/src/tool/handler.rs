@@ -79,7 +79,9 @@ impl AtomicCancel {
     /// Construct a fresh, un-tripped token.
     #[must_use]
     pub const fn new() -> Self {
-        Self { flag: std::sync::atomic::AtomicBool::new(false) }
+        Self {
+            flag: std::sync::atomic::AtomicBool::new(false),
+        }
     }
 
     /// Trip the token. Subsequent [`Self::is_cancelled`] calls return true.

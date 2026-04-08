@@ -82,8 +82,7 @@ pub trait IntegrationScenarioFn: Send + Sync {
     async fn run(&self, signal: &Signal, ctx: &Context) -> Verdict;
 }
 
-type BoxedScenarioFuture =
-    Pin<Box<dyn Future<Output = Verdict> + Send + 'static>>;
+type BoxedScenarioFuture = Pin<Box<dyn Future<Output = Verdict> + Send + 'static>>;
 
 /// Internal wrapper that turns a plain `Fn` into an
 /// [`IntegrationScenarioFn`].
@@ -131,9 +130,7 @@ impl std::fmt::Debug for IntegrationScenario {
                 .field("build", build)
                 .field("pattern", pattern)
                 .finish(),
-            Self::Script { path } => {
-                f.debug_struct("Script").field("path", path).finish()
-            }
+            Self::Script { path } => f.debug_struct("Script").field("path", path).finish(),
             Self::Custom(_) => f.debug_struct("Custom").finish(),
         }
     }
@@ -266,8 +263,7 @@ impl Gate for IntegrationGate {
 
         let verdict = match &self.scenario {
             IntegrationScenario::BuildTest { build, pattern } => {
-                run_build_test(&self.name, *build, pattern, signal, remaining)
-                    .await
+                run_build_test(&self.name, *build, pattern, signal, remaining).await
             }
             IntegrationScenario::Script { path } => {
                 run_script(&self.name, path, signal, remaining).await
@@ -277,8 +273,7 @@ impl Gate for IntegrationGate {
             }
         };
 
-        let elapsed =
-            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         verdict.with_duration(elapsed)
     }
 
@@ -358,8 +353,7 @@ async fn run_build_test(
             .status
             .code()
             .map_or_else(|| "terminated by signal".to_string(), |c| c.to_string());
-        Verdict::fail(gate_name, format!("scenario exit code: {code}"))
-            .with_detail(combined)
+        Verdict::fail(gate_name, format!("scenario exit code: {code}")).with_detail(combined)
     };
     if let Some(tc) = counts {
         verdict = verdict.with_test_count(tc);
@@ -394,10 +388,7 @@ async fn run_script(
     let output = match timeout(remaining, cmd.output()).await {
         Ok(Ok(out)) => out,
         Ok(Err(e)) => {
-            return Verdict::fail(
-                gate_name,
-                format!("spawn failed: {e}"),
-            );
+            return Verdict::fail(gate_name, format!("spawn failed: {e}"));
         }
         Err(_) => {
             return Verdict::fail(
@@ -421,8 +412,7 @@ async fn run_script(
             .status
             .code()
             .map_or_else(|| "terminated by signal".to_string(), |c| c.to_string());
-        Verdict::fail(gate_name, format!("script exit code: {code}"))
-            .with_detail(combined)
+        Verdict::fail(gate_name, format!("script exit code: {code}")).with_detail(combined)
     }
 }
 
@@ -585,8 +575,7 @@ mod tests {
 
     #[test]
     fn with_name_overrides_display_name() {
-        let g = IntegrationGate::build_test(BuildSystem::Cargo, "foo")
-            .with_name("lifecycle");
+        let g = IntegrationGate::build_test(BuildSystem::Cargo, "foo").with_name("lifecycle");
         assert_eq!(g.name(), "lifecycle");
     }
 
@@ -668,12 +657,11 @@ test foo::c ... ok";
 
     #[tokio::test]
     async fn custom_pass_scenario_passes_through() {
-        let gate = IntegrationGate::from_fn(|_sig, _ctx| async move {
-            Verdict::pass("scenario-ok")
-        })
-        .with_warmup_ms(0)
-        .with_timeout_ms(5_000)
-        .with_name("custom-pass");
+        let gate =
+            IntegrationGate::from_fn(|_sig, _ctx| async move { Verdict::pass("scenario-ok") })
+                .with_warmup_ms(0)
+                .with_timeout_ms(5_000)
+                .with_name("custom-pass");
         let v = gate.verify(&empty_signal(), &Context::at(0)).await;
         assert!(v.passed, "verdict should pass; got {v:?}");
         assert_eq!(v.gate, "scenario-ok");
@@ -731,11 +719,9 @@ test foo::c ... ok";
 
     #[tokio::test]
     async fn zero_warmup_skips_sleep() {
-        let gate = IntegrationGate::from_fn(|_s, _c| async move {
-            Verdict::pass("fast")
-        })
-        .with_warmup_ms(0)
-        .with_timeout_ms(5_000);
+        let gate = IntegrationGate::from_fn(|_s, _c| async move { Verdict::pass("fast") })
+            .with_warmup_ms(0)
+            .with_timeout_ms(5_000);
         let start = Instant::now();
         let v = gate.verify(&empty_signal(), &Context::at(0)).await;
         let elapsed = start.elapsed();
@@ -751,12 +737,8 @@ test foo::c ... ok";
     #[tokio::test]
     async fn script_passes_when_exit_zero() {
         let tmp = std::env::temp_dir();
-        let path = tmp.join(format!(
-            "roko-integration-pass-{}.sh",
-            std::process::id()
-        ));
-        std::fs::write(&path, "#!/usr/bin/env bash\necho ALL-OK\nexit 0\n")
-            .unwrap();
+        let path = tmp.join(format!("roko-integration-pass-{}.sh", std::process::id()));
+        std::fs::write(&path, "#!/usr/bin/env bash\necho ALL-OK\nexit 0\n").unwrap();
         let gate = IntegrationGate::script(&path)
             .with_warmup_ms(0)
             .with_timeout_ms(5_000);
@@ -769,15 +751,8 @@ test foo::c ... ok";
     #[tokio::test]
     async fn script_fails_when_exit_nonzero() {
         let tmp = std::env::temp_dir();
-        let path = tmp.join(format!(
-            "roko-integration-fail-{}.sh",
-            std::process::id()
-        ));
-        std::fs::write(
-            &path,
-            "#!/usr/bin/env bash\necho going-bad 1>&2\nexit 7\n",
-        )
-        .unwrap();
+        let path = tmp.join(format!("roko-integration-fail-{}.sh", std::process::id()));
+        std::fs::write(&path, "#!/usr/bin/env bash\necho going-bad 1>&2\nexit 7\n").unwrap();
         let gate = IntegrationGate::script(&path)
             .with_warmup_ms(0)
             .with_timeout_ms(5_000);
@@ -793,10 +768,9 @@ test foo::c ... ok";
 
     #[tokio::test]
     async fn script_missing_file_fails_gracefully() {
-        let gate =
-            IntegrationGate::script("/definitely/not/a/real/script/xyz.sh")
-                .with_warmup_ms(0)
-                .with_timeout_ms(1_000);
+        let gate = IntegrationGate::script("/definitely/not/a/real/script/xyz.sh")
+            .with_warmup_ms(0)
+            .with_timeout_ms(1_000);
         let v = gate.verify(&empty_signal(), &Context::at(0)).await;
         assert!(!v.passed);
         // Either a spawn failure or an exit-code failure is acceptable.
@@ -817,10 +791,9 @@ test foo::c ... ok";
         let sig = Signal::builder(Kind::Task)
             .body(Body::from_json(&payload).unwrap())
             .build();
-        let gate =
-            IntegrationGate::build_test(BuildSystem::Cargo, "__no_such_test")
-                .with_warmup_ms(0)
-                .with_timeout_ms(30_000);
+        let gate = IntegrationGate::build_test(BuildSystem::Cargo, "__no_such_test")
+            .with_warmup_ms(0)
+            .with_timeout_ms(30_000);
         let v = gate.verify(&sig, &Context::at(0)).await;
         // Either cargo is installed and reports no manifest (fail), or
         // not installed and we get a spawn failure. Both satisfy the

@@ -31,11 +31,16 @@ pub const DESCRIPTION: &str = "Fetch a URL via HTTP(S) and return its body, subj
 /// Build the [`ToolDef`] for `web_fetch`.
 #[must_use]
 pub fn tool_def() -> ToolDef {
-    ToolDef::new(NAME, DESCRIPTION, ToolCategory::Network, ToolPermission::networked())
-        .with_parameters(ToolSchema::any_object())
-        .with_concurrency(ToolConcurrency::Parallel)
-        .with_idempotent(true)
-        .with_timeout_ms(30_000)
+    ToolDef::new(
+        NAME,
+        DESCRIPTION,
+        ToolCategory::Network,
+        ToolPermission::networked(),
+    )
+    .with_parameters(ToolSchema::any_object())
+    .with_concurrency(ToolConcurrency::Parallel)
+    .with_idempotent(true)
+    .with_timeout_ms(30_000)
 }
 
 /// Handler for `web_fetch` (§36.22).
@@ -63,13 +68,19 @@ impl ToolHandler for Handler {
             Ok(u) => u,
             Err(e) => return ToolResult::Err(e),
         };
-        let scheme = url.split("://").next().unwrap_or_default().to_ascii_lowercase();
+        let scheme = url
+            .split("://")
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
         if scheme != "http" && scheme != "https" {
             return ToolResult::Err(ToolError::SchemaInvalid(format!(
                 "web_fetch: only http(s) URLs are supported, got `{url}`"
             )));
         }
-        if scheme == "http" && !url.starts_with("http://localhost") && !url.starts_with("http://127.")
+        if scheme == "http"
+            && !url.starts_with("http://localhost")
+            && !url.starts_with("http://127.")
         {
             return ToolResult::Err(ToolError::NetworkBlocked(format!(
                 "web_fetch: plain http is only allowed for localhost, got `{url}`"
@@ -107,7 +118,10 @@ mod tests {
             serde_json::json!({ "url": "https://example.com" }),
         );
         let res = Handler.execute(call, &ctx).await;
-        assert!(matches!(res, ToolResult::Err(ToolError::PermissionDenied(_))));
+        assert!(matches!(
+            res,
+            ToolResult::Err(ToolError::PermissionDenied(_))
+        ));
     }
 
     #[tokio::test]
@@ -121,7 +135,11 @@ mod tests {
     #[tokio::test]
     async fn non_http_scheme_rejected() {
         let ctx = testing_ctx_with_net();
-        let call = ToolCall::new("c", NAME, serde_json::json!({ "url": "file:///etc/passwd" }));
+        let call = ToolCall::new(
+            "c",
+            NAME,
+            serde_json::json!({ "url": "file:///etc/passwd" }),
+        );
         let res = Handler.execute(call, &ctx).await;
         assert!(matches!(res, ToolResult::Err(ToolError::SchemaInvalid(_))));
     }
@@ -129,7 +147,11 @@ mod tests {
     #[tokio::test]
     async fn plain_http_only_allowed_for_localhost() {
         let ctx = testing_ctx_with_net();
-        let call = ToolCall::new("c", NAME, serde_json::json!({ "url": "http://evil.example.com" }));
+        let call = ToolCall::new(
+            "c",
+            NAME,
+            serde_json::json!({ "url": "http://evil.example.com" }),
+        );
         let res = Handler.execute(call, &ctx).await;
         assert!(matches!(res, ToolResult::Err(ToolError::NetworkBlocked(_))));
     }
@@ -137,7 +159,11 @@ mod tests {
     #[tokio::test]
     async fn localhost_http_passes_through_to_stub_error() {
         let ctx = testing_ctx_with_net();
-        let call = ToolCall::new("c", NAME, serde_json::json!({ "url": "http://localhost:8080/x" }));
+        let call = ToolCall::new(
+            "c",
+            NAME,
+            serde_json::json!({ "url": "http://localhost:8080/x" }),
+        );
         let res = Handler.execute(call, &ctx).await;
         // Falls through to the "not yet wired" error, which is Other(..).
         assert!(matches!(res, ToolResult::Err(ToolError::Other(_))));
@@ -146,7 +172,11 @@ mod tests {
     #[tokio::test]
     async fn https_passes_through_to_stub_error() {
         let ctx = testing_ctx_with_net();
-        let call = ToolCall::new("c", NAME, serde_json::json!({ "url": "https://example.com" }));
+        let call = ToolCall::new(
+            "c",
+            NAME,
+            serde_json::json!({ "url": "https://example.com" }),
+        );
         let res = Handler.execute(call, &ctx).await;
         assert!(matches!(res, ToolResult::Err(ToolError::Other(_))));
     }

@@ -39,8 +39,8 @@
 pub mod agent;
 pub mod body;
 pub mod build;
-pub mod config;
 pub mod conductor;
+pub mod config;
 pub mod context;
 pub mod decay;
 pub mod error;
@@ -72,17 +72,17 @@ pub use build::{BuildCommand, BuildSystem};
 pub use conductor::ConductorDecision;
 pub use context::Context;
 pub use decay::Decay;
-pub use error::{RokoError, Result};
+pub use error::{Result, RokoError};
 pub use hash::ContentHash;
 pub use kind::Kind;
 pub use language::{Import, ImportKind, LanguageProvider, Symbol, SymbolKind, Visibility};
-pub use loop_tick::{loop_tick, TickOutcome};
-pub use metric::{compute_headlines, ConfigHash, Headlines, TaskMetric};
-pub use phase::{is_monotonic_progression, valid_transitions, FailureKind, PhaseKind, PlanPhase};
-pub use polyglot::{detect_polyglot, PolyglotProject};
+pub use loop_tick::{TickOutcome, loop_tick};
+pub use metric::{ConfigHash, Headlines, TaskMetric, compute_headlines};
+pub use phase::{FailureKind, PhaseKind, PlanPhase, is_monotonic_progression, valid_transitions};
+pub use polyglot::{PolyglotProject, detect_polyglot};
 pub use project::{
-    detect_from_files, detect_from_files_with_cargo_toml, DetectedBuildSystem, Language,
-    ProjectInfo,
+    DetectedBuildSystem, Language, ProjectInfo, detect_from_files,
+    detect_from_files_with_cargo_toml,
 };
 pub use provenance::Provenance;
 pub use query::{Budget, Query};
@@ -96,13 +96,13 @@ pub use task::{
 // collision with phase::FailureKind (for PlanPhase failures); reach it via
 // `roko_core::tool::FailureKind`.
 pub use tool::{
-    compute_reward, galileo_tsq, profile_for_model, ArmEntry, Artifact, AuditSink, BanditKey,
-    CancelSource, CancelToken, EpsilonGreedyBandit, FailureTrace, FormatBandit,
-    KeywordOverlapScorer, MemoryPointer, MetricsKey, MetricsSink, ProfileBandit, RewardConfig,
-    ToolCall, ToolCategory, ToolConcurrency, ToolContext, ToolDef, ToolError, ToolFormat,
-    ToolFormatProfile, ToolHandler, ToolMetrics, ToolOutcome, ToolPermission, ToolRegistry,
-    ToolRelevanceScorer, ToolResult, ToolSchema, ToolTrace, ToolTraceEvent, TraceBuilder, TraceId,
-    TraceSink, TraceStep, VecToolRegistry,
+    ArmEntry, Artifact, AuditSink, BanditKey, CancelSource, CancelToken, EpsilonGreedyBandit,
+    FailureTrace, FormatBandit, KeywordOverlapScorer, MemoryPointer, MetricsKey, MetricsSink,
+    ProfileBandit, RewardConfig, ToolCall, ToolCategory, ToolConcurrency, ToolContext, ToolDef,
+    ToolError, ToolFormat, ToolFormatProfile, ToolHandler, ToolMetrics, ToolOutcome,
+    ToolPermission, ToolRegistry, ToolRelevanceScorer, ToolResult, ToolSchema, ToolTrace,
+    ToolTraceEvent, TraceBuilder, TraceId, TraceSink, TraceStep, VecToolRegistry, compute_reward,
+    galileo_tsq, profile_for_model,
 };
 pub use traits::{Composer, Gate, Policy, Router, Scorer, Substrate};
 pub use verdict::{Outcome, Selection, TestCount, Verdict};

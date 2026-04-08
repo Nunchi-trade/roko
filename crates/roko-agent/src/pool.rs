@@ -115,7 +115,11 @@ pub struct AgentTask {
 impl AgentTask {
     /// Create a new task.
     #[must_use]
-    pub const fn new(id: AgentInstanceId, input: roko_core::Signal, ctx: roko_core::Context) -> Self {
+    pub const fn new(
+        id: AgentInstanceId,
+        input: roko_core::Signal,
+        ctx: roko_core::Context,
+    ) -> Self {
         Self { id, input, ctx }
     }
 }
@@ -192,9 +196,27 @@ impl AgentPool {
         self.pending.push_back(task);
     }
 
+    /// Submit multiple tasks for sequential execution.
+    ///
+    /// Tasks are enqueued in iterator order.
+    pub fn submit_all<I>(&mut self, tasks: I)
+    where
+        I: IntoIterator<Item = AgentTask>,
+    {
+        for task in tasks {
+            self.submit(task);
+        }
+    }
+
     /// Poll for the next completed outcome (if any are ready).
     pub fn poll(&mut self) -> Option<TaskOutcome> {
         self.completed.pop_front()
+    }
+
+    /// Drain all completed outcomes currently buffered by the pool.
+    #[must_use]
+    pub fn drain_completed(&mut self) -> Vec<TaskOutcome> {
+        self.completed.drain(..).collect()
     }
 
     /// Cancel a pending or active task by instance ID.
@@ -418,8 +440,7 @@ mod tests {
     async fn pool_fallback_on_primary_failure() {
         let primary = Arc::new(MockAgent::fail_with("primary died"));
         let fallback = Arc::new(MockAgent::reply("fallback saved it"));
-        let mut pool =
-            AgentPool::new(AgentRole::Implementer, primary).with_fallback(fallback);
+        let mut pool = AgentPool::new(AgentRole::Implementer, primary).with_fallback(fallback);
 
         let id = AgentInstanceId::new(AgentRole::Implementer, "t2");
         pool.submit(AgentTask::new(id.clone(), prompt("fix"), ctx()));
@@ -434,8 +455,7 @@ mod tests {
     async fn pool_both_primary_and_fallback_fail() {
         let primary = Arc::new(MockAgent::fail_with("primary dead"));
         let fallback = Arc::new(MockAgent::fail_with("fallback dead too"));
-        let mut pool =
-            AgentPool::new(AgentRole::Implementer, primary).with_fallback(fallback);
+        let mut pool = AgentPool::new(AgentRole::Implementer, primary).with_fallback(fallback);
 
         let id = AgentInstanceId::new(AgentRole::Implementer, "t3");
         pool.submit(AgentTask::new(id.clone(), prompt("doomed"), ctx()));
@@ -477,6 +497,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pool_submit_all_preserves_order() {
+        let agent = Arc::new(MockAgent::reply("ok"));
+        let mut pool = AgentPool::new(AgentRole::Implementer, agent);
+
+        let tasks = (0..3).map(|i| {
+            AgentTask::new(
+                AgentInstanceId::new(AgentRole::Implementer, format!("bulk-{i}")),
+                prompt(&format!("task {i}")),
+                ctx(),
+            )
+        });
+        pool.submit_all(tasks);
+
+        let outcomes = pool.execute_all().await;
+        let ids: Vec<String> = outcomes.into_iter().map(|o| o.id.instance).collect();
+        assert_eq!(ids, vec!["bulk-0", "bulk-1", "bulk-2"]);
+    }
+
+    #[tokio::test]
     async fn pool_cancel_pending_task() {
         let agent = Arc::new(MockAgent::reply("ok"));
         let mut pool = AgentPool::new(AgentRole::Implementer, agent);
@@ -509,6 +548,25 @@ mod tests {
     async fn pool_poll_returns_none_when_empty() {
         let agent = Arc::new(MockAgent::reply("ok"));
         let mut pool = AgentPool::new(AgentRole::Implementer, agent);
+        assert!(pool.poll().is_none());
+    }
+
+    #[tokio::test]
+    async fn pool_drain_completed_returns_every_buffered_outcome() {
+        let agent = Arc::new(MockAgent::reply("ok"));
+        let mut pool = AgentPool::new(AgentRole::Implementer, agent);
+
+        for i in 0..2 {
+            pool.submit(AgentTask::new(
+                AgentInstanceId::new(AgentRole::Implementer, format!("done-{i}")),
+                prompt("x"),
+                ctx(),
+            ));
+        }
+
+        let _ = pool.execute_all().await;
+        let drained = pool.drain_completed();
+        assert_eq!(drained.len(), 2);
         assert!(pool.poll().is_none());
     }
 

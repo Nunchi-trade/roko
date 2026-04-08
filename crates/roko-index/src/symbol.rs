@@ -29,7 +29,11 @@ pub struct SymbolId {
 
 impl SymbolId {
     /// Build a `SymbolId` from its components.
-    pub fn new(file_path: impl Into<String>, symbol_name: impl Into<String>, kind: SymbolKind) -> Self {
+    pub fn new(
+        file_path: impl Into<String>,
+        symbol_name: impl Into<String>,
+        kind: SymbolKind,
+    ) -> Self {
         Self {
             file_path: file_path.into(),
             symbol_name: symbol_name.into(),
@@ -49,7 +53,11 @@ impl SymbolId {
 
 impl std::fmt::Display for SymbolId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}::{}({:?})", self.file_path, self.symbol_name, self.kind)
+        write!(
+            f,
+            "{}::{}({:?})",
+            self.file_path, self.symbol_name, self.kind
+        )
     }
 }
 
@@ -101,8 +109,18 @@ mod tests {
                 language: "rust".into(),
                 content: String::new(),
                 symbols: vec![
-                    Symbol { name: "foo".into(), kind: SymbolKind::Function, visibility: Visibility::Public, line: 1 },
-                    Symbol { name: "Bar".into(), kind: SymbolKind::Struct, visibility: Visibility::Public, line: 5 },
+                    Symbol {
+                        name: "foo".into(),
+                        kind: SymbolKind::Function,
+                        visibility: Visibility::Public,
+                        line: 1,
+                    },
+                    Symbol {
+                        name: "Bar".into(),
+                        kind: SymbolKind::Struct,
+                        visibility: Visibility::Public,
+                        line: 5,
+                    },
                 ],
                 imports: vec![],
             },
@@ -110,10 +128,17 @@ mod tests {
                 path: "b.rs".into(),
                 language: "rust".into(),
                 content: String::new(),
-                symbols: vec![
-                    Symbol { name: "foo".into(), kind: SymbolKind::Function, visibility: Visibility::Private, line: 1 },
-                ],
-                imports: vec![Import { path: "a::Bar".into(), alias: None, kind: ImportKind::Use }],
+                symbols: vec![Symbol {
+                    name: "foo".into(),
+                    kind: SymbolKind::Function,
+                    visibility: Visibility::Private,
+                    line: 1,
+                }],
+                imports: vec![Import {
+                    path: "a::Bar".into(),
+                    alias: None,
+                    kind: ImportKind::Use,
+                }],
             },
         ]
     }

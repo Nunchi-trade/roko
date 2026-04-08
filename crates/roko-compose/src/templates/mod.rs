@@ -18,7 +18,7 @@ pub mod strategist;
 pub mod task_impl;
 
 pub use assembly::PromptAssembler;
-pub use common::{budget_for, PromptBudget};
+pub use common::{PromptBudget, budget_for};
 pub use implementer::{ImplementerInput, ImplementerTemplate};
 pub use integration::{IntegrationInput, IntegrationTemplate};
 pub use quick::{QuickFixInput, QuickFixTemplate, QuickReviewerInput, QuickReviewerTemplate};
@@ -222,11 +222,13 @@ mod tests {
     #[test]
     fn task_enhancements_empty_check() {
         assert!(TaskEnhancements::default().is_empty());
-        assert!(!TaskEnhancements {
-            types_to_define: vec!["Foo".into()],
-            ..Default::default()
-        }
-        .is_empty());
+        assert!(
+            !TaskEnhancements {
+                types_to_define: vec!["Foo".into()],
+                ..Default::default()
+            }
+            .is_empty()
+        );
     }
 
     #[test]

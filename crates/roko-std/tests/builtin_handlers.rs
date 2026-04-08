@@ -14,7 +14,10 @@ fn call_with_args(name: &str, args: serde_json::Value) -> ToolCall {
 fn assert_ok_text(result: ToolResult, substr: &str) {
     match result {
         ToolResult::Ok { content, .. } => {
-            assert!(content.contains(substr), "content={content} (want substring {substr})");
+            assert!(
+                content.contains(substr),
+                "content={content} (want substring {substr})"
+            );
         }
         ToolResult::Err(e) => panic!("expected Ok, got Err: {e}"),
     }
@@ -42,7 +45,10 @@ async fn read_file_rejects_path_escape() {
     let ctx = ToolContext::testing(tmp.path());
     let call = call_with_args("read_file", serde_json::json!({ "path": "../etc/passwd" }));
     let result = handler.execute(call, &ctx).await;
-    assert!(matches!(result, ToolResult::Err(ToolError::PathOutsideWorktree(_))));
+    assert!(matches!(
+        result,
+        ToolResult::Err(ToolError::PathOutsideWorktree(_))
+    ));
 }
 
 #[tokio::test]
@@ -52,7 +58,10 @@ async fn read_file_rejects_missing_path_arg() {
     let ctx = ToolContext::testing(tmp.path());
     let call = call_with_args("read_file", serde_json::json!({}));
     let result = handler.execute(call, &ctx).await;
-    assert!(matches!(result, ToolResult::Err(ToolError::SchemaInvalid(_))));
+    assert!(matches!(
+        result,
+        ToolResult::Err(ToolError::SchemaInvalid(_))
+    ));
 }
 
 #[tokio::test]
@@ -68,7 +77,9 @@ async fn write_file_creates_and_reads_back() {
     let result = handler.execute(call, &ctx).await;
     assert_ok_text(result, "wrote 7 bytes");
 
-    let back = tokio::fs::read_to_string(worktree.join("out.txt")).await.expect("read");
+    let back = tokio::fs::read_to_string(worktree.join("out.txt"))
+        .await
+        .expect("read");
     assert_eq!(back, "payload");
 }
 
@@ -104,8 +115,13 @@ async fn edit_file_replaces_single_occurrence() {
             "new_string": "delta",
         }),
     );
-    assert!(matches!(handler.execute(call, &ctx).await, ToolResult::Ok { .. }));
-    let after = tokio::fs::read_to_string(worktree.join("file.txt")).await.expect("read");
+    assert!(matches!(
+        handler.execute(call, &ctx).await,
+        ToolResult::Ok { .. }
+    ));
+    let after = tokio::fs::read_to_string(worktree.join("file.txt"))
+        .await
+        .expect("read");
     assert_eq!(after, "alpha delta gamma");
 }
 
@@ -113,7 +129,9 @@ async fn edit_file_replaces_single_occurrence() {
 async fn edit_file_errors_on_ambiguous_match() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let worktree = tmp.path();
-    tokio::fs::write(worktree.join("file.txt"), "x x x").await.expect("write");
+    tokio::fs::write(worktree.join("file.txt"), "x x x")
+        .await
+        .expect("write");
     let handler = handler_for("edit_file").expect("edit_file");
     let ctx = ToolContext::testing(worktree);
     let call = call_with_args(
@@ -132,7 +150,9 @@ async fn edit_file_errors_on_ambiguous_match() {
 async fn edit_file_replace_all_works() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let worktree = tmp.path();
-    tokio::fs::write(worktree.join("file.txt"), "x x x").await.expect("write");
+    tokio::fs::write(worktree.join("file.txt"), "x x x")
+        .await
+        .expect("write");
     let handler = handler_for("edit_file").expect("edit_file");
     let ctx = ToolContext::testing(worktree);
     let call = call_with_args(
@@ -144,8 +164,13 @@ async fn edit_file_replace_all_works() {
             "replace_all": true,
         }),
     );
-    assert!(matches!(handler.execute(call, &ctx).await, ToolResult::Ok { .. }));
-    let after = tokio::fs::read_to_string(worktree.join("file.txt")).await.expect("read");
+    assert!(matches!(
+        handler.execute(call, &ctx).await,
+        ToolResult::Ok { .. }
+    ));
+    let after = tokio::fs::read_to_string(worktree.join("file.txt"))
+        .await
+        .expect("read");
     assert_eq!(after, "y y y");
 }
 
@@ -153,7 +178,9 @@ async fn edit_file_replace_all_works() {
 async fn edit_file_errors_when_old_string_absent() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let worktree = tmp.path();
-    tokio::fs::write(worktree.join("file.txt"), "hello").await.expect("write");
+    tokio::fs::write(worktree.join("file.txt"), "hello")
+        .await
+        .expect("write");
     let handler = handler_for("edit_file").expect("edit_file");
     let ctx = ToolContext::testing(worktree);
     let call = call_with_args(
@@ -174,8 +201,12 @@ async fn edit_file_errors_when_old_string_absent() {
 async fn ls_lists_entries() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let worktree = tmp.path();
-    tokio::fs::write(worktree.join("a.txt"), "aaa").await.expect("write");
-    tokio::fs::create_dir(worktree.join("sub")).await.expect("mkdir");
+    tokio::fs::write(worktree.join("a.txt"), "aaa")
+        .await
+        .expect("write");
+    tokio::fs::create_dir(worktree.join("sub"))
+        .await
+        .expect("mkdir");
     let handler = handler_for("ls").expect("ls");
     let ctx = ToolContext::testing(worktree);
     let call = call_with_args("ls", serde_json::json!({}));
@@ -243,7 +274,11 @@ async fn exit_plan_mode_returns_structured_payload() {
         serde_json::json!({ "plan": "1. do X\n2. do Y" }),
     );
     match handler.execute(call, &ctx).await {
-        ToolResult::Ok { content, is_structured, .. } => {
+        ToolResult::Ok {
+            content,
+            is_structured,
+            ..
+        } => {
             assert!(is_structured);
             assert!(content.contains("plan_submitted"));
             assert!(content.contains("plan_length_chars"));
@@ -290,7 +325,9 @@ async fn multi_edit_applies_sequential_edits_atomically() {
         }),
     );
     assert_ok_text(handler.execute(call, &ctx).await, "applied 3 edits");
-    let after = tokio::fs::read_to_string(worktree.join("file.txt")).await.expect("read");
+    let after = tokio::fs::read_to_string(worktree.join("file.txt"))
+        .await
+        .expect("read");
     assert_eq!(after, "a b g delta");
 }
 
@@ -299,7 +336,9 @@ async fn multi_edit_aborts_on_failing_edit_preserving_file() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let worktree = tmp.path();
     let original = "alpha beta gamma";
-    tokio::fs::write(worktree.join("file.txt"), original).await.expect("write");
+    tokio::fs::write(worktree.join("file.txt"), original)
+        .await
+        .expect("write");
     let handler = handler_for("multi_edit").expect("multi_edit");
     let ctx = ToolContext::testing(worktree);
     let call = call_with_args(
@@ -317,7 +356,9 @@ async fn multi_edit_aborts_on_failing_edit_preserving_file() {
         ToolResult::Err(ToolError::Other(_))
     ));
     // File should be unchanged.
-    let after = tokio::fs::read_to_string(worktree.join("file.txt")).await.expect("read");
+    let after = tokio::fs::read_to_string(worktree.join("file.txt"))
+        .await
+        .expect("read");
     assert_eq!(after, original);
 }
 
@@ -337,10 +378,18 @@ async fn multi_edit_requires_edits_array() {
 async fn glob_finds_matching_files() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let worktree = tmp.path();
-    tokio::fs::create_dir(worktree.join("src")).await.expect("mkdir");
-    tokio::fs::write(worktree.join("src/main.rs"), "a").await.expect("write");
-    tokio::fs::write(worktree.join("src/lib.rs"), "b").await.expect("write");
-    tokio::fs::write(worktree.join("README.md"), "c").await.expect("write");
+    tokio::fs::create_dir(worktree.join("src"))
+        .await
+        .expect("mkdir");
+    tokio::fs::write(worktree.join("src/main.rs"), "a")
+        .await
+        .expect("write");
+    tokio::fs::write(worktree.join("src/lib.rs"), "b")
+        .await
+        .expect("write");
+    tokio::fs::write(worktree.join("README.md"), "c")
+        .await
+        .expect("write");
 
     let handler = handler_for("glob").expect("glob");
     let ctx = ToolContext::testing(worktree);
@@ -391,8 +440,8 @@ async fn bash_rejects_blocklisted_command() {
 
 #[tokio::test]
 async fn bash_requires_exec_capability() {
-    use roko_core::tool::{ToolPermission, NeverCancel, NoopAuditSink, NoopMetricsSink};
     use roko_core::tool::trace::NoopTraceSink;
+    use roko_core::tool::{NeverCancel, NoopAuditSink, NoopMetricsSink, ToolPermission};
     use std::sync::Arc;
     use std::time::Duration;
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -441,8 +490,12 @@ async fn run_tests_rejects_unknown_build_system() {
 async fn grep_finds_matching_lines() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let worktree = tmp.path();
-    tokio::fs::write(worktree.join("a.txt"), "alpha\nbeta\ngamma\n").await.expect("write");
-    tokio::fs::write(worktree.join("b.txt"), "nothing\nbeta\n").await.expect("write");
+    tokio::fs::write(worktree.join("a.txt"), "alpha\nbeta\ngamma\n")
+        .await
+        .expect("write");
+    tokio::fs::write(worktree.join("b.txt"), "nothing\nbeta\n")
+        .await
+        .expect("write");
     let handler = handler_for("grep").expect("grep");
     let ctx = ToolContext::testing(worktree);
     let call = call_with_args("grep", serde_json::json!({ "pattern": "beta" }));
@@ -460,8 +513,12 @@ async fn grep_finds_matching_lines() {
 async fn grep_files_with_matches_mode() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let worktree = tmp.path();
-    tokio::fs::write(worktree.join("x.rs"), "fn main() {}").await.expect("write");
-    tokio::fs::write(worktree.join("y.rs"), "fn helper() {}").await.expect("write");
+    tokio::fs::write(worktree.join("x.rs"), "fn main() {}")
+        .await
+        .expect("write");
+    tokio::fs::write(worktree.join("y.rs"), "fn helper() {}")
+        .await
+        .expect("write");
     let handler = handler_for("grep").expect("grep");
     let ctx = ToolContext::testing(worktree);
     let call = call_with_args(
@@ -483,10 +540,15 @@ async fn grep_files_with_matches_mode() {
 async fn grep_count_mode() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let worktree = tmp.path();
-    tokio::fs::write(worktree.join("x.txt"), "a\nb\na\na\n").await.expect("write");
+    tokio::fs::write(worktree.join("x.txt"), "a\nb\na\na\n")
+        .await
+        .expect("write");
     let handler = handler_for("grep").expect("grep");
     let ctx = ToolContext::testing(worktree);
-    let call = call_with_args("grep", serde_json::json!({ "pattern": "a", "mode": "count" }));
+    let call = call_with_args(
+        "grep",
+        serde_json::json!({ "pattern": "a", "mode": "count" }),
+    );
     match handler.execute(call, &ctx).await {
         ToolResult::Ok { content, .. } => {
             assert!(content.contains("x.txt:3"), "got: {content}");
@@ -499,13 +561,17 @@ async fn grep_count_mode() {
 async fn apply_patch_applies_simple_diff() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let worktree = tmp.path();
-    tokio::fs::write(worktree.join("note.txt"), "alpha\nbeta\ngamma\n").await.expect("write");
+    tokio::fs::write(worktree.join("note.txt"), "alpha\nbeta\ngamma\n")
+        .await
+        .expect("write");
     let handler = handler_for("apply_patch").expect("apply_patch");
     let ctx = ToolContext::testing(worktree);
     let patch = "--- a/note.txt\n+++ b/note.txt\n@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETA\n gamma\n";
     let call = call_with_args("apply_patch", serde_json::json!({ "patch": patch }));
     assert_ok_text(handler.execute(call, &ctx).await, "patched");
-    let after = tokio::fs::read_to_string(worktree.join("note.txt")).await.expect("read");
+    let after = tokio::fs::read_to_string(worktree.join("note.txt"))
+        .await
+        .expect("read");
     assert_eq!(after, "alpha\nBETA\ngamma\n");
 }
 
@@ -522,9 +588,12 @@ async fn notebook_edit_edits_existing_cell() {
         "nbformat": 4,
         "nbformat_minor": 5,
     });
-    tokio::fs::write(worktree.join("nb.ipynb"), serde_json::to_string(&nb).expect("ser"))
-        .await
-        .expect("write");
+    tokio::fs::write(
+        worktree.join("nb.ipynb"),
+        serde_json::to_string(&nb).expect("ser"),
+    )
+    .await
+    .expect("write");
     let handler = handler_for("notebook_edit").expect("notebook_edit");
     let ctx = ToolContext::testing(worktree);
     let call = call_with_args(
@@ -538,7 +607,9 @@ async fn notebook_edit_edits_existing_cell() {
     );
     assert_ok_text(handler.execute(call, &ctx).await, "edit cell 0");
     let after: serde_json::Value = serde_json::from_str(
-        &tokio::fs::read_to_string(worktree.join("nb.ipynb")).await.expect("read"),
+        &tokio::fs::read_to_string(worktree.join("nb.ipynb"))
+            .await
+            .expect("read"),
     )
     .expect("json");
     assert_eq!(after["cells"][0]["source"], "print('hi')");
@@ -549,9 +620,12 @@ async fn notebook_edit_inserts_and_deletes_cells() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let worktree = tmp.path();
     let nb = serde_json::json!({"cells": [], "metadata": {}, "nbformat": 4, "nbformat_minor": 5});
-    tokio::fs::write(worktree.join("nb.ipynb"), serde_json::to_string(&nb).expect("ser"))
-        .await
-        .expect("write");
+    tokio::fs::write(
+        worktree.join("nb.ipynb"),
+        serde_json::to_string(&nb).expect("ser"),
+    )
+    .await
+    .expect("write");
     let handler = handler_for("notebook_edit").expect("notebook_edit");
     let ctx = ToolContext::testing(worktree);
     // Insert.
@@ -561,15 +635,23 @@ async fn notebook_edit_inserts_and_deletes_cells() {
             "path": "nb.ipynb", "cell_index": 0, "mode": "insert", "source": "x = 1", "cell_type": "code"
         }),
     );
-    assert!(matches!(handler.execute(call, &ctx).await, ToolResult::Ok { .. }));
+    assert!(matches!(
+        handler.execute(call, &ctx).await,
+        ToolResult::Ok { .. }
+    ));
     // Delete.
     let call = call_with_args(
         "notebook_edit",
         serde_json::json!({"path": "nb.ipynb", "cell_index": 0, "mode": "delete"}),
     );
-    assert!(matches!(handler.execute(call, &ctx).await, ToolResult::Ok { .. }));
+    assert!(matches!(
+        handler.execute(call, &ctx).await,
+        ToolResult::Ok { .. }
+    ));
     let after: serde_json::Value = serde_json::from_str(
-        &tokio::fs::read_to_string(worktree.join("nb.ipynb")).await.expect("read"),
+        &tokio::fs::read_to_string(worktree.join("nb.ipynb"))
+            .await
+            .expect("read"),
     )
     .expect("json");
     assert_eq!(after["cells"].as_array().expect("arr").len(), 0);
@@ -580,9 +662,12 @@ async fn notebook_edit_rejects_oob_index() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let worktree = tmp.path();
     let nb = serde_json::json!({"cells": [], "metadata": {}, "nbformat": 4, "nbformat_minor": 5});
-    tokio::fs::write(worktree.join("nb.ipynb"), serde_json::to_string(&nb).expect("ser"))
-        .await
-        .expect("write");
+    tokio::fs::write(
+        worktree.join("nb.ipynb"),
+        serde_json::to_string(&nb).expect("ser"),
+    )
+    .await
+    .expect("write");
     let handler = handler_for("notebook_edit").expect("notebook_edit");
     let ctx = ToolContext::testing(worktree);
     let call = call_with_args(
@@ -599,7 +684,9 @@ async fn notebook_edit_rejects_oob_index() {
 async fn apply_patch_rejects_mismatched_context() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let worktree = tmp.path();
-    tokio::fs::write(worktree.join("note.txt"), "alpha\nbeta\n").await.expect("write");
+    tokio::fs::write(worktree.join("note.txt"), "alpha\nbeta\n")
+        .await
+        .expect("write");
     let handler = handler_for("apply_patch").expect("apply_patch");
     let ctx = ToolContext::testing(worktree);
     let patch = "--- a/note.txt\n+++ b/note.txt\n@@ -1,2 +1,2 @@\n WRONG\n-beta\n+B\n";
@@ -609,6 +696,8 @@ async fn apply_patch_rejects_mismatched_context() {
         ToolResult::Err(ToolError::Other(_))
     ));
     // Verify file unchanged.
-    let after = tokio::fs::read_to_string(worktree.join("note.txt")).await.expect("read");
+    let after = tokio::fs::read_to_string(worktree.join("note.txt"))
+        .await
+        .expect("read");
     assert_eq!(after, "alpha\nbeta\n");
 }

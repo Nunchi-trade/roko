@@ -35,11 +35,16 @@ pub const DESCRIPTION: &str = "Launch a specialized sub-agent to handle a focuse
 /// Build the [`ToolDef`] for `task`.
 #[must_use]
 pub fn tool_def() -> ToolDef {
-    ToolDef::new(NAME, DESCRIPTION, ToolCategory::Meta, ToolPermission::writes())
-        .with_parameters(ToolSchema::any_object())
-        .with_concurrency(ToolConcurrency::Parallel)
-        .with_idempotent(false)
-        .with_timeout_ms(600_000)
+    ToolDef::new(
+        NAME,
+        DESCRIPTION,
+        ToolCategory::Meta,
+        ToolPermission::writes(),
+    )
+    .with_parameters(ToolSchema::any_object())
+    .with_concurrency(ToolConcurrency::Parallel)
+    .with_idempotent(false)
+    .with_timeout_ms(600_000)
 }
 
 /// Handler for `task` (§36.25) — day-one stub.
@@ -88,11 +93,7 @@ mod tests {
     #[tokio::test]
     async fn missing_subagent_type_is_schema_invalid() {
         let ctx = testing_ctx();
-        let call = ToolCall::new(
-            "c",
-            NAME,
-            serde_json::json!({ "prompt": "do the thing" }),
-        );
+        let call = ToolCall::new("c", NAME, serde_json::json!({ "prompt": "do the thing" }));
         let res = Handler.execute(call, &ctx).await;
         assert!(matches!(res, ToolResult::Err(ToolError::SchemaInvalid(_))));
     }

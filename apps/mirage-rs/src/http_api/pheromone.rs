@@ -9,8 +9,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use super::{ApiError, ApiState, now_secs};
-use crate::chain::{PheromoneKind, pheromone::PheromoneId};
 use crate::chain::projection::project_tokens;
+use crate::chain::{PheromoneKind, pheromone::PheromoneId};
 
 // ---------------------------------------------------------------------------
 // GET /api/pheromones
@@ -190,11 +190,7 @@ pub async fn pheromone_summary(State(state): State<ApiState>) -> Json<PheromoneS
     let by_kind = by_kind
         .into_iter()
         .map(|(k, (count, total, min, max))| {
-            let avg = if count > 0 {
-                total / count as f64
-            } else {
-                0.0
-            };
+            let avg = if count > 0 { total / count as f64 } else { 0.0 };
             (
                 k.to_owned(),
                 KindSummary {

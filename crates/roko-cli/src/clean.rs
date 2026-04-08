@@ -282,7 +282,8 @@ mod tests {
 
     #[test]
     fn strips_ollama_thinking_block() {
-        let raw = "Thinking...\nlots of reasoning\nmore steps\n...done thinking.\n\nFinal answer: 42";
+        let raw =
+            "Thinking...\nlots of reasoning\nmore steps\n...done thinking.\n\nFinal answer: 42";
         let out = strip_thinking(raw);
         assert!(!out.contains("reasoning"));
         assert!(!out.contains("Thinking..."));

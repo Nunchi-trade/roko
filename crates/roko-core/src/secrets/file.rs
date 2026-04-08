@@ -58,10 +58,7 @@ impl FileStore {
             toml::Value::Table(toml::value::Table::new())
         } else {
             text.parse::<toml::Value>().map_err(|e| {
-                RokoError::invalid(format!(
-                    "file {:?} has invalid TOML: {e}",
-                    path.display()
-                ))
+                RokoError::invalid(format!("file {:?} has invalid TOML: {e}", path.display()))
             })?
         };
         Ok(Self {
@@ -184,9 +181,9 @@ fn write_atomic_restricted(path: &Path, text: &str) -> Result<()> {
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-    let file_name = path.file_name().ok_or_else(|| {
-        RokoError::invalid(format!("path {} has no file name", path.display()))
-    })?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| RokoError::invalid(format!("path {} has no file name", path.display())))?;
     let tmp_name = format!(".{}.tmp", file_name.to_string_lossy());
     let tmp_path = parent.join(tmp_name);
 

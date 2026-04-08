@@ -34,13 +34,19 @@ impl HttpPostError {
     /// Build a pre-response transport error (no HTTP status).
     #[must_use]
     pub fn transport(message: impl Into<String>) -> Self {
-        Self { status: None, message: message.into() }
+        Self {
+            status: None,
+            message: message.into(),
+        }
     }
 
     /// Build an error from an HTTP status + response body.
     #[must_use]
     pub fn http(status: u16, message: impl Into<String>) -> Self {
-        Self { status: Some(status), message: message.into() }
+        Self {
+            status: Some(status),
+            message: message.into(),
+        }
     }
 }
 
@@ -83,7 +89,9 @@ impl ReqwestPoster {
     /// Build a new poster with a fresh `reqwest::Client`.
     #[must_use]
     pub fn new() -> Self {
-        Self { client: reqwest::Client::new() }
+        Self {
+            client: reqwest::Client::new(),
+        }
     }
 
     /// Wrap an existing `reqwest::Client` (useful when pooling is desired).

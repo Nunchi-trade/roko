@@ -7,10 +7,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use super::{ApiState, now_secs};
-use crate::chain::{
-    KnowledgeKind, KnowledgeState, PheromoneKind,
-    projection::project_tokens,
-};
+use crate::chain::{KnowledgeKind, KnowledgeState, PheromoneKind, projection::project_tokens};
 
 // ---------------------------------------------------------------------------
 // GET /api/knowledge/entries
@@ -203,10 +200,7 @@ pub async fn list_edges(
     // HDC-similarity edges (top-K neighbors above threshold per node).
     if include_hdc {
         for entry in &entries {
-            if matches!(
-                entry.state,
-                KnowledgeState::Pruned | KnowledgeState::Stale
-            ) {
+            if matches!(entry.state, KnowledgeState::Pruned | KnowledgeState::Stale) {
                 continue;
             }
             let hits = chain.knowledge.search(&entry.vector, max_per_node + 1);

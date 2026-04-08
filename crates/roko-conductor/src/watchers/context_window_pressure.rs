@@ -46,10 +46,7 @@ impl ContextWindowPressureWatcher {
 impl Policy for ContextWindowPressureWatcher {
     fn decide(&self, stream: &[Signal], _ctx: &Context) -> Vec<Signal> {
         // Find the most recent TokenUsage signal.
-        let latest = stream
-            .iter()
-            .rev()
-            .find(|s| s.kind == Kind::TokenUsage);
+        let latest = stream.iter().rev().find(|s| s.kind == Kind::TokenUsage);
 
         let Some(signal) = latest else {
             return Vec::new();
@@ -71,17 +68,17 @@ impl Policy for ContextWindowPressureWatcher {
         let ratio = used / total;
 
         if ratio > self.max_ratio {
-            vec![Signal::builder(Kind::Custom(
-                "conductor.intervention".into(),
-            ))
-            .body(Body::text(format!(
-                "context window {:.0}% full ({used:.0}/{total:.0} tokens)",
-                ratio * 100.0
-            )))
-            .tag("watcher", WATCHER_NAME)
-            .tag("severity", "warning")
-            .tag("ratio", format!("{ratio:.3}"))
-            .build()]
+            vec![
+                Signal::builder(Kind::Custom("conductor.intervention".into()))
+                    .body(Body::text(format!(
+                        "context window {:.0}% full ({used:.0}/{total:.0} tokens)",
+                        ratio * 100.0
+                    )))
+                    .tag("watcher", WATCHER_NAME)
+                    .tag("severity", "warning")
+                    .tag("ratio", format!("{ratio:.3}"))
+                    .build(),
+            ]
         } else {
             Vec::new()
         }

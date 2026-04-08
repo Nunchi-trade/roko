@@ -9,9 +9,9 @@ use std::collections::HashMap;
 use serde::Deserialize;
 
 use super::schema::{
-    AgentConfig, AgentRoleToggles, BudgetConfig, ConductorConfig, GatesConfig, LearningConfig,
-    ProjectConfig, RokoConfig, RoleOverride, RoutingConfig, ServerConfig, TuiConfig,
-    CURRENT_SCHEMA_VERSION,
+    AgentConfig, AgentRoleToggles, BudgetConfig, CURRENT_SCHEMA_VERSION, ConductorConfig,
+    GatesConfig, LearningConfig, ProjectConfig, RokoConfig, RoleOverride, RoutingConfig,
+    ServerConfig, TuiConfig,
 };
 
 /// Subset of Mori's `ConfigState` that we recognize.
@@ -174,7 +174,10 @@ fn convert_routing(m: &MoriConfig) -> RoutingConfig {
     RoutingConfig {
         mode: m.routing_mode.clone().unwrap_or(d.mode),
         fast_task_model: m.fast_task_model.clone().unwrap_or(d.fast_task_model),
-        standard_task_model: m.standard_task_model.clone().unwrap_or(d.standard_task_model),
+        standard_task_model: m
+            .standard_task_model
+            .clone()
+            .unwrap_or(d.standard_task_model),
         complex_task_model: m.complex_task_model.clone().unwrap_or(d.complex_task_model),
         context_strategy: m.context_strategy.clone().unwrap_or(d.context_strategy),
     }
@@ -193,7 +196,9 @@ fn convert_conductor(m: &MoriConfig) -> ConductorConfig {
         max_auto_fix_attempts: m.max_auto_fix_attempts.unwrap_or(d.max_auto_fix_attempts),
         auto_fix_model: m.auto_fix_model.clone().unwrap_or(d.auto_fix_model),
         conductor_model: m.conductor_model.clone(),
-        warm_implementers_per_plan: m.warm_implementers_per_plan.unwrap_or(d.warm_implementers_per_plan),
+        warm_implementers_per_plan: m
+            .warm_implementers_per_plan
+            .unwrap_or(d.warm_implementers_per_plan),
         enabled_roles: AgentRoleToggles {
             architect: m.architect_enabled.unwrap_or(true),
             auditor: m.auditor_enabled.unwrap_or(true),
@@ -210,8 +215,12 @@ fn convert_learning(m: &MoriConfig) -> LearningConfig {
         knowledge_file_intel: m.knowledge_file_intel.unwrap_or(d.knowledge_file_intel),
         knowledge_warnings: m.knowledge_warnings.unwrap_or(d.knowledge_warnings),
         knowledge_wave_context: m.knowledge_wave_context.unwrap_or(d.knowledge_wave_context),
-        knowledge_error_patterns: m.knowledge_error_patterns.unwrap_or(d.knowledge_error_patterns),
-        learning_min_occurrences: m.learning_min_occurrences.unwrap_or(d.learning_min_occurrences),
+        knowledge_error_patterns: m
+            .knowledge_error_patterns
+            .unwrap_or(d.knowledge_error_patterns),
+        learning_min_occurrences: m
+            .learning_min_occurrences
+            .unwrap_or(d.learning_min_occurrences),
         file_intel_max_entries: m.file_intel_max_entries.unwrap_or(d.file_intel_max_entries),
         warning_max_entries: m.warning_max_entries.unwrap_or(d.warning_max_entries),
     }

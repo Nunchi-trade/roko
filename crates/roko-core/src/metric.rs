@@ -123,9 +123,7 @@ fn canonical_json(v: &serde_json::Value) -> String {
                     if i > 0 {
                         out.push(',');
                     }
-                    out.push_str(
-                        &serde_json::to_string(k).unwrap_or_else(|_| "\"\"".into()),
-                    );
+                    out.push_str(&serde_json::to_string(k).unwrap_or_else(|_| "\"\"".into()));
                     out.push(':');
                     walk(&map[*k], out);
                 }
@@ -201,7 +199,11 @@ pub struct TaskMetric {
 impl TaskMetric {
     /// Construct a minimal record with defaults. Populate fields after.
     #[must_use]
-    pub fn new(config_hash: ConfigHash, plan_id: impl Into<String>, task_id: impl Into<String>) -> Self {
+    pub fn new(
+        config_hash: ConfigHash,
+        plan_id: impl Into<String>,
+        task_id: impl Into<String>,
+    ) -> Self {
         Self {
             timestamp: String::new(),
             run_id: String::new(),
@@ -314,10 +316,12 @@ pub fn compute_headlines(records: &[TaskMetric]) -> Headlines {
     }
 
     let n_plans = plans.len();
-    let avg_iters = plans.values().map(|a| f64::from(a.max_iter)).sum::<f64>() / n_plans.max(1) as f64;
+    let avg_iters =
+        plans.values().map(|a| f64::from(a.max_iter)).sum::<f64>() / n_plans.max(1) as f64;
     let avg_cost = plans.values().map(|a| a.total_cost).sum::<f64>() / n_plans.max(1) as f64;
 
-    let avg_input = records.iter().map(|r| r.input_tokens as f64).sum::<f64>() / records.len() as f64;
+    let avg_input =
+        records.iter().map(|r| r.input_tokens as f64).sum::<f64>() / records.len() as f64;
 
     Headlines {
         first_attempt_pass_rate: pass_rate,
@@ -492,7 +496,12 @@ mod tests {
             r.gate_passed = passed;
             r
         };
-        let records = vec![make("A", true), make("B", true), make("C", false), make("D", true)];
+        let records = vec![
+            make("A", true),
+            make("B", true),
+            make("C", false),
+            make("D", true),
+        ];
         let h = compute_headlines(&records);
         assert!((h.first_attempt_pass_rate - 0.75).abs() < 1e-9);
     }

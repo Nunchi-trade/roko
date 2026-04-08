@@ -3,8 +3,8 @@
 use std::fmt::Write as _;
 
 use roko_core::{
-    error::{Result, RokoError},
     Body, Budget, Composer, Context, Kind, Provenance, Scorer, Signal,
+    error::{Result, RokoError},
 };
 use serde::{Deserialize, Serialize};
 
@@ -543,19 +543,10 @@ mod tests {
         // High-pri section ~10 tokens; low-pri ~100 tokens; budget 20 tokens.
         let sections = [
             section("keep", "small important section", SectionPriority::High),
-            section(
-                "drop",
-                &"word ".repeat(100),
-                SectionPriority::Low,
-            ),
+            section("drop", &"word ".repeat(100), SectionPriority::Low),
         ];
         let out = composer
-            .compose(
-                &sections,
-                &Budget::tokens(20),
-                &NoOpScorer,
-                &Context::at(0),
-            )
+            .compose(&sections, &Budget::tokens(20), &NoOpScorer, &Context::at(0))
             .unwrap();
         let text = out.body.as_text().unwrap();
         assert!(text.contains("small important"));
@@ -571,12 +562,7 @@ mod tests {
         ];
         // Budget that can only fit the role, not the fluff.
         let out = composer
-            .compose(
-                &sections,
-                &Budget::tokens(20),
-                &NoOpScorer,
-                &Context::at(0),
-            )
+            .compose(&sections, &Budget::tokens(20), &NoOpScorer, &Context::at(0))
             .unwrap();
         let text = out.body.as_text().unwrap();
         assert!(text.contains("you are an agent"));
@@ -683,7 +669,13 @@ mod tests {
     fn composer_respects_max_signals() {
         let composer = PromptComposer::new();
         let sections: Vec<_> = (0..10)
-            .map(|i| section(&format!("s{i}"), &format!("content{i}"), SectionPriority::Normal))
+            .map(|i| {
+                section(
+                    &format!("s{i}"),
+                    &format!("content{i}"),
+                    SectionPriority::Normal,
+                )
+            })
             .collect();
         let out = composer
             .compose(
@@ -734,12 +726,7 @@ mod tests {
             .into_signal()
             .unwrap();
         let out = composer
-            .compose(
-                &[sig],
-                &Budget::unlimited(),
-                &NoOpScorer,
-                &Context::at(0),
-            )
+            .compose(&[sig], &Budget::unlimited(), &NoOpScorer, &Context::at(0))
             .unwrap();
         let text = out.body.as_text().unwrap();
         assert!(text.contains("[truncated"));
@@ -775,12 +762,7 @@ mod tests {
         let composer = PromptComposer::new().without_headers();
         let s = section("role", "agent here", SectionPriority::Critical);
         let out = composer
-            .compose(
-                &[s],
-                &Budget::unlimited(),
-                &NoOpScorer,
-                &Context::at(0),
-            )
+            .compose(&[s], &Budget::unlimited(), &NoOpScorer, &Context::at(0))
             .unwrap();
         let text = out.body.as_text().unwrap();
         assert!(!text.contains("---"));

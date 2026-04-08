@@ -730,8 +730,8 @@ impl Drop for TraceBuilder {
 #[cfg(test)]
 #[allow(clippy::significant_drop_tightening)] // test lock scopes are intentional
 mod tests {
-    use super::*;
     use super::super::def::{ToolCategory, ToolConcurrency};
+    use super::*;
     use parking_lot::Mutex;
     use std::sync::Arc;
 

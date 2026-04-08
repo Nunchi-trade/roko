@@ -143,8 +143,7 @@ impl TaintTracker {
                 .get(&child)
                 .is_some_and(|r| r.category != "propagated");
             if !already_specific {
-                let reason =
-                    TaintReason::propagated(format!("inherited from {}", parent.short()));
+                let reason = TaintReason::propagated(format!("inherited from {}", parent.short()));
                 guard.insert(child, reason);
             }
             true
@@ -158,10 +157,8 @@ impl TaintTracker {
     /// if the signal's provenance is clean.
     pub fn observe_signal(&self, signal: &Signal) -> bool {
         if signal.provenance.tainted {
-            let reason = TaintReason::external(format!(
-                "signal author {}",
-                signal.provenance.author
-            ));
+            let reason =
+                TaintReason::external(format!("signal author {}", signal.provenance.author));
             self.mark_tainted(signal.id, reason);
             true
         } else {

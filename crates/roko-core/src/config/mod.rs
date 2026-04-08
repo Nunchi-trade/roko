@@ -14,7 +14,7 @@ pub mod schema;
 pub use compat::from_mori_toml;
 pub use presets::Preset;
 pub use schema::{
-    AgentConfig, AgentRoleToggles, BudgetConfig, ConductorConfig, GatesConfig, LearningConfig,
-    ProjectConfig, RokoConfig, RoleOverride, RoutingConfig, ServerConfig, TuiConfig,
-    CURRENT_SCHEMA_VERSION,
+    AgentConfig, AgentRoleToggles, BudgetConfig, CURRENT_SCHEMA_VERSION, ConductorConfig,
+    GatesConfig, LearningConfig, ProjectConfig, RokoConfig, RoleOverride, RoutingConfig,
+    ServerConfig, TuiConfig,
 };

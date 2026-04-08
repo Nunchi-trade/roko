@@ -20,11 +20,16 @@ pub const DESCRIPTION: &str = "List the contents of a directory in the worktree.
 /// Build the [`ToolDef`] for `ls`.
 #[must_use]
 pub fn tool_def() -> ToolDef {
-    ToolDef::new(NAME, DESCRIPTION, ToolCategory::Read, ToolPermission::read_only())
-        .with_parameters(ToolSchema::any_object())
-        .with_concurrency(ToolConcurrency::Parallel)
-        .with_idempotent(true)
-        .with_timeout_ms(10_000)
+    ToolDef::new(
+        NAME,
+        DESCRIPTION,
+        ToolCategory::Read,
+        ToolPermission::read_only(),
+    )
+    .with_parameters(ToolSchema::any_object())
+    .with_concurrency(ToolConcurrency::Parallel)
+    .with_idempotent(true)
+    .with_timeout_ms(10_000)
 }
 
 /// Handler for `ls` (§36.21).
@@ -62,7 +67,9 @@ impl ToolHandler for Handler {
         let mut lines: Vec<String> = Vec::new();
         while let Ok(Some(entry)) = entries.next_entry().await {
             let name = entry.file_name().to_string_lossy().into_owned();
-            let Ok(meta) = entry.metadata().await else { continue };
+            let Ok(meta) = entry.metadata().await else {
+                continue;
+            };
             let marker = if meta.is_dir() {
                 'd'
             } else if meta.is_symlink() {

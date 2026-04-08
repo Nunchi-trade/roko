@@ -32,10 +32,8 @@
 
 use std::sync::Arc;
 
-use roko_core::tool::{
-    ToolCall, ToolContext, ToolError, ToolHandler, ToolRegistry, ToolResult,
-};
 use roko_core::ToolPermissions;
+use roko_core::tool::{ToolCall, ToolContext, ToolError, ToolHandler, ToolRegistry, ToolResult};
 
 use crate::safety::SafetyLayer;
 
@@ -89,7 +87,12 @@ impl ToolDispatcher {
     /// handler resolver.
     #[must_use]
     pub fn new(registry: Arc<dyn ToolRegistry>, resolver: Arc<dyn HandlerResolver>) -> Self {
-        Self { registry, resolver, max_result_bytes: DEFAULT_MAX_RESULT_BYTES, safety: None }
+        Self {
+            registry,
+            resolver,
+            max_result_bytes: DEFAULT_MAX_RESULT_BYTES,
+            safety: None,
+        }
     }
 
     /// Override the default result-byte cap.
@@ -288,11 +291,7 @@ mod tests {
         })
     }
 
-    fn tool(
-        name: &str,
-        perm: ToolPermission,
-        conc: ToolConcurrency,
-    ) -> ToolDef {
+    fn tool(name: &str, perm: ToolPermission, conc: ToolConcurrency) -> ToolDef {
         ToolDef::new(name, "x", ToolCategory::Meta, perm).with_concurrency(conc)
     }
 
@@ -332,12 +331,11 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_tool_returns_other_error() {
-        let registry: Arc<dyn ToolRegistry> =
-            Arc::new(VecToolRegistry::from_tools(vec![tool(
-                "echo",
-                ToolPermission::read_only(),
-                ToolConcurrency::Parallel,
-            )]));
+        let registry: Arc<dyn ToolRegistry> = Arc::new(VecToolRegistry::from_tools(vec![tool(
+            "echo",
+            ToolPermission::read_only(),
+            ToolConcurrency::Parallel,
+        )]));
         let resolver = resolver_from([("echo", Arc::new(EchoHandler) as Arc<dyn ToolHandler>)]);
         let d = ToolDispatcher::new(registry, resolver);
         let call = ToolCall::new("c", "no_such_tool", serde_json::json!({}));
@@ -371,12 +369,11 @@ mod tests {
     #[tokio::test]
     async fn missing_permission_returns_permission_denied() {
         // Tool requires write, context only grants read.
-        let registry: Arc<dyn ToolRegistry> =
-            Arc::new(VecToolRegistry::from_tools(vec![tool(
-                "echo",
-                ToolPermission::writes(),
-                ToolConcurrency::Parallel,
-            )]));
+        let registry: Arc<dyn ToolRegistry> = Arc::new(VecToolRegistry::from_tools(vec![tool(
+            "echo",
+            ToolPermission::writes(),
+            ToolConcurrency::Parallel,
+        )]));
         let resolver = resolver_from([("echo", Arc::new(EchoHandler) as Arc<dyn ToolHandler>)]);
         let d = ToolDispatcher::new(registry, resolver);
         let call = ToolCall::new("c", "echo", serde_json::json!({}));
@@ -402,12 +399,11 @@ mod tests {
 
     #[tokio::test]
     async fn handler_timeout_returns_timeout_error_with_ms() {
-        let registry: Arc<dyn ToolRegistry> =
-            Arc::new(VecToolRegistry::from_tools(vec![tool(
-                "sleep",
-                ToolPermission::read_only(),
-                ToolConcurrency::Parallel,
-            )]));
+        let registry: Arc<dyn ToolRegistry> = Arc::new(VecToolRegistry::from_tools(vec![tool(
+            "sleep",
+            ToolPermission::read_only(),
+            ToolConcurrency::Parallel,
+        )]));
         let resolver = resolver_from([(
             "sleep",
             Arc::new(SleepHandler { ms: 500 }) as Arc<dyn ToolHandler>,
@@ -437,12 +433,11 @@ mod tests {
 
     #[tokio::test]
     async fn cancellation_returns_cancelled() {
-        let registry: Arc<dyn ToolRegistry> =
-            Arc::new(VecToolRegistry::from_tools(vec![tool(
-                "sleep",
-                ToolPermission::read_only(),
-                ToolConcurrency::Parallel,
-            )]));
+        let registry: Arc<dyn ToolRegistry> = Arc::new(VecToolRegistry::from_tools(vec![tool(
+            "sleep",
+            ToolPermission::read_only(),
+            ToolConcurrency::Parallel,
+        )]));
         let resolver = resolver_from([(
             "sleep",
             Arc::new(SleepHandler { ms: 2_000 }) as Arc<dyn ToolHandler>,
@@ -474,12 +469,11 @@ mod tests {
 
     #[tokio::test]
     async fn successful_call_returns_ok() {
-        let registry: Arc<dyn ToolRegistry> =
-            Arc::new(VecToolRegistry::from_tools(vec![tool(
-                "echo",
-                ToolPermission::read_only(),
-                ToolConcurrency::Parallel,
-            )]));
+        let registry: Arc<dyn ToolRegistry> = Arc::new(VecToolRegistry::from_tools(vec![tool(
+            "echo",
+            ToolPermission::read_only(),
+            ToolConcurrency::Parallel,
+        )]));
         let resolver = resolver_from([("echo", Arc::new(EchoHandler) as Arc<dyn ToolHandler>)]);
         let d = ToolDispatcher::new(registry, resolver);
         let call = ToolCall::new("c", "echo", serde_json::json!({"x": 1}));
@@ -492,15 +486,16 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_content_truncated_with_marker() {
-        let registry: Arc<dyn ToolRegistry> =
-            Arc::new(VecToolRegistry::from_tools(vec![tool(
-                "huge",
-                ToolPermission::read_only(),
-                ToolConcurrency::Parallel,
-            )]));
+        let registry: Arc<dyn ToolRegistry> = Arc::new(VecToolRegistry::from_tools(vec![tool(
+            "huge",
+            ToolPermission::read_only(),
+            ToolConcurrency::Parallel,
+        )]));
         let resolver = resolver_from([(
             "huge",
-            Arc::new(HugeHandler { payload_bytes: 5_000 }) as Arc<dyn ToolHandler>,
+            Arc::new(HugeHandler {
+                payload_bytes: 5_000,
+            }) as Arc<dyn ToolHandler>,
         )]);
         let d = ToolDispatcher::new(registry, resolver).with_max_result_bytes(1_024);
         let call = ToolCall::new("c", "huge", serde_json::json!({}));
@@ -508,7 +503,10 @@ mod tests {
         match res {
             ToolResult::Ok { content, .. } => {
                 assert!(content.contains("[truncated]"));
-                assert!(content.len() < 5_000, "content should be shorter than the handler output");
+                assert!(
+                    content.len() < 5_000,
+                    "content should be shorter than the handler output"
+                );
             }
             other => panic!("expected Ok, got {other:?}"),
         }
@@ -528,14 +526,12 @@ mod tests {
                 ToolResult::text(chunk.repeat(500)) // 500*9 = 4500 bytes
             }
         }
-        let registry: Arc<dyn ToolRegistry> =
-            Arc::new(VecToolRegistry::from_tools(vec![tool(
-                "mb",
-                ToolPermission::read_only(),
-                ToolConcurrency::Parallel,
-            )]));
-        let resolver =
-            resolver_from([("mb", Arc::new(MultibyteHandler) as Arc<dyn ToolHandler>)]);
+        let registry: Arc<dyn ToolRegistry> = Arc::new(VecToolRegistry::from_tools(vec![tool(
+            "mb",
+            ToolPermission::read_only(),
+            ToolConcurrency::Parallel,
+        )]));
+        let resolver = resolver_from([("mb", Arc::new(MultibyteHandler) as Arc<dyn ToolHandler>)]);
         let d = ToolDispatcher::new(registry, resolver).with_max_result_bytes(100);
         let call = ToolCall::new("c", "mb", serde_json::json!({}));
         let res = d.dispatch(call, &ToolContext::testing("/tmp")).await;
@@ -552,12 +548,11 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_batch_runs_parallel_tools_concurrently() {
-        let registry: Arc<dyn ToolRegistry> =
-            Arc::new(VecToolRegistry::from_tools(vec![tool(
-                "sleep",
-                ToolPermission::read_only(),
-                ToolConcurrency::Parallel,
-            )]));
+        let registry: Arc<dyn ToolRegistry> = Arc::new(VecToolRegistry::from_tools(vec![tool(
+            "sleep",
+            ToolPermission::read_only(),
+            ToolConcurrency::Parallel,
+        )]));
         let resolver = resolver_from([(
             "sleep",
             Arc::new(SleepHandler { ms: 100 }) as Arc<dyn ToolHandler>,
@@ -607,14 +602,12 @@ mod tests {
             }
         }
         COUNTER.store(0, Ordering::SeqCst);
-        let registry: Arc<dyn ToolRegistry> =
-            Arc::new(VecToolRegistry::from_tools(vec![tool(
-                "ser",
-                ToolPermission::read_only(),
-                ToolConcurrency::Serial,
-            )]));
-        let resolver =
-            resolver_from([("ser", Arc::new(SerialHandler) as Arc<dyn ToolHandler>)]);
+        let registry: Arc<dyn ToolRegistry> = Arc::new(VecToolRegistry::from_tools(vec![tool(
+            "ser",
+            ToolPermission::read_only(),
+            ToolConcurrency::Serial,
+        )]));
+        let resolver = resolver_from([("ser", Arc::new(SerialHandler) as Arc<dyn ToolHandler>)]);
         let d = ToolDispatcher::new(registry, resolver);
         let ctx = ToolContext::testing("/tmp");
         let calls = vec![
@@ -637,9 +630,7 @@ mod tests {
         let observations: Vec<usize> = out
             .iter()
             .map(|(_, r)| match r {
-                ToolResult::Ok { content, .. } => {
-                    content.parse().expect("observation is usize")
-                }
+                ToolResult::Ok { content, .. } => content.parse().expect("observation is usize"),
                 ToolResult::Err(e) => panic!("handler failed: {e}"),
             })
             .collect();

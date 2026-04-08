@@ -194,7 +194,10 @@ pub fn write_mcp_config(base: &Path, launch: &McpLaunch) -> Result<PathBuf, std:
             }
         }
     });
-    std::fs::write(&path, serde_json::to_string_pretty(&value).unwrap_or_default())?;
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&value).unwrap_or_default(),
+    )?;
     Ok(path)
 }
 

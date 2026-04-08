@@ -80,11 +80,7 @@ impl OneshotMode {
                 format!("error: {details}")
             }
         } else {
-            format!(
-                "{} {}",
-                if success { "ok:" } else { "fail:" },
-                details
-            )
+            format!("{} {}", if success { "ok:" } else { "fail:" }, details)
         };
         OneshotResult {
             success,
@@ -172,7 +168,9 @@ mod tests {
 
     #[test]
     fn prepare_copies_fields() {
-        let mode = OneshotMode::new("hello".into()).with_json(true).with_quiet(false);
+        let mode = OneshotMode::new("hello".into())
+            .with_json(true)
+            .with_quiet(false);
         let prepared = mode.prepare();
         assert_eq!(prepared.prompt, "hello");
         assert!(prepared.json_output);

@@ -20,11 +20,16 @@ pub const DESCRIPTION: &str = "Edit, insert, or delete a cell in a Jupyter noteb
 /// Build the [`ToolDef`] for `notebook_edit`.
 #[must_use]
 pub fn tool_def() -> ToolDef {
-    ToolDef::new(NAME, DESCRIPTION, ToolCategory::Notebook, ToolPermission::writes())
-        .with_parameters(ToolSchema::any_object())
-        .with_concurrency(ToolConcurrency::Serial)
-        .with_idempotent(false)
-        .with_timeout_ms(30_000)
+    ToolDef::new(
+        NAME,
+        DESCRIPTION,
+        ToolCategory::Notebook,
+        ToolPermission::writes(),
+    )
+    .with_parameters(ToolSchema::any_object())
+    .with_concurrency(ToolConcurrency::Serial)
+    .with_idempotent(false)
+    .with_timeout_ms(30_000)
 }
 
 /// Handler for `notebook_edit` (§36.24).
@@ -50,7 +55,11 @@ impl ToolHandler for Handler {
             Ok(p) => p,
             Err(e) => return ToolResult::Err(e),
         };
-        let idx = match call.arguments.get("cell_index").and_then(serde_json::Value::as_u64) {
+        let idx = match call
+            .arguments
+            .get("cell_index")
+            .and_then(serde_json::Value::as_u64)
+        {
             Some(i) => usize::try_from(i).unwrap_or(usize::MAX),
             None => {
                 return ToolResult::Err(ToolError::SchemaInvalid(
@@ -84,7 +93,10 @@ impl ToolHandler for Handler {
                 )));
             }
         };
-        let Some(cells) = nb.get_mut("cells").and_then(serde_json::Value::as_array_mut) else {
+        let Some(cells) = nb
+            .get_mut("cells")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
             return ToolResult::Err(ToolError::Other(
                 "notebook_edit: notebook has no `cells` array".into(),
             ));

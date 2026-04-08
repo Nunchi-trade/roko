@@ -5,8 +5,8 @@
 //! prefix (plan, workspace map, prd2, brief) and differ only in role identity
 //! and instructions.
 
+use super::{PlanSlice, RolePromptTemplate, truncate};
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
-use super::{truncate, PlanSlice, RolePromptTemplate};
 
 /// Which reviewer variant to generate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -299,7 +299,10 @@ mod tests {
     fn render_golden_auditor() {
         let template = ReviewerTemplate::new(Reviewer::Auditor);
         let sections = template.sections(&full_input());
-        let criteria = sections.iter().find(|s| s.name == "reviewer_criteria").unwrap();
+        let criteria = sections
+            .iter()
+            .find(|s| s.name == "reviewer_criteria")
+            .unwrap();
         assert!(criteria.content.contains("Auditor"));
         assert!(criteria.content.contains("Formula constants"));
     }
@@ -308,7 +311,10 @@ mod tests {
     fn render_golden_combined() {
         let template = ReviewerTemplate::new(Reviewer::Combined);
         let sections = template.sections(&full_input());
-        let criteria = sections.iter().find(|s| s.name == "reviewer_criteria").unwrap();
+        let criteria = sections
+            .iter()
+            .find(|s| s.name == "reviewer_criteria")
+            .unwrap();
         assert!(criteria.content.contains("Combined"));
     }
 

@@ -5,7 +5,7 @@
 //! rejects illegal transitions) and suggests the next
 //! [`ExecutorAction`](super::action::ExecutorAction) based on the new state.
 
-use roko_core::{valid_transitions, AgentRole, FailureKind, PhaseKind, PlanPhase};
+use roko_core::{AgentRole, FailureKind, PhaseKind, PlanPhase, valid_transitions};
 
 use super::action::ExecutorAction;
 use super::plan_state::PlanState;
@@ -240,11 +240,7 @@ impl PlanStateMachine {
             }),
             PhaseKind::Gating => Some(ExecutorAction::RunGate {
                 plan_id: plan_state.plan_id.clone(),
-                rung: plan_state
-                    .gate_results
-                    .len()
-                    .try_into()
-                    .unwrap_or(u32::MAX),
+                rung: plan_state.gate_results.len().try_into().unwrap_or(u32::MAX),
             }),
             PhaseKind::AutoFixing => Some(ExecutorAction::SpawnAgent {
                 plan_id: plan_state.plan_id.clone(),
@@ -328,13 +324,11 @@ mod tests {
         assert_eq!(ps.current_phase.kind(), PhaseKind::Gating);
 
         // Gating -> Verifying
-        ps.current_phase =
-            PlanStateMachine::transition(&ps, &ExecutorEvent::GatePassed).unwrap();
+        ps.current_phase = PlanStateMachine::transition(&ps, &ExecutorEvent::GatePassed).unwrap();
         assert_eq!(ps.current_phase.kind(), PhaseKind::Verifying);
 
         // Verifying -> Reviewing
-        ps.current_phase =
-            PlanStateMachine::transition(&ps, &ExecutorEvent::VerifyPassed).unwrap();
+        ps.current_phase = PlanStateMachine::transition(&ps, &ExecutorEvent::VerifyPassed).unwrap();
         assert_eq!(ps.current_phase.kind(), PhaseKind::Reviewing);
 
         // Reviewing -> DocRevision
@@ -432,8 +426,7 @@ mod tests {
     #[test]
     fn fatal_from_gating() {
         let ps = at_phase(PlanPhase::Gating);
-        let next =
-            PlanStateMachine::transition(&ps, &ExecutorEvent::Fatal("oom".into())).unwrap();
+        let next = PlanStateMachine::transition(&ps, &ExecutorEvent::Fatal("oom".into())).unwrap();
         assert_eq!(next.kind(), PhaseKind::Failed);
     }
 

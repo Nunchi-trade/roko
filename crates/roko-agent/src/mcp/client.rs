@@ -188,7 +188,10 @@ impl<T: Transport> McpClient<T> {
     /// List available tools from the MCP server.
     pub async fn list_tools(&self) -> Result<Vec<McpToolDef>, McpError> {
         let result = self.call("tools/list", serde_json::json!({})).await?;
-        let tools_value = result.get("tools").cloned().unwrap_or(serde_json::Value::Array(vec![]));
+        let tools_value = result
+            .get("tools")
+            .cloned()
+            .unwrap_or(serde_json::Value::Array(vec![]));
         let tools: Vec<McpToolDef> = serde_json::from_value(tools_value)?;
         Ok(tools)
     }
@@ -277,7 +280,10 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_initialize_sends_correct_method() {
-        let transport = MockTransport::new(vec![ok_response(1, serde_json::json!({"capabilities": {}}))]);
+        let transport = MockTransport::new(vec![ok_response(
+            1,
+            serde_json::json!({"capabilities": {}}),
+        )]);
         let client = McpClient::new(transport);
         let result = client.initialize().await.unwrap();
         assert!(result.get("capabilities").is_some());

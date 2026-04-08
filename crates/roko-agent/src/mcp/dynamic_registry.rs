@@ -99,11 +99,21 @@ mod tests {
     use roko_core::tool::{ToolCategory, ToolPermission, VecToolRegistry};
 
     fn base_tool(name: &str) -> ToolDef {
-        ToolDef::new(name, "base tool", ToolCategory::Read, ToolPermission::read_only())
+        ToolDef::new(
+            name,
+            "base tool",
+            ToolCategory::Read,
+            ToolPermission::read_only(),
+        )
     }
 
     fn mcp_tool(name: &str) -> ToolDef {
-        ToolDef::new(name, "mcp tool", ToolCategory::Mcp, ToolPermission::read_only())
+        ToolDef::new(
+            name,
+            "mcp tool",
+            ToolCategory::Mcp,
+            ToolPermission::read_only(),
+        )
     }
 
     #[test]
@@ -120,10 +130,7 @@ mod tests {
     fn mcp_dynamic_registry_add_mcp_tools() {
         let base = VecToolRegistry::from_tools(vec![base_tool("read_file")]);
         let mut reg = DynamicToolRegistry::new(&base);
-        reg.add_mcp_tools(
-            "fs",
-            vec![mcp_tool("fs__list"), mcp_tool("fs__stat")],
-        );
+        reg.add_mcp_tools("fs", vec![mcp_tool("fs__list"), mcp_tool("fs__stat")]);
         assert_eq!(reg.all().len(), 3);
         assert!(reg.get("read_file").is_some());
         assert!(reg.get("fs__list").is_some());

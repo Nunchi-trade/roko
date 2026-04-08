@@ -545,9 +545,9 @@ mod tests {
                 ErrorKind::Io => {
                     RokoError::Io(std::io::Error::new(std::io::ErrorKind::Other, "oops"))
                 }
-                ErrorKind::Json => RokoError::Json(
-                    serde_json::from_str::<serde_json::Value>("{ bad").unwrap_err(),
-                ),
+                ErrorKind::Json => {
+                    RokoError::Json(serde_json::from_str::<serde_json::Value>("{ bad").unwrap_err())
+                }
                 ErrorKind::Invalid => RokoError::invalid("bad input"),
                 ErrorKind::Planning => RokoError::planning("no plan"),
                 ErrorKind::Agent => RokoError::agent("claude", "rate-limited"),
@@ -691,7 +691,10 @@ mod tests {
         let err = RokoError::agent("claude", "rate-limited");
         let msg = format!("{err}");
         assert!(msg.contains("claude"), "display missing backend: {msg}");
-        assert!(msg.contains("rate-limited"), "display missing message: {msg}");
+        assert!(
+            msg.contains("rate-limited"),
+            "display missing message: {msg}"
+        );
 
         let err = RokoError::gate("compile", "boom");
         let msg = format!("{err}");

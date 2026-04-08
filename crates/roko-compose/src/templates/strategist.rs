@@ -5,8 +5,8 @@
 //! task checklist. On iteration 2+, it also processes prior review feedback
 //! and generates remediation instructions.
 
+use super::{PlanSlice, RolePromptTemplate, truncate};
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
-use super::{truncate, PlanSlice, RolePromptTemplate};
 
 /// Typed input for the strategist template. All fields are pre-read strings —
 /// no filesystem access.

@@ -19,8 +19,8 @@
 //! ```
 
 use crate::{
-    error::Result, Budget, Composer, Context, Gate, Policy, Query, Router, Scorer, Signal,
-    Substrate, Verdict,
+    Budget, Composer, Context, Gate, Policy, Query, Router, Scorer, Signal, Substrate, Verdict,
+    error::Result,
 };
 
 /// What happened during one tick of the universal loop.

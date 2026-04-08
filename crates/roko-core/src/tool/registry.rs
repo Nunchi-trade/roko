@@ -12,8 +12,8 @@
 use super::def::ToolDef;
 use super::relevance::{KeywordOverlapScorer, ToolRelevanceScorer};
 use super::role_allowlist::role_allowlist;
-use crate::error::{Result, RokoError};
 use crate::AgentRole;
+use crate::error::{Result, RokoError};
 
 // ─── ToolRegistry trait ──────────────────────────────────────────────────
 
@@ -120,15 +120,30 @@ mod tests {
     use crate::tool::{ToolCategory, ToolPermission};
 
     fn read_file() -> ToolDef {
-        ToolDef::new("read_file", "read a file", ToolCategory::Read, ToolPermission::read_only())
+        ToolDef::new(
+            "read_file",
+            "read a file",
+            ToolCategory::Read,
+            ToolPermission::read_only(),
+        )
     }
 
     fn write_file() -> ToolDef {
-        ToolDef::new("write_file", "write a file", ToolCategory::Write, ToolPermission::writes())
+        ToolDef::new(
+            "write_file",
+            "write a file",
+            ToolCategory::Write,
+            ToolPermission::writes(),
+        )
     }
 
     fn bash() -> ToolDef {
-        ToolDef::new("bash", "run a command", ToolCategory::Exec, ToolPermission::executes())
+        ToolDef::new(
+            "bash",
+            "run a command",
+            ToolCategory::Exec,
+            ToolPermission::executes(),
+        )
     }
 
     #[test]
@@ -191,22 +206,102 @@ mod tests {
     /// Realistic 16-tool registry matching the built-in menu.
     fn sixteen_builtins() -> VecToolRegistry {
         VecToolRegistry::from_tools(vec![
-            ToolDef::new("read_file", "Read the contents of a UTF-8 file from the worktree", ToolCategory::Read, ToolPermission::read_only()),
-            ToolDef::new("write_file", "Write the provided content to a file in the worktree creating or overwriting", ToolCategory::Write, ToolPermission::writes()),
-            ToolDef::new("edit_file", "Replace an exact string in a file with a new string", ToolCategory::Write, ToolPermission::writes()),
-            ToolDef::new("multi_edit", "Apply multiple exact-string replacements to a single file atomically", ToolCategory::Write, ToolPermission::writes()),
-            ToolDef::new("glob", "Find files in the worktree matching a glob pattern", ToolCategory::Read, ToolPermission::read_only()),
-            ToolDef::new("grep", "Search file contents for a literal-substring or simple pattern matching", ToolCategory::Read, ToolPermission::read_only()),
-            ToolDef::new("bash", "Execute a shell command via bash -c and return its output", ToolCategory::Exec, ToolPermission::executes()),
-            ToolDef::new("ls", "List the contents of a directory in the worktree", ToolCategory::Read, ToolPermission::read_only()),
-            ToolDef::new("web_fetch", "Fetch a URL over HTTPS and return the body", ToolCategory::Network, ToolPermission::networked()),
-            ToolDef::new("web_search", "Query a configured web search provider and return top results", ToolCategory::Network, ToolPermission::networked()),
-            ToolDef::new("notebook_edit", "Edit insert or delete a cell in a Jupyter notebook", ToolCategory::Notebook, ToolPermission::writes()),
-            ToolDef::new("todo_write", "Manage the agent per-turn todo list", ToolCategory::Meta, ToolPermission::default()),
-            ToolDef::new("task", "Launch a specialized sub-agent to handle a focused task", ToolCategory::Meta, ToolPermission::writes()),
-            ToolDef::new("exit_plan_mode", "Exit plan-mode and submit the drafted plan for approval", ToolCategory::Meta, ToolPermission::default()),
-            ToolDef::new("apply_patch", "Apply a unified-diff patch to a single file in the worktree", ToolCategory::Write, ToolPermission::writes()),
-            ToolDef::new("run_tests", "Run the project test suite or a filtered subset and report results", ToolCategory::Exec, ToolPermission::executes()),
+            ToolDef::new(
+                "read_file",
+                "Read the contents of a UTF-8 file from the worktree",
+                ToolCategory::Read,
+                ToolPermission::read_only(),
+            ),
+            ToolDef::new(
+                "write_file",
+                "Write the provided content to a file in the worktree creating or overwriting",
+                ToolCategory::Write,
+                ToolPermission::writes(),
+            ),
+            ToolDef::new(
+                "edit_file",
+                "Replace an exact string in a file with a new string",
+                ToolCategory::Write,
+                ToolPermission::writes(),
+            ),
+            ToolDef::new(
+                "multi_edit",
+                "Apply multiple exact-string replacements to a single file atomically",
+                ToolCategory::Write,
+                ToolPermission::writes(),
+            ),
+            ToolDef::new(
+                "glob",
+                "Find files in the worktree matching a glob pattern",
+                ToolCategory::Read,
+                ToolPermission::read_only(),
+            ),
+            ToolDef::new(
+                "grep",
+                "Search file contents for a literal-substring or simple pattern matching",
+                ToolCategory::Read,
+                ToolPermission::read_only(),
+            ),
+            ToolDef::new(
+                "bash",
+                "Execute a shell command via bash -c and return its output",
+                ToolCategory::Exec,
+                ToolPermission::executes(),
+            ),
+            ToolDef::new(
+                "ls",
+                "List the contents of a directory in the worktree",
+                ToolCategory::Read,
+                ToolPermission::read_only(),
+            ),
+            ToolDef::new(
+                "web_fetch",
+                "Fetch a URL over HTTPS and return the body",
+                ToolCategory::Network,
+                ToolPermission::networked(),
+            ),
+            ToolDef::new(
+                "web_search",
+                "Query a configured web search provider and return top results",
+                ToolCategory::Network,
+                ToolPermission::networked(),
+            ),
+            ToolDef::new(
+                "notebook_edit",
+                "Edit insert or delete a cell in a Jupyter notebook",
+                ToolCategory::Notebook,
+                ToolPermission::writes(),
+            ),
+            ToolDef::new(
+                "todo_write",
+                "Manage the agent per-turn todo list",
+                ToolCategory::Meta,
+                ToolPermission::default(),
+            ),
+            ToolDef::new(
+                "task",
+                "Launch a specialized sub-agent to handle a focused task",
+                ToolCategory::Meta,
+                ToolPermission::writes(),
+            ),
+            ToolDef::new(
+                "exit_plan_mode",
+                "Exit plan-mode and submit the drafted plan for approval",
+                ToolCategory::Meta,
+                ToolPermission::default(),
+            ),
+            ToolDef::new(
+                "apply_patch",
+                "Apply a unified-diff patch to a single file in the worktree",
+                ToolCategory::Write,
+                ToolPermission::writes(),
+            ),
+            ToolDef::new(
+                "run_tests",
+                "Run the project test suite or a filtered subset and report results",
+                ToolCategory::Exec,
+                ToolPermission::executes(),
+            ),
         ])
     }
 

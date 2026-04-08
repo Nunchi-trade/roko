@@ -37,4 +37,4 @@ pub use roko_core::{ConductorDecision, PhaseKind, PlanPhase};
 pub use circuit_breaker::CircuitBreaker;
 pub use conductor::Conductor;
 pub use interventions::{InterventionPolicy, Severity, WatcherOutput, WorstSeverityPolicy};
-pub use state_machine::{phase_timeout, PhaseTransition};
+pub use state_machine::{PhaseTransition, phase_timeout};

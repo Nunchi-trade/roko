@@ -21,7 +21,10 @@ const PERSONA: &str = "chain-native/uniswap-analyst";
 
 const INSIGHTS: &[(&str, &str)] = &[
     // (short label, content)
-    ("uniV3-stf-revert", "uniswap v3 STF revert typically means insufficient allowance on the input token"),
+    (
+        "uniV3-stf-revert",
+        "uniswap v3 STF revert typically means insufficient allowance on the input token",
+    ),
     (
         "uniV3-twap-depth",
         "uniswap v3 TWAP oracle accuracy depends on pool liquidity depth; thin pools are manipulable",
@@ -89,15 +92,20 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    println!("\npersona_chain_native: done ({} entries in substrate).", substrate.len().await?);
+    println!(
+        "\npersona_chain_native: done ({} entries in substrate).",
+        substrate.len().await?
+    );
     Ok(())
 }
 
 fn format_hash(bytes: &[u8; 32]) -> String {
     // Short prefix of the content hash for readability.
     use std::fmt::Write as _;
-    bytes[..6].iter().fold(String::with_capacity(12), |mut acc, b| {
-        let _ = write!(&mut acc, "{b:02x}");
-        acc
-    })
+    bytes[..6]
+        .iter()
+        .fold(String::with_capacity(12), |mut acc, b| {
+            let _ = write!(&mut acc, "{b:02x}");
+            acc
+        })
 }

@@ -17,7 +17,7 @@
 use roko_core::metric::TaskMetric;
 use serde::{Deserialize, Serialize};
 
-use crate::baseline::{compute_baseline, Baseline};
+use crate::baseline::{Baseline, compute_baseline};
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 
@@ -160,8 +160,8 @@ pub fn detect_regressions(
 
     // ── Overall pass rate ───────────────────────────────────────────
     if baseline.overall_pass_rate > 0.0 {
-        let drop =
-            (baseline.overall_pass_rate - current_baseline.overall_pass_rate) / baseline.overall_pass_rate;
+        let drop = (baseline.overall_pass_rate - current_baseline.overall_pass_rate)
+            / baseline.overall_pass_rate;
 
         if drop > thresholds.pass_rate_drop {
             alerts.push(RegressionAlert {
@@ -201,8 +201,8 @@ pub fn detect_regressions(
 
     // ── Overall cost ────────────────────────────────────────────────
     if baseline.overall_avg_cost > 0.0 {
-        let increase =
-            (current_baseline.overall_avg_cost - baseline.overall_avg_cost) / baseline.overall_avg_cost;
+        let increase = (current_baseline.overall_avg_cost - baseline.overall_avg_cost)
+            / baseline.overall_avg_cost;
 
         if increase > thresholds.cost_increase {
             alerts.push(RegressionAlert {
@@ -241,7 +241,8 @@ pub fn detect_regressions(
 
     // ── Overall duration ────────────────────────────────────────────
     if baseline.overall_avg_duration_ms > 0.0 {
-        let increase = (current_baseline.overall_avg_duration_ms - baseline.overall_avg_duration_ms)
+        let increase = (current_baseline.overall_avg_duration_ms
+            - baseline.overall_avg_duration_ms)
             / baseline.overall_avg_duration_ms;
 
         if increase > thresholds.duration_increase {
@@ -263,9 +264,7 @@ pub fn detect_regressions(
         }
     }
 
-    let has_regressions = alerts
-        .iter()
-        .any(|a| a.severity == AlertSeverity::Alert);
+    let has_regressions = alerts.iter().any(|a| a.severity == AlertSeverity::Alert);
 
     RegressionReport {
         alerts,
@@ -285,11 +284,21 @@ mod tests {
 
     fn baseline_records() -> Vec<TaskMetric> {
         vec![
-            make_rich_metric("p1", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 10000),
-            make_rich_metric("p2", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 10000),
-            make_rich_metric("p3", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 10000),
-            make_rich_metric("p4", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 10000),
-            make_rich_metric("p5", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 10000),
+            make_rich_metric(
+                "p1", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 10000,
+            ),
+            make_rich_metric(
+                "p2", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 10000,
+            ),
+            make_rich_metric(
+                "p3", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 10000,
+            ),
+            make_rich_metric(
+                "p4", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 10000,
+            ),
+            make_rich_metric(
+                "p5", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 10000,
+            ),
         ]
     }
 
@@ -314,11 +323,21 @@ mod tests {
 
         // Current: only 2/5 pass = 40% pass rate → 60% drop > 15% threshold
         let current = vec![
-            make_rich_metric("p1", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 10000),
-            make_rich_metric("p2", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 10000),
-            make_rich_metric("p3", "t1", "Impl", "s", "std", "compile", false, 1, 0.50, 1000, 200, 10000),
-            make_rich_metric("p4", "t1", "Impl", "s", "std", "compile", false, 1, 0.50, 1000, 200, 10000),
-            make_rich_metric("p5", "t1", "Impl", "s", "std", "compile", false, 1, 0.50, 1000, 200, 10000),
+            make_rich_metric(
+                "p1", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 10000,
+            ),
+            make_rich_metric(
+                "p2", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 10000,
+            ),
+            make_rich_metric(
+                "p3", "t1", "Impl", "s", "std", "compile", false, 1, 0.50, 1000, 200, 10000,
+            ),
+            make_rich_metric(
+                "p4", "t1", "Impl", "s", "std", "compile", false, 1, 0.50, 1000, 200, 10000,
+            ),
+            make_rich_metric(
+                "p5", "t1", "Impl", "s", "std", "compile", false, 1, 0.50, 1000, 200, 10000,
+            ),
         ];
 
         let report = detect_regressions(&b, &current, &RegressionThresholds::default());
@@ -335,11 +354,21 @@ mod tests {
 
         // Current: avg cost $0.80 → 60% increase > 20% threshold
         let current = vec![
-            make_rich_metric("p1", "t1", "Impl", "s", "std", "compile", true, 1, 0.80, 1000, 200, 10000),
-            make_rich_metric("p2", "t1", "Impl", "s", "std", "compile", true, 1, 0.80, 1000, 200, 10000),
-            make_rich_metric("p3", "t1", "Impl", "s", "std", "compile", true, 1, 0.80, 1000, 200, 10000),
-            make_rich_metric("p4", "t1", "Impl", "s", "std", "compile", true, 1, 0.80, 1000, 200, 10000),
-            make_rich_metric("p5", "t1", "Impl", "s", "std", "compile", true, 1, 0.80, 1000, 200, 10000),
+            make_rich_metric(
+                "p1", "t1", "Impl", "s", "std", "compile", true, 1, 0.80, 1000, 200, 10000,
+            ),
+            make_rich_metric(
+                "p2", "t1", "Impl", "s", "std", "compile", true, 1, 0.80, 1000, 200, 10000,
+            ),
+            make_rich_metric(
+                "p3", "t1", "Impl", "s", "std", "compile", true, 1, 0.80, 1000, 200, 10000,
+            ),
+            make_rich_metric(
+                "p4", "t1", "Impl", "s", "std", "compile", true, 1, 0.80, 1000, 200, 10000,
+            ),
+            make_rich_metric(
+                "p5", "t1", "Impl", "s", "std", "compile", true, 1, 0.80, 1000, 200, 10000,
+            ),
         ];
 
         let report = detect_regressions(&b, &current, &RegressionThresholds::default());
@@ -355,11 +384,21 @@ mod tests {
 
         // Current: avg duration 15000ms → 50% increase > 30% threshold
         let current = vec![
-            make_rich_metric("p1", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 15000),
-            make_rich_metric("p2", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 15000),
-            make_rich_metric("p3", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 15000),
-            make_rich_metric("p4", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 15000),
-            make_rich_metric("p5", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 15000),
+            make_rich_metric(
+                "p1", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 15000,
+            ),
+            make_rich_metric(
+                "p2", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 15000,
+            ),
+            make_rich_metric(
+                "p3", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 15000,
+            ),
+            make_rich_metric(
+                "p4", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 15000,
+            ),
+            make_rich_metric(
+                "p5", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 15000,
+            ),
         ];
 
         let report = detect_regressions(&b, &current, &RegressionThresholds::default());
@@ -370,14 +409,14 @@ mod tests {
 
     #[test]
     fn regression_insufficient_data_skips_detection() {
-        let base = vec![
-            make_rich_metric("p1", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 10000),
-        ];
+        let base = vec![make_rich_metric(
+            "p1", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 10000,
+        )];
         let b = compute_baseline(&base, 5);
 
-        let current = vec![
-            make_rich_metric("p1", "t1", "Impl", "s", "std", "compile", false, 1, 0.50, 1000, 200, 10000),
-        ];
+        let current = vec![make_rich_metric(
+            "p1", "t1", "Impl", "s", "std", "compile", false, 1, 0.50, 1000, 200, 10000,
+        )];
 
         let report = detect_regressions(&b, &current, &RegressionThresholds::default());
         assert!(!report.sufficient_data);
@@ -392,11 +431,21 @@ mod tests {
 
         // 4/5 pass = 80% → 20% drop from 100%
         let current = vec![
-            make_rich_metric("p1", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 10000),
-            make_rich_metric("p2", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 10000),
-            make_rich_metric("p3", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 10000),
-            make_rich_metric("p4", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 10000),
-            make_rich_metric("p5", "t1", "Impl", "s", "std", "compile", false, 1, 0.50, 1000, 200, 10000),
+            make_rich_metric(
+                "p1", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 10000,
+            ),
+            make_rich_metric(
+                "p2", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 10000,
+            ),
+            make_rich_metric(
+                "p3", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 10000,
+            ),
+            make_rich_metric(
+                "p4", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 10000,
+            ),
+            make_rich_metric(
+                "p5", "t1", "Impl", "s", "std", "compile", false, 1, 0.50, 1000, 200, 10000,
+            ),
         ];
 
         // With strict threshold (10%), 20% drop should fire.
@@ -420,21 +469,41 @@ mod tests {
     fn regression_improvement_detected() {
         // Baseline with 60% pass rate
         let base = vec![
-            make_rich_metric("p1", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 10000),
-            make_rich_metric("p2", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 10000),
-            make_rich_metric("p3", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 10000),
-            make_rich_metric("p4", "t1", "Impl", "s", "std", "compile", false, 1, 0.50, 1000, 200, 10000),
-            make_rich_metric("p5", "t1", "Impl", "s", "std", "compile", false, 1, 0.50, 1000, 200, 10000),
+            make_rich_metric(
+                "p1", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 10000,
+            ),
+            make_rich_metric(
+                "p2", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 10000,
+            ),
+            make_rich_metric(
+                "p3", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 10000,
+            ),
+            make_rich_metric(
+                "p4", "t1", "Impl", "s", "std", "compile", false, 1, 0.50, 1000, 200, 10000,
+            ),
+            make_rich_metric(
+                "p5", "t1", "Impl", "s", "std", "compile", false, 1, 0.50, 1000, 200, 10000,
+            ),
         ];
         let b = compute_baseline(&base, 5);
 
         // Current: 100% pass rate + lower cost → improvements
         let current = vec![
-            make_rich_metric("p1", "t1", "Impl", "s", "std", "compile", true, 1, 0.30, 1000, 200, 10000),
-            make_rich_metric("p2", "t1", "Impl", "s", "std", "compile", true, 1, 0.30, 1000, 200, 10000),
-            make_rich_metric("p3", "t1", "Impl", "s", "std", "compile", true, 1, 0.30, 1000, 200, 10000),
-            make_rich_metric("p4", "t1", "Impl", "s", "std", "compile", true, 1, 0.30, 1000, 200, 10000),
-            make_rich_metric("p5", "t1", "Impl", "s", "std", "compile", true, 1, 0.30, 1000, 200, 10000),
+            make_rich_metric(
+                "p1", "t1", "Impl", "s", "std", "compile", true, 1, 0.30, 1000, 200, 10000,
+            ),
+            make_rich_metric(
+                "p2", "t1", "Impl", "s", "std", "compile", true, 1, 0.30, 1000, 200, 10000,
+            ),
+            make_rich_metric(
+                "p3", "t1", "Impl", "s", "std", "compile", true, 1, 0.30, 1000, 200, 10000,
+            ),
+            make_rich_metric(
+                "p4", "t1", "Impl", "s", "std", "compile", true, 1, 0.30, 1000, 200, 10000,
+            ),
+            make_rich_metric(
+                "p5", "t1", "Impl", "s", "std", "compile", true, 1, 0.30, 1000, 200, 10000,
+            ),
         ];
 
         let report = detect_regressions(&b, &current, &RegressionThresholds::default());

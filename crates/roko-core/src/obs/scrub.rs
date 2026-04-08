@@ -204,7 +204,8 @@ mod tests {
     #[test]
     fn scrubs_multiple_secrets_in_one_line() {
         let scrubber = LogScrubber::new();
-        let input = "keys: sk-ant-abcdefghijklmnopqrstuvwxyz and ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234";
+        let input =
+            "keys: sk-ant-abcdefghijklmnopqrstuvwxyz and ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234";
         let output = scrubber.scrub(input);
         assert!(!output.contains("sk-ant-"));
         assert!(!output.contains("ghp_"));
@@ -242,7 +243,10 @@ mod tests {
     #[test]
     fn default_has_builtin_patterns() {
         let scrubber = LogScrubber::default();
-        assert!(scrubber.pattern_count() >= 5, "should have at least 5 built-in patterns");
+        assert!(
+            scrubber.pattern_count() >= 5,
+            "should have at least 5 built-in patterns"
+        );
     }
 
     #[test]

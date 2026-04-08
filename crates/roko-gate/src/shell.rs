@@ -84,11 +84,9 @@ impl Gate for ShellGate {
                 format!("timed out after {} ms", self.timeout_ms),
             )
             .with_duration(elapsed),
-            Ok(Err(io_err)) => Verdict::fail(
-                &self.name,
-                format!("spawn failed: {io_err}"),
-            )
-            .with_duration(elapsed),
+            Ok(Err(io_err)) => {
+                Verdict::fail(&self.name, format!("spawn failed: {io_err}")).with_duration(elapsed)
+            }
             Ok(Ok(output)) => {
                 let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
                 let stderr = String::from_utf8_lossy(&output.stderr).into_owned();

@@ -45,7 +45,9 @@ async fn alloy_client_reads_block_number_and_chain_id() {
 
 #[tokio::test]
 async fn alloy_wallet_reports_address_and_nonce() {
-    let Some(_) = live_or_skip().await else { return };
+    let Some(_) = live_or_skip().await else {
+        return;
+    };
     let wallet = AlloyChainWallet::from_hex_key(&rpc_url(), DEPLOYER_PK, 31337).unwrap();
     let addr = wallet.address().await.unwrap();
     assert!(addr.starts_with("0x"));
@@ -56,7 +58,9 @@ async fn alloy_wallet_reports_address_and_nonce() {
 
 #[tokio::test]
 async fn alloy_wallet_can_submit_empty_tx_and_get_receipt() {
-    let Some(_) = live_or_skip().await else { return };
+    let Some(_) = live_or_skip().await else {
+        return;
+    };
     let wallet = AlloyChainWallet::from_hex_key(&rpc_url(), DEPLOYER_PK, 31337).unwrap();
     // Self-send of 1 wei — exercises signing + broadcast + receipt polling.
     let from = wallet.address().await.unwrap();

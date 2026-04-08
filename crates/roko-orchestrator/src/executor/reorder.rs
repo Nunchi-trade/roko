@@ -33,7 +33,10 @@ pub fn reorder_queue(queue: &[String], failed_plan_id: &str) -> Vec<String> {
 /// Plans not found in `plan_priorities` are treated as priority 0.
 /// Ties are broken by preserving the original order (stable sort).
 #[must_use]
-pub fn priority_reorder<S: BuildHasher>(queue: &[String], plan_priorities: &HashMap<String, u32, S>) -> Vec<String> {
+pub fn priority_reorder<S: BuildHasher>(
+    queue: &[String],
+    plan_priorities: &HashMap<String, u32, S>,
+) -> Vec<String> {
     let mut indexed: Vec<(usize, &String)> = queue.iter().enumerate().collect();
     indexed.sort_by(|(idx_a, id_a), (idx_b, id_b)| {
         let prio_a = plan_priorities.get(id_a.as_str()).copied().unwrap_or(0);

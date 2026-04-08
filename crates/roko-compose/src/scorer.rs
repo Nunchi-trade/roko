@@ -24,7 +24,7 @@ pub struct SectionScorer {
 impl Default for SectionScorer {
     fn default() -> Self {
         Self {
-            recency_window_ms: 60 * 60 * 1000,    // 1 hour
+            recency_window_ms: 60 * 60 * 1000,        // 1 hour
             staleness_window_ms: 24 * 60 * 60 * 1000, // 24 hours
         }
     }
@@ -90,11 +90,7 @@ mod tests {
     use super::*;
     use crate::prompt::{CacheLayer, Placement};
 
-    fn make_signal(
-        priority: SectionPriority,
-        content: &str,
-        created_at_ms: i64,
-    ) -> Signal {
+    fn make_signal(priority: SectionPriority, content: &str, created_at_ms: i64) -> Signal {
         PromptSection::new("x", content)
             .with_priority(priority)
             .with_cache_layer(CacheLayer::Task)

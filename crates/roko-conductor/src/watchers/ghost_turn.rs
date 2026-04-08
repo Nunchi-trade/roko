@@ -62,14 +62,16 @@ impl Policy for GhostTurnWatcher {
             .count();
 
         if consecutive >= self.max_ghost_turns {
-            vec![Signal::builder(Kind::Custom("conductor.intervention".into()))
-                .body(Body::text(format!(
-                    "{consecutive} consecutive ghost turns detected"
-                )))
-                .tag("watcher", WATCHER_NAME)
-                .tag("severity", "warning")
-                .tag("consecutive", consecutive.to_string())
-                .build()]
+            vec![
+                Signal::builder(Kind::Custom("conductor.intervention".into()))
+                    .body(Body::text(format!(
+                        "{consecutive} consecutive ghost turns detected"
+                    )))
+                    .tag("watcher", WATCHER_NAME)
+                    .tag("severity", "warning")
+                    .tag("consecutive", consecutive.to_string())
+                    .build(),
+            ]
         } else {
             Vec::new()
         }
@@ -163,7 +165,9 @@ mod tests {
         let stream = vec![
             ghost_signal(),
             ghost_signal(),
-            Signal::builder(Kind::GateVerdict).body(Body::empty()).build(),
+            Signal::builder(Kind::GateVerdict)
+                .body(Body::empty())
+                .build(),
             ghost_signal(),
             ghost_signal(),
         ];

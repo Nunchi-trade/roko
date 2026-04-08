@@ -277,10 +277,7 @@ impl StuckDetector {
         }
 
         // Find the last entry with file changes.
-        let last_with_changes = history
-            .iter()
-            .rev()
-            .find(|e| e.files_changed > 0);
+        let last_with_changes = history.iter().rev().find(|e| e.files_changed > 0);
 
         let first_ts = match last_with_changes {
             Some(entry) => entry.timestamp_ms,
@@ -295,10 +292,7 @@ impl StuckDetector {
                 kind: StuckKind::NoProgress,
                 confidence: (elapsed as f64 / self.thresholds.no_progress_ms as f64).min(1.0),
                 duration_ms: Some(elapsed),
-                description: format!(
-                    "no file changes for {:.0}s",
-                    elapsed as f64 / 1000.0
-                ),
+                description: format!("no file changes for {:.0}s", elapsed as f64 / 1000.0),
             })
         } else {
             None
@@ -374,9 +368,7 @@ impl StuckDetector {
                 kind: StuckKind::CompileLoop,
                 confidence: confidence_from_count(consecutive, threshold),
                 duration_ms: None,
-                description: format!(
-                    "{consecutive} consecutive identical compile failures"
-                ),
+                description: format!("{consecutive} consecutive identical compile failures"),
             })
         } else {
             None
@@ -390,8 +382,9 @@ impl StuckDetector {
             return None;
         }
 
-        let consecutive =
-            count_consecutive_from_end(history, |e| e.output_hash.is_empty() && e.files_changed == 0);
+        let consecutive = count_consecutive_from_end(history, |e| {
+            e.output_hash.is_empty() && e.files_changed == 0
+        });
 
         if consecutive >= threshold {
             let duration_ms = if history.len() >= 2 {
@@ -424,8 +417,9 @@ impl StuckDetector {
 
             Some(StuckSignal {
                 kind: StuckKind::ExcessiveRetries,
-                confidence: (f64::from(max_iter) / f64::from(self.thresholds.excessive_retry_count))
-                    .min(1.0),
+                confidence: (f64::from(max_iter)
+                    / f64::from(self.thresholds.excessive_retry_count))
+                .min(1.0),
                 duration_ms,
                 description: format!(
                     "{max_iter} iterations (threshold: {})",
@@ -518,7 +512,9 @@ mod tests {
         }
         let signal = detector().check_stuck(&history);
         // Should not match output loop (3 < 4).
-        let is_output_loop = signal.as_ref().is_some_and(|s| s.kind == StuckKind::OutputLoop);
+        let is_output_loop = signal
+            .as_ref()
+            .is_some_and(|s| s.kind == StuckKind::OutputLoop);
         assert!(!is_output_loop);
     }
 
@@ -613,7 +609,10 @@ mod tests {
         }
         let signal = detector().check_stuck(&history);
         assert!(signal.is_some());
-        assert_eq!(signal.as_ref().expect("signal").kind, StuckKind::EmptyOutput);
+        assert_eq!(
+            signal.as_ref().expect("signal").kind,
+            StuckKind::EmptyOutput
+        );
     }
 
     // ---- Excessive retries ----
@@ -632,7 +631,10 @@ mod tests {
         }
         let signal = detector().check_stuck(&entries);
         assert!(signal.is_some());
-        assert_eq!(signal.as_ref().expect("signal").kind, StuckKind::ExcessiveRetries);
+        assert_eq!(
+            signal.as_ref().expect("signal").kind,
+            StuckKind::ExcessiveRetries
+        );
     }
 
     #[test]
@@ -686,13 +688,7 @@ mod tests {
         // Build a history with both empty outputs and excessive retries.
         let mut entries = Vec::new();
         for i in 0..7 {
-            entries.push(ActivityEntry::new(
-                i64::from(i) * 1000,
-                "",
-                0,
-                None,
-                i + 1,
-            ));
+            entries.push(ActivityEntry::new(i64::from(i) * 1000, "", 0, None, i + 1));
         }
         let signals = detector().check_all(&entries);
         assert!(signals.len() >= 2, "expected >=2, got {}", signals.len());

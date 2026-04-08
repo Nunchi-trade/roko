@@ -46,22 +46,20 @@ impl Policy for IterationLoopWatcher {
     fn decide(&self, stream: &[Signal], _ctx: &Context) -> Vec<Signal> {
         let restart_count = stream
             .iter()
-            .filter(|s| {
-                s.kind == Kind::PlanPhase && s.tag(IMPL_RESTART_TAG) == Some("true")
-            })
+            .filter(|s| s.kind == Kind::PlanPhase && s.tag(IMPL_RESTART_TAG) == Some("true"))
             .count();
 
         if restart_count >= self.max_attempts {
-            vec![Signal::builder(Kind::Custom(
-                "conductor.intervention".into(),
-            ))
-            .body(Body::text(format!(
-                "implementer restarted {restart_count} times without advancing"
-            )))
-            .tag("watcher", WATCHER_NAME)
-            .tag("severity", "critical")
-            .tag("attempts", restart_count.to_string())
-            .build()]
+            vec![
+                Signal::builder(Kind::Custom("conductor.intervention".into()))
+                    .body(Body::text(format!(
+                        "implementer restarted {restart_count} times without advancing"
+                    )))
+                    .tag("watcher", WATCHER_NAME)
+                    .tag("severity", "critical")
+                    .tag("attempts", restart_count.to_string())
+                    .build(),
+            ]
         } else {
             Vec::new()
         }
@@ -115,7 +113,11 @@ mod tests {
     #[test]
     fn non_restart_signals_ignored() {
         let w = IterationLoopWatcher::default();
-        let stream = vec![other_phase_signal(), other_phase_signal(), other_phase_signal()];
+        let stream = vec![
+            other_phase_signal(),
+            other_phase_signal(),
+            other_phase_signal(),
+        ];
         assert!(w.decide(&stream, &Context::at(0)).is_empty());
     }
 

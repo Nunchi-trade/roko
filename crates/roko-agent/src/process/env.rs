@@ -87,9 +87,7 @@ mod tests {
 
     #[test]
     fn apply_agent_env_does_not_panic() {
-        let env = AgentEnv::new()
-            .set("TEST_VAR", "hello")
-            .unset("PATH_EXTRA");
+        let env = AgentEnv::new().set("TEST_VAR", "hello").unset("PATH_EXTRA");
         let mut cmd = Command::new("echo");
         apply_agent_env(&mut cmd, &env);
         // Cannot inspect the command's env directly, but ensure no panic.

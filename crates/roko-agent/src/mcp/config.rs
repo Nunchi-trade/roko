@@ -60,11 +60,10 @@ fn load_config(path: &Path) -> Result<(PathBuf, McpConfig), ConfigError> {
         path: path.to_path_buf(),
         detail: e.to_string(),
     })?;
-    let config: McpConfig =
-        serde_json::from_str(&content).map_err(|e| ConfigError::Parse {
-            path: path.to_path_buf(),
-            detail: e.to_string(),
-        })?;
+    let config: McpConfig = serde_json::from_str(&content).map_err(|e| ConfigError::Parse {
+        path: path.to_path_buf(),
+        detail: e.to_string(),
+    })?;
     Ok((path.to_path_buf(), config))
 }
 

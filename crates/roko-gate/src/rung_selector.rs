@@ -59,9 +59,7 @@ impl PlanComplexity {
 
 /// Canonical rung identifiers. Numeric repr matches [`CANONICAL_ORDER`]
 /// position, so derived `Ord` gives the correct execution sequence.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum Rung {
@@ -206,11 +204,7 @@ const fn base_rungs(complexity: PlanComplexity) -> &'static [Rung] {
 ///
 /// Results are always in [`CANONICAL_ORDER`].
 #[must_use]
-pub fn select_rungs(
-    complexity: PlanComplexity,
-    caps: &RungCaps,
-    prior_failures: u32,
-) -> Vec<Rung> {
+pub fn select_rungs(complexity: PlanComplexity, caps: &RungCaps, prior_failures: u32) -> Vec<Rung> {
     let effective = complexity.escalate_by(prior_failures);
     base_rungs(effective)
         .iter()
@@ -300,12 +294,7 @@ mod tests {
         assert!(!rungs.contains(&Rung::Symbol));
         assert_eq!(
             rungs,
-            vec![
-                Rung::Compile,
-                Rung::Lint,
-                Rung::Test,
-                Rung::GeneratedTest,
-            ]
+            vec![Rung::Compile, Rung::Lint, Rung::Test, Rung::GeneratedTest,]
         );
     }
 

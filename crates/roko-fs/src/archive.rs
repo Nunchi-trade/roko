@@ -94,7 +94,8 @@ impl Archiver {
     /// Path to the archive file for a given month (e.g. `2026-04.jsonl`).
     #[must_use]
     pub fn archive_file_for_month(&self, year: i32, month: u32) -> PathBuf {
-        self.archive_dir().join(format!("{year:04}-{month:02}.jsonl"))
+        self.archive_dir()
+            .join(format!("{year:04}-{month:02}.jsonl"))
     }
 
     /// Archive a single run directory.
@@ -171,11 +172,7 @@ impl Archiver {
     /// # Errors
     ///
     /// Returns an error on I/O failure (other than not-found).
-    pub async fn read_month(
-        &self,
-        year: i32,
-        month: u32,
-    ) -> std::io::Result<Vec<ArchiveEntry>> {
+    pub async fn read_month(&self, year: i32, month: u32) -> std::io::Result<Vec<ArchiveEntry>> {
         let path = self.archive_file_for_month(year, month);
         read_archive_file(&path).await
     }
@@ -222,10 +219,7 @@ impl Archiver {
     /// Useful for reducing N individual episode entries into one aggregate
     /// record.
     #[must_use]
-    pub fn iteration_summary(
-        entries: &[ArchiveEntry],
-        source_id: &str,
-    ) -> Option<ArchiveEntry> {
+    pub fn iteration_summary(entries: &[ArchiveEntry], source_id: &str) -> Option<ArchiveEntry> {
         if entries.is_empty() {
             return None;
         }
@@ -385,7 +379,9 @@ mod tests {
 
         // Create a run directory.
         let run_dir = archiver.layout.run_dir("run-1");
-        tokio::fs::create_dir_all(&run_dir).await.expect("create run dir");
+        tokio::fs::create_dir_all(&run_dir)
+            .await
+            .expect("create run dir");
         tokio::fs::write(run_dir.join("data.txt"), "hello")
             .await
             .expect("write");
@@ -399,7 +395,10 @@ mod tests {
 
         assert_eq!(entry.kind, ArchiveKind::Run);
         assert_eq!(entry.source_id, "run-1");
-        assert!(!run_dir.exists(), "run dir should be removed after archival");
+        assert!(
+            !run_dir.exists(),
+            "run dir should be removed after archival"
+        );
 
         // Verify it was written to the archive file.
         let entries = archiver.read_month(2026, 4).await.expect("read month");
@@ -507,8 +506,8 @@ mod tests {
             },
         ];
 
-        let summary = Archiver::iteration_summary(&entries, "summary-1")
-            .expect("should produce summary");
+        let summary =
+            Archiver::iteration_summary(&entries, "summary-1").expect("should produce summary");
         assert_eq!(summary.source_id, "summary-1");
         assert_eq!(summary.item_count, 10);
         assert_eq!(summary.stats.gate_passes, 7);

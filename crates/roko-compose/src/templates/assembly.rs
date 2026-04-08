@@ -13,12 +13,12 @@
 //! `*_prompt()` functions that concatenate sections under budget) into a
 //! reusable, I/O-free assembler.
 
-use crate::prompt::{
-    estimate_tokens, CacheLayer, ContextStrategy, Placement, PromptBuild, PromptSection,
-    SectionPriority,
-};
-use super::common::{CONTEXT_LAYOUT_STANZA, MCP_TOOLS_STANZA};
 use super::RolePromptTemplate;
+use super::common::{CONTEXT_LAYOUT_STANZA, MCP_TOOLS_STANZA};
+use crate::prompt::{
+    CacheLayer, ContextStrategy, Placement, PromptBuild, PromptSection, SectionPriority,
+    estimate_tokens,
+};
 
 /// High-level prompt assembler.
 ///
@@ -214,8 +214,8 @@ fn render(sections: &[PromptSection], headers: bool) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::{PlanSlice, QuickReviewerInput, QuickReviewerTemplate};
+    use super::*;
 
     #[test]
     fn render_golden_full_assembly() {
@@ -235,12 +235,7 @@ mod tests {
             prior_review: None,
         };
 
-        let build = assembler.assemble_from(
-            &template,
-            &input,
-            None,
-            ContextStrategy::Full,
-        );
+        let build = assembler.assemble_from(&template, &input, None, ContextStrategy::Full);
 
         // Prompt contains role identity, plan content, and common stanzas
         assert!(build.prompt.contains("Quick Reviewer"));
@@ -262,10 +257,8 @@ mod tests {
             .without_context_layout()
             .without_mcp_tools();
 
-        let sections = vec![
-            PromptSection::new("task", "implement X")
-                .with_priority(SectionPriority::High),
-        ];
+        let sections =
+            vec![PromptSection::new("task", "implement X").with_priority(SectionPriority::High)];
 
         let build = assembler.assemble(
             "You are a test agent.",
@@ -289,20 +282,13 @@ mod tests {
             .without_mcp_tools();
 
         let sections = vec![
-            PromptSection::new("important", "keep this")
-                .with_priority(SectionPriority::Critical),
-            PromptSection::new("filler", &"x".repeat(4000))
-                .with_priority(SectionPriority::Low),
+            PromptSection::new("important", "keep this").with_priority(SectionPriority::Critical),
+            PromptSection::new("filler", &"x".repeat(4000)).with_priority(SectionPriority::Low),
         ];
 
         // Budget of 30 tokens (~120 chars) — role identity + "keep this" fits,
         // but the 4000-char filler does not.
-        let build = assembler.assemble(
-            "Agent",
-            sections,
-            Some(30),
-            ContextStrategy::Trimmed,
-        );
+        let build = assembler.assemble("Agent", sections, Some(30), ContextStrategy::Trimmed);
 
         assert!(build.prompt.contains("keep this"));
         assert!(!build.prompt.contains("xxxx"));
@@ -319,18 +305,11 @@ mod tests {
             .without_mcp_tools();
 
         let sections = vec![
-            PromptSection::new("end_section", "I am end")
-                .with_placement(Placement::End),
-            PromptSection::new("middle_section", "I am middle")
-                .with_placement(Placement::Middle),
+            PromptSection::new("end_section", "I am end").with_placement(Placement::End),
+            PromptSection::new("middle_section", "I am middle").with_placement(Placement::Middle),
         ];
 
-        let build = assembler.assemble(
-            "Role start",
-            sections,
-            None,
-            ContextStrategy::Full,
-        );
+        let build = assembler.assemble("Role start", sections, None, ContextStrategy::Full);
 
         // Role identity is Start, then middle, then end
         let start_pos = build.prompt.find("Role start").unwrap();
@@ -347,17 +326,10 @@ mod tests {
             .without_mcp_tools()
             .with_headers();
 
-        let sections = vec![
-            PromptSection::new("task", "do the thing")
-                .with_priority(SectionPriority::High),
-        ];
+        let sections =
+            vec![PromptSection::new("task", "do the thing").with_priority(SectionPriority::High)];
 
-        let build = assembler.assemble(
-            "Agent role.",
-            sections,
-            None,
-            ContextStrategy::Full,
-        );
+        let build = assembler.assemble("Agent role.", sections, None, ContextStrategy::Full);
 
         assert!(build.prompt.contains("--- role_identity ---"));
         assert!(build.prompt.contains("--- task ---"));
@@ -375,12 +347,7 @@ mod tests {
                 .with_hard_cap(5),
         ];
 
-        let build = assembler.assemble(
-            "Role",
-            sections,
-            None,
-            ContextStrategy::Full,
-        );
+        let build = assembler.assemble("Role", sections, None, ContextStrategy::Full);
 
         // The 400-char section should be truncated to ~20 bytes + marker
         assert!(build.prompt.contains("[truncated"));
@@ -392,10 +359,8 @@ mod tests {
     fn assembly_determinism() {
         let assembler = PromptAssembler::new();
         let sections1 = vec![
-            PromptSection::new("a", "content a")
-                .with_priority(SectionPriority::High),
-            PromptSection::new("b", "content b")
-                .with_priority(SectionPriority::Normal),
+            PromptSection::new("a", "content a").with_priority(SectionPriority::High),
+            PromptSection::new("b", "content b").with_priority(SectionPriority::Normal),
         ];
         let sections2 = sections1.clone();
 
@@ -417,12 +382,7 @@ mod tests {
                 .with_priority(SectionPriority::High),
         ];
 
-        let build = assembler.assemble(
-            "Retry agent.",
-            sections,
-            None,
-            ContextStrategy::Retry,
-        );
+        let build = assembler.assemble("Retry agent.", sections, None, ContextStrategy::Retry);
 
         assert_eq!(build.context_strategy, ContextStrategy::Retry);
         assert!(build.prompt.contains("Previous errors"));

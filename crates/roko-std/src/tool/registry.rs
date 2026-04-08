@@ -133,7 +133,11 @@ mod tests {
     fn no_duplicate_names() {
         let mut seen = HashSet::new();
         for t in ROKO_BUILTIN_TOOLS.iter() {
-            assert!(seen.insert(t.name.clone()), "duplicate tool name: {}", t.name);
+            assert!(
+                seen.insert(t.name.clone()),
+                "duplicate tool name: {}",
+                t.name
+            );
         }
         assert_eq!(seen.len(), TOOL_COUNT);
     }
@@ -174,12 +178,14 @@ mod tests {
     #[test]
     fn validate_known_tool_with_object_args_is_ok() {
         let reg = StaticToolRegistry::new();
-        assert!(reg
-            .validate_args("read_file", &serde_json::json!({}))
-            .is_ok());
-        assert!(reg
-            .validate_args("bash", &serde_json::json!({"command": "ls"}))
-            .is_ok());
+        assert!(
+            reg.validate_args("read_file", &serde_json::json!({}))
+                .is_ok()
+        );
+        assert!(
+            reg.validate_args("bash", &serde_json::json!({"command": "ls"}))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -198,7 +204,10 @@ mod tests {
     fn for_role_implementer_is_nonempty() {
         let reg = StaticToolRegistry::new();
         let tools = reg.for_role(AgentRole::Implementer);
-        assert!(!tools.is_empty(), "Implementer should see at least one tool");
+        assert!(
+            !tools.is_empty(),
+            "Implementer should see at least one tool"
+        );
         // Implementer has read + write + exec → should see write_file and bash.
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"read_file"));

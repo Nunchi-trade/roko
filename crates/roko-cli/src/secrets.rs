@@ -57,9 +57,7 @@ pub fn dispatch_secrets(cmd: &SecretsCmd, workdir: &Path) -> Result<()> {
 fn cmd_set(store: &FileStore, namespace: &str, key: &str) -> Result<()> {
     let value = read_value_from_stdin()?;
     let ns = Namespace::new(namespace, key);
-    store
-        .set(&ns, value)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    store.set(&ns, value).map_err(|e| anyhow::anyhow!("{e}"))?;
     println!("secret {namespace}.{key} stored");
     Ok(())
 }
@@ -84,9 +82,7 @@ fn cmd_list(store: &FileStore, namespace: Option<&str>, secrets_path: &Path) -> 
         println!("(no secrets stored)");
         return Ok(());
     }
-    let value: toml::Value = text
-        .parse()
-        .with_context(|| "parse secrets.toml")?;
+    let value: toml::Value = text.parse().with_context(|| "parse secrets.toml")?;
     let Some(root) = value.as_table() else {
         println!("(no secrets stored)");
         return Ok(());

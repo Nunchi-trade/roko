@@ -84,7 +84,11 @@ impl std::fmt::Display for ExecutorAction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::DispatchPlan { plan_id } => write!(f, "dispatch({plan_id})"),
-            Self::SpawnAgent { plan_id, role, task } => {
+            Self::SpawnAgent {
+                plan_id,
+                role,
+                task,
+            } => {
                 write!(f, "spawn({plan_id}, {role}, {task})")
             }
             Self::RunGate { plan_id, rung } => write!(f, "gate({plan_id}, rung={rung})"),
@@ -93,7 +97,10 @@ impl std::fmt::Display for ExecutorAction {
                 write!(f, "fail({plan_id}: {reason})")
             }
             Self::CompletePlan { plan_id } => write!(f, "complete({plan_id})"),
-            Self::Reorder { plan_id, new_position } => {
+            Self::Reorder {
+                plan_id,
+                new_position,
+            } => {
                 write!(f, "reorder({plan_id} -> {new_position})")
             }
             Self::PausePlan { plan_id } => write!(f, "pause({plan_id})"),
@@ -109,7 +116,9 @@ mod tests {
 
     #[test]
     fn action_display_formats() {
-        let a = ExecutorAction::DispatchPlan { plan_id: "p1".into() };
+        let a = ExecutorAction::DispatchPlan {
+            plan_id: "p1".into(),
+        };
         assert_eq!(a.to_string(), "dispatch(p1)");
 
         let b = ExecutorAction::SpawnAgent {
@@ -119,7 +128,10 @@ mod tests {
         };
         assert!(b.to_string().contains("implementer"));
 
-        let c = ExecutorAction::RunGate { plan_id: "p3".into(), rung: 2 };
+        let c = ExecutorAction::RunGate {
+            plan_id: "p3".into(),
+            rung: 2,
+        };
         assert_eq!(c.to_string(), "gate(p3, rung=2)");
     }
 
@@ -138,25 +150,38 @@ mod tests {
     #[test]
     fn all_variants_serialize() {
         let variants: Vec<ExecutorAction> = vec![
-            ExecutorAction::DispatchPlan { plan_id: "a".into() },
+            ExecutorAction::DispatchPlan {
+                plan_id: "a".into(),
+            },
             ExecutorAction::SpawnAgent {
                 plan_id: "b".into(),
                 role: AgentRole::Implementer,
                 task: "t1".into(),
             },
-            ExecutorAction::RunGate { plan_id: "c".into(), rung: 0 },
-            ExecutorAction::MergeBranch { plan_id: "d".into() },
+            ExecutorAction::RunGate {
+                plan_id: "c".into(),
+                rung: 0,
+            },
+            ExecutorAction::MergeBranch {
+                plan_id: "d".into(),
+            },
             ExecutorAction::FailPlan {
                 plan_id: "e".into(),
                 reason: "boom".into(),
             },
-            ExecutorAction::CompletePlan { plan_id: "f".into() },
+            ExecutorAction::CompletePlan {
+                plan_id: "f".into(),
+            },
             ExecutorAction::Reorder {
                 plan_id: "g".into(),
                 new_position: 5,
             },
-            ExecutorAction::PausePlan { plan_id: "h".into() },
-            ExecutorAction::ResumePlan { plan_id: "i".into() },
+            ExecutorAction::PausePlan {
+                plan_id: "h".into(),
+            },
+            ExecutorAction::ResumePlan {
+                plan_id: "i".into(),
+            },
         ];
         for v in &variants {
             let json = serde_json::to_string(v).unwrap();

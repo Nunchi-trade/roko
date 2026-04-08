@@ -266,7 +266,10 @@ mod tests {
     #[test]
     fn new_populates_all_fields() {
         let p = sample_permit();
-        assert_eq!(p.scope, PermitScope::Path(PathBuf::from("/tmp/work/out.txt")));
+        assert_eq!(
+            p.scope,
+            PermitScope::Path(PathBuf::from("/tmp/work/out.txt"))
+        );
         assert_eq!(p.granted_at_ms, T0);
         assert_eq!(p.ttl_ms, 5_000);
         assert_eq!(p.grantor, "conductor");

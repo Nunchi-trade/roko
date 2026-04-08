@@ -1,0 +1,199 @@
+[meta]
+plan = "P06-process-management"
+iteration = 1
+total = 7
+done = 0
+status = "ready"
+max_parallel = 2
+estimated_total_minutes = 70
+
+# ── T1 ──────────────────────────────────────────────────────────────────────
+# Wire set_process_group + register_spawned_pid into ExecAgent::run.
+#
+# ExecAgent currently calls `Command::new` and `cmd.output()` with no process-
+# group isolation or PID tracking.  After this task, every ExecAgent spawn:
+#   1. Calls `process::set_process_group(&mut cmd)` before spawn.
+#   2. After `cmd.spawn()` (switch from `.output()` to manual spawn+wait to
+#      get a Child handle), calls `process::register_spawned_pid(child.id())`.
+#   3. Calls `process::unregister_pid(pid)` in the finally branch.
+#
+# NOTE: `cmd.output()` does not expose the Child, so ExecAgent must be
+# refactored to use `cmd.spawn()` + `child.wait_with_output()` instead.
+[[task]]
+id = "T1"
+title = "Wire set_process_group and register_spawned_pid into ExecAgent::run"
+status = "ready"
+files = [
+    "crates/roko-agent/src/exec.rs",
+]
+acceptance = [
+    "grep -n 'set_process_group' crates/roko-agent/src/exec.rs returns a match",
+    "grep -n 'register_spawned_pid' crates/roko-agent/src/exec.rs returns a match",
+    "grep -n 'unregister_pid' crates/roko-agent/src/exec.rs returns a match",
+    "grep -n 'spawn()' crates/roko-agent/src/exec.rs returns a match (switched from .output())",
+    "cargo test -p roko-agent -- exec 2>&1 | grep -v FAILED | tail -5",
+]
+depends_on = []
+
+# ── T2 ──────────────────────────────────────────────────────────────────────
+# Replace the blunt `tokio::time::timeout(…, cmd.output())` in ExecAgent with
+# `kill_tree` escalation on timeout.
+#
+# Current code: `timeout(duration, cmd.output())` — when it fires, the child
+# is dropped (kill_on_drop) but no SIGTERM grace period is given.
+#
+# After T1, ExecAgent holds a `Child`.  T2 makes the timeout branch call
+# `process::kill_tree(&mut child, Duration::from_millis(grace_ms))` instead of
+# relying on drop.  The `grace_ms` value should come from a builder method
+# `with_kill_grace_ms(u64)` defaulting to `GRACE_SIGTERM_MS` (800 ms).
+[[task]]
+id = "T2"
+title = "Replace blunt timeout drop with kill_tree SIGTERM-then-SIGKILL escalation in ExecAgent"
+status = "ready"
+files = [
+    "crates/roko-agent/src/exec.rs",
+]
+acceptance = [
+    "grep -n 'kill_tree' crates/roko-agent/src/exec.rs returns a match",
+    "grep -n 'with_kill_grace_ms\\|kill_grace_ms' crates/roko-agent/src/exec.rs returns a match",
+    "grep -n 'GRACE_SIGTERM_MS\\|grace_ms' crates/roko-agent/src/exec.rs returns a match",
+    "cargo test -p roko-agent -- exec::tests::exec_timeout_kills_process 2>&1 | grep -E 'ok|FAILED'",
+    "cargo test -p roko-agent -- tests::kill_tree 2>&1 | grep -E 'ok|FAILED'",
+]
+depends_on = ["T1"]
+
+# ── T3 ──────────────────────────────────────────────────────────────────────
+# Wire classify_benign_stderr + benign_stderr_warn_once into ExecAgent::run.
+#
+# ExecAgent currently logs stderr on failure via `first_line(&stderr)`.
+# After T3, non-empty stderr lines from successful runs are each passed through
+# `process::classify_benign_stderr(line)`.  If classified, the first occurrence
+# is surfaced via `process::benign_stderr_warn_once(key)` (which returns true
+# once per key), and subsequent ones are silently dropped.  Unclassified lines
+# are forwarded to tracing::warn! as before.
+[[task]]
+id = "T3"
+title = "Wire classify_benign_stderr and warn-once suppression into ExecAgent stderr handling"
+status = "ready"
+files = [
+    "crates/roko-agent/src/exec.rs",
+]
+acceptance = [
+    "grep -n 'classify_benign_stderr' crates/roko-agent/src/exec.rs returns a match",
+    "grep -n 'benign_stderr_warn_once' crates/roko-agent/src/exec.rs returns a match",
+    "cargo test -p roko-agent -- exec::tests::exec_stderr_warning 2>&1 | grep -E 'ok|FAILED'",
+    "cargo test -p roko-agent 2>&1 | grep -E '^test result'",
+]
+depends_on = ["T1"]
+
+# ── T4 ──────────────────────────────────────────────────────────────────────
+# Wire the same process management primitives into ClaudeCliAgent::run.
+#
+# ClaudeCliAgent already uses `cmd.spawn()` + `child.wait_with_output()` style,
+# so this is lighter-weight than ExecAgent.  Apply:
+#   - `set_process_group(&mut cmd)` before spawn (process isolation)
+#   - `register_spawned_pid(child.id())` after spawn
+#   - `unregister_pid(pid)` in finally/drop
+#   - `kill_tree(&mut child, grace)` on timeout path (replace drop-based kill)
+#   - `classify_benign_stderr` / `benign_stderr_warn_once` on stderr lines
+[[task]]
+id = "T4"
+title = "Wire process group, PID registry, kill_tree, and benign stderr into ClaudeCliAgent"
+status = "ready"
+files = [
+    "crates/roko-agent/src/claude_cli_agent.rs",
+]
+acceptance = [
+    "grep -n 'set_process_group' crates/roko-agent/src/claude_cli_agent.rs returns a match",
+    "grep -n 'register_spawned_pid' crates/roko-agent/src/claude_cli_agent.rs returns a match",
+    "grep -n 'kill_tree' crates/roko-agent/src/claude_cli_agent.rs returns a match",
+    "grep -n 'classify_benign_stderr' crates/roko-agent/src/claude_cli_agent.rs returns a match",
+    "cargo test -p roko-agent 2>&1 | grep -E '^test result'",
+]
+depends_on = []
+
+# ── T5 ──────────────────────────────────────────────────────────────────────
+# Add ResourceLimits struct and apply_resource_limits() to the process module.
+#
+# Create `crates/roko-agent/src/process/limits.rs` with:
+#   - `ResourceLimits { max_cpu_secs: Option<u64>, max_rss_bytes: Option<u64> }`
+#   - `apply_resource_limits(cmd: &mut Command, limits: &ResourceLimits)` that
+#     installs a `pre_exec` hook on Unix calling `setrlimit(RLIMIT_CPU, …)` and
+#     `setrlimit(RLIMIT_RSS, …)` (or RLIMIT_AS on Linux) as appropriate.
+#   - Non-Unix stub: no-op.
+# Export from `process/mod.rs` as `ResourceLimits` and `apply_resource_limits`.
+# Add `with_resource_limits(ResourceLimits)` builder method to ExecAgent.
+[[task]]
+id = "T5"
+title = "Add ResourceLimits struct and apply_resource_limits pre-exec hook to process module"
+status = "ready"
+files = [
+    "crates/roko-agent/src/process/limits.rs",
+    "crates/roko-agent/src/process/mod.rs",
+    "crates/roko-agent/src/exec.rs",
+]
+acceptance = [
+    "test -f crates/roko-agent/src/process/limits.rs",
+    "grep -n 'ResourceLimits' crates/roko-agent/src/process/limits.rs returns a match",
+    "grep -n 'apply_resource_limits' crates/roko-agent/src/process/limits.rs returns a match",
+    "grep -n 'pub mod limits' crates/roko-agent/src/process/mod.rs returns a match",
+    "grep -n 'ResourceLimits' crates/roko-agent/src/process/mod.rs returns a match",
+    "grep -n 'with_resource_limits' crates/roko-agent/src/exec.rs returns a match",
+    "cargo test -p roko-agent 2>&1 | grep -E '^test result'",
+]
+depends_on = []
+
+# ── T6 ──────────────────────────────────────────────────────────────────────
+# Wire orphan reaper startup and GracefulShutdown into CLI main().
+#
+# In `roko-cli/src/main.rs`, in the `main()` or `dispatch()` function:
+#   1. Call `roko_agent::process::cleanup_orphaned_agents()` at startup to kill
+#      any PIDs left over from a previous crash.
+#   2. Create a `roko_core::shutdown::GracefulShutdown` and register a hook that
+#      calls `roko_agent::process::reap_orphaned_children()` on drain.
+#   3. Install a SIGTERM handler (use `tokio::signal::unix::signal`) that calls
+#      `shutdown.drain()` and then exits with code 0.
+#
+# roko-cli's Cargo.toml already depends on roko-agent; check whether roko-core
+# is already a dependency and add it if not.
+[[task]]
+id = "T6"
+title = "Wire orphan reaper startup and GracefulShutdown SIGTERM handler into CLI main"
+status = "ready"
+files = [
+    "crates/roko-cli/src/main.rs",
+    "crates/roko-cli/Cargo.toml",
+]
+acceptance = [
+    "grep -n 'cleanup_orphaned_agents' crates/roko-cli/src/main.rs returns a match",
+    "grep -n 'GracefulShutdown' crates/roko-cli/src/main.rs returns a match",
+    "grep -n 'signal\\|SIGTERM' crates/roko-cli/src/main.rs returns a match",
+    "cargo check -p roko-cli 2>&1 | grep -E '^error' | wc -l | grep '^0$'",
+]
+depends_on = []
+
+# ── T7 ───────────────────────────���──────────────────────────────────────────
+# Add integration test: verify orphan reaper removes stale PIDs from the PID
+# file when those processes are no longer alive.
+#
+# Extend (or add alongside) `crates/roko-agent/tests/process_integration.rs`:
+#   - Register a fake PID (e.g. u32::MAX - 1) via `register_spawned_pid`.
+#   - Call `cleanup_orphaned_agents()`.
+#   - Assert `registered_pids()` no longer contains that fake PID (dead process
+#     is reaped).
+#   - Register a real PID (std::process::id()), call cleanup, assert it is kept
+#     (current process is still alive).
+[[task]]
+id = "T7"
+title = "Add integration tests for orphan reaper: dead PIDs removed, live PID kept"
+status = "ready"
+files = [
+    "crates/roko-agent/tests/process_integration.rs",
+]
+acceptance = [
+    "grep -n 'cleanup_orphaned_agents' crates/roko-agent/tests/process_integration.rs returns a match",
+    "grep -n 'registered_pids' crates/roko-agent/tests/process_integration.rs returns a match",
+    "grep -n 'register_spawned_pid' crates/roko-agent/tests/process_integration.rs returns a match",
+    "cargo test -p roko-agent --test process_integration 2>&1 | grep -E 'ok|FAILED'",
+]
+depends_on = ["T1"]

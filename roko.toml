@@ -1,0 +1,24 @@
+# Roko project config — routes through the bardo gateway
+
+[agent]
+command = "claude"
+args = ["--print", "--output-format", "stream-json", "--dangerously-skip-permissions"]
+model = "claude-sonnet-4-6"
+effort = "high"
+bare_mode = true
+fallback_model = "claude-haiku-4-5"
+timeout_ms = 300000
+env = [
+  ["ANTHROPIC_BASE_URL", "http://127.0.0.1:4000"],
+  ["ANTHROPIC_API_KEY", "mori-local-gateway"],
+]
+
+[prompt]
+token_budget = 50000
+role = "You are a Roko agent working on the roko codebase at /Users/will/dev/nunchi/roko/roko/."
+
+[[gate]]
+kind = "compile"
+
+[[gate]]
+kind = "test"

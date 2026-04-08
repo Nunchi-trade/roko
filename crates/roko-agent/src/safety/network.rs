@@ -99,14 +99,12 @@ impl Default for NetworkPolicy {
 /// 6. Allow-host match (when [`NetworkPolicy::allow_hosts`] is non-empty).
 pub fn check_url_with_policy(url: &str, policy: &NetworkPolicy) -> Result<(), ToolError> {
     // 1. Parse.
-    let parsed = Url::parse(url)
-        .map_err(|_| ToolError::NetworkBlocked(format!("invalid url: {url}")))?;
+    let parsed =
+        Url::parse(url).map_err(|_| ToolError::NetworkBlocked(format!("invalid url: {url}")))?;
 
     // 2. Scheme check.
     let scheme = parsed.scheme();
-    if !policy.allow_schemes.is_empty()
-        && !policy.allow_schemes.iter().any(|s| s == scheme)
-    {
+    if !policy.allow_schemes.is_empty() && !policy.allow_schemes.iter().any(|s| s == scheme) {
         return Err(ToolError::NetworkBlocked(format!(
             "scheme {scheme} not allowed"
         )));
