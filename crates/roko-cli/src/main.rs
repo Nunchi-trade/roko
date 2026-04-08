@@ -250,6 +250,14 @@ enum PlanCmd {
         #[arg(long)]
         from_file: Option<PathBuf>,
     },
+    /// Regenerate an existing plan, filling in missing metadata (tier, verify, context).
+    Regenerate {
+        /// Path to the plan directory (containing tasks.toml).
+        plan_dir: PathBuf,
+        /// Preview changes without overwriting.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1165,6 +1173,62 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                  Create plan.md and tasks.toml files with tier, model_hint, context (read_files with line ranges), \
                  and verify steps (executable shell commands). \
                  Use the cheapest model tier for each task.\n\n{source_text}"
+            );
+
+            run_agent(AgentExecOpts {
+                prompt: &task_prompt,
+                workdir: &workdir,
+                model: model_ref,
+                effort: Some("high"),
+                system_prompt: Some(&system),
+                resume_session: None,
+                env_vars: &gw.vars,
+            }).await
+        }
+        PlanCmd::Regenerate { plan_dir, dry_run } => {
+            use roko_cli::agent_exec::{run_agent, AgentExecOpts, load_gateway_env, model_from_config};
+
+            let workdir = std::env::current_dir().context("resolve cwd")?;
+            let tasks_path = plan_dir.join("tasks.toml");
+            if !tasks_path.exists() {
+                anyhow::bail!("No tasks.toml found in {}", plan_dir.display());
+            }
+
+            let existing = std::fs::read_to_string(&tasks_path)
+                .with_context(|| format!("read {}", tasks_path.display()))?;
+
+            // Validate the existing plan and show issues.
+            if let Ok(tf) = roko_cli::task_parser::TasksFile::parse(&tasks_path) {
+                let issues = tf.validate();
+                if issues.is_empty() {
+                    eprintln!("Plan already has full metadata. Nothing to regenerate.");
+                    return Ok(EXIT_SUCCESS);
+                }
+                eprintln!("Validation issues ({}):", issues.len());
+                for issue in &issues {
+                    eprintln!("  - {issue}");
+                }
+            }
+
+            if dry_run {
+                eprintln!("\n[dry-run] Would regenerate {}", tasks_path.display());
+                let system = roko_cli::plan_generate::build_regeneration_prompt(&workdir, &existing);
+                eprintln!("Prompt length: {} chars", system.len());
+                return Ok(EXIT_SUCCESS);
+            }
+
+            let gw = load_gateway_env(&workdir);
+            let model = model_from_config(&workdir);
+            let model_ref = model.as_deref();
+
+            let system = roko_cli::plan_generate::build_regeneration_prompt(&workdir, &existing);
+            let task_prompt = format!(
+                "Regenerate the tasks.toml at {} with full metadata. \
+                 Read the codebase to fill in tier, model_hint, max_loc, \
+                 context (read_files with line ranges, symbols, anti_patterns), \
+                 and verify steps for each task. \
+                 Write the updated tasks.toml back to the same file.",
+                tasks_path.display()
             );
 
             run_agent(AgentExecOpts {

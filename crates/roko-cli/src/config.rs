@@ -171,6 +171,9 @@ pub struct BudgetConfig {
     /// Maximum USD spend per task.
     #[serde(default = "BudgetConfig::default_max_task")]
     pub max_task_usd: f64,
+    /// Maximum USD spend per session (across all plans).
+    #[serde(default = "BudgetConfig::default_max_session")]
+    pub max_session_usd: f64,
     /// Warn at this percentage of budget consumed.
     #[serde(default = "BudgetConfig::default_warn_pct")]
     pub warn_at_percent: u32,
@@ -179,6 +182,7 @@ pub struct BudgetConfig {
 impl BudgetConfig {
     const fn default_max_plan() -> f64 { 10.0 }
     const fn default_max_task() -> f64 { 1.0 }
+    const fn default_max_session() -> f64 { 50.0 }
     const fn default_warn_pct() -> u32 { 80 }
 }
 
@@ -187,6 +191,7 @@ impl Default for BudgetConfig {
         Self {
             max_plan_usd: Self::default_max_plan(),
             max_task_usd: Self::default_max_task(),
+            max_session_usd: Self::default_max_session(),
             warn_at_percent: Self::default_warn_pct(),
         }
     }

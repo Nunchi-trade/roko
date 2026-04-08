@@ -178,6 +178,32 @@ pub fn build_generation_prompt(workdir: &Path, source: &str, source_type: &str) 
     prompt
 }
 
+/// Build a prompt for regenerating an existing plan in place (§11).
+///
+/// Strips the existing tasks to just `id`/`title`/`depends_on` and asks the
+/// agent to fill in `tier`, `model_hint`, `read_files`, `verify`, `context`,
+/// and `max_loc`.
+pub fn build_regeneration_prompt(workdir: &Path, existing_tasks_toml: &str) -> String {
+    let mut prompt = String::new();
+    let _ = writeln!(prompt, "{PLAN_GENERATOR_SYSTEM_PROMPT}");
+    let _ = writeln!(prompt, "\n---\n");
+    let _ = writeln!(prompt, "## Workspace: {}\n", workdir.display());
+    let _ = writeln!(prompt, "## Task: Regenerate plan\n");
+    let _ = writeln!(
+        prompt,
+        "The following tasks.toml exists but is missing full metadata (tier, model_hint, \
+         read_files, verify, context, max_loc). Your job is to read the codebase and fill in \
+         every field for each task. Keep the existing id, title, and depends_on. Add:\n\
+         - `tier` (mechanical/focused/integrative/architectural)\n\
+         - `model_hint` (the cheapest model for that tier)\n\
+         - `max_loc` (estimated lines of change)\n\
+         - `[task.context]` with read_files, symbols, anti_patterns\n\
+         - `[[task.verify]]` with at least compile + test checks\n\n\
+         ## Existing tasks.toml:\n\n```toml\n{existing_tasks_toml}\n```"
+    );
+    prompt
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

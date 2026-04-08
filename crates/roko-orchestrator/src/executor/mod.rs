@@ -78,6 +78,8 @@ pub struct ParallelExecutor {
     plans: HashMap<String, PlanState>,
     /// Execution queue: `plan_id`s in priority order.
     queue: Vec<String>,
+    /// Cross-plan dependencies: `plan_id` → list of `plan_id`s it depends on.
+    plan_deps: HashMap<String, Vec<String>>,
 }
 
 impl ParallelExecutor {
@@ -88,6 +90,7 @@ impl ParallelExecutor {
             config,
             plans: HashMap::new(),
             queue: Vec::new(),
+            plan_deps: HashMap::new(),
         }
     }
 
@@ -98,6 +101,7 @@ impl ParallelExecutor {
             config,
             plans: snapshot.plan_states,
             queue: snapshot.queue_order,
+            plan_deps: HashMap::new(),
         }
     }
 
@@ -115,12 +119,32 @@ impl ParallelExecutor {
         true
     }
 
+    /// Set cross-plan dependencies (`plan_id` → list of `plan_id`s it depends on).
+    ///
+    /// Plans whose dependencies are not all terminal will be skipped in `tick()`.
+    pub fn set_plan_dependencies(&mut self, deps: HashMap<String, Vec<String>>) {
+        self.plan_deps = deps;
+    }
+
+    /// Check whether all dependency plans for `plan_id` are in a terminal state.
+    fn deps_satisfied(&self, plan_id: &str) -> bool {
+        let Some(deps) = self.plan_deps.get(plan_id) else {
+            return true; // no deps declared
+        };
+        deps.iter().all(|dep| {
+            self.plans
+                .get(dep.as_str())
+                .is_some_and(PlanState::is_terminal)
+        })
+    }
+
     /// One iteration of the main orchestration loop.
     ///
     /// Examines every active (non-terminal, non-paused) plan and returns
     /// the actions the runtime should dispatch. The executor respects
     /// `max_concurrent_plans`: only the first N queued plans are
-    /// considered active.
+    /// considered active. Plans whose cross-plan dependencies are not yet
+    /// terminal are skipped.
     #[must_use]
     pub fn tick(&self) -> Vec<ExecutorAction> {
         let mut actions = Vec::new();
@@ -138,6 +162,11 @@ impl ParallelExecutor {
 
             // Skip paused plans.
             if state.paused {
+                continue;
+            }
+
+            // Skip plans whose cross-plan dependencies are not yet satisfied.
+            if !self.deps_satisfied(plan_id) {
                 continue;
             }
 

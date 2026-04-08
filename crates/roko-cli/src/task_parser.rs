@@ -325,6 +325,26 @@ impl TasksFile {
             }
         }
     }
+
+    /// Validate that all tasks have the full metadata required for execution (§11).
+    ///
+    /// Returns a list of validation issues (empty = valid).
+    pub fn validate(&self) -> Vec<String> {
+        let mut issues = Vec::new();
+        for task in &self.tasks {
+            let tid = &task.id;
+            if task.tier.is_empty() || task.tier == "unknown" {
+                issues.push(format!("{tid}: missing or unknown tier"));
+            }
+            if task.verify.is_empty() {
+                issues.push(format!("{tid}: missing verify steps"));
+            }
+            if task.context.as_ref().is_none_or(|c| c.read_files.is_empty()) {
+                issues.push(format!("{tid}: missing context.read_files"));
+            }
+        }
+        issues
+    }
 }
 
 /// Extract lines from content given a range like "40-80" or "10-".

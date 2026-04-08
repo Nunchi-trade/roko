@@ -346,6 +346,8 @@ struct TaskTracker {
     last_matched_rule_id: Option<String>,
     /// Prompt experiment variant assigned during the last dispatch.
     last_experiment_variant_id: Option<String>,
+    /// Number of consecutive gate failures for this plan (for re-planning, §9).
+    gate_failure_count: u32,
 }
 
 impl TaskTracker {
@@ -364,6 +366,7 @@ impl TaskTracker {
             last_matched_skill_id: None,
             last_matched_rule_id: None,
             last_experiment_variant_id: None,
+            gate_failure_count: 0,
         }
     }
 
@@ -599,8 +602,8 @@ impl PlanRunner {
             executor.add_plan(state);
         }
 
-        // TODO: pass plan_deps to executor for cross-plan ordering
-        // executor.set_plan_dependencies(plan_deps);
+        // Wire cross-plan dependency ordering (§10).
+        executor.set_plan_dependencies(plan_deps);
 
         // Pre-populate task trackers for plans with tasks.toml
         let mut task_trackers = HashMap::new();
@@ -894,6 +897,14 @@ impl PlanRunner {
         decision
     }
 
+    /// Push a conductor signal so watchers can detect anomalies (§7).
+    fn emit_conductor_signal(&mut self, kind: Kind, body: serde_json::Value) {
+        let sig = Signal::builder(kind)
+            .body(Body::Json(body))
+            .build();
+        self.conductor_signals.push(sig);
+    }
+
     /// Take a snapshot of the current executor state.
     ///
     /// # Errors
@@ -1033,7 +1044,16 @@ impl PlanRunner {
     /// Returns an error if agent dispatch, gate execution, or substrate
     /// I/O fails fatally (per-plan failures are recorded in the report).
     pub async fn run_all(&mut self) -> Result<OrchestrationReport> {
-        // Start all queued plans.
+        // Clean up stale worktrees from previous runs (§6).
+        if let Err(e) = self.worktrees.prune().await {
+            eprintln!("[orchestrate] worktree prune failed: {e}");
+        }
+        if let Err(e) = self.worktrees.reclaim_idle().await {
+            eprintln!("[orchestrate] worktree reclaim failed: {e}");
+        }
+
+        // Start plans whose cross-plan dependencies are already satisfied (§10).
+        // Plans with unsatisfied deps will be started once their deps complete.
         let plan_ids: Vec<String> = self
             .executor
             .snapshot(0)
@@ -1078,6 +1098,11 @@ impl PlanRunner {
                 }
                 self.actions_since_save = 0;
             }
+        }
+
+        // Clean up worktrees after completion (§6).
+        if let Err(e) = self.worktrees.reclaim_idle().await {
+            eprintln!("[orchestrate] post-run worktree reclaim failed: {e}");
         }
 
         // Build the report.
@@ -1217,6 +1242,16 @@ impl PlanRunner {
                     EventKind::AgentSpawned,
                     serde_json::json!({"plan_id": plan_id, "role": format!("{role:?}"), "task": task}),
                 );
+                // Conductor signal: agent spawned (§7).
+                self.emit_conductor_signal(
+                    Kind::AgentOutput,
+                    serde_json::json!({
+                        "plan_id": &plan_id,
+                        "role": format!("{role:?}"),
+                        "task": &task,
+                        "event": "spawned",
+                    }),
+                );
 
                 match (role, task.as_str()) {
                     (AgentRole::Strategist, "enrich") => self.handle_enriching(&plan_id).await,
@@ -1259,6 +1294,17 @@ impl PlanRunner {
 
                         // Update adaptive gate thresholds.
                         self.adaptive_thresholds.update(rung, passed);
+
+                        // Conductor signal: gate verdict (§7).
+                        self.emit_conductor_signal(
+                            Kind::GateVerdict,
+                            serde_json::json!({
+                                "plan_id": &plan_id,
+                                "rung": rung,
+                                "passed": passed,
+                                "duration_ms": wall_ms,
+                            }),
+                        );
 
                         // Store gate failure context for AutoFix phase
                         if !passed {
@@ -1309,11 +1355,29 @@ impl PlanRunner {
                             }
                         }
                         let event = if passed {
+                            if let Some(tracker) = self.task_trackers.get_mut(&plan_id) {
+                                tracker.gate_failure_count = 0;
+                            }
                             ExecutorEvent::GatePassed
                         } else {
+                            if let Some(tracker) = self.task_trackers.get_mut(&plan_id) {
+                                tracker.gate_failure_count += 1;
+                            }
                             ExecutorEvent::GateFailed
                         };
                         let _ = self.executor.apply_event(&plan_id, &event);
+
+                        // Failure-driven re-planning (§9): after 3 consecutive
+                        // gate failures, attempt to re-plan.
+                        if !passed {
+                            let failure_count = self.task_trackers
+                                .get(&plan_id)
+                                .map(|t| t.gate_failure_count)
+                                .unwrap_or(0);
+                            if failure_count >= 3 {
+                                self.attempt_replan(&plan_id).await;
+                            }
+                        }
                     }
                     Err(e) => {
                         eprintln!("[orchestrate] gate failed for {plan_id}: {e}");
@@ -1494,7 +1558,15 @@ impl PlanRunner {
             self.handle_implementing_single(plan_id, &ready[0]).await;
         } else {
             // ── Multiple ready tasks: parallel dispatch ──────────────
-            let batch: Vec<String> = ready.into_iter().take(MAX_PARALLEL_TASKS).collect();
+            // Respect per-plan max_parallel from tasks.toml (§6), falling
+            // back to the global MAX_PARALLEL_TASKS constant.
+            let effective_max = self
+                .task_trackers
+                .get(plan_id)
+                .map(|t| t.tasks_file.meta.max_parallel as usize)
+                .filter(|&n| n > 0)
+                .unwrap_or(MAX_PARALLEL_TASKS);
+            let batch: Vec<String> = ready.into_iter().take(effective_max).collect();
             eprintln!(
                 "[orchestrate] Implementing {plan_id}: dispatching {} tasks in parallel: {}",
                 batch.len(),
@@ -1853,6 +1925,16 @@ impl PlanRunner {
             }
         }
 
+        // 5. Crate familiarity score from cascade router observations (§9).
+        let obs_count = self.learning.cascade_router().total_observations();
+        if obs_count > 0 {
+            let familiarity = (obs_count as f64 / 100.0).min(1.0);
+            parts.push(format!(
+                "## Crate Familiarity\nBased on {obs_count} prior observations, \
+                 familiarity score: {familiarity:.2}/1.0."
+            ));
+        }
+
         // Ignore task_text for now — use it in future for semantic search
         let _ = task_text;
 
@@ -1877,6 +1959,35 @@ impl PlanRunner {
 
         if let Ok(text) = result.output.body.as_text() {
             save_task_output(&self.workdir, task_id, text);
+        }
+
+        // ── Observe cascade router for bandit learning (§9) ─────────
+        {
+            use roko_learn::model_router::RoutingContext;
+            use roko_core::TaskComplexityBand;
+
+            let task_def = self.task_trackers.get(plan_id)
+                .and_then(|t| t.tasks_file.tasks.iter().find(|td| td.id == task_id));
+            let complexity = task_def
+                .map(|td| match td.tier.as_str() {
+                    "mechanical" | "fast" => TaskComplexityBand::Fast,
+                    "architectural" | "complex" | "premium" => TaskComplexityBand::Complex,
+                    _ => TaskComplexityBand::Standard,
+                })
+                .unwrap_or(TaskComplexityBand::Standard);
+            let routing_ctx = RoutingContext {
+                task_category: roko_core::TaskCategory::Implementation,
+                complexity,
+                iteration: 0,
+                role: AgentRole::Implementer,
+                crate_familiarity: 0.5,
+                has_prior_failure: false,
+            };
+            let model = self.effective_model();
+            let reward = if result.success { 1.0 } else { 0.0 };
+            self.learning.cascade_router().record_observation(
+                &routing_ctx, &model, reward, result.success,
+            );
         }
 
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -1935,6 +2046,51 @@ impl PlanRunner {
         }
         if let Some(ref skill_id) = update.extracted_skill_id {
             tracing::info!(plan_id = %plan_id, skill = %skill_id, "skill extracted from agent output");
+        }
+    }
+
+    /// Attempt to re-plan after repeated gate failures (§9).
+    ///
+    /// Spawns a Strategist agent with the failure context and asks it to
+    /// update the remaining tasks. Resets the gate failure counter on success.
+    async fn attempt_replan(&mut self, plan_id: &str) {
+        let failure_context = self
+            .task_trackers
+            .get(plan_id)
+            .and_then(|t| t.last_gate_failure.clone())
+            .unwrap_or_default();
+        let failure_phase = self
+            .task_trackers
+            .get(plan_id)
+            .and_then(|t| t.last_gate_failure_phase.clone())
+            .unwrap_or_default();
+
+        let prompt = format!(
+            "The plan '{plan_id}' has failed gates 3+ times consecutively.\n\n\
+             Last failing phase: {failure_phase}\n\
+             Failure details:\n```\n{failure_context}\n```\n\n\
+             Analyze the failures and suggest concrete fixes. Focus on the root cause \
+             and provide updated implementation steps."
+        );
+
+        eprintln!("[orchestrate] Attempting re-plan for {plan_id} after repeated gate failures");
+        match self
+            .dispatch_agent_with(plan_id, AgentRole::Strategist, "replan", Some(prompt), None, None)
+            .await
+        {
+            Ok(_result) => {
+                eprintln!("[orchestrate] Re-plan completed for {plan_id}");
+                if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+                    tracker.gate_failure_count = 0;
+                }
+                // Reset to implementing phase so the updated plan gets executed.
+                let _ = self
+                    .executor
+                    .apply_event(plan_id, &ExecutorEvent::EnrichmentDone);
+            }
+            Err(e) => {
+                eprintln!("[orchestrate] Re-plan failed for {plan_id}: {e}");
+            }
         }
     }
 
@@ -2293,11 +2449,18 @@ impl PlanRunner {
         }
     }
 
-    /// Log a phase transition event.
-    fn log_transition(&self, plan_id: &str, event: &ExecutorEvent) {
+    /// Log a phase transition event and emit a conductor signal (§7).
+    fn log_transition(&mut self, plan_id: &str, event: &ExecutorEvent) {
         self.event_log.append(
             EventKind::PhaseTransition,
             serde_json::json!({"plan_id": plan_id, "event": format!("{event:?}")}),
+        );
+        self.emit_conductor_signal(
+            Kind::PlanPhase,
+            serde_json::json!({
+                "plan_id": plan_id,
+                "event": format!("{event:?}"),
+            }),
         );
     }
 
@@ -2815,6 +2978,38 @@ impl PlanRunner {
             ));
         }
         *self.plan_costs.entry(plan_id.to_string()).or_insert(0.0) += task_cost;
+        let plan_spent = self.plan_costs.get(plan_id).copied().unwrap_or(0.0);
+
+        // ── Warn-at-percent budget check (§8) ───────────────────────
+        let max_plan_usd = self.config.budget.max_plan_usd;
+        let max_session_usd = self.config.budget.max_session_usd;
+        let warn_threshold = self.config.budget.warn_at_percent as f64 / 100.0;
+        if max_plan_usd > 0.0 && plan_spent / max_plan_usd >= warn_threshold {
+            tracing::warn!(
+                plan_id,
+                plan_spent,
+                max_plan_usd,
+                "[budget] plan {plan_id} has consumed {:.0}% of budget (${plan_spent:.2}/${max_plan_usd:.2})",
+                (plan_spent / max_plan_usd) * 100.0,
+            );
+            self.emit_conductor_signal(
+                Kind::Custom("cost-pressure".into()),
+                serde_json::json!({
+                    "plan_id": plan_id,
+                    "plan_spent": plan_spent,
+                    "max_plan_usd": max_plan_usd,
+                    "percent_used": (plan_spent / max_plan_usd) * 100.0,
+                }),
+            );
+        }
+
+        // ── Session budget check (§8) ───────────────────────────────
+        let session_total: f64 = self.plan_costs.values().sum();
+        if max_session_usd > 0.0 && session_total > max_session_usd {
+            return Err(anyhow!(
+                "session budget exceeded: ${session_total:.2} > max_session_usd ${max_session_usd:.2}"
+            ));
+        }
 
         self.learning.costs_db().insert(CostRecord {
             timestamp: chrono::Utc::now().to_rfc3339(),
@@ -2864,6 +3059,21 @@ impl PlanRunner {
                 )
                 .inc_by(cost_micro);
         }
+
+        // ── Conductor signal: agent output (§7) ──────────────────────
+        self.emit_conductor_signal(
+            Kind::AgentOutput,
+            serde_json::json!({
+                "plan_id": plan_id,
+                "task": task,
+                "role": format!("{role:?}"),
+                "model": &selected_model,
+                "cost_usd": task_cost,
+                "duration_ms": result.usage.wall_ms,
+                "tokens": u64::from(result.usage.input_tokens) + u64::from(result.usage.output_tokens),
+                "success": result.success,
+            }),
+        );
 
         // ── Run per-task verification pipeline ──────────────────────
         if let Some(ref td) = task_def {
