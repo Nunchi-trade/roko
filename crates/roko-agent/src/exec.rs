@@ -4,12 +4,16 @@
 //! for testing. This is the lowest-common-denominator LLM integration.
 
 use crate::agent::{Agent, AgentResult};
+use crate::process::{
+    GRACE_STDIN_CLOSE_MS, benign_stderr_warn_once, classify_benign_stderr, kill_tree,
+    register_spawned_pid, set_process_group, unregister_pid,
+};
 use crate::usage::Usage;
 use async_trait::async_trait;
 use roko_core::{Body, Context, Kind, Provenance, Signal};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -116,46 +120,56 @@ impl Agent for ExecAgent {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
         cmd.kill_on_drop(true);
+        set_process_group(&mut cmd);
 
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
-                return self.failure_signal(
-                    input,
-                    &format!("spawn failed: {e}"),
-                    started,
-                );
+                return self.failure_signal(input, &format!("spawn failed: {e}"), started);
             }
         };
+        let pid = child.id();
+        if track_pids()
+            && let Some(pid) = pid
+        {
+            register_spawned_pid(pid);
+        }
+
+        let mut stdout_pipe = child.stdout.take();
+        let mut stderr_pipe = child.stderr.take();
 
         // Write prompt to stdin, then close it.
         if let Some(mut stdin) = child.stdin.take() {
             if let Err(e) = stdin.write_all(prompt_text.as_bytes()).await {
-                return self.failure_signal(
-                    input,
-                    &format!("stdin write failed: {e}"),
-                    started,
-                );
+                let _ = kill_tree(&mut child, Duration::from_millis(GRACE_STDIN_CLOSE_MS)).await;
+                if track_pids()
+                    && let Some(pid) = pid
+                {
+                    unregister_pid(pid);
+                }
+                return self.failure_signal(input, &format!("stdin write failed: {e}"), started);
             }
             drop(stdin);
         }
 
         // Wait for exit with timeout.
-        let output = match timeout(
-            Duration::from_millis(self.timeout_ms),
-            child.wait_with_output(),
-        )
-        .await
-        {
-            Ok(Ok(out)) => out,
+        let status = match timeout(Duration::from_millis(self.timeout_ms), child.wait()).await {
+            Ok(Ok(status)) => status,
             Ok(Err(e)) => {
-                return self.failure_signal(
-                    input,
-                    &format!("wait failed: {e}"),
-                    started,
-                );
+                if track_pids()
+                    && let Some(pid) = pid
+                {
+                    unregister_pid(pid);
+                }
+                return self.failure_signal(input, &format!("wait failed: {e}"), started);
             }
             Err(_) => {
+                let _ = kill_tree(&mut child, Duration::from_millis(GRACE_STDIN_CLOSE_MS)).await;
+                if track_pids()
+                    && let Some(pid) = pid
+                {
+                    unregister_pid(pid);
+                }
                 return self.failure_signal(
                     input,
                     &format!("timed out after {} ms", self.timeout_ms),
@@ -163,14 +177,18 @@ impl Agent for ExecAgent {
                 );
             }
         };
+        if track_pids()
+            && let Some(pid) = pid
+        {
+            unregister_pid(pid);
+        }
 
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        let stdout = read_pipe_to_string(&mut stdout_pipe).await;
+        let stderr = read_pipe_to_string(&mut stderr_pipe).await;
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
-        if !output.status.success() {
-            let code = output
-                .status
+        if !status.success() {
+            let code = status
                 .code()
                 .map_or_else(|| "signal".into(), |c| c.to_string());
             return self.failure_signal(
@@ -188,17 +206,7 @@ impl Agent for ExecAgent {
             .build();
 
         // Trace: one signal per non-empty stderr line (as AgentMessage events).
-        let trace: Vec<Signal> = stderr
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(|line| {
-                Signal::builder(Kind::AgentMessage)
-                    .body(Body::text(line))
-                    .provenance(Provenance::agent(&self.name))
-                    .tag("stream", "stderr")
-                    .build()
-            })
-            .collect();
+        let trace = stderr_trace(&self.name, &stderr);
 
         AgentResult::ok(out_signal)
             .with_trace(trace)
@@ -240,6 +248,49 @@ fn first_line(s: &str) -> &str {
     s.lines().next().unwrap_or(s)
 }
 
+const fn track_pids() -> bool {
+    !cfg!(test)
+}
+
+fn maybe_warn_and_filter_benign(name: &str, line: &str) -> bool {
+    if let Some(benign) = classify_benign_stderr(line) {
+        if benign_stderr_warn_once(benign.key) {
+            eprintln!("[{name}] {}", benign.summary);
+        }
+        return true;
+    }
+    false
+}
+
+fn stderr_trace(name: &str, stderr: &str) -> Vec<Signal> {
+    stderr
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter(|line| !maybe_warn_and_filter_benign(name, line))
+        .map(|line| {
+            Signal::builder(Kind::AgentMessage)
+                .body(Body::text(line))
+                .provenance(Provenance::agent(name))
+                .tag("stream", "stderr")
+                .build()
+        })
+        .collect()
+}
+
+async fn read_pipe_to_string<R>(pipe: &mut Option<R>) -> String
+where
+    R: AsyncRead + Unpin,
+{
+    let Some(reader) = pipe.as_mut() else {
+        return String::new();
+    };
+    let mut bytes = Vec::new();
+    if reader.read_to_end(&mut bytes).await.is_err() {
+        return String::new();
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,11 +311,8 @@ mod tests {
 
     #[tokio::test]
     async fn with_env_accepts_iterator() {
-        let agent = ExecAgent::new(
-            "sh",
-            vec!["-c".into(), "echo $A-$B".into()],
-        )
-        .with_env([("A", "alpha"), ("B", "beta")]);
+        let agent = ExecAgent::new("sh", vec!["-c".into(), "echo $A-$B".into()])
+            .with_env([("A", "alpha"), ("B", "beta")]);
         let result = agent.run(&prompt(""), &Context::now()).await;
         assert!(result.success);
         assert_eq!(result.output.body.as_text().unwrap().trim(), "alpha-beta");
@@ -293,12 +341,14 @@ mod tests {
         let agent = ExecAgent::new("definitely_not_a_real_binary_xyz", vec![]);
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(!result.success);
-        assert!(result
-            .output
-            .body
-            .as_text()
-            .unwrap()
-            .contains("spawn failed"));
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .unwrap()
+                .contains("spawn failed")
+        );
     }
 
     #[tokio::test]
@@ -306,12 +356,7 @@ mod tests {
         let agent = ExecAgent::new("sleep", vec!["10".into()]).with_timeout_ms(100);
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(!result.success);
-        assert!(result
-            .output
-            .body
-            .as_text()
-            .unwrap()
-            .contains("timed out"));
+        assert!(result.output.body.as_text().unwrap().contains("timed out"));
     }
 
     #[tokio::test]
@@ -347,10 +392,20 @@ mod tests {
         assert!(result.output.body.as_text().unwrap().contains("hello"));
         assert_eq!(result.trace.len(), 1);
         assert_eq!(result.trace[0].kind, Kind::AgentMessage);
-        assert!(result.trace[0]
-            .body
-            .as_text()
-            .unwrap()
-            .contains("warning"));
+        assert!(result.trace[0].body.as_text().unwrap().contains("warning"));
+    }
+
+    #[tokio::test]
+    async fn benign_stderr_is_suppressed_from_trace() {
+        let agent = ExecAgent::new(
+            "sh",
+            vec![
+                "-c".into(),
+                "echo ok; echo 'Claude CLI is starting up...' 1>&2".into(),
+            ],
+        );
+        let result = agent.run(&prompt(""), &Context::now()).await;
+        assert!(result.success);
+        assert!(result.trace.is_empty());
     }
 }

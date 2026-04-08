@@ -8,17 +8,20 @@
 
 #![allow(clippy::too_many_lines)]
 
-use anyhow::{anyhow, Context as _, Result};
+use anyhow::{Context as _, Result, anyhow};
 use clap::{Parser, Subcommand, ValueEnum};
+use roko_agent::process::{cleanup_orphaned_agents, reap_orphaned_children};
 use roko_cli::{
-    config_cmd, load_layered, run_init_wizard, run_once, Config, EditTarget, InjectKind,
-    InjectRequest, OneshotMode, PipeMode, Plan, PlanSummary, ReplMode, SessionStatus,
-    Source, WizardInputs, DaemonMode,
+    Config, DaemonMode, EditTarget, InjectKind, InjectRequest, OneshotMode, PipeMode, Plan,
+    PlanSummary, ReplMode, SessionStatus, Source, WizardInputs, config_cmd, load_layered,
+    run_init_wizard, run_once,
 };
 use roko_core::{ContentHash, Context, Kind, Query, Substrate};
-use roko_fs::FileSubstrate;
+use roko_fs::{FileSubstrate, RokoLayout};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use tracing_subscriber::EnvFilter;
 
 // -----------------------------------------------------------------------
 // Exit codes
@@ -66,7 +69,11 @@ impl std::fmt::Display for Effort {
 
 /// Minimal CLI for the Roko universal loop.
 #[derive(Debug, Parser)]
-#[command(name = "roko", version, about = "Minimal CLI for the Roko universal loop")]
+#[command(
+    name = "roko",
+    version,
+    about = "Minimal CLI for the Roko universal loop"
+)]
 struct Cli {
     /// Override the config file (default: `./roko.toml`).
     #[arg(long, global = true)]
@@ -164,6 +171,11 @@ enum Command {
         #[command(subcommand)]
         cmd: PlanCmd,
     },
+    /// Manage product requirements documents (idea, draft, publish, plan).
+    Prd {
+        #[command(subcommand)]
+        cmd: PrdCmd,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -207,6 +219,52 @@ enum PlanCmd {
         #[arg(long)]
         resume: Option<PathBuf>,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum PrdCmd {
+    /// Capture a quick idea.
+    Idea {
+        /// The idea text.
+        text: Vec<String>,
+    },
+    /// List all PRDs (published, drafts, ideas).
+    List,
+    /// Show coverage report across PRDs and plans.
+    Status,
+    /// Create, edit, or promote draft PRDs.
+    Draft {
+        #[command(subcommand)]
+        cmd: PrdDraftCmd,
+    },
+    /// Generate implementation plans from a PRD.
+    Plan {
+        /// PRD slug (filename without .md).
+        slug: String,
+    },
+    /// Scan all PRDs for duplicates, gaps, and inconsistencies.
+    Consolidate,
+}
+
+#[derive(Debug, Subcommand)]
+enum PrdDraftCmd {
+    /// Create a new draft PRD (agent-assisted).
+    New {
+        /// Title for the new PRD.
+        title: Vec<String>,
+    },
+    /// Refine an existing draft.
+    Edit {
+        /// Draft slug (filename without .md).
+        slug: String,
+    },
+    /// Promote a draft to published.
+    Promote {
+        /// Draft slug (filename without .md).
+        slug: String,
+    },
+    /// List all drafts.
+    List,
 }
 
 #[derive(Debug, Subcommand)]
@@ -283,6 +341,7 @@ enum ConfigCmd {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+    init_tracing(&cli);
     let code = match dispatch(cli).await {
         Ok(code) => code,
         Err(e) => {
@@ -341,6 +400,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             workdir,
         } => cmd_inject(cli, session, &kind, payload, workdir),
         Command::Plan { cmd } => cmd_plan(cli, cmd).await,
+        Command::Prd { cmd } => cmd_prd(cli, cmd),
     }
 }
 
@@ -368,7 +428,9 @@ async fn cmd_oneshot(cli: &Cli, prompt: &str) -> Result<i32> {
         .with_quiet(cli.quiet);
 
     let workdir = resolve_workdir(cli);
-    let config = resolve_config(cli)?;
+    prepare_runtime_hooks(&workdir, cli.quiet);
+    let mut config = resolve_config(cli)?;
+    apply_resume_session_override(&mut config, cli.resume.clone());
 
     let report = run_once(&workdir, &config, &mode.prepare().prompt).await?;
     let result = mode.format_result(
@@ -385,9 +447,7 @@ async fn cmd_oneshot(cli: &Cli, prompt: &str) -> Result<i32> {
 }
 
 async fn cmd_pipe(cli: &Cli) -> Result<i32> {
-    let pipe = PipeMode::new()
-        .with_json(cli.json)
-        .with_quiet(cli.quiet);
+    let pipe = PipeMode::new().with_json(cli.json).with_quiet(cli.quiet);
 
     let input = pipe
         .read_input(&mut std::io::stdin().lock())
@@ -417,6 +477,7 @@ fn cmd_headless(cli: &Cli) -> i32 {
         .clone()
         .unwrap_or_else(|| format!("daemon-{}", std::process::id()));
     let workdir = resolve_workdir(cli);
+    prepare_runtime_hooks(&workdir, cli.quiet);
     let mut daemon = DaemonMode::with_workdir(&workdir, session_id);
 
     daemon.start();
@@ -461,6 +522,7 @@ fn dispatch_config(cmd: ConfigCmd) -> Result<()> {
             let mut inputs = WizardInputs {
                 agent_command: agent.clone(),
                 token_budget: budget,
+                model: model.clone(),
                 role,
                 enable_gates: if enable_gates { Some(true) } else { None },
                 yes,
@@ -562,8 +624,8 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
     match cmd {
         PlanCmd::List { workdir } => {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
-            let files = roko_cli::plan::list_plan_files(&wd)
-                .map_err(|e| anyhow!("list plans: {e}"))?;
+            let files =
+                roko_cli::plan::list_plan_files(&wd).map_err(|e| anyhow!("list plans: {e}"))?;
             let summaries: Vec<PlanSummary> = files
                 .iter()
                 .map(|p| {
@@ -615,34 +677,30 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 .map_err(|errs| anyhow!("plan validation failed: {}", errs.join("; ")))?;
 
             let plans_dir = roko_cli::plan::plans_dir(&wd);
-            std::fs::create_dir_all(&plans_dir)
-                .map_err(|e| anyhow!("create plans dir: {e}"))?;
+            std::fs::create_dir_all(&plans_dir).map_err(|e| anyhow!("create plans dir: {e}"))?;
             let path = plans_dir.join(format!("{plan_id}.toml"));
 
             // Write a minimal plan skeleton.
             let content = format!(
                 "# Plan: {}\n# {}\n\n[plan]\nid = \"{}\"\ntitle = \"{}\"\ntasks = []\n",
-                plan.title,
-                plan.description,
-                plan.id,
-                plan.title,
+                plan.title, plan.description, plan.id, plan.title,
             );
-            std::fs::write(&path, content)
-                .map_err(|e| anyhow!("write plan: {e}"))?;
+            std::fs::write(&path, content).map_err(|e| anyhow!("write plan: {e}"))?;
 
             if cli.json {
-                println!(
-                    r#"{{"created":"{}","path":"{}"}}"#,
-                    plan_id,
-                    path.display()
-                );
+                println!(r#"{{"created":"{}","path":"{}"}}"#, plan_id, path.display());
             } else if !cli.quiet {
                 println!("created plan '{}' at {}", plan_id, path.display());
             }
             Ok(EXIT_SUCCESS)
         }
-        PlanCmd::Run { plans_dir, workdir, resume } => {
+        PlanCmd::Run {
+            plans_dir,
+            workdir,
+            resume,
+        } => {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            prepare_runtime_hooks(&wd, cli.quiet);
             let config = load_layered(&wd)?.config;
 
             let mut runner = if let Some(snap_path) = resume {
@@ -653,15 +711,14 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 if events_path.exists() {
                     let log_json = std::fs::read_to_string(&events_path)
                         .map_err(|e| anyhow!("read event log: {e}"))?;
-                    roko_cli::PlanRunner::from_snapshots(
-                        &exec_json, &log_json, &wd, config,
-                    )?
+                    roko_cli::PlanRunner::from_snapshots(&exec_json, &log_json, &wd, config)?
                 } else {
                     roko_cli::PlanRunner::from_snapshot(&exec_json, &wd, config)?
                 }
             } else {
                 roko_cli::PlanRunner::from_plans_dir(&plans_dir, &wd, config)?
             };
+            runner.set_claude_resume_session(cli.resume.clone());
 
             let report = runner.run_all().await?;
 
@@ -669,16 +726,20 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             let snap_path = wd.join(".roko").join("state").join("executor.json");
 
             if cli.json {
-                println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                    "succeeded": report.all_succeeded(),
-                    "total_agent_calls": report.total_agent_calls,
-                    "total_gate_runs": report.total_gate_runs,
-                    "plans": report.plans.iter().map(|p| serde_json::json!({
-                        "plan_id": p.plan_id,
-                        "succeeded": p.succeeded,
-                        "agent_calls": p.agent_calls,
-                    })).collect::<Vec<_>>(),
-                })).unwrap_or_default());
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "succeeded": report.all_succeeded(),
+                        "total_agent_calls": report.total_agent_calls,
+                        "total_gate_runs": report.total_gate_runs,
+                        "plans": report.plans.iter().map(|p| serde_json::json!({
+                            "plan_id": p.plan_id,
+                            "succeeded": p.succeeded,
+                            "agent_calls": p.agent_calls,
+                        })).collect::<Vec<_>>(),
+                    }))
+                    .unwrap_or_default()
+                );
             } else if !cli.quiet {
                 println!("Orchestration complete:");
                 for p in &report.plans {
@@ -694,12 +755,20 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                     "\nTotal: {} agent calls, {} gate runs. Overall: {}",
                     report.total_agent_calls,
                     report.total_gate_runs,
-                    if report.all_succeeded() { "SUCCESS" } else { "FAILED" }
+                    if report.all_succeeded() {
+                        "SUCCESS"
+                    } else {
+                        "FAILED"
+                    }
                 );
                 println!("Snapshot saved to {}", snap_path.display());
             }
 
-            Ok(if report.all_succeeded() { EXIT_SUCCESS } else { EXIT_FAILURE })
+            Ok(if report.all_succeeded() {
+                EXIT_SUCCESS
+            } else {
+                EXIT_FAILURE
+            })
         }
     }
 }
@@ -707,6 +776,128 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
 // -----------------------------------------------------------------------
 // Existing subcommand handlers (init, run, status, replay)
 // -----------------------------------------------------------------------
+
+fn cmd_prd(_cli: &Cli, cmd: PrdCmd) -> Result<i32> {
+    let workdir = std::env::current_dir().context("resolve cwd")?;
+
+    match cmd {
+        PrdCmd::Idea { text } => {
+            let joined = text.join(" ");
+            roko_cli::prd::cmd_idea(&workdir, &joined)?;
+            Ok(0)
+        }
+        PrdCmd::List => {
+            roko_cli::prd::cmd_list(&workdir)?;
+            Ok(0)
+        }
+        PrdCmd::Status => {
+            roko_cli::prd::cmd_status(&workdir, None)?;
+            Ok(0)
+        }
+        PrdCmd::Draft { cmd: draft_cmd } => match draft_cmd {
+            PrdDraftCmd::New { title } => {
+                let title = title.join(" ");
+                let slug = roko_cli::prd::slugify(&title);
+                let drafts = workdir.join(".roko").join("prd").join("drafts");
+                roko_cli::prd::ensure_dirs(&workdir)?;
+                let target = drafts.join(format!("{slug}.md"));
+                if target.exists() {
+                    eprintln!("Draft already exists: {}", target.display());
+                    eprintln!("Use: roko prd draft edit {slug}");
+                    return Ok(1);
+                }
+                // Write the scaffold, then print agent prompt for the user
+                let frontmatter = roko_cli::prd::new_draft_frontmatter(&slug, &title);
+                let body = format!(
+                    "{frontmatter}\
+                     # {title}\n\n\
+                     ## Overview\n\n\
+                     <!-- Describe what this feature/system does and why -->\n\n\
+                     ## Requirements\n\n\
+                     <!-- REQ-XXX items -->\n\n\
+                     ## Acceptance criteria\n\n\
+                     <!-- Machine-verifiable checkboxes -->\n\n\
+                     ## Design\n\n\
+                     <!-- How it should work, reference existing crates -->\n\n\
+                     ## References\n\n\
+                     <!-- Links to relevant source files -->\n"
+                );
+                std::fs::write(&target, &body)?;
+                println!("📄 Draft created: {}", target.display());
+                println!();
+                println!("Edit it manually or run an agent:");
+                println!("  roko prd draft edit {slug}");
+                let prompt = roko_cli::prd::prd_agent_prompt(
+                    &workdir,
+                    &format!(
+                        "Fill in the draft PRD at {path}. Read the codebase to understand what exists. \
+                         Make requirements specific and acceptance criteria machine-verifiable.",
+                        path = target.display()
+                    ),
+                );
+                println!();
+                println!("Or use this prompt with `roko run`:");
+                println!("  roko run '{}'", prompt.lines().next().unwrap_or(""));
+                Ok(0)
+            }
+            PrdDraftCmd::Edit { slug } => {
+                let draft = workdir
+                    .join(".roko")
+                    .join("prd")
+                    .join("drafts")
+                    .join(format!("{slug}.md"));
+                if !draft.exists() {
+                    eprintln!("Draft not found: {}", draft.display());
+                    return Ok(1);
+                }
+                let prompt = roko_cli::prd::prd_agent_prompt(
+                    &workdir,
+                    &format!(
+                        "Read and improve the draft PRD at {path}. \
+                         Check: are requirements specific? Are acceptance criteria machine-verifiable? \
+                         Search the codebase to verify claims. Update the file in place.",
+                        path = draft.display()
+                    ),
+                );
+                println!("Refining draft: {slug}");
+                println!("Run: roko run '{}'", prompt.lines().next().unwrap_or(""));
+                // TODO: once roko run can be called programmatically, do it here
+                Ok(0)
+            }
+            PrdDraftCmd::Promote { slug } => {
+                roko_cli::prd::cmd_promote(&workdir, &slug)?;
+                Ok(0)
+            }
+            PrdDraftCmd::List => {
+                let drafts = workdir.join(".roko").join("prd").join("drafts");
+                roko_cli::prd::ensure_dirs(&workdir)?;
+                let files = roko_cli::prd::list_md_files(&drafts);
+                if files.is_empty() {
+                    println!("No drafts. Create one: roko prd draft new \"title\"");
+                } else {
+                    for f in &files {
+                        println!("  {}", f.file_stem().unwrap_or_default().to_string_lossy());
+                    }
+                }
+                Ok(0)
+            }
+        },
+        PrdCmd::Plan { slug } => {
+            println!("Generating plans from PRD: {slug}");
+            println!("Run: ./scripts/generate-plans.sh checklist \"{slug}\"");
+            // TODO: call agent directly once run_once is refactored to return output
+            Ok(0)
+        }
+        PrdCmd::Consolidate => {
+            println!("Run: ./scripts/roko-prd.sh consolidate");
+            // TODO: call agent directly
+            Ok(0)
+        }
+    }
+}
+
+// Make list_md_files public so main.rs can use it for draft list
+// (it's already pub in prd.rs)
 
 async fn cmd_init(path: Option<PathBuf>) -> Result<()> {
     let target = path.unwrap_or_else(|| PathBuf::from("."));
@@ -745,7 +936,9 @@ async fn cmd_init(path: Option<PathBuf>) -> Result<()> {
 
 async fn cmd_run(cli: &Cli, workdir: Option<PathBuf>, prompt: String) -> Result<i32> {
     let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
-    let config = resolve_config_for_workdir(cli, &workdir)?;
+    prepare_runtime_hooks(&workdir, cli.quiet);
+    let mut config = resolve_config_for_workdir(cli, &workdir)?;
+    apply_resume_session_override(&mut config, cli.resume.clone());
 
     if !cli.quiet {
         println!(
@@ -948,23 +1141,129 @@ fn resolve_config_for_workdir(cli: &Cli, workdir: &Path) -> Result<Config> {
         config.prompt.role.clone_from(role);
     }
     if let Some(model) = &cli.model {
-        // Insert the model as the first arg if not already present.
-        if !config.agent.args.contains(model) {
+        config.agent.model = Some(model.clone());
+        // Non-Claude CLIs often still expect the model as a positional arg.
+        if config.agent.command != "claude" && !config.agent.args.contains(model) {
             config.agent.args.insert(0, model.clone());
         }
     }
     if let Some(effort) = &cli.effort {
-        // Map effort to token budget multiplier.
-        let budget = match effort {
-            Effort::Low => 4_000,
-            Effort::Medium => 10_000,
-            Effort::High => 32_000,
-            Effort::Max => 100_000,
-        };
-        config.prompt.token_budget = budget;
+        config.agent.effort = effort.to_string();
+        // Claude handles effort natively; preserve the prompt budget only for
+        // the older stdin/stdout backends.
+        if config.agent.command != "claude" {
+            let budget = match effort {
+                Effort::Low => 4_000,
+                Effort::Medium => 10_000,
+                Effort::High => 32_000,
+                Effort::Max => 100_000,
+            };
+            config.prompt.token_budget = budget;
+        }
     }
 
     Ok(config)
+}
+
+fn apply_resume_session_override(config: &mut Config, resume: Option<String>) {
+    let Some(session_id) = resume
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+
+    if let Some(existing) = config
+        .agent
+        .env
+        .iter_mut()
+        .find(|(key, _)| key.eq_ignore_ascii_case("ROKO_SESSION_ID"))
+    {
+        existing.1 = session_id;
+    } else {
+        config
+            .agent
+            .env
+            .push(("ROKO_SESSION_ID".to_string(), session_id));
+    }
+}
+
+fn init_tracing(cli: &Cli) {
+    static INIT: OnceLock<()> = OnceLock::new();
+    INIT.get_or_init(|| {
+        let env_filter = if std::env::var_os("RUST_LOG").is_some() {
+            EnvFilter::from_default_env()
+        } else if cli.quiet {
+            EnvFilter::new("warn")
+        } else {
+            EnvFilter::new("info")
+        };
+
+        if cli.json {
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter(env_filter)
+                .with_ansi(false)
+                .json()
+                .try_init();
+        } else {
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter(env_filter)
+                .try_init();
+        }
+    });
+}
+
+fn prepare_runtime_hooks(workdir: &Path, quiet: bool) {
+    if let Err(err) = bootstrap_observability_dirs(workdir) {
+        if !quiet {
+            eprintln!("warning: observability bootstrap failed: {err}");
+        }
+    }
+    run_process_lifecycle_hooks(workdir, quiet);
+}
+
+fn bootstrap_observability_dirs(workdir: &Path) -> std::io::Result<()> {
+    let layout = RokoLayout::for_project(workdir);
+    std::fs::create_dir_all(layout.root())?;
+    for dir in layout.top_level_dirs() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::create_dir_all(layout.root().join("traces"))?;
+    std::fs::create_dir_all(layout.root().join("metrics"))?;
+    Ok(())
+}
+
+fn run_process_lifecycle_hooks(workdir: &Path, quiet: bool) {
+    // The process registry currently keys off `std::env::current_dir()`.
+    // Avoid cleaning the wrong workspace when `--repo` points elsewhere.
+    if !process_registry_matches_workdir(workdir) {
+        tracing::debug!(
+            workdir = %workdir.display(),
+            "skipping process lifecycle hooks; registry is cwd-scoped",
+        );
+        return;
+    }
+    cleanup_orphaned_agents();
+    let reaped = reap_orphaned_children();
+    if reaped > 0 && !quiet {
+        eprintln!("reaped {reaped} orphaned agent process(es)");
+    }
+}
+
+fn process_registry_matches_workdir(workdir: &Path) -> bool {
+    let cwd = std::env::current_dir().ok();
+    let target = if workdir.is_absolute() {
+        Some(workdir.to_path_buf())
+    } else {
+        cwd.clone().map(|base| base.join(workdir))
+    };
+
+    let Some(cwd) = cwd else { return false };
+    let Some(target) = target else { return false };
+
+    let lhs = std::fs::canonicalize(cwd).unwrap_or_else(|_| PathBuf::from("."));
+    let rhs = std::fs::canonicalize(&target).unwrap_or(target);
+    lhs == rhs
 }
 
 // -----------------------------------------------------------------------
@@ -1065,15 +1364,8 @@ mod tests {
 
     #[test]
     fn cli_parses_plan_create() {
-        let cli = Cli::try_parse_from([
-            "roko",
-            "plan",
-            "create",
-            "my-plan",
-            "--title",
-            "My Plan",
-        ])
-        .unwrap();
+        let cli = Cli::try_parse_from(["roko", "plan", "create", "my-plan", "--title", "My Plan"])
+            .unwrap();
         assert!(matches!(
             cli.command,
             Some(Command::Plan {
@@ -1089,6 +1381,40 @@ mod tests {
     }
 
     #[test]
+    fn apply_resume_session_override_adds_env_var() {
+        let mut config = Config::default();
+        apply_resume_session_override(&mut config, Some("sess-42".to_string()));
+        assert_eq!(
+            config
+                .agent
+                .env
+                .iter()
+                .find(|(key, _)| key == "ROKO_SESSION_ID")
+                .map(|(_, value)| value.as_str()),
+            Some("sess-42")
+        );
+    }
+
+    #[test]
+    fn apply_resume_session_override_updates_existing_env_var() {
+        let mut config = Config::default();
+        config
+            .agent
+            .env
+            .push(("ROKO_SESSION_ID".to_string(), "old".to_string()));
+        apply_resume_session_override(&mut config, Some("  sess-99  ".to_string()));
+        assert_eq!(
+            config
+                .agent
+                .env
+                .iter()
+                .find(|(key, _)| key == "ROKO_SESSION_ID")
+                .map(|(_, value)| value.as_str()),
+            Some("sess-99")
+        );
+    }
+
+    #[test]
     fn effort_display() {
         assert_eq!(Effort::Low.to_string(), "low");
         assert_eq!(Effort::Medium.to_string(), "medium");
@@ -1100,8 +1426,7 @@ mod tests {
     fn effort_value_enum_all_variants() {
         // Ensure all four variants parse.
         for name in &["low", "medium", "high", "max"] {
-            let cli =
-                Cli::try_parse_from(["roko", "--effort", name]).unwrap();
+            let cli = Cli::try_parse_from(["roko", "--effort", name]).unwrap();
             assert!(cli.effort.is_some());
         }
     }
@@ -1140,5 +1465,27 @@ mod tests {
     fn cli_parses_replay_subcommand() {
         let cli = Cli::try_parse_from(["roko", "replay", "abcd1234"]).unwrap();
         assert!(matches!(cli.command, Some(Command::Replay { .. })));
+    }
+
+    #[test]
+    fn bootstrap_observability_dirs_creates_expected_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        bootstrap_observability_dirs(tmp.path()).unwrap();
+        let roko = tmp.path().join(".roko");
+        assert!(roko.join("traces").is_dir());
+        assert!(roko.join("metrics").is_dir());
+        assert!(roko.join("runtime").is_dir());
+        assert!(roko.join("runs").is_dir());
+    }
+
+    #[test]
+    fn process_registry_matches_workdir_for_current_dir() {
+        assert!(process_registry_matches_workdir(Path::new(".")));
+    }
+
+    #[test]
+    fn process_registry_does_not_match_unrelated_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!process_registry_matches_workdir(tmp.path()));
     }
 }

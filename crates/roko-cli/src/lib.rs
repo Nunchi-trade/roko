@@ -20,24 +20,28 @@ pub mod oneshot;
 pub mod orchestrate;
 pub mod pipe;
 pub mod plan;
+pub mod prd;
+pub mod prd_prompt;
 pub mod repl;
 pub mod run;
 pub mod secrets;
 pub mod status;
+pub mod tui;
 
 pub use config::{
-    load_layered, AgentConfig, Config, ConfigLayer, ConfigPaths, ConfigSources, GateConfig,
-    PromptConfig, PromptFile, ResolvedConfig, Source,
+    AgentConfig, Config, ConfigLayer, ConfigPaths, ConfigSources, GateConfig, PromptConfig,
+    PromptFile, ResolvedConfig, Source, load_layered,
 };
-pub use config_cmd::{run_init_wizard, EditTarget, WizardInputs};
+pub use config_cmd::{EditTarget, WizardInputs, run_init_wizard};
 pub use daemon::{DaemonConfig, DaemonMode, DaemonState, DaemonStatus};
 pub use episode::EpisodePolicy;
 pub use inject::{InjectKind, InjectRequest};
 pub use oneshot::{OneshotMode, OneshotResult};
 pub use orchestrate::{OrchestrationReport, PlanRunReport, PlanRunner};
-pub use pipe::{stdin_is_tty, PipeInput, PipeMode};
+pub use pipe::{PipeInput, PipeMode, stdin_is_tty};
 pub use plan::{Plan, PlanSummary, PlanTask};
 pub use repl::{ReplCommand, ReplMode};
-pub use run::{run_once, RunReport};
+pub use run::{RunReport, run_once};
 pub use secrets::SecretsCmd;
 pub use status::SessionStatus;
+pub use tui::{DashboardScaffold, DashboardSummary, PageId, PageScaffold, WidgetScaffold};

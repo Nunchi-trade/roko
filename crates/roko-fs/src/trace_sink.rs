@@ -37,6 +37,9 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use roko_core::tool::trace::{ToolTrace, ToolTraceEvent, TraceId, TraceSink};
 
+/// Relative path of the default trace directory from a workspace root.
+pub const DEFAULT_TRACE_DIR_REL_PATH: &str = ".roko/traces";
+
 /// Pluggable wall-clock source for the trace sink.
 ///
 /// The default clock returns [`chrono::Utc::now`]. Tests construct a
@@ -66,6 +69,22 @@ struct TraceWriter {
 }
 
 impl JsonlTraceSink {
+    /// Construct a sink from a workspace root directory.
+    ///
+    /// Traces are persisted under `<workdir>/.roko/traces/`.
+    #[must_use]
+    pub fn for_workdir(workdir: impl AsRef<Path>) -> Self {
+        Self::new(workdir.as_ref().join(DEFAULT_TRACE_DIR_REL_PATH))
+    }
+
+    /// Construct a sink from an existing `.roko/` directory.
+    ///
+    /// Traces are persisted under `<roko_dir>/traces/`.
+    #[must_use]
+    pub fn for_roko_dir(roko_dir: impl AsRef<Path>) -> Self {
+        Self::new(roko_dir.as_ref().join("traces"))
+    }
+
     /// Construct a sink rooted at `root` (typically `.roko/traces/`).
     ///
     /// Directories are created on first append; nothing is touched until
@@ -74,7 +93,9 @@ impl JsonlTraceSink {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
-            inner: Arc::new(Mutex::new(Inner { writers: HashMap::new() })),
+            inner: Arc::new(Mutex::new(Inner {
+                writers: HashMap::new(),
+            })),
             clock: Arc::new(chrono::Utc::now),
         }
     }
@@ -84,7 +105,9 @@ impl JsonlTraceSink {
     pub fn with_clock(root: impl Into<PathBuf>, clock: Clock) -> Self {
         Self {
             root: root.into(),
-            inner: Arc::new(Mutex::new(Inner { writers: HashMap::new() })),
+            inner: Arc::new(Mutex::new(Inner {
+                writers: HashMap::new(),
+            })),
             clock,
         }
     }
@@ -126,14 +149,14 @@ impl JsonlTraceSink {
                 let file = match OpenOptions::new().create(true).append(true).open(&path) {
                     Ok(f) => f,
                     Err(e) => {
-                        eprintln!(
-                            "JsonlTraceSink: failed to open {}: {e}",
-                            path.display()
-                        );
+                        eprintln!("JsonlTraceSink: failed to open {}: {e}", path.display());
                         return None;
                     }
                 };
-                Some(v.insert(TraceWriter { path, writer: BufWriter::new(file) }))
+                Some(v.insert(TraceWriter {
+                    path,
+                    writer: BufWriter::new(file),
+                }))
             }
         }
     }
@@ -215,9 +238,9 @@ impl TraceSink for JsonlTraceSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roko_core::tool::trace::{CancelSource, ToolOutcome};
-    use roko_core::tool::ToolFormat;
     use roko_core::AgentRole;
+    use roko_core::tool::ToolFormat;
+    use roko_core::tool::trace::{CancelSource, ToolOutcome};
     use std::fs;
     use std::sync::atomic::{AtomicI64, Ordering};
 
@@ -226,7 +249,9 @@ mod tests {
     }
 
     fn fixed_clock(secs: i64) -> Clock {
-        Arc::new(move || chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0).unwrap_or_default())
+        Arc::new(move || {
+            chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0).unwrap_or_default()
+        })
     }
 
     fn make_trace(id: TraceId, started_at_ms: i64) -> ToolTrace {
@@ -244,6 +269,18 @@ mod tests {
     }
 
     #[test]
+    fn for_workdir_uses_default_trace_path() {
+        let sink = JsonlTraceSink::for_workdir("/repo");
+        assert_eq!(sink.root(), Path::new("/repo/.roko/traces"));
+    }
+
+    #[test]
+    fn for_roko_dir_uses_traces_subdir() {
+        let sink = JsonlTraceSink::for_roko_dir("/repo/.roko");
+        assert_eq!(sink.root(), Path::new("/repo/.roko/traces"));
+    }
+
+    #[test]
     fn append_and_finish_writes_jsonl_file() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let sink = JsonlTraceSink::with_clock(tmp.path(), fixed_clock(1_700_000_000));
@@ -252,7 +289,9 @@ mod tests {
         for i in 0..5 {
             sink.append(
                 id,
-                ToolTraceEvent::StreamCoerced { at_ms: 1_700_000_000_000 + i },
+                ToolTraceEvent::StreamCoerced {
+                    at_ms: 1_700_000_000_000 + i,
+                },
             );
         }
         sink.finish(make_trace(id, 1_700_000_000_000));
@@ -298,16 +337,18 @@ mod tests {
 
         assert!(tmp.path().join("2023-11-14").is_dir());
         assert!(tmp.path().join("2023-11-15").is_dir());
-        assert!(tmp
-            .path()
-            .join("2023-11-14")
-            .join(format!("{}.jsonl", id_a.to_hex()))
-            .is_file());
-        assert!(tmp
-            .path()
-            .join("2023-11-15")
-            .join(format!("{}.jsonl", id_b.to_hex()))
-            .is_file());
+        assert!(
+            tmp.path()
+                .join("2023-11-14")
+                .join(format!("{}.jsonl", id_a.to_hex()))
+                .is_file()
+        );
+        assert!(
+            tmp.path()
+                .join("2023-11-15")
+                .join(format!("{}.jsonl", id_b.to_hex()))
+                .is_file()
+        );
     }
 
     #[test]
@@ -322,7 +363,10 @@ mod tests {
         sink.append(id_b, ToolTraceEvent::StreamCoerced { at_ms: 2 });
         sink.append(
             id_a,
-            ToolTraceEvent::Cancellation { source: CancelSource::UserAbort, at_ms: 3 },
+            ToolTraceEvent::Cancellation {
+                source: CancelSource::UserAbort,
+                at_ms: 3,
+            },
         );
         sink.append(id_b, ToolTraceEvent::StreamCoerced { at_ms: 4 });
         sink.finish(make_trace(id_a, 1));
@@ -350,7 +394,11 @@ mod tests {
 
         let events = vec![
             ToolTraceEvent::StreamCoerced { at_ms: 100 },
-            ToolTraceEvent::Truncation { kept: 50, total: 100, at_ms: 101 },
+            ToolTraceEvent::Truncation {
+                kept: 50,
+                total: 100,
+                at_ms: 101,
+            },
             ToolTraceEvent::StreamCoerced { at_ms: 102 },
         ];
         for e in &events {
@@ -366,8 +414,7 @@ mod tests {
         let lines: Vec<&str> = contents.lines().collect();
         assert_eq!(lines.len(), 4);
         for (i, line) in lines.iter().take(3).enumerate() {
-            let parsed: ToolTraceEvent =
-                serde_json::from_str(line).expect("parse event line");
+            let parsed: ToolTraceEvent = serde_json::from_str(line).expect("parse event line");
             assert_eq!(parsed, events[i]);
         }
         // Final line is the ToolTrace summary.

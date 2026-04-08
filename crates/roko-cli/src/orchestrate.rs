@@ -8,30 +8,36 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use anyhow::{anyhow, Context as _, Result};
-use roko_agent::{Agent, AgentResult, ExecAgent};
-use roko_compose::{Placement, PromptComposer, PromptSection, SectionPriority};
+use anyhow::{Context as _, Result, anyhow};
+use roko_agent::translate::{ClaudeTranslator, RenderedTools, Translator};
+use roko_agent::{Agent, AgentResult, ClaudeCliAgent, ExecAgent};
+use roko_compose::{
+    Placement, PromptComposer, PromptSection, RoleSystemPromptSpec, SectionPriority, TaskContext,
+};
+use roko_core::tool::ToolRegistry;
 use roko_core::{
-    AgentRole, Body, Budget, Composer, Context, Gate, Kind, PhaseKind,
-    Provenance, Signal, Substrate,
+    AgentRole, Body, Budget, Composer, Context, Gate, Kind, PhaseKind, Provenance, Signal,
+    Substrate, Verdict,
 };
 use roko_fs::FileSubstrate;
 use roko_gate::{
-    clippy_gate::ClippyGate, compile::CompileGate, payload::GatePayload,
-    test_gate::TestGate,
+    clippy_gate::ClippyGate, compile::CompileGate, payload::GatePayload, test_gate::TestGate,
 };
+use roko_orchestrator::worktree::{WorktreeConfig, WorktreeManager};
 use roko_orchestrator::{
-    discover_plans, EventKind, EventLog, EventLogSnapshot, ExecutorAction,
-    ExecutorConfig, ExecutorEvent, ExecutorSnapshot, GateResult,
-    ParallelExecutor, PlanState,
+    EventKind, EventLog, EventLogSnapshot, ExecutorAction, ExecutorConfig, ExecutorEvent,
+    ExecutorSnapshot, GateResult, ParallelExecutor, PlanState, PostMergeRunner, discover_plans,
 };
 use roko_std::NoOpScorer;
+use roko_std::StaticToolRegistry;
 
 use crate::config::Config;
 
 /// Default number of actions between auto-saves.
 const AUTOSAVE_INTERVAL: usize = 5;
+const DEFAULT_WORKTREE_IDLE_TTL_SECS: u64 = 30 * 60;
 
 // ─── Report types ─────────────────────────────────────────────────────────
 
@@ -85,6 +91,12 @@ pub struct PlanRunner {
     /// Counters for reporting.
     agent_calls: usize,
     gate_runs: usize,
+    /// Per-plan worktree manager.
+    worktrees: WorktreeManager,
+    /// Post-merge regression history and follow-up decisions.
+    post_merge: PostMergeRunner,
+    /// Optional Claude session resume id from upper layers.
+    claude_resume_session: Option<String>,
     /// Actions dispatched since last auto-save.
     actions_since_save: usize,
     /// Per-plan tracking.
@@ -99,11 +111,7 @@ impl PlanRunner {
     ///
     /// Returns an error if the plans directory doesn't exist, contains no
     /// plans, or plan discovery fails.
-    pub fn from_plans_dir(
-        plans_dir: &Path,
-        workdir: &Path,
-        config: Config,
-    ) -> Result<Self> {
+    pub fn from_plans_dir(plans_dir: &Path, workdir: &Path, config: Config) -> Result<Self> {
         if !plans_dir.exists() {
             return Err(anyhow!(
                 "plans directory does not exist: {}",
@@ -111,8 +119,7 @@ impl PlanRunner {
             ));
         }
 
-        let plans =
-            discover_plans(plans_dir).map_err(|e| anyhow!("plan discovery failed: {e}"))?;
+        let plans = discover_plans(plans_dir).map_err(|e| anyhow!("plan discovery failed: {e}"))?;
 
         if plans.is_empty() {
             return Err(anyhow!("no plans found in {}", plans_dir.display()));
@@ -137,6 +144,9 @@ impl PlanRunner {
             event_log: EventLog::default(),
             agent_calls: 0,
             gate_runs: 0,
+            worktrees: default_worktree_manager(workdir),
+            post_merge: PostMergeRunner::new(),
+            claude_resume_session: None,
             actions_since_save: 0,
             per_plan_agents: HashMap::new(),
             per_plan_gates: HashMap::new(),
@@ -148,13 +158,9 @@ impl PlanRunner {
     /// # Errors
     ///
     /// Returns an error if snapshot parsing fails.
-    pub fn from_snapshot(
-        snapshot_json: &str,
-        workdir: &Path,
-        config: Config,
-    ) -> Result<Self> {
-        let snapshot = ExecutorSnapshot::from_json(snapshot_json)
-            .map_err(|e| anyhow!("bad snapshot: {e}"))?;
+    pub fn from_snapshot(snapshot_json: &str, workdir: &Path, config: Config) -> Result<Self> {
+        let snapshot =
+            ExecutorSnapshot::from_json(snapshot_json).map_err(|e| anyhow!("bad snapshot: {e}"))?;
         let executor = ParallelExecutor::from_snapshot(ExecutorConfig::default(), snapshot);
         Ok(Self {
             workdir: workdir.to_path_buf(),
@@ -163,6 +169,9 @@ impl PlanRunner {
             event_log: EventLog::default(),
             agent_calls: 0,
             gate_runs: 0,
+            worktrees: default_worktree_manager(workdir),
+            post_merge: PostMergeRunner::new(),
+            claude_resume_session: None,
             actions_since_save: 0,
             per_plan_agents: HashMap::new(),
             per_plan_gates: HashMap::new(),
@@ -193,10 +202,19 @@ impl PlanRunner {
             event_log,
             agent_calls: 0,
             gate_runs: 0,
+            worktrees: default_worktree_manager(workdir),
+            post_merge: PostMergeRunner::new(),
+            claude_resume_session: None,
             actions_since_save: 0,
             per_plan_agents: HashMap::new(),
             per_plan_gates: HashMap::new(),
         })
+    }
+
+    /// Thread an optional Claude resume id from upper-layer orchestration
+    /// context into per-agent launches.
+    pub fn set_claude_resume_session(&mut self, session_id: Option<String>) {
+        self.claude_resume_session = normalize_resume_session(session_id);
     }
 
     /// Take a snapshot of the current executor state.
@@ -233,15 +251,13 @@ impl PlanRunner {
     /// files cannot be written.
     pub fn save_state(&self) -> Result<()> {
         let state_dir = self.workdir.join(".roko").join("state");
-        std::fs::create_dir_all(&state_dir)
-            .map_err(|e| anyhow!("create state dir: {e}"))?;
+        std::fs::create_dir_all(&state_dir).map_err(|e| anyhow!("create state dir: {e}"))?;
 
         // Executor snapshot — atomic write.
         let exec_json = self.snapshot()?;
         let exec_path = state_dir.join("executor.json");
         let exec_tmp = state_dir.join("executor.json.tmp");
-        std::fs::write(&exec_tmp, &exec_json)
-            .map_err(|e| anyhow!("write executor tmp: {e}"))?;
+        std::fs::write(&exec_tmp, &exec_json).map_err(|e| anyhow!("write executor tmp: {e}"))?;
         std::fs::rename(&exec_tmp, &exec_path)
             .map_err(|e| anyhow!("rename executor snapshot: {e}"))?;
 
@@ -249,10 +265,8 @@ impl PlanRunner {
         let log_json = self.event_log_snapshot()?;
         let log_path = state_dir.join("events.json");
         let log_tmp = state_dir.join("events.json.tmp");
-        std::fs::write(&log_tmp, &log_json)
-            .map_err(|e| anyhow!("write events tmp: {e}"))?;
-        std::fs::rename(&log_tmp, &log_path)
-            .map_err(|e| anyhow!("rename events snapshot: {e}"))?;
+        std::fs::write(&log_tmp, &log_json).map_err(|e| anyhow!("write events tmp: {e}"))?;
+        std::fs::rename(&log_tmp, &log_path).map_err(|e| anyhow!("rename events snapshot: {e}"))?;
 
         Ok(())
     }
@@ -275,11 +289,15 @@ impl PlanRunner {
     /// I/O fails fatally (per-plan failures are recorded in the report).
     pub async fn run_all(&mut self) -> Result<OrchestrationReport> {
         // Start all queued plans.
-        let plan_ids: Vec<String> = self.executor.snapshot(0).plan_states.keys().cloned().collect();
+        let plan_ids: Vec<String> = self
+            .executor
+            .snapshot(0)
+            .plan_states
+            .keys()
+            .cloned()
+            .collect();
         for plan_id in &plan_ids {
-            let _ = self
-                .executor
-                .apply_event(plan_id, &ExecutorEvent::Start);
+            let _ = self.executor.apply_event(plan_id, &ExecutorEvent::Start);
         }
 
         // Maximum iterations to prevent infinite loops.
@@ -322,8 +340,8 @@ impl PlanRunner {
             .iter()
             .map(|id| {
                 let state = self.executor.plan_state(id);
-                let succeeded = state
-                    .is_some_and(|s| s.current_phase.kind() == PhaseKind::Complete);
+                let succeeded =
+                    state.is_some_and(|s| s.current_phase.kind() == PhaseKind::Complete);
                 PlanRunReport {
                     plan_id: id.clone(),
                     succeeded,
@@ -423,9 +441,32 @@ impl PlanRunner {
                 );
                 match self.merge_branch(&plan_id).await {
                     Ok(()) => {
-                        let _ = self
-                            .executor
-                            .apply_event(&plan_id, &ExecutorEvent::MergeSucceeded);
+                        match self.run_post_merge_follow_up(&plan_id).await {
+                            Ok(true) => {
+                                let _ = self
+                                    .executor
+                                    .apply_event(&plan_id, &ExecutorEvent::MergeSucceeded);
+                            }
+                            Ok(false) => {
+                                let _ = self
+                                    .executor
+                                    .apply_event(&plan_id, &ExecutorEvent::MergeFailed);
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "[orchestrate] post-merge checks failed for {plan_id}: {e}"
+                                );
+                                self.event_log.append(
+                                    EventKind::ErrorOccurred,
+                                    serde_json::json!({"plan_id": plan_id, "error": format!("post-merge follow-up failed: {e}")}),
+                                );
+                                // Keep historical behavior on infrastructure errors:
+                                // merge itself succeeded.
+                                let _ = self
+                                    .executor
+                                    .apply_event(&plan_id, &ExecutorEvent::MergeSucceeded);
+                            }
+                        }
                     }
                     Err(e) => {
                         eprintln!("[orchestrate] merge failed for {plan_id}: {e}");
@@ -441,9 +482,7 @@ impl PlanRunner {
                     EventKind::PlanStarted,
                     serde_json::json!({"plan_id": plan_id}),
                 );
-                let _ = self
-                    .executor
-                    .apply_event(&plan_id, &ExecutorEvent::Start);
+                let _ = self.executor.apply_event(&plan_id, &ExecutorEvent::Start);
             }
             ExecutorAction::PausePlan { plan_id } => {
                 eprintln!("[orchestrate] PausePlan {plan_id}");
@@ -502,17 +541,18 @@ impl PlanRunner {
         task: &str,
     ) -> Result<AgentResult> {
         let ctx = Context::now();
+        let exec_dir = self.plan_exec_dir(plan_id).await;
 
         // Build the prompt from role + task description.
-        let role_instruction = role_system_prompt(role);
+        let task_text =
+            format!("Plan: {plan_id}\nTask: {task}\n\nImplement the task described above.");
+        let claude_tools_csv = claude_tool_allowlist(role);
+        let role_instruction = build_system_prompt(role, plan_id, task, &claude_tools_csv);
         let role_section = PromptSection::new("role", &role_instruction)
             .with_priority(SectionPriority::Critical)
             .with_placement(Placement::Start)
             .into_signal()
             .map_err(|e| anyhow!("role section: {e}"))?;
-
-        let task_text =
-            format!("Plan: {plan_id}\nTask: {task}\n\nImplement the task described above.");
         let task_section = PromptSection::new("task", &task_text)
             .with_priority(SectionPriority::Critical)
             .with_placement(Placement::End)
@@ -542,16 +582,43 @@ impl PlanRunner {
             .map_err(|e| anyhow!("persist prompt: {e}"))?;
 
         // Run the agent.
-        let mut agent = ExecAgent::new(
-            &self.config.agent.command,
-            self.config.agent.args.clone(),
-        )
-        .with_timeout_ms(self.config.agent.timeout_ms);
-        for (k, v) in &self.config.agent.env {
-            agent = agent.with_env_var(k, v);
-        }
-
-        let result: AgentResult = agent.run(&prompt, &ctx).await;
+        // ClaudeCliAgent handles the subprocess wiring internally: the
+        // system prompt is forwarded via `--append-system-prompt`, the role
+        // allowlist becomes `--tools`, and the safety hooks are passed with
+        // `--settings`.
+        let result: AgentResult = if self.config.agent.command == "claude" {
+            let model = self
+                .config
+                .agent
+                .model
+                .clone()
+                .unwrap_or_else(|| "claude-opus-4-6".to_string());
+            let mut agent = ClaudeCliAgent::new(&self.config.agent.command, &exec_dir, model)
+                .with_timeout_ms(self.config.agent.timeout_ms)
+                .with_bare_mode(self.config.agent.bare_mode)
+                .with_effort(self.config.agent.effort.clone())
+                .with_system_prompt(role_instruction.clone())
+                .with_tools(claude_tools_csv)
+                .with_settings_json(roko_agent::claude_cli_agent::build_settings_json())
+                .with_dangerously_skip_permissions(claude_skip_permissions_for_role(role))
+                .with_optional_resume(self.claude_resume_session.clone())
+                .with_extra_args(self.config.agent.args.clone());
+            if let Some(fallback_model) = &self.config.agent.fallback_model {
+                agent = agent.with_fallback_model(fallback_model.clone());
+            }
+            for (k, v) in &self.config.agent.env {
+                agent = agent.with_env_var(k, v);
+            }
+            agent.run(&prompt, &ctx).await
+        } else {
+            let mut agent =
+                ExecAgent::new(&self.config.agent.command, self.config.agent.args.clone())
+                    .with_timeout_ms(self.config.agent.timeout_ms);
+            for (k, v) in &self.config.agent.env {
+                agent = agent.with_env_var(k, v);
+            }
+            agent.run(&prompt, &ctx).await
+        };
 
         // Persist the output.
         substrate
@@ -570,10 +637,8 @@ impl PlanRunner {
 
     /// Run gates at the specified rung level and return whether all passed.
     async fn run_gate_pipeline(&mut self, plan_id: &str, rung: u32) -> Result<bool> {
-        let ctx = Context::now();
-
-        let payload = GatePayload::in_dir(&self.workdir)
-            .with_label(format!("{plan_id}:rung-{rung}"));
+        let exec_dir = self.plan_exec_dir(plan_id).await;
+        let payload = GatePayload::in_dir(&exec_dir).with_label(format!("{plan_id}:rung-{rung}"));
         let payload_sig = Signal::builder(Kind::Task)
             .body(Body::from_json(&payload)?)
             .provenance(Provenance::trusted("orchestrate"))
@@ -581,31 +646,7 @@ impl PlanRunner {
             .tag("rung", rung.to_string())
             .build();
 
-        // Rung 0 = compile, rung 1 = test, rung 2 = clippy, rung 3+ = all.
-        let verdicts = match rung {
-            0 => {
-                let gate = CompileGate::cargo();
-                vec![gate.verify(&payload_sig, &ctx).await]
-            }
-            1 => {
-                let gate = TestGate::cargo();
-                vec![gate.verify(&payload_sig, &ctx).await]
-            }
-            2 => {
-                let gate = ClippyGate::cargo();
-                vec![gate.verify(&payload_sig, &ctx).await]
-            }
-            _ => {
-                let c = CompileGate::cargo();
-                let t = TestGate::cargo();
-                let cl = ClippyGate::cargo();
-                vec![
-                    c.verify(&payload_sig, &ctx).await,
-                    t.verify(&payload_sig, &ctx).await,
-                    cl.verify(&payload_sig, &ctx).await,
-                ]
-            }
-        };
+        let verdicts = Self::run_gate_rung(&payload_sig, rung).await;
 
         // Persist verdicts.
         let substrate_dir = self.workdir.join(".roko");
@@ -628,7 +669,9 @@ impl PlanRunner {
         // Record gate results on the plan state.
         if let Some(state) = self.executor.plan_state_mut(plan_id) {
             for verdict in &verdicts {
-                state.gate_results.push(GateResult::from_verdict(verdict, rung));
+                state
+                    .gate_results
+                    .push(GateResult::from_verdict(verdict, rung));
             }
         }
 
@@ -638,7 +681,10 @@ impl PlanRunner {
 
     /// Attempt a git merge for a plan's branch.
     async fn merge_branch(&self, plan_id: &str) -> Result<()> {
-        let branch_name = format!("roko/{plan_id}");
+        let branch_name = self
+            .worktrees
+            .get(plan_id)
+            .map_or_else(|| format!("roko/{plan_id}"), |h| h.branch);
         let output = tokio::process::Command::new("git")
             .args(["merge", "--no-ff", &branch_name])
             .current_dir(&self.workdir)
@@ -653,52 +699,142 @@ impl PlanRunner {
             Err(anyhow!("merge failed: {stderr}"))
         }
     }
+
+    async fn run_post_merge_follow_up(&self, plan_id: &str) -> Result<bool> {
+        let payload =
+            GatePayload::in_dir(&self.workdir).with_label(format!("{plan_id}:post-merge"));
+        let payload_sig = Signal::builder(Kind::Task)
+            .body(Body::from_json(&payload)?)
+            .provenance(Provenance::trusted("orchestrate"))
+            .tag("plan_id", plan_id)
+            .tag("rung", "post-merge")
+            .build();
+
+        let verdicts = Self::run_gate_rung(&payload_sig, 3).await;
+        let merged_at_ms = now_unix_ms_i64();
+        let (_check, follow_up) =
+            self.post_merge
+                .run_record_and_follow_up(plan_id, merged_at_ms, &verdicts);
+
+        if follow_up.needs_revert() {
+            self.event_log.append(
+                EventKind::ErrorOccurred,
+                serde_json::json!({
+                    "plan_id": plan_id,
+                    "error": "post-merge regression detected",
+                    "failing_tests": follow_up.failing_tests,
+                }),
+            );
+            return Ok(false);
+        }
+
+        Ok(true)
+    }
+
+    async fn plan_exec_dir(&self, plan_id: &str) -> PathBuf {
+        match self.worktrees.ensure_for_plan(plan_id).await {
+            Ok(handle) => handle.path,
+            Err(err) => {
+                eprintln!(
+                    "[orchestrate] worktree unavailable for plan={plan_id}, using repo root: {err}"
+                );
+                self.workdir.clone()
+            }
+        }
+    }
+
+    async fn run_gate_rung(payload_sig: &Signal, rung: u32) -> Vec<Verdict> {
+        let ctx = Context::now();
+        // Rung 0 = compile, rung 1 = test, rung 2 = clippy, rung 3+ = all.
+        match rung {
+            0 => {
+                let gate = CompileGate::cargo();
+                vec![gate.verify(payload_sig, &ctx).await]
+            }
+            1 => {
+                let gate = TestGate::cargo();
+                vec![gate.verify(payload_sig, &ctx).await]
+            }
+            2 => {
+                let gate = ClippyGate::cargo();
+                vec![gate.verify(payload_sig, &ctx).await]
+            }
+            _ => {
+                let c = CompileGate::cargo();
+                let t = TestGate::cargo();
+                let cl = ClippyGate::cargo();
+                vec![
+                    c.verify(payload_sig, &ctx).await,
+                    t.verify(payload_sig, &ctx).await,
+                    cl.verify(payload_sig, &ctx).await,
+                ]
+            }
+        }
+    }
 }
 
 // ─── Role-specific system prompts ────────────────────────────────────────
 
-fn role_system_prompt(role: AgentRole) -> String {
-    match role {
-        AgentRole::Implementer => {
-            "You are an expert Rust software engineer. Implement the task \
-             precisely, writing clean, well-tested code that follows the \
-             existing codebase conventions."
-                .to_string()
+fn default_worktree_manager(workdir: &Path) -> WorktreeManager {
+    let config = WorktreeConfig {
+        repo_root: workdir.to_path_buf(),
+        base_branch: "HEAD".to_string(),
+        worktrees_root: workdir.join(".roko").join("worktrees"),
+        max_live: None,
+        idle_ttl: Duration::from_secs(DEFAULT_WORKTREE_IDLE_TTL_SECS),
+    };
+    WorktreeManager::new(config)
+}
+
+const fn claude_skip_permissions_for_role(role: AgentRole) -> bool {
+    let perms = role.tool_permissions();
+    perms.exec || perms.write || perms.git
+}
+
+fn normalize_resume_session(session_id: Option<String>) -> Option<String> {
+    session_id.and_then(|id| {
+        let trimmed = id.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
         }
-        AgentRole::Auditor => {
-            "You are a code auditor. Review the code for correctness, \
-             safety, and adherence to the acceptance criteria."
-                .to_string()
-        }
-        AgentRole::Scribe => {
-            "You are a documentation writer. Update docs and comments to \
-             match the code changes."
-                .to_string()
-        }
-        AgentRole::AutoFixer => {
-            "You are an auto-fixer. The previous gate run failed. Read the \
-             error output and make the minimal changes needed to fix the issue."
-                .to_string()
-        }
-        AgentRole::Strategist => {
-            "You are a strategist. Decompose the plan into concrete tasks \
-             and enrich each with acceptance criteria."
-                .to_string()
-        }
-        AgentRole::Researcher => {
-            "You are a researcher. Gather context from docs and code to \
-             inform the implementation."
-                .to_string()
-        }
-        _ => {
-            format!("You are an AI agent in the {role:?} role. Complete your assigned task.")
-        }
+    })
+}
+
+fn now_unix_ms_i64() -> i64 {
+    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+    {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0_i64, |d| d.as_millis() as i64)
+    }
+}
+
+fn build_system_prompt(role: AgentRole, plan_id: &str, task: &str, tools_csv: &str) -> String {
+    RoleSystemPromptSpec::new(
+        role,
+        TaskContext::new(task)
+            .with_plan_id(plan_id)
+            .with_workspace("roko-cli orchestration"),
+        tools_csv,
+    )
+    .build()
+}
+
+fn claude_tool_allowlist(role: AgentRole) -> String {
+    let registry = StaticToolRegistry::new();
+    let tools: Vec<_> = registry.for_role(role).into_iter().cloned().collect();
+    match ClaudeTranslator.render_tools(&tools) {
+        RenderedTools::CliFlag(csv) => csv,
+        _ => String::new(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn orchestration_report_all_succeeded() {
@@ -758,8 +894,48 @@ mod tests {
             AgentRole::Conductor,
         ];
         for role in roles {
-            let prompt = role_system_prompt(role);
+            let prompt = roko_compose::role_identity_for(role);
             assert!(!prompt.is_empty(), "empty prompt for {role:?}");
         }
+    }
+
+    #[test]
+    fn claude_skip_permissions_tracks_role_permissions() {
+        assert!(claude_skip_permissions_for_role(AgentRole::Implementer));
+        assert!(claude_skip_permissions_for_role(
+            AgentRole::IntegrationTester
+        ));
+        assert!(!claude_skip_permissions_for_role(AgentRole::Auditor));
+        assert!(!claude_skip_permissions_for_role(AgentRole::Strategist));
+    }
+
+    #[test]
+    fn normalize_resume_session_trims_and_drops_blank_values() {
+        assert_eq!(normalize_resume_session(None), None);
+        assert_eq!(normalize_resume_session(Some(String::new())), None);
+        assert_eq!(normalize_resume_session(Some("   ".to_string())), None);
+        assert_eq!(
+            normalize_resume_session(Some("  sess-42  ".to_string())),
+            Some("sess-42".to_string())
+        );
+    }
+
+    #[test]
+    fn default_worktree_manager_paths_under_roko_directory() {
+        let workdir = PathBuf::from("/tmp/roko-test");
+        let manager = default_worktree_manager(&workdir);
+        assert_eq!(
+            manager.path_for("plan-1"),
+            workdir.join(".roko").join("worktrees").join("plan-1")
+        );
+    }
+
+    #[test]
+    fn post_merge_follow_up_reports_unresolved_regression() {
+        let runner = PostMergeRunner::new();
+        let (_check, follow_up) =
+            runner.run_record_and_follow_up("plan-a", 100, &[Verdict::fail("test", "boom")]);
+        assert!(follow_up.needs_revert());
+        assert_eq!(runner.unresolved_regressions(), vec!["plan-a".to_string()]);
     }
 }

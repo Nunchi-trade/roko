@@ -22,6 +22,7 @@
 
 pub mod agent;
 pub mod claude_agent;
+pub mod claude_cli_agent;
 pub mod codex_agent;
 pub mod cursor_agent;
 pub mod dispatcher;
@@ -44,6 +45,7 @@ pub mod translate;
 pub mod usage;
 
 pub use agent::{Agent, AgentResult};
+pub use claude_cli_agent::ClaudeCliAgent;
 pub use exec::ExecAgent;
 pub use mock::MockAgent;
 pub use multi_pool::MultiAgentPool;

@@ -21,21 +21,26 @@ pub mod conventions;
 pub mod enrichment;
 pub mod prompt;
 pub mod prompt_hints;
+pub mod role_prompts;
 pub mod scorer;
 pub mod system_prompt_builder;
 pub mod templates;
 
 pub use agents_md::AgentsMd;
-pub use budget::{adjusted_budget_for, AdjustedBudget, Complexity};
-pub use conventions::{detect_conventions, ProjectConventions};
+pub use budget::{AdjustedBudget, Complexity, adjusted_budget_for};
+pub use conventions::{ProjectConventions, detect_conventions};
 pub use prompt::{
-    estimate_tokens, CacheLayer, ContextStrategy, Placement, PromptBuild,
-    PromptComposer, PromptSection, SectionPriority,
+    CacheLayer, ContextStrategy, Placement, PromptBuild, PromptComposer, PromptSection,
+    SectionPriority, estimate_tokens,
 };
 pub use prompt_hints::prompt_hints_for;
+pub use role_prompts::{
+    DEFAULT_CONVENTIONS_SUFFIX, RoleSystemPromptSpec, TaskContext, role_identity_for,
+    tool_allowlist_instructions,
+};
 pub use scorer::SectionScorer;
 pub use system_prompt_builder::SystemPromptBuilder;
 pub use templates::{
-    PromptAssembler, PromptBudget, budget_for,
-    QuickFixInput, QuickFixTemplate, QuickReviewerInput, QuickReviewerTemplate,
+    PromptAssembler, PromptBudget, QuickFixInput, QuickFixTemplate, QuickReviewerInput,
+    QuickReviewerTemplate, budget_for,
 };

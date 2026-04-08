@@ -4559,13 +4559,16 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
+ "chrono",
  "clap",
  "predicates",
+ "regex",
  "roko-agent",
  "roko-compose",
  "roko-core",
  "roko-fs",
  "roko-gate",
+ "roko-learn",
  "roko-orchestrator",
  "roko-std",
  "serde",
@@ -4573,6 +4576,8 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "tracing",
+ "tracing-subscriber 0.3.23",
 ]
 
 [[package]]
@@ -4668,6 +4673,10 @@ dependencies = [
  "tempfile",
  "tokio",
 ]
+
+[[package]]
+name = "roko-golem"
+version = "0.1.0"
 
 [[package]]
 name = "roko-index"

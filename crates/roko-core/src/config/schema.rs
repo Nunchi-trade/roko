@@ -94,6 +94,143 @@ impl Default for RokoConfig {
 }
 
 impl RokoConfig {
+    fn write_example_prelude(out: &mut String) {
+        let _ = writeln!(
+            out,
+            "# Roko configuration -- all fields shown with defaults."
+        );
+        let _ = writeln!(
+            out,
+            "# Delete any section you don't need; defaults apply.\n"
+        );
+        let _ = writeln!(out, "schema_version = {CURRENT_SCHEMA_VERSION}\n");
+    }
+
+    fn write_example_project(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "# -- Project metadata --");
+        let _ = writeln!(out, "[project]");
+        let _ = writeln!(out, "name = \"{}\"", cfg.project.name);
+        let _ = writeln!(out, "root = \"{}\"", cfg.project.root);
+        let _ = writeln!(
+            out,
+            "fresh_base_branch = \"{}\"\n",
+            cfg.project.fresh_base_branch
+        );
+    }
+
+    fn write_example_agent(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "# -- Agent / model settings --");
+        let _ = writeln!(out, "[agent]");
+        let _ = writeln!(out, "default_model = \"{}\"", cfg.agent.default_model);
+        let _ = writeln!(out, "default_backend = \"{}\"", cfg.agent.default_backend);
+        let _ = writeln!(out, "default_effort = \"{}\"", cfg.agent.default_effort);
+        let _ = writeln!(out, "context_limit_k = {}", cfg.agent.context_limit_k);
+        let _ = writeln!(out, "bare_mode = {}\n", cfg.agent.bare_mode);
+
+        let _ = writeln!(out, "# Per-role overrides (repeat for each role):");
+        let _ = writeln!(out, "# [agent.roles.implementer]");
+        let _ = writeln!(out, "# model = \"claude-opus-4-6\"");
+        let _ = writeln!(out, "# effort = \"high\"");
+        let _ = writeln!(out, "# context_limit_k = 200\n");
+    }
+
+    fn write_example_gates(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "# -- Verification gates --");
+        let _ = writeln!(out, "[gates]");
+        let _ = writeln!(out, "clippy_enabled = {}", cfg.gates.clippy_enabled);
+        let _ = writeln!(out, "skip_tests = {}", cfg.gates.skip_tests);
+        let _ = writeln!(out, "max_iterations = {}\n", cfg.gates.max_iterations);
+    }
+
+    fn write_example_routing(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "# -- Model routing --");
+        let _ = writeln!(out, "[routing]");
+        let _ = writeln!(out, "mode = \"{}\"", cfg.routing.mode);
+        let _ = writeln!(out, "fast_task_model = \"{}\"", cfg.routing.fast_task_model);
+        let _ = writeln!(
+            out,
+            "standard_task_model = \"{}\"",
+            cfg.routing.standard_task_model
+        );
+        let _ = writeln!(
+            out,
+            "complex_task_model = \"{}\"\n",
+            cfg.routing.complex_task_model
+        );
+    }
+
+    fn write_example_budget(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "# -- Spend / token budgets --");
+        let _ = writeln!(out, "[budget]");
+        let _ = writeln!(out, "max_plan_usd = {:.1}", cfg.budget.max_plan_usd);
+        let _ = writeln!(out, "max_turn_usd = {:.1}", cfg.budget.max_turn_usd);
+        let _ = writeln!(
+            out,
+            "prompt_token_budget = {}\n",
+            cfg.budget.prompt_token_budget
+        );
+    }
+
+    fn write_example_conductor(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "# -- Conductor (meta-orchestrator) --");
+        let _ = writeln!(out, "[conductor]");
+        let _ = writeln!(out, "max_agents = {}", cfg.conductor.max_agents);
+        let _ = writeln!(
+            out,
+            "max_parallel_plans = {}",
+            cfg.conductor.max_parallel_plans
+        );
+        let _ = writeln!(out, "parallel_enabled = {}", cfg.conductor.parallel_enabled);
+        let _ = writeln!(out, "express_mode = {}", cfg.conductor.express_mode);
+        let _ = writeln!(
+            out,
+            "auto_advance_batch = {}",
+            cfg.conductor.auto_advance_batch
+        );
+        let _ = writeln!(
+            out,
+            "auto_merge_on_complete = {}",
+            cfg.conductor.auto_merge_on_complete
+        );
+        let _ = writeln!(out, "pre_plan = {}", cfg.conductor.pre_plan);
+        let _ = writeln!(
+            out,
+            "max_auto_fix_attempts = {}\n",
+            cfg.conductor.max_auto_fix_attempts
+        );
+    }
+
+    fn write_example_learning(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "# -- Learning subsystem --");
+        let _ = writeln!(out, "[learning]");
+        let _ = writeln!(
+            out,
+            "auto_playbook_refresh = {}",
+            cfg.learning.auto_playbook_refresh
+        );
+        let _ = writeln!(
+            out,
+            "knowledge_warnings = {}",
+            cfg.learning.knowledge_warnings
+        );
+        let _ = writeln!(
+            out,
+            "learning_min_occurrences = {}\n",
+            cfg.learning.learning_min_occurrences
+        );
+    }
+
+    fn write_example_tui_and_server(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "# -- TUI preferences --");
+        let _ = writeln!(out, "[tui]");
+        let _ = writeln!(out, "refresh_rate_ms = {}\n", cfg.tui.refresh_rate_ms);
+
+        let _ = writeln!(out, "# -- HTTP server / gateway --");
+        let _ = writeln!(out, "[server]");
+        let _ = writeln!(out, "bind = \"{}\"", cfg.server.bind);
+        let _ = writeln!(out, "port = {}", cfg.server.port);
+    }
+
     /// Parse from a TOML string.
     pub fn from_toml(s: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(s)
@@ -178,82 +315,25 @@ impl RokoConfig {
         let cfg = Self::default();
         let mut out = String::with_capacity(4096);
 
-        // Infallible writes to String -- unwrap is safe.
-        let _ = writeln!(out, "# Roko configuration -- all fields shown with defaults.");
-        let _ = writeln!(out, "# Delete any section you don't need; defaults apply.\n");
-        let _ = writeln!(out, "schema_version = {CURRENT_SCHEMA_VERSION}\n");
-
-        let _ = writeln!(out, "# -- Project metadata --");
-        let _ = writeln!(out, "[project]");
-        let _ = writeln!(out, "name = \"{}\"", cfg.project.name);
-        let _ = writeln!(out, "root = \"{}\"", cfg.project.root);
-        let _ = writeln!(out, "fresh_base_branch = \"{}\"\n", cfg.project.fresh_base_branch);
-
-        let _ = writeln!(out, "# -- Agent / model settings --");
-        let _ = writeln!(out, "[agent]");
-        let _ = writeln!(out, "default_model = \"{}\"", cfg.agent.default_model);
-        let _ = writeln!(out, "default_backend = \"{}\"", cfg.agent.default_backend);
-        let _ = writeln!(out, "default_effort = \"{}\"", cfg.agent.default_effort);
-        let _ = writeln!(out, "context_limit_k = {}", cfg.agent.context_limit_k);
-        let _ = writeln!(out, "bare_mode = {}\n", cfg.agent.bare_mode);
-
-        let _ = writeln!(out, "# Per-role overrides (repeat for each role):");
-        let _ = writeln!(out, "# [agent.roles.implementer]");
-        let _ = writeln!(out, "# model = \"claude-opus-4-6\"");
-        let _ = writeln!(out, "# effort = \"high\"");
-        let _ = writeln!(out, "# context_limit_k = 200\n");
-
-        let _ = writeln!(out, "# -- Verification gates --");
-        let _ = writeln!(out, "[gates]");
-        let _ = writeln!(out, "clippy_enabled = {}", cfg.gates.clippy_enabled);
-        let _ = writeln!(out, "skip_tests = {}", cfg.gates.skip_tests);
-        let _ = writeln!(out, "max_iterations = {}\n", cfg.gates.max_iterations);
-
-        let _ = writeln!(out, "# -- Model routing --");
-        let _ = writeln!(out, "[routing]");
-        let _ = writeln!(out, "mode = \"{}\"", cfg.routing.mode);
-        let _ = writeln!(out, "fast_task_model = \"{}\"", cfg.routing.fast_task_model);
-        let _ = writeln!(out, "standard_task_model = \"{}\"", cfg.routing.standard_task_model);
-        let _ = writeln!(out, "complex_task_model = \"{}\"\n", cfg.routing.complex_task_model);
-
-        let _ = writeln!(out, "# -- Spend / token budgets --");
-        let _ = writeln!(out, "[budget]");
-        let _ = writeln!(out, "max_plan_usd = {:.1}", cfg.budget.max_plan_usd);
-        let _ = writeln!(out, "max_turn_usd = {:.1}", cfg.budget.max_turn_usd);
-        let _ = writeln!(out, "prompt_token_budget = {}\n", cfg.budget.prompt_token_budget);
-
-        let _ = writeln!(out, "# -- Conductor (meta-orchestrator) --");
-        let _ = writeln!(out, "[conductor]");
-        let _ = writeln!(out, "max_agents = {}", cfg.conductor.max_agents);
-        let _ = writeln!(out, "max_parallel_plans = {}", cfg.conductor.max_parallel_plans);
-        let _ = writeln!(out, "parallel_enabled = {}", cfg.conductor.parallel_enabled);
-        let _ = writeln!(out, "express_mode = {}", cfg.conductor.express_mode);
-        let _ = writeln!(out, "auto_advance_batch = {}", cfg.conductor.auto_advance_batch);
-        let _ = writeln!(out, "auto_merge_on_complete = {}", cfg.conductor.auto_merge_on_complete);
-        let _ = writeln!(out, "pre_plan = {}", cfg.conductor.pre_plan);
-        let _ = writeln!(out, "max_auto_fix_attempts = {}\n", cfg.conductor.max_auto_fix_attempts);
-
-        let _ = writeln!(out, "# -- Learning subsystem --");
-        let _ = writeln!(out, "[learning]");
-        let _ = writeln!(out, "auto_playbook_refresh = {}", cfg.learning.auto_playbook_refresh);
-        let _ = writeln!(out, "knowledge_warnings = {}", cfg.learning.knowledge_warnings);
-        let _ = writeln!(out, "learning_min_occurrences = {}\n", cfg.learning.learning_min_occurrences);
-
-        let _ = writeln!(out, "# -- TUI preferences --");
-        let _ = writeln!(out, "[tui]");
-        let _ = writeln!(out, "refresh_rate_ms = {}\n", cfg.tui.refresh_rate_ms);
-
-        let _ = writeln!(out, "# -- HTTP server / gateway --");
-        let _ = writeln!(out, "[server]");
-        let _ = writeln!(out, "bind = \"{}\"", cfg.server.bind);
-        let _ = writeln!(out, "port = {}", cfg.server.port);
+        Self::write_example_prelude(&mut out);
+        Self::write_example_project(&mut out, &cfg);
+        Self::write_example_agent(&mut out, &cfg);
+        Self::write_example_gates(&mut out, &cfg);
+        Self::write_example_routing(&mut out, &cfg);
+        Self::write_example_budget(&mut out, &cfg);
+        Self::write_example_conductor(&mut out, &cfg);
+        Self::write_example_learning(&mut out, &cfg);
+        Self::write_example_tui_and_server(&mut out, &cfg);
 
         out
     }
 }
 
 fn parse_bool_env(s: &str) -> bool {
-    matches!(s.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+    matches!(
+        s.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 // ---- [project] -----------------------------------------------------------

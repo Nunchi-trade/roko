@@ -59,6 +59,42 @@ pub struct PostMergeCheck {
     pub result: PostMergeResult,
 }
 
+/// Actionable follow-up produced from a post-merge check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PostMergeFollowUp {
+    /// Plan this follow-up belongs to.
+    pub plan_id: String,
+    /// Whether the merged branch should be reverted automatically.
+    pub should_revert: bool,
+    /// Human-readable failing gate/test descriptions.
+    pub failing_tests: Vec<String>,
+}
+
+impl PostMergeFollowUp {
+    /// Create a follow-up from a result payload.
+    #[must_use]
+    pub fn from_result(plan_id: &str, result: &PostMergeResult) -> Self {
+        match result {
+            PostMergeResult::Clean => Self {
+                plan_id: plan_id.to_string(),
+                should_revert: false,
+                failing_tests: Vec::new(),
+            },
+            PostMergeResult::RegressionDetected { failing_tests, .. } => Self {
+                plan_id: plan_id.to_string(),
+                should_revert: true,
+                failing_tests: failing_tests.clone(),
+            },
+        }
+    }
+
+    /// Whether the follow-up requests a revert.
+    #[must_use]
+    pub const fn needs_revert(&self) -> bool {
+        self.should_revert
+    }
+}
+
 // ─── PostMergeRunner ───────────────────────────────────────────────────
 
 /// Runs post-merge regression checks and maintains a history of results.
@@ -132,10 +168,30 @@ impl PostMergeRunner {
         check
     }
 
+    /// Run regression checks, persist history, and return the immediate
+    /// orchestration follow-up decision.
+    pub fn run_record_and_follow_up(
+        &self,
+        plan_id: &str,
+        merged_at_ms: i64,
+        gate_results: &[Verdict],
+    ) -> (PostMergeCheck, PostMergeFollowUp) {
+        let check = self.run_and_record(plan_id, merged_at_ms, gate_results);
+        let follow_up = PostMergeFollowUp::from_result(plan_id, &check.result);
+        (check, follow_up)
+    }
+
     /// Look up the most recent check for a given plan.
     #[must_use]
     pub fn get_check(&self, plan_id: &str) -> Option<PostMergeCheck> {
         self.history.lock().get(plan_id).cloned()
+    }
+
+    /// Build a follow-up decision from the latest stored check for a plan.
+    #[must_use]
+    pub fn follow_up_for(&self, plan_id: &str) -> Option<PostMergeFollowUp> {
+        self.get_check(plan_id)
+            .map(|check| PostMergeFollowUp::from_result(&check.plan_id, &check.result))
     }
 
     /// Number of checks in history.
@@ -183,6 +239,21 @@ impl PostMergeRunner {
             PostMergeResult::Clean => false,
         }
     }
+
+    /// Return the plan ids that currently have unresolved regressions.
+    #[must_use]
+    pub fn unresolved_regressions(&self) -> Vec<String> {
+        self.history
+            .lock()
+            .iter()
+            .filter_map(|(plan_id, check)| match &check.result {
+                PostMergeResult::RegressionDetected { reverted, .. } if !reverted => {
+                    Some(plan_id.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────────
@@ -219,7 +290,10 @@ mod tests {
         let result = PostMergeRunner::check_regression(&verdicts);
         assert!(result.is_regression());
         match &result {
-            PostMergeResult::RegressionDetected { failing_tests, reverted } => {
+            PostMergeResult::RegressionDetected {
+                failing_tests,
+                reverted,
+            } => {
                 assert_eq!(failing_tests.len(), 1);
                 assert!(failing_tests[0].contains("test"));
                 assert!(failing_tests[0].contains("3 tests failed"));
@@ -276,11 +350,7 @@ mod tests {
     fn regressions_filter() {
         let runner = PostMergeRunner::new();
         runner.run_and_record("clean-plan", 100, &[Verdict::pass("test")]);
-        runner.run_and_record(
-            "bad-plan",
-            200,
-            &[Verdict::fail("test", "boom")],
-        );
+        runner.run_and_record("bad-plan", 200, &[Verdict::fail("test", "boom")]);
 
         let regs = runner.regressions();
         assert_eq!(regs.len(), 1);
@@ -296,11 +366,7 @@ mod tests {
     #[test]
     fn mark_reverted_flips_flag() {
         let runner = PostMergeRunner::new();
-        runner.run_and_record(
-            "bad-plan",
-            200,
-            &[Verdict::fail("test", "boom")],
-        );
+        runner.run_and_record("bad-plan", 200, &[Verdict::fail("test", "boom")]);
         assert!(runner.mark_reverted("bad-plan"));
 
         let check = runner.get_check("bad-plan").unwrap();
@@ -350,8 +416,7 @@ mod tests {
 
     #[test]
     fn regression_with_test_counts() {
-        let v = Verdict::fail("test", "regression")
-            .with_test_count(TestCount::new(90, 5, 2));
+        let v = Verdict::fail("test", "regression").with_test_count(TestCount::new(90, 5, 2));
         let verdicts = vec![Verdict::pass("compile"), v];
         let result = PostMergeRunner::check_regression(&verdicts);
         assert!(result.is_regression());
@@ -377,5 +442,59 @@ mod tests {
         assert!(runner.get_check("plan-a").unwrap().result.is_clean());
         // History should still have 1 entry, not 2.
         assert_eq!(runner.history_len(), 1);
+    }
+
+    #[test]
+    fn follow_up_from_result_matches_clean_and_regression() {
+        let clean = PostMergeFollowUp::from_result("p-clean", &PostMergeResult::Clean);
+        assert!(!clean.needs_revert());
+        assert!(clean.failing_tests.is_empty());
+
+        let regression = PostMergeFollowUp::from_result(
+            "p-bad",
+            &PostMergeResult::RegressionDetected {
+                failing_tests: vec!["test: boom".to_string()],
+                reverted: false,
+            },
+        );
+        assert!(regression.needs_revert());
+        assert_eq!(regression.failing_tests, vec!["test: boom".to_string()]);
+    }
+
+    #[test]
+    fn run_record_and_follow_up_returns_matching_decision() {
+        let runner = PostMergeRunner::new();
+        let (_check, follow_up) =
+            runner.run_record_and_follow_up("plan-x", 1_000, &[Verdict::fail("test", "oops")]);
+        assert!(follow_up.needs_revert());
+        assert_eq!(follow_up.plan_id, "plan-x");
+        assert!(follow_up.failing_tests[0].contains("oops"));
+    }
+
+    #[test]
+    fn follow_up_for_uses_latest_recorded_check() {
+        let runner = PostMergeRunner::new();
+        runner.run_and_record("plan-y", 100, &[Verdict::fail("test", "first")]);
+        runner.run_and_record("plan-y", 200, &[Verdict::pass("test")]);
+        let follow_up = runner.follow_up_for("plan-y").unwrap();
+        assert!(!follow_up.needs_revert());
+        assert!(follow_up.failing_tests.is_empty());
+    }
+
+    #[test]
+    fn unresolved_regressions_excludes_reverted_entries() {
+        let runner = PostMergeRunner::new();
+        runner.run_and_record("bad-a", 100, &[Verdict::fail("test", "A")]);
+        runner.run_and_record("bad-b", 200, &[Verdict::fail("test", "B")]);
+        runner.run_and_record("clean-c", 300, &[Verdict::pass("test")]);
+
+        let unresolved = runner.unresolved_regressions();
+        assert_eq!(unresolved.len(), 2);
+        assert!(unresolved.contains(&"bad-a".to_string()));
+        assert!(unresolved.contains(&"bad-b".to_string()));
+
+        assert!(runner.mark_reverted("bad-a"));
+        let unresolved = runner.unresolved_regressions();
+        assert_eq!(unresolved, vec!["bad-b".to_string()]);
     }
 }

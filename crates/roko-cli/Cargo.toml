@@ -22,6 +22,7 @@ roko-compose = { path = "../roko-compose" }
 roko-agent = { path = "../roko-agent" }
 roko-gate = { path = "../roko-gate" }
 roko-orchestrator = { path = "../roko-orchestrator" }
+roko-learn = { path = "../roko-learn" }
 
 clap = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs"] }
@@ -29,6 +30,10 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 toml = { workspace = true }
 anyhow = { workspace = true }
+chrono = { workspace = true }
+regex = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

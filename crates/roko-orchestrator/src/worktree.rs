@@ -246,6 +246,32 @@ impl WorktreeManager {
         self.create(plan_id, &branch).await
     }
 
+    /// Get a tracked worktree handle by id.
+    #[must_use]
+    pub fn get(&self, id: &str) -> Option<WorktreeHandle> {
+        self.active.lock().get(id).cloned()
+    }
+
+    /// Ensure a plan worktree exists and return its handle.
+    ///
+    /// If the worktree is already tracked, this touches and returns it.
+    /// Otherwise a new canonical plan worktree is created.
+    pub async fn ensure_for_plan(&self, plan_id: &str) -> Result<WorktreeHandle, WorktreeError> {
+        if let Some(existing) = self.get(plan_id) {
+            self.touch(plan_id);
+            return self
+                .get(plan_id)
+                .ok_or(WorktreeError::NotFound(existing.id));
+        }
+        self.create_for_plan(plan_id).await
+    }
+
+    /// Return the active worktree path for `plan_id` if tracked.
+    #[must_use]
+    pub fn plan_path(&self, plan_id: &str) -> Option<PathBuf> {
+        self.get(plan_id).map(|h| h.path)
+    }
+
     /// Remove the worktree tracked under `id`. Errors if `id` isn't
     /// tracked. The underlying git directory is removed via
     /// `git worktree remove --force` so uncommitted files are cleaned up
@@ -277,6 +303,12 @@ impl WorktreeManager {
         };
         out.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(out)
+    }
+
+    /// Number of active worktrees currently tracked in memory.
+    #[must_use]
+    pub fn active_count(&self) -> usize {
+        self.active.lock().len()
     }
 
     /// Bump the last-active timestamp for `id` (§15.4).
@@ -324,9 +356,7 @@ impl WorktreeManager {
             .await?;
 
         if output.status.success() {
-            let current = String::from_utf8_lossy(&output.stdout)
-                .trim()
-                .to_string();
+            let current = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if current != handle.branch {
                 return Ok(WorktreeHealth::Detached);
             }
@@ -365,6 +395,21 @@ impl WorktreeManager {
         Ok(removed)
     }
 
+    /// Remove all currently tracked worktrees.
+    ///
+    /// Returns the ids that were successfully removed.
+    pub async fn remove_all(&self) -> Result<Vec<String>, WorktreeError> {
+        let ids: Vec<String> = self.active.lock().keys().cloned().collect();
+        let mut removed = Vec::new();
+        for id in ids {
+            if self.remove(&id).await.is_ok() {
+                removed.push(id);
+            }
+        }
+        removed.sort();
+        Ok(removed)
+    }
+
     /// Remove stale `.git/index.lock` files (older than 5 minutes)
     /// across the main repo and all git-tracked worktrees (§15.7).
     pub fn clear_stale_locks(&self) -> Result<Vec<PathBuf>, WorktreeError> {
@@ -385,9 +430,7 @@ impl WorktreeManager {
             if let Ok(entries) = std::fs::read_dir(&wt_meta_dir) {
                 for entry in entries.flatten() {
                     let lock = entry.path().join("index.lock");
-                    if lock.exists()
-                        && is_stale_lock(&lock)
-                        && std::fs::remove_file(&lock).is_ok()
+                    if lock.exists() && is_stale_lock(&lock) && std::fs::remove_file(&lock).is_ok()
                     {
                         cleared.push(lock);
                     }
@@ -512,8 +555,8 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::{
-        format_branch_name, validate_id, WorktreeConfig, WorktreeError, WorktreeHealth,
-        WorktreeManager,
+        WorktreeConfig, WorktreeError, WorktreeHealth, WorktreeManager, format_branch_name,
+        validate_id,
     };
     use std::path::Path;
     use std::process::Command as StdCommand;
@@ -766,6 +809,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_and_plan_path_return_tracked_handle() {
+        let Some((_tmp, mgr)) = make_manager() else {
+            return;
+        };
+        let handle = mgr.create_for_plan("07-golf-2").await.unwrap();
+        let fetched = mgr.get("07-golf-2").unwrap();
+        assert_eq!(fetched.id, "07-golf-2");
+        assert_eq!(mgr.plan_path("07-golf-2"), Some(handle.path));
+    }
+
+    #[tokio::test]
+    async fn ensure_for_plan_reuses_existing_worktree() {
+        let Some((_tmp, mgr)) = make_manager() else {
+            return;
+        };
+        let first = mgr.create_for_plan("07-golf-3").await.unwrap();
+        let before_count = mgr.active_count();
+        let ensured = mgr.ensure_for_plan("07-golf-3").await.unwrap();
+        assert_eq!(before_count, mgr.active_count());
+        assert_eq!(ensured.id, first.id);
+        assert_eq!(ensured.path, first.path);
+        assert_eq!(ensured.branch, first.branch);
+    }
+
+    #[tokio::test]
+    async fn remove_all_clears_every_tracked_worktree() {
+        let Some((_tmp, mgr)) = make_manager() else {
+            return;
+        };
+        mgr.create_for_plan("07-golf-4").await.unwrap();
+        mgr.create_for_plan("07-golf-5").await.unwrap();
+
+        let removed = mgr.remove_all().await.unwrap();
+        assert_eq!(
+            removed,
+            vec!["07-golf-4".to_string(), "07-golf-5".to_string()]
+        );
+        assert_eq!(mgr.active_count(), 0);
+    }
+
+    #[tokio::test]
     async fn budget_exhausted_when_max_live_reached() {
         let Some((_tmp, mgr)) = make_manager_with_budget(1) else {
             return;
@@ -847,11 +931,11 @@ mod tests {
 
         // Plant a stale lock in the git worktrees metadata dir.
         let repo_root = tmp.path().join("repo");
-        let lock_dir = repo_root
-            .join(".git")
-            .join("worktrees")
-            .join("13-mike");
-        assert!(lock_dir.exists(), "git should have created worktree metadata");
+        let lock_dir = repo_root.join(".git").join("worktrees").join("13-mike");
+        assert!(
+            lock_dir.exists(),
+            "git should have created worktree metadata"
+        );
         let lock_path = lock_dir.join("index.lock");
         std::fs::write(&lock_path, "").unwrap();
 
@@ -868,10 +952,7 @@ mod tests {
             .unwrap();
 
         let cleared = mgr.clear_stale_locks().unwrap();
-        assert!(
-            cleared.contains(&lock_path),
-            "stale lock should be cleared"
-        );
+        assert!(cleared.contains(&lock_path), "stale lock should be cleared");
         assert!(!lock_path.exists(), "lock file should be deleted");
     }
 

@@ -1,0 +1,364 @@
+//! Shared role-based system prompt construction helpers.
+//!
+//! This module centralizes the prompt wiring that was previously duplicated
+//! across CLI entrypoints. It uses [`SystemPromptBuilder`] plus the existing
+//! role-template identities from [`crate::templates`] and exposes a typed API
+//! suitable for both single-shot and orchestrated execution paths.
+
+use crate::prompt::{PromptComposer, PromptSection};
+use crate::scorer::SectionScorer;
+use crate::system_prompt_builder::SystemPromptBuilder;
+use crate::templates::RolePromptTemplate;
+use crate::templates::common::CONTEXT_LAYOUT_STANZA;
+use crate::templates::implementer::ImplementerTemplate;
+use crate::templates::integration::IntegrationTemplate;
+use crate::templates::quick::{QuickFixTemplate, QuickReviewerTemplate};
+use crate::templates::reviewer::{Reviewer, ReviewerTemplate};
+use crate::templates::scribe::{ScribeTemplate, ScribeVariant};
+use crate::templates::strategist::StrategistTemplate;
+use crate::templates::task_impl::TaskImplTemplate;
+use roko_core::error::Result;
+use roko_core::{AgentRole, Budget, Composer, Context};
+
+/// Default conventions appended to every constructed system prompt.
+pub const DEFAULT_CONVENTIONS_SUFFIX: &str = "\
+- Keep changes minimal and prefer wiring existing modules over reimplementation.
+- Use the repo's existing patterns before inventing new ones.";
+
+const DEFAULT_ANTI_PATTERNS: [&str; 3] = [
+    "Do not reimplement existing modules when wiring existing code will do.",
+    "Do not use git checkout, git switch, or git branch -m.",
+    "Do not push branches directly.",
+];
+
+/// Typed task/domain context for role prompts.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TaskContext {
+    /// The current task description.
+    pub task: String,
+    /// Optional plan id associated with the task.
+    pub plan_id: Option<String>,
+    /// Optional workspace label/path.
+    pub workspace: Option<String>,
+    /// Optional extra domain notes.
+    pub domain_notes: Option<String>,
+}
+
+impl TaskContext {
+    /// Create a new context from the required task text.
+    #[must_use]
+    pub fn new(task: impl Into<String>) -> Self {
+        Self {
+            task: task.into(),
+            ..Self::default()
+        }
+    }
+
+    /// Attach a plan id.
+    #[must_use]
+    pub fn with_plan_id(mut self, plan_id: impl Into<String>) -> Self {
+        self.plan_id = Some(plan_id.into());
+        self
+    }
+
+    /// Attach a workspace label/path.
+    #[must_use]
+    pub fn with_workspace(mut self, workspace: impl Into<String>) -> Self {
+        self.workspace = Some(workspace.into());
+        self
+    }
+
+    /// Attach extra domain notes.
+    #[must_use]
+    pub fn with_domain_notes(mut self, notes: impl Into<String>) -> Self {
+        self.domain_notes = Some(notes.into());
+        self
+    }
+
+    fn task_layer(&self) -> String {
+        self.plan_id.as_ref().map_or_else(
+            || self.task.clone(),
+            |plan_id| format!("Plan: {plan_id}\nTask: {}", self.task),
+        )
+    }
+
+    fn domain_layer(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(plan_id) = &self.plan_id {
+            parts.push(format!("Plan: {plan_id}"));
+        }
+        if !self.task.is_empty() {
+            parts.push(format!("Task: {}", self.task));
+        }
+        if let Some(workspace) = &self.workspace {
+            parts.push(format!("Workspace: {workspace}"));
+        }
+        if let Some(notes) = &self.domain_notes {
+            parts.push(notes.clone());
+        }
+        parts.join("\n")
+    }
+}
+
+/// Typed specification for building a role-scoped system prompt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoleSystemPromptSpec {
+    /// Role/persona that will run the task.
+    pub role: AgentRole,
+    /// Task/domain context.
+    pub task_context: TaskContext,
+    /// Comma-separated hosted-backend tool allowlist.
+    pub tool_allowlist_csv: String,
+    /// Optional extra conventions appended after defaults.
+    pub extra_conventions: Option<String>,
+    /// Optional extra anti-patterns appended after defaults.
+    pub extra_anti_patterns: Vec<String>,
+    /// Whether to include cache markers between stability tiers.
+    pub cache_markers: bool,
+}
+
+impl RoleSystemPromptSpec {
+    /// Create a new spec with required role/task/tool context.
+    #[must_use]
+    pub fn new(role: AgentRole, task_context: TaskContext, tool_csv: impl Into<String>) -> Self {
+        Self {
+            role,
+            task_context,
+            tool_allowlist_csv: tool_csv.into(),
+            extra_conventions: None,
+            extra_anti_patterns: Vec::new(),
+            cache_markers: false,
+        }
+    }
+
+    /// Append extra conventions text.
+    #[must_use]
+    pub fn with_extra_conventions(mut self, text: impl Into<String>) -> Self {
+        self.extra_conventions = Some(text.into());
+        self
+    }
+
+    /// Append one anti-pattern rule.
+    #[must_use]
+    pub fn add_anti_pattern(mut self, rule: impl Into<String>) -> Self {
+        self.extra_anti_patterns.push(rule.into());
+        self
+    }
+
+    /// Enable cache-marker emission in the underlying builder.
+    #[must_use]
+    pub const fn with_cache_markers(mut self) -> Self {
+        self.cache_markers = true;
+        self
+    }
+
+    fn conventions_text(&self) -> String {
+        let mut out = format!("{CONTEXT_LAYOUT_STANZA}\n\n{DEFAULT_CONVENTIONS_SUFFIX}");
+        if let Some(extra) = &self.extra_conventions {
+            let trimmed = extra.trim();
+            if !trimmed.is_empty() {
+                out.push_str("\n\n");
+                out.push_str(trimmed);
+            }
+        }
+        out
+    }
+
+    fn anti_patterns(&self) -> Vec<String> {
+        let mut out: Vec<String> = DEFAULT_ANTI_PATTERNS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        for rule in &self.extra_anti_patterns {
+            if !out.iter().any(|seen| seen == rule) {
+                out.push(rule.clone());
+            }
+        }
+        out
+    }
+
+    /// Build the raw prompt text via [`SystemPromptBuilder`].
+    #[must_use]
+    pub fn build(&self) -> String {
+        let mut builder = SystemPromptBuilder::new(role_identity_for(self.role))
+            .with_conventions(self.conventions_text())
+            .with_tools(tool_allowlist_instructions(&self.tool_allowlist_csv))
+            .with_anti_patterns(self.anti_patterns());
+
+        let domain = self.task_context.domain_layer();
+        if !domain.is_empty() {
+            builder = builder.with_domain(domain);
+        }
+        let task = self.task_context.task_layer();
+        if !task.is_empty() {
+            builder = builder.with_task(task);
+        }
+        if self.cache_markers {
+            builder = builder.with_cache_markers();
+        }
+        builder.build()
+    }
+
+    /// Build structured prompt sections via [`SystemPromptBuilder`].
+    #[must_use]
+    pub fn build_sections(&self) -> Vec<PromptSection> {
+        let mut builder = SystemPromptBuilder::new(role_identity_for(self.role))
+            .with_conventions(self.conventions_text())
+            .with_tools(tool_allowlist_instructions(&self.tool_allowlist_csv))
+            .with_anti_patterns(self.anti_patterns());
+
+        let domain = self.task_context.domain_layer();
+        if !domain.is_empty() {
+            builder = builder.with_domain(domain);
+        }
+        let task = self.task_context.task_layer();
+        if !task.is_empty() {
+            builder = builder.with_task(task);
+        }
+        if self.cache_markers {
+            builder = builder.with_cache_markers();
+        }
+        builder.build_sections()
+    }
+
+    /// Compose the section form under a token budget using [`PromptComposer`].
+    ///
+    /// This is useful when callers want a budget-aware system prompt string
+    /// while preserving the role/system/session/task layering semantics.
+    pub fn compose_with_budget(&self, token_budget: usize) -> Result<String> {
+        let sections = self.build_sections();
+        let signals = sections
+            .into_iter()
+            .map(PromptSection::into_signal)
+            .collect::<Result<Vec<_>>>()?;
+        let composed = PromptComposer::new().compose(
+            &signals,
+            &Budget::tokens(token_budget),
+            &SectionScorer::new(),
+            &Context::now(),
+        )?;
+        composed.body.as_text().map(str::to_string)
+    }
+}
+
+/// Render the tool allowlist guidance block from a comma-separated list.
+#[must_use]
+pub fn tool_allowlist_instructions(tools_csv: &str) -> String {
+    let csv = tools_csv.trim();
+    if csv.is_empty() {
+        "No hosted-backend tool allowlist was supplied. Use only the minimum tools required for the role."
+            .to_string()
+    } else {
+        format!("Claude tool allowlist: {csv}\n\nUse only the tools granted to your role.")
+    }
+}
+
+/// Resolve role identity text from template modules plus typed fallbacks.
+#[must_use]
+pub fn role_identity_for(role: AgentRole) -> String {
+    match role {
+        AgentRole::Strategist => StrategistTemplate.role_identity().to_string(),
+        AgentRole::Implementer => ImplementerTemplate.role_identity().to_string(),
+        AgentRole::Architect => ReviewerTemplate::new(Reviewer::Architect)
+            .role_identity()
+            .to_string(),
+        AgentRole::Auditor => ReviewerTemplate::new(Reviewer::Auditor)
+            .role_identity()
+            .to_string(),
+        AgentRole::QuickReviewer => QuickReviewerTemplate.role_identity().to_string(),
+        AgentRole::Scribe => {
+            ScribeTemplate::role_identity_for_variant(ScribeVariant::Initial).to_string()
+        }
+        AgentRole::Critic => {
+            ScribeTemplate::role_identity_for_variant(ScribeVariant::Critic).to_string()
+        }
+        AgentRole::AutoFixer => QuickFixTemplate.role_identity().to_string(),
+        AgentRole::IntegrationTester => IntegrationTemplate.role_identity().to_string(),
+        AgentRole::Refactorer => TaskImplTemplate.role_identity().to_string(),
+        AgentRole::Researcher => {
+            "You are a researcher. Gather context from docs and code to inform implementation."
+                .to_string()
+        }
+        AgentRole::Conductor => {
+            "You are the Conductor. Coordinate the work, surface risks, and keep the plan moving."
+                .to_string()
+        }
+        other => format!(
+            "You are an AI agent in the {} role. Complete your assigned task.",
+            other.label()
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::prompt::SectionPriority;
+    use std::collections::HashSet;
+
+    #[test]
+    fn role_identities_are_non_empty_and_distinct_for_core_roles() {
+        let roles = [
+            AgentRole::Strategist,
+            AgentRole::Implementer,
+            AgentRole::Architect,
+            AgentRole::Auditor,
+            AgentRole::QuickReviewer,
+            AgentRole::Scribe,
+            AgentRole::Critic,
+            AgentRole::AutoFixer,
+            AgentRole::IntegrationTester,
+            AgentRole::Refactorer,
+            AgentRole::Conductor,
+        ];
+        let ids: Vec<String> = roles.into_iter().map(role_identity_for).collect();
+        assert!(ids.iter().all(|id| !id.trim().is_empty()));
+        let unique: HashSet<String> = ids.into_iter().collect();
+        assert_eq!(unique.len(), roles.len());
+    }
+
+    #[test]
+    fn built_prompt_includes_context_and_tool_guidance() {
+        let ctx = TaskContext::new("Implement task wiring")
+            .with_plan_id("042-golem-mortality")
+            .with_workspace("roko-cli orchestration")
+            .with_domain_notes("Focus on runtime prompt-path parity.");
+        let spec = RoleSystemPromptSpec::new(AgentRole::Implementer, ctx, "Read,Edit,Bash")
+            .with_extra_conventions("Prefer additive changes.");
+        let prompt = spec.build();
+        assert!(prompt.contains("Plan: 042-golem-mortality"));
+        assert!(prompt.contains("Task: Implement task wiring"));
+        assert!(prompt.contains("Workspace: roko-cli orchestration"));
+        assert!(prompt.contains("Claude tool allowlist: Read,Edit,Bash"));
+        assert!(prompt.contains("Prefer additive changes."));
+    }
+
+    #[test]
+    fn compose_with_budget_keeps_critical_sections() {
+        let ctx = TaskContext::new("Implement prompt wiring")
+            .with_plan_id("123")
+            .with_workspace("workspace")
+            .with_domain_notes(&"X".repeat(8_000));
+        let spec = RoleSystemPromptSpec::new(AgentRole::Conductor, ctx, "Read,Edit")
+            .with_extra_conventions("Y".repeat(8_000))
+            .add_anti_pattern("Z".repeat(8_000));
+
+        let sections = spec.build_sections();
+        let critical_tokens = sections
+            .iter()
+            .filter(|s| s.priority == SectionPriority::Critical)
+            .map(PromptSection::estimated_tokens)
+            .sum::<usize>();
+
+        let prompt = spec
+            .compose_with_budget(critical_tokens)
+            .expect("composition should keep critical layers");
+
+        assert!(prompt.contains("--- role_identity ---"));
+        assert!(prompt.contains("--- task_context ---"));
+        assert!(!prompt.contains("--- conventions ---"));
+        assert!(!prompt.contains("--- domain_context ---"));
+        assert!(!prompt.contains("--- tool_instructions ---"));
+        assert!(!prompt.contains("--- anti_patterns ---"));
+    }
+}

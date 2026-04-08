@@ -37,8 +37,7 @@ impl Config {
         let path = path.as_ref();
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("read config {}", path.display()))?;
-        Self::parse_toml(&text)
-            .with_context(|| format!("parse config {}", path.display()))
+        Self::parse_toml(&text).with_context(|| format!("parse config {}", path.display()))
     }
 
     /// Parse a TOML config from a string.
@@ -60,6 +59,18 @@ pub struct AgentConfig {
     /// Extra args passed to the program.
     #[serde(default)]
     pub args: Vec<String>,
+    /// Preferred model slug for Claude-style CLIs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Reasoning effort passed to Claude-style CLIs.
+    #[serde(default = "AgentConfig::default_effort")]
+    pub effort: String,
+    /// Whether to run Claude in `--bare` mode.
+    #[serde(default = "AgentConfig::default_bare_mode")]
+    pub bare_mode: bool,
+    /// Optional fallback model slug for Claude-style CLIs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_model: Option<String>,
     /// Timeout in milliseconds (default: `120_000`).
     #[serde(default = "AgentConfig::default_timeout")]
     pub timeout_ms: u64,
@@ -79,6 +90,14 @@ impl AgentConfig {
         120_000
     }
 
+    fn default_effort() -> String {
+        "medium".to_string()
+    }
+
+    const fn default_bare_mode() -> bool {
+        true
+    }
+
     const fn default_clean() -> bool {
         true
     }
@@ -90,6 +109,10 @@ impl Default for AgentConfig {
         Self {
             command: "cat".into(),
             args: Vec::new(),
+            model: None,
+            effort: Self::default_effort(),
+            bare_mode: Self::default_bare_mode(),
+            fallback_model: None,
             timeout_ms: Self::default_timeout(),
             env: Vec::new(),
             clean_output: Self::default_clean(),
@@ -119,7 +142,7 @@ impl PromptConfig {
     }
 
     fn default_role() -> String {
-        "You are a Roko agent.".to_string()
+        "implementer".to_string()
     }
 }
 
@@ -314,12 +337,27 @@ impl ConfigLayer {
         let agent = match self.agent {
             Some(a) => {
                 let defaults = AgentConfig::default();
+                let AgentConfig {
+                    command: default_command,
+                    args: default_args,
+                    model: default_model,
+                    effort: default_effort,
+                    bare_mode: default_bare_mode,
+                    fallback_model: default_fallback_model,
+                    timeout_ms: default_timeout_ms,
+                    env: default_env,
+                    clean_output: default_clean_output,
+                } = defaults;
                 AgentConfig {
-                    command: a.command.unwrap_or(defaults.command),
-                    args: a.args.unwrap_or(defaults.args),
-                    timeout_ms: a.timeout_ms.unwrap_or(defaults.timeout_ms),
-                    env: a.env.unwrap_or(defaults.env),
-                    clean_output: a.clean_output.unwrap_or(defaults.clean_output),
+                    command: a.command.unwrap_or(default_command),
+                    args: a.args.unwrap_or(default_args),
+                    model: a.model.or(default_model),
+                    effort: a.effort.unwrap_or(default_effort),
+                    bare_mode: a.bare_mode.unwrap_or(default_bare_mode),
+                    fallback_model: a.fallback_model.or(default_fallback_model),
+                    timeout_ms: a.timeout_ms.unwrap_or(default_timeout_ms),
+                    env: a.env.unwrap_or(default_env),
+                    clean_output: a.clean_output.unwrap_or(default_clean_output),
                 }
             }
             None => AgentConfig::default(),
@@ -336,7 +374,11 @@ impl ConfigLayer {
             None => PromptConfig::default(),
         };
         let gates = self.gates.unwrap_or_default();
-        Config { agent, prompt, gates }
+        Config {
+            agent,
+            prompt,
+            gates,
+        }
     }
 }
 
@@ -349,6 +391,18 @@ pub struct AgentLayer {
     /// Extra args.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<String>>,
+    /// Preferred model slug.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Claude effort level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// Claude bare-mode toggle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bare_mode: Option<bool>,
+    /// Claude fallback model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_model: Option<String>,
     /// Subprocess timeout in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
@@ -367,6 +421,10 @@ impl AgentLayer {
         Self {
             command: overlay.command.or(self.command),
             args: overlay.args.or(self.args),
+            model: overlay.model.or(self.model),
+            effort: overlay.effort.or(self.effort),
+            bare_mode: overlay.bare_mode.or(self.bare_mode),
+            fallback_model: overlay.fallback_model.or(self.fallback_model),
             timeout_ms: overlay.timeout_ms.or(self.timeout_ms),
             env: overlay.env.or(self.env),
             clean_output: overlay.clean_output.or(self.clean_output),
@@ -424,13 +482,19 @@ pub fn global_config_path() -> PathBuf {
         }
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".config").join("roko").join("config.toml")
+    PathBuf::from(home)
+        .join(".config")
+        .join("roko")
+        .join("config.toml")
 }
 
 /// Walk up from `start` looking for `roko.toml`. Returns the first hit.
 #[must_use]
 pub fn discover_project_config(start: &Path) -> Option<PathBuf> {
-    let mut cur = start.canonicalize().ok().unwrap_or_else(|| start.to_path_buf());
+    let mut cur = start
+        .canonicalize()
+        .ok()
+        .unwrap_or_else(|| start.to_path_buf());
     loop {
         let candidate = cur.join("roko.toml");
         if candidate.is_file() {
@@ -470,6 +534,14 @@ pub struct ConfigSources {
     pub agent_command: Source,
     /// Where `agent.args` came from.
     pub agent_args: Source,
+    /// Where `agent.model` came from.
+    pub agent_model: Source,
+    /// Where `agent.effort` came from.
+    pub agent_effort: Source,
+    /// Where `agent.bare_mode` came from.
+    pub agent_bare_mode: Source,
+    /// Where `agent.fallback_model` came from.
+    pub agent_fallback_model: Source,
     /// Where `agent.timeout_ms` came from.
     pub agent_timeout_ms: Source,
     /// Where `prompt.token_budget` came from.
@@ -491,7 +563,11 @@ pub fn load_layered(workdir: &Path) -> Result<ResolvedConfig> {
         let layer = ConfigLayer::from_file(env_path)?;
         let sources = sources_from_layer(&layer, Source::Env, Source::Default);
         let config = layer.resolve();
-        return Ok(ResolvedConfig { config, sources, paths });
+        return Ok(ResolvedConfig {
+            config,
+            sources,
+            paths,
+        });
     }
 
     let global_layer = if paths.global.is_file() {
@@ -508,7 +584,11 @@ pub fn load_layered(workdir: &Path) -> Result<ResolvedConfig> {
     let merged = global_layer.merge(project_layer);
     let config = merged.resolve();
 
-    Ok(ResolvedConfig { config, sources, paths })
+    Ok(ResolvedConfig {
+        config,
+        sources,
+        paths,
+    })
 }
 
 /// Compute per-field provenance from global + project layers.
@@ -537,6 +617,22 @@ fn compute_sources(global: &ConfigLayer, project: &ConfigLayer) -> ConfigSources
             p_agent.and_then(|a| a.args.as_ref()).is_some(),
             g_agent.and_then(|a| a.args.as_ref()).is_some(),
         ),
+        agent_model: pick(
+            p_agent.and_then(|a| a.model.as_ref()).is_some(),
+            g_agent.and_then(|a| a.model.as_ref()).is_some(),
+        ),
+        agent_effort: pick(
+            p_agent.and_then(|a| a.effort.as_ref()).is_some(),
+            g_agent.and_then(|a| a.effort.as_ref()).is_some(),
+        ),
+        agent_bare_mode: pick(
+            p_agent.and_then(|a| a.bare_mode).is_some(),
+            g_agent.and_then(|a| a.bare_mode).is_some(),
+        ),
+        agent_fallback_model: pick(
+            p_agent.and_then(|a| a.fallback_model.as_ref()).is_some(),
+            g_agent.and_then(|a| a.fallback_model.as_ref()).is_some(),
+        ),
         agent_timeout_ms: pick(
             p_agent.and_then(|a| a.timeout_ms).is_some(),
             g_agent.and_then(|a| a.timeout_ms).is_some(),
@@ -561,6 +657,10 @@ fn sources_from_layer(layer: &ConfigLayer, present: Source, fallback: Source) ->
     ConfigSources {
         agent_command: pick(agent.and_then(|a| a.command.as_ref()).is_some()),
         agent_args: pick(agent.and_then(|a| a.args.as_ref()).is_some()),
+        agent_model: pick(agent.and_then(|a| a.model.as_ref()).is_some()),
+        agent_effort: pick(agent.and_then(|a| a.effort.as_ref()).is_some()),
+        agent_bare_mode: pick(agent.and_then(|a| a.bare_mode).is_some()),
+        agent_fallback_model: pick(agent.and_then(|a| a.fallback_model.as_ref()).is_some()),
         agent_timeout_ms: pick(agent.and_then(|a| a.timeout_ms).is_some()),
         prompt_token_budget: pick(prompt.and_then(|p| p.token_budget).is_some()),
         prompt_role: pick(prompt.and_then(|p| p.role.as_ref()).is_some()),
@@ -590,7 +690,7 @@ pub fn candidate_clis() -> Vec<DetectedCli> {
     vec![
         DetectedCli {
             command: "claude".into(),
-            default_args: vec!["-p".into()],
+            default_args: vec![],
             description: "Claude CLI (anthropic)".into(),
         },
         DetectedCli {
@@ -696,7 +796,10 @@ build_system = "cargo"
 "#;
         let cfg = Config::parse_toml(toml).unwrap();
         assert_eq!(cfg.agent.command, "ollama");
-        assert_eq!(cfg.agent.args, vec!["run".to_string(), "llama3".to_string()]);
+        assert_eq!(
+            cfg.agent.args,
+            vec!["run".to_string(), "llama3".to_string()]
+        );
         assert_eq!(cfg.agent.timeout_ms, 30_000);
         assert_eq!(cfg.prompt.token_budget, 20_000);
         assert_eq!(cfg.gates.len(), 2);
@@ -739,7 +842,10 @@ token_budget = 8000
 
         let merged = global.merge(project).resolve();
         assert_eq!(merged.agent.command, "mods");
-        assert_eq!(merged.agent.args, vec!["run".to_string(), "llama3".to_string()]);
+        assert_eq!(
+            merged.agent.args,
+            vec!["run".to_string(), "llama3".to_string()]
+        );
         assert_eq!(merged.agent.timeout_ms, 60_000);
         assert_eq!(merged.prompt.token_budget, 8000);
         assert_eq!(merged.prompt.role, "global role");

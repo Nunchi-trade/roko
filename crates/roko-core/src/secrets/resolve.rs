@@ -7,6 +7,8 @@
 
 use std::sync::Arc;
 
+type EnvResolver = dyn Fn(&str) -> Option<String> + Send + Sync;
+
 /// Where a secret was resolved from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
@@ -90,7 +92,7 @@ pub trait SecretProvider: Send + Sync {
 /// `{prefix}LLM_ANTHROPIC` (uppercased, joined with `_`).
 pub struct EnvProvider {
     prefix: String,
-    resolver: Arc<dyn Fn(&str) -> Option<String> + Send + Sync>,
+    resolver: Arc<EnvResolver>,
 }
 
 impl std::fmt::Debug for EnvProvider {
@@ -120,10 +122,7 @@ impl EnvProvider {
 
     /// Replace the env-var lookup function (useful for tests).
     #[must_use]
-    pub fn with_resolver(
-        mut self,
-        resolver: Arc<dyn Fn(&str) -> Option<String> + Send + Sync>,
-    ) -> Self {
+    pub fn with_resolver(mut self, resolver: Arc<EnvResolver>) -> Self {
         self.resolver = resolver;
         self
     }
@@ -430,8 +429,14 @@ mod tests {
         let mut resolver = SecretResolver::new(ResolverConfig::default());
         resolver.add_provider(Box::new(file));
 
-        assert_eq!(resolver.resolve("llm", "anthropic").unwrap().value(), "ant-key");
-        assert_eq!(resolver.resolve("rpc", "alchemy").unwrap().value(), "alch-key");
+        assert_eq!(
+            resolver.resolve("llm", "anthropic").unwrap().value(),
+            "ant-key"
+        );
+        assert_eq!(
+            resolver.resolve("rpc", "alchemy").unwrap().value(),
+            "alch-key"
+        );
         assert!(resolver.resolve("llm", "openai").is_none());
     }
 }

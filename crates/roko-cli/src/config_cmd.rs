@@ -6,10 +6,10 @@
 //! working global config with one interactive pass.
 
 use crate::config::{
-    detect_clis, global_config_path, load_layered, AgentLayer, ConfigLayer, DetectedCli,
-    GateConfig, PromptLayer, ResolvedConfig, Source,
+    AgentLayer, ConfigLayer, DetectedCli, GateConfig, PromptLayer, ResolvedConfig, Source,
+    detect_clis, global_config_path, load_layered,
 };
-use anyhow::{anyhow, Context as _, Result};
+use anyhow::{Context as _, Result, anyhow};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
@@ -20,6 +20,8 @@ pub struct WizardInputs {
     pub agent_command: Option<String>,
     /// Extra args for the agent (replaces the detected defaults).
     pub agent_args: Option<Vec<String>>,
+    /// Preferred model slug, if the backend supports one.
+    pub model: Option<String>,
     /// Token budget for prompt composition.
     pub token_budget: Option<usize>,
     /// System role text.
@@ -89,6 +91,10 @@ pub fn run_init_wizard(target: Option<PathBuf>, inputs: &WizardInputs) -> Result
         agent: Some(AgentLayer {
             command: Some(agent_command),
             args: Some(agent_args),
+            model: inputs.model.clone(),
+            effort: None,
+            bare_mode: None,
+            fallback_model: None,
             timeout_ms: None,
             env: None,
             clean_output: None,
@@ -122,8 +128,7 @@ pub fn run_init_wizard(target: Option<PathBuf>, inputs: &WizardInputs) -> Result
     }
 
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     std::fs::write(&path, rendered).with_context(|| format!("write {}", path.display()))?;
     println!("wrote {}", path.display());
@@ -145,7 +150,10 @@ pub fn cmd_path(workdir: &Path) -> Result<()> {
     } else {
         "missing"
     };
-    println!("global : {} ({global_exists})", resolved.paths.global.display());
+    println!(
+        "global : {} ({global_exists})",
+        resolved.paths.global.display()
+    );
     match &resolved.paths.project {
         Some(p) => println!("project: {}", p.display()),
         None => println!("project: (none)"),
@@ -165,15 +173,11 @@ pub fn cmd_edit(workdir: &Path, which: EditTarget) -> Result<()> {
             .paths
             .project
             .unwrap_or_else(|| workdir.join("roko.toml")),
-        EditTarget::Auto => resolved
-            .paths
-            .project
-            .unwrap_or(resolved.paths.global),
+        EditTarget::Auto => resolved.paths.project.unwrap_or(resolved.paths.global),
     };
 
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     if !path.exists() {
         std::fs::write(&path, "# roko config\n")
@@ -208,13 +212,11 @@ pub fn cmd_set(workdir: &Path, target: EditTarget, key: &str, value: &str) -> Re
     } else {
         ConfigLayer::default()
     };
-    apply_key_value(&mut layer, key, value)
-        .with_context(|| format!("set {key} = {value}"))?;
+    apply_key_value(&mut layer, key, value).with_context(|| format!("set {key} = {value}"))?;
 
     let rendered = toml::to_string_pretty(&layer).context("serialize config")?;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     std::fs::write(&path, rendered).with_context(|| format!("write {}", path.display()))?;
     println!("set {key} = {value} in {}", path.display());
@@ -238,12 +240,56 @@ pub enum EditTarget {
 
 fn print_resolved(r: &ResolvedConfig) {
     println!("effective config:");
-    println!("  agent.command      = {:?} {}", r.config.agent.command, r.sources.agent_command.tag());
-    println!("  agent.args         = {:?} {}", r.config.agent.args, r.sources.agent_args.tag());
-    println!("  agent.timeout_ms   = {} {}", r.config.agent.timeout_ms, r.sources.agent_timeout_ms.tag());
-    println!("  prompt.token_budget= {} {}", r.config.prompt.token_budget, r.sources.prompt_token_budget.tag());
-    println!("  prompt.role        = {:?} {}", r.config.prompt.role, r.sources.prompt_role.tag());
-    println!("  gates              = {} entries {}", r.config.gates.len(), r.sources.gates.tag());
+    println!(
+        "  agent.command      = {:?} {}",
+        r.config.agent.command,
+        r.sources.agent_command.tag()
+    );
+    println!(
+        "  agent.args         = {:?} {}",
+        r.config.agent.args,
+        r.sources.agent_args.tag()
+    );
+    println!(
+        "  agent.model        = {:?} {}",
+        r.config.agent.model,
+        r.sources.agent_model.tag()
+    );
+    println!(
+        "  agent.effort       = {:?} {}",
+        r.config.agent.effort,
+        r.sources.agent_effort.tag()
+    );
+    println!(
+        "  agent.bare_mode    = {} {}",
+        r.config.agent.bare_mode,
+        r.sources.agent_bare_mode.tag()
+    );
+    println!(
+        "  agent.fallback_model = {:?} {}",
+        r.config.agent.fallback_model,
+        r.sources.agent_fallback_model.tag()
+    );
+    println!(
+        "  agent.timeout_ms   = {} {}",
+        r.config.agent.timeout_ms,
+        r.sources.agent_timeout_ms.tag()
+    );
+    println!(
+        "  prompt.token_budget= {} {}",
+        r.config.prompt.token_budget,
+        r.sources.prompt_token_budget.tag()
+    );
+    println!(
+        "  prompt.role        = {:?} {}",
+        r.config.prompt.role,
+        r.sources.prompt_role.tag()
+    );
+    println!(
+        "  gates              = {} entries {}",
+        r.config.gates.len(),
+        r.sources.gates.tag()
+    );
     println!();
     println!("sources:");
     println!("  global : {}", r.paths.global.display());
@@ -278,6 +324,23 @@ fn apply_key_value(layer: &mut ConfigLayer, key: &str, value: &str) -> Result<()
             let agent = layer.agent.get_or_insert_with(AgentLayer::default);
             agent.args = Some(args);
         }
+        "agent.model" => {
+            let agent = layer.agent.get_or_insert_with(AgentLayer::default);
+            agent.model = Some(value.into());
+        }
+        "agent.effort" => {
+            let agent = layer.agent.get_or_insert_with(AgentLayer::default);
+            agent.effort = Some(value.into());
+        }
+        "agent.bare_mode" => {
+            let bare_mode = value.parse::<bool>().context("parse bare_mode as bool")?;
+            let agent = layer.agent.get_or_insert_with(AgentLayer::default);
+            agent.bare_mode = Some(bare_mode);
+        }
+        "agent.fallback_model" => {
+            let agent = layer.agent.get_or_insert_with(AgentLayer::default);
+            agent.fallback_model = Some(value.into());
+        }
         "agent.timeout_ms" => {
             let ms: u64 = value.parse().context("parse timeout_ms as u64")?;
             let agent = layer.agent.get_or_insert_with(AgentLayer::default);
@@ -310,7 +373,10 @@ fn resolve_agent_command(preset: Option<String>, detected: &[DetectedCli]) -> Re
         println!("  [{}] {} — {}", i + 1, d.command, d.description);
     }
     loop {
-        let raw = prompt_string("Pick an agent backend (number or name)", &detected[0].command)?;
+        let raw = prompt_string(
+            "Pick an agent backend (number or name)",
+            &detected[0].command,
+        )?;
         if let Ok(idx) = raw.parse::<usize>() {
             if idx >= 1 && idx <= detected.len() {
                 return Ok(detected[idx - 1].command.clone());
@@ -333,7 +399,10 @@ fn resolve_agent_args(
     }
     // Special-case ollama: ask for model name.
     if command == "ollama" {
-        let model = prompt_string("Ollama model (e.g. llama3, codellama, qwen2.5-coder)", "llama3")?;
+        let model = prompt_string(
+            "Ollama model (e.g. llama3, codellama, qwen2.5-coder)",
+            "llama3",
+        )?;
         return Ok(vec!["run".into(), model]);
     }
     let suggested_str = if suggested.is_empty() {
@@ -355,7 +424,10 @@ fn prompt_string(label: &str, default: &str) -> Result<String> {
     print!("{label} [{default}]: ");
     io::stdout().flush().ok();
     let mut line = String::new();
-    io::stdin().lock().read_line(&mut line).context("read stdin")?;
+    io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .context("read stdin")?;
     let trimmed = line.trim();
     Ok(if trimmed.is_empty() {
         default.into()
@@ -380,7 +452,10 @@ fn prompt_bool(label: &str, default: bool) -> Result<bool> {
         print!("{label} [{hint}]: ");
         io::stdout().flush().ok();
         let mut line = String::new();
-        io::stdin().lock().read_line(&mut line).context("read stdin")?;
+        io::stdin()
+            .lock()
+            .read_line(&mut line)
+            .context("read stdin")?;
         let trimmed = line.trim().to_ascii_lowercase();
         if trimmed.is_empty() {
             return Ok(default);
@@ -438,6 +513,7 @@ mod tests {
         let inputs = WizardInputs {
             agent_command: Some("cat".into()),
             agent_args: Some(vec![]),
+            model: None,
             token_budget: Some(4000),
             role: Some("test role".into()),
             enable_gates: Some(false),
@@ -447,7 +523,10 @@ mod tests {
         assert_eq!(written, path);
         assert!(path.exists());
         let layer = ConfigLayer::from_file(&path).unwrap();
-        assert_eq!(layer.agent.as_ref().unwrap().command.as_deref(), Some("cat"));
+        assert_eq!(
+            layer.agent.as_ref().unwrap().command.as_deref(),
+            Some("cat")
+        );
         assert_eq!(layer.prompt.as_ref().unwrap().token_budget, Some(4000));
     }
 }

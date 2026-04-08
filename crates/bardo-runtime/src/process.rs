@@ -106,6 +106,39 @@ pub struct ProcessHandle {
 }
 
 impl ProcessHandle {
+    fn outcome(&self, exit_status: Option<ExitStatus>, was_killed: bool) -> ProcessOutcome {
+        ProcessOutcome {
+            id: self.id,
+            label: self.label.clone(),
+            exit_status,
+            was_killed,
+        }
+    }
+
+    async fn wait_for_graceful_exit(&mut self) -> Option<ProcessOutcome> {
+        match timeout(self.grace_period, self.child.wait()).await {
+            Ok(Ok(status)) => {
+                info!(id = %self.id, label = %self.label, code = ?status.code(), "process exited within grace period");
+                Some(self.outcome(Some(status), false))
+            }
+            Ok(Err(e)) => {
+                warn!(id = %self.id, label = %self.label, error = %e, "error waiting for process");
+                None
+            }
+            Err(_) => {
+                debug!(id = %self.id, label = %self.label, "grace period expired, force killing");
+                None
+            }
+        }
+    }
+
+    async fn force_kill(&mut self) -> ProcessOutcome {
+        let _ = self.child.kill().await;
+        let status = self.child.wait().await.ok();
+        warn!(id = %self.id, label = %self.label, "process force-killed");
+        self.outcome(status, true)
+    }
+
     /// The OS-level PID, if available.
     pub const fn os_pid(&self) -> Option<u32> {
         self.os_pid
@@ -147,36 +180,10 @@ impl ProcessHandle {
     pub async fn shutdown(&mut self) -> ProcessOutcome {
         debug!(id = %self.id, label = %self.label, "shutting down process");
         self.cancel.cancel();
-
-        // First try waiting briefly — the process may already be exiting.
-        match timeout(self.grace_period, self.child.wait()).await {
-            Ok(Ok(status)) => {
-                info!(id = %self.id, label = %self.label, code = ?status.code(), "process exited within grace period");
-                return ProcessOutcome {
-                    id: self.id,
-                    label: self.label.clone(),
-                    exit_status: Some(status),
-                    was_killed: false,
-                };
-            }
-            Ok(Err(e)) => {
-                warn!(id = %self.id, label = %self.label, error = %e, "error waiting for process");
-            }
-            Err(_) => {
-                debug!(id = %self.id, label = %self.label, "grace period expired, force killing");
-            }
+        if let Some(outcome) = self.wait_for_graceful_exit().await {
+            return outcome;
         }
-
-        // Grace period expired — force kill.
-        let _ = self.child.kill().await;
-        let status = self.child.wait().await.ok();
-        warn!(id = %self.id, label = %self.label, "process force-killed");
-        ProcessOutcome {
-            id: self.id,
-            label: self.label.clone(),
-            exit_status: status,
-            was_killed: true,
-        }
+        self.force_kill().await
     }
 
     /// The cancellation token associated with this process.

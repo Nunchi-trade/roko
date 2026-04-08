@@ -170,9 +170,7 @@ impl BlockObserver {
     pub async fn get_block(&self, n: u64) -> Result<Option<ObservedBlock>> {
         let tag = format!("0x{n:x}");
         let full = self.fetch_full_txs;
-        let r = self
-            .rpc("eth_getBlockByNumber", json!([tag, full]))
-            .await?;
+        let r = self.rpc("eth_getBlockByNumber", json!([tag, full])).await?;
         if r.is_null() {
             return Ok(None);
         }
@@ -216,9 +214,7 @@ impl BlockObserver {
             return Ok(Vec::new());
         }
         let tag = format!("0x{n:x}");
-        let r = self
-            .rpc("eth_getBlockByNumber", json!([tag, true]))
-            .await?;
+        let r = self.rpc("eth_getBlockByNumber", json!([tag, true])).await?;
         if r.is_null() {
             return Ok(Vec::new());
         }
@@ -239,9 +235,21 @@ impl BlockObserver {
                 continue;
             }
             out.push(LargeTransfer {
-                tx_hash: tx.get("hash").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                from: tx.get("from").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                to: tx.get("to").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                tx_hash: tx
+                    .get("hash")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                from: tx
+                    .get("from")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                to: tx
+                    .get("to")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 value_eth: (value_wei as f64) / 1e18,
             });
             if out.len() >= 5 {
@@ -255,7 +263,9 @@ impl BlockObserver {
     pub async fn analyze_range(&self, start: u64, end: u64) -> Result<usize> {
         let mut posted = 0usize;
         for n in start..=end {
-            let Some(block) = self.get_block(n).await? else { continue };
+            let Some(block) = self.get_block(n).await? else {
+                continue;
+            };
             // Push into trend ring
             {
                 let mut g = self.recent.lock();
@@ -290,7 +300,8 @@ impl BlockObserver {
                 "block #{} saturated: {:.1}% gas used ({} / {}), base fee {:.2} gwei",
                 b.number, b.saturation_pct, b.gas_used, b.gas_limit, base_fee_gwei
             );
-            self.deposit("threat", &content, (b.saturation_pct - 90.0) / 10.0).await?;
+            self.deposit("threat", &content, (b.saturation_pct - 90.0) / 10.0)
+                .await?;
             posted += 1;
         }
 
@@ -301,7 +312,15 @@ impl BlockObserver {
                 b.number, base_fee_gwei, b.tx_count
             );
             self.post_insight("heuristic", &content).await?;
-            self.deposit("opportunity", &format!("low gas window: {:.2} gwei at block #{}", base_fee_gwei, b.number), 0.6).await?;
+            self.deposit(
+                "opportunity",
+                &format!(
+                    "low gas window: {:.2} gwei at block #{}",
+                    base_fee_gwei, b.number
+                ),
+                0.6,
+            )
+            .await?;
             posted += 2;
         }
 
@@ -311,7 +330,8 @@ impl BlockObserver {
                 "high gas: block #{} base fee {:.2} gwei — congestion spike",
                 b.number, base_fee_gwei
             );
-            self.deposit("threat", &content, (base_fee_gwei as f32 / 200.0).min(1.0)).await?;
+            self.deposit("threat", &content, (base_fee_gwei as f32 / 200.0).min(1.0))
+                .await?;
             posted += 1;
         }
 
@@ -324,7 +344,10 @@ impl BlockObserver {
             self.post_insight("insight", &content).await?;
             posted += 1;
         } else if b.tx_count == 0 {
-            let content = format!("empty block #{} — propagation delay or validator miss", b.number);
+            let content = format!(
+                "empty block #{} — propagation delay or validator miss",
+                b.number
+            );
             self.post_insight("warning", &content).await?;
             posted += 1;
         }
@@ -340,11 +363,10 @@ impl BlockObserver {
     /// Deep transaction-level analysis: DEX routing, MEV detection, whale movements,
     /// contract interactions. Generates diverse, interesting insights grounded in
     /// real tx data.
+    #[allow(clippy::cognitive_complexity)]
     async fn analyze_transactions(&self, n: u64) -> Result<usize> {
         let tag = format!("0x{n:x}");
-        let r = self
-            .rpc("eth_getBlockByNumber", json!([tag, true]))
-            .await?;
+        let r = self.rpc("eth_getBlockByNumber", json!([tag, true])).await?;
         if r.is_null() {
             return Ok(0);
         }
@@ -365,7 +387,7 @@ impl BlockObserver {
         let mut total_value_eth: f64 = 0.0;
         let mut large_transfers: Vec<(String, String, String, f64, String)> = Vec::new();
         let mut contract_creations: Vec<String> = Vec::new();
-        let mut high_tip_txs: Vec<(String, f64)> = Vec::new();  // (tx, tip_gwei)
+        let mut high_tip_txs: Vec<(String, f64)> = Vec::new(); // (tx, tip_gwei)
 
         for tx in &txs {
             let to = tx.get("to").and_then(|v| v.as_str()).unwrap_or("");
@@ -400,7 +422,9 @@ impl BlockObserver {
             // Large value transfers
             if value_eth >= 50.0 && large_transfers.len() < 4 {
                 large_transfers.push((
-                    hash.to_string(), from.to_string(), to.to_string(),
+                    hash.to_string(),
+                    from.to_string(),
+                    to.to_string(),
                     value_eth,
                     lookup(to).map(|c| c.name.to_string()).unwrap_or_default(),
                 ));
@@ -453,8 +477,15 @@ impl BlockObserver {
                 .collect();
             let content = format!(
                 "DEX aggregated: {} router swaps in block #{} across {} routers ({})",
-                dex_total, n, routers.len(),
-                routers.iter().take(3).copied().collect::<Vec<_>>().join(", ")
+                dex_total,
+                n,
+                routers.len(),
+                routers
+                    .iter()
+                    .take(3)
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
             self.post_insight("insight", &content).await?;
             posted += 1;
@@ -479,7 +510,10 @@ impl BlockObserver {
         // === INSIGHT: Liquid staking activity ===
         if let Some(count) = category_hits.get(&ContractCategory::Lst) {
             if *count >= 2 {
-                let content = format!("liquid staking activity: {} LST interactions in block #{}", count, n);
+                let content = format!(
+                    "liquid staking activity: {} LST interactions in block #{}",
+                    count, n
+                );
                 self.post_insight("heuristic", &content).await?;
                 posted += 1;
             }
@@ -504,7 +538,9 @@ impl BlockObserver {
                     .collect();
                 let content = format!(
                     "cross-chain bridge activity in block #{}: {} calls via {}",
-                    n, count, bridges.join(", ")
+                    n,
+                    count,
+                    bridges.join(", ")
                 );
                 self.post_insight("insight", &content).await?;
                 posted += 1;
@@ -521,7 +557,9 @@ impl BlockObserver {
                     .collect();
                 let content = format!(
                     "stablecoin velocity in block #{}: {} transfers across {}",
-                    n, count, stables.join(", ")
+                    n,
+                    count,
+                    stables.join(", ")
                 );
                 self.post_insight("heuristic", &content).await?;
                 posted += 1;
@@ -535,12 +573,23 @@ impl BlockObserver {
             } else if to.is_empty() {
                 "contract creation".to_string()
             } else {
-                format!("{}..{}", &to[..6.min(to.len())], &to[to.len().saturating_sub(4)..])
+                format!(
+                    "{}..{}",
+                    &to[..6.min(to.len())],
+                    &to[to.len().saturating_sub(4)..]
+                )
             };
-            let from_short = format!("{}..{}", &from[..6.min(from.len())], &from[from.len().saturating_sub(4)..]);
+            let from_short = format!(
+                "{}..{}",
+                &from[..6.min(from.len())],
+                &from[from.len().saturating_sub(4)..]
+            );
             let content = format!(
                 "whale move in block #{}: {} ETH  {} → {}  (tx {}..)",
-                n, format_eth(*eth), from_short, to_label,
+                n,
+                format_eth(*eth),
+                from_short,
+                to_label,
                 &hash[..10.min(hash.len())]
             );
             self.post_insight("insight", &content).await?;
@@ -551,7 +600,8 @@ impl BlockObserver {
         if !contract_creations.is_empty() {
             let content = format!(
                 "{} contract(s) deployed in block #{} (first: tx {}..)",
-                contract_creations.len(), n,
+                contract_creations.len(),
+                n,
                 &contract_creations[0][..10.min(contract_creations[0].len())]
             );
             self.post_insight("insight", &content).await?;
@@ -563,9 +613,12 @@ impl BlockObserver {
             let max_tip = high_tip_txs.iter().map(|(_, t)| *t).fold(0.0_f64, f64::max);
             let content = format!(
                 "MEV signal: {} tx(s) in block #{} paid priority tips ≥5 gwei (max={:.1} gwei)",
-                high_tip_txs.len(), n, max_tip
+                high_tip_txs.len(),
+                n,
+                max_tip
             );
-            self.deposit("threat", &content, (max_tip / 20.0).min(1.0) as f32).await?;
+            self.deposit("threat", &content, (max_tip / 20.0).min(1.0) as f32)
+                .await?;
             posted += 1;
         }
 
@@ -573,7 +626,9 @@ impl BlockObserver {
         if total_value_eth >= 500.0 {
             let content = format!(
                 "{} ETH moved in block #{} across {} txs ({:.1} avg)",
-                format_eth(total_value_eth), n, tx_total,
+                format_eth(total_value_eth),
+                n,
+                tx_total,
                 total_value_eth / tx_total as f64
             );
             self.post_insight("heuristic", &content).await?;
@@ -615,7 +670,11 @@ impl BlockObserver {
         if first_fee > 0.1 {
             let pct_change = ((last_fee - first_fee) / first_fee) * 100.0;
             if pct_change.abs() > 25.0 {
-                let direction = if pct_change > 0.0 { "rising" } else { "falling" };
+                let direction = if pct_change > 0.0 {
+                    "rising"
+                } else {
+                    "falling"
+                };
                 let content = format!(
                     "base fee {} {:.1}% over 3 blocks: {:.2} → {:.2} gwei (blocks #{}–#{})",
                     direction, pct_change, first_fee, last_fee, first.number, last.number
@@ -637,18 +696,21 @@ impl BlockObserver {
         // Sustained saturation trend
         let tail = &snapshot[n.saturating_sub(5).max(0)..];
         if tail.len() >= 3 {
-            let avg_sat: f32 = tail.iter().map(|b| b.saturation_pct).sum::<f32>() / tail.len() as f32;
+            let avg_sat: f32 =
+                tail.iter().map(|b| b.saturation_pct).sum::<f32>() / tail.len() as f32;
             if avg_sat > 90.0 {
                 let content = format!(
                     "sustained congestion: avg {:.1}% saturation over last {} blocks",
-                    avg_sat, tail.len()
+                    avg_sat,
+                    tail.len()
                 );
                 self.post_insight("warning", &content).await?;
                 posted += 1;
             } else if avg_sat < 50.0 && avg_sat > 0.0 {
                 let content = format!(
                     "network underutilized: avg {:.1}% saturation over last {} blocks",
-                    avg_sat, tail.len()
+                    avg_sat,
+                    tail.len()
                 );
                 self.post_insight("heuristic", &content).await?;
                 posted += 1;
@@ -704,7 +766,10 @@ impl BlockObserver {
             return Ok(());
         }
         if self.dry_run {
-            info!(dry_run = true, kind, content, intensity, "would deposit pheromone");
+            info!(
+                dry_run = true,
+                kind, content, intensity, "would deposit pheromone"
+            );
             return Ok(());
         }
         match self
@@ -719,9 +784,13 @@ impl BlockObserver {
     }
 
     /// Run the observer loop.
+    #[allow(clippy::cognitive_complexity)]
     pub async fn run(&self, interval: Duration, batch_size: u64) -> Result<()> {
         // Seed: analyze N recent historical blocks on startup
-        let tip = self.block_number().await.context("initial eth_blockNumber")?;
+        let tip = self
+            .block_number()
+            .await
+            .context("initial eth_blockNumber")?;
         // Analyze blocks: anchor = tip - batch_size..=tip
         let anchor = tip.saturating_sub(batch_size);
         info!(tip, anchor, "seeding block observer with recent history");
@@ -804,9 +873,15 @@ mod tests {
     #[test]
     fn observed_block_gwei_conversion() {
         let b = ObservedBlock {
-            number: 1, hash: String::new(), timestamp: 0,
-            gas_used: 0, gas_limit: 1, base_fee_wei: 25_000_000_000,
-            tx_count: 0, miner: String::new(), saturation_pct: 0.0,
+            number: 1,
+            hash: String::new(),
+            timestamp: 0,
+            gas_used: 0,
+            gas_limit: 1,
+            base_fee_wei: 25_000_000_000,
+            tx_count: 0,
+            miner: String::new(),
+            saturation_pct: 0.0,
         };
         assert!((b.base_fee_gwei() - 25.0).abs() < 0.01);
     }

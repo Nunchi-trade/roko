@@ -184,6 +184,7 @@ impl TargetedFollower {
     }
 
     /// Runs the follower until shutdown or upstream stream exhaustion.
+    #[allow(clippy::cognitive_complexity)]
     pub async fn run(mut self, mut shutdown: broadcast::Receiver<()>) -> Result<()> {
         if self.is_proxy_mode() {
             return Ok(());
@@ -328,6 +329,7 @@ impl TargetedFollower {
         Ok(())
     }
 
+    #[allow(clippy::cognitive_complexity)]
     fn replay_to_head(&mut self, head: u64) {
         if self.is_proxy_mode() || head <= self.last_block_number {
             return;
@@ -366,6 +368,7 @@ impl TargetedFollower {
         }
     }
 
+    #[allow(clippy::cognitive_complexity)]
     fn replay_block(&self, number: u64) -> Result<()> {
         if self.is_proxy_mode() {
             return Ok(());
