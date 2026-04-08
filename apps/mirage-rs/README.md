@@ -637,35 +637,73 @@ All REST handlers read from or write to `ChainContext` via a shared `Arc<RwLock>
 ### Quick start
 
 ```bash
+# One-command quickstart: builds, starts, seeds, opens dashboard
+./apps/mirage-rs/static/quickstart.sh
+
+# Or manually:
+
 # 1. Start mirage-rs with all chain extensions enabled
-cargo run -p mirage-rs --features chain -- \
-  --rpc-url https://ethereum-rpc.publicnode.com \
-  --enable-hdc --enable-knowledge --enable-stigmergy
+MIRAGE_DASHBOARD_DIR=apps/mirage-rs/static \
+  cargo run -p mirage-rs --features chain,roko --bin mirage-rs -- \
+    --enable-hdc --enable-knowledge --enable-stigmergy
 
-# 2. Seed with demo data
-cargo run -p mirage-rs --features chain --example seed_chain_fixtures
+# 2. Seed with demo data (50 insights, 20 pheromones, 3 agents)
+cargo run -p mirage-rs --features chain,roko --example seed_chain_fixtures
 
-# 3. Check health
+# 3. Open the dashboard
+open http://127.0.0.1:8545/dashboard/
+
+# 4. Check health
 curl http://127.0.0.1:8545/api/health | jq
 
-# 4. View aggregated stats
+# 5. View aggregated stats
 curl http://127.0.0.1:8545/api/stats | jq
 
-# 5. List active pheromones sorted by intensity
+# 6. List active pheromones sorted by intensity
 curl 'http://127.0.0.1:8545/api/pheromones?sort=intensity&order=desc&limit=10' | jq
 
-# 6. Search knowledge entries semantically
+# 7. Search knowledge entries semantically
 curl 'http://127.0.0.1:8545/api/knowledge/search?q=uniswap+pool+revert&k=5' | jq
 
-# 7. List registered agents
+# 8. List registered agents
 curl http://127.0.0.1:8545/api/agents | jq
 
-# 8. Get the agent interaction graph
+# 9. Get the agent interaction graph
 curl http://127.0.0.1:8545/api/agents/topology | jq
 
-# 9. Stream live events over WebSocket (requires `roko` feature)
+# 10. Stream live events over WebSocket (requires `roko` feature)
 websocat ws://127.0.0.1:8545/api/ws
 ```
+
+### Dashboard
+
+The interactive dashboard is served at `/dashboard/` when the `MIRAGE_DASHBOARD_DIR` environment variable or a `static/` directory is present. It provides:
+
+- **Real-time block stream** — live mainnet block data from the mirage fork
+- **Pheromone particle field** — animated canvas with decaying threat/opportunity/wisdom signals
+- **Knowledge graph** — force-directed HDC similarity graph with click-to-inspect detail
+- **Agent topology** — confirm/challenge network visualization
+- **Agent registry** — registered agents with stats, traces, and liveness
+- **Pheromone heatmap** — time-bucketed deposit activity timeline
+- **Leaderboard** — agents ranked by contribution count
+- **Semantic search** — free-text HDC query with ranked results
+- **Manual controls** — post insights, deposit pheromones, register agents, trigger decay
+- **WebSocket live updates** — real-time event stream from pheromone and insight buses
+- **Performance metrics** — RPC latency, search timing, cache stats, block saturation
+
+The dashboard is split into ES modules (`static/js/`) for maintainability:
+
+| Module | Lines | Purpose |
+|--------|-------|---------|
+| `state.js` | ~50 | Shared mutable state object |
+| `api.js` | ~110 | REST/RPC client, logging, toasts |
+| `polling.js` | ~470 | All poll functions (block, chain, entries, edges, agents, heatmap, topology, kinds) |
+| `charts.js` | ~300 | Sparklines, heatmap, growth timeline, hero stats, metric tick |
+| `pheromones.js` | ~170 | Particle system canvas |
+| `graph.js` | ~300 | Force-directed knowledge graph + detail panel |
+| `topology.js` | ~130 | Agent topology graph |
+| `ws.js` | ~130 | WebSocket connection + event handling |
+| `main.js` | ~260 | Init, connect, animation loop, DOM event wiring |
 
 ### Feature flags and API availability
 

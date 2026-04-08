@@ -197,6 +197,30 @@ async fn finish_start_rpc_server(
     if let Some(api) = api_router {
         app = app.nest("/api", api);
     }
+    // Serve the dashboard UI from the static/ directory if present.
+    // Checks: $MIRAGE_DASHBOARD_DIR, ./static/, and the binary's sibling static/.
+    let dashboard_dir = std::env::var("MIRAGE_DASHBOARD_DIR")
+        .ok()
+        .or_else(|| {
+            let candidates = [
+                std::path::PathBuf::from("static"),
+                std::path::PathBuf::from("apps/mirage-rs/static"),
+                std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|d| d.join("static")))
+                    .unwrap_or_default(),
+            ];
+            candidates
+                .into_iter()
+                .find(|p| p.join("index.html").exists())
+                .map(|p| p.to_string_lossy().into_owned())
+        });
+    if let Some(dir) = dashboard_dir {
+        let serve_dir = tower_http::services::ServeDir::new(&dir)
+            .append_index_html_on_directories(true);
+        app = app.nest_service("/dashboard", serve_dir);
+        tracing::info!("dashboard UI served at /dashboard from {dir}");
+    }
     let app = app.layer(CorsLayer::permissive());
     let shutdown_handle = server_handle.clone();
     tokio::spawn(async move {

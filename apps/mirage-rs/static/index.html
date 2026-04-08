@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mirage-rs · roko agents · dashboard</title>
+<link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+<header>
+  <div class="brand">
+    <div class="brand-logo"></div>
+    <div class="brand-text">
+      <span class="brand-title">MIRAGE-RS · ROKO AGENTS · MAINNET FORK</span>
+      <span class="brand-sub">real chain · stigmergy · knowledge-graph · interactive</span>
+    </div>
+  </div>
+  <div class="conn">
+    <input id="rpc-url" type="text" value="http://127.0.0.1:8545" spellcheck="false">
+    <button id="btn-reconnect" class="btn sm">RECONNECT</button>
+  </div>
+  <div class="header-actions">
+    <span id="conn-chip" class="chip err"><span class="dot"></span><span id="conn-label">CONNECTING…</span></span>
+    <span id="fork-chip" class="chip"><span class="dot"></span>fork · mainnet</span>
+    <span id="agents-chip" class="chip"><span class="dot"></span>0 agents</span>
+    <button id="btn-ws" class="btn ghost sm">WS LIVE</button>
+    <button id="btn-clear" class="btn ghost sm">RESET</button>
+  </div>
+</header>
+
+<main>
+
+  <!-- === HERO STATS === -->
+  <div class="hero-stats">
+    <div class="hero-card">
+      <div class="hero-label">Chain Tip (mirage fork)</div>
+      <div class="hero-value"><span id="h-block">—</span><span class="unit">#</span></div>
+      <div class="hero-delta neutral" id="h-block-delta">probing…</div>
+      <canvas class="hero-spark" data-spark="block"></canvas>
+    </div>
+    <div class="hero-card">
+      <div class="hero-label">Gas · base fee</div>
+      <div class="hero-value"><span id="h-fee">—</span><span class="unit">gwei</span></div>
+      <div class="hero-delta neutral" id="h-fee-delta">—</div>
+      <canvas class="hero-spark" data-spark="fee"></canvas>
+    </div>
+    <div class="hero-card">
+      <div class="hero-label">Saturation · last block</div>
+      <div class="hero-value"><span id="h-sat">—</span><span class="unit">%</span></div>
+      <div class="hero-delta neutral" id="h-sat-delta">—</div>
+      <canvas class="hero-spark" data-spark="sat"></canvas>
+    </div>
+    <div class="hero-card">
+      <div class="hero-label">Insights on-chain</div>
+      <div class="hero-value"><span id="h-insights">0</span></div>
+      <div class="hero-delta neutral" id="h-insights-delta">—</div>
+      <canvas class="hero-spark" data-spark="insights"></canvas>
+    </div>
+    <div class="hero-card">
+      <div class="hero-label">Live Pheromones</div>
+      <div class="hero-value"><span id="h-phero">0</span></div>
+      <div class="hero-delta neutral" id="h-phero-delta">—</div>
+      <canvas class="hero-spark" data-spark="phero"></canvas>
+    </div>
+    <div class="hero-card">
+      <div class="hero-label">Registered Agents</div>
+      <div class="hero-value"><span id="h-agents">0</span></div>
+      <div class="hero-delta neutral" id="h-agents-delta">—</div>
+      <canvas class="hero-spark" data-spark="agents"></canvas>
+    </div>
+  </div>
+
+  <!-- === KNOWLEDGE GROWTH TIMELINE === -->
+  <div class="panel" style="margin-bottom:20px">
+    <div class="panel-head">
+      <div class="panel-title"><span class="icon"></span>Knowledge Accumulation · last 60s</div>
+      <div class="panel-meta" id="growth-meta">waiting for data…</div>
+    </div>
+    <div class="growth-wrap">
+      <canvas id="growth-canvas"></canvas>
+      <div class="growth-hud">
+        <span>insights <b id="growth-i" style="color:var(--accent-bright)">0</b></span>
+        <span>confirms <b id="growth-c" style="color:var(--green)">0</b></span>
+        <span>challenges <b id="growth-ch" style="color:var(--red)">0</b></span>
+        <span>pheromones <b id="growth-p" style="color:var(--orange)">0</b></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- === MAIN 3-COL === -->
+  <div class="dash-grid">
+    <!-- LEFT: REAL Blocks -->
+    <div class="panel">
+      <div class="panel-head">
+        <div class="panel-title"><span class="icon"></span>Real Mainnet Blocks</div>
+        <div class="panel-meta" id="block-meta">idle</div>
+      </div>
+      <div class="block-stream" id="block-stream"></div>
+    </div>
+
+    <!-- CENTER: Pheromone Field -->
+    <div class="panel">
+      <div class="panel-head">
+        <div class="panel-title"><span class="icon"></span>Pheromone Field · agents drop signals, they decay</div>
+        <div class="panel-meta" id="phero-meta">3 zones · threats fade in 30s · opps 45s · wisdom 90s</div>
+      </div>
+      <div class="phero-canvas-wrap">
+        <canvas id="phero-canvas"></canvas>
+        <div class="phero-legend">
+          <div class="legend-item threat"><span class="legend-dot"></span>THREAT · <span id="phero-c-threat">0</span></div>
+          <div class="legend-item opp"><span class="legend-dot"></span>OPPORTUNITY · <span id="phero-c-opp">0</span></div>
+          <div class="legend-item wisdom"><span class="legend-dot"></span>WISDOM · <span id="phero-c-wisdom">0</span></div>
+        </div>
+        <div class="phero-hud">
+          <span class="kv">particles <b id="phero-particles">0</b></span>
+          <span class="kv">fps <b id="phero-fps">0</b></span>
+          <span class="kv">Σintensity <b id="phero-intensity">0.00</b></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT: Multi-agent log -->
+    <div class="panel">
+      <div class="panel-head">
+        <div class="panel-title"><span class="icon"></span>Agent Activity · roko-*</div>
+        <div class="panel-meta" id="agent-meta">watching…</div>
+      </div>
+      <div class="agent-log" id="agent-log"></div>
+    </div>
+  </div>
+
+  <!-- === AGENT REGISTRY === -->
+  <div class="panel" style="margin-bottom:20px">
+    <div class="panel-head">
+      <div class="panel-title"><span class="icon"></span>Agent Registry · registered agents with stats &amp; traces</div>
+      <div class="panel-meta" id="agent-reg-meta">loading…</div>
+    </div>
+    <div style="overflow-x:auto">
+      <table class="kinds-table" style="width:100%">
+        <thead><tr><th>Agent</th><th>Role</th><th>Status</th><th>Tasks OK</th><th>Tasks Fail</th><th>Tokens</th><th>Cost (USD)</th><th>Last Seen</th></tr></thead>
+        <tbody id="agent-reg-tbody"><tr><td colspan="8" style="color:var(--text-faint)">loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- === PHEROMONE SUMMARY === -->
+  <div class="panel" style="margin-bottom:20px">
+    <div class="panel-head">
+      <div class="panel-title"><span class="icon"></span>Pheromone Summary · per-kind stats</div>
+      <div class="panel-meta" id="phero-summary-meta">loading…</div>
+    </div>
+    <div class="phero-summary-grid" id="phero-summary-grid">
+      <div class="phero-summary-card threat">
+        <div class="phero-summary-kind">Threat</div>
+        <div class="phero-summary-stat"><span>count</span><b id="ps-threat-count">0</b></div>
+        <div class="phero-summary-stat"><span>total intensity</span><b id="ps-threat-total">0.00</b></div>
+        <div class="phero-summary-stat"><span>avg intensity</span><b id="ps-threat-avg">0.00</b></div>
+      </div>
+      <div class="phero-summary-card opportunity">
+        <div class="phero-summary-kind">Opportunity</div>
+        <div class="phero-summary-stat"><span>count</span><b id="ps-opp-count">0</b></div>
+        <div class="phero-summary-stat"><span>total intensity</span><b id="ps-opp-total">0.00</b></div>
+        <div class="phero-summary-stat"><span>avg intensity</span><b id="ps-opp-avg">0.00</b></div>
+      </div>
+      <div class="phero-summary-card wisdom">
+        <div class="phero-summary-kind">Wisdom</div>
+        <div class="phero-summary-stat"><span>count</span><b id="ps-wisdom-count">0</b></div>
+        <div class="phero-summary-stat"><span>total intensity</span><b id="ps-wisdom-total">0.00</b></div>
+        <div class="phero-summary-stat"><span>avg intensity</span><b id="ps-wisdom-avg">0.00</b></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- === PHEROMONE HEATMAP TIMELINE === -->
+  <div class="panel" style="margin-bottom:20px">
+    <div class="panel-head">
+      <div class="panel-title"><span class="icon"></span>Pheromone Heatmap · 5-min buckets · last hour</div>
+      <div class="panel-meta" id="heatmap-meta">loading…</div>
+    </div>
+    <div class="heatmap-wrap">
+      <canvas id="heatmap-canvas"></canvas>
+      <div class="heatmap-hud">
+        <span>threat <b id="hm-threat" style="color:var(--red)">0</b></span>
+        <span>opp <b id="hm-opp" style="color:var(--green)">0</b></span>
+        <span>wisdom <b id="hm-wisdom" style="color:var(--yellow)">0</b></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- === INSIGHT GRAPH + DETAIL === -->
+  <div class="insight-wrap">
+    <div class="panel">
+      <div class="panel-head">
+        <div class="panel-title"><span class="icon"></span>Insight Knowledge Graph · HDC proximity · click nodes</div>
+        <div class="panel-meta" id="graph-meta">0 nodes · 0 edges</div>
+      </div>
+      <div class="insight-graph-wrap">
+        <canvas id="graph-canvas"></canvas>
+        <div class="graph-hud">
+          <span>nodes <b id="g-nodes" style="color:var(--text)">0</b></span>
+          <span>edges <b id="g-edges" style="color:var(--text)">0</b></span>
+          <span>conf <b id="g-conf" style="color:var(--green)">0</b></span>
+          <span>chall <b id="g-chall" style="color:var(--red)">0</b></span>
+        </div>
+        <div class="graph-legend">
+          <span style="color:var(--accent-bright)">&#9679; Insight</span>
+          <span style="color:var(--cyan)">&#9679; Heuristic</span>
+          <span style="color:var(--yellow)">&#9679; Warning</span>
+          <span style="color:var(--pink)">&#9679; CausalLink</span>
+          <span style="color:var(--blue)">&#9679; Strategy</span>
+          <span style="color:var(--purple)">--- enabled_by</span>
+          <span style="color:var(--cyan)">&mdash; hdc</span>
+        </div>
+        <div class="graph-hint" id="graph-hint">click node &rarr; similar insights &middot; hover &rarr; HDC neighbors</div>
+        <div class="node-tooltip" id="node-tooltip"></div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-head">
+        <div class="panel-title"><span class="icon"></span>Insight Detail</div>
+        <div class="panel-meta" id="detail-meta">click a node</div>
+      </div>
+      <div class="detail-panel" id="detail-panel">
+        <div class="detail-empty">click any node in the knowledge graph to see its content, similar insights (via HDC), and confirm/challenge actions</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- === AGENT TOPOLOGY GRAPH === -->
+  <div class="panel" style="margin-bottom:20px">
+    <div class="panel-head">
+      <div class="panel-title"><span class="icon"></span>Agent Topology · confirm/challenge network</div>
+      <div class="panel-meta" id="topo-meta">loading…</div>
+    </div>
+    <div class="topo-graph-wrap">
+      <canvas id="topo-canvas"></canvas>
+      <div class="topo-hud">
+        <span>agents <b id="t-agents" style="color:var(--text)">0</b></span>
+        <span>links <b id="t-links" style="color:var(--text)">0</b></span>
+      </div>
+      <div class="topo-legend">
+        <span style="color:var(--green)">&mdash; confirmed</span>
+        <span style="color:var(--red)">--- challenged</span>
+        <span style="color:var(--accent-bright)">&#9679; agent</span>
+      </div>
+      <div class="topo-tooltip" id="topo-tooltip"></div>
+    </div>
+  </div>
+
+  <!-- === AGENT LEADERBOARD === -->
+  <div class="panel" style="margin-bottom:20px">
+    <div class="panel-head">
+      <div class="panel-title"><span class="icon"></span>Agent Leaderboard · ranked by activity</div>
+      <div class="panel-meta" id="leaderboard-meta">loading…</div>
+    </div>
+    <div style="overflow-x:auto">
+      <table class="kinds-table" style="width:100%">
+        <thead><tr><th>Agent</th><th>Posts</th><th>Confirms</th><th>Challenges</th><th>Weight</th></tr></thead>
+        <tbody id="leaderboard-tbody"><tr><td colspan="5" style="color:var(--text-faint)">loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- === PERFORMANCE METRICS === -->
+  <div class="section-title">performance · mirage fork</div>
+  <div class="metrics-grid">
+    <div class="metric-card">
+      <div class="metric-head"><span class="metric-name">RPC calls</span><span class="metric-now"><span id="m-rpc">0</span><span class="unit">/s</span></span></div>
+      <canvas class="metric-sparkline" data-metric="rpc"></canvas>
+      <div class="metric-footer"><span>total <span id="m-rpc-total">0</span></span><span id="m-rpc-latency">p50 —</span></div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-head"><span class="metric-name">Knowledge Search (REST)</span><span class="metric-now"><span id="m-search">—</span><span class="unit">ms</span></span></div>
+      <canvas class="metric-sparkline" data-metric="search"></canvas>
+      <div class="metric-footer"><span>HDC top-k</span><span id="m-search-count">— hits</span></div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-head"><span class="metric-name">Base-fee mainnet</span><span class="metric-now"><span id="m-fee">—</span><span class="unit">gwei</span></span></div>
+      <canvas class="metric-sparkline" data-metric="fee"></canvas>
+      <div class="metric-footer"><span id="m-fee-trend">—</span><span id="m-fee-range">— low / — high</span></div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-head"><span class="metric-name">Block Saturation</span><span class="metric-now"><span id="m-sat">—</span><span class="unit">%</span></span></div>
+      <canvas class="metric-sparkline" data-metric="sat"></canvas>
+      <div class="metric-footer"><span id="m-sat-avg">avg —</span><span id="m-sat-max">max —</span></div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-head"><span class="metric-name">Mirage Cache</span><span class="metric-now"><span id="m-cache">—</span><span class="unit">%</span></span></div>
+      <canvas class="metric-sparkline" data-metric="cache"></canvas>
+      <div class="metric-footer"><span id="m-cache-entries">— entries</span><span id="m-cache-dirty">— dirty</span></div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-head"><span class="metric-name">Agent Posts · last min</span><span class="metric-now"><span id="m-posts">0</span><span class="unit">/min</span></span></div>
+      <canvas class="metric-sparkline" data-metric="posts"></canvas>
+      <div class="metric-footer"><span id="m-authors">— authors</span><span id="m-kinds">—</span></div>
+    </div>
+    <!-- Knowledge Kinds reference card -->
+    <div class="metric-card" style="grid-column: span 2">
+      <div class="metric-head"><span class="metric-name">Knowledge Kinds Reference</span><span class="metric-now" id="kinds-total-label">—</span></div>
+      <div style="overflow-y:auto; max-height:160px;">
+        <table class="kinds-table" id="kinds-table">
+          <thead><tr><th>Kind</th><th>Type</th><th>Half-life</th><th>Reward</th><th>Count</th></tr></thead>
+          <tbody id="kinds-tbody"><tr><td colspan="5" style="color:var(--text-faint)">loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- === CONTROLS === -->
+  <div class="section-title">manual interactions · REST API</div>
+  <div class="controls-grid">
+    <div class="panel ctrl-panel">
+      <div class="panel-title" style="margin-bottom:10px">Post Insight · POST /api/knowledge/entries</div>
+      <label>Kind</label>
+      <select id="ins-kind">
+        <option value="insight">insight</option>
+        <option value="heuristic">heuristic</option>
+        <option value="warning">warning</option>
+        <option value="pattern">pattern</option>
+        <option value="strategy">strategy</option>
+        <option value="anti_knowledge">anti_knowledge</option>
+        <option value="meta">meta</option>
+      </select>
+      <div class="ctrl-row">
+        <div><label>Author</label><input id="ins-author" type="text" value="human-operator"></div>
+        <div><label>Stake (wei)</label><input id="ins-stake" type="text" value="0"></div>
+      </div>
+      <label>Content</label>
+      <textarea id="ins-content" placeholder="describe what you observed on chain…"></textarea>
+      <button class="btn" id="btn-post">POST INSIGHT</button>
+    </div>
+
+    <div class="panel ctrl-panel">
+      <div class="panel-title" style="margin-bottom:10px">Deposit Pheromone · POST /api/pheromones</div>
+      <div class="ctrl-row">
+        <div><label>Kind</label>
+          <select id="ph-kind">
+            <option value="threat">threat</option>
+            <option value="opportunity">opportunity</option>
+            <option value="wisdom">wisdom</option>
+          </select>
+        </div>
+        <div><label>Intensity <span id="ph-int-label">1.00</span></label><input id="ph-intensity" type="range" min="0" max="100" value="100"></div>
+      </div>
+      <label>Content (HDC-projected)</label>
+      <textarea id="ph-content" placeholder="e.g. gas spike detected on mainnet"></textarea>
+      <div class="ctrl-btn-row">
+        <button class="btn" id="btn-deposit">DEPOSIT</button>
+        <button class="btn ghost" id="btn-decay">APPLY DECAY</button>
+      </div>
+    </div>
+
+    <div class="panel ctrl-panel">
+      <div class="panel-title" style="margin-bottom:10px">Semantic Search · GET /api/knowledge/search</div>
+      <label>Query (free text → HDC vector)</label>
+      <input id="qu-query" type="text" placeholder="e.g. gas congestion">
+      <div class="ctrl-row">
+        <div><label>K (top-k)</label><input id="qu-k" type="number" value="8" min="1" max="30"></div>
+        <div><label>Kind filter</label>
+          <select id="qu-kind">
+            <option value="">any</option>
+            <option value="insight">insight</option>
+            <option value="heuristic">heuristic</option>
+            <option value="warning">warning</option>
+            <option value="pattern">pattern</option>
+            <option value="strategy">strategy</option>
+            <option value="anti_knowledge">anti_knowledge</option>
+            <option value="meta">meta</option>
+          </select>
+        </div>
+      </div>
+      <button class="btn" id="btn-search">SEARCH</button>
+      <div id="search-results" class="search-results" style="max-height:320px;overflow-y:auto;margin-top:8px"></div>
+    </div>
+
+    <div class="panel ctrl-panel">
+      <div class="panel-title" style="margin-bottom:10px">Register Agent · POST /api/agents</div>
+      <div class="ctrl-row">
+        <div><label>Agent ID</label><input id="reg-id" type="text" placeholder="roko-alpha"></div>
+        <div><label>Role</label><input id="reg-role" type="text" value="watcher"></div>
+      </div>
+      <button class="btn" id="btn-register">REGISTER AGENT</button>
+    </div>
+  </div>
+
+  <!-- === RPC LOG === -->
+  <div class="panel" style="margin-bottom:20px">
+    <div class="panel-head">
+      <div class="panel-title"><span class="icon"></span>API Trace · REST /api/* + JSON-RPC</div>
+      <div class="panel-meta"><button id="btn-clear-log" class="btn ghost sm">CLEAR</button></div>
+    </div>
+    <div class="log-view" id="log-view"></div>
+  </div>
+
+</main>
+
+<div id="toasts"></div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
