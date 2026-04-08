@@ -19,6 +19,7 @@ pub mod episode;
 pub mod index;
 pub mod inject;
 pub mod oneshot;
+pub mod serve;
 pub mod orchestrate;
 pub mod pipe;
 pub mod plan;
@@ -32,6 +33,7 @@ pub mod secrets;
 pub mod status;
 pub mod task_parser;
 pub mod tui;
+pub mod worker;
 
 pub use config::{
     AgentConfig, Config, ConfigLayer, ConfigPaths, ConfigSources, GateConfig, PromptConfig,

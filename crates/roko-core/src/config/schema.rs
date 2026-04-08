@@ -70,6 +70,10 @@ pub struct RokoConfig {
     /// HTTP server / gateway settings.
     #[serde(default)]
     pub server: ServerConfig,
+
+    /// Cloud deployment settings (Railway, etc.).
+    #[serde(default)]
+    pub deploy: DeployConfig,
 }
 
 const fn default_schema_version() -> u32 {
@@ -89,6 +93,7 @@ impl Default for RokoConfig {
             learning: LearningConfig::default(),
             tui: TuiConfig::default(),
             server: ServerConfig::default(),
+            deploy: DeployConfig::default(),
         }
     }
 }
@@ -231,6 +236,20 @@ impl RokoConfig {
         let _ = writeln!(out, "port = {}", cfg.server.port);
     }
 
+    fn write_example_deploy(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "\n# -- Cloud deployment (Railway, etc.) --");
+        let _ = writeln!(out, "[deploy]");
+        let _ = writeln!(out, "backend = \"{}\"", cfg.deploy.backend);
+        let _ = writeln!(out, "# railway_api_token = \"...\"");
+        let _ = writeln!(out, "# project_id = \"...\"");
+        let _ = writeln!(out, "# environment_id = \"...\"");
+        let _ = writeln!(
+            out,
+            "# worker_image = \"ghcr.io/example/roko-worker:latest\""
+        );
+        let _ = writeln!(out, "# default_region = \"us-west1\"");
+    }
+
     /// Parse from a TOML string.
     pub fn from_toml(s: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(s)
@@ -324,6 +343,7 @@ impl RokoConfig {
         Self::write_example_conductor(&mut out, &cfg);
         Self::write_example_learning(&mut out, &cfg);
         Self::write_example_tui_and_server(&mut out, &cfg);
+        Self::write_example_deploy(&mut out, &cfg);
 
         out
     }
@@ -787,6 +807,12 @@ pub struct ServerConfig {
     /// Port number.
     #[serde(default = "default_port")]
     pub port: u16,
+    /// Allowed CORS origins. Empty = permissive.
+    #[serde(default)]
+    pub cors_origins: Vec<String>,
+    /// Optional bearer token for API authentication.
+    #[serde(default)]
+    pub auth_token: Option<String>,
 }
 
 fn default_bind() -> String {
@@ -802,6 +828,65 @@ impl Default for ServerConfig {
         Self {
             bind: default_bind(),
             port: default_port(),
+            cors_origins: Vec::new(),
+            auth_token: None,
+        }
+    }
+}
+
+// ---- deploy ---------------------------------------------------------------
+
+/// Cloud deployment configuration.
+///
+/// ```toml
+/// [deploy]
+/// backend = "railway-api"
+/// railway_api_token = "..."
+/// project_id = "..."
+/// environment_id = "..."
+/// worker_image = "ghcr.io/example/roko-worker:latest"
+/// default_region = "us-west1"
+/// ```
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DeployConfig {
+    /// Which deploy backend to use: `"railway-api"`, `"railway-cli"`, `"manual"`.
+    #[serde(default = "default_deploy_backend")]
+    pub backend: String,
+
+    /// Railway API token (for the `railway-api` backend).
+    #[serde(default)]
+    pub railway_api_token: Option<String>,
+
+    /// Railway project ID.
+    #[serde(default)]
+    pub project_id: Option<String>,
+
+    /// Railway environment ID.
+    #[serde(default)]
+    pub environment_id: Option<String>,
+
+    /// Docker image for worker containers.
+    #[serde(default)]
+    pub worker_image: Option<String>,
+
+    /// Default region for deployments.
+    #[serde(default)]
+    pub default_region: Option<String>,
+}
+
+fn default_deploy_backend() -> String {
+    "manual".into()
+}
+
+impl Default for DeployConfig {
+    fn default() -> Self {
+        Self {
+            backend: default_deploy_backend(),
+            railway_api_token: None,
+            project_id: None,
+            environment_id: None,
+            worker_image: None,
+            default_region: None,
         }
     }
 }

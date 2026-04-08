@@ -199,6 +199,24 @@ enum Command {
         #[arg(long)]
         workdir: Option<PathBuf>,
     },
+    /// Start the HTTP API server.
+    Serve {
+        /// Address to bind to (default: 127.0.0.1).
+        #[arg(long)]
+        bind: Option<String>,
+        /// Port number (default: 9090).
+        #[arg(long)]
+        port: Option<u16>,
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Run as a deployed worker (reads template from env, serves tasks).
+    Worker {
+        /// Port to listen on (default: 8080, overridden by PORT env).
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -486,6 +504,19 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             list_pages,
             workdir,
         } => cmd_dashboard(cli, workdir, page, list_pages).await,
+        Command::Serve {
+            bind,
+            port,
+            workdir,
+        } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            roko_cli::serve::run_server(wd, bind, port).await?;
+            Ok(EXIT_SUCCESS)
+        }
+        Command::Worker { port } => {
+            roko_cli::worker::run_worker(port).await?;
+            Ok(EXIT_SUCCESS)
+        }
     }
 }
 

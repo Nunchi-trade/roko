@@ -4559,12 +4559,16 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
+ "async-trait",
+ "axum",
  "bardo-runtime",
+ "base64",
  "chrono",
  "clap",
  "futures",
  "predicates",
  "regex",
+ "reqwest 0.12.28",
  "roko-agent",
  "roko-compose",
  "roko-conductor",
@@ -4578,9 +4582,13 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-tungstenite 0.26.2",
  "toml",
+ "tower",
+ "tower-http",
  "tracing",
  "tracing-subscriber 0.3.23",
+ "uuid",
 ]
 
 [[package]]

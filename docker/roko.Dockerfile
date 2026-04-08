@@ -31,17 +31,27 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --bin roko && \
     cp target/release/roko /roko
 
-FROM gcr.io/distroless/cc-debian12:nonroot
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 LABEL org.opencontainers.image.source="https://github.com/wpank/bardo"
 LABEL org.opencontainers.image.description="Roko orchestration CLI"
 LABEL org.opencontainers.image.licenses="MIT OR Apache-2.0"
 LABEL org.opencontainers.image.title="roko"
 LABEL org.opencontainers.image.vendor="Bardo"
 
-COPY --from=builder --chown=nonroot:nonroot /roko /usr/local/bin/roko
+COPY --from=builder /roko /usr/local/bin/roko
 
-USER nonroot
+# Environment variables for Railway/cloud deployment
+ENV PORT=3000
+ENV RUST_LOG=info
+
+RUN useradd --create-home --shell /bin/bash roko
+USER roko
 WORKDIR /workspace
 
 ENTRYPOINT ["/usr/local/bin/roko"]
-CMD ["--help"]
+CMD ["serve"]

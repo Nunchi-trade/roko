@@ -323,6 +323,8 @@ pub struct PlanRunner {
     adaptive_thresholds: AdaptiveThresholds,
     /// In-memory efficiency events collected during this run.
     efficiency_events: Vec<AgentEfficiencyEvent>,
+    /// Optional event bus sender for HTTP API event streaming.
+    server_event_bus: Option<bardo_runtime::event_bus::BusSender<crate::serve::events::ServerEvent>>,
 }
 
 /// Tracks per-task completion within a plan. Lives in PlanRunner (CLI crate),
@@ -664,6 +666,7 @@ impl PlanRunner {
                 &workdir.join(".roko").join("learn").join("gate-thresholds.json"),
             ),
             efficiency_events: Vec::new(),
+            server_event_bus: None,
         })
     }
 
@@ -719,6 +722,7 @@ impl PlanRunner {
                 &workdir.join(".roko").join("learn").join("gate-thresholds.json"),
             ),
             efficiency_events: Vec::new(),
+            server_event_bus: None,
         })
     }
 
@@ -783,6 +787,7 @@ impl PlanRunner {
                 &workdir.join(".roko").join("learn").join("gate-thresholds.json"),
             ),
             efficiency_events: Vec::new(),
+            server_event_bus: None,
         })
     }
 
@@ -790,6 +795,21 @@ impl PlanRunner {
     /// context into per-agent launches.
     pub fn set_claude_resume_session(&mut self, session_id: Option<String>) {
         self.claude_resume_session = normalize_resume_session(session_id);
+    }
+
+    /// Attach a server event bus sender for HTTP API event streaming.
+    pub fn set_server_event_bus(
+        &mut self,
+        bus: bardo_runtime::event_bus::BusSender<crate::serve::events::ServerEvent>,
+    ) {
+        self.server_event_bus = Some(bus);
+    }
+
+    /// Emit a server event if a bus is attached.
+    fn emit_server_event(&self, event: crate::serve::events::ServerEvent) {
+        if let Some(bus) = &self.server_event_bus {
+            bus.emit(event);
+        }
     }
 
     /// Gracefully shut down all managed agent processes.
@@ -1063,6 +1083,9 @@ impl PlanRunner {
             .collect();
         for plan_id in &plan_ids {
             let _ = self.executor.apply_event(plan_id, &ExecutorEvent::Start);
+            self.emit_server_event(crate::serve::events::ServerEvent::PlanStarted {
+                plan_id: plan_id.clone(),
+            });
         }
 
         // Maximum iterations to prevent infinite loops.
@@ -1120,6 +1143,14 @@ impl PlanRunner {
                 }
             })
             .collect();
+
+        // Emit plan-completed server events.
+        for p in &plans {
+            self.emit_server_event(crate::serve::events::ServerEvent::PlanCompleted {
+                plan_id: p.plan_id.clone(),
+                success: p.succeeded,
+            });
+        }
 
         // Increment plan completion metrics and log cost summaries.
         for p in &plans {
@@ -1253,6 +1284,11 @@ impl PlanRunner {
                     }),
                 );
 
+                self.emit_server_event(crate::serve::events::ServerEvent::AgentSpawned {
+                    agent_id: format!("{plan_id}:{task}"),
+                    role: format!("{role:?}"),
+                });
+
                 match (role, task.as_str()) {
                     (AgentRole::Strategist, "enrich") => self.handle_enriching(&plan_id).await,
                     (AgentRole::Implementer, _) => self.handle_implementing(&plan_id).await,
@@ -1294,6 +1330,13 @@ impl PlanRunner {
 
                         // Update adaptive gate thresholds.
                         self.adaptive_thresholds.update(rung, passed);
+
+                        self.emit_server_event(crate::serve::events::ServerEvent::GateResult {
+                            plan_id: plan_id.clone(),
+                            task_id: format!("rung-{rung}"),
+                            gate: format!("rung-{rung}"),
+                            passed,
+                        });
 
                         // Conductor signal: gate verdict (§7).
                         self.emit_conductor_signal(
@@ -2451,6 +2494,11 @@ impl PlanRunner {
 
     /// Log a phase transition event and emit a conductor signal (§7).
     fn log_transition(&mut self, plan_id: &str, event: &ExecutorEvent) {
+        self.emit_server_event(crate::serve::events::ServerEvent::PhaseTransition {
+            plan_id: plan_id.to_string(),
+            from: String::new(),
+            to: format!("{event:?}"),
+        });
         self.event_log.append(
             EventKind::PhaseTransition,
             serde_json::json!({"plan_id": plan_id, "event": format!("{event:?}")}),
