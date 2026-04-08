@@ -333,30 +333,7 @@ export async function pollTopology() {
     document.getElementById('t-links').textContent = state.topoEdges.length;
     document.getElementById('topo-meta').textContent =
       state.topoNodes.length + ' agents · ' + state.topoEdges.length + ' links · ' + Math.round(res.ms) + 'ms';
-    // Update leaderboard table
-    var sorted = state.topoNodes.slice().sort(function(a, b) {
-      return (b.insightsPosted + b.confirmationsGiven) - (a.insightsPosted + a.confirmationsGiven);
-    });
-    var lb = document.getElementById('leaderboard-tbody');
-    if (lb) {
-      lb.innerHTML = '';
-      for (var si = 0; si < Math.min(sorted.length, 10); si++) {
-        var agent = sorted[si];
-        var tr = document.createElement('tr');
-        var roleColors = {
-          researcher: 'var(--accent-bright)', validator: 'var(--green)',
-          challenger: 'var(--red)', synthesizer: 'var(--cyan)',
-        };
-        tr.innerHTML =
-          '<td style="color:' + (roleColors[agent.role] || 'var(--text)') + '">' + agent.id.slice(0,12) + '</td>' +
-          '<td>' + (agent.role || 'agent') + '</td>' +
-          '<td style="color:var(--accent-bright)">' + agent.insightsPosted + '</td>' +
-          '<td style="color:var(--green)">' + agent.confirmationsGiven + '</td>' +
-          '<td style="color:var(--red)">' + agent.challengesGiven + '</td>' +
-          '<td style="font-weight:600">' + (agent.totalWeight || 0).toFixed(2) + '</td>';
-        lb.appendChild(tr);
-      }
-    }
+    // Leaderboard updated separately by pollLeaderboard()
   } catch (e) { /* ignore */ }
 }
 
@@ -393,47 +370,68 @@ export async function pollKinds() {
   } catch (e) { /* ignore */ }
 }
 
-/* ---------- Poll agent registry via REST ---------- */
+/* ---------- Poll agent registry via REST (diff-update) ---------- */
+var agentRegHash = '';
 export async function pollAgentRegistry() {
   try {
     var res = await api('/agents');
     var data = res.data;
     var agents = data && data.items ? data.items : (Array.isArray(data) ? data : []);
     state.registeredAgents = agents;
+
+    // Update hero
+    document.getElementById('h-agents').textContent = agents.length;
+    document.getElementById('agent-reg-meta').textContent = agents.length + ' agents';
+    pushSeries('agents', agents.length);
+
+    // Quick hash to skip DOM work if nothing changed
+    var hash = agents.map(function(a) {
+      var s = a.stats || {};
+      return (a.id || '') + (s.total_tokens || 0) + (a.last_heartbeat_ts || 0);
+    }).join('|');
+    if (hash === agentRegHash) return;
+    agentRegHash = hash;
+
     var tbody = document.getElementById('agent-reg-tbody');
     if (!tbody) return;
-    tbody.innerHTML = '';
+
+    // Ensure correct number of rows
+    while (tbody.children.length > agents.length) tbody.removeChild(tbody.lastChild);
+    while (tbody.children.length < agents.length) {
+      var tr = document.createElement('tr');
+      for (var c = 0; c < 8; c++) tr.appendChild(document.createElement('td'));
+      tbody.appendChild(tr);
+    }
     if (agents.length === 0) {
       tbody.innerHTML = '<tr><td colspan="8" style="color:var(--text-faint)">no agents registered</td></tr>';
-      document.getElementById('agent-reg-meta').textContent = '0 agents';
       return;
     }
     for (var i = 0; i < agents.length; i++) {
       var a = agents[i];
-      var tr = document.createElement('tr');
+      var s = a.stats || {};
+      var row = tbody.children[i];
+      var cells = row.children;
       var alive = a.is_alive !== false;
-      var statusClass = alive ? 'color:var(--green)' : 'color:var(--red)';
-      var statusLabel = alive ? 'ALIVE' : 'OFFLINE';
-      var lastSeen = a.last_heartbeat ? new Date(a.last_heartbeat * 1000).toLocaleTimeString('en-US', {hour12: false}) : '—';
-      tr.innerHTML =
-        '<td style="font-weight:600;color:var(--accent-bright)">' + (a.id || a.agent_id || '?') + '</td>' +
-        '<td>' + (a.role || '—') + '</td>' +
-        '<td style="' + statusClass + '">' + statusLabel + '</td>' +
-        '<td>' + (a.tasks_completed || 0) + '</td>' +
-        '<td>' + (a.tasks_failed || 0) + '</td>' +
-        '<td>' + (a.total_tokens || 0).toLocaleString() + '</td>' +
-        '<td>$' + (a.total_cost_usd || 0).toFixed(4) + '</td>' +
-        '<td>' + lastSeen + '</td>';
-      tbody.appendChild(tr);
+      var hbTs = a.last_heartbeat_ts || a.last_heartbeat || 0;
+      var lastSeen = hbTs ? new Date(hbTs * 1000).toLocaleTimeString('en-US', {hour12: false}) : '—';
+      var tokens = s.total_tokens || a.total_tokens || 0;
+      var cost = s.total_cost_usd || a.total_cost_usd || 0;
+      cells[0].textContent = a.id || a.agent_id || '?';
+      cells[0].style.cssText = 'font-weight:600;color:var(--accent-bright)';
+      cells[1].textContent = a.role || '—';
+      cells[2].textContent = alive ? 'ALIVE' : 'OFFLINE';
+      cells[2].style.color = alive ? 'var(--green)' : 'var(--red)';
+      cells[3].textContent = s.insights_posted || a.tasks_completed || 0;
+      cells[4].textContent = s.challenges_given || a.tasks_failed || 0;
+      cells[5].textContent = tokens.toLocaleString();
+      cells[6].textContent = '$' + cost.toFixed(4);
+      cells[7].textContent = lastSeen;
     }
-    document.getElementById('agent-reg-meta').textContent = agents.length + ' agents';
-    // Update hero agents count
-    document.getElementById('h-agents').textContent = agents.length;
-    pushSeries('agents', agents.length);
   } catch (e) { /* ignore */ }
 }
 
-/* ---------- Poll leaderboard from topology ---------- */
+/* ---------- Poll leaderboard from topology (diff-update) ---------- */
+var leaderHash = '';
 export async function pollLeaderboard() {
   try {
     var res = await api('/agents/topology');
@@ -442,24 +440,37 @@ export async function pollLeaderboard() {
     var nodes = data.nodes.slice().sort(function(a, b) {
       return (b.contribution_count || 0) - (a.contribution_count || 0);
     });
+
+    var hash = nodes.map(function(n) { return n.id + (n.contribution_count || 0); }).join('|');
+    if (hash === leaderHash) return;
+    leaderHash = hash;
+
     var tbody = document.getElementById('leaderboard-tbody');
     if (!tbody) return;
-    tbody.innerHTML = '';
+    document.getElementById('leaderboard-meta').textContent = nodes.length + ' agents';
+
+    while (tbody.children.length > nodes.length) tbody.removeChild(tbody.lastChild);
+    while (tbody.children.length < nodes.length) {
+      var tr = document.createElement('tr');
+      for (var c = 0; c < 5; c++) tr.appendChild(document.createElement('td'));
+      tbody.appendChild(tr);
+    }
     if (nodes.length === 0) {
       tbody.innerHTML = '<tr><td colspan="5" style="color:var(--text-faint)">no agents</td></tr>';
       return;
     }
     for (var i = 0; i < nodes.length; i++) {
       var n = nodes[i];
-      var tr = document.createElement('tr');
-      tr.innerHTML =
-        '<td style="font-weight:600;color:var(--accent-bright)">' + n.id + '</td>' +
-        '<td>' + (n.insightsPosted || n.contribution_count || 0) + '</td>' +
-        '<td style="color:var(--green)">' + (n.confirmationsGiven || 0) + '</td>' +
-        '<td style="color:var(--red)">' + (n.challengesGiven || 0) + '</td>' +
-        '<td>' + (n.totalWeight || 0).toFixed(2) + '</td>';
-      tbody.appendChild(tr);
+      var row = tbody.children[i];
+      var cells = row.children;
+      cells[0].textContent = n.id;
+      cells[0].style.cssText = 'font-weight:600;color:var(--accent-bright)';
+      cells[1].textContent = n.insightsPosted || n.contribution_count || 0;
+      cells[2].textContent = n.confirmationsGiven || 0;
+      cells[2].style.color = 'var(--green)';
+      cells[3].textContent = n.challengesGiven || 0;
+      cells[3].style.color = 'var(--red)';
+      cells[4].textContent = (n.totalWeight || 0).toFixed(2);
     }
-    document.getElementById('leaderboard-meta').textContent = nodes.length + ' agents';
   } catch (e) { /* ignore */ }
 }

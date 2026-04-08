@@ -11,11 +11,15 @@ export var P_HALFLIFE = { threat: 60, opportunity: 90, wisdom: 180 };
 var pheroW=0, pheroH=0;
 
 export function resizeCanvas(c) {
-  var rect = c.getBoundingClientRect();
   var dpr = window.devicePixelRatio || 1;
-  c.width = rect.width * dpr; c.height = rect.height * dpr;
-  var ctx = c.getContext('2d'); ctx.scale(dpr, dpr);
-  return {w: rect.width, h: rect.height};
+  var cw = c.clientWidth, ch = c.clientHeight;
+  var targetW = Math.round(cw * dpr), targetH = Math.round(ch * dpr);
+  if (c.width !== targetW || c.height !== targetH) {
+    c.width = targetW; c.height = targetH;
+  }
+  var ctx = c.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return {w: cw, h: ch};
 }
 
 export function depositPheromoneParticle(kind, content, intensity, chainId) {

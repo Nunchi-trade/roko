@@ -517,6 +517,25 @@
     background: linear-gradient(90deg, transparent, var(--border-strong), transparent);
   }
 
+  /* Smooth transitions and containment */
+  .hero-value, .hero-delta { transition: color 0.3s ease; }
+  .hero-card { contain: layout style; }
+  .panel { contain: layout style; }
+  .block-stream, .agent-log, .log-view { contain: layout; overflow-y: auto; }
+  .block-row, .agent-entry, .log-line {
+    transition: opacity 0.2s ease;
+    will-change: opacity;
+  }
+  .block-row.fresh { animation: fadeIn 0.3s ease; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+  canvas { image-rendering: auto; }
+  .phero-canvas-wrap canvas, .insight-graph-wrap canvas, .topo-graph-wrap canvas,
+  .growth-wrap canvas, .heatmap-wrap canvas {
+    will-change: contents;
+  }
+  .kinds-table td, .kinds-table th { transition: none; }
+  .metric-sparkline { will-change: contents; }
+
   /* Pheromone summary grid */
   .phero-summary-grid {
     display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;

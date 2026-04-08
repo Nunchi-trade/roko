@@ -55,15 +55,15 @@ async function connect() {
     if (state.pollers.summary) clearInterval(state.pollers.summary);
     // Start polling
     state.pollers.blocks = setInterval(pollBlock, 1000);
-    state.pollers.chain = setInterval(pollChain, 1500);
-    state.pollers.heatmap = setInterval(pollHeatmap, 8000);
-    state.pollers.topo = setInterval(pollTopology, 3000);
-    state.pollers.kinds = setInterval(pollKinds, 8000);
-    state.pollers.edges = setInterval(pollEdges, 3000);
-    state.pollers.entries = setInterval(pollEntries, 2000);
-    state.pollers.summary = setInterval(pollPheroSummary, 4000);
-    state.pollers.agentReg = setInterval(pollAgentRegistry, 3000);
-    state.pollers.leaderboard = setInterval(pollLeaderboard, 5000);
+    state.pollers.chain = setInterval(pollChain, 2000);
+    state.pollers.heatmap = setInterval(pollHeatmap, 10000);
+    state.pollers.topo = setInterval(pollTopology, 5000);
+    state.pollers.kinds = setInterval(pollKinds, 15000);
+    state.pollers.edges = setInterval(pollEdges, 5000);
+    state.pollers.entries = setInterval(pollEntries, 3000);
+    state.pollers.summary = setInterval(pollPheroSummary, 5000);
+    state.pollers.agentReg = setInterval(pollAgentRegistry, 5000);
+    state.pollers.leaderboard = setInterval(pollLeaderboard, 8000);
     pollAgentRegistry();
     pollLeaderboard();
   } catch (e) {

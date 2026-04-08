@@ -8,13 +8,19 @@ import { rpc, fmtTs, shortHash } from './api.js';
 import { resizeCanvas } from './pheromones.js';
 
 /* ---------- Sparklines ---------- */
+var sparkSizeCache = new WeakMap();
 export function sparkDraw(canvas, data, color) {
   if (!canvas || !data) return;
-  var rect = canvas.getBoundingClientRect();
   var dpr = window.devicePixelRatio || 1;
-  canvas.width = rect.width * dpr; canvas.height = rect.height * dpr;
-  var ctx = canvas.getContext('2d'); ctx.scale(dpr, dpr);
-  var w = rect.width, h = rect.height;
+  var cached = sparkSizeCache.get(canvas);
+  var cw = canvas.clientWidth, ch = canvas.clientHeight;
+  if (!cached || cached.cw !== cw || cached.ch !== ch) {
+    canvas.width = cw * dpr; canvas.height = ch * dpr;
+    sparkSizeCache.set(canvas, {cw: cw, ch: ch});
+  }
+  var ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  var w = cw, h = ch;
   ctx.clearRect(0,0,w,h);
   if (data.length < 2) return;
   var max = Math.max.apply(null, data.concat([1]));
@@ -134,17 +140,29 @@ export async function metricTick() {
   drawGrowth();
 }
 
-/* ---------- Block rendering ---------- */
+/* ---------- Block rendering (incremental) ---------- */
+var lastBlockCount = 0;
 export function renderBlocks() {
   var el = document.getElementById('block-stream');
-  var frag = document.createDocumentFragment();
-  for (var i = state.blocks.length - 1; i >= 0 && i >= state.blocks.length - 40; i--) {
-    var b = state.blocks[i];
+  var blocks = state.blocks;
+  var bps = blocksPerSec();
+  document.getElementById('block-meta').textContent = blocks.length + ' · ' + bps.toFixed(1) + ' bps';
+
+  // Only rebuild if new blocks arrived
+  if (blocks.length === lastBlockCount) return;
+  var newCount = blocks.length - lastBlockCount;
+  lastBlockCount = blocks.length;
+
+  // Add new blocks at top
+  for (var n = 0; n < newCount && n < 5; n++) {
+    var idx = blocks.length - 1 - n;
+    if (idx < 0) break;
+    var b = blocks[idx];
     var row = document.createElement('div');
-    var selected = state.selectedBlock === b.number;
-    row.className = 'block-row' + (b.fresh ? ' fresh' : '') + (selected ? ' selected' : '');
+    row.className = 'block-row fresh';
+    row.dataset.blockNum = b.number;
     (function(bNum) {
-      row.onclick = function() { state.selectedBlock = (state.selectedBlock === bNum) ? null : bNum; renderBlocks(); };
+      row.onclick = function() { state.selectedBlock = (state.selectedBlock === bNum) ? null : bNum; };
     })(b.number);
     var satColor = b.saturation > 90 ? 'var(--red)' : b.saturation > 60 ? 'var(--yellow)' : 'var(--green)';
     row.innerHTML =
@@ -158,43 +176,57 @@ export function renderBlocks() {
         '<span>fee <span class="fee">' + b.baseFeeGwei.toFixed(1) + '</span></span>' +
       '</div>' +
       '<div class="sat-bar"><div style="width:' + b.saturation + '%; background:' + satColor + '"></div></div>';
-    frag.appendChild(row);
+    el.insertBefore(row, el.firstChild);
   }
-  el.innerHTML = '';
-  el.appendChild(frag);
-  var bps = blocksPerSec();
-  document.getElementById('block-meta').textContent = state.blocks.length + ' · ' + bps.toFixed(1) + ' bps';
+  // Trim excess (keep max 40)
+  while (el.children.length > 40) el.removeChild(el.lastChild);
 }
 
-/* ---------- Agent log ---------- */
+/* ---------- Agent log (incremental) ---------- */
+var lastAgentLogLen = 0;
 export function renderAgent() {
   var el = document.getElementById('agent-log');
-  var frag = document.createDocumentFragment();
-  for (var i = state.agentLog.length - 1; i >= 0 && i >= state.agentLog.length - 40; i--) {
-    var e = state.agentLog[i];
+  var logs = state.agentLog;
+  var agentCount = Math.max(state.seenAuthors.size, state.topoNodes.length);
+  document.getElementById('agent-meta').textContent = agentCount + ' agents · ' + logs.length + ' events';
+  document.getElementById('agents-chip').innerHTML = '<span class="dot"></span>' + agentCount + ' agents';
+
+  if (logs.length === lastAgentLogLen) return;
+  var newCount = logs.length - lastAgentLogLen;
+  lastAgentLogLen = logs.length;
+
+  for (var n = 0; n < newCount && n < 10; n++) {
+    var idx = logs.length - 1 - n;
+    if (idx < 0) break;
+    var e = logs[idx];
     var row = document.createElement('div');
     row.className = 'agent-entry ' + e.type;
     row.innerHTML = '<span class="ts mono">' + fmtTs(e.ts) + '</span> <span class="author">' + e.author + '</span><span class="msg">' + e.msg + '</span>';
-    frag.appendChild(row);
+    el.insertBefore(row, el.firstChild);
   }
-  el.innerHTML = ''; el.appendChild(frag);
-  var agentCount = Math.max(state.seenAuthors.size, state.topoNodes.length);
-  document.getElementById('agent-meta').textContent = agentCount + ' agents · ' + state.agentLog.length + ' events';
-  document.getElementById('agents-chip').innerHTML = '<span class="dot"></span>' + agentCount + ' agents';
+  while (el.children.length > 40) el.removeChild(el.lastChild);
 }
 
-/* ---------- Request log ---------- */
+/* ---------- Request log (incremental) ---------- */
+var lastReqLogLen = 0;
 export function renderLog() {
   var el = document.getElementById('log-view');
-  var frag = document.createDocumentFragment();
-  for (var i = state.requestLog.length - 1; i >= 0 && i >= state.requestLog.length - 40; i--) {
-    var r = state.requestLog[i];
+  var logs = state.requestLog;
+
+  if (logs.length === lastReqLogLen) return;
+  var newCount = logs.length - lastReqLogLen;
+  lastReqLogLen = logs.length;
+
+  for (var n = 0; n < newCount && n < 10; n++) {
+    var idx = logs.length - 1 - n;
+    if (idx < 0) break;
+    var r = logs[idx];
     var row = document.createElement('div');
     row.className = 'log-line';
     row.innerHTML = '<span class="ts">' + fmtTs(r.ts) + '</span><span class="lv ' + r.lv + '">' + r.lv.toUpperCase() + '</span><span class="msg">' + r.msg + '</span>';
-    frag.appendChild(row);
+    el.insertBefore(row, el.firstChild);
   }
-  el.innerHTML = ''; el.appendChild(frag);
+  while (el.children.length > 40) el.removeChild(el.lastChild);
 }
 
 /* ---------- Growth timeline ---------- */
