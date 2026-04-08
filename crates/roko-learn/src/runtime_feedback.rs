@@ -14,9 +14,15 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use roko_core::metric::TaskMetric;
 
+use crate::cascade_router::CascadeRouter;
+use crate::context_pack_cache::ContextPackCache;
 use crate::costs_db::{CostRecord, CostsDb};
 use crate::costs_log::CostsLog;
 use crate::episode_logger::{Episode, EpisodeLogger, LoggerError};
+use crate::model_router::RoutingContext;
+use crate::pattern_discovery::{EpisodeView, PatternMiner};
+use roko_core::agent::AgentRole;
+use roko_core::task::{TaskCategory, TaskComplexityBand};
 use crate::playbook::PlaybookStore;
 use crate::playbook_rules::PlaybookRules;
 use crate::provider_health::ProviderHealthTracker;
@@ -24,6 +30,32 @@ use crate::regression::{RegressionReport, RegressionThresholds, detect_regressio
 use crate::skill_library::{SkillLibrary, SkillLibraryError, TemplatePatternGenerator};
 
 /// Filesystem locations used by [`LearningRuntime`].
+/// Thin wrapper that materializes the action slice required by [`EpisodeView`]
+/// from an [`Episode`]'s gate verdicts.
+struct EpisodeActions {
+    actions: Vec<String>,
+    success: bool,
+}
+
+impl EpisodeActions {
+    fn from_episode(ep: &Episode) -> Self {
+        Self {
+            actions: ep.gate_verdicts.iter().map(|v| v.gate.clone()).collect(),
+            success: ep.success,
+        }
+    }
+}
+
+impl EpisodeView for EpisodeActions {
+    fn actions(&self) -> &[String] {
+        &self.actions
+    }
+    fn succeeded(&self) -> bool {
+        self.success
+    }
+}
+
+/// Well-known paths used by the learning runtime for persistence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LearningPaths {
     /// Root directory for runtime-managed learning artifacts.
@@ -155,6 +187,10 @@ pub struct LearningUpdate {
     pub matched_skill_updated: ApplyStatus,
     /// Regression report when a task metric was provided and sufficient data exists.
     pub regression_report: Option<RegressionReport>,
+    /// Whether pattern mining ingested this episode.
+    pub patterns_ingested: bool,
+    /// Whether the cascade router was updated with an observation.
+    pub router_updated: bool,
 }
 
 /// Errors produced by [`LearningRuntime`].
@@ -186,6 +222,9 @@ pub struct LearningRuntime {
     playbook_rules: PlaybookRules,
     regression: RegressionConfig,
     task_metrics: AsyncMutex<Vec<TaskMetric>>,
+    pattern_miner: parking_lot::Mutex<PatternMiner>,
+    cascade_router: CascadeRouter,
+    context_pack_cache: ContextPackCache,
 }
 
 impl LearningRuntime {
@@ -212,6 +251,14 @@ impl LearningRuntime {
         let playbook_rules = PlaybookRules::open(&paths.playbook_rules_toml)?;
         let task_metrics = load_task_metrics(&paths.task_metrics_jsonl).await?;
 
+        let pattern_miner = parking_lot::Mutex::new(PatternMiner::new(3, 0.5));
+        let cascade_router = CascadeRouter::new(vec![
+            "claude-sonnet-4-20250514".into(),
+            "claude-haiku-4-5-20251001".into(),
+        ]);
+        let context_pack_cache =
+            ContextPackCache::new(256, paths.root.join("context-cache.json"));
+
         Ok(Self {
             paths,
             episode_logger,
@@ -223,6 +270,9 @@ impl LearningRuntime {
             playbook_rules,
             regression,
             task_metrics: AsyncMutex::new(task_metrics),
+            pattern_miner,
+            cascade_router,
+            context_pack_cache,
         })
     }
 
@@ -257,6 +307,35 @@ impl LearningRuntime {
     #[must_use]
     pub const fn skill_library(&self) -> &SkillLibrary {
         &self.skill_library
+    }
+
+    /// Mutably borrow the skill library (e.g. for recording outcomes).
+    pub const fn skill_library_mut(&mut self) -> &mut SkillLibrary {
+        &mut self.skill_library
+    }
+
+    /// Borrow playbook rules.
+    #[must_use]
+    pub const fn playbook_rules(&self) -> &PlaybookRules {
+        &self.playbook_rules
+    }
+
+    /// Borrow pattern miner (behind `parking_lot::Mutex` for `&mut` access).
+    #[must_use]
+    pub const fn pattern_miner(&self) -> &parking_lot::Mutex<PatternMiner> {
+        &self.pattern_miner
+    }
+
+    /// Borrow cascade router.
+    #[must_use]
+    pub const fn cascade_router(&self) -> &CascadeRouter {
+        &self.cascade_router
+    }
+
+    /// Borrow context pack cache.
+    #[must_use]
+    pub const fn context_pack_cache(&self) -> &ContextPackCache {
+        &self.context_pack_cache
     }
 
     /// Persist one completed run and update all available learning subsystems.
@@ -353,7 +432,53 @@ impl LearningRuntime {
                 compute_regression_report(&metrics_snapshot, &self.regression);
         }
 
+        // ── Pattern mining ──────────────────────────────────────────────
+        let actions = EpisodeActions::from_episode(&input.episode);
+        if !actions.actions.is_empty() {
+            self.pattern_miner.lock().ingest_episode(&actions);
+            update.patterns_ingested = true;
+        }
+
+        // ── Cascade router observation ─────────────────────────────────
+        update.router_updated = self.update_cascade_router(&input.episode);
+
         Ok(update)
+    }
+
+    /// Update the cascade router from episode metadata if role + model are available.
+    fn update_cascade_router(&self, episode: &Episode) -> bool {
+        let role_str = extra_string(episode, "role");
+        let model_slug = extra_string(episode, "model");
+        let (Some(role_raw), Some(slug)) = (role_str, model_slug) else {
+            return false;
+        };
+        let role_json = format!("\"{role_raw}\"");
+        let Ok(role) = serde_json::from_str::<AgentRole>(&role_json) else {
+            return false;
+        };
+        let category_str = extra_string(episode, "task_category")
+            .unwrap_or_else(|| "implementation".to_string());
+        let cat_json = format!("\"{category_str}\"");
+        let task_category =
+            serde_json::from_str::<TaskCategory>(&cat_json).unwrap_or(TaskCategory::Implementation);
+        let complexity_str = extra_string(episode, "complexity_band")
+            .unwrap_or_else(|| "standard".to_string());
+        let cplx_json = format!("\"{complexity_str}\"");
+        let complexity =
+            serde_json::from_str::<TaskComplexityBand>(&cplx_json).unwrap_or(TaskComplexityBand::Standard);
+
+        let ctx = RoutingContext {
+            task_category,
+            complexity,
+            iteration: 0,
+            role,
+            crate_familiarity: 0.5,
+            has_prior_failure: !episode.success,
+        };
+        let reward = if episode.success { 1.0 } else { 0.0 };
+        self.cascade_router
+            .record_observation(&ctx, &slug, reward, episode.success);
+        true
     }
 }
 

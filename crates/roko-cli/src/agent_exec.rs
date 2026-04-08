@@ -38,6 +38,7 @@ pub async fn run_agent(opts: AgentExecOpts<'_>) -> Result<i32> {
     let model = opts.model.unwrap_or("claude-opus-4-6");
     let mut agent = ClaudeCliAgent::new("claude", opts.workdir, model)
         .with_dangerously_skip_permissions(true)
+        .with_timeout_ms(600_000) // 10 min for plan generation / research tasks
         .with_effort(opts.effort.unwrap_or("medium"));
     if let Some(system_prompt) = opts.system_prompt {
         agent = agent.with_system_prompt(system_prompt);

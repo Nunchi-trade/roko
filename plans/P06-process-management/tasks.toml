@@ -2,8 +2,8 @@
 plan = "P06-process-management"
 iteration = 1
 total = 7
-done = 0
-status = "ready"
+done = 7
+status = "complete"
 max_parallel = 2
 estimated_total_minutes = 70
 
@@ -22,7 +22,7 @@ estimated_total_minutes = 70
 [[task]]
 id = "T1"
 title = "Wire set_process_group and register_spawned_pid into ExecAgent::run"
-status = "ready"
+status = "done"
 files = [
     "crates/roko-agent/src/exec.rs",
 ]
@@ -49,7 +49,7 @@ depends_on = []
 [[task]]
 id = "T2"
 title = "Replace blunt timeout drop with kill_tree SIGTERM-then-SIGKILL escalation in ExecAgent"
-status = "ready"
+status = "done"
 files = [
     "crates/roko-agent/src/exec.rs",
 ]
@@ -74,7 +74,7 @@ depends_on = ["T1"]
 [[task]]
 id = "T3"
 title = "Wire classify_benign_stderr and warn-once suppression into ExecAgent stderr handling"
-status = "ready"
+status = "done"
 files = [
     "crates/roko-agent/src/exec.rs",
 ]
@@ -99,7 +99,7 @@ depends_on = ["T1"]
 [[task]]
 id = "T4"
 title = "Wire process group, PID registry, kill_tree, and benign stderr into ClaudeCliAgent"
-status = "ready"
+status = "done"
 files = [
     "crates/roko-agent/src/claude_cli_agent.rs",
 ]
@@ -126,7 +126,7 @@ depends_on = []
 [[task]]
 id = "T5"
 title = "Add ResourceLimits struct and apply_resource_limits pre-exec hook to process module"
-status = "ready"
+status = "done"
 files = [
     "crates/roko-agent/src/process/limits.rs",
     "crates/roko-agent/src/process/mod.rs",
@@ -159,7 +159,7 @@ depends_on = []
 [[task]]
 id = "T6"
 title = "Wire orphan reaper startup and GracefulShutdown SIGTERM handler into CLI main"
-status = "ready"
+status = "done"
 files = [
     "crates/roko-cli/src/main.rs",
     "crates/roko-cli/Cargo.toml",
@@ -186,7 +186,7 @@ depends_on = []
 [[task]]
 id = "T7"
 title = "Add integration tests for orphan reaper: dead PIDs removed, live PID kept"
-status = "ready"
+status = "done"
 files = [
     "crates/roko-agent/tests/process_integration.rs",
 ]

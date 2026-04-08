@@ -264,7 +264,17 @@ impl PlanStateMachine {
             PhaseKind::Merging => Some(ExecutorAction::MergeBranch {
                 plan_id: plan_state.plan_id.clone(),
             }),
-            // Enriching, RegeneratingVerify, Done, terminal — waiting for external input
+            PhaseKind::Enriching => Some(ExecutorAction::SpawnAgent {
+                plan_id: plan_state.plan_id.clone(),
+                role: AgentRole::Strategist,
+                task: "enrich".into(),
+            }),
+            PhaseKind::RegeneratingVerify => Some(ExecutorAction::SpawnAgent {
+                plan_id: plan_state.plan_id.clone(),
+                role: AgentRole::AutoFixer,
+                task: "regen-verify".into(),
+            }),
+            // Done, terminal — no action needed
             _ => None,
         }
     }
@@ -531,6 +541,32 @@ mod tests {
     fn next_action_terminal_is_none() {
         let ps = at_phase(PlanPhase::Complete);
         assert!(PlanStateMachine::next_action(&ps).is_none());
+    }
+
+    #[test]
+    fn next_action_enriching_spawns_strategist() {
+        let ps = at_phase(PlanPhase::Enriching);
+        let action = PlanStateMachine::next_action(&ps);
+        match action {
+            Some(ExecutorAction::SpawnAgent { role, task, .. }) => {
+                assert_eq!(role, AgentRole::Strategist);
+                assert_eq!(task, "enrich");
+            }
+            other => panic!("expected SpawnAgent(Strategist), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn next_action_regenerating_verify_spawns_auto_fixer() {
+        let ps = at_phase(PlanPhase::RegeneratingVerify);
+        let action = PlanStateMachine::next_action(&ps);
+        match action {
+            Some(ExecutorAction::SpawnAgent { role, task, .. }) => {
+                assert_eq!(role, AgentRole::AutoFixer);
+                assert_eq!(task, "regen-verify");
+            }
+            other => panic!("expected SpawnAgent(AutoFixer), got {other:?}"),
+        }
     }
 
     #[test]

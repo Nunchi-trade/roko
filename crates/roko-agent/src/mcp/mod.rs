@@ -11,7 +11,7 @@ pub mod dedup;
 pub mod dynamic_registry;
 pub mod to_tool_def;
 
-pub use client::{McpClient, McpRequest, McpResponse, McpToolDef, McpToolResult, Transport};
+pub use client::{McpClient, McpRequest, McpResponse, McpToolDef, McpToolResult, StdioTransport, Transport};
 pub use config::{McpConfig, McpServerConfig, find_mcp_config};
 pub use dedup::dedup_tools;
 pub use dynamic_registry::DynamicToolRegistry;

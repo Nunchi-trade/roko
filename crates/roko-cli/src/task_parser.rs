@@ -7,7 +7,7 @@
 //! to select models, assemble context, and verify results.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context as _, Result};
 use serde::Deserialize;
@@ -77,13 +77,25 @@ fn default_tier() -> String {
 
 impl TaskDef {
     /// Get the model to use for this task, falling back through:
-    /// 1. model_hint from task
-    /// 2. tier-based default
-    /// 3. provided fallback
-    pub fn effective_model(&self, fallback: &str) -> String {
+    /// 1. model_hint from task definition
+    /// 2. tier_models from config (if provided)
+    /// 3. built-in tier defaults
+    /// 4. provided fallback
+    pub fn effective_model(
+        &self,
+        fallback: &str,
+        tier_models: Option<&std::collections::HashMap<String, String>>,
+    ) -> String {
         if let Some(ref hint) = self.model_hint {
             return hint.clone();
         }
+        // Check config tier_models first
+        if let Some(models) = tier_models {
+            if let Some(model) = models.get(&self.tier) {
+                return model.clone();
+            }
+        }
+        // Built-in defaults
         match self.tier.as_str() {
             "mechanical" => "claude-haiku-4-5".into(),
             "focused" => "claude-sonnet-4-6".into(),
@@ -167,6 +179,29 @@ impl TaskDef {
         }
 
         prompt
+    }
+
+    /// Build a fix prompt for retry after verification failure.
+    /// Appends failure context to the original task prompt.
+    pub fn build_fix_prompt(
+        &self,
+        original_prompt: &str,
+        failing_phase: &str,
+        error_output: &str,
+    ) -> String {
+        let truncated = if error_output.len() > 4000 {
+            &error_output[..4000]
+        } else {
+            error_output
+        };
+
+        format!(
+            "{}\n\n---\n\n## ⚠️ Verification Failed\n\n\
+            Phase: {}\n\n\
+            Error output:\n```\n{}\n```\n\n\
+            Fix the issue and ensure all verification steps pass.",
+            original_prompt, failing_phase, truncated
+        )
     }
 }
 
@@ -400,17 +435,17 @@ command = "cargo check -p roko-cli"
             verify: vec![],
             acceptance: vec![],
         };
-        assert_eq!(task.effective_model("fallback"), "claude-haiku-4-5");
+        assert_eq!(task.effective_model("fallback", None), "claude-haiku-4-5");
 
         let t2 = TaskDef { tier: "architectural".into(), ..task.clone() };
-        assert_eq!(t2.effective_model("fallback"), "claude-opus-4-6");
+        assert_eq!(t2.effective_model("fallback", None), "claude-opus-4-6");
 
         let t3 = TaskDef {
             tier: "focused".into(),
             model_hint: Some("custom-model".into()),
             ..task
         };
-        assert_eq!(t3.effective_model("fallback"), "custom-model");
+        assert_eq!(t3.effective_model("fallback", None), "custom-model");
     }
 
     #[test]
@@ -501,5 +536,56 @@ depends_on = ["other-plan:T3"]
 "#).unwrap();
         tasks.update_cross_refs("other-plan:T3", "other-plan:T5");
         assert_eq!(tasks.tasks[0].depends_on[0], "other-plan:T5");
+    }
+
+    #[test]
+    fn build_fix_prompt_includes_error_output() {
+        let task = TaskDef {
+            id: "T1".into(),
+            title: "test task".into(),
+            status: "ready".into(),
+            tier: "focused".into(),
+            model_hint: None,
+            max_loc: None,
+            files: vec![],
+            depends_on: vec![],
+            context: None,
+            verify: vec![],
+            acceptance: vec![],
+        };
+        let original = "Original task prompt";
+        let error_msg = "compilation failed: undefined symbol";
+        let prompt = task.build_fix_prompt(original, "compile", error_msg);
+
+        assert!(prompt.contains(original));
+        assert!(prompt.contains(error_msg));
+        assert!(prompt.contains("compile"));
+    }
+
+    #[test]
+    fn build_fix_prompt_truncates_long_error() {
+        let task = TaskDef {
+            id: "T1".into(),
+            title: "test task".into(),
+            status: "ready".into(),
+            tier: "focused".into(),
+            model_hint: None,
+            max_loc: None,
+            files: vec![],
+            depends_on: vec![],
+            context: None,
+            verify: vec![],
+            acceptance: vec![],
+        };
+        let original = "Original prompt";
+        let long_error = "x".repeat(5000);
+        let prompt = task.build_fix_prompt(original, "test", &long_error);
+
+        // The prompt should contain truncated error (4000 chars max)
+        assert!(prompt.contains(original));
+        // Should not contain the full 5000-char string
+        assert!(!prompt.contains(&long_error));
+        // But should contain a 4000-char substring of it
+        assert!(prompt.contains(&"x".repeat(4000)));
     }
 }

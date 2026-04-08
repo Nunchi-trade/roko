@@ -30,6 +30,17 @@ pub struct McpConfig {
     pub servers: Vec<McpServerConfig>,
 }
 
+impl McpConfig {
+    /// Load and parse an MCP config from an explicit file path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read or is not valid JSON.
+    pub fn load(path: &Path) -> Result<Self, ConfigError> {
+        load_config(path).map(|(_path, cfg)| cfg)
+    }
+}
+
 /// Walk up from `start_dir` looking for a `.mcp.json` file.
 ///
 /// Checks `start_dir`, then its parent, then grandparent, etc. until

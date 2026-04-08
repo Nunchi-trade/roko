@@ -2,15 +2,15 @@
 plan = "W01-wire-system-prompts"
 iteration = 1
 total = 4
-done = 0
-status = "ready"
+done = 4
+status = "complete"
 max_parallel = 1
 estimated_total_minutes = 30
 
 [[task]]
 id = "T1"
 title = "Add roko-compose dependency to roko-cli"
-status = "ready"
+status = "done"
 files = ["crates/roko-cli/Cargo.toml"]
 acceptance = [
     "roko-compose appears in [dependencies] of crates/roko-cli/Cargo.toml",
@@ -21,7 +21,7 @@ depends_on = []
 [[task]]
 id = "T2"
 title = "Import SystemPromptBuilder in orchestrate.rs"
-status = "ready"
+status = "done"
 files = ["crates/roko-cli/src/orchestrate.rs"]
 acceptance = [
     "use roko_compose::SystemPromptBuilder appears in orchestrate.rs",
@@ -32,7 +32,7 @@ depends_on = ["T1"]
 [[task]]
 id = "T3"
 title = "Replace role_system_prompt() with SystemPromptBuilder calls"
-status = "ready"
+status = "done"
 files = ["crates/roko-cli/src/orchestrate.rs"]
 acceptance = [
     "role_system_prompt function body uses SystemPromptBuilder::new()",
@@ -45,7 +45,7 @@ depends_on = ["T2"]
 [[task]]
 id = "T4"
 title = "Verify composed prompts reach agent dispatch"
-status = "ready"
+status = "done"
 files = ["crates/roko-cli/src/orchestrate.rs"]
 acceptance = [
     "dispatch_agent() uses the composed system prompt (not hardcoded text)",

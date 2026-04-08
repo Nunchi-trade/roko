@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow};
@@ -16,18 +17,28 @@ use bardo_runtime::process::ProcessSupervisor;
 use roko_agent::translate::{ClaudeTranslator, RenderedTools, Translator};
 use roko_agent::{Agent, AgentResult, ClaudeCliAgent, ExecAgent};
 use roko_compose::{
-    Placement, PromptComposer, PromptSection, RoleSystemPromptSpec, SectionPriority, TaskContext,
+    ContextProvider, PlanArtifacts, Placement, PromptComposer, PromptSection,
+    RoleSystemPromptSpec, SectionPriority, TaskContext,
 };
-use roko_core::tool::ToolRegistry;
+use roko_conductor::{Conductor, ConductorDecision};
+use roko_core::obs::{LabelSet, MetricRegistry};
+use roko_core::tool::{FormatBandit, ProfileBandit, ToolTraceEvent, TraceSink};
+use roko_core::tool::trace::{FailureKind, FailureTrace, TraceStep};
+use roko_core::obs::health::{AlwaysUpProbe, ProbeRegistry};
+use roko_core::tool::TraceId;
 use roko_core::{
     AgentRole, Body, Budget, Composer, Context, Gate, Kind, PhaseKind, Provenance, Signal,
     Substrate, Verdict,
 };
 use roko_fs::FileSubstrate;
+use roko_fs::observability::FsObservabilitySinks;
 use roko_gate::{
     clippy_gate::ClippyGate, compile::CompileGate, payload::GatePayload, test_gate::TestGate,
 };
-use roko_learn::episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage};
+use roko_core::metric::{ConfigHash, TaskMetric};
+use roko_learn::costs_db::CostRecord;
+use roko_learn::episode_logger::{Episode, GateVerdict, Usage};
+use roko_learn::runtime_feedback::{CompletedRunInput, LearningRuntime, LearningUpdate};
 use roko_orchestrator::worktree::{WorktreeConfig, WorktreeManager};
 use roko_orchestrator::{
     EventKind, EventLog, EventLogSnapshot, ExecutorAction, ExecutorConfig, ExecutorEvent,
@@ -37,10 +48,138 @@ use roko_std::NoOpScorer;
 use roko_std::StaticToolRegistry;
 
 use crate::config::Config;
+use crate::task_parser::TasksFile;
 
 /// Default number of actions between auto-saves.
 const AUTOSAVE_INTERVAL: usize = 5;
 const DEFAULT_WORKTREE_IDLE_TTL_SECS: u64 = 30 * 60;
+/// Maximum number of tasks to dispatch in parallel.
+const MAX_PARALLEL_TASKS: usize = 4;
+
+// ─── ContextAttributionTracker ────────────────────────────────────────────
+
+/// Tracks per-(tier, source_type) context attribution rates.
+/// Loaded from `.roko/context-attribution.jsonl` at startup.
+struct ContextAttributionTracker {
+    /// (tier, source_type) -> (referenced_count, total_count)
+    rates: HashMap<(String, String), (usize, usize)>,
+}
+
+impl ContextAttributionTracker {
+    fn load(path: &Path) -> Self {
+        let mut rates: HashMap<(String, String), (usize, usize)> = HashMap::new();
+        if let Ok(contents) = std::fs::read_to_string(path) {
+            for line in contents.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                    if let (Some(tier), Some(source_type)) = (
+                        v.get("tier").and_then(|t| t.as_str()),
+                        v.get("source_type").and_then(|s| s.as_str()),
+                    ) {
+                        let referenced = v
+                            .get("referenced")
+                            .and_then(|r| r.as_bool())
+                            .unwrap_or(false);
+                        let entry = rates
+                            .entry((tier.to_string(), source_type.to_string()))
+                            .or_insert((0, 0));
+                        if referenced {
+                            entry.0 += 1;
+                        }
+                        entry.1 += 1;
+                    }
+                }
+            }
+        }
+        Self { rates }
+    }
+
+    fn ref_rate(&self, tier: &str, source_type: &str) -> f64 {
+        match self.rates.get(&(tier.to_string(), source_type.to_string())) {
+            Some(&(referenced, total)) if total > 0 => referenced as f64 / total as f64,
+            _ => 1.0,
+        }
+    }
+
+    fn should_demote(&self, tier: &str, source_type: &str) -> bool {
+        self.ref_rate(tier, source_type) < 0.10
+    }
+
+    fn record(&mut self, tier: &str, source_type: &str, referenced: bool) {
+        let entry = self
+            .rates
+            .entry((tier.to_string(), source_type.to_string()))
+            .or_insert((0, 0));
+        if referenced {
+            entry.0 += 1;
+        }
+        entry.1 += 1;
+    }
+}
+
+// ─── Parallel agent execution ────────────────────────────────────────────
+
+/// Owned data needed to run a single agent subprocess in isolation.
+/// Constructed from `PlanRunner` state, then run in parallel without
+/// borrowing the runner.
+struct AgentRunConfig {
+    command: String,
+    exec_dir: PathBuf,
+    model: String,
+    timeout_ms: u64,
+    bare_mode: bool,
+    effort: String,
+    system_prompt: String,
+    tools_csv: String,
+    mcp_config: Option<PathBuf>,
+    fallback_model: Option<String>,
+    env_vars: Vec<(String, String)>,
+    extra_args: Vec<String>,
+    resume_session: Option<String>,
+    prompt: String,
+    skip_permissions: bool,
+}
+
+/// Run a prepared agent configuration. No `PlanRunner` borrow required.
+async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
+    let ctx = Context::now();
+    let prompt_signal = Signal::builder(Kind::Task)
+        .body(Body::Text(cfg.prompt.clone()))
+        .build();
+
+    if cfg.command == "claude" {
+        let mut agent = ClaudeCliAgent::new(&cfg.command, &cfg.exec_dir, &cfg.model)
+            .with_timeout_ms(cfg.timeout_ms)
+            .with_bare_mode(cfg.bare_mode)
+            .with_effort(cfg.effort)
+            .with_system_prompt(cfg.system_prompt)
+            .with_tools(cfg.tools_csv)
+            .with_settings_json(roko_agent::claude_cli_agent::build_settings_json())
+            .with_dangerously_skip_permissions(cfg.skip_permissions)
+            .with_optional_resume(cfg.resume_session)
+            .with_extra_args(cfg.extra_args);
+        if let Some(mcp_path) = &cfg.mcp_config {
+            agent = agent.with_mcp_config(mcp_path);
+        }
+        if let Some(fallback) = &cfg.fallback_model {
+            agent = agent.with_fallback_model(fallback.clone());
+        }
+        for (k, v) in &cfg.env_vars {
+            agent = agent.with_env_var(k, v);
+        }
+        agent.run(&prompt_signal, &ctx).await
+    } else {
+        let mut agent = ExecAgent::new(&cfg.command, cfg.extra_args)
+            .with_timeout_ms(cfg.timeout_ms);
+        for (k, v) in &cfg.env_vars {
+            agent = agent.with_env_var(k, v);
+        }
+        agent.run(&prompt_signal, &ctx).await
+    }
+}
 
 // ─── Report types ─────────────────────────────────────────────────────────
 
@@ -76,6 +215,47 @@ impl OrchestrationReport {
     }
 }
 
+/// Health probe that checks if a CLI command is findable on PATH.
+struct CliProbe {
+    command: String,
+}
+
+impl roko_core::obs::health::Probe for CliProbe {
+    fn name(&self) -> &str {
+        &self.command
+    }
+    fn check(&self) -> Result<(), roko_core::obs::health::DegradedReason> {
+        // Use `command -v` to check PATH availability without adding a dep.
+        let ok = std::process::Command::new("sh")
+            .args(["-c", &format!("command -v {}", self.command)])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        if ok {
+            Ok(())
+        } else {
+            Err(roko_core::obs::health::DegradedReason::new(
+                &self.command,
+                format!("command '{}' not found on PATH", self.command),
+            ))
+        }
+    }
+}
+
+/// Context gathered from the learning subsystem for a given task dispatch.
+///
+/// Includes the prompt text plus IDs of matched skills/rules so confidence
+/// can be updated after the task completes.
+struct LearnedContext {
+    /// Assembled context text to inject into the agent prompt.
+    text: String,
+    /// The best-match skill ID (if any) for confidence updates.
+    matched_skill_id: Option<String>,
+    /// The best-match playbook rule ID (if any) for confidence updates.
+    matched_rule_id: Option<String>,
+}
+
 // ─── PlanRunner ───────────────────────────────────────────────────────────
 
 /// The runtime harness that drives plan execution end-to-end.
@@ -106,21 +286,248 @@ pub struct PlanRunner {
     per_plan_agents: HashMap<String, usize>,
     per_plan_gates: HashMap<String, Vec<(String, bool)>>,
     /// Episode logger for recording agent turns to `.roko/episodes.jsonl`.
-    episode_logger: EpisodeLogger,
+    learning: LearningRuntime,
     /// Process supervisor for tracking and cleaning up agent subprocesses.
     supervisor: ProcessSupervisor,
     /// Root cancellation token for coordinated shutdown.
     cancel: CancelToken,
+    /// Per-plan task tracking for granular Implementing → Gating progression.
+    task_trackers: HashMap<String, TaskTracker>,
+    /// Conductor for anomaly detection between phases.
+    conductor: Conductor,
+    /// Signals accumulated during the current plan run for conductor evaluation.
+    conductor_signals: Vec<Signal>,
+    /// Context attribution tracker for per-(tier, source_type) demotion decisions.
+    attribution_tracker: ContextAttributionTracker,
+    /// Cumulative USD cost per plan_id.
+    plan_costs: HashMap<String, f64>,
+    /// Metric registry for counters/histograms/gauges (prometheus-style).
+    metrics: Arc<MetricRegistry>,
+    /// Format-selection bandit for adaptive tool-call format per model/role.
+    format_bandit: ProfileBandit,
+    /// MCP server clients spawned at plan-run startup.
+    /// MCP server clients (kept alive for lifecycle management).
+    #[allow(dead_code)]
+    mcp_clients: Vec<roko_agent::mcp::McpClient<roko_agent::mcp::StdioTransport>>,
+    /// Dynamic tool registry combining static tools with MCP-discovered tools.
+    tool_registry: Option<Arc<roko_agent::mcp::DynamicToolRegistry>>,
+    /// Filesystem-backed observability sinks (traces + metrics).
+    obs_sinks: FsObservabilitySinks,
+    /// Health probe registry for readiness/liveness checks.
+    health_probes: ProbeRegistry,
+}
+
+/// Tracks per-task completion within a plan. Lives in PlanRunner (CLI crate),
+/// NOT in PlanState (orchestrator crate) — the state machine stays pure.
+struct TaskTracker {
+    tasks_file: TasksFile,
+    completed: Vec<String>,
+    failed: Vec<String>,
+    current_group_index: usize,
+    _plan_dir: PathBuf,
+    last_gate_failure: Option<String>,
+    /// Which gate phase failed (e.g. "compile", "test", "clippy").
+    last_gate_failure_phase: Option<String>,
+    /// The task id that was most recently dispatched for implementation.
+    last_impl_task_id: Option<String>,
+    review_feedback: Option<String>,
+    impl_round: u32,
+    /// Skill matched during the last dispatch (for confidence updates).
+    last_matched_skill_id: Option<String>,
+    /// Playbook rule matched during the last dispatch (for confidence updates).
+    last_matched_rule_id: Option<String>,
+}
+
+impl TaskTracker {
+    fn new(tasks_file: TasksFile, plan_dir: PathBuf) -> Self {
+        Self {
+            tasks_file,
+            completed: Vec::new(),
+            failed: Vec::new(),
+            current_group_index: 0,
+            _plan_dir: plan_dir,
+            last_gate_failure: None,
+            last_gate_failure_phase: None,
+            last_impl_task_id: None,
+            review_feedback: None,
+            impl_round: 0,
+            last_matched_skill_id: None,
+            last_matched_rule_id: None,
+        }
+    }
+
+    /// Find the next unfinished task that has all deps satisfied.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    fn next_ready_task(&self) -> Option<&crate::task_parser::TaskDef> {
+        self.tasks_file
+            .tasks
+            .iter()
+            .find(|t| !self.completed.contains(&t.id) && !self.failed.contains(&t.id) && t.is_ready(&self.completed))
+    }
+
+    /// Return ALL ready tasks (deps satisfied, not completed, not failed).
+    fn ready_tasks(&self) -> Vec<&crate::task_parser::TaskDef> {
+        self.tasks_file
+            .tasks
+            .iter()
+            .filter(|t| {
+                !self.completed.contains(&t.id)
+                    && !self.failed.contains(&t.id)
+                    && t.is_ready(&self.completed)
+            })
+            .collect()
+    }
+
+    /// Whether all tasks in the plan are completed.
+    fn all_tasks_done(&self) -> bool {
+        self.tasks_file
+            .tasks
+            .iter()
+            .all(|t| self.completed.contains(&t.id))
+    }
+
+    /// Mark a task as completed and advance group index if current group is fully done.
+    fn mark_completed(&mut self, task_id: &str) {
+        if !self.completed.contains(&task_id.to_string()) {
+            self.completed.push(task_id.to_string());
+        }
+        // Advance group index if all tasks in current group are done
+        let groups = self.tasks_file.parallel_groups();
+        if self.current_group_index < groups.len() {
+            let current_group_done = groups[self.current_group_index]
+                .iter()
+                .all(|t| self.completed.contains(&t.id));
+            if current_group_done {
+                self.current_group_index += 1;
+            }
+        }
+    }
+
+    /// Reset for re-implementation after review rejection.
+    fn reset_for_reimpl(&mut self) {
+        self.completed.clear();
+        self.failed.clear();
+        self.current_group_index = 0;
+        self.impl_round += 1;
+    }
 }
 
 impl PlanRunner {
+    /// Spawn MCP server processes and build a DynamicToolRegistry from their tools.
+    ///
+    /// Returns `(clients, registry)` where `registry` is `None` if no MCP config
+    /// was found or no servers are configured.
+    async fn setup_mcp(
+        config: &Config,
+        workdir: &Path,
+    ) -> (
+        Vec<roko_agent::mcp::McpClient<roko_agent::mcp::StdioTransport>>,
+        Option<Arc<roko_agent::mcp::DynamicToolRegistry>>,
+    ) {
+        use roko_agent::mcp::{
+            McpClient, StdioTransport, find_mcp_config, mcp_to_tool_def,
+        };
+        use roko_core::tool::VecToolRegistry;
+
+        // Resolve MCP config: explicit path in config, or walk-up discovery.
+        let mcp_config = if let Some(ref explicit) = config.agent.mcp_config {
+            match roko_agent::mcp::McpConfig::load(explicit) {
+                Ok(cfg) => Some(cfg),
+                Err(e) => {
+                    tracing::warn!("failed to load MCP config from {}: {e}", explicit.display());
+                    None
+                }
+            }
+        } else {
+            find_mcp_config(workdir).and_then(|res| match res {
+                Ok((_path, cfg)) => Some(cfg),
+                Err(e) => {
+                    tracing::warn!("MCP config discovery error: {e}");
+                    None
+                }
+            })
+        };
+
+        let mcp_config = match mcp_config {
+            Some(cfg) if !cfg.servers.is_empty() => cfg,
+            _ => return (Vec::new(), None),
+        };
+
+        let mut clients = Vec::new();
+        let mut all_server_tools = Vec::new();
+
+        for server in &mcp_config.servers {
+            match StdioTransport::spawn(&server.command, &server.args) {
+                Ok(transport) => {
+                    let client = McpClient::new(transport);
+                    // Initialize the server
+                    if let Err(e) = client.initialize().await {
+                        tracing::warn!("MCP server '{}' initialize failed: {e}", server.name);
+                        continue;
+                    }
+                    // List available tools
+                    match client.list_tools().await {
+                        Ok(tools) => {
+                            tracing::info!(
+                                "MCP server '{}': discovered {} tools",
+                                server.name,
+                                tools.len()
+                            );
+                            let defs: Vec<_> = tools
+                                .iter()
+                                .map(|t| mcp_to_tool_def(t, &server.name))
+                                .collect();
+                            all_server_tools.push((server.name.clone(), defs));
+                            clients.push(client);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "MCP server '{}' list_tools failed: {e}",
+                                server.name
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("failed to spawn MCP server '{}': {e}", server.name);
+                }
+            }
+        }
+
+        if all_server_tools.is_empty() {
+            return (clients, None);
+        }
+
+        // Dedup across servers and build the dynamic registry.
+        let deduped = roko_agent::mcp::dedup_tools(all_server_tools);
+        let base = VecToolRegistry::new();
+        let mut registry = roko_agent::mcp::DynamicToolRegistry::new(&base);
+        // Group deduped tools by their server prefix (everything before `__`).
+        let mut by_server: HashMap<String, Vec<roko_core::tool::ToolDef>> = HashMap::new();
+        for tool in deduped {
+            let server_name = tool
+                .name
+                .split("__")
+                .next()
+                .unwrap_or("unknown")
+                .to_string();
+            by_server.entry(server_name).or_default().push(tool);
+        }
+        for (server_name, tools) in by_server {
+            registry.add_mcp_tools(&server_name, tools);
+        }
+
+        (clients, Some(Arc::new(registry)))
+    }
+
     /// Discover plans from a directory and build the executor.
     ///
     /// # Errors
     ///
     /// Returns an error if the plans directory doesn't exist, contains no
     /// plans, or plan discovery fails.
-    pub fn from_plans_dir(plans_dir: &Path, workdir: &Path, config: Config) -> Result<Self> {
+    pub async fn from_plans_dir(plans_dir: &Path, workdir: &Path, config: Config, metrics: Arc<MetricRegistry>) -> Result<Self> {
         if !plans_dir.exists() {
             return Err(anyhow!(
                 "plans directory does not exist: {}",
@@ -184,7 +591,32 @@ impl PlanRunner {
         // TODO: pass plan_deps to executor for cross-plan ordering
         // executor.set_plan_dependencies(plan_deps);
 
+        // Pre-populate task trackers for plans with tasks.toml
+        let mut task_trackers = HashMap::new();
+        for plan_info in &plans {
+            let plan_id = plan_info
+                .frontmatter
+                .as_ref()
+                .and_then(|fm| fm.plan.clone())
+                .unwrap_or_else(|| plan_info.base.clone());
+            let tasks_path = plans_dir.join(&plan_info.base).join("tasks.toml");
+            if tasks_path.exists() {
+                if let Ok(tf) = TasksFile::parse(&tasks_path) {
+                    let pdir = plans_dir.join(&plan_info.base);
+                    task_trackers.insert(plan_id, TaskTracker::new(tf, pdir));
+                }
+            }
+        }
+
         let cancel = CancelToken::new();
+        let learning = LearningRuntime::open_under(workdir.join(".roko").join("learn"))
+            .await
+            .map_err(|e| anyhow!("init learning runtime: {e}"))?;
+        let (mcp_clients, tool_registry) = Self::setup_mcp(&config, workdir).await;
+        let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
+        obs_sinks.initialize().context("initialize observability sinks")?;
+        roko_core::obs::register_standard_metrics(&metrics);
+        let health_probes = Self::build_health_probes(&config);
         Ok(Self {
             workdir: workdir.to_path_buf(),
             config,
@@ -198,9 +630,22 @@ impl PlanRunner {
             actions_since_save: 0,
             per_plan_agents: HashMap::new(),
             per_plan_gates: HashMap::new(),
-            episode_logger: EpisodeLogger::new(workdir.join(".roko").join("episodes.jsonl")),
+            learning,
             supervisor: ProcessSupervisor::new(cancel.clone()),
             cancel,
+            task_trackers,
+            conductor: Conductor::default(),
+            conductor_signals: Vec::new(),
+            attribution_tracker: ContextAttributionTracker::load(
+                &workdir.join(".roko").join("context-attribution.jsonl"),
+            ),
+            plan_costs: HashMap::new(),
+            metrics,
+            format_bandit: ProfileBandit::with_static_profiles(),
+            mcp_clients,
+            tool_registry,
+            obs_sinks,
+            health_probes,
         })
     }
 
@@ -209,11 +654,20 @@ impl PlanRunner {
     /// # Errors
     ///
     /// Returns an error if snapshot parsing fails.
-    pub fn from_snapshot(snapshot_json: &str, workdir: &Path, config: Config) -> Result<Self> {
+    pub async fn from_snapshot(snapshot_json: &str, workdir: &Path, config: Config, metrics: Arc<MetricRegistry>) -> Result<Self> {
         let snapshot =
             ExecutorSnapshot::from_json(snapshot_json).map_err(|e| anyhow!("bad snapshot: {e}"))?;
         let executor = ParallelExecutor::from_snapshot(ExecutorConfig::default(), snapshot);
+        let task_trackers = Self::restore_task_trackers(workdir);
         let cancel = CancelToken::new();
+        let learning = LearningRuntime::open_under(workdir.join(".roko").join("learn"))
+            .await
+            .map_err(|e| anyhow!("init learning runtime: {e}"))?;
+        let (mcp_clients, tool_registry) = Self::setup_mcp(&config, workdir).await;
+        let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
+        obs_sinks.initialize().context("initialize observability sinks")?;
+        roko_core::obs::register_standard_metrics(&metrics);
+        let health_probes = Self::build_health_probes(&config);
         Ok(Self {
             workdir: workdir.to_path_buf(),
             config,
@@ -227,9 +681,22 @@ impl PlanRunner {
             actions_since_save: 0,
             per_plan_agents: HashMap::new(),
             per_plan_gates: HashMap::new(),
-            episode_logger: EpisodeLogger::new(workdir.join(".roko").join("episodes.jsonl")),
+            learning,
             supervisor: ProcessSupervisor::new(cancel.clone()),
             cancel,
+            task_trackers,
+            conductor: Conductor::default(),
+            conductor_signals: Vec::new(),
+            attribution_tracker: ContextAttributionTracker::load(
+                &workdir.join(".roko").join("context-attribution.jsonl"),
+            ),
+            plan_costs: HashMap::new(),
+            metrics,
+            format_bandit: ProfileBandit::with_static_profiles(),
+            mcp_clients,
+            tool_registry,
+            obs_sinks,
+            health_probes,
         })
     }
 
@@ -238,11 +705,12 @@ impl PlanRunner {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
-    pub fn from_snapshots(
+    pub async fn from_snapshots(
         executor_json: &str,
         event_log_json: &str,
         workdir: &Path,
         config: Config,
+        metrics: Arc<MetricRegistry>,
     ) -> Result<Self> {
         let exec_snap = ExecutorSnapshot::from_json(executor_json)
             .map_err(|e| anyhow!("bad executor snapshot: {e}"))?;
@@ -250,7 +718,16 @@ impl PlanRunner {
             .map_err(|e| anyhow!("bad event log snapshot: {e}"))?;
         let executor = ParallelExecutor::from_snapshot(ExecutorConfig::default(), exec_snap);
         let event_log = EventLog::restore(log_snap);
+        let task_trackers = Self::restore_task_trackers(workdir);
         let cancel = CancelToken::new();
+        let learning = LearningRuntime::open_under(workdir.join(".roko").join("learn"))
+            .await
+            .map_err(|e| anyhow!("init learning runtime: {e}"))?;
+        let (mcp_clients, tool_registry) = Self::setup_mcp(&config, workdir).await;
+        let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
+        obs_sinks.initialize().context("initialize observability sinks")?;
+        roko_core::obs::register_standard_metrics(&metrics);
+        let health_probes = Self::build_health_probes(&config);
         Ok(Self {
             workdir: workdir.to_path_buf(),
             config,
@@ -264,9 +741,22 @@ impl PlanRunner {
             actions_since_save: 0,
             per_plan_agents: HashMap::new(),
             per_plan_gates: HashMap::new(),
-            episode_logger: EpisodeLogger::new(workdir.join(".roko").join("episodes.jsonl")),
+            learning,
             supervisor: ProcessSupervisor::new(cancel.clone()),
             cancel,
+            task_trackers,
+            conductor: Conductor::default(),
+            conductor_signals: Vec::new(),
+            attribution_tracker: ContextAttributionTracker::load(
+                &workdir.join(".roko").join("context-attribution.jsonl"),
+            ),
+            plan_costs: HashMap::new(),
+            metrics,
+            format_bandit: ProfileBandit::with_static_profiles(),
+            mcp_clients,
+            tool_registry,
+            obs_sinks,
+            health_probes,
         })
     }
 
@@ -282,6 +772,16 @@ impl PlanRunner {
         if !outcomes.is_empty() {
             eprintln!("[orchestrate] shut down {} agent processes", outcomes.len());
         }
+        // Dump prometheus metrics for post-mortem debugging.
+        let metrics_dir = self.workdir.join(".roko").join("metrics");
+        if let Err(e) = std::fs::create_dir_all(&metrics_dir) {
+            eprintln!("[orchestrate] create metrics dir: {e}");
+        } else {
+            let prom = self.metrics.render_prometheus();
+            if let Err(e) = std::fs::write(metrics_dir.join("prometheus.txt"), &prom) {
+                eprintln!("[orchestrate] write prometheus.txt: {e}");
+            }
+        }
     }
 
     /// The root cancellation token — callers can cancel to trigger shutdown.
@@ -290,16 +790,64 @@ impl PlanRunner {
         &self.cancel
     }
 
-    /// The episode logger — exposed for status queries.
+    /// The learning runtime — exposed for status queries.
     #[must_use]
-    pub const fn episode_logger(&self) -> &EpisodeLogger {
-        &self.episode_logger
+    pub const fn learning(&self) -> &LearningRuntime {
+        &self.learning
+    }
+
+    /// The metric registry — exposed for status queries and external instrumentation.
+    #[must_use]
+    pub fn metrics(&self) -> &Arc<MetricRegistry> {
+        &self.metrics
     }
 
     /// The process supervisor — exposed for status queries.
     #[must_use]
     pub const fn supervisor(&self) -> &ProcessSupervisor {
         &self.supervisor
+    }
+
+    /// The filesystem-backed observability sinks — exposed for status queries.
+    #[must_use]
+    pub fn obs_sinks(&self) -> &FsObservabilitySinks {
+        &self.obs_sinks
+    }
+
+    /// The health probe registry — exposed for status queries and dashboard.
+    #[must_use]
+    pub fn health_probes(&self) -> &ProbeRegistry {
+        &self.health_probes
+    }
+
+    /// Build the probe registry with real probes for configured backends.
+    fn build_health_probes(config: &Config) -> ProbeRegistry {
+        let registry = ProbeRegistry::new();
+        registry.register(Arc::new(AlwaysUpProbe::new("orchestrator")));
+
+        // Register a probe for the Claude CLI backend — checks if the binary exists.
+        let command = config.agent.command.clone();
+        registry.register(Arc::new(CliProbe { command }));
+
+        registry
+    }
+
+    /// Run conductor watchers against accumulated signals.
+    /// Returns the decision and logs non-continue outcomes.
+    fn run_conductor_check(&self, plan_id: &str) -> ConductorDecision {
+        let ctx = Context::now();
+        let decision = self.conductor.evaluate(&self.conductor_signals, &ctx);
+        match &decision {
+            ConductorDecision::Continue => {}
+            ConductorDecision::Restart { watcher, reason } => {
+                eprintln!("[conductor] {plan_id}: RESTART ({watcher}) — {reason}");
+            }
+            ConductorDecision::Fail { watcher, reason } => {
+                eprintln!("[conductor] {plan_id}: FAIL ({watcher}) — {reason}");
+            }
+            _ => {}
+        }
+        decision
     }
 
     /// Take a snapshot of the current executor state.
@@ -353,6 +901,15 @@ impl PlanRunner {
         std::fs::write(&log_tmp, &log_json).map_err(|e| anyhow!("write events tmp: {e}"))?;
         std::fs::rename(&log_tmp, &log_path).map_err(|e| anyhow!("rename events snapshot: {e}"))?;
 
+        // Task tracker snapshot — atomic write.
+        let tracker_json = self.task_tracker_snapshot()?;
+        let tracker_path = state_dir.join("task-trackers.json");
+        let tracker_tmp = state_dir.join("task-trackers.json.tmp");
+        std::fs::write(&tracker_tmp, &tracker_json)
+            .map_err(|e| anyhow!("write tracker tmp: {e}"))?;
+        std::fs::rename(&tracker_tmp, &tracker_path)
+            .map_err(|e| anyhow!("rename tracker snapshot: {e}"))?;
+
         Ok(())
     }
 
@@ -360,6 +917,65 @@ impl PlanRunner {
     #[must_use]
     pub const fn executor(&self) -> &ParallelExecutor {
         &self.executor
+    }
+
+    /// Serialize task tracker state for persistence.
+    fn task_tracker_snapshot(&self) -> Result<String> {
+        let entries: Vec<serde_json::Value> = self
+            .task_trackers
+            .iter()
+            .map(|(plan_id, tracker)| {
+                serde_json::json!({
+                    "plan_id": plan_id,
+                    "completed": tracker.completed,
+                    "failed": tracker.failed,
+                    "current_group_index": tracker.current_group_index,
+                    "impl_round": tracker.impl_round,
+                })
+            })
+            .collect();
+        serde_json::to_string_pretty(&entries).map_err(|e| anyhow!("tracker snapshot: {e}"))
+    }
+
+    /// Restore task trackers from `.roko/state/task-trackers.json` + plan dirs.
+    fn restore_task_trackers(workdir: &Path) -> HashMap<String, TaskTracker> {
+        let tracker_path = workdir.join(".roko").join("state").join("task-trackers.json");
+        let snap: Vec<serde_json::Value> = std::fs::read_to_string(&tracker_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+
+        let mut trackers = HashMap::new();
+        for entry in snap {
+            let plan_id = entry["plan_id"].as_str().unwrap_or_default().to_string();
+            if plan_id.is_empty() {
+                continue;
+            }
+            let plan_dir = workdir.join("plans").join(&plan_id);
+            let tasks_path = plan_dir.join("tasks.toml");
+            let Ok(tf) = TasksFile::parse(&tasks_path) else {
+                continue;
+            };
+
+            let completed: Vec<String> = entry["completed"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let failed: Vec<String> = entry["failed"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let current_group_index = entry["current_group_index"].as_u64().unwrap_or(0) as usize;
+            let impl_round = entry["impl_round"].as_u64().unwrap_or(0) as u32;
+
+            let mut tracker = TaskTracker::new(tf, plan_dir);
+            tracker.completed = completed;
+            tracker.failed = failed;
+            tracker.current_group_index = current_group_index;
+            tracker.impl_round = impl_round;
+            trackers.insert(plan_id, tracker);
+        }
+        trackers
     }
 
     /// Run all plans to completion (or failure).
@@ -436,6 +1052,37 @@ impl PlanRunner {
             })
             .collect();
 
+        // Increment plan completion metrics and log cost summaries.
+        for p in &plans {
+            let status = if p.succeeded { "succeeded" } else { "failed" };
+            self.metrics
+                .register_counter("roko_plans_total", "", LabelSet::from_pairs(&[("status", status)]))
+                .inc();
+
+            // Log cost summary from plan_costs HashMap.
+            let plan_cost = self.plan_costs.get(&p.plan_id).copied().unwrap_or(0.0);
+            if plan_cost > 0.0 {
+                tracing::info!(
+                    plan_id = %p.plan_id,
+                    cost_usd = plan_cost,
+                    agent_calls = p.agent_calls,
+                    succeeded = p.succeeded,
+                    "plan completed"
+                );
+            }
+        }
+
+        // Log aggregate cost from CostsDb.
+        let total_cost = self.learning.costs_db().total_cost();
+        if total_cost > 0.0 {
+            tracing::info!(
+                total_cost_usd = total_cost,
+                total_agent_calls = self.agent_calls,
+                total_gate_runs = self.gate_runs,
+                "orchestration cost summary"
+            );
+        }
+
         // Shut down any lingering agent processes.
         self.shutdown().await;
 
@@ -449,6 +1096,64 @@ impl PlanRunner {
             total_gate_runs: self.gate_runs,
             plans,
         })
+    }
+
+    /// Run plans using tasks.toml files, routing through the full 14-phase
+    /// executor state machine.
+    ///
+    /// Pre-loads [`TaskTracker`]s for plans that have `tasks.toml`, then
+    /// delegates to [`run_all()`] which drives the state machine. The phase
+    /// handlers (handle_enriching, handle_implementing, etc.) use the
+    /// trackers for task-level granularity.
+    pub async fn run_task_plans(&mut self, plans_dir: &Path) -> Result<OrchestrationReport> {
+        // Pre-load task trackers for any plans not already tracked
+        let plan_dirs = Self::find_plan_dirs(plans_dir)?;
+        for plan_dir in &plan_dirs {
+            let name = plan_dir
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let tasks_path = plan_dir.join("tasks.toml");
+            if tasks_path.exists() {
+                if let Ok(tf) = TasksFile::parse(&tasks_path) {
+                    self.task_trackers
+                        .entry(name)
+                        .or_insert_with(|| TaskTracker::new(tf, plan_dir.clone()));
+                }
+            }
+        }
+
+        self.run_all().await
+    }
+
+    /// Find plan directories (containing plan.md or tasks.toml).
+    fn find_plan_dirs(plans_dir: &Path) -> Result<Vec<PathBuf>> {
+        let mut dirs = Vec::new();
+        if !plans_dir.is_dir() {
+            return Ok(dirs);
+        }
+
+        // If plans_dir itself IS a plan (has tasks.toml or plan.md), use it directly.
+        if plans_dir.join("tasks.toml").exists() || plans_dir.join("plan.md").exists() {
+            dirs.push(plans_dir.to_path_buf());
+            return Ok(dirs);
+        }
+
+        // Otherwise, look for plan subdirectories.
+        for entry in std::fs::read_dir(plans_dir)
+            .with_context(|| format!("read {}", plans_dir.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir()
+                && (path.join("tasks.toml").exists() || path.join("plan.md").exists())
+            {
+                dirs.push(path);
+            }
+        }
+        dirs.sort();
+        Ok(dirs)
     }
 
     // ── Internal dispatch ─────────────────────────────────────────────────
@@ -469,80 +1174,14 @@ impl PlanRunner {
                     serde_json::json!({"plan_id": plan_id, "role": format!("{role:?}"), "task": task}),
                 );
 
-                // ── Retry loop with model escalation ────────────────
-                let max_retries = 3u32;
-                let escalation_models = ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-6"];
-                let mut last_error = String::new();
-                let mut succeeded = false;
-                let started = std::time::Instant::now();
-
-                for attempt in 0..=max_retries {
-                    if attempt > 0 {
-                        // Escalate: find current model's index and go up
-                        let current = self.config.agent.model.as_deref().unwrap_or("claude-sonnet-4-6");
-                        let current_idx = escalation_models.iter().position(|m| *m == current).unwrap_or(1);
-                        let next_idx = (current_idx + attempt as usize).min(escalation_models.len() - 1);
-                        let escalated = escalation_models[next_idx];
-                        eprintln!(
-                            "[orchestrate] Retry {attempt}/{max_retries} for {plan_id}/{task} — escalating to {escalated} (error: {last_error})"
-                        );
-                        // Temporarily override model for this retry
-                        // (the task_def.effective_model already handles tier-based selection,
-                        //  but on retry we force escalation)
-                    }
-
-                    match self.dispatch_agent(&plan_id, role, &task).await {
-                        Ok(ref result) => {
-                            *self.per_plan_agents.entry(plan_id.clone()).or_default() += 1;
-                            self.agent_calls += 1;
-                            let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                            let mut ep = Episode::new(
-                                format!("{role:?}"),
-                                &task,
-                            ).succeeded();
-                            ep.usage = Usage { wall_ms, ..Usage::default() };
-                            ep.input_signal_hash.clone_from(&plan_id);
-                            ep.output_signal_hash = result.output.id.to_string();
-                            if let Err(e) = self.episode_logger.append(&ep).await {
-                                eprintln!("[orchestrate] episode log failed: {e}");
-                            }
-                            let event = self.agent_completion_event(&plan_id);
-                            self.log_transition(&plan_id, &event);
-                            let _ = self.executor.apply_event(&plan_id, &event);
-                            succeeded = true;
-                            break;
-                        }
-                        Err(e) => {
-                            last_error = e.to_string();
-                            if attempt == max_retries {
-                                // Final failure — record and move on
-                                eprintln!("[orchestrate] agent failed for {plan_id} after {max_retries} retries: {e}");
-                                let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                                let mut ep = Episode::new(
-                                    format!("{role:?}"),
-                                    &task,
-                                ).failed(e.to_string());
-                                ep.usage = Usage { wall_ms, ..Usage::default() };
-                                ep.input_signal_hash.clone_from(&plan_id);
-                                if let Err(log_err) = self.episode_logger.append(&ep).await {
-                                    eprintln!("[orchestrate] episode log failed: {log_err}");
-                                }
-                                self.event_log.append(
-                                    EventKind::ErrorOccurred,
-                                    serde_json::json!({"plan_id": plan_id, "error": e.to_string(), "attempts": attempt + 1}),
-                                );
-                                let _ = self.executor.apply_event(
-                                    &plan_id,
-                                    &ExecutorEvent::Fatal(format!("agent error after {attempt} retries: {e}")),
-                                );
-                            }
-                            // else: loop continues with retry
-                        }
-                    }
-                }
-
-                if !succeeded {
-                    eprintln!("[orchestrate] All retries exhausted for {plan_id}/{task}");
+                match (role, task.as_str()) {
+                    (AgentRole::Strategist, "enrich") => self.handle_enriching(&plan_id).await,
+                    (AgentRole::Implementer, _) => self.handle_implementing(&plan_id).await,
+                    (AgentRole::AutoFixer, "fix") => self.handle_autofix(&plan_id).await,
+                    (AgentRole::AutoFixer, "regen-verify") => self.handle_regen_verify(&plan_id).await,
+                    (AgentRole::Auditor, "review") => self.handle_reviewing(&plan_id).await,
+                    (AgentRole::Scribe, "docs") => self.handle_doc_revision(&plan_id).await,
+                    _ => self.handle_generic_agent(&plan_id, role, &task).await,
                 }
             }
             ExecutorAction::RunGate { plan_id, rung } => {
@@ -566,8 +1205,61 @@ impl PlanRunner {
                         ep.usage = Usage { wall_ms, ..Usage::default() };
                         ep.gate_verdicts.push(GateVerdict::new(format!("rung-{rung}"), passed));
                         ep.input_signal_hash.clone_from(&plan_id);
-                        if let Err(e) = self.episode_logger.append(&ep).await {
-                            eprintln!("[orchestrate] episode log failed: {e}");
+                        let gate_input = self.enrich_completed_run(
+                            ep, &plan_id, &format!("rung-{rung}"), "gate", "n/a", Some(passed), 1,
+                        );
+                        self.record_and_check_learning(gate_input, &plan_id).await;
+
+                        // Emit observability metric for gate result.
+                        self.emit_gate_metric(&plan_id, rung, passed, wall_ms);
+
+                        // Store gate failure context for AutoFix phase
+                        if !passed {
+                            if let Some(tracker) = self.task_trackers.get_mut(&plan_id) {
+                                let failed_gates: Vec<&GateResult> = self
+                                    .executor
+                                    .plan_state(&plan_id)
+                                    .map(|s| {
+                                        s.gate_results
+                                            .iter()
+                                            .filter(|g| !g.passed)
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                let failure_summaries: Vec<String> = failed_gates
+                                    .iter()
+                                    .map(|g| format!("{}: {}", g.gate_name, g.summary))
+                                    .collect();
+                                // Determine the primary failure phase (compile > test > clippy > other)
+                                let phase = failed_gates.iter()
+                                    .map(|g| g.gate_name.as_str())
+                                    .find(|n| *n == "compile")
+                                    .or_else(|| failed_gates.iter().map(|g| g.gate_name.as_str()).find(|n| *n == "test"))
+                                    .or_else(|| failed_gates.iter().map(|g| g.gate_name.as_str()).find(|n| *n == "clippy"))
+                                    .unwrap_or("unknown");
+                                tracker.last_gate_failure = Some(failure_summaries.join("\n"));
+                                tracker.last_gate_failure_phase = Some(phase.to_string());
+
+                                // Emit a FailureTrace for observability.
+                                let trace_id = Self::trace_id_for(&plan_id, &format!("gate-fail-{rung}"));
+                                let evidence = failed_gates
+                                    .iter()
+                                    .map(|g| format!("{}: {}", g.gate_name, g.summary))
+                                    .collect::<Vec<_>>()
+                                    .join("; ");
+                                let ft = FailureTrace::new(
+                                    trace_id,
+                                    TraceStep::Execute,
+                                    FailureKind::ToolHandlerError,
+                                    evidence,
+                                );
+                                let event = ToolTraceEvent::Custom {
+                                    name: "failure_trace".to_string(),
+                                    data: serde_json::to_value(&ft).unwrap_or_default(),
+                                    at_ms: now_unix_ms_i64(),
+                                };
+                                self.obs_sinks.trace_sink.append(trace_id, event);
+                            }
                         }
                         let event = if passed {
                             ExecutorEvent::GatePassed
@@ -586,6 +1278,22 @@ impl PlanRunner {
                             .executor
                             .apply_event(&plan_id, &ExecutorEvent::GateFailed);
                     }
+                }
+                // Conductor check after gate results.
+                match self.run_conductor_check(&plan_id) {
+                    ConductorDecision::Continue => {}
+                    ConductorDecision::Restart { reason, .. } => {
+                        eprintln!("[conductor] restarting {plan_id}: {reason}");
+                        let _ = self.executor.apply_event(&plan_id, &ExecutorEvent::Start);
+                    }
+                    ConductorDecision::Fail { reason, .. } => {
+                        eprintln!("[conductor] failing {plan_id}: {reason}");
+                        let _ = self.executor.apply_event(
+                            &plan_id,
+                            &ExecutorEvent::Fatal(format!("conductor: {reason}")),
+                        );
+                    }
+                    _ => {}
                 }
             }
             ExecutorAction::MergeBranch { plan_id } => {
@@ -630,13 +1338,34 @@ impl PlanRunner {
                             .apply_event(&plan_id, &ExecutorEvent::MergeFailed);
                     }
                 }
+                // Conductor check after merge results.
+                match self.run_conductor_check(&plan_id) {
+                    ConductorDecision::Continue => {}
+                    ConductorDecision::Restart { reason, .. } => {
+                        eprintln!("[conductor] restarting {plan_id}: {reason}");
+                        let _ = self.executor.apply_event(&plan_id, &ExecutorEvent::Start);
+                    }
+                    ConductorDecision::Fail { reason, .. } => {
+                        eprintln!("[conductor] failing {plan_id}: {reason}");
+                        let _ = self.executor.apply_event(
+                            &plan_id,
+                            &ExecutorEvent::Fatal(format!("conductor: {reason}")),
+                        );
+                    }
+                    _ => {}
+                }
             }
             ExecutorAction::DispatchPlan { plan_id } => {
                 eprintln!("[orchestrate] DispatchPlan {plan_id}");
+                self.metrics
+                    .register_counter("roko_plans_total", "", LabelSet::from_pairs(&[("status", "started")]))
+                    .inc();
                 self.event_log.append(
                     EventKind::PlanStarted,
                     serde_json::json!({"plan_id": plan_id}),
                 );
+                // Ensure TaskTracker exists for resume-from-snapshot case
+                self.ensure_task_tracker(&plan_id);
                 let _ = self.executor.apply_event(&plan_id, &ExecutorEvent::Start);
             }
             ExecutorAction::PausePlan { plan_id } => {
@@ -650,6 +1379,847 @@ impl PlanRunner {
             _ => {
                 // Future ExecutorAction variants — log and skip.
                 eprintln!("[orchestrate] unhandled action: {action:?}");
+            }
+        }
+    }
+
+    // ── Phase handlers ─────────────────────────────────────────────────
+
+    /// Enriching phase: ensure TaskTracker is loaded, log plan info, advance.
+    async fn handle_enriching(&mut self, plan_id: &str) {
+        // Ensure tracker is loaded
+        self.ensure_task_tracker(plan_id);
+
+        if let Some(tracker) = self.task_trackers.get(plan_id) {
+            let groups = tracker.tasks_file.parallel_groups();
+            eprintln!(
+                "[orchestrate] Enriching {plan_id}: {} tasks, {} parallel groups",
+                tracker.tasks_file.tasks.len(),
+                groups.len(),
+            );
+        } else {
+            eprintln!("[orchestrate] Enriching {plan_id}: no tasks.toml, proceeding with generic flow");
+        }
+
+        let event = ExecutorEvent::EnrichmentDone;
+        self.log_transition(plan_id, &event);
+        let _ = self.executor.apply_event(plan_id, &event);
+    }
+
+    /// Implementing phase: dispatch ready tasks, parallelising when multiple are
+    /// unblocked. Single-task dispatch includes retry logic; parallel batches
+    /// fail individual tasks without retries (the next tick re-evaluates).
+    async fn handle_implementing(&mut self, plan_id: &str) {
+        // If no tracker, fall through to generic agent
+        if !self.task_trackers.contains_key(plan_id) {
+            self.handle_generic_agent(plan_id, AgentRole::Implementer, "next").await;
+            return;
+        }
+
+        // Collect ALL ready tasks (deps satisfied, not completed/failed).
+        let ready: Vec<String> = {
+            let Some(tracker) = self.task_trackers.get(plan_id) else {
+                return; // unreachable: checked above
+            };
+            tracker.ready_tasks().iter().map(|t| t.id.clone()).collect()
+        };
+
+        if ready.is_empty() {
+            // No ready tasks — check if all done or blocked
+            let all_done = self.task_trackers.get(plan_id)
+                .is_some_and(TaskTracker::all_tasks_done);
+            if all_done {
+                let event = ExecutorEvent::ImplementationDone;
+                self.log_transition(plan_id, &event);
+                let _ = self.executor.apply_event(plan_id, &event);
+            } else {
+                eprintln!("[orchestrate] {plan_id}: no ready tasks but not all done — blocked or failed");
+                let _ = self.executor.apply_event(
+                    plan_id,
+                    &ExecutorEvent::Fatal("all remaining tasks blocked or failed".into()),
+                );
+            }
+            return;
+        }
+
+        if ready.len() == 1 {
+            // ── Single task: sequential dispatch with retry ──────────
+            self.handle_implementing_single(plan_id, &ready[0]).await;
+        } else {
+            // ── Multiple ready tasks: parallel dispatch ──────────────
+            let batch: Vec<String> = ready.into_iter().take(MAX_PARALLEL_TASKS).collect();
+            eprintln!(
+                "[orchestrate] Implementing {plan_id}: dispatching {} tasks in parallel: {}",
+                batch.len(),
+                batch.join(", "),
+            );
+            self.handle_implementing_parallel(plan_id, &batch).await;
+        }
+
+        // Check if all tasks are now done
+        let all_done = self.task_trackers.get(plan_id).is_some_and(TaskTracker::all_tasks_done);
+        if all_done {
+            eprintln!("[orchestrate] {plan_id}: all tasks done, advancing to Gating");
+            let event = ExecutorEvent::ImplementationDone;
+            self.log_transition(plan_id, &event);
+            let _ = self.executor.apply_event(plan_id, &event);
+        }
+
+        // Conductor check after agent dispatch completes.
+        match self.run_conductor_check(plan_id) {
+            ConductorDecision::Restart { reason, .. } => {
+                eprintln!("[conductor] restarting {plan_id}: {reason}");
+                let _ = self.executor.apply_event(plan_id, &ExecutorEvent::Start);
+            }
+            ConductorDecision::Fail { reason, .. } => {
+                eprintln!("[conductor] failing {plan_id}: {reason}");
+                let _ = self.executor.apply_event(
+                    plan_id,
+                    &ExecutorEvent::Fatal(format!("conductor: {reason}")),
+                );
+            }
+            _ => {}
+        }
+        // else: plan stays in Implementing. Next tick() returns another SpawnAgent.
+    }
+
+    /// Dispatch a single task with retry logic (up to 2 retries).
+    async fn handle_implementing_single(&mut self, plan_id: &str, task_id: &str) {
+        eprintln!("[orchestrate] Implementing {plan_id}: dispatching task {task_id}");
+
+        // Track which task is being worked on (used by autofix if gates fail).
+        if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+            tracker.last_impl_task_id = Some(task_id.to_string());
+        }
+
+        let started = std::time::Instant::now();
+        let max_retries = 2u32;
+        let mut succeeded = false;
+
+        for attempt in 0..=max_retries {
+            if attempt > 0 {
+                eprintln!(
+                    "[orchestrate] Retry {attempt}/{max_retries} for {plan_id}/{task_id}"
+                );
+            }
+
+            match self.dispatch_agent(plan_id, AgentRole::Implementer, task_id).await {
+                Ok(result) => {
+                    self.record_task_success(plan_id, task_id, &result, &started).await;
+                    succeeded = true;
+                    break;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[orchestrate] task {task_id} failed (attempt {}): {e}",
+                        attempt + 1
+                    );
+                    if attempt == max_retries {
+                        self.record_task_failure(plan_id, task_id, &e, &started).await;
+                    }
+                }
+            }
+        }
+
+        if !succeeded {
+            eprintln!("[orchestrate] task {task_id} failed after {max_retries} retries");
+            let _ = self.executor.apply_event(
+                plan_id,
+                &ExecutorEvent::Fatal(format!("task {task_id} failed after retries")),
+            );
+        }
+    }
+
+    /// Dispatch multiple tasks in parallel using per-task worktrees.
+    /// Each task gets its own worktree so agents don't step on each other.
+    /// Failures are recorded individually; the batch does not abort on error.
+    async fn handle_implementing_parallel(&mut self, plan_id: &str, task_ids: &[String]) {
+        // Create per-task worktrees and record exec dirs.
+        let shared_target = self.workdir.join("target");
+        let mut task_dirs: Vec<(String, PathBuf)> = Vec::with_capacity(task_ids.len());
+        for tid in task_ids {
+            let dir = self.task_exec_dir(plan_id, tid).await;
+            task_dirs.push((tid.clone(), dir));
+        }
+
+        // Track all tasks as in-progress.
+        if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+            if let Some(first) = task_ids.first() {
+                tracker.last_impl_task_id = Some(first.clone());
+            }
+        }
+
+        // ── Build agent configs sequentially (needs &mut self) ───────
+        let started = std::time::Instant::now();
+        let mut configs: Vec<(String, AgentRunConfig)> = Vec::with_capacity(task_dirs.len());
+
+        let plan_dir = self.workdir.join("plans").join(plan_id);
+        let tasks_toml = plan_dir.join("tasks.toml");
+        let tasks_file = if tasks_toml.exists() {
+            crate::task_parser::TasksFile::parse(&tasks_toml).ok()
+        } else {
+            None
+        };
+
+        let role = AgentRole::Implementer;
+        let claude_tools_csv = claude_tool_allowlist(role);
+        let skip_perms = role == AgentRole::Implementer || role == AgentRole::AutoFixer;
+
+        for (tid, dir) in &task_dirs {
+            let task_def = tasks_file.as_ref()
+                .and_then(|tf| tf.tasks.iter().find(|t| t.id == *tid).cloned());
+
+            let (prompt_text, model) = if let Some(ref td) = task_def {
+                let p = td.build_prompt(plan_id, &self.workdir);
+                let m = td.effective_model(
+                    self.config.agent.model.as_deref().unwrap_or("claude-sonnet-4-6"),
+                    Some(&self.config.agent.tier_models),
+                );
+                (p, m)
+            } else {
+                let p = format!("Plan: {plan_id}\nTask: {tid}\n\nImplement the task described above.");
+                let m = self.config.agent.model.clone().unwrap_or_else(|| "claude-opus-4-6".into());
+                (p, m)
+            };
+
+            let system_prompt = build_system_prompt(role, plan_id, tid, &claude_tools_csv);
+            let env_vars: Vec<(String, String)> = self.config.agent.env.iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .chain(std::iter::once(("CARGO_TARGET_DIR".into(), shared_target.display().to_string())))
+                .collect();
+
+            configs.push((tid.clone(), AgentRunConfig {
+                command: self.config.agent.command.clone(),
+                exec_dir: dir.clone(),
+                model,
+                timeout_ms: self.config.agent.timeout_ms,
+                bare_mode: self.config.agent.bare_mode,
+                effort: self.config.agent.effort.clone(),
+                system_prompt,
+                tools_csv: claude_tools_csv.clone(),
+                mcp_config: self.config.agent.mcp_config.clone(),
+                fallback_model: self.config.agent.fallback_model.clone(),
+                env_vars,
+                extra_args: self.config.agent.args.clone(),
+                resume_session: self.claude_resume_session.clone(),
+                prompt: prompt_text,
+                skip_permissions: skip_perms,
+            }));
+        }
+
+        // ── Run all agents in parallel ───────────────────────────────
+        let futs: Vec<_> = configs
+            .into_iter()
+            .map(|(tid, cfg)| async move {
+                let result = run_prepared_agent(cfg).await;
+                (tid, result)
+            })
+            .collect();
+
+        let results = futures::future::join_all(futs).await;
+
+        // ── Process results sequentially ─────────────────────────────
+        let mut any_fatal = false;
+        for (tid, agent_result) in &results {
+            if agent_result.success {
+                self.record_task_success(plan_id, tid, agent_result, &started).await;
+            } else {
+                eprintln!("[orchestrate] parallel task {tid} failed");
+                let err = anyhow!("agent returned non-success for task {tid}");
+                self.record_task_failure(plan_id, tid, &err, &started).await;
+                any_fatal = true;
+            }
+        }
+
+        // ── Clean up per-task worktrees ──────────────────────────────
+        for tid in task_ids {
+            let wt_id = format!("{plan_id}-{tid}");
+            if let Err(e) = self.worktrees.remove(&wt_id).await {
+                eprintln!("[orchestrate] worktree cleanup failed for {tid}: {e}");
+            }
+        }
+
+        if any_fatal && self.task_trackers.get(plan_id).is_some_and(|t| t.ready_tasks().is_empty()) {
+            // All remaining tasks are blocked by failures.
+            let _ = self.executor.apply_event(
+                plan_id,
+                &ExecutorEvent::Fatal("parallel batch had failures; remaining tasks blocked".into()),
+            );
+        }
+    }
+
+    /// Build a [`CompletedRunInput`] enriched with cost record, provider, and
+    /// task metric data derived from the agent result context.
+    fn enrich_completed_run(
+        &self,
+        ep: Episode,
+        plan_id: &str,
+        task_id: &str,
+        role: &str,
+        model: &str,
+        gate_passed: Option<bool>,
+        iteration: u32,
+    ) -> CompletedRunInput {
+        let cost = CostRecord {
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            model: model.to_string(),
+            provider: "anthropic".to_string(),
+            role: role.to_string(),
+            plan_id: plan_id.to_string(),
+            task_id: task_id.to_string(),
+            complexity_band: "standard".to_string(),
+            input_tokens: ep.usage.input_tokens,
+            output_tokens: ep.usage.output_tokens,
+            cached_tokens: 0,
+            cost_usd: ep.usage.cost_usd,
+            duration_ms: ep.usage.wall_ms,
+            success: ep.success,
+            session_id: plan_id.to_string(),
+        };
+
+        let mut input = CompletedRunInput::from_episode(ep)
+            .with_cost_record(cost);
+        input.provider = Some(model.to_string());
+
+        // Flow matched skill/rule IDs from the task tracker so
+        // record_completed_run can update confidence scores.
+        if let Some(tracker) = self.task_trackers.get(plan_id) {
+            if input.matched_skill_id.is_none() {
+                input.matched_skill_id = tracker.last_matched_skill_id.clone();
+            }
+            if input.playbook_rule_id.is_none() {
+                input.playbook_rule_id = tracker.last_matched_rule_id.clone();
+            }
+        }
+
+        if let Some(passed) = gate_passed {
+            let metric = TaskMetric {
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                plan_id: plan_id.to_string(),
+                task_id: task_id.to_string(),
+                iteration,
+                role: role.to_string(),
+                backend: "claude".to_string(),
+                model: model.to_string(),
+                gate_passed: passed,
+                wall_time_ms: input.episode.usage.wall_ms,
+                input_tokens: input.episode.usage.input_tokens,
+                output_tokens: input.episode.usage.output_tokens,
+                cost_usd: input.episode.usage.cost_usd,
+                ..TaskMetric::new(ConfigHash("roko".to_string()), plan_id, task_id)
+            };
+            input = input.with_task_metric(metric);
+        }
+
+        input
+    }
+
+    /// Resolve the effective model name from config.
+    fn effective_model(&self) -> String {
+        self.config
+            .agent
+            .model
+            .clone()
+            .unwrap_or_else(|| "claude-sonnet-4-6".into())
+    }
+
+    /// Build a learned-context string from skills, playbook rules, and patterns.
+    ///
+    /// Returns the context text plus any matched skill/rule IDs for flowing
+    /// into `CompletedRunInput` so confidence gets updated.
+    fn build_learned_context(&self, role: AgentRole, task_text: &str) -> LearnedContext {
+        use roko_learn::playbook_rules::MatchContext;
+
+        let mut parts: Vec<String> = Vec::new();
+        let mut matched_skill_id: Option<String> = None;
+        let mut matched_rule_id: Option<String> = None;
+
+        // 1. Relevant skills from the skill library (search by role tag)
+        let role_tag = format!("{role:?}").to_lowercase();
+        let skills = self.learning.skill_library().search_by_tag(&role_tag);
+        if !skills.is_empty() {
+            // Track the top skill as the matched one for confidence updates.
+            matched_skill_id = skills.first().map(|s| s.name.clone());
+            let mut skill_section = String::from("## Relevant Skills from Past Successes\n");
+            for skill in skills.iter().take(3) {
+                skill_section.push_str(&format!(
+                    "- **{}**: {}\n",
+                    skill.name,
+                    skill.summary
+                ));
+            }
+            parts.push(skill_section);
+        }
+
+        // 2. Applicable playbook rules
+        let match_ctx = MatchContext {
+            files: Vec::new(),
+            tags: Vec::new(),
+            category: None,
+            error_signature: None,
+            role: role_tag.clone(),
+        };
+        let rules = self.learning.playbook_rules().select(&match_ctx, 5);
+        if !rules.is_empty() {
+            // Track the top rule for confidence updates.
+            matched_rule_id = rules.first().map(|r| r.rule_id.clone());
+            let mut rule_section = String::from("## Playbook Rules (do/don\'t heuristics)\n");
+            for rule in &rules {
+                rule_section.push_str(&format!(
+                    "- [confidence={:.0}%] {}\n",
+                    rule.confidence * 100.0,
+                    rule.body
+                ));
+            }
+            parts.push(rule_section);
+        }
+
+        // 3. Discovered patterns from the pattern miner
+        let patterns = self.learning.pattern_miner().lock().discover();
+        if !patterns.is_empty() {
+            let mut pat_section = String::from("## Discovered Action Patterns\n");
+            for pat in patterns.iter().take(3) {
+                pat_section.push_str(&format!(
+                    "- Pattern (support={}, confidence={:.0}%): {}\n",
+                    pat.support_count,
+                    pat.confidence * 100.0,
+                    pat.description
+                ));
+            }
+            parts.push(pat_section);
+        }
+
+        // Ignore task_text for now — use it in future for semantic search
+        let _ = task_text;
+
+        LearnedContext {
+            text: parts.join("\n"),
+            matched_skill_id,
+            matched_rule_id,
+        }
+    }
+
+    /// Record a successful task result: persist output, episode, mark completed.
+    async fn record_task_success(
+        &mut self,
+        plan_id: &str,
+        task_id: &str,
+        result: &AgentResult,
+        started: &std::time::Instant,
+    ) {
+        *self.per_plan_agents.entry(plan_id.to_string()).or_default() += 1;
+        self.agent_calls += 1;
+
+        if let Ok(text) = result.output.body.as_text() {
+            save_task_output(&self.workdir, task_id, text);
+        }
+
+        let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let mut ep = Episode::new("Implementer", task_id).succeeded();
+        ep.usage = Usage {
+            wall_ms,
+            cost_usd: f64::from(result.usage.cost_usd),
+            input_tokens: u64::from(result.usage.input_tokens),
+            output_tokens: u64::from(result.usage.output_tokens),
+            ..Usage::default()
+        };
+        ep.input_signal_hash = plan_id.to_string();
+        ep.output_signal_hash = result.output.id.to_string();
+        let model = self.effective_model();
+        let input = self.enrich_completed_run(ep, plan_id, task_id, "Implementer", &model, None, 1);
+        self.record_and_check_learning(input, plan_id).await;
+
+        if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+            tracker.mark_completed(task_id);
+        }
+
+        // Emit observability trace event for the successful agent dispatch.
+        self.emit_agent_trace(plan_id, task_id, true, wall_ms);
+
+        eprintln!("[orchestrate] task {task_id} completed");
+    }
+
+    /// Record a completed run and check the returned `LearningUpdate` for
+    /// regression alerts.
+    async fn record_and_check_learning(&mut self, input: CompletedRunInput, plan_id: &str) {
+        match self.learning.record_completed_run(input).await {
+            Ok(update) => self.handle_learning_update(&update, plan_id),
+            Err(e) => eprintln!("[orchestrate] episode log failed: {e}"),
+        }
+    }
+
+    /// Inspect a `LearningUpdate` for regression alerts and extracted skills,
+    /// logging them via tracing.
+    fn handle_learning_update(&self, update: &LearningUpdate, plan_id: &str) {
+        if let Some(ref report) = update.regression_report {
+            if report.has_regressions {
+                for alert in report.regressions() {
+                    tracing::warn!(
+                        plan_id = %plan_id,
+                        metric = %alert.metric_name,
+                        severity = ?alert.severity,
+                        description = %alert.description,
+                        "regression detected"
+                    );
+                }
+            }
+        }
+        if let Some(ref skill_id) = update.extracted_skill_id {
+            tracing::info!(plan_id = %plan_id, skill = %skill_id, "skill extracted from agent output");
+        }
+    }
+
+    /// Record a failed task: episode log + mark failed in tracker.
+    async fn record_task_failure(
+        &mut self,
+        plan_id: &str,
+        task_id: &str,
+        error: &anyhow::Error,
+        started: &std::time::Instant,
+    ) {
+        let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let mut ep = Episode::new("Implementer", task_id).failed(error.to_string());
+        ep.usage = Usage { wall_ms, ..Usage::default() };
+        ep.input_signal_hash = plan_id.to_string();
+        let model = self.effective_model();
+        let input = self.enrich_completed_run(ep, plan_id, task_id, "Implementer", &model, None, 1);
+        self.record_and_check_learning(input, plan_id).await;
+        if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+            tracker.failed.push(task_id.to_string());
+        }
+
+        // Emit observability trace event for the failed agent dispatch.
+        self.emit_agent_trace(plan_id, task_id, false, wall_ms);
+
+        // Emit a FailureTrace for agent dispatch errors.
+        let trace_id = Self::trace_id_for(plan_id, task_id);
+        let kind = if error.to_string().to_lowercase().contains("timeout") {
+            FailureKind::Timeout
+        } else {
+            FailureKind::ToolHandlerError
+        };
+        let ft = FailureTrace::new(trace_id, TraceStep::Execute, kind, error.to_string());
+        let event = ToolTraceEvent::Custom {
+            name: "failure_trace".to_string(),
+            data: serde_json::to_value(&ft).unwrap_or_default(),
+            at_ms: now_unix_ms_i64(),
+        };
+        self.obs_sinks.trace_sink.append(trace_id, event);
+    }
+    ///
+    /// Uses `TaskDef::build_fix_prompt` to produce a targeted prompt that includes
+    /// the original task, the failing phase, and the error output. Selects the model
+    /// based on error type: Haiku for compile errors (fast iteration), Sonnet for
+    /// test/clippy failures (needs reasoning).
+    async fn handle_autofix(&mut self, plan_id: &str) {
+        let gate_context = self
+            .task_trackers
+            .get(plan_id)
+            .and_then(|t| t.last_gate_failure.clone())
+            .unwrap_or_default();
+
+        let gate_phase = self
+            .task_trackers
+            .get(plan_id)
+            .and_then(|t| t.last_gate_failure_phase.clone())
+            .unwrap_or_else(|| "unknown".into());
+
+        if !gate_context.is_empty() {
+            eprintln!(
+                "[orchestrate] AutoFix {plan_id}: gate failure phase={gate_phase} context ({} chars)",
+                gate_context.len()
+            );
+        }
+
+        // Build fix prompt from the last implemented task's definition + gate failure
+        let (fix_prompt, fix_model) = {
+            let tracker = self.task_trackers.get(plan_id);
+            let last_task_id = tracker.and_then(|t| t.last_impl_task_id.as_deref());
+            let task_def = tracker.and_then(|t| {
+                last_task_id.and_then(|tid| t.tasks_file.tasks.iter().find(|td| td.id == tid))
+            });
+
+            if let Some(td) = task_def {
+                let original_prompt = td.build_prompt(plan_id, &self.workdir);
+                let prompt = td.build_fix_prompt(&original_prompt, &gate_phase, &gate_context);
+
+                // Model selection: mechanical tier (Haiku-class) for compile errors
+                // (fast iteration), focused tier (Sonnet-class) for test/logic failures.
+                let fix_tier = if gate_phase == "compile" { "mechanical" } else { "focused" };
+                let model = self.config.agent.tier_models.get(fix_tier)
+                    .cloned()
+                    .unwrap_or_else(|| match fix_tier {
+                        "mechanical" => "claude-haiku-4-5".into(),
+                        _ => "claude-sonnet-4-6".into(),
+                    });
+
+                (Some(prompt), Some(model))
+            } else {
+                (None, None)
+            }
+        };
+
+        let started = std::time::Instant::now();
+        match self.dispatch_agent_with(plan_id, AgentRole::AutoFixer, "fix", fix_prompt, fix_model, None).await {
+            Ok(result) => {
+                *self.per_plan_agents.entry(plan_id.to_string()).or_default() += 1;
+                self.agent_calls += 1;
+
+                let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                let mut ep = Episode::new("AutoFixer", "fix").succeeded();
+                ep.usage = Usage {
+                    wall_ms,
+                    cost_usd: f64::from(result.usage.cost_usd),
+                    input_tokens: u64::from(result.usage.input_tokens),
+                    output_tokens: u64::from(result.usage.output_tokens),
+                    ..Usage::default()
+                };
+                ep.input_signal_hash = plan_id.to_string();
+                ep.output_signal_hash = result.output.id.to_string();
+                let model = self.effective_model();
+                let input = self.enrich_completed_run(ep, plan_id, "fix", "AutoFixer", &model, None, 1);
+                self.record_and_check_learning(input, plan_id).await;
+
+                // Reset for retry: increment iteration, clear gate results
+                if let Some(state) = self.executor.plan_state_mut(plan_id) {
+                    state.reset_for_retry();
+                }
+
+                let event = ExecutorEvent::AutoFixDone;
+                self.log_transition(plan_id, &event);
+                let _ = self.executor.apply_event(plan_id, &event);
+            }
+            Err(e) => {
+                eprintln!("[orchestrate] AutoFix failed for {plan_id}: {e}");
+                let _ = self.executor.apply_event(
+                    plan_id,
+                    &ExecutorEvent::Fatal(format!("autofix failed: {e}")),
+                );
+            }
+        }
+    }
+
+    /// RegeneratingVerify phase: dispatch fixer with verify-specific context.
+    async fn handle_regen_verify(&mut self, plan_id: &str) {
+        let started = std::time::Instant::now();
+        match self.dispatch_agent(plan_id, AgentRole::AutoFixer, "regen-verify").await {
+            Ok(result) => {
+                *self.per_plan_agents.entry(plan_id.to_string()).or_default() += 1;
+                self.agent_calls += 1;
+
+                let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                let mut ep = Episode::new("AutoFixer", "regen-verify").succeeded();
+                ep.usage = Usage {
+                    wall_ms,
+                    cost_usd: f64::from(result.usage.cost_usd),
+                    input_tokens: u64::from(result.usage.input_tokens),
+                    output_tokens: u64::from(result.usage.output_tokens),
+                    ..Usage::default()
+                };
+                ep.input_signal_hash = plan_id.to_string();
+                ep.output_signal_hash = result.output.id.to_string();
+                let model = self.effective_model();
+                let input = self.enrich_completed_run(ep, plan_id, "regen-verify", "AutoFixer", &model, None, 1);
+                self.record_and_check_learning(input, plan_id).await;
+
+                let event = ExecutorEvent::VerifyRegenDone;
+                self.log_transition(plan_id, &event);
+                let _ = self.executor.apply_event(plan_id, &event);
+            }
+            Err(e) => {
+                eprintln!("[orchestrate] RegenVerify failed for {plan_id}: {e}");
+                let _ = self.executor.apply_event(
+                    plan_id,
+                    &ExecutorEvent::Fatal(format!("regen-verify failed: {e}")),
+                );
+            }
+        }
+    }
+
+    /// Reviewing phase: dispatch auditor using ReviewerTemplate, parse verdict.
+    async fn handle_reviewing(&mut self, plan_id: &str) {
+        let started = std::time::Instant::now();
+
+        // Build review prompt from ReviewerTemplate with available context.
+        let review_prompt = self.build_review_prompt(plan_id).await;
+
+        match self.dispatch_agent_with(plan_id, AgentRole::Auditor, "review", Some(review_prompt), None, None).await {
+            Ok(result) => {
+                *self.per_plan_agents.entry(plan_id.to_string()).or_default() += 1;
+                self.agent_calls += 1;
+
+                let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                let output_text = result.output.body.as_text().unwrap_or_default().to_string();
+
+                let approved = parse_review_verdict(&output_text);
+                eprintln!(
+                    "[orchestrate] Review {plan_id}: verdict={}",
+                    if approved { "approved" } else { "revise" }
+                );
+
+                let mut ep = Episode::new("Auditor", "review").succeeded();
+                ep.usage = Usage {
+                    wall_ms,
+                    cost_usd: f64::from(result.usage.cost_usd),
+                    input_tokens: u64::from(result.usage.input_tokens),
+                    output_tokens: u64::from(result.usage.output_tokens),
+                    ..Usage::default()
+                };
+                ep.input_signal_hash = plan_id.to_string();
+                ep.output_signal_hash = result.output.id.to_string();
+                let model = self.effective_model();
+                let input = self.enrich_completed_run(ep, plan_id, "review", "Auditor", &model, None, 1);
+                self.record_and_check_learning(input, plan_id).await;
+
+                if approved {
+                    let event = ExecutorEvent::ReviewApproved;
+                    self.log_transition(plan_id, &event);
+                    let _ = self.executor.apply_event(plan_id, &event);
+                } else {
+                    // Store feedback and reset tracker for reimplementation
+                    if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+                        tracker.review_feedback = Some(output_text);
+                        tracker.reset_for_reimpl();
+                    }
+                    let event = ExecutorEvent::ReviewRejected;
+                    self.log_transition(plan_id, &event);
+                    let _ = self.executor.apply_event(plan_id, &event);
+                }
+            }
+            Err(e) => {
+                // On infrastructure error, auto-approve (don't block pipeline)
+                eprintln!("[orchestrate] Review failed for {plan_id}: {e} — auto-approving");
+                let event = ExecutorEvent::ReviewApproved;
+                self.log_transition(plan_id, &event);
+                let _ = self.executor.apply_event(plan_id, &event);
+            }
+        }
+    }
+
+    /// DocRevision phase: dispatch scribe. Non-blocking — always advances.
+    async fn handle_doc_revision(&mut self, plan_id: &str) {
+        let started = std::time::Instant::now();
+
+        // Build doc-revision prompt from ScribeTemplate with available context.
+        let doc_prompt = self.build_doc_revision_prompt(plan_id).await;
+
+        match self.dispatch_agent_with(plan_id, AgentRole::Scribe, "docs", Some(doc_prompt), None, None).await {
+            Ok(result) => {
+                *self.per_plan_agents.entry(plan_id.to_string()).or_default() += 1;
+                self.agent_calls += 1;
+
+                let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                let mut ep = Episode::new("Scribe", "docs").succeeded();
+                ep.usage = Usage {
+                    wall_ms,
+                    cost_usd: f64::from(result.usage.cost_usd),
+                    input_tokens: u64::from(result.usage.input_tokens),
+                    output_tokens: u64::from(result.usage.output_tokens),
+                    ..Usage::default()
+                };
+                ep.input_signal_hash = plan_id.to_string();
+                ep.output_signal_hash = result.output.id.to_string();
+                let model = self.effective_model();
+                let input = self.enrich_completed_run(ep, plan_id, "docs", "Scribe", &model, None, 1);
+                self.record_and_check_learning(input, plan_id).await;
+            }
+            Err(e) => {
+                eprintln!("[orchestrate] DocRevision failed for {plan_id}: {e} — continuing (non-blocking)");
+            }
+        }
+        // Always advance regardless of success/failure
+        let event = ExecutorEvent::DocRevisionDone;
+        self.log_transition(plan_id, &event);
+        let _ = self.executor.apply_event(plan_id, &event);
+    }
+
+    /// Generic fallback agent handler with retry loop + model escalation.
+    /// Used for any role not handled by a dedicated phase handler.
+    async fn handle_generic_agent(&mut self, plan_id: &str, role: AgentRole, task: &str) {
+        let max_retries = 3u32;
+        let escalation_models = ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-6"];
+        let mut last_error = String::new();
+        let mut succeeded = false;
+        let started = std::time::Instant::now();
+
+        for attempt in 0..=max_retries {
+            if attempt > 0 {
+                let current = self.config.agent.model.as_deref().unwrap_or("claude-sonnet-4-6");
+                let current_idx = escalation_models.iter().position(|m| *m == current).unwrap_or(1);
+                let next_idx = (current_idx + attempt as usize).min(escalation_models.len() - 1);
+                let escalated = escalation_models[next_idx];
+                eprintln!(
+                    "[orchestrate] Retry {attempt}/{max_retries} for {plan_id}/{task} — escalating to {escalated} (error: {last_error})"
+                );
+            }
+
+            match self.dispatch_agent(plan_id, role, task).await {
+                Ok(ref result) => {
+                    *self.per_plan_agents.entry(plan_id.to_string()).or_default() += 1;
+                    self.agent_calls += 1;
+                    let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    let mut ep = Episode::new(format!("{role:?}"), task).succeeded();
+                    ep.usage = Usage {
+                        wall_ms,
+                        cost_usd: f64::from(result.usage.cost_usd),
+                        input_tokens: u64::from(result.usage.input_tokens),
+                        output_tokens: u64::from(result.usage.output_tokens),
+                        ..Usage::default()
+                    };
+                    ep.input_signal_hash = plan_id.to_string();
+                    ep.output_signal_hash = result.output.id.to_string();
+                    let model = self.effective_model();
+                    let role_str = format!("{role:?}");
+                    let input = self.enrich_completed_run(ep, plan_id, task, &role_str, &model, None, attempt + 1);
+                    if let Err(e) = self.learning.record_completed_run(input).await {
+                        eprintln!("[orchestrate] episode log failed: {e}");
+                    }
+                    let event = self.generic_completion_event(plan_id);
+                    self.log_transition(plan_id, &event);
+                    let _ = self.executor.apply_event(plan_id, &event);
+                    succeeded = true;
+                    break;
+                }
+                Err(e) => {
+                    last_error = e.to_string();
+                    if attempt == max_retries {
+                        eprintln!("[orchestrate] agent failed for {plan_id} after {max_retries} retries: {e}");
+                        let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                        let mut ep = Episode::new(format!("{role:?}"), task).failed(e.to_string());
+                        ep.usage = Usage { wall_ms, ..Usage::default() };
+                        ep.input_signal_hash = plan_id.to_string();
+                        let model = self.effective_model();
+                        let role_str = format!("{role:?}");
+                        let input = self.enrich_completed_run(ep, plan_id, task, &role_str, &model, None, attempt + 1);
+                        self.record_and_check_learning(input, plan_id).await;
+                        self.event_log.append(
+                            EventKind::ErrorOccurred,
+                            serde_json::json!({"plan_id": plan_id, "error": e.to_string(), "attempts": attempt + 1}),
+                        );
+                        let _ = self.executor.apply_event(
+                            plan_id,
+                            &ExecutorEvent::Fatal(format!("agent error after {attempt} retries: {e}")),
+                        );
+                    }
+                }
+            }
+        }
+
+        if !succeeded {
+            eprintln!("[orchestrate] All retries exhausted for {plan_id}/{task}");
+        }
+    }
+
+    /// Ensure a TaskTracker exists for the given plan (lazy loading).
+    fn ensure_task_tracker(&mut self, plan_id: &str) {
+        if self.task_trackers.contains_key(plan_id) {
+            return;
+        }
+        let plan_dir = self.workdir.join("plans").join(plan_id);
+        let tasks_path = plan_dir.join("tasks.toml");
+        if tasks_path.exists() {
+            if let Ok(tf) = TasksFile::parse(&tasks_path) {
+                self.task_trackers.insert(plan_id.to_string(), TaskTracker::new(tf, plan_dir));
             }
         }
     }
@@ -670,9 +2240,10 @@ impl PlanRunner {
         })
     }
 
-    /// Determine which completion event to fire after an agent completes.
-    #[allow(clippy::match_same_arms)] // Each phase listed for clarity
-    fn agent_completion_event(&self, plan_id: &str) -> ExecutorEvent {
+    /// Determine which completion event to fire for the generic agent handler.
+    /// Only used by `handle_generic_agent` for non-standard roles.
+    #[allow(clippy::match_same_arms)]
+    fn generic_completion_event(&self, plan_id: &str) -> ExecutorEvent {
         let Some(state) = self.executor.plan_state(plan_id) else {
             return ExecutorEvent::Fatal("unknown plan".into());
         };
@@ -695,29 +2266,72 @@ impl PlanRunner {
     /// verification. Falls back to the generic prompt if no tasks.toml exists
     /// or the task ID isn't found.
     async fn dispatch_agent(
-        &self,
+        &mut self,
         plan_id: &str,
         role: AgentRole,
         task: &str,
     ) -> Result<AgentResult> {
+        self.dispatch_agent_with(plan_id, role, task, None, None, None).await
+    }
+
+    /// Core agent dispatch with optional prompt and model overrides.
+    async fn dispatch_agent_with(
+        &mut self,
+        plan_id: &str,
+        role: AgentRole,
+        task: &str,
+        prompt_override: Option<String>,
+        model_override: Option<String>,
+        exec_dir_override: Option<PathBuf>,
+    ) -> Result<AgentResult> {
         let ctx = Context::now();
-        let exec_dir = self.plan_exec_dir(plan_id).await;
+        let exec_dir = match exec_dir_override {
+            Some(dir) => dir,
+            None => self.plan_exec_dir(plan_id).await,
+        };
+
+        // ── Budget check before dispatch ─────────────────────────────
+        let plan_spent = self.plan_costs.get(plan_id).copied().unwrap_or(0.0);
+        let budget = &self.config.budget;
+        if plan_spent >= budget.max_plan_usd {
+            return Err(anyhow!(
+                "plan {plan_id} budget exhausted: ${plan_spent:.2} >= ${:.2} max",
+                budget.max_plan_usd
+            ));
+        }
+        let warn_threshold = budget.max_plan_usd * f64::from(budget.warn_at_percent) / 100.0;
+        if plan_spent >= warn_threshold {
+            eprintln!(
+                "[budget] WARNING: plan {plan_id} at ${plan_spent:.2} / ${:.2} ({:.0}%)",
+                budget.max_plan_usd,
+                plan_spent / budget.max_plan_usd * 100.0
+            );
+        }
 
         // ── Try to load structured task definition ──────────────────
-        let tasks_toml = self.workdir.join("plans").join(plan_id).join("tasks.toml");
-        let task_def = if tasks_toml.exists() {
-            crate::task_parser::TasksFile::parse(&tasks_toml)
-                .ok()
-                .and_then(|tf| tf.tasks.into_iter().find(|t| t.id == task))
+        let plan_dir = self.workdir.join("plans").join(plan_id);
+        let tasks_toml = plan_dir.join("tasks.toml");
+        let tasks_file = if tasks_toml.exists() {
+            crate::task_parser::TasksFile::parse(&tasks_toml).ok()
         } else {
             None
         };
+        let task_def = tasks_file.as_ref()
+            .and_then(|tf| tf.tasks.iter().find(|t| t.id == task).cloned());
 
         // ── Build prompt: surgical (from TaskDef) or generic ────────
-        let (task_text, selected_model) = if let Some(ref td) = task_def {
+        // Also collect attribution keys for context feedback after the agent runs.
+        let mut attribution_keys: Vec<(String, String)> = Vec::new();
+        let (task_text, selected_model) = if let Some(override_prompt) = prompt_override {
+            let model = model_override.unwrap_or_else(|| {
+                self.config.agent.model.clone().unwrap_or_else(|| "claude-sonnet-4-6".into())
+            });
+            (override_prompt, model)
+        } else if let Some(ref td) = task_def {
             let prompt = td.build_prompt(plan_id, &self.workdir);
             let model = td.effective_model(
                 self.config.agent.model.as_deref().unwrap_or("claude-sonnet-4-6"),
+                Some(&self.config.agent.tier_models),
             );
             eprintln!(
                 "[orchestrate] Task {} tier={} model={} max_loc={:?} context={} verify={}",
@@ -735,7 +2349,183 @@ impl PlanRunner {
             (text, model)
         };
 
-        let claude_tools_csv = claude_tool_allowlist(role);
+        // ── Adaptive model selection via CascadeRouter ───────────────
+        let selected_model = {
+            use roko_learn::model_router::RoutingContext;
+            use roko_core::TaskComplexityBand;
+
+            let cascade_router = self.learning.cascade_router();
+            let complexity = task_def
+                .as_ref()
+                .map(|td| match td.tier.as_str() {
+                    "fast" => TaskComplexityBand::Fast,
+                    "complex" | "premium" => TaskComplexityBand::Complex,
+                    _ => TaskComplexityBand::Standard,
+                })
+                .unwrap_or(TaskComplexityBand::Standard);
+            let has_prior_failure = self.task_trackers
+                .get(plan_id)
+                .is_some_and(|t| t.last_gate_failure.is_some());
+            let routing_ctx = RoutingContext {
+                task_category: roko_core::TaskCategory::Implementation,
+                complexity,
+                iteration: 0,
+                role,
+                crate_familiarity: 0.5,
+                has_prior_failure,
+            };
+            let cascade = cascade_router.route(&routing_ctx);
+            // Use cascade recommendation only if it has enough observations
+            // Otherwise stick with the statically selected model
+            if cascade.stage != roko_learn::cascade_router::CascadeStage::Static {
+                eprintln!(
+                    "[orchestrate] CascadeRouter recommends model={} (stage={:?})",
+                    cascade.primary.slug, cascade.stage
+                );
+                cascade.primary.slug
+            } else {
+                selected_model
+            }
+        };
+
+        // ── Provider health check ────────────────────────────────────
+        let selected_model = if !self.learning.provider_health().is_healthy(&selected_model) {
+            let fallback = self.config.agent.fallback_model
+                .clone()
+                .unwrap_or_else(|| "claude-sonnet-4-6".into());
+            tracing::warn!(
+                unhealthy_model = %selected_model,
+                fallback_model = %fallback,
+                "model marked unhealthy by ProviderHealthTracker, falling back"
+            );
+            fallback
+        } else {
+            selected_model
+        };
+
+        // ── Build context via tiered ContextProvider ───────────────
+        let context_sections = if let Some(ref td) = task_def {
+            let context_provider = ContextProvider::new(self.workdir.clone())
+                .with_budgets(self.config.prompt.context_budgets.to_context_budgets());
+
+            let task_input = task_def_to_input(td);
+            let plan_artifacts = PlanArtifacts::new(plan_dir.clone(), plan_id.to_string());
+
+            // Build sibling list from the tasks file
+            let siblings: Vec<roko_compose::SiblingTask> = tasks_file
+                .as_ref()
+                .map(|tf| {
+                    tf.tasks.iter()
+                        .filter(|t| t.id != td.id)
+                        .map(|t| roko_compose::SiblingTask {
+                            id: t.id.clone(),
+                            title: t.title.clone(),
+                            status: t.status.clone(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            // Prior task outputs: read from .roko/task-outputs/ if available
+            let prior_outputs = load_prior_task_outputs(&self.workdir, &td.depends_on);
+
+            let mut resolved = context_provider.resolve(
+                &task_input,
+                &selected_model,
+                &plan_artifacts,
+                &siblings,
+                &prior_outputs,
+            );
+
+            eprintln!(
+                "[orchestrate] Context tier={:?} sections={} tokens_est={} budget={}",
+                resolved.tier,
+                resolved.sections.len(),
+                resolved.total_tokens_estimate,
+                resolved.budget_tokens,
+            );
+
+            // ── Attribution-based demotion ───────────────────────────────
+            let tier_str = format!("{:?}", resolved.tier);
+            resolved.sections.retain(|cs| {
+                use roko_compose::ContextSource;
+                let source_type = match &cs.source {
+                    ContextSource::InlineFile { .. } => "file",
+                    ContextSource::SymbolSignature { .. } => "symbol",
+                    ContextSource::AntiPattern => "anti_pattern",
+                    ContextSource::Verification => "verification",
+                    ContextSource::TaskBrief => "task_brief",
+                    ContextSource::PriorTaskOutput { .. } => "prior_output",
+                    ContextSource::PlanBrief => "plan_brief",
+                    ContextSource::ResearchMemo => "research_memo",
+                    ContextSource::Invariants => "invariants",
+                    ContextSource::CrossPlanContext => "cross_plan",
+                    ContextSource::PrdExtract => "prd_extract",
+                    ContextSource::Decomposition => "decomposition",
+                    ContextSource::SiblingTasks => "sibling_tasks",
+                };
+                let rate = self.attribution_tracker.ref_rate(&tier_str, source_type);
+                let demoted = self.attribution_tracker.should_demote(&tier_str, source_type);
+                if demoted {
+                    eprintln!("[context] {source_type}: demoted (ref_rate={rate:.2})");
+                } else {
+                    eprintln!("[context] {source_type}: included (ref_rate={rate:.2})");
+                }
+                !demoted
+            });
+
+            // Extract attribution keys before consuming into prompt sections.
+            // Each key is a searchable token (file path, symbol name) that we'll
+            // look for in the agent's output to measure context utilization.
+            attribution_keys = resolved
+                .sections
+                .iter()
+                .filter_map(|cs| {
+                    use roko_compose::ContextSource;
+                    match &cs.source {
+                        ContextSource::InlineFile { path, .. } => {
+                            Some(("file".into(), path.clone()))
+                        }
+                        ContextSource::SymbolSignature { symbol, .. } => {
+                            Some(("symbol".into(), symbol.clone()))
+                        }
+                        _ => None,
+                    }
+                })
+                .collect();
+
+            resolved.into_prompt_sections()
+        } else {
+            Vec::new()
+        };
+
+        let claude_tools_csv = claude_tool_allowlist_with(
+            role,
+            self.tool_registry.as_deref(),
+        );
+
+        // ── Adaptive format selection via bandit ─────────────────────
+        let tool_count = claude_tools_csv.split(',').filter(|s| !s.is_empty()).count();
+        let complexity = task_def
+            .as_ref()
+            .map(|td| match td.tier.as_str() {
+                "fast" => roko_core::TaskComplexityBand::Fast,
+                "complex" | "premium" => roko_core::TaskComplexityBand::Complex,
+                _ => roko_core::TaskComplexityBand::Standard,
+            })
+            .unwrap_or(roko_core::TaskComplexityBand::Standard);
+        #[allow(clippy::cast_possible_truncation)]
+        let bandit_key = roko_core::tool::BanditKey::new(
+            &selected_model,
+            role,
+            tool_count.min(255) as u8,
+            complexity,
+        );
+        let selected_format = self.format_bandit.select(&bandit_key);
+        eprintln!(
+            "[orchestrate] format_bandit: model={selected_model} role={role:?} tools={tool_count} → {selected_format:?}",
+        );
+
         let role_instruction = build_system_prompt(role, plan_id, task, &claude_tools_csv);
         let role_section = PromptSection::new("role", &role_instruction)
             .with_priority(SectionPriority::Critical)
@@ -748,7 +2538,52 @@ impl PlanRunner {
             .into_signal()
             .map_err(|e| anyhow!("task section: {e}"))?;
 
-        let sections = vec![role_section, task_section];
+        // Combine: role (Critical/Start) + context sections (tiered) + learned context + task (Critical/End)
+        let mut sections = vec![role_section];
+        for cs in context_sections {
+            sections.push(
+                cs.into_signal().map_err(|e| anyhow!("context section: {e}"))?
+            );
+        }
+
+        // ── Inject learned knowledge (skills, playbook rules, patterns) ──
+        let learned = self.build_learned_context(role, &task_text);
+        if !learned.text.is_empty() {
+            let learned_section = PromptSection::new("learned-context", &learned.text)
+                .with_priority(SectionPriority::Normal)
+                .with_placement(Placement::Middle)
+                .into_signal()
+                .map_err(|e| anyhow!("learned-context section: {e}"))?;
+            sections.push(learned_section);
+            eprintln!(
+                "[orchestrate] injected learned context ({} chars)",
+                learned.text.len()
+            );
+        }
+        // Store matched skill/rule IDs for flowing into CompletedRunInput.
+        if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+            tracker.last_matched_skill_id = learned.matched_skill_id;
+            tracker.last_matched_rule_id = learned.matched_rule_id;
+        }
+
+        sections.push(task_section);
+
+        // ── Tool manifest for non-CLI agents ──────────────────────────
+        // Claude CLI gets tools via `--allowedTools` flag; for ExecAgent
+        // and other backends, inject the role-filtered tool list into the
+        // prompt so the agent knows which tools are available.
+        let is_exec_agent = self.config.agent.command != "claude";
+        if is_exec_agent {
+            let tool_manifest = self.build_tool_manifest(role);
+            if !tool_manifest.is_empty() {
+                let tool_section = PromptSection::new("available-tools", &tool_manifest)
+                    .with_priority(SectionPriority::Normal)
+                    .with_placement(Placement::Middle)
+                    .into_signal()
+                    .map_err(|e| anyhow!("tool manifest section: {e}"))?;
+                sections.push(tool_section);
+            }
+        }
 
         let composer = PromptComposer::new();
         let prompt = composer
@@ -814,42 +2649,224 @@ impl PlanRunner {
             ));
         }
 
-        // ── Run per-task verification pipeline ──────────────────────
-        if let Some(ref td) = task_def {
-            if !td.verify.is_empty() {
-                eprintln!("[orchestrate] Running {} verify steps for {}", td.verify.len(), td.id);
-                for step in &td.verify {
-                    let output = tokio::process::Command::new("sh")
-                        .arg("-c")
-                        .arg(&step.command)
-                        .current_dir(&exec_dir)
-                        .output()
-                        .await;
-                    match output {
-                        Ok(o) if o.status.success() => {
-                            eprintln!("  ✅ [{}] {}", step.phase, step.command);
-                        }
-                        Ok(o) => {
-                            let stderr = String::from_utf8_lossy(&o.stderr);
-                            let msg = step.fail_msg.as_deref().unwrap_or("verification failed");
-                            eprintln!("  ❌ [{}] {} — {}: {}", step.phase, step.command, msg, stderr.trim());
-                            return Err(anyhow!(
-                                "verify failed for {}: {} — {}",
-                                td.id,
-                                step.command,
-                                msg
-                            ));
-                        }
-                        Err(e) => {
-                            eprintln!("  ❌ [{}] {} — spawn error: {e}", step.phase, step.command);
-                            return Err(anyhow!("verify spawn error for {}: {e}", td.id));
-                        }
+        // ── Context attribution feedback ──────────────────────────────
+        // Scan agent output for references to injected context sections.
+        // This measures which context was actually useful, enabling the
+        // ContextProvider to demote low-utility sources over time.
+        if !attribution_keys.is_empty() {
+            let output_text = result.output.body.as_text().unwrap_or_default();
+            let mut referenced = 0usize;
+            let total = attribution_keys.len();
+
+            for (kind, key) in &attribution_keys {
+                // Check if the agent's output references this context section.
+                // For files: look for the file path. For symbols: look for the symbol name.
+                let was_referenced = match kind.as_str() {
+                    "file" => {
+                        // Match full path or just filename
+                        let filename = std::path::Path::new(key)
+                            .file_name()
+                            .and_then(|f| f.to_str())
+                            .unwrap_or(key);
+                        output_text.contains(key) || output_text.contains(filename)
                     }
+                    "symbol" => output_text.contains(key.as_str()),
+                    _ => false,
+                };
+                if was_referenced {
+                    referenced += 1;
+                }
+                // Update rolling attribution tracker per (tier, source_type).
+                let tier_str = task_def.as_ref().map(|td| td.tier.as_str()).unwrap_or("unknown");
+                self.attribution_tracker.record(tier_str, kind, was_referenced);
+            }
+
+            let ref_rate = if total > 0 {
+                (referenced as f64) / (total as f64)
+            } else {
+                0.0
+            };
+
+            eprintln!(
+                "[orchestrate] Context attribution: {referenced}/{total} sections referenced (ref_rate={ref_rate:.2})"
+            );
+
+            // Persist attribution to .roko/context-attribution.jsonl
+            let attribution_path = self.workdir.join(".roko").join("context-attribution.jsonl");
+            let record = serde_json::json!({
+                "plan_id": plan_id,
+                "task": task,
+                "tier": task_def.as_ref().map(|td| td.tier.as_str()).unwrap_or("unknown"),
+                "total_sections": total,
+                "referenced_sections": referenced,
+                "ref_rate": ref_rate,
+                "ts": chrono::Utc::now().to_rfc3339(),
+            });
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&attribution_path)
+            {
+                use std::io::Write;
+                let _ = writeln!(file, "{}", record);
+                // Write per-source records so the tracker can distinguish source types.
+                for (kind, key) in &attribution_keys {
+                    let was_referenced = match kind.as_str() {
+                        "file" => {
+                            let filename = std::path::Path::new(key)
+                                .file_name()
+                                .and_then(|f| f.to_str())
+                                .unwrap_or(key);
+                            output_text.contains(key) || output_text.contains(filename)
+                        }
+                        "symbol" => output_text.contains(key.as_str()),
+                        _ => false,
+                    };
+                    let per_source = serde_json::json!({
+                        "plan_id": plan_id,
+                        "task": task,
+                        "tier": task_def.as_ref().map(|td| td.tier.as_str()).unwrap_or("unknown"),
+                        "source_type": kind,
+                        "source_key": key,
+                        "referenced": was_referenced,
+                        "ts": chrono::Utc::now().to_rfc3339(),
+                    });
+                    let _ = writeln!(file, "{}", per_source);
                 }
             }
         }
 
+        // ── Cost recording ────────────────────────────────────────────
+        let task_cost = f64::from(result.usage.cost_usd);
+        if task_cost > self.config.budget.max_task_usd {
+            return Err(anyhow!(
+                "task {task} cost ${task_cost:.2} exceeds max_task_usd ${:.2}",
+                self.config.budget.max_task_usd
+            ));
+        }
+        *self.plan_costs.entry(plan_id.to_string()).or_insert(0.0) += task_cost;
+
+        self.learning.costs_db().insert(CostRecord {
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            model: selected_model.clone(),
+            provider: self.config.agent.command.clone(),
+            role: format!("{role:?}"),
+            plan_id: plan_id.to_string(),
+            task_id: task.to_string(),
+            complexity_band: task_def.as_ref().map(|td| td.tier.clone()).unwrap_or_default(),
+            input_tokens: u64::from(result.usage.input_tokens),
+            output_tokens: u64::from(result.usage.output_tokens),
+            cached_tokens: u64::from(result.usage.cache_read_tokens),
+            cost_usd: task_cost,
+            duration_ms: result.usage.wall_ms,
+            success: result.success,
+            session_id: self.claude_resume_session.clone().unwrap_or_default(),
+        });
+
+        // ── Metric instrumentation ──────────────────────────────────────
+        #[allow(clippy::cast_precision_loss)]
+        {
+            let status = if result.success { "succeeded" } else { "failed" };
+            let role_str = format!("{role:?}");
+            self.metrics
+                .register_counter("roko_tasks_total", "", LabelSet::from_pairs(&[("status", status), ("role", &role_str)]))
+                .inc();
+            self.metrics
+                .register_histogram(
+                    "roko_agent_duration_seconds",
+                    "",
+                    LabelSet::from_pairs(&[("role", &role_str)]),
+                    roko_core::obs::LLM_LATENCY_BUCKETS.to_vec(),
+                )
+                .observe(result.usage.wall_ms as f64 / 1000.0);
+            let total_tokens = u64::from(result.usage.input_tokens) + u64::from(result.usage.output_tokens);
+            self.metrics
+                .register_counter("roko_llm_tokens_total", "", LabelSet::from_pairs(&[("role", &role_str)]))
+                .inc_by(total_tokens);
+            // Cost metric — scale to millionths to use integer counter.
+            #[allow(clippy::cast_sign_loss)]
+            let cost_micro = (task_cost * 1_000_000.0) as u64;
+            self.metrics
+                .register_counter(
+                    "roko_llm_cost_usd_total",
+                    "",
+                    LabelSet::from_pairs(&[("role", &role_str), ("model", &selected_model)]),
+                )
+                .inc_by(cost_micro);
+        }
+
+        // ── Run per-task verification pipeline ──────────────────────
+        if let Some(ref td) = task_def {
+            if let Err((task_id, _phase, command, _error_output)) =
+                self.run_verify_steps(&td.id, &td.verify, &exec_dir).await
+            {
+                let msg = td.verify
+                    .iter()
+                    .find(|s| s.command == command)
+                    .and_then(|s| s.fail_msg.as_deref())
+                    .unwrap_or("verification failed");
+                return Err(anyhow!(
+                    "verify failed for {}: {} — {}",
+                    task_id,
+                    command,
+                    msg
+                ));
+            }
+        }
+
         Ok(result)
+    }
+
+    /// Run per-task verification steps.
+    ///
+    /// Returns `Ok(())` if all steps succeed. If a step fails, returns
+    /// `Err((task_id, phase, command, error_output))`.
+    async fn run_verify_steps(
+        &self,
+        task_id: &str,
+        verify_steps: &[crate::task_parser::VerifyStep],
+        exec_dir: &Path,
+    ) -> Result<(), (String, String, String, String)> {
+        if verify_steps.is_empty() {
+            return Ok(());
+        }
+
+        eprintln!("[orchestrate] Running {} verify steps for {}", verify_steps.len(), task_id);
+        for step in verify_steps {
+            let output = tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg(&step.command)
+                .current_dir(exec_dir)
+                .output()
+                .await;
+
+            match output {
+                Ok(o) if o.status.success() => {
+                    eprintln!("  ✅ [{}] {}", step.phase, step.command);
+                }
+                Ok(o) => {
+                    let stderr = String::from_utf8_lossy(&o.stderr);
+                    let msg = step.fail_msg.as_deref().unwrap_or("verification failed");
+                    eprintln!("  ❌ [{}] {} — {}: {}", step.phase, step.command, msg, stderr.trim());
+                    return Err((
+                        task_id.to_string(),
+                        step.phase.clone(),
+                        step.command.clone(),
+                        stderr.to_string(),
+                    ));
+                }
+                Err(e) => {
+                    eprintln!("  ❌ [{}] {} — spawn error: {e}", step.phase, step.command);
+                    return Err((
+                        task_id.to_string(),
+                        step.phase.clone(),
+                        step.command.clone(),
+                        format!("spawn error: {e}"),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Run gates at the specified rung level and return whether all passed.
@@ -893,6 +2910,18 @@ impl PlanRunner {
         }
 
         let all_passed = verdicts.iter().all(|v| v.passed);
+
+        // Increment gate verdict metrics.
+        for v in &verdicts {
+            let verdict_str = if v.passed { "pass" } else { "fail" };
+            self.metrics
+                .register_counter(
+                    "roko_gate_verdicts_total",
+                    "",
+                    LabelSet::from_pairs(&[("gate", &v.gate), ("verdict", verdict_str)]),
+                )
+                .inc();
+        }
         Ok(all_passed)
     }
 
@@ -960,6 +2989,21 @@ impl PlanRunner {
         }
     }
 
+    /// Create (or fall back to plan-level) worktree for an individual task
+    /// within a plan, so parallel tasks get isolated working directories.
+    async fn task_exec_dir(&self, plan_id: &str, task_id: &str) -> PathBuf {
+        let wt_id = format!("{plan_id}-{task_id}");
+        match self.worktrees.create(&wt_id, "HEAD").await {
+            Ok(handle) => handle.path.clone(),
+            Err(e) => {
+                eprintln!(
+                    "[orchestrate] task worktree failed for {task_id}: {e}, falling back to plan dir"
+                );
+                self.plan_exec_dir(plan_id).await
+            }
+        }
+    }
+
     async fn run_gate_rung(payload_sig: &Signal, rung: u32) -> Vec<Verdict> {
         let ctx = Context::now();
         // Rung 0 = compile, rung 1 = test, rung 2 = clippy, rung 3+ = all.
@@ -987,6 +3031,212 @@ impl PlanRunner {
                 ]
             }
         }
+    }
+    /// Build a review prompt using the ReviewerTemplate with available context.
+    async fn build_review_prompt(&self, plan_id: &str) -> String {
+        use roko_compose::templates::reviewer::{Reviewer, ReviewerInput, ReviewerTemplate};
+        use roko_compose::templates::{PlanSlice, RolePromptTemplate};
+
+        let plan_dir = self.workdir.join("plans").join(plan_id);
+
+        // Load plan.md content
+        let plan_md_path = plan_dir.join("plan.md");
+        let plan_content = tokio::fs::read_to_string(&plan_md_path)
+            .await
+            .unwrap_or_default();
+
+        // Load AGENTS.md if it exists
+        let agents_md_path = self.workdir.join("AGENTS.md");
+        let agents_md = tokio::fs::read_to_string(&agents_md_path)
+            .await
+            .unwrap_or_default();
+
+        // Get files changed via git diff
+        let exec_dir = self.plan_exec_dir(plan_id).await;
+        let files_changed = tokio::process::Command::new("git")
+            .args(["diff", "--name-only", "HEAD"])
+            .current_dir(&exec_dir)
+            .output()
+            .await
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.lines().map(String::from).collect::<Vec<_>>())
+            .unwrap_or_default();
+
+        // Prior review findings from tracker
+        let prior_findings = self
+            .task_trackers
+            .get(plan_id)
+            .and_then(|t| t.review_feedback.clone());
+
+        let input = ReviewerInput {
+            agents_md,
+            plan: PlanSlice {
+                num: String::new(),
+                base: plan_id.to_string(),
+                title: plan_id.to_string(),
+                content: plan_content,
+            },
+            filtered_workspace_map: String::new(),
+            prd2_extract: String::new(),
+            brief: String::new(),
+            files_changed,
+            prior_findings,
+        };
+
+        let template = ReviewerTemplate::new(Reviewer::Combined);
+        let sections = template.sections(&input);
+
+        // Join sections into a single prompt string
+        sections
+            .iter()
+            .map(|s| s.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n---\n\n")
+    }
+
+    /// Build a doc-revision prompt using the ScribeTemplate with available context.
+    async fn build_doc_revision_prompt(&self, plan_id: &str) -> String {
+        use roko_compose::templates::scribe::{ScribeInput, ScribeTemplate, ScribeVariant};
+        use roko_compose::templates::{PlanSlice, RolePromptTemplate};
+
+        let plan_dir = self.workdir.join("plans").join(plan_id);
+
+        // Load plan.md content
+        let plan_md_path = plan_dir.join("plan.md");
+        let plan_content = tokio::fs::read_to_string(&plan_md_path)
+            .await
+            .unwrap_or_default();
+
+        // Load AGENTS.md if it exists
+        let agents_md_path = self.workdir.join("AGENTS.md");
+        let agents_md = tokio::fs::read_to_string(&agents_md_path)
+            .await
+            .unwrap_or_default();
+
+        let input = ScribeInput {
+            agents_md,
+            plan: PlanSlice {
+                num: String::new(),
+                base: plan_id.to_string(),
+                title: plan_id.to_string(),
+                content: plan_content,
+            },
+            prd2_extract: String::new(),
+            brief: String::new(),
+            source_snippets: Vec::new(),
+            variant: ScribeVariant::Initial,
+            critic_feedback: None,
+            prior_docs: None,
+        };
+
+        let template = ScribeTemplate;
+        let sections = template.sections(&input);
+
+        sections
+            .iter()
+            .map(|s| s.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n---\n\n")
+    }
+
+    // ── Observability helpers ────────────────────────────────────────────
+
+    /// Derive a deterministic `TraceId` from plan + task identifiers.
+    fn trace_id_for(plan_id: &str, task_id: &str) -> TraceId {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        plan_id.hash(&mut hasher);
+        task_id.hash(&mut hasher);
+        let h = hasher.finish();
+        let mut bytes = [0u8; 16];
+        bytes[..8].copy_from_slice(&h.to_le_bytes());
+        // Second half: hash again with a salt for uniqueness.
+        "roko-trace".hash(&mut hasher);
+        let h2 = hasher.finish();
+        bytes[8..].copy_from_slice(&h2.to_le_bytes());
+        TraceId::from_bytes(bytes)
+    }
+
+    /// Emit a trace event after an agent dispatch (success or failure).
+    fn emit_agent_trace(&self, plan_id: &str, task_id: &str, success: bool, wall_ms: u64) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        let trace_id = Self::trace_id_for(plan_id, task_id);
+        let event = ToolTraceEvent::Custom {
+            name: "agent_dispatch".to_string(),
+            data: serde_json::json!({
+                "plan_id": plan_id,
+                "task_id": task_id,
+                "success": success,
+                "wall_ms": wall_ms,
+            }),
+            at_ms: now_ms,
+        };
+        self.obs_sinks.trace_sink.append(trace_id, event);
+    }
+
+    /// Emit a trace event after a gate pipeline run.
+    fn emit_gate_metric(&self, plan_id: &str, rung: u32, passed: bool, wall_ms: u64) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        let trace_id = Self::trace_id_for(plan_id, &format!("gate-rung-{rung}"));
+        let event = ToolTraceEvent::Custom {
+            name: "gate_result".to_string(),
+            data: serde_json::json!({
+                "plan_id": plan_id,
+                "rung": rung,
+                "passed": passed,
+                "wall_ms": wall_ms,
+            }),
+            at_ms: now_ms,
+        };
+        self.obs_sinks.trace_sink.append(trace_id, event);
+
+        // Increment the well-known gate metric.
+        let rung_str = format!("rung-{rung}");
+        let verdict = if passed { "pass" } else { "fail" };
+        self.metrics
+            .register_counter(
+                "roko_gate_verdicts_total",
+                "",
+                LabelSet::from_pairs(&[("gate", &rung_str), ("verdict", verdict)]),
+            )
+            .inc();
+    }
+
+    /// Build a tool manifest string for non-CLI agent backends.
+    ///
+    /// Uses `DynamicToolRegistry` (which includes MCP tools) if available,
+    /// falling back to `StaticToolRegistry`. The result is a human-readable
+    /// list of tool names and descriptions suitable for injection into a
+    /// system prompt.
+    fn build_tool_manifest(&self, role: AgentRole) -> String {
+        use roko_core::tool::ToolRegistry;
+
+        let tools: Vec<roko_core::tool::ToolDef> = if let Some(ref registry) = self.tool_registry {
+            registry.for_role(role).into_iter().cloned().collect()
+        } else {
+            let static_reg = StaticToolRegistry::new();
+            static_reg.for_role(role).into_iter().cloned().collect()
+        };
+
+        if tools.is_empty() {
+            return String::new();
+        }
+
+        let mut manifest = String::from("## Available Tools\n\n");
+        manifest.push_str("You may call the following tools during this task:\n\n");
+        for tool in &tools {
+            manifest.push_str(&format!("- **{}**", tool.name));
+            if !tool.description.is_empty() {
+                manifest.push_str(&format!(": {}", tool.description));
+            }
+            manifest.push('\n');
+        }
+        manifest
     }
 }
 
@@ -1040,12 +3290,145 @@ fn build_system_prompt(role: AgentRole, plan_id: &str, task: &str, tools_csv: &s
 }
 
 fn claude_tool_allowlist(role: AgentRole) -> String {
-    let registry = StaticToolRegistry::new();
-    let tools: Vec<_> = registry.for_role(role).into_iter().cloned().collect();
+    claude_tool_allowlist_with(role, None)
+}
+
+fn claude_tool_allowlist_with(
+    role: AgentRole,
+    dynamic_registry: Option<&roko_agent::mcp::DynamicToolRegistry>,
+) -> String {
+    use roko_core::tool::ToolRegistry;
+    let tools: Vec<roko_core::tool::ToolDef> = if let Some(registry) = dynamic_registry {
+        registry.for_role(role).into_iter().cloned().collect()
+    } else {
+        let registry = StaticToolRegistry::new();
+        registry.for_role(role).into_iter().cloned().collect()
+    };
     match ClaudeTranslator.render_tools(&tools) {
         RenderedTools::CliFlag(csv) => csv,
         _ => String::new(),
     }
+}
+
+/// Parse a review verdict from agent output text.
+///
+/// Looks for `verdict = "approve"` / `verdict = "revise"` patterns,
+/// falls back to keyword matching. Returns `true` for approve.
+fn parse_review_verdict(output: &str) -> bool {
+    let lower = output.to_lowercase();
+    // Structured verdict
+    if lower.contains("verdict = \"approve\"") || lower.contains("verdict: approve") {
+        return true;
+    }
+    if lower.contains("verdict = \"revise\"") || lower.contains("verdict: revise")
+        || lower.contains("verdict = \"reject\"") || lower.contains("verdict: reject")
+    {
+        return false;
+    }
+    // Keyword fallback
+    if lower.contains("approved") || lower.contains("lgtm") || lower.contains("looks good") {
+        return true;
+    }
+    if lower.contains("revise") || lower.contains("reject") || lower.contains("rework") {
+        return false;
+    }
+    // Default: approve (don't block pipeline on ambiguous output)
+    true
+}
+
+/// Convert a `TaskDef` (from the CLI's task_parser) into a `TaskInput`
+/// (from roko-compose's `context_provider`). This bridges the two crate
+/// boundaries without creating a dependency.
+fn task_def_to_input(td: &crate::task_parser::TaskDef) -> roko_compose::TaskInput {
+    let (read_files, symbols, anti_patterns, prior_failures) = match &td.context {
+        Some(ctx) => (
+            ctx.read_files.iter().map(|rf| roko_compose::ReadFileSpec {
+                path: rf.path.clone(),
+                lines: rf.lines.clone(),
+                why: rf.why.clone(),
+            }).collect(),
+            ctx.symbols.clone(),
+            ctx.anti_patterns.clone(),
+            ctx.prior_failures.clone(),
+        ),
+        None => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+    };
+
+    roko_compose::TaskInput {
+        id: td.id.clone(),
+        title: td.title.clone(),
+        tier: td.tier.clone(),
+        files: td.files.clone(),
+        read_files,
+        symbols,
+        anti_patterns,
+        prior_failures,
+        verify_commands: td.verify.iter().map(|v| roko_compose::VerifySpec {
+            phase: v.phase.clone(),
+            command: v.command.clone(),
+            fail_msg: v.fail_msg.clone(),
+        }).collect(),
+        acceptance: td.acceptance.clone(),
+        depends_on: td.depends_on.clone(),
+        max_loc: td.max_loc,
+    }
+}
+
+/// Load prior task outputs from `.roko/task-outputs/{task_id}.txt`.
+///
+/// When a task completes successfully, we persist a summary of its output
+/// so that downstream tasks can reference it. If no outputs exist on disk,
+/// returns an empty vec.
+fn load_prior_task_outputs(
+    workdir: &Path,
+    depends_on: &[String],
+) -> Vec<roko_compose::PriorTaskOutput> {
+    let output_dir = workdir.join(".roko").join("task-outputs");
+    let mut outputs = Vec::new();
+
+    for dep_id in depends_on {
+        let output_path = output_dir.join(format!("{dep_id}.txt"));
+        if let Ok(summary) = std::fs::read_to_string(&output_path) {
+            if !summary.trim().is_empty() {
+                outputs.push(roko_compose::PriorTaskOutput {
+                    task_id: dep_id.clone(),
+                    summary,
+                });
+            }
+        }
+    }
+
+    outputs
+}
+
+/// Maximum output size stored in task outputs and episode context (32 KB).
+const MAX_OUTPUT_BYTES: usize = 32_768;
+
+/// Truncate an agent output string, keeping the last N lines if it exceeds
+/// `MAX_OUTPUT_BYTES` and prepending a truncation header.
+fn truncate_output(output: &str) -> String {
+    if output.len() <= MAX_OUTPUT_BYTES {
+        return output.to_string();
+    }
+    // Keep the tail — the most recent output is usually most relevant.
+    let tail = &output[output.len() - MAX_OUTPUT_BYTES..];
+    // Find the first newline to avoid a partial first line.
+    let start = tail.find('\n').map_or(0, |i| i + 1);
+    format!(
+        "[truncated: original {} bytes, showing last {} bytes]\n{}",
+        output.len(),
+        MAX_OUTPUT_BYTES,
+        &tail[start..]
+    )
+}
+
+/// Persist a task's output summary so downstream tasks can reference it.
+fn save_task_output(workdir: &Path, task_id: &str, output: &str) {
+    let output_dir = workdir.join(".roko").join("task-outputs");
+    let _ = std::fs::create_dir_all(&output_dir);
+    let output_path = output_dir.join(format!("{task_id}.txt"));
+    let summary = truncate_output(output);
+    let _ = std::fs::write(output_path, summary);
 }
 
 #[cfg(test)]
@@ -1154,5 +3537,91 @@ mod tests {
             runner.run_record_and_follow_up("plan-a", 100, &[Verdict::fail("test", "boom")]);
         assert!(follow_up.needs_revert());
         assert_eq!(runner.unresolved_regressions(), vec!["plan-a".to_string()]);
+    }
+
+    #[test]
+    fn parse_review_verdict_structured() {
+        assert!(parse_review_verdict("verdict = \"approve\""));
+        assert!(!parse_review_verdict("verdict = \"revise\""));
+        assert!(parse_review_verdict("verdict: approve"));
+        assert!(!parse_review_verdict("verdict: reject"));
+    }
+
+    #[test]
+    fn parse_review_verdict_keyword_fallback() {
+        assert!(parse_review_verdict("The code looks good, LGTM!"));
+        assert!(parse_review_verdict("Changes approved."));
+        assert!(!parse_review_verdict("Please revise the implementation."));
+        assert!(!parse_review_verdict("I reject this change due to bugs."));
+        // Ambiguous → default approve
+        assert!(parse_review_verdict("I have some minor comments."));
+    }
+
+    #[test]
+    fn task_tracker_next_ready_and_completion() {
+        let toml_str = r#"
+[meta]
+plan = "test"
+total = 3
+
+[[task]]
+id = "T1"
+title = "first"
+depends_on = []
+
+[[task]]
+id = "T2"
+title = "second"
+depends_on = ["T1"]
+
+[[task]]
+id = "T3"
+title = "independent"
+depends_on = []
+"#;
+        let tf: TasksFile = toml::from_str(toml_str).unwrap();
+        let mut tracker = TaskTracker::new(tf, PathBuf::from("/tmp"));
+
+        assert!(!tracker.all_tasks_done());
+
+        // T1 and T3 should be ready (no deps)
+        let ready = tracker.next_ready_task().unwrap();
+        assert!(ready.id == "T1" || ready.id == "T3");
+
+        tracker.mark_completed("T1");
+        tracker.mark_completed("T3");
+
+        // Now T2 should be ready
+        let ready = tracker.next_ready_task().unwrap();
+        assert_eq!(ready.id, "T2");
+
+        tracker.mark_completed("T2");
+        assert!(tracker.all_tasks_done());
+        assert!(tracker.next_ready_task().is_none());
+    }
+
+    #[test]
+    fn task_tracker_reset_for_reimpl() {
+        let toml_str = r#"
+[meta]
+plan = "test"
+total = 1
+
+[[task]]
+id = "T1"
+title = "first"
+depends_on = []
+"#;
+        let tf: TasksFile = toml::from_str(toml_str).unwrap();
+        let mut tracker = TaskTracker::new(tf, PathBuf::from("/tmp"));
+
+        tracker.mark_completed("T1");
+        assert!(tracker.all_tasks_done());
+        assert_eq!(tracker.impl_round, 0);
+
+        tracker.reset_for_reimpl();
+        assert!(!tracker.all_tasks_done());
+        assert_eq!(tracker.impl_round, 1);
+        assert!(tracker.completed.is_empty());
     }
 }

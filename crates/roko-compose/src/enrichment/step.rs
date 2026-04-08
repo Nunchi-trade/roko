@@ -18,6 +18,8 @@ pub enum LlmBackend {
     Codex,
     /// Cursor Composer models.
     Cursor,
+    /// Local models via Ollama (Gemma, Llama, Qwen, etc.).
+    Ollama,
 }
 
 /// An individual enrichment step in the pipeline.
@@ -155,6 +157,22 @@ impl EnrichStep {
                 | Self::Integration => "gpt-5.4-mini",
             },
             LlmBackend::Cursor => "composer-2-fast",
+            // Ollama: heavier steps use a capable local model, lighter use small.
+            // These are common Ollama model tags; the actual model depends on what
+            // the user has pulled locally.
+            LlmBackend::Ollama => match self {
+                Self::Decompose | Self::Verify | Self::Reviews | Self::Tests | Self::Scribe => {
+                    "gemma4:27b"
+                }
+                Self::Prd
+                | Self::Briefs
+                | Self::Tasks
+                | Self::Invariants
+                | Self::Research
+                | Self::Dependencies
+                | Self::Fixtures
+                | Self::Integration => "gemma4:12b",
+            },
         }
     }
 

@@ -19,6 +19,9 @@ pub struct Config {
     /// Gates to run on the agent output, in declaration order.
     #[serde(default, rename = "gate")]
     pub gates: Vec<GateConfig>,
+    /// Cost budget configuration.
+    #[serde(default)]
+    pub budget: BudgetConfig,
 }
 
 impl Default for Config {
@@ -27,6 +30,7 @@ impl Default for Config {
             agent: AgentConfig::default(),
             prompt: PromptConfig::default(),
             gates: vec![GateConfig::default_shell_true()],
+            budget: BudgetConfig::default(),
         }
     }
 }
@@ -88,6 +92,12 @@ pub struct AgentConfig {
     /// auto-discovers by walking up from the working directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_config: Option<PathBuf>,
+    /// Per-tier model mapping. Keys: `mechanical`, `focused`, `integrative`, `architectural`.
+    #[serde(default)]
+    pub tier_models: std::collections::HashMap<String, String>,
+    /// Retry escalation configuration.
+    #[serde(default)]
+    pub escalation: EscalationConfig,
 }
 
 impl AgentConfig {
@@ -110,7 +120,6 @@ impl AgentConfig {
 
 impl Default for AgentConfig {
     fn default() -> Self {
-        // `cat` is the "echo" backend — useful for smoke tests without an LLM.
         Self {
             command: "cat".into(),
             args: Vec::new(),
@@ -122,6 +131,63 @@ impl Default for AgentConfig {
             env: Vec::new(),
             clean_output: Self::default_clean(),
             mcp_config: None,
+            tier_models: std::collections::HashMap::new(),
+            escalation: EscalationConfig::default(),
+        }
+    }
+}
+
+/// Retry escalation configuration.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct EscalationConfig {
+    /// Maximum retries per task before failing.
+    #[serde(default = "EscalationConfig::default_max_retries")]
+    pub max_retries: u32,
+    /// Whether to escalate to a higher-tier model on failure.
+    #[serde(default = "EscalationConfig::default_escalate")]
+    pub escalate_model: bool,
+}
+
+impl EscalationConfig {
+    const fn default_max_retries() -> u32 { 3 }
+    const fn default_escalate() -> bool { true }
+}
+
+impl Default for EscalationConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: Self::default_max_retries(),
+            escalate_model: Self::default_escalate(),
+        }
+    }
+}
+
+/// Cost budget configuration.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct BudgetConfig {
+    /// Maximum USD spend per plan.
+    #[serde(default = "BudgetConfig::default_max_plan")]
+    pub max_plan_usd: f64,
+    /// Maximum USD spend per task.
+    #[serde(default = "BudgetConfig::default_max_task")]
+    pub max_task_usd: f64,
+    /// Warn at this percentage of budget consumed.
+    #[serde(default = "BudgetConfig::default_warn_pct")]
+    pub warn_at_percent: u32,
+}
+
+impl BudgetConfig {
+    const fn default_max_plan() -> f64 { 10.0 }
+    const fn default_max_task() -> f64 { 1.0 }
+    const fn default_warn_pct() -> u32 { 80 }
+}
+
+impl Default for BudgetConfig {
+    fn default() -> Self {
+        Self {
+            max_plan_usd: Self::default_max_plan(),
+            max_task_usd: Self::default_max_task(),
+            warn_at_percent: Self::default_warn_pct(),
         }
     }
 }
@@ -136,10 +202,77 @@ pub struct PromptConfig {
     #[serde(default = "PromptConfig::default_role")]
     pub role: String,
     /// Files whose contents should be injected into the prompt as sections.
-    /// Useful for feeding an issue description or buggy source files to the
-    /// agent.
     #[serde(default, rename = "files")]
     pub files: Vec<PromptFile>,
+    /// Per-role prompt budgets (chars per section).
+    #[serde(default)]
+    pub budgets: std::collections::HashMap<String, RoleBudget>,
+    /// Per-tier context budgets (tokens). Overrides the defaults in ContextProvider.
+    #[serde(default)]
+    pub context_budgets: ContextBudgetConfig,
+}
+
+/// Per-tier context token budget overrides for the ContextProvider.
+///
+/// These control how much context is assembled for each model tier.
+/// If unset, defaults are: surgical=4000, focused=12000, full=24000.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ContextBudgetConfig {
+    /// Token budget for surgical tier (Haiku / Ollama / mechanical tasks).
+    #[serde(default = "ContextBudgetConfig::default_surgical")]
+    pub surgical: usize,
+    /// Token budget for focused tier (Sonnet / focused+integrative tasks).
+    #[serde(default = "ContextBudgetConfig::default_focused")]
+    pub focused: usize,
+    /// Token budget for full tier (Opus / architectural tasks).
+    #[serde(default = "ContextBudgetConfig::default_full")]
+    pub full: usize,
+}
+
+impl ContextBudgetConfig {
+    const fn default_surgical() -> usize { 4_000 }
+    const fn default_focused() -> usize { 12_000 }
+    const fn default_full() -> usize { 24_000 }
+
+    /// Convert to the ContextBudgets type used by roko-compose.
+    #[must_use]
+    pub fn to_context_budgets(&self) -> roko_compose::ContextBudgets {
+        roko_compose::ContextBudgets {
+            surgical: self.surgical,
+            focused: self.focused,
+            full: self.full,
+        }
+    }
+}
+
+impl Default for ContextBudgetConfig {
+    fn default() -> Self {
+        Self {
+            surgical: Self::default_surgical(),
+            focused: Self::default_focused(),
+            full: Self::default_full(),
+        }
+    }
+}
+
+/// Per-role prompt budget (character limits per section).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RoleBudget {
+    /// Plan context budget (chars).
+    #[serde(default)]
+    pub plan: usize,
+    /// PRD context budget (chars).
+    #[serde(default)]
+    pub prd: usize,
+    /// Brief context budget (chars).
+    #[serde(default)]
+    pub brief: usize,
+    /// File context budget (chars).
+    #[serde(default)]
+    pub file_context: usize,
+    /// Skills/playbook budget (chars).
+    #[serde(default)]
+    pub skills: usize,
 }
 
 impl PromptConfig {
@@ -158,6 +291,8 @@ impl Default for PromptConfig {
             token_budget: Self::default_budget(),
             role: Self::default_role(),
             files: Vec::new(),
+            budgets: std::collections::HashMap::new(),
+            context_budgets: ContextBudgetConfig::default(),
         }
     }
 }
@@ -343,29 +478,19 @@ impl ConfigLayer {
         let agent = match self.agent {
             Some(a) => {
                 let defaults = AgentConfig::default();
-                let AgentConfig {
-                    command: default_command,
-                    args: default_args,
-                    model: default_model,
-                    effort: default_effort,
-                    bare_mode: default_bare_mode,
-                    fallback_model: default_fallback_model,
-                    timeout_ms: default_timeout_ms,
-                    env: default_env,
-                    clean_output: default_clean_output,
-                    mcp_config: default_mcp_config,
-                } = defaults;
                 AgentConfig {
-                    command: a.command.unwrap_or(default_command),
-                    args: a.args.unwrap_or(default_args),
-                    model: a.model.or(default_model),
-                    effort: a.effort.unwrap_or(default_effort),
-                    bare_mode: a.bare_mode.unwrap_or(default_bare_mode),
-                    fallback_model: a.fallback_model.or(default_fallback_model),
-                    timeout_ms: a.timeout_ms.unwrap_or(default_timeout_ms),
-                    env: a.env.unwrap_or(default_env),
-                    clean_output: a.clean_output.unwrap_or(default_clean_output),
-                    mcp_config: a.mcp_config.or(default_mcp_config),
+                    command: a.command.unwrap_or(defaults.command),
+                    args: a.args.unwrap_or(defaults.args),
+                    model: a.model.or(defaults.model),
+                    effort: a.effort.unwrap_or(defaults.effort),
+                    bare_mode: a.bare_mode.unwrap_or(defaults.bare_mode),
+                    fallback_model: a.fallback_model.or(defaults.fallback_model),
+                    timeout_ms: a.timeout_ms.unwrap_or(defaults.timeout_ms),
+                    env: a.env.unwrap_or(defaults.env),
+                    clean_output: a.clean_output.unwrap_or(defaults.clean_output),
+                    mcp_config: a.mcp_config.or(defaults.mcp_config),
+                    tier_models: defaults.tier_models,
+                    escalation: defaults.escalation,
                 }
             }
             None => AgentConfig::default(),
@@ -377,6 +502,8 @@ impl ConfigLayer {
                     token_budget: p.token_budget.unwrap_or(defaults.token_budget),
                     role: p.role.unwrap_or(defaults.role),
                     files: p.files.unwrap_or(defaults.files),
+                    budgets: defaults.budgets,
+                    context_budgets: defaults.context_budgets,
                 }
             }
             None => PromptConfig::default(),
@@ -386,6 +513,7 @@ impl ConfigLayer {
             agent,
             prompt,
             gates,
+            budget: BudgetConfig::default(),
         }
     }
 }

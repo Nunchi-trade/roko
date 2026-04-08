@@ -239,6 +239,14 @@ enum PlanCmd {
         #[arg(long)]
         resume: Option<PathBuf>,
     },
+    /// Generate implementation plans from a prompt, file, or PRD.
+    Generate {
+        /// Source: free-text prompt, or path to a file (PRD, requirements, etc).
+        source: Vec<String>,
+        /// Treat source as a file path to read (instead of inline text).
+        #[arg(long)]
+        from_file: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1045,6 +1053,10 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             prepare_runtime_hooks(&wd, cli.quiet);
             let config = load_layered(&wd)?.config;
 
+            // Create the shared metric registry and register standard metrics.
+            let metrics = std::sync::Arc::new(roko_core::obs::MetricRegistry::new());
+            roko_core::obs::register_standard_metrics(&metrics);
+
             let mut runner = if let Some(snap_path) = resume {
                 let exec_json = std::fs::read_to_string(&snap_path)
                     .map_err(|e| anyhow!("read snapshot: {e}"))?;
@@ -1053,16 +1065,18 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 if events_path.exists() {
                     let log_json = std::fs::read_to_string(&events_path)
                         .map_err(|e| anyhow!("read event log: {e}"))?;
-                    roko_cli::PlanRunner::from_snapshots(&exec_json, &log_json, &wd, config)?
+                    roko_cli::PlanRunner::from_snapshots(&exec_json, &log_json, &wd, config, metrics).await?
                 } else {
-                    roko_cli::PlanRunner::from_snapshot(&exec_json, &wd, config)?
+                    roko_cli::PlanRunner::from_snapshot(&exec_json, &wd, config, metrics).await?
                 }
             } else {
-                roko_cli::PlanRunner::from_plans_dir(&plans_dir, &wd, config)?
+                roko_cli::PlanRunner::from_plans_dir(&plans_dir, &wd, config, metrics).await?
             };
             runner.set_claude_resume_session(cli.resume.clone());
 
-            let report = runner.run_all().await?;
+            // Use task-driven execution (reads tasks.toml directly) instead of
+            // the phase-machine executor which expects enrichment phases.
+            let report = runner.run_task_plans(&plans_dir).await?;
 
             // State is auto-saved during and after the run.
             let snap_path = wd.join(".roko").join("state").join("executor.json");
@@ -1111,6 +1125,54 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             } else {
                 EXIT_FAILURE
             })
+        }
+        PlanCmd::Generate { source, from_file } => {
+            use roko_cli::agent_exec::{run_agent, AgentExecOpts, load_gateway_env, model_from_config};
+
+            let workdir = std::env::current_dir().context("resolve cwd")?;
+            let gw = load_gateway_env(&workdir);
+            let model = model_from_config(&workdir);
+            let model_ref = model.as_deref();
+
+            // Get the source content: either from a file or inline text
+            let source_text = if let Some(ref path) = from_file {
+                let content = std::fs::read_to_string(path)
+                    .with_context(|| format!("read {}", path.display()))?;
+                eprintln!("📋 Generating plans from file: {}", path.display());
+                content
+            } else {
+                let text = source.join(" ");
+                if text.is_empty() {
+                    anyhow::bail!("Provide a prompt or --from-file <path>");
+                }
+                eprintln!("📋 Generating plans from prompt: {text}");
+                text
+            };
+
+            let source_type = if from_file.is_some() { "file" } else { "prompt" };
+            let system = roko_cli::plan_generate::build_generation_prompt(
+                &workdir,
+                &source_text,
+                source_type,
+            );
+
+            let task_prompt = format!(
+                "Read the source below and generate implementation plan directories under plans/. \
+                 Search the codebase first to understand what exists. \
+                 Create plan.md and tasks.toml files with tier, model_hint, context (read_files with line ranges), \
+                 and verify steps (executable shell commands). \
+                 Use the cheapest model tier for each task.\n\n{source_text}"
+            );
+
+            run_agent(AgentExecOpts {
+                prompt: &task_prompt,
+                workdir: &workdir,
+                model: model_ref,
+                effort: Some("high"),
+                system_prompt: Some(&system),
+                resume_session: None,
+                env_vars: &gw.vars,
+            }).await
         }
     }
 }
@@ -1670,6 +1732,20 @@ async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>) -> Result<()> {
         .filter(|v| v.tag("passed") == Some("false"))
         .count();
     println!("gate verdicts: {passed} pass / {failed} fail");
+
+    // Health probes — quick snapshot of orchestrator readiness.
+    let health_probes = roko_core::obs::health::ProbeRegistry::new();
+    health_probes.register(std::sync::Arc::new(
+        roko_core::obs::health::AlwaysUpProbe::new("orchestrator"),
+    ));
+    let (readiness_status, degraded_reasons) = health_probes.readiness();
+    println!();
+    println!("health: {readiness_status}");
+    if !degraded_reasons.is_empty() {
+        for reason in &degraded_reasons {
+            println!("  {} — {}", reason.component, reason.message);
+        }
+    }
 
     Ok(())
 }

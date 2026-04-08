@@ -23,10 +23,12 @@ roko-agent = { path = "../roko-agent" }
 roko-gate = { path = "../roko-gate" }
 roko-orchestrator = { path = "../roko-orchestrator" }
 roko-learn = { path = "../roko-learn" }
+roko-conductor = { path = "../roko-conductor" }
 bardo-runtime = { path = "../bardo-runtime" }
 
 clap = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs"] }
+futures = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 toml = { workspace = true }
