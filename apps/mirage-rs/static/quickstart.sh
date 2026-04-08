@@ -43,13 +43,16 @@ echo "[1/3] building mirage-rs…"
 cd "$REPO_ROOT"
 cargo build -p mirage-rs --features chain,roko --bin mirage-rs 2>&1 | tail -3
 
-# 2. Start server
-echo "[2/3] starting mirage-rs on :${PORT}…"
+# 2. Start server (fork ETH mainnet via public node)
+ETH_RPC="${ETH_RPC_URL:-https://ethereum-rpc.publicnode.com}"
+echo "[2/4] starting mirage-rs on :${PORT} (forking mainnet via $ETH_RPC)…"
 MIRAGE_DASHBOARD_DIR="$MIRAGE_DIR/static" \
   cargo run -p mirage-rs --features chain,roko --bin mirage-rs -- \
+    --rpc-url "$ETH_RPC" \
+    --block-time 50 \
     --enable-hdc --enable-knowledge --enable-stigmergy 2>&1 &
 PIDS+=($!)
-sleep 3
+sleep 5
 
 # Wait for health
 for i in $(seq 1 10); do
@@ -61,9 +64,15 @@ for i in $(seq 1 10); do
 done
 
 # 3. Seed demo data
-echo "[3/3] seeding demo data (50 insights, 20 pheromones, 3 agents)…"
+echo "[3/4] seeding demo data (50 insights, 20 pheromones, 3 agents)…"
 cargo run -p mirage-rs --features chain,roko --example seed_chain_fixtures -- \
   --rpc-url "http://127.0.0.1:${PORT}" 2>&1 | tail -5
+
+# 4. Start 20-agent simulation
+echo "[4/4] starting 20-agent continuous simulation…"
+cargo run -p mirage-rs --features chain,roko --example agent_simulation -- \
+  --rpc-url "http://127.0.0.1:${PORT}" 2>&1 &
+PIDS+=($!)
 
 echo ""
 echo "=========================================================="

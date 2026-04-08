@@ -28,6 +28,7 @@ pub mod insight;
 pub mod knowledge;
 pub mod pheromone;
 pub mod projection;
+pub mod task;
 
 pub use agent::{AgentEntry, AgentEvent, AgentRegistry, AgentStats, AgentTrace, CognitivePhase};
 pub use hdc_index::{HdcIndex, Hit, IndexedVector};
@@ -41,4 +42,7 @@ pub use pheromone::{
 };
 pub use projection::{
     DEFAULT_EMBEDDING_DIM, HDC_BITS, ProjectionMatrix, project_bytes, project_tokens,
+};
+pub use task::{
+    TaskEntry, TaskError, TaskEvent, TaskId, TaskPriority, TaskState, TaskStats, TaskStore,
 };

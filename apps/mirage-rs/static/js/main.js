@@ -4,7 +4,7 @@
 
 import { state } from './state.js';
 import { rpc, api, apiPost, logReq, logAgent, toast, onRenderLog, onRenderAgent } from './api.js';
-import { pollBlock, pollChain, pollEntries, pollEdges, pollKinds, pollPheroSummary, pollHeatmap, pollTopology, pollAgentRegistry, pollLeaderboard } from './polling.js';
+import { pollBlock, pollChain, pollEntries, pollEdges, pollKinds, pollPheroSummary, pollHeatmap, pollTopology, pollAgentRegistry, pollLeaderboard, pollTasks } from './polling.js';
 import { sparkDraw, drawGrowth, drawHeatmap, metricTick, renderBlocks, renderAgent, renderLog } from './charts.js';
 import { drawPheromones, depositPheromoneParticle, resetPheroSize } from './pheromones.js';
 import { drawGraph, canvasToNode, openDetail, renderDetail, addInsightNode, graphNodes, graphEdges, hdcHighlights, resetGraphSize } from './graph.js';
@@ -64,8 +64,12 @@ async function connect() {
     state.pollers.summary = setInterval(pollPheroSummary, 5000);
     state.pollers.agentReg = setInterval(pollAgentRegistry, 5000);
     state.pollers.leaderboard = setInterval(pollLeaderboard, 8000);
+    state.pollers.tasks = setInterval(pollTasks, 3000);
     pollAgentRegistry();
     pollLeaderboard();
+    pollTasks();
+    // Auto-connect WebSocket for real-time updates
+    if (!state.wsLive) toggleWs();
   } catch (e) {
     state.connected = false;
     chip.className = 'chip err';

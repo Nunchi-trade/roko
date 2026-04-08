@@ -173,6 +173,56 @@
     </div>
   </div>
 
+  <!-- === TASK LIFECYCLE === -->
+  <div class="panel" style="margin-bottom:20px">
+    <div class="panel-head">
+      <div class="panel-title"><span class="icon"></span>Task Lifecycle · create → assign → execute → complete</div>
+      <div class="panel-meta" id="task-meta">loading…</div>
+    </div>
+    <div class="task-stats-grid" id="task-stats-grid">
+      <div class="task-stat-card open"><div class="task-stat-label">Open</div><div class="task-stat-value" id="ts-open">0</div></div>
+      <div class="task-stat-card assigned"><div class="task-stat-label">Assigned</div><div class="task-stat-value" id="ts-assigned">0</div></div>
+      <div class="task-stat-card in-progress"><div class="task-stat-label">In Progress</div><div class="task-stat-value" id="ts-in-progress">0</div></div>
+      <div class="task-stat-card completed"><div class="task-stat-label">Completed</div><div class="task-stat-value" id="ts-completed">0</div></div>
+      <div class="task-stat-card failed"><div class="task-stat-label">Failed</div><div class="task-stat-value" id="ts-failed">0</div></div>
+      <div class="task-stat-card cancelled"><div class="task-stat-label">Cancelled</div><div class="task-stat-value" id="ts-cancelled">0</div></div>
+    </div>
+    <div style="overflow-x:auto; max-height:300px; overflow-y:auto;">
+      <table class="kinds-table" style="width:100%">
+        <thead><tr><th>ID</th><th>Title</th><th>Kind</th><th>Priority</th><th>State</th><th>Assignee</th><th>Stake</th><th>Age</th></tr></thead>
+        <tbody id="task-tbody"><tr><td colspan="8" style="color:var(--text-faint)">no tasks</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- === TOKENOMICS === -->
+  <div class="panel" style="margin-bottom:20px">
+    <div class="panel-head">
+      <div class="panel-title"><span class="icon"></span>Tokenomics · stake, rewards, confirmations</div>
+      <div class="panel-meta" id="token-meta">loading…</div>
+    </div>
+    <div class="phero-summary-grid">
+      <div class="phero-summary-card" style="border-left:3px solid var(--accent)">
+        <div class="phero-summary-kind">Staked</div>
+        <div class="phero-summary-stat"><span>total stake (wei)</span><b id="tok-stake">0</b></div>
+        <div class="phero-summary-stat"><span>total rewards (wei)</span><b id="tok-reward">0</b></div>
+        <div class="phero-summary-stat"><span>reward ratio</span><b id="tok-ratio">—</b></div>
+      </div>
+      <div class="phero-summary-card" style="border-left:3px solid var(--green)">
+        <div class="phero-summary-kind">Confirmations</div>
+        <div class="phero-summary-stat"><span>total confirms</span><b id="tok-confirms">0</b></div>
+        <div class="phero-summary-stat"><span>unique confirmers</span><b id="tok-confirmers">0</b></div>
+        <div class="phero-summary-stat"><span>avg per insight</span><b id="tok-avg-conf">0.00</b></div>
+      </div>
+      <div class="phero-summary-card" style="border-left:3px solid var(--red)">
+        <div class="phero-summary-kind">Challenges</div>
+        <div class="phero-summary-stat"><span>total challenges</span><b id="tok-challenges">0</b></div>
+        <div class="phero-summary-stat"><span>unique challengers</span><b id="tok-challengers">0</b></div>
+        <div class="phero-summary-stat"><span>challenge rate</span><b id="tok-chall-rate">0%</b></div>
+      </div>
+    </div>
+  </div>
+
   <!-- === PHEROMONE HEATMAP TIMELINE === -->
   <div class="panel" style="margin-bottom:20px">
     <div class="panel-head">

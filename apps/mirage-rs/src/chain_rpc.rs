@@ -101,6 +101,10 @@ pub struct ChainContext {
     pub agent_registry: crate::chain::AgentRegistry,
     /// Broadcast bus for agent lifecycle events (WebSocket streaming).
     pub agent_bus: tokio::sync::broadcast::Sender<crate::chain::AgentEvent>,
+    /// Task store for agent work coordination.
+    pub task_store: crate::chain::TaskStore,
+    /// Broadcast bus for task lifecycle events (WebSocket streaming).
+    pub task_bus: tokio::sync::broadcast::Sender<crate::chain::TaskEvent>,
 }
 
 impl ChainContext {
@@ -117,6 +121,8 @@ impl ChainContext {
             insight_bus: None,
             agent_registry: crate::chain::AgentRegistry::new(),
             agent_bus: tokio::sync::broadcast::channel(1_024).0,
+            task_store: crate::chain::TaskStore::new(),
+            task_bus: tokio::sync::broadcast::channel(1_024).0,
         }
     }
 
@@ -133,6 +139,8 @@ impl ChainContext {
             insight_bus: None,
             agent_registry: crate::chain::AgentRegistry::new(),
             agent_bus: tokio::sync::broadcast::channel(1_024).0,
+            task_store: crate::chain::TaskStore::new(),
+            task_bus: tokio::sync::broadcast::channel(1_024).0,
         }
     }
 
@@ -153,6 +161,8 @@ impl ChainContext {
             insight_bus: Some(Arc::new(InsightBus::new())),
             agent_registry: crate::chain::AgentRegistry::new(),
             agent_bus: tokio::sync::broadcast::channel(1_024).0,
+            task_store: crate::chain::TaskStore::new(),
+            task_bus: tokio::sync::broadcast::channel(1_024).0,
         }
     }
 
@@ -171,7 +181,8 @@ impl std::fmt::Debug for ChainContext {
         let mut dbg = f.debug_struct("ChainContext");
         dbg.field("toggles", &self.toggles)
             .field("insights", &self.knowledge.len())
-            .field("pheromones", &self.pheromones.len());
+            .field("pheromones", &self.pheromones.len())
+            .field("tasks", &self.task_store.len());
         #[cfg(feature = "roko")]
         {
             dbg.field("pheromone_bus", &self.pheromone_bus.is_some())

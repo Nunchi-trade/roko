@@ -160,6 +160,7 @@ impl ProjectionCache {
 pub mod agent;
 pub mod knowledge;
 pub mod pheromone;
+pub mod task;
 pub mod topology;
 #[cfg(feature = "roko")]
 pub mod ws;
@@ -205,6 +206,15 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/agents/{id}/trace", get(agent::get_agent_trace))
         .route("/agents/{id}/heartbeat", get(agent::get_agent_heartbeat).post(agent::agent_heartbeat))
         .route("/agents/{id}/stats", get(agent::get_agent_stats))
+        // Task tracking
+        .route("/tasks", get(task::list_tasks).post(task::create_task))
+        .route("/tasks/stats", get(task::task_stats))
+        .route("/tasks/{id}", get(task::get_task))
+        .route("/tasks/{id}/assign", post(task::assign_task))
+        .route("/tasks/{id}/start", post(task::start_task))
+        .route("/tasks/{id}/complete", post(task::complete_task))
+        .route("/tasks/{id}/fail", post(task::fail_task))
+        .route("/tasks/{id}/cancel", post(task::cancel_task))
         // Combined stats
         .route("/stats", get(combined_stats));
 
@@ -254,6 +264,7 @@ async fn health(State(state): State<ApiState>) -> Json<serde_json::Value> {
     let insight_count = chain.knowledge.len();
     let pheromone_count = chain.pheromones.len();
     let agent_count = chain.agent_registry.list_agents().len();
+    let task_count = chain.task_store.len();
 
     Json(serde_json::json!({
         "status": "ok",
@@ -268,6 +279,7 @@ async fn health(State(state): State<ApiState>) -> Json<serde_json::Value> {
                 "insights": insight_count,
                 "pheromones": pheromone_count,
                 "agents": agent_count,
+                "tasks": task_count,
             }
         }
     }))
@@ -309,6 +321,8 @@ async fn combined_stats(State(state): State<ApiState>) -> impl IntoResponse {
         }
     }
 
+    let task_stats = chain.task_store.stats();
+
     with_cache_control(
         serde_json::json!({
             "insights": {
@@ -324,6 +338,16 @@ async fn combined_stats(State(state): State<ApiState>) -> impl IntoResponse {
                 "opportunity": opportunity_count,
                 "wisdom": wisdom_count,
                 "total_intensity": total_intensity,
+            },
+            "tasks": {
+                "open": task_stats.open,
+                "assigned": task_stats.assigned,
+                "in_progress": task_stats.in_progress,
+                "completed": task_stats.completed,
+                "failed": task_stats.failed,
+                "cancelled": task_stats.cancelled,
+                "total_stake_wei": task_stats.total_stake_wei,
+                "total_reward_wei": task_stats.total_reward_wei,
             },
             "toggles": {
                 "hdc": chain.toggles.hdc,

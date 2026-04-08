@@ -536,6 +536,31 @@
   .kinds-table td, .kinds-table th { transition: none; }
   .metric-sparkline { will-change: contents; }
 
+  /* Task lifecycle grid */
+  .task-stats-grid {
+    display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px;
+    padding: 12px; margin-bottom: 8px;
+  }
+  .task-stat-card {
+    background: var(--bg2); border-radius: 8px; padding: 10px; text-align: center;
+    border: 1px solid var(--border);
+  }
+  .task-stat-card.open { border-top: 2px solid var(--accent); }
+  .task-stat-card.assigned { border-top: 2px solid var(--cyan); }
+  .task-stat-card.in-progress { border-top: 2px solid var(--yellow); }
+  .task-stat-card.completed { border-top: 2px solid var(--green); }
+  .task-stat-card.failed { border-top: 2px solid var(--red); }
+  .task-stat-card.cancelled { border-top: 2px solid var(--text-faint); }
+  .task-stat-label {
+    font-family: var(--mono); font-size: 9px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.1em;
+    color: var(--text-faint); margin-bottom: 4px;
+  }
+  .task-stat-value {
+    font-family: var(--mono); font-size: 20px; font-weight: 700;
+    color: var(--text);
+  }
+
   /* Pheromone summary grid */
   .phero-summary-grid {
     display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;

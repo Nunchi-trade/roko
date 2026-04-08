@@ -379,9 +379,14 @@ export async function pollAgentRegistry() {
     var agents = data && data.items ? data.items : (Array.isArray(data) ? data : []);
     state.registeredAgents = agents;
 
-    // Update hero
+    // Update hero + header chip
     document.getElementById('h-agents').textContent = agents.length;
     document.getElementById('agent-reg-meta').textContent = agents.length + ' agents';
+    var chip = document.getElementById('agents-chip');
+    if (chip) {
+      chip.className = agents.length > 0 ? 'chip ok' : 'chip';
+      chip.innerHTML = '<span class="dot"></span>' + agents.length + ' agents';
+    }
     pushSeries('agents', agents.length);
 
     // Quick hash to skip DOM work if nothing changed
@@ -473,4 +478,96 @@ export async function pollLeaderboard() {
       cells[4].textContent = (n.totalWeight || 0).toFixed(2);
     }
   } catch (e) { /* ignore */ }
+}
+
+/* ---------- Poll task lifecycle via REST ---------- */
+var taskHash = '';
+export async function pollTasks() {
+  try {
+    // Try task stats endpoint first
+    var statsRes = await api('/tasks/stats');
+    var stats = statsRes.data;
+    if (stats) {
+      var el = function(id, v) { var e = document.getElementById(id); if (e) e.textContent = v; };
+      el('ts-open', stats.open || 0);
+      el('ts-assigned', stats.assigned || 0);
+      el('ts-in-progress', stats.in_progress || 0);
+      el('ts-completed', stats.completed || 0);
+      el('ts-failed', stats.failed || 0);
+      el('ts-cancelled', stats.cancelled || 0);
+      var total = (stats.open||0) + (stats.assigned||0) + (stats.in_progress||0) + (stats.completed||0) + (stats.failed||0) + (stats.cancelled||0);
+      document.getElementById('task-meta').textContent = total + ' tasks';
+
+      // Tokenomics from task stats
+      el('tok-stake', (stats.total_stake_wei || 0).toLocaleString());
+      el('tok-reward', (stats.total_reward_wei || 0).toLocaleString());
+      var ratio = stats.total_stake_wei > 0 ? ((stats.total_reward_wei || 0) / stats.total_stake_wei * 100).toFixed(1) + '%' : '—';
+      el('tok-ratio', ratio);
+    }
+  } catch(e) {
+    // Task endpoint may not exist yet — use stats endpoint for tokenomics
+    document.getElementById('task-meta').textContent = 'no task system';
+  }
+
+  // Tokenomics from knowledge entries (confirmations/challenges)
+  try {
+    var statsRes2 = await api('/stats');
+    var d = statsRes2.data;
+    if (d && d.insights) {
+      var el = function(id, v) { var e = document.getElementById(id); if (e) e.textContent = v; };
+      el('tok-confirms', d.insights.confirmed || 0);
+      el('tok-challenges', d.insights.challenged || 0);
+      var total = d.insights.total || 1;
+      el('tok-chall-rate', ((d.insights.challenged || 0) / total * 100).toFixed(1) + '%');
+      el('tok-avg-conf', ((d.insights.confirmed || 0) / total).toFixed(2));
+    }
+  } catch(e) {}
+
+  // Task list
+  try {
+    var res = await api('/tasks?limit=20&sort=created_at&order=desc');
+    var data = res.data;
+    var tasks = data && data.items ? data.items : (Array.isArray(data) ? data : []);
+    var hash = tasks.map(function(t) { return t.id + ':' + t.state; }).join('|');
+    if (hash === taskHash) return;
+    taskHash = hash;
+
+    var tbody = document.getElementById('task-tbody');
+    if (!tbody) return;
+
+    while (tbody.children.length > tasks.length) tbody.removeChild(tbody.lastChild);
+    while (tbody.children.length < tasks.length) {
+      var tr = document.createElement('tr');
+      for (var c = 0; c < 8; c++) tr.appendChild(document.createElement('td'));
+      tbody.appendChild(tr);
+    }
+    if (tasks.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="8" style="color:var(--text-faint)">no tasks</td></tr>';
+      return;
+    }
+    var stateColors = {
+      open: 'var(--accent)', assigned: 'var(--cyan)', in_progress: 'var(--yellow)',
+      completed: 'var(--green)', failed: 'var(--red)', cancelled: 'var(--text-faint)'
+    };
+    var prioColors = { critical: 'var(--red)', high: 'var(--orange)', medium: 'var(--yellow)', low: 'var(--text-dim)' };
+    var now = Date.now() / 1000;
+    for (var i = 0; i < tasks.length; i++) {
+      var t = tasks[i];
+      var row = tbody.children[i];
+      var cells = row.children;
+      cells[0].textContent = '#' + t.id;
+      cells[0].style.cssText = 'font-weight:600;color:var(--text)';
+      cells[1].textContent = (t.title || '').slice(0, 40);
+      cells[2].textContent = t.kind || '—';
+      cells[3].textContent = (t.priority || 'medium').toUpperCase();
+      cells[3].style.color = prioColors[t.priority] || 'var(--text-dim)';
+      cells[4].textContent = (t.state || 'open').toUpperCase();
+      cells[4].style.color = stateColors[t.state] || 'var(--text)';
+      cells[5].textContent = t.assignee || '—';
+      cells[5].style.color = t.assignee ? 'var(--accent-bright)' : 'var(--text-faint)';
+      cells[6].textContent = t.stake_wei ? (t.stake_wei / 1e18).toFixed(4) : '0';
+      var age = t.created_at ? Math.max(0, now - t.created_at) : 0;
+      cells[7].textContent = age < 60 ? Math.round(age) + 's' : age < 3600 ? Math.round(age/60) + 'm' : Math.round(age/3600) + 'h';
+    }
+  } catch(e) { /* tasks endpoint may not exist yet */ }
 }

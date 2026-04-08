@@ -64,6 +64,7 @@ async-trait = { workspace = true, optional = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
 anyhow = { workspace = true }
+rand = { workspace = true }
 reqwest = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
@@ -79,6 +80,10 @@ required-features = ["roko"]
 [[example]]
 name = "persona_chain_native"
 required-features = ["roko"]
+
+[[example]]
+name = "agent_simulation"
+required-features = ["chain"]
 
 [features]
 # Default = pure EVM fork simulator with binary surface.
