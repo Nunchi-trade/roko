@@ -18,9 +18,11 @@ use crate::cascade_router::CascadeRouter;
 use crate::context_pack_cache::ContextPackCache;
 use crate::costs_db::{CostRecord, CostsDb};
 use crate::costs_log::CostsLog;
+use crate::efficiency::AgentEfficiencyEvent;
 use crate::episode_logger::{Episode, EpisodeLogger, LoggerError};
 use crate::model_router::RoutingContext;
 use crate::pattern_discovery::{EpisodeView, PatternMiner};
+use crate::prompt_experiment::ExperimentStore;
 use roko_core::agent::AgentRole;
 use roko_core::task::{TaskCategory, TaskComplexityBand};
 use crate::playbook::PlaybookStore;
@@ -72,6 +74,14 @@ pub struct LearningPaths {
     pub playbook_rules_toml: PathBuf,
     /// Append-only `TaskMetric` JSONL file used for regression checks.
     pub task_metrics_jsonl: PathBuf,
+    /// Append-only efficiency events JSONL file.
+    pub efficiency_jsonl: PathBuf,
+    /// Cascade router persisted observations JSON.
+    pub cascade_router_json: PathBuf,
+    /// Prompt experiment store JSON.
+    pub experiments_json: PathBuf,
+    /// Adaptive gate thresholds JSON.
+    pub gate_thresholds_json: PathBuf,
 }
 
 impl LearningPaths {
@@ -86,6 +96,10 @@ impl LearningPaths {
             playbooks_dir: root.join("playbooks"),
             playbook_rules_toml: root.join("playbook-rules.toml"),
             task_metrics_jsonl: root.join("task-metrics.jsonl"),
+            efficiency_jsonl: root.join("efficiency.jsonl"),
+            cascade_router_json: root.join("cascade-router.json"),
+            experiments_json: root.join("experiments.json"),
+            gate_thresholds_json: root.join("gate-thresholds.json"),
             root,
         }
     }
@@ -126,6 +140,8 @@ pub struct CompletedRunInput {
     pub matched_skill_id: Option<String>,
     /// Optional metric for regression history.
     pub task_metric: Option<TaskMetric>,
+    /// Optional prompt experiment variant id for A/B outcome recording.
+    pub experiment_variant_id: Option<String>,
 }
 
 impl CompletedRunInput {
@@ -140,6 +156,7 @@ impl CompletedRunInput {
             playbook_rule_id: None,
             matched_skill_id: None,
             task_metric: None,
+            experiment_variant_id: None,
         }
     }
 
@@ -225,6 +242,9 @@ pub struct LearningRuntime {
     pattern_miner: parking_lot::Mutex<PatternMiner>,
     cascade_router: CascadeRouter,
     context_pack_cache: ContextPackCache,
+    experiment_store: parking_lot::Mutex<ExperimentStore>,
+    /// Count of cascade router observations since last save.
+    cascade_obs_since_save: std::sync::atomic::AtomicU32,
 }
 
 impl LearningRuntime {
@@ -252,12 +272,13 @@ impl LearningRuntime {
         let task_metrics = load_task_metrics(&paths.task_metrics_jsonl).await?;
 
         let pattern_miner = parking_lot::Mutex::new(PatternMiner::new(3, 0.5));
-        let cascade_router = CascadeRouter::new(vec![
+        let cascade_router = CascadeRouter::load_or_new(&paths.cascade_router_json, vec![
             "claude-sonnet-4-20250514".into(),
             "claude-haiku-4-5-20251001".into(),
         ]);
         let context_pack_cache =
             ContextPackCache::new(256, paths.root.join("context-cache.json"));
+        let experiment_store = ExperimentStore::load_or_new(&paths.experiments_json);
 
         Ok(Self {
             paths,
@@ -273,6 +294,57 @@ impl LearningRuntime {
             pattern_miner,
             cascade_router,
             context_pack_cache,
+            experiment_store: parking_lot::Mutex::new(experiment_store),
+            cascade_obs_since_save: std::sync::atomic::AtomicU32::new(0),
+        })
+    }
+
+    /// Open a runtime with a custom model list for the cascade router.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if persistence files cannot be read/initialized.
+    pub async fn open_with_models(
+        paths: LearningPaths,
+        regression: RegressionConfig,
+        models: Vec<String>,
+    ) -> Result<Self, LearningRuntimeError> {
+        tokio::fs::create_dir_all(&paths.root).await?;
+        tokio::fs::create_dir_all(&paths.playbooks_dir).await?;
+
+        let episode_logger = EpisodeLogger::new(&paths.episodes_jsonl);
+        let costs_log = CostsLog::open_creating(&paths.costs_jsonl).await?;
+        let costs_db = CostsDb::new();
+        let existing_costs = costs_log.read_all().await?;
+        costs_db.insert_batch(existing_costs);
+
+        let skill_library = SkillLibrary::new(&paths.skills_json).await?;
+        let playbook_store = PlaybookStore::new(&paths.playbooks_dir);
+        let playbook_rules = PlaybookRules::open(&paths.playbook_rules_toml)?;
+        let task_metrics = load_task_metrics(&paths.task_metrics_jsonl).await?;
+
+        let pattern_miner = parking_lot::Mutex::new(PatternMiner::new(3, 0.5));
+        let cascade_router = CascadeRouter::load_or_new(&paths.cascade_router_json, models);
+        let context_pack_cache =
+            ContextPackCache::new(256, paths.root.join("context-cache.json"));
+        let experiment_store = ExperimentStore::load_or_new(&paths.experiments_json);
+
+        Ok(Self {
+            paths,
+            episode_logger,
+            costs_log,
+            costs_db,
+            provider_health: ProviderHealthTracker::new(),
+            skill_library,
+            playbook_store,
+            playbook_rules,
+            regression,
+            task_metrics: AsyncMutex::new(task_metrics),
+            pattern_miner,
+            cascade_router,
+            context_pack_cache,
+            experiment_store: parking_lot::Mutex::new(experiment_store),
+            cascade_obs_since_save: std::sync::atomic::AtomicU32::new(0),
         })
     }
 
@@ -336,6 +408,47 @@ impl LearningRuntime {
     #[must_use]
     pub const fn context_pack_cache(&self) -> &ContextPackCache {
         &self.context_pack_cache
+    }
+
+    /// Borrow experiment store (behind `parking_lot::Mutex`).
+    #[must_use]
+    pub const fn experiment_store(&self) -> &parking_lot::Mutex<ExperimentStore> {
+        &self.experiment_store
+    }
+
+    /// Append an efficiency event to the JSONL log.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on write failure.
+    pub async fn append_efficiency_event(
+        &self,
+        event: &AgentEfficiencyEvent,
+    ) -> Result<(), LearningRuntimeError> {
+        let mut line = serde_json::to_string(event)?;
+        line.push('\n');
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.paths.efficiency_jsonl)
+            .await?;
+        f.write_all(line.as_bytes()).await?;
+        Ok(())
+    }
+
+    /// Read all persisted efficiency events from the JSONL log.
+    ///
+    /// Returns an empty vec if the file does not exist.
+    pub async fn read_efficiency_events(
+        &self,
+    ) -> Result<Vec<AgentEfficiencyEvent>, LearningRuntimeError> {
+        read_efficiency_events(&self.paths.efficiency_jsonl).await
+    }
+
+    /// Save cascade router observations to disk.
+    pub fn save_cascade_router(&self) -> Result<(), LearningRuntimeError> {
+        self.cascade_router.save(&self.paths.cascade_router_json)?;
+        Ok(())
     }
 
     /// Persist one completed run and update all available learning subsystems.
@@ -441,6 +554,27 @@ impl LearningRuntime {
 
         // ── Cascade router observation ─────────────────────────────────
         update.router_updated = self.update_cascade_router(&input.episode);
+
+        // Periodically save cascade router to disk (every 10 observations).
+        if update.router_updated {
+            let prev = self
+                .cascade_obs_since_save
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if (prev + 1) % 10 == 0 {
+                if let Err(e) = self.cascade_router.save(&self.paths.cascade_router_json) {
+                    eprintln!("[learn] cascade router save failed: {e}");
+                }
+            }
+        }
+
+        // ── Prompt experiment outcome ────────────────────────────────────
+        if let Some(ref variant_id) = input.experiment_variant_id {
+            let mut store = self.experiment_store.lock();
+            store.record_outcome(variant_id, input.episode.success);
+            if let Err(e) = store.save(&self.paths.experiments_json) {
+                eprintln!("[learn] experiment store save failed: {e}");
+            }
+        }
 
         Ok(update)
     }
@@ -596,6 +730,29 @@ fn compute_regression_report(
         current_records,
         &cfg.thresholds,
     ))
+}
+
+/// Read efficiency events from a JSONL file. Returns empty vec if file missing.
+pub async fn read_efficiency_events(
+    path: &Path,
+) -> Result<Vec<AgentEfficiencyEvent>, LearningRuntimeError> {
+    let file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(LearningRuntimeError::Io(err)),
+    };
+    let mut lines = BufReader::new(file).lines();
+    let mut out = Vec::new();
+    while let Some(line) = lines.next_line().await? {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(event) = serde_json::from_str::<AgentEfficiencyEvent>(trimmed) {
+            out.push(event);
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

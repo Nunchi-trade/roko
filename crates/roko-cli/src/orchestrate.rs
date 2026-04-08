@@ -33,10 +33,12 @@ use roko_core::{
 use roko_fs::FileSubstrate;
 use roko_fs::observability::FsObservabilitySinks;
 use roko_gate::{
+    adaptive_threshold::AdaptiveThresholds,
     clippy_gate::ClippyGate, compile::CompileGate, payload::GatePayload, test_gate::TestGate,
 };
 use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_learn::costs_db::CostRecord;
+use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::episode_logger::{Episode, GateVerdict, Usage};
 use roko_learn::runtime_feedback::{CompletedRunInput, LearningRuntime, LearningUpdate};
 use roko_orchestrator::worktree::{WorktreeConfig, WorktreeManager};
@@ -254,6 +256,8 @@ struct LearnedContext {
     matched_skill_id: Option<String>,
     /// The best-match playbook rule ID (if any) for confidence updates.
     matched_rule_id: Option<String>,
+    /// The assigned prompt experiment variant ID (if any) for outcome tracking.
+    experiment_variant_id: Option<String>,
 }
 
 // ─── PlanRunner ───────────────────────────────────────────────────────────
@@ -315,6 +319,10 @@ pub struct PlanRunner {
     obs_sinks: FsObservabilitySinks,
     /// Health probe registry for readiness/liveness checks.
     health_probes: ProbeRegistry,
+    /// Adaptive gate thresholds for retry budgeting.
+    adaptive_thresholds: AdaptiveThresholds,
+    /// In-memory efficiency events collected during this run.
+    efficiency_events: Vec<AgentEfficiencyEvent>,
 }
 
 /// Tracks per-task completion within a plan. Lives in PlanRunner (CLI crate),
@@ -336,6 +344,8 @@ struct TaskTracker {
     last_matched_skill_id: Option<String>,
     /// Playbook rule matched during the last dispatch (for confidence updates).
     last_matched_rule_id: Option<String>,
+    /// Prompt experiment variant assigned during the last dispatch.
+    last_experiment_variant_id: Option<String>,
 }
 
 impl TaskTracker {
@@ -353,6 +363,7 @@ impl TaskTracker {
             impl_round: 0,
             last_matched_skill_id: None,
             last_matched_rule_id: None,
+            last_experiment_variant_id: None,
         }
     }
 
@@ -646,6 +657,10 @@ impl PlanRunner {
             tool_registry,
             obs_sinks,
             health_probes,
+            adaptive_thresholds: AdaptiveThresholds::load_or_new(
+                &workdir.join(".roko").join("learn").join("gate-thresholds.json"),
+            ),
+            efficiency_events: Vec::new(),
         })
     }
 
@@ -697,6 +712,10 @@ impl PlanRunner {
             tool_registry,
             obs_sinks,
             health_probes,
+            adaptive_thresholds: AdaptiveThresholds::load_or_new(
+                &workdir.join(".roko").join("learn").join("gate-thresholds.json"),
+            ),
+            efficiency_events: Vec::new(),
         })
     }
 
@@ -757,6 +776,10 @@ impl PlanRunner {
             tool_registry,
             obs_sinks,
             health_probes,
+            adaptive_thresholds: AdaptiveThresholds::load_or_new(
+                &workdir.join(".roko").join("learn").join("gate-thresholds.json"),
+            ),
+            efficiency_events: Vec::new(),
         })
     }
 
@@ -782,6 +805,15 @@ impl PlanRunner {
                 eprintln!("[orchestrate] write prometheus.txt: {e}");
             }
         }
+        // Persist adaptive gate thresholds.
+        let thresholds_path = self.workdir.join(".roko").join("learn").join("gate-thresholds.json");
+        if let Err(e) = self.adaptive_thresholds.save(&thresholds_path) {
+            eprintln!("[orchestrate] save adaptive thresholds: {e}");
+        }
+        // Persist cascade router observations.
+        if let Err(e) = self.learning.save_cascade_router() {
+            eprintln!("[orchestrate] save cascade router: {e}");
+        }
     }
 
     /// The root cancellation token — callers can cancel to trigger shutdown.
@@ -794,6 +826,18 @@ impl PlanRunner {
     #[must_use]
     pub const fn learning(&self) -> &LearningRuntime {
         &self.learning
+    }
+
+    /// The adaptive gate thresholds — exposed for status queries.
+    #[must_use]
+    pub const fn adaptive_thresholds(&self) -> &AdaptiveThresholds {
+        &self.adaptive_thresholds
+    }
+
+    /// In-memory efficiency events collected during this run.
+    #[must_use]
+    pub fn efficiency_events(&self) -> &[AgentEfficiencyEvent] {
+        &self.efficiency_events
     }
 
     /// The metric registry — exposed for status queries and external instrumentation.
@@ -1212,6 +1256,9 @@ impl PlanRunner {
 
                         // Emit observability metric for gate result.
                         self.emit_gate_metric(&plan_id, rung, passed, wall_ms);
+
+                        // Update adaptive gate thresholds.
+                        self.adaptive_thresholds.update(rung, passed);
 
                         // Store gate failure context for AutoFix phase
                         if !passed {
@@ -1681,14 +1728,17 @@ impl PlanRunner {
             .with_cost_record(cost);
         input.provider = Some(model.to_string());
 
-        // Flow matched skill/rule IDs from the task tracker so
-        // record_completed_run can update confidence scores.
+        // Flow matched skill/rule/experiment IDs from the task tracker so
+        // record_completed_run can update confidence scores and experiment outcomes.
         if let Some(tracker) = self.task_trackers.get(plan_id) {
             if input.matched_skill_id.is_none() {
                 input.matched_skill_id = tracker.last_matched_skill_id.clone();
             }
             if input.playbook_rule_id.is_none() {
                 input.playbook_rule_id = tracker.last_matched_rule_id.clone();
+            }
+            if input.experiment_variant_id.is_none() {
+                input.experiment_variant_id = tracker.last_experiment_variant_id.clone();
             }
         }
 
@@ -1789,6 +1839,20 @@ impl PlanRunner {
             parts.push(pat_section);
         }
 
+        // 4. Prompt experiment variants — check if any active experiment applies.
+        let mut experiment_variant_id = None;
+        // Check standard prompt section names for active experiments.
+        {
+            let store = self.learning.experiment_store().lock();
+            for section in &["constraints", "style", "guidelines", "context"] {
+                if let Some((vid, content)) = store.assign_variant_for_section(section) {
+                    parts.push(format!("## Experiment ({section})\n{content}"));
+                    experiment_variant_id = Some(vid);
+                    break; // Only one experiment at a time.
+                }
+            }
+        }
+
         // Ignore task_text for now — use it in future for semantic search
         let _ = task_text;
 
@@ -1796,6 +1860,7 @@ impl PlanRunner {
             text: parts.join("\n"),
             matched_skill_id,
             matched_rule_id,
+            experiment_variant_id,
         }
     }
 
@@ -1828,6 +1893,10 @@ impl PlanRunner {
         let model = self.effective_model();
         let input = self.enrich_completed_run(ep, plan_id, task_id, "Implementer", &model, None, 1);
         self.record_and_check_learning(input, plan_id).await;
+
+        // Emit efficiency event for this agent turn.
+        self.emit_efficiency_event(plan_id, task_id, "Implementer", &model, result, wall_ms, true)
+            .await;
 
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
             tracker.mark_completed(task_id);
@@ -2564,6 +2633,7 @@ impl PlanRunner {
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
             tracker.last_matched_skill_id = learned.matched_skill_id;
             tracker.last_matched_rule_id = learned.matched_rule_id;
+            tracker.last_experiment_variant_id = learned.experiment_variant_id;
         }
 
         sections.push(task_section);
@@ -3205,6 +3275,62 @@ impl PlanRunner {
                 LabelSet::from_pairs(&[("gate", &rung_str), ("verdict", verdict)]),
             )
             .inc();
+    }
+
+    /// Construct and persist an [`AgentEfficiencyEvent`] for one agent turn.
+    async fn emit_efficiency_event(
+        &mut self,
+        plan_id: &str,
+        task_id: &str,
+        role: &str,
+        model: &str,
+        result: &AgentResult,
+        wall_ms: u64,
+        success: bool,
+    ) {
+        let event = AgentEfficiencyEvent {
+            agent_id: result.output.id.to_string(),
+            role: role.to_string(),
+            backend: "claude".to_string(),
+            model: model.to_string(),
+            plan_id: plan_id.to_string(),
+            task_id: task_id.to_string(),
+            input_tokens: u64::from(result.usage.input_tokens),
+            output_tokens: u64::from(result.usage.output_tokens),
+            cache_read_tokens: u64::from(result.usage.cache_read_tokens),
+            cache_write_tokens: u64::from(result.usage.cache_create_tokens),
+            cost_usd: f64::from(result.usage.cost_usd),
+            cost_usd_without_cache: f64::from(result.usage.cost_usd), // No cache discount info available.
+            prompt_sections: Vec::new(),
+            total_prompt_tokens: u64::from(result.usage.input_tokens),
+            system_prompt_tokens: 0, // Not tracked at this level.
+            tools_available: 0,
+            tools_used: 0,
+            tool_calls: Vec::new(),
+            wall_time_ms: wall_ms,
+            time_to_first_token_ms: 0,
+            was_warm_start: false,
+            iteration: 1,
+            gate_passed: success,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        };
+
+        tracing::info!(
+            plan_id = %plan_id,
+            task_id = %task_id,
+            role = %role,
+            model = %model,
+            cost_usd = event.cost_usd,
+            wall_ms = wall_ms,
+            success = success,
+            "agent efficiency event"
+        );
+
+        self.efficiency_events.push(event.clone());
+
+        if let Err(e) = self.learning.append_efficiency_event(&event).await {
+            tracing::warn!("failed to persist efficiency event: {e}");
+        }
     }
 
     /// Build a tool manifest string for non-CLI agent backends.

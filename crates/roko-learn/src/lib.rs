@@ -30,6 +30,7 @@ pub mod model_router;
 pub mod pattern_discovery;
 pub mod playbook;
 pub mod playbook_rules;
+pub mod prompt_experiment;
 pub mod provider_health;
 pub mod regression;
 pub mod runtime_feedback;

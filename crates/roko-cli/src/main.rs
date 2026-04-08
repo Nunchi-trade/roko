@@ -19,7 +19,10 @@ use roko_cli::{
 use roko_core::{ContentHash, Context, Kind, Query, Substrate};
 use roko_core::{Headlines, TaskMetric, compute_headlines};
 use roko_fs::{FileSubstrate, FsObservabilitySinks, RokoLayout};
+use roko_learn::efficiency::compute_role_profiles;
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
+use roko_learn::prompt_experiment::ExperimentStore;
+use roko_learn::runtime_feedback::read_efficiency_events;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -1732,6 +1735,58 @@ async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>) -> Result<()> {
         .filter(|v| v.tag("passed") == Some("false"))
         .count();
     println!("gate verdicts: {passed} pass / {failed} fail");
+
+    // Learning subsystem stats.
+    let learn_dir = workdir.join(".roko").join("learn");
+    let efficiency_path = learn_dir.join("efficiency.jsonl");
+    match read_efficiency_events(&efficiency_path).await {
+        Ok(events) if !events.is_empty() => {
+            println!();
+            println!("efficiency events: {} total", events.len());
+            let profiles = compute_role_profiles(&events);
+            for p in &profiles {
+                println!(
+                    "  {:<16} avg_cost=${:.4}  p95_cost=${:.4}  pass_rate={:.0}%  n={}",
+                    p.role,
+                    p.avg_cost_usd,
+                    p.p95_cost_usd,
+                    p.pass_rate * 100.0,
+                    p.observations,
+                );
+            }
+        }
+        _ => {}
+    }
+
+    // Experiment store summary.
+    let experiments_path = learn_dir.join("experiments.json");
+    let exp_store = ExperimentStore::load_or_new(&experiments_path);
+    let running = exp_store.running_count();
+    let concluded = exp_store.concluded_count();
+    if running > 0 || concluded > 0 {
+        println!();
+        println!(
+            "prompt experiments: {running} running, {concluded} concluded"
+        );
+    }
+
+    // Adaptive threshold summary.
+    let thresholds_path = learn_dir.join("gate-thresholds.json");
+    let thresholds = roko_gate::adaptive_threshold::AdaptiveThresholds::load_or_new(&thresholds_path);
+    let rung_count: usize = thresholds.all_rungs().count();
+    if rung_count > 0 {
+        println!();
+        println!("adaptive gate thresholds: {rung_count} rungs tracked");
+        for (rung, stats) in thresholds.all_rungs() {
+            println!(
+                "  rung {rung}: pass_rate={:.0}% retries={} obs={} skip={}",
+                stats.ema_pass_rate * 100.0,
+                thresholds.suggested_max_retries(*rung),
+                stats.total_observations,
+                if thresholds.should_skip_rung(*rung) { "yes" } else { "no" },
+            );
+        }
+    }
 
     // Health probes — quick snapshot of orchestrator readiness.
     let health_probes = roko_core::obs::health::ProbeRegistry::new();

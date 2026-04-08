@@ -14,6 +14,8 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+pub mod adaptive_threshold;
+
 pub mod artifact_store;
 pub mod clippy_gate;
 pub mod compile;

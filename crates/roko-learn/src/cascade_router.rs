@@ -23,6 +23,7 @@ use parking_lot::Mutex;
 use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
 
 use crate::model_router::{COLD_START_THRESHOLD, LinUCBRouter, RoutingContext};
 
@@ -276,6 +277,76 @@ impl CascadeRouter {
             .collect()
     }
 
+    /// Save confidence stats + model slugs to a JSON file.
+    ///
+    /// `LinUCB` state is not persisted (it re-learns from new observations).
+    /// Only confidence stats are saved because they represent the accumulated
+    /// pass-rate history needed for stage-2 routing.
+    pub fn save(&self, path: &Path) -> Result<(), std::io::Error> {
+        let snapshot = CascadeSnapshot {
+            model_slugs: self.model_slugs.clone(),
+            confidence_stats: self
+                .confidence_stats
+                .lock()
+                .iter()
+                .map(|(k, v)| (k.clone(), PersistedModelStats { trials: v.trials, successes: v.successes }))
+                .collect(),
+        };
+        let json = serde_json::to_string_pretty(&snapshot)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, json)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    /// Load a cascade router from a persisted JSON file, or create a new one.
+    ///
+    /// If the file exists and parses correctly, the confidence stats are restored
+    /// and the model slugs from the file are merged with the provided `model_slugs`
+    /// (the union is used). If the file doesn't exist or fails to parse, a fresh
+    /// router is created with the given `model_slugs`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `model_slugs` is empty and no persisted state exists.
+    pub fn load_or_new(path: &Path, model_slugs: Vec<String>) -> Self {
+        let snapshot = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<CascadeSnapshot>(&s).ok());
+
+        match snapshot {
+            Some(snap) => {
+                // Merge model sets: union of persisted + provided.
+                let mut slugs: Vec<String> = snap.model_slugs;
+                for s in &model_slugs {
+                    if !slugs.contains(s) {
+                        slugs.push(s.clone());
+                    }
+                }
+                if slugs.is_empty() {
+                    slugs = model_slugs;
+                }
+                assert!(!slugs.is_empty(), "CascadeRouter: need at least one model");
+                let router = Self::new(slugs);
+                // Restore confidence stats.
+                let mut stats = router.confidence_stats.lock();
+                for (model, persisted) in snap.confidence_stats {
+                    stats.insert(model, ModelStats {
+                        trials: persisted.trials,
+                        successes: persisted.successes,
+                    });
+                }
+                drop(stats);
+                router
+            }
+            None => Self::new(model_slugs),
+        }
+    }
+
     // ── Internal routing per stage ──────────────────────────────────────
 
     fn route_static(&self, ctx: &RoutingContext) -> CascadeModel {
@@ -354,7 +425,23 @@ const fn stage_for_observations(obs: u64) -> CascadeStage {
     }
 }
 
-// ─── Tests ──────────────────────────────────────────────────────────────────
+// ─── Persistence ────────────────────────────────────────────────────────────
+
+/// Persisted snapshot of cascade router state.
+#[derive(Serialize, Deserialize)]
+struct CascadeSnapshot {
+    model_slugs: Vec<String>,
+    confidence_stats: HashMap<String, PersistedModelStats>,
+}
+
+/// Serializable form of per-model confidence stats.
+#[derive(Serialize, Deserialize)]
+struct PersistedModelStats {
+    trials: u64,
+    successes: u64,
+}
+
+// ─── Tests ────────────────────────────────────────��─────────────────────────
 
 #[cfg(test)]
 mod tests {
