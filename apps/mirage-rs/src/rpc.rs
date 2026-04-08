@@ -731,6 +731,34 @@ fn register_chain_methods(
         Ok::<_, ErrorObjectOwned>(result)
     })?;
 
+    // Agent registry RPC methods
+    module.register_async_method("chain_registerAgent", |params, ctx, _| async move {
+        let (id, address_hex, role): (String, String, String) =
+            params.parse().map_err(invalid_params)?;
+        let chain = require_chain(&ctx)?;
+        crate::chain_rpc::handle_register_agent(&chain, id, address_hex, role)
+    })?;
+
+    module.register_async_method("chain_agentHeartbeat", |params, ctx, _| async move {
+        let (id,): (String,) = params.parse().map_err(invalid_params)?;
+        let chain = require_chain(&ctx)?;
+        Ok::<_, ErrorObjectOwned>(crate::chain_rpc::handle_agent_heartbeat(&chain, id))
+    })?;
+
+    module.register_async_method("chain_agentTrace", |params, ctx, _| async move {
+        let (id, phase, reads, reasoning, action): (String, String, Vec<String>, String, String) =
+            params.parse().map_err(invalid_params)?;
+        let chain = require_chain(&ctx)?;
+        crate::chain_rpc::handle_agent_trace(&chain, id, phase, reads, reasoning, action)
+    })?;
+
+    module.register_async_method("chain_agentStats", |params, ctx, _| async move {
+        let (id, delta): (String, crate::chain::AgentStats) =
+            params.parse().map_err(invalid_params)?;
+        let chain = require_chain(&ctx)?;
+        Ok::<_, ErrorObjectOwned>(crate::chain_rpc::handle_agent_stats(&chain, id, delta))
+    })?;
+
     #[cfg(feature = "roko")]
     register_chain_subscription_methods(module)?;
 
@@ -3819,5 +3847,271 @@ mod tests {
             }
             other => panic!("expected JSON-RPC error object, got {other:?}"),
         }
+    }
+
+    #[cfg(feature = "chain")]
+    fn test_rpc_module_with_chain() -> (jsonrpsee::RpcModule<ServerContext>, ServerContext) {
+        let upstream = Arc::new(UpstreamRpc::mock(1));
+        let db = HybridDB::new(upstream, 32, Duration::from_secs(12), NonZeroUsize::MIN, 1);
+        let fork = ForkState::new(db, 0, 1);
+        let mirage = MirageFork::new(
+            fork,
+            ResourceModel::for_profile(Profile::Standard, Duration::from_secs(12)),
+            MirageMode::Live,
+        );
+        let (shutdown, _) = broadcast::channel(1);
+        let chain = Arc::new(parking_lot::RwLock::new(
+            crate::chain_rpc::ChainContext::new(crate::chain_rpc::ChainToggles::default()),
+        ));
+        let context = ServerContext {
+            state: mirage.state(),
+            shutdown,
+            chain: Some(chain),
+            #[cfg(feature = "roko")]
+            chain_subs: None,
+        };
+        let module = build_rpc_module(context.clone())
+            .unwrap_or_else(|error| panic!("build rpc module with chain: {error}"));
+        (module, context)
+    }
+
+    #[cfg(feature = "chain")]
+    #[tokio::test]
+    async fn chain_register_agent_rpc() {
+        let (module, _context) = test_rpc_module_with_chain();
+        let result: bool = module
+            .call("chain_registerAgent", ("agent-1", "0xdead", "researcher"))
+            .await
+            .expect("register agent");
+        assert!(result, "first registration should succeed");
+
+        let duplicate: bool = module
+            .call("chain_registerAgent", ("agent-1", "0xdead", "researcher"))
+            .await
+            .expect("duplicate register");
+        assert!(!duplicate, "duplicate registration should return false");
+    }
+
+    #[cfg(feature = "chain")]
+    #[tokio::test]
+    async fn chain_agent_heartbeat_rpc() {
+        let (module, _context) = test_rpc_module_with_chain();
+        let _: bool = module
+            .call("chain_registerAgent", ("agent-1", "0xdead", "worker"))
+            .await
+            .unwrap();
+
+        let result: bool = module
+            .call("chain_agentHeartbeat", ("agent-1",))
+            .await
+            .expect("heartbeat");
+        assert!(result);
+
+        let missing: bool = module
+            .call("chain_agentHeartbeat", ("nonexistent",))
+            .await
+            .expect("heartbeat nonexistent");
+        assert!(!missing);
+    }
+
+    #[cfg(feature = "chain")]
+    #[tokio::test]
+    async fn chain_agent_trace_rpc() {
+        let (module, _context) = test_rpc_module_with_chain();
+        let _: bool = module
+            .call("chain_registerAgent", ("agent-1", "0xdead", "coder"))
+            .await
+            .unwrap();
+
+        let result: bool = module
+            .call(
+                "chain_agentTrace",
+                (
+                    "agent-1",
+                    "reason",
+                    vec!["file.rs"],
+                    "thinking about it",
+                    "edit file",
+                ),
+            )
+            .await
+            .expect("trace");
+        assert!(result);
+
+        let missing: bool = module
+            .call(
+                "chain_agentTrace",
+                (
+                    "nonexistent",
+                    "act",
+                    Vec::<String>::new(),
+                    "doing something",
+                    "run cmd",
+                ),
+            )
+            .await
+            .expect("trace for missing agent");
+        assert!(!missing);
+    }
+
+    #[cfg(feature = "chain")]
+    #[tokio::test]
+    async fn chain_agent_stats_rpc() {
+        let (module, _context) = test_rpc_module_with_chain();
+        let _: bool = module
+            .call("chain_registerAgent", ("agent-1", "0xdead", "analyst"))
+            .await
+            .unwrap();
+
+        let delta = crate::chain::AgentStats {
+            confirmations_given: 5,
+            challenges_given: 2,
+            warnings_posted: 1,
+            insights_posted: 3,
+            delta_cycles: 10,
+            total_cost_usd: 0.5,
+            total_tokens: 1000,
+        };
+        let result: bool = module
+            .call("chain_agentStats", ("agent-1", delta))
+            .await
+            .expect("stats update");
+        assert!(result);
+
+        // Verify stats were accumulated in the chain context.
+        let chain = _context.chain.as_ref().expect("chain present");
+        let guard = chain.read();
+        let stats = guard
+            .agent_registry
+            .get_stats("agent-1")
+            .expect("agent should exist");
+        assert_eq!(stats.confirmations_given, 5);
+        assert_eq!(stats.total_tokens, 1000);
+    }
+
+    #[cfg(feature = "chain")]
+    #[tokio::test]
+    async fn agent_http_endpoints_via_full_server() {
+        let upstream = Arc::new(UpstreamRpc::mock(1));
+        let db = HybridDB::new(upstream, 32, Duration::from_secs(12), NonZeroUsize::MIN, 1);
+        let fork = ForkState::new(db, 0, 1);
+        let mirage = MirageFork::new(
+            fork,
+            ResourceModel::for_profile(Profile::Standard, Duration::from_secs(12)),
+            MirageMode::Live,
+        );
+        let (shutdown, _) = broadcast::channel(4);
+        let chain = Arc::new(parking_lot::RwLock::new(
+            crate::chain_rpc::ChainContext::new(crate::chain_rpc::ChainToggles::default()),
+        ));
+        let (addr, _handle) =
+            super::start_rpc_server_with_chain("127.0.0.1:0", mirage, shutdown, chain)
+                .await
+                .expect("start server");
+        let url = format!("http://{addr}");
+        let http = reqwest::Client::new();
+
+        // Register an agent via JSON-RPC.
+        let resp = http
+            .post(&url)
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0", "id": 1,
+                "method": "chain_registerAgent",
+                "params": ["agent-1", "0xdead", "researcher"]
+            }))
+            .send()
+            .await
+            .unwrap();
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["result"], true);
+
+        // Heartbeat.
+        let resp = http
+            .post(&url)
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0", "id": 2,
+                "method": "chain_agentHeartbeat",
+                "params": ["agent-1"]
+            }))
+            .send()
+            .await
+            .unwrap();
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["result"], true);
+
+        // Add a trace.
+        let resp = http
+            .post(&url)
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0", "id": 3,
+                "method": "chain_agentTrace",
+                "params": ["agent-1", "retrieve", ["doc.md"], "reading docs", "read file"]
+            }))
+            .send()
+            .await
+            .unwrap();
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["result"], true);
+
+        // GET /api/agents — list agents.
+        let resp: serde_json::Value = http
+            .get(format!("{url}/api/agents"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let agents = resp["agents"].as_array().unwrap();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0]["id"], "agent-1");
+        assert_eq!(agents[0]["role"], "researcher");
+
+        // GET /api/agents/agent-1/trace
+        let resp: serde_json::Value = http
+            .get(format!("{url}/api/agents/agent-1/trace?limit=10&offset=0"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(resp["total"], 1);
+        assert_eq!(resp["traces"].as_array().unwrap().len(), 1);
+
+        // GET /api/agents/agent-1/heartbeat
+        let resp: serde_json::Value = http
+            .get(format!("{url}/api/agents/agent-1/heartbeat"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(resp["agent_id"], "agent-1");
+        assert!(resp.get("alive").is_some());
+
+        // GET /api/agents/agent-1/stats
+        let resp: serde_json::Value = http
+            .get(format!("{url}/api/agents/agent-1/stats"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(resp["agent_id"], "agent-1");
+        assert_eq!(resp["registered_at"].as_u64().is_some(), true);
+
+        // Non-existent agent returns error.
+        let resp: serde_json::Value = http
+            .get(format!("{url}/api/agents/nobody/stats"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(resp["error"], "agent not found");
     }
 }

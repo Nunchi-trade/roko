@@ -85,6 +85,8 @@ pub struct MockUpstream {
     pub block_transactions: HashMap<u64, Vec<Value>>,
     /// Transaction payloads keyed by hash for `eth_getTransactionByHash` in mock mode.
     pub transactions_by_hash: HashMap<B256, Value>,
+    /// Block timestamp (seconds since UNIX epoch) for mock blocks.
+    pub timestamp: u64,
 }
 
 /// Minimal upstream RPC adapter.
@@ -150,6 +152,10 @@ impl UpstreamRpc {
                 block_hashes: HashMap::new(),
                 block_transactions: HashMap::new(),
                 transactions_by_hash: HashMap::new(),
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
             })),
             code_by_hash: Arc::new(RwLock::new(HashMap::new())),
             addresses_by_code_hash: Arc::new(RwLock::new(HashMap::new())),
@@ -364,10 +370,18 @@ impl UpstreamRpc {
                 .get(&number)
                 .cloned()
                 .unwrap_or_default();
+            let parent_hash = if number > 0 {
+                keccak256((number - 1).to_le_bytes())
+            } else {
+                B256::ZERO
+            };
             return Ok(Some(json!({
                 "hash": hash,
                 "number": format!("0x{number:x}"),
-                "timestamp": "0x0",
+                "timestamp": format!("0x{:x}", mock.timestamp),
+                "parentHash": format!("{parent_hash}"),
+                "gasLimit": "0x1c9c380",
+                "gasUsed": "0x0",
                 "transactions": transactions,
             })));
         }

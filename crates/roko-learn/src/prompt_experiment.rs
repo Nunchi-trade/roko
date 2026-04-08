@@ -305,6 +305,11 @@ impl ExperimentStore {
             .filter(|e| e.status == ExperimentStatus::Concluded)
             .count()
     }
+
+    /// Iterate over all experiments.
+    pub fn iter(&self) -> impl Iterator<Item = &PromptExperiment> {
+        self.experiments.values()
+    }
 }
 
 impl Default for ExperimentStore {

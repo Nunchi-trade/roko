@@ -639,7 +639,7 @@ async fn dashboard_output(
     let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
     prepare_runtime_hooks(&workdir, cli.quiet);
 
-    let dashboard = DashboardScaffold::new();
+    let dashboard = DashboardScaffold::new_in(&workdir);
     if list_pages {
         let mut out = String::new();
         for page in dashboard.pages() {

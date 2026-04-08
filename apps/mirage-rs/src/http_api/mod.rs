@@ -41,6 +41,7 @@ use std::sync::Arc;
 
 use crate::chain_rpc::ChainContext;
 
+pub mod agent;
 pub mod knowledge;
 pub mod pheromone;
 pub mod topology;
@@ -73,6 +74,11 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/knowledge/kinds", get(knowledge::list_kinds))
         // Agent topology
         .route("/agents/topology", get(topology::agent_topology))
+        // Agent registry
+        .route("/agents", get(agent::list_agents))
+        .route("/agents/{id}/trace", get(agent::get_agent_trace))
+        .route("/agents/{id}/heartbeat", get(agent::get_agent_heartbeat))
+        .route("/agents/{id}/stats", get(agent::get_agent_stats))
         // Combined stats
         .route("/stats", get(combined_stats));
 

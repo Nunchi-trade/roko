@@ -37,6 +37,12 @@ pub struct WsParams {
     /// Subscribe to insight events (default true).
     #[serde(default = "default_true")]
     pub insights: bool,
+    /// Subscribe to agent events (default false).
+    #[serde(default)]
+    pub agents: bool,
+    /// Optional agent ID filter for agent events.
+    #[serde(default)]
+    pub agent_id: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -86,6 +92,14 @@ async fn handle_ws(mut socket: WebSocket, state: ApiState, params: WsParams) {
         insi_sub_id = Some(id);
     }
 
+    // Subscribe to agent events if requested.
+    let mut agent_rx = if params.agents {
+        Some(state.chain.read().agent_bus.subscribe())
+    } else {
+        None
+    };
+    let agent_id_filter = params.agent_id.clone();
+
     // Send initial confirmation.
     let _ = socket
         .send(Message::Text(
@@ -93,6 +107,7 @@ async fn handle_ws(mut socket: WebSocket, state: ApiState, params: WsParams) {
                 "type": "connected",
                 "pheromones": params.pheromones,
                 "insights": params.insights,
+                "agents": params.agents,
             })
             .to_string()
             .into(),
@@ -149,6 +164,44 @@ async fn handle_ws(mut socket: WebSocket, state: ApiState, params: WsParams) {
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         let _ = socket.send(Message::Text(
                             serde_json::json!({"type": "lagged", "channel": "insight", "missed": n})
+                                .to_string().into()
+                        )).await;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
+            // Agent events
+            event = async {
+                match agent_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match event {
+                    Ok(ev) => {
+                        let event_agent_id = match &ev {
+                            crate::chain::AgentEvent::Trace { agent_id, .. }
+                            | crate::chain::AgentEvent::Heartbeat { agent_id, .. }
+                            | crate::chain::AgentEvent::Stats { agent_id, .. }
+                            | crate::chain::AgentEvent::Registered { agent_id, .. } => agent_id,
+                        };
+                        if let Some(ref wanted) = agent_id_filter {
+                            if wanted != event_agent_id {
+                                continue;
+                            }
+                        }
+                        let payload = serde_json::json!({
+                            "channel": "agent",
+                            "data": ev,
+                        });
+                        if socket.send(Message::Text(payload.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        let _ = socket.send(Message::Text(
+                            serde_json::json!({"type": "lagged", "channel": "agent", "missed": n})
                                 .to_string().into()
                         )).await;
                     }

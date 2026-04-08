@@ -4,18 +4,27 @@
 //! best-effort learning snapshot on top so the health and trends pages
 //! can render real stats when the memory JSONL files are present.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Write as _};
 use std::path::{Path, PathBuf};
 
 use roko_core::metric::{Headlines, TaskMetric, compute_headlines};
+use roko_gate::adaptive_threshold::AdaptiveThresholds;
+use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
+use roko_learn::prompt_experiment::ExperimentStore;
 
 use super::pages::{PageId, PageScaffold, efficiency, operations};
 
 const MEMORY_DIR: &str = ".roko/memory";
 const EPISODES_FILE: &str = "episodes.jsonl";
 const TASK_METRICS_FILE: &str = "task-metrics.jsonl";
+
+const LEARN_DIR: &str = ".roko/learn";
+const EFFICIENCY_FILE: &str = "efficiency.jsonl";
+const EXPERIMENTS_FILE: &str = "experiments.json";
+const GATE_THRESHOLDS_FILE: &str = "gate-thresholds.json";
+const CASCADE_ROUTER_FILE: &str = "cascade-router.json";
 
 /// In-memory scaffold of all placeholder dashboard pages.
 #[derive(Debug, Clone)]
@@ -124,17 +133,19 @@ impl DashboardScaffold {
     #[must_use]
     pub fn render_page_text(&self, page: PageId) -> Option<String> {
         let scaffold = self.page(page)?;
-        match page {
-            PageId::Health => self
-                .snapshot
-                .render_health_page(scaffold)
-                .or_else(|| Some(scaffold.render_text())),
-            PageId::Trends => self
-                .snapshot
-                .render_trends_page(scaffold)
-                .or_else(|| Some(scaffold.render_text())),
-            _ => Some(scaffold.render_text()),
-        }
+        let rendered = match page {
+            PageId::Health => self.snapshot.render_health_page(scaffold),
+            PageId::Trends => self.snapshot.render_trends_page(scaffold),
+            PageId::Correlations => self.snapshot.render_correlations_page(scaffold),
+            PageId::Parameters => self.snapshot.render_parameters_page(scaffold),
+            PageId::Experiments => self.snapshot.render_experiments_page(scaffold),
+            PageId::Optimizer => self.snapshot.render_optimizer_page(scaffold),
+            PageId::AgentStatus => self.snapshot.render_agent_status_page(scaffold),
+            PageId::PlanView => self.snapshot.render_plan_view_page(scaffold),
+            PageId::LogView => self.snapshot.render_log_view_page(scaffold),
+            PageId::ConfigView => self.snapshot.render_config_view_page(scaffold),
+        };
+        rendered.or_else(|| Some(scaffold.render_text()))
     }
 
     /// Render one page's widget list only. Returns `None` if the page does not exist.
@@ -206,6 +217,32 @@ pub struct DashboardSnapshot {
     haiku_share: Option<f64>,
     cache_hit_rate: Option<f64>,
     headlines: Headlines,
+    /// Raw efficiency events from `.roko/learn/efficiency.jsonl`.
+    efficiency_events: Vec<AgentEfficiencyEvent>,
+    /// Prompt experiment store from `.roko/learn/experiments.json`.
+    experiments: Option<ExperimentStore>,
+    /// Adaptive gate thresholds from `.roko/learn/gate-thresholds.json`.
+    adaptive_thresholds: Option<AdaptiveThresholds>,
+    /// Cascade router snapshot from `.roko/learn/cascade-router.json` (raw JSON).
+    cascade_snapshot: Option<CascadeSnapshotData>,
+    /// Raw episodes kept for per-agent analysis.
+    episodes: Vec<Episode>,
+}
+
+/// Deserialized cascade router snapshot matching the private `CascadeSnapshot`.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct CascadeSnapshotData {
+    #[serde(default)]
+    model_slugs: Vec<String>,
+    #[serde(default)]
+    confidence_stats: HashMap<String, PersistedModelStatsData>,
+}
+
+/// Per-model stats from the cascade router JSON.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct PersistedModelStatsData {
+    trials: u64,
+    successes: u64,
 }
 
 impl DashboardSnapshot {
@@ -213,6 +250,7 @@ impl DashboardSnapshot {
     pub async fn load(root: impl AsRef<Path>) -> Result<Self, std::io::Error> {
         let root = resolve_snapshot_root(root.as_ref());
         let memory_dir = root.join(MEMORY_DIR);
+        let learn_dir = root.join(LEARN_DIR);
         let episodes_path = memory_dir.join(EPISODES_FILE);
         let task_metrics_path = memory_dir.join(TASK_METRICS_FILE);
 
@@ -222,14 +260,39 @@ impl DashboardSnapshot {
             .map_err(std::io::Error::other)?;
         let task_metrics = read_task_metrics(&task_metrics_path).await?;
 
-        Ok(Self::from_records(root, &episodes, &task_metrics))
+        // Load learning subsystem data (best-effort).
+        let efficiency_events = read_efficiency_events(&learn_dir.join(EFFICIENCY_FILE)).await;
+        let experiments = load_json_opt::<ExperimentStore>(&learn_dir.join(EXPERIMENTS_FILE));
+        let adaptive_thresholds =
+            load_json_opt::<AdaptiveThresholds>(&learn_dir.join(GATE_THRESHOLDS_FILE));
+        let cascade_snapshot =
+            load_json_opt::<CascadeSnapshotData>(&learn_dir.join(CASCADE_ROUTER_FILE));
+
+        Ok(Self::from_records(
+            root,
+            &episodes,
+            &task_metrics,
+            efficiency_events,
+            experiments,
+            adaptive_thresholds,
+            cascade_snapshot,
+        ))
     }
 
     fn empty(root: PathBuf) -> Self {
-        Self::from_records(root, &[], &[])
+        Self::from_records(root, &[], &[], Vec::new(), None, None, None)
     }
 
-    fn from_records(root: PathBuf, episodes: &[Episode], task_metrics: &[TaskMetric]) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    fn from_records(
+        root: PathBuf,
+        episodes: &[Episode],
+        task_metrics: &[TaskMetric],
+        efficiency_events: Vec<AgentEfficiencyEvent>,
+        experiments: Option<ExperimentStore>,
+        adaptive_thresholds: Option<AdaptiveThresholds>,
+        cascade_snapshot: Option<CascadeSnapshotData>,
+    ) -> Self {
         let episode_count = episodes.len();
         let success_rate = if episode_count == 0 {
             None
@@ -293,6 +356,11 @@ impl DashboardSnapshot {
             haiku_share,
             cache_hit_rate,
             headlines,
+            efficiency_events,
+            experiments,
+            adaptive_thresholds,
+            cascade_snapshot,
+            episodes: episodes.to_vec(),
         }
     }
 
@@ -414,6 +482,439 @@ impl DashboardSnapshot {
         }
         Some(out)
     }
+
+    // ── Efficiency pages ────────────────────────────────────────────
+
+    fn render_correlations_page(&self, page: &PageScaffold) -> Option<String> {
+        if self.efficiency_events.is_empty() {
+            return None;
+        }
+        let mut out = page_header(page);
+        let _ = writeln!(out, "events: {}", self.efficiency_events.len());
+        let _ = writeln!(out);
+
+        // prompt_tokens vs gate_passed histogram.
+        // Bucket by prompt token count in 1k increments.
+        let mut buckets: BTreeMap<u64, (u32, u32)> = BTreeMap::new(); // bucket -> (total, passed)
+        for ev in &self.efficiency_events {
+            let bucket = ev.total_prompt_tokens / 1000 * 1000; // round down to nearest 1k
+            let entry = buckets.entry(bucket).or_default();
+            entry.0 += 1;
+            if ev.gate_passed {
+                entry.1 += 1;
+            }
+        }
+        let _ = writeln!(out, "prompt tokens vs pass rate:");
+        let _ = writeln!(out, "  {:>10}  {:>6}  {:>9}  bar", "tokens", "count", "pass rate");
+        for (bucket, (total, passed)) in &buckets {
+            let rate = if *total > 0 {
+                *passed as f64 / *total as f64
+            } else {
+                0.0
+            };
+            let bar_len = (rate * 20.0).round() as usize;
+            let bar: String = std::iter::repeat_n('#', bar_len).collect();
+            let _ = writeln!(
+                out,
+                "  {:>9}k  {:>6}  {:>8}  {}",
+                bucket / 1000,
+                total,
+                format_pct(rate),
+                bar
+            );
+        }
+
+        // cost vs pass rate.
+        let _ = writeln!(out);
+        let _ = writeln!(out, "cost vs pass rate:");
+        let cost_buckets: Vec<(f64, &str)> =
+            vec![(0.001, "<$0.001"), (0.01, "<$0.01"), (0.1, "<$0.10"), (f64::MAX, ">=$0.10")];
+        let _ = writeln!(out, "  {:>10}  {:>6}  {:>9}", "range", "count", "pass rate");
+        let mut prev = 0.0_f64;
+        for (threshold, label) in &cost_buckets {
+            let matching: Vec<&AgentEfficiencyEvent> = self
+                .efficiency_events
+                .iter()
+                .filter(|e| e.cost_usd >= prev && e.cost_usd < *threshold)
+                .collect();
+            let total = matching.len();
+            let passed = matching.iter().filter(|e| e.gate_passed).count();
+            if total > 0 {
+                let rate = count_to_f64(passed) / count_to_f64(total);
+                let _ = writeln!(out, "  {:>10}  {:>6}  {:>9}", label, total, format_pct(rate));
+            }
+            prev = *threshold;
+        }
+
+        Some(out)
+    }
+
+    fn render_parameters_page(&self, page: &PageScaffold) -> Option<String> {
+        let has_thresholds = self.adaptive_thresholds.is_some();
+        let has_cascade = self.cascade_snapshot.is_some();
+        if !has_thresholds && !has_cascade {
+            return None;
+        }
+
+        let mut out = page_header(page);
+
+        // Cascade router model weights.
+        if let Some(snap) = &self.cascade_snapshot {
+            let _ = writeln!(out, "cascade router:");
+            let _ = writeln!(out, "  registered models: {}", snap.model_slugs.len());
+            for slug in &snap.model_slugs {
+                let _ = writeln!(out, "    - {slug}");
+            }
+            if !snap.confidence_stats.is_empty() {
+                let _ = writeln!(out, "  confidence-stage stats:");
+                let _ = writeln!(out, "    {:>20}  {:>8}  {:>8}  {:>9}", "model", "trials", "passes", "pass rate");
+                let mut stats: Vec<_> = snap.confidence_stats.iter().collect();
+                stats.sort_by(|a, b| b.1.trials.cmp(&a.1.trials));
+                for (model, s) in stats {
+                    #[allow(clippy::cast_precision_loss)]
+                    let rate = if s.trials > 0 {
+                        s.successes as f64 / s.trials as f64
+                    } else {
+                        0.0
+                    };
+                    let _ = writeln!(
+                        out,
+                        "    {:>20}  {:>8}  {:>8}  {:>9}",
+                        model, s.trials, s.successes, format_pct(rate)
+                    );
+                }
+            }
+            let _ = writeln!(out);
+        }
+
+        // Adaptive gate thresholds.
+        if let Some(at) = &self.adaptive_thresholds {
+            let _ = writeln!(out, "adaptive gate thresholds:");
+            let _ = writeln!(out, "  {:>5}  {:>12}  {:>6}  {:>12}  {:>4}", "rung", "ema pass rate", "obs", "consec pass", "skip");
+            let mut rungs: Vec<_> = at.all_rungs().collect();
+            rungs.sort_by_key(|(r, _)| *r);
+            for (rung, stats) in rungs {
+                let skip = if at.should_skip_rung(*rung) {
+                    "yes"
+                } else {
+                    "no"
+                };
+                let _ = writeln!(
+                    out,
+                    "  {:>5}  {:>12}  {:>6}  {:>12}  {:>4}",
+                    rung,
+                    format_pct(stats.ema_pass_rate),
+                    stats.total_observations,
+                    stats.consecutive_passes,
+                    skip
+                );
+            }
+        }
+
+        Some(out)
+    }
+
+    fn render_experiments_page(&self, page: &PageScaffold) -> Option<String> {
+        let store = self.experiments.as_ref()?;
+        if store.running_count() == 0 && store.concluded_count() == 0 {
+            return None;
+        }
+
+        let mut out = page_header(page);
+        let _ = writeln!(
+            out,
+            "experiments: {} running, {} concluded",
+            store.running_count(),
+            store.concluded_count()
+        );
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "  {:>20}  {:>10}  {:>8}  {:>10}  verdict",
+            "section", "status", "trials", "arms"
+        );
+        for exp in store.iter() {
+            let total_trials: u64 = exp.stats.values().map(|s| s.trials).sum();
+            let verdict = exp
+                .winner_id
+                .as_ref()
+                .map_or_else(|| "-".to_string(), |winner| format!("winner={winner}"));
+            let _ = writeln!(
+                out,
+                "  {:>20}  {:>10}  {:>8}  {:>10}  {}",
+                exp.section_name,
+                format!("{:?}", exp.status),
+                total_trials,
+                exp.variants.len(),
+                verdict
+            );
+        }
+
+        Some(out)
+    }
+
+    fn render_optimizer_page(&self, page: &PageScaffold) -> Option<String> {
+        let at = self.adaptive_thresholds.as_ref()?;
+        let mut out = page_header(page);
+
+        // Show EMA confidence per rung.
+        let _ = writeln!(out, "gate EMA confidence by rung:");
+        let _ = writeln!(out, "  {:>5}  {:>12}  {:>12}  {:>6}", "rung", "ema pass", "observations", "retries");
+        let mut rungs: Vec<_> = at.all_rungs().collect();
+        rungs.sort_by_key(|(r, _)| *r);
+        for (rung, stats) in &rungs {
+            let retries = at.suggested_max_retries(**rung);
+            let _ = writeln!(
+                out,
+                "  {:>5}  {:>12}  {:>12}  {:>6}",
+                rung,
+                format_pct(stats.ema_pass_rate),
+                stats.total_observations,
+                retries
+            );
+        }
+
+        // Overall optimization state.
+        let _ = writeln!(out);
+        let total_obs: u64 = rungs.iter().map(|(_, s)| s.total_observations).sum();
+        let avg_ema: f64 = if rungs.is_empty() {
+            0.0
+        } else {
+            rungs.iter().map(|(_, s)| s.ema_pass_rate).sum::<f64>() / count_to_f64(rungs.len())
+        };
+        let _ = writeln!(out, "optimization cycle:");
+        let _ = writeln!(out, "  total observations: {total_obs}");
+        let _ = writeln!(out, "  avg ema pass rate: {}", format_pct(avg_ema));
+        let skippable: usize = rungs.iter().filter(|(r, _)| at.should_skip_rung(**r)).count();
+        let _ = writeln!(
+            out,
+            "  skippable rungs: {} / {}",
+            skippable,
+            rungs.len()
+        );
+
+        // Experiment store summary if present.
+        if let Some(store) = &self.experiments {
+            let _ = writeln!(out, "  active experiments: {}", store.running_count());
+            let _ = writeln!(out, "  concluded experiments: {}", store.concluded_count());
+        }
+
+        Some(out)
+    }
+
+    // ── Operations pages ────────────────────────────────────────────
+
+    fn render_agent_status_page(&self, page: &PageScaffold) -> Option<String> {
+        if self.episodes.is_empty() {
+            return None;
+        }
+        let mut out = page_header(page);
+
+        // Aggregate per-agent stats from episodes.
+        let mut agents: BTreeMap<String, AgentStats> = BTreeMap::new();
+        for ep in &self.episodes {
+            let entry = agents.entry(ep.agent_id.clone()).or_default();
+            entry.turns += 1;
+            entry.total_cost += ep.usage.cost_usd;
+            entry.total_input_tokens += ep.usage.input_tokens;
+            entry.total_output_tokens += ep.usage.output_tokens;
+            if ep.success {
+                entry.successes += 1;
+            }
+        }
+
+        let _ = writeln!(
+            out,
+            "  {:>24}  {:>6}  {:>9}  {:>10}  {:>12}  {:>12}",
+            "agent", "turns", "pass rate", "cost", "in tokens", "out tokens"
+        );
+        for (agent_id, stats) in &agents {
+            let rate = count_to_f64(stats.successes) / count_to_f64(stats.turns);
+            let _ = writeln!(
+                out,
+                "  {:>24}  {:>6}  {:>9}  {:>10}  {:>12}  {:>12}",
+                agent_id,
+                stats.turns,
+                format_pct(rate),
+                format_usd(stats.total_cost),
+                stats.total_input_tokens,
+                stats.total_output_tokens
+            );
+        }
+
+        // Also show efficiency event model breakdown if available.
+        if !self.efficiency_events.is_empty() {
+            let _ = writeln!(out);
+            let mut models: BTreeMap<String, usize> = BTreeMap::new();
+            for ev in &self.efficiency_events {
+                *models.entry(ev.model.clone()).or_default() += 1;
+            }
+            let _ = writeln!(out, "model usage:");
+            for (model, count) in &models {
+                let _ = writeln!(out, "  {model}: {count} turns");
+            }
+        }
+
+        Some(out)
+    }
+
+    fn render_plan_view_page(&self, page: &PageScaffold) -> Option<String> {
+        // Try to load executor state from .roko/state/executor.json.
+        let state_path = self.root.join(".roko").join("state").join("executor.json");
+        let state_text = std::fs::read_to_string(&state_path).ok()?;
+        let state: serde_json::Value = serde_json::from_str(&state_text).ok()?;
+
+        let mut out = page_header(page);
+        let _ = writeln!(
+            out,
+            "source: {}",
+            state_path.display()
+        );
+
+        // Show task list from the executor state.
+        if let Some(tasks) = state.get("tasks").and_then(|t| t.as_array()) {
+            let total = tasks.len();
+            let done = tasks
+                .iter()
+                .filter(|t| t.get("status").and_then(|s| s.as_str()) == Some("done"))
+                .count();
+            let failed = tasks
+                .iter()
+                .filter(|t| t.get("status").and_then(|s| s.as_str()) == Some("failed"))
+                .count();
+            let running = tasks
+                .iter()
+                .filter(|t| t.get("status").and_then(|s| s.as_str()) == Some("running"))
+                .count();
+            let pending = total - done - failed - running;
+            let _ = writeln!(out);
+            let _ = writeln!(out, "tasks: {total} total, {done} done, {failed} failed, {running} running, {pending} pending");
+            let _ = writeln!(out);
+
+            // Task table.
+            let _ = writeln!(out, "  {:>4}  {:>10}  {:>30}", "idx", "status", "id");
+            for (i, task) in tasks.iter().enumerate() {
+                let status = task
+                    .get("status")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("unknown");
+                let id = task
+                    .get("id")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("-");
+                let _ = writeln!(out, "  {:>4}  {:>10}  {:>30}", i, status, id);
+            }
+        } else {
+            let _ = writeln!(out, "(no task data in executor state)");
+        }
+
+        Some(out)
+    }
+
+    fn render_log_view_page(&self, page: &PageScaffold) -> Option<String> {
+        let signals_path = self.root.join(".roko").join("signals.jsonl");
+        let episodes_path = self.root.join(MEMORY_DIR).join(EPISODES_FILE);
+
+        let signals_exist = signals_path.exists();
+        let episodes_exist = episodes_path.exists();
+        if !signals_exist && !episodes_exist && self.episodes.is_empty() {
+            return None;
+        }
+
+        let mut out = page_header(page);
+
+        // Show last N episodes.
+        let tail_n = 20;
+        let _ = writeln!(out, "recent episodes (last {tail_n}):");
+        let start = self.episodes.len().saturating_sub(tail_n);
+        if self.episodes.is_empty() {
+            let _ = writeln!(out, "  (none)");
+        } else {
+            let _ = writeln!(
+                out,
+                "  {:>20}  {:>24}  {:>8}  {:>9}  {:>10}",
+                "timestamp", "agent", "task", "success", "cost"
+            );
+            for ep in &self.episodes[start..] {
+                let ts = ep.timestamp.format("%Y-%m-%d %H:%M:%S").to_string();
+                let _ = writeln!(
+                    out,
+                    "  {:>20}  {:>24}  {:>8}  {:>9}  {:>10}",
+                    ts,
+                    truncate_str(&ep.agent_id, 24),
+                    truncate_str(&ep.task_id, 8),
+                    if ep.success { "pass" } else { "FAIL" },
+                    format_usd(ep.usage.cost_usd)
+                );
+            }
+        }
+
+        // Show last N signals if the file exists.
+        if signals_exist {
+            let _ = writeln!(out);
+            let _ = writeln!(out, "recent signals (last {tail_n}):");
+            if let Ok(text) = std::fs::read_to_string(&signals_path) {
+                let lines: Vec<&str> = text.lines().collect();
+                let start = lines.len().saturating_sub(tail_n);
+                for line in &lines[start..] {
+                    let _ = writeln!(out, "  {line}");
+                }
+            }
+        }
+
+        Some(out)
+    }
+
+    fn render_config_view_page(&self, page: &PageScaffold) -> Option<String> {
+        let config_path = self.root.join("roko.toml");
+        let text = std::fs::read_to_string(&config_path).ok()?;
+
+        let mut out = page_header(page);
+        let _ = writeln!(out, "source: {}", config_path.display());
+        let _ = writeln!(out);
+
+        // Render with section annotations.
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                let _ = writeln!(out, "## {line}");
+            } else {
+                let _ = writeln!(out, "  {line}");
+            }
+        }
+
+        Some(out)
+    }
+}
+
+/// Per-agent aggregated stats.
+#[derive(Debug, Default)]
+struct AgentStats {
+    turns: usize,
+    successes: usize,
+    total_cost: f64,
+    total_input_tokens: u64,
+    total_output_tokens: u64,
+}
+
+/// Render standard page header.
+fn page_header(page: &PageScaffold) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "{} ({})", page.title, page.id.slug());
+    let _ = writeln!(out, "group: {}", page.id.group());
+    let _ = writeln!(out, "intent: {}", page.intent);
+    out
+}
+
+/// Truncate a string to `max` chars, adding "..." if truncated.
+fn truncate_str(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else if max > 3 {
+        format!("{}...", &s[..max - 3])
+    } else {
+        s[..max].to_string()
+    }
 }
 
 fn load_snapshot_best_effort(root: &Path) -> DashboardSnapshot {
@@ -492,6 +993,24 @@ fn count_to_f64(count: usize) -> f64 {
 
 fn wall_ms_to_f64(wall_ms: u64) -> f64 {
     f64::from(u32::try_from(wall_ms).unwrap_or(u32::MAX))
+}
+
+/// Read efficiency events from JSONL (best-effort, returns empty on error).
+async fn read_efficiency_events(path: &Path) -> Vec<AgentEfficiencyEvent> {
+    let Ok(text) = tokio::fs::read_to_string(path).await else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
+}
+
+/// Best-effort JSON file loader. Returns `None` if missing or corrupt.
+fn load_json_opt<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
 }
 
 #[cfg(test)]
@@ -575,7 +1094,8 @@ mod tests {
 
     #[test]
     fn page_render_includes_widgets() {
-        let dashboard = DashboardScaffold::new();
+        let tmpdir = tempdir().expect("tempdir");
+        let dashboard = DashboardScaffold::new_in(tmpdir.path());
         let rendered = dashboard
             .render_page_text(PageId::PlanView)
             .expect("plan page should exist");
@@ -714,5 +1234,160 @@ mod tests {
         assert!(trends.contains("haiku share: 66.7%"));
         assert!(trends.contains("cache hit rate: 31.7%"));
         assert!(trends.contains("- avg_cost_per_plan: $0.3000"));
+    }
+
+    fn write_json(path: &Path, value: &impl serde::Serialize) {
+        fs::create_dir_all(path.parent().expect("file has parent"))
+            .expect("should create parent dir");
+        let json = serde_json::to_string_pretty(value).expect("should serialize");
+        fs::write(path, json).expect("should write json");
+    }
+
+    #[test]
+    fn parameters_page_renders_cascade_and_thresholds() {
+        let tmpdir = tempdir().expect("tempdir");
+        let learn_dir = tmpdir.path().join(".roko/learn");
+
+        // Write cascade router data.
+        let cascade = serde_json::json!({
+            "model_slugs": ["claude-sonnet-4-5", "claude-haiku-4-5"],
+            "confidence_stats": {
+                "claude-sonnet-4-5": { "trials": 50, "successes": 45 },
+                "claude-haiku-4-5": { "trials": 30, "successes": 20 }
+            }
+        });
+        write_json(&learn_dir.join(CASCADE_ROUTER_FILE), &cascade);
+
+        // Write adaptive thresholds.
+        let thresholds = AdaptiveThresholds::default();
+        write_json(&learn_dir.join(GATE_THRESHOLDS_FILE), &thresholds);
+
+        // Need memory dir to exist for the root resolver.
+        let memory_dir = tmpdir.path().join(MEMORY_DIR);
+        fs::create_dir_all(&memory_dir).expect("memory dir");
+        fs::write(memory_dir.join(EPISODES_FILE), "").expect("empty episodes");
+
+        let dashboard = DashboardScaffold::new_in(tmpdir.path());
+        let rendered = dashboard
+            .render_page_text(PageId::Parameters)
+            .expect("parameters page should render");
+        assert!(rendered.contains("Parameters"));
+        assert!(rendered.contains("cascade router:"));
+        assert!(rendered.contains("registered models: 2"));
+    }
+
+    #[test]
+    fn experiments_page_renders_with_store() {
+        let tmpdir = tempdir().expect("tempdir");
+        let learn_dir = tmpdir.path().join(".roko/learn");
+
+        // Write experiment store as raw JSON matching ExperimentStore structure.
+        let store_json = serde_json::json!({
+            "experiments": {
+                "exp-1": {
+                    "experiment_id": "exp-1",
+                    "section_name": "system_prompt",
+                    "variants": [
+                        { "id": "baseline", "name": "Baseline", "section_name": "system_prompt", "content": "v1", "active": true },
+                        { "id": "verbose", "name": "Verbose", "section_name": "system_prompt", "content": "v2", "active": true }
+                    ],
+                    "stats": {
+                        "baseline": { "trials": 10, "successes": 8 },
+                        "verbose": { "trials": 10, "successes": 5 }
+                    },
+                    "status": "Running",
+                    "winner_id": null,
+                    "min_trials_per_variant": 20,
+                    "min_effect_size": 0.1
+                }
+            }
+        });
+        write_json(&learn_dir.join(EXPERIMENTS_FILE), &store_json);
+
+        let memory_dir = tmpdir.path().join(MEMORY_DIR);
+        fs::create_dir_all(&memory_dir).expect("memory dir");
+        fs::write(memory_dir.join(EPISODES_FILE), "").expect("empty episodes");
+
+        let dashboard = DashboardScaffold::new_in(tmpdir.path());
+        let rendered = dashboard
+            .render_page_text(PageId::Experiments)
+            .expect("experiments page should render");
+        assert!(rendered.contains("Experiments"));
+        assert!(rendered.contains("system_prompt"));
+        assert!(rendered.contains("1 running"));
+    }
+
+    #[test]
+    fn agent_status_page_renders_with_episodes() {
+        let tmpdir = tempdir().expect("tempdir");
+        let memory_dir = tmpdir.path().join(MEMORY_DIR);
+        let episodes_path = memory_dir.join(EPISODES_FILE);
+
+        let episodes = vec![
+            serde_json::to_string(&sample_episode("agent-a", "task-1", true, 0.5, 500))
+                .expect("json"),
+            serde_json::to_string(&sample_episode("agent-a", "task-2", false, 1.0, 1500))
+                .expect("json"),
+            serde_json::to_string(&sample_episode("agent-b", "task-3", true, 0.3, 300))
+                .expect("json"),
+        ];
+        write_jsonl(&episodes_path, &episodes);
+
+        let dashboard = DashboardScaffold::new_in(tmpdir.path());
+        let rendered = dashboard
+            .render_page_text(PageId::AgentStatus)
+            .expect("agent status page should render");
+        assert!(rendered.contains("Agent Status"));
+        assert!(rendered.contains("agent-a"));
+        assert!(rendered.contains("agent-b"));
+    }
+
+    #[test]
+    fn plan_view_renders_with_executor_state() {
+        let tmpdir = tempdir().expect("tempdir");
+        let state_dir = tmpdir.path().join(".roko/state");
+        fs::create_dir_all(&state_dir).expect("state dir");
+
+        let executor_state = serde_json::json!({
+            "tasks": [
+                { "id": "task-1", "status": "done", "plan": "plan-a" },
+                { "id": "task-2", "status": "running", "plan": "plan-a" },
+                { "id": "task-3", "status": "pending", "plan": "plan-a" }
+            ]
+        });
+        write_json(&state_dir.join("executor.json"), &executor_state);
+
+        let memory_dir = tmpdir.path().join(MEMORY_DIR);
+        fs::create_dir_all(&memory_dir).expect("memory dir");
+        fs::write(memory_dir.join(EPISODES_FILE), "").expect("empty episodes");
+
+        let dashboard = DashboardScaffold::new_in(tmpdir.path());
+        let rendered = dashboard
+            .render_page_text(PageId::PlanView)
+            .expect("plan view page should render");
+        assert!(rendered.contains("Plan View"));
+        assert!(rendered.contains("task-1"));
+    }
+
+    #[test]
+    fn config_view_renders_with_roko_toml() {
+        let tmpdir = tempdir().expect("tempdir");
+        let config_path = tmpdir.path().join("roko.toml");
+        fs::write(
+            &config_path,
+            "[agent]\nmodel = \"claude-sonnet-4-5\"\n\n[gate]\nmax_retries = 3\n",
+        )
+        .expect("write roko.toml");
+
+        let memory_dir = tmpdir.path().join(MEMORY_DIR);
+        fs::create_dir_all(&memory_dir).expect("memory dir");
+        fs::write(memory_dir.join(EPISODES_FILE), "").expect("empty episodes");
+
+        let dashboard = DashboardScaffold::new_in(tmpdir.path());
+        let rendered = dashboard
+            .render_page_text(PageId::ConfigView)
+            .expect("config view page should render");
+        assert!(rendered.contains("Config View"));
+        assert!(rendered.contains("[agent]"));
     }
 }

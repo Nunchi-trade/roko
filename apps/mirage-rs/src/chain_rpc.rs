@@ -97,6 +97,10 @@ pub struct ChainContext {
     /// `InsightEvent`s to every registered subscriber.
     #[cfg(feature = "roko")]
     pub insight_bus: Option<Arc<InsightBus>>,
+    /// Agent registry for identity, trace, and stats tracking.
+    pub agent_registry: crate::chain::AgentRegistry,
+    /// Broadcast bus for agent lifecycle events (WebSocket streaming).
+    pub agent_bus: tokio::sync::broadcast::Sender<crate::chain::AgentEvent>,
 }
 
 impl ChainContext {
@@ -111,6 +115,8 @@ impl ChainContext {
             pheromone_bus: None,
             #[cfg(feature = "roko")]
             insight_bus: None,
+            agent_registry: crate::chain::AgentRegistry::new(),
+            agent_bus: tokio::sync::broadcast::channel(1_024).0,
         }
     }
 
@@ -125,6 +131,8 @@ impl ChainContext {
             pheromone_bus: None,
             #[cfg(feature = "roko")]
             insight_bus: None,
+            agent_registry: crate::chain::AgentRegistry::new(),
+            agent_bus: tokio::sync::broadcast::channel(1_024).0,
         }
     }
 
@@ -143,6 +151,8 @@ impl ChainContext {
             toggles,
             pheromone_bus: Some(Arc::new(PheromoneBus::new())),
             insight_bus: Some(Arc::new(InsightBus::new())),
+            agent_registry: crate::chain::AgentRegistry::new(),
+            agent_bus: tokio::sync::broadcast::channel(1_024).0,
         }
     }
 
@@ -1381,6 +1391,102 @@ static METHOD_SCHEMAS: LazyLock<HashMap<&'static str, JsonValue>> = LazyLock::ne
 
     m
 });
+
+// ─── Agent registry handlers ────────────────────────────────────────────────
+
+/// Handle `chain_registerAgent(id, address_hex, role)`.
+pub fn handle_register_agent(
+    chain: &Arc<RwLock<ChainContext>>,
+    id: String,
+    address_hex: String,
+    role: String,
+) -> Result<bool, ErrorObjectOwned> {
+    let address = alloy_primitives::hex::decode(address_hex.trim_start_matches("0x"))
+        .map_err(|e| {
+            ErrorObjectOwned::owned(err_code::INVALID, e.to_string(), None::<()>)
+        })?;
+    let mut chain = chain.write();
+    let timestamp = crate::http_api::now_secs();
+    let registered = chain
+        .agent_registry
+        .register(id.clone(), address, role.clone(), timestamp);
+    if registered {
+        let _ = chain.agent_bus.send(crate::chain::AgentEvent::Registered {
+            agent_id: id,
+            role,
+        });
+    }
+    Ok(registered)
+}
+
+/// Handle `chain_agentHeartbeat(id)`.
+pub fn handle_agent_heartbeat(chain: &Arc<RwLock<ChainContext>>, id: String) -> bool {
+    let mut chain = chain.write();
+    let timestamp = crate::http_api::now_secs();
+    let ok = chain.agent_registry.heartbeat(&id, 0, timestamp);
+    if ok {
+        let _ = chain.agent_bus.send(crate::chain::AgentEvent::Heartbeat {
+            agent_id: id,
+            block: 0,
+            timestamp,
+        });
+    }
+    ok
+}
+
+/// Handle `chain_agentTrace(id, phase, reads, reasoning, action)`.
+pub fn handle_agent_trace(
+    chain: &Arc<RwLock<ChainContext>>,
+    id: String,
+    phase: String,
+    reads: Vec<String>,
+    reasoning: String,
+    action: String,
+) -> Result<bool, ErrorObjectOwned> {
+    let cognitive_phase = match phase.as_str() {
+        "retrieve" => crate::chain::CognitivePhase::Retrieve,
+        "reason" => crate::chain::CognitivePhase::Reason,
+        "act" => crate::chain::CognitivePhase::Act,
+        "verify" => crate::chain::CognitivePhase::Verify,
+        _ => {
+            return Err(ErrorObjectOwned::owned(
+                err_code::INVALID,
+                format!("invalid phase: {phase}; expected retrieve, reason, act, or verify"),
+                None::<()>,
+            ))
+        }
+    };
+    let mut chain = chain.write();
+    let timestamp = crate::http_api::now_secs();
+    let trace = crate::chain::AgentTrace {
+        cycle: 0,
+        phase: cognitive_phase,
+        reads,
+        reasoning,
+        action,
+        action_id: format!("{id}-{timestamp}"),
+        timestamp,
+    };
+    let _ = chain.agent_bus.send(crate::chain::AgentEvent::Trace {
+        agent_id: id.clone(),
+        trace: trace.clone(),
+    });
+    Ok(chain.agent_registry.add_trace(&id, trace))
+}
+
+/// Handle `chain_agentStats(id, stats_delta)`.
+pub fn handle_agent_stats(
+    chain: &Arc<RwLock<ChainContext>>,
+    id: String,
+    delta: crate::chain::AgentStats,
+) -> bool {
+    let mut chain = chain.write();
+    let _ = chain.agent_bus.send(crate::chain::AgentEvent::Stats {
+        agent_id: id.clone(),
+        delta: delta.clone(),
+    });
+    chain.agent_registry.add_stats_delta(&id, &delta)
+}
 
 #[cfg(test)]
 mod tests {
