@@ -176,6 +176,11 @@ enum Command {
         #[command(subcommand)]
         cmd: PrdCmd,
     },
+    /// Research topics, enhance documents, analyze execution data.
+    Research {
+        #[command(subcommand)]
+        cmd: ResearchCmd,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -264,6 +269,34 @@ enum PrdDraftCmd {
         slug: String,
     },
     /// List all drafts.
+    List,
+}
+
+#[derive(Debug, Subcommand)]
+enum ResearchCmd {
+    /// Deep-dive research on a topic. Produces .roko/research/<slug>.md with citations.
+    Topic {
+        /// The research topic.
+        topic: Vec<String>,
+    },
+    /// Enhance a PRD with academic citations, diagrams, and research-backed improvements.
+    EnhancePrd {
+        /// PRD slug (filename without .md).
+        slug: String,
+    },
+    /// Optimize an implementation plan with research-backed task decomposition techniques.
+    EnhancePlan {
+        /// Plan directory name under plans/.
+        plan: String,
+    },
+    /// Optimize tasks for efficiency, parallelism, and cheapest viable model.
+    EnhanceTasks {
+        /// Plan directory name under plans/.
+        plan: String,
+    },
+    /// Analyze execution episodes for self-learning insights and bandit weight recommendations.
+    Analyze,
+    /// List all research artifacts.
     List,
 }
 
@@ -400,7 +433,8 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             workdir,
         } => cmd_inject(cli, session, &kind, payload, workdir),
         Command::Plan { cmd } => cmd_plan(cli, cmd).await,
-        Command::Prd { cmd } => cmd_prd(cli, cmd),
+        Command::Prd { cmd } => cmd_prd(cli, cmd).await,
+        Command::Research { cmd } => cmd_research(cli, cmd).await,
     }
 }
 
@@ -777,8 +811,175 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
 // Existing subcommand handlers (init, run, status, replay)
 // -----------------------------------------------------------------------
 
-fn cmd_prd(_cli: &Cli, cmd: PrdCmd) -> Result<i32> {
+async fn cmd_research(_cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
+    use roko_cli::agent_exec::{run_agent, AgentExecOpts, load_gateway_env, model_from_config};
+    use roko_cli::research::{build_research_prompt, ResearchMode};
+
     let workdir = std::env::current_dir().context("resolve cwd")?;
+    roko_cli::research::ensure_dirs(&workdir)?;
+    let gw = load_gateway_env(&workdir);
+    let model = model_from_config(&workdir);
+    let model_ref = model.as_deref();
+
+    match cmd {
+        ResearchCmd::Topic { topic } => {
+            let topic = topic.join(" ");
+            println!("🔬 Researching: {topic}");
+            let task_prompt = format!(
+                "Research the topic: \"{topic}\". \
+                 Save your findings to .roko/research/{slug}.md with full citations. \
+                 Read existing docs in .roko/prd/ and .roko/research/ for context on the project.",
+                slug = topic.to_lowercase().replace(' ', "-")
+            );
+            let system = build_research_prompt(&workdir, &topic, "", ResearchMode::Topic);
+            run_agent(AgentExecOpts {
+                prompt: &task_prompt,
+                workdir: &workdir,
+                model: model_ref,
+                system_prompt: Some(&system),
+                env_vars: &gw.vars,
+            }).await
+        }
+        ResearchCmd::EnhancePrd { slug } => {
+            let prd_path = find_prd(&workdir, &slug)?;
+            let content = std::fs::read_to_string(&prd_path)
+                .with_context(|| format!("read {}", prd_path.display()))?;
+            println!("🔬 Enhancing PRD: {slug}");
+            let task_prompt = format!(
+                "Read the PRD at {path} and enhance it: \
+                 (1) Add academic citations [AUTHOR-YEAR] for every design decision. \
+                 (2) Add mermaid diagrams with color styling where architecture would be clearer. \
+                 (3) Identify improvements from recent research. \
+                 (4) Flag claims that contradict recent findings. \
+                 Update the file in place. Also save a research summary to .roko/research/enhance-{slug}.md",
+                path = prd_path.display()
+            );
+            let system = build_research_prompt(&workdir, &slug, &content, ResearchMode::EnhancePrd);
+            run_agent(AgentExecOpts {
+                prompt: &task_prompt,
+                workdir: &workdir,
+                model: model_ref,
+                system_prompt: Some(&system),
+                env_vars: &gw.vars,
+            }).await
+        }
+        ResearchCmd::EnhancePlan { plan } => {
+            let plan_dir = workdir.join("plans").join(&plan);
+            if !plan_dir.is_dir() {
+                anyhow::bail!("Plan directory not found: {}", plan_dir.display());
+            }
+            println!("🔬 Enhancing plan: {plan}");
+            let task_prompt = format!(
+                "Read the plan at plans/{plan}/plan.md and plans/{plan}/tasks.toml. \
+                 Optimize them using research-backed techniques: \
+                 (1) Better task decomposition (cite SWE-bench, Agentless). \
+                 (2) More precise context injection per task (exact file:line ranges). \
+                 (3) Stronger verification (executable commands, not descriptions). \
+                 (4) Cost optimization (assign cheapest model per task tier). \
+                 Update the files in place."
+            );
+            let mut context = String::new();
+            for name in ["plan.md", "tasks.toml"] {
+                let p = plan_dir.join(name);
+                if p.exists() {
+                    let c = std::fs::read_to_string(&p).unwrap_or_default();
+                    context.push_str(&format!("### {name}\n```\n{c}\n```\n\n"));
+                }
+            }
+            let system = build_research_prompt(&workdir, &plan, &context, ResearchMode::EnhancePlan);
+            run_agent(AgentExecOpts {
+                prompt: &task_prompt,
+                workdir: &workdir,
+                model: model_ref,
+                system_prompt: Some(&system),
+                env_vars: &gw.vars,
+            }).await
+        }
+        ResearchCmd::EnhanceTasks { plan } => {
+            let tasks_path = workdir.join("plans").join(&plan).join("tasks.toml");
+            if !tasks_path.exists() {
+                anyhow::bail!("tasks.toml not found: {}", tasks_path.display());
+            }
+            println!("🔬 Optimizing tasks: {plan}");
+            let content = std::fs::read_to_string(&tasks_path)?;
+            let task_prompt = format!(
+                "Read plans/{plan}/tasks.toml and optimize every task: \
+                 (1) Split any task >50 LOC into smaller subtasks. \
+                 (2) Add context.read_files with exact line ranges for each task. \
+                 (3) Ensure every acceptance criterion is a runnable shell command. \
+                 (4) Remove unnecessary dependency edges to increase parallelism. \
+                 (5) Assign tier (mechanical/focused/integrative/architectural) and model_hint. \
+                 Search the codebase to verify file paths exist. Update tasks.toml in place."
+            );
+            let system = build_research_prompt(&workdir, &plan, &content, ResearchMode::EnhanceTasks);
+            run_agent(AgentExecOpts {
+                prompt: &task_prompt,
+                workdir: &workdir,
+                model: model_ref,
+                system_prompt: Some(&system),
+                env_vars: &gw.vars,
+            }).await
+        }
+        ResearchCmd::Analyze => {
+            let episodes_path = workdir.join(".roko/memory/episodes.jsonl");
+            let context = if episodes_path.exists() {
+                std::fs::read_to_string(&episodes_path).unwrap_or_default()
+            } else {
+                String::from("(no episodes yet — run some tasks first)")
+            };
+            println!("🔬 Analyzing execution data");
+            let task_prompt = "Read .roko/memory/episodes.jsonl and analyze: \
+                 (1) First-attempt pass rate by task tier and model. \
+                 (2) Cost per task — are expensive models used for easy tasks? \
+                 (3) Retry patterns — what kinds of tasks fail most? \
+                 (4) Recommendations: which bandit weights to adjust. \
+                 Save analysis to .roko/research/execution-analysis.md".to_string();
+            let system = build_research_prompt(&workdir, "execution-analysis", &context, ResearchMode::AnalyzeExecution);
+            run_agent(AgentExecOpts {
+                prompt: &task_prompt,
+                workdir: &workdir,
+                model: model_ref,
+                system_prompt: Some(&system),
+                env_vars: &gw.vars,
+            }).await
+        }
+        ResearchCmd::List => {
+            let files = roko_cli::research::list_research(&workdir)?;
+            if files.is_empty() {
+                println!("No research artifacts. Run: roko research topic \"your topic\"");
+            } else {
+                println!("═══ Research Artifacts ═══");
+                for f in &files {
+                    let name = f.file_stem().unwrap_or_default().to_string_lossy();
+                    let size = std::fs::metadata(f).map(|m| m.len()).unwrap_or(0);
+                    println!("  {name:<45} {size:>6} bytes");
+                }
+            }
+            Ok(0)
+        }
+    }
+}
+
+/// Find a PRD by slug in either published or drafts.
+fn find_prd(workdir: &Path, slug: &str) -> Result<PathBuf> {
+    let published = workdir.join(".roko/prd/published").join(format!("{slug}.md"));
+    if published.exists() {
+        return Ok(published);
+    }
+    let draft = workdir.join(".roko/prd/drafts").join(format!("{slug}.md"));
+    if draft.exists() {
+        return Ok(draft);
+    }
+    anyhow::bail!("PRD not found: {slug} (checked published/ and drafts/)");
+}
+
+async fn cmd_prd(_cli: &Cli, cmd: PrdCmd) -> Result<i32> {
+    use roko_cli::agent_exec::{run_agent, AgentExecOpts, load_gateway_env, model_from_config};
+
+    let workdir = std::env::current_dir().context("resolve cwd")?;
+    let gw = load_gateway_env(&workdir);
+    let model = model_from_config(&workdir);
+    let model_ref = model.as_deref();
 
     match cmd {
         PrdCmd::Idea { text } => {
@@ -806,63 +1007,72 @@ fn cmd_prd(_cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                     eprintln!("Use: roko prd draft edit {slug}");
                     return Ok(1);
                 }
-                // Write the scaffold, then print agent prompt for the user
+                // Write scaffold first so agent can read and fill it
                 let frontmatter = roko_cli::prd::new_draft_frontmatter(&slug, &title);
-                let body = format!(
-                    "{frontmatter}\
-                     # {title}\n\n\
-                     ## Overview\n\n\
-                     <!-- Describe what this feature/system does and why -->\n\n\
-                     ## Requirements\n\n\
-                     <!-- REQ-XXX items -->\n\n\
-                     ## Acceptance criteria\n\n\
-                     <!-- Machine-verifiable checkboxes -->\n\n\
-                     ## Design\n\n\
-                     <!-- How it should work, reference existing crates -->\n\n\
-                     ## References\n\n\
-                     <!-- Links to relevant source files -->\n"
+                let scaffold = format!(
+                    "{frontmatter}# {title}\n\n\
+                     ## Overview\n\n## Requirements\n\n## Acceptance criteria\n\n\
+                     ## Design\n\n## References\n"
                 );
-                std::fs::write(&target, &body)?;
-                println!("📄 Draft created: {}", target.display());
-                println!();
-                println!("Edit it manually or run an agent:");
-                println!("  roko prd draft edit {slug}");
-                let prompt = roko_cli::prd::prd_agent_prompt(
+                std::fs::write(&target, &scaffold)?;
+                println!("📄 Creating PRD: {title}");
+
+                let system = roko_cli::prd::prd_agent_prompt(
                     &workdir,
                     &format!(
-                        "Fill in the draft PRD at {path}. Read the codebase to understand what exists. \
-                         Make requirements specific and acceptance criteria machine-verifiable.",
+                        "Fill in the draft PRD at {path}. \
+                         Read the codebase to understand what exists. \
+                         Follow the PRD quality standards in your system prompt exactly.",
                         path = target.display()
                     ),
                 );
-                println!();
-                println!("Or use this prompt with `roko run`:");
-                println!("  roko run '{}'", prompt.lines().next().unwrap_or(""));
-                Ok(0)
+                let task_prompt = format!(
+                    "Read the scaffold at {path} and fill it in completely. \
+                     Search the codebase with grep to understand what exists. \
+                     Include 10+ academic citations, 2+ mermaid diagrams, and \
+                     machine-verifiable acceptance criteria. \
+                     Write the complete PRD to {path}.",
+                    path = target.display()
+                );
+                run_agent(AgentExecOpts {
+                    prompt: &task_prompt,
+                    workdir: &workdir,
+                    model: model_ref,
+                    system_prompt: Some(&system),
+                    env_vars: &gw.vars,
+                }).await
             }
             PrdDraftCmd::Edit { slug } => {
-                let draft = workdir
-                    .join(".roko")
-                    .join("prd")
-                    .join("drafts")
-                    .join(format!("{slug}.md"));
+                let draft = workdir.join(".roko/prd/drafts").join(format!("{slug}.md"));
                 if !draft.exists() {
                     eprintln!("Draft not found: {}", draft.display());
                     return Ok(1);
                 }
-                let prompt = roko_cli::prd::prd_agent_prompt(
+                println!("📝 Refining draft: {slug}");
+                let system = roko_cli::prd::prd_agent_prompt(
                     &workdir,
                     &format!(
                         "Read and improve the draft PRD at {path}. \
-                         Check: are requirements specific? Are acceptance criteria machine-verifiable? \
-                         Search the codebase to verify claims. Update the file in place.",
+                         Follow the PRD quality standards in your system prompt.",
                         path = draft.display()
                     ),
                 );
-                println!("Refining draft: {slug}");
-                println!("Run: roko run '{}'", prompt.lines().next().unwrap_or(""));
-                // TODO: once roko run can be called programmatically, do it here
-                Ok(0)
+                let task_prompt = format!(
+                    "Read {path} and improve it: \
+                     (1) Are requirements specific and testable? \
+                     (2) Are acceptance criteria machine-verifiable shell commands? \
+                     (3) Are there 10+ citations with [AUTHOR-YEAR] format? \
+                     (4) Are there 2+ mermaid diagrams with color styling? \
+                     Search the codebase to verify claims. Update the file in place.",
+                    path = draft.display()
+                );
+                run_agent(AgentExecOpts {
+                    prompt: &task_prompt,
+                    workdir: &workdir,
+                    model: model_ref,
+                    system_prompt: Some(&system),
+                    env_vars: &gw.vars,
+                }).await
             }
             PrdDraftCmd::Promote { slug } => {
                 roko_cli::prd::cmd_promote(&workdir, &slug)?;
@@ -883,15 +1093,58 @@ fn cmd_prd(_cli: &Cli, cmd: PrdCmd) -> Result<i32> {
             }
         },
         PrdCmd::Plan { slug } => {
-            println!("Generating plans from PRD: {slug}");
-            println!("Run: ./scripts/generate-plans.sh checklist \"{slug}\"");
-            // TODO: call agent directly once run_once is refactored to return output
-            Ok(0)
+            let prd_path = find_prd(&workdir, &slug)?;
+            let content = std::fs::read_to_string(&prd_path)?;
+            println!("📋 Generating plans from PRD: {slug}");
+            let system = roko_cli::plan_generate::PLAN_GENERATOR_SYSTEM_PROMPT;
+            let task_prompt = format!(
+                "Read the PRD at {path} and generate implementation plan directories \
+                 under plans/. Each REQ-XXX requirement becomes one or more tasks. \
+                 Each acceptance criterion becomes a task verification command. \
+                 Search the codebase first to understand what already exists. \
+                 Create plan.md and tasks.toml files directly.\n\n\
+                 PRD content:\n{content}",
+                path = prd_path.display()
+            );
+            run_agent(AgentExecOpts {
+                prompt: &task_prompt,
+                workdir: &workdir,
+                model: model_ref,
+                system_prompt: Some(system),
+                env_vars: &gw.vars,
+            }).await
         }
         PrdCmd::Consolidate => {
-            println!("Run: ./scripts/roko-prd.sh consolidate");
-            // TODO: call agent directly
-            Ok(0)
+            println!("🔄 Scanning all PRDs for duplicates, gaps, and inconsistencies...");
+            let mut all_context = String::new();
+            for dir_name in ["published", "drafts"] {
+                let dir = workdir.join(".roko/prd").join(dir_name);
+                for path in roko_cli::prd::list_md_files(&dir) {
+                    if let Ok(c) = std::fs::read_to_string(&path) {
+                        let truncated: String = c.lines().take(50).collect::<Vec<_>>().join("\n");
+                        all_context.push_str(&format!("### {}\n{truncated}\n---\n\n", path.display()));
+                    }
+                }
+            }
+            let ideas = std::fs::read_to_string(workdir.join(".roko/prd/ideas.md")).unwrap_or_default();
+            let task_prompt = format!(
+                "Review ALL existing PRDs and ideas. Report: \
+                 (1) DUPLICATES: PRDs covering the same thing (propose merge). \
+                 (2) GAPS: Areas with no PRD coverage. \
+                 (3) INCONSISTENCIES: Conflicting requirements. \
+                 (4) STALE: Requirements already implemented (check the code). \
+                 (5) IDEAS TO PROMOTE: Ideas that should become draft PRDs. \
+                 After analysis, create new drafts for gaps and update existing PRDs.\n\n\
+                 PRDs:\n{all_context}\n\nIdeas:\n{ideas}"
+            );
+            let system = roko_cli::prd::prd_agent_prompt(&workdir, "Consolidate all PRDs");
+            run_agent(AgentExecOpts {
+                prompt: &task_prompt,
+                workdir: &workdir,
+                model: model_ref,
+                system_prompt: Some(&system),
+                env_vars: &gw.vars,
+            }).await
         }
     }
 }

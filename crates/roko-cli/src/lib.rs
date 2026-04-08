@@ -10,6 +10,7 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+pub mod agent_exec;
 pub mod clean;
 pub mod config;
 pub mod config_cmd;
@@ -20,9 +21,11 @@ pub mod oneshot;
 pub mod orchestrate;
 pub mod pipe;
 pub mod plan;
+pub mod plan_generate;
 pub mod prd;
 pub mod prd_prompt;
 pub mod repl;
+pub mod research;
 pub mod run;
 pub mod secrets;
 pub mod status;
