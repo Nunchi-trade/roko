@@ -64,6 +64,20 @@ impl PageId {
             Self::ConfigView => "config-view",
         }
     }
+
+    /// Stable high-level grouping used by CLI renderers.
+    #[must_use]
+    pub const fn group(self) -> &'static str {
+        match self {
+            Self::Health
+            | Self::Trends
+            | Self::Correlations
+            | Self::Parameters
+            | Self::Experiments
+            | Self::Optimizer => "efficiency",
+            Self::AgentStatus | Self::PlanView | Self::LogView | Self::ConfigView => "operations",
+        }
+    }
 }
 
 /// Placeholder widget metadata for a page.
@@ -121,16 +135,121 @@ impl PageScaffold {
         }
     }
 
+    /// Number of widgets on this page.
+    #[must_use]
+    pub fn widget_count(&self) -> usize {
+        self.widgets.len()
+    }
+
+    /// Compact comma-separated widget-title summary.
+    #[must_use]
+    pub fn widget_title_summary(&self, limit: usize) -> String {
+        if self.widgets.is_empty() {
+            return String::from("no widgets");
+        }
+
+        let mut titles = self
+            .widgets
+            .iter()
+            .take(limit)
+            .map(|widget| widget.title)
+            .collect::<Vec<_>>();
+        if self.widgets.len() > limit {
+            titles.push("...");
+        }
+        titles.join(", ")
+    }
+
+    /// Render a one-line page summary for page indexes and selectors.
+    #[must_use]
+    pub fn render_summary_line(&self, active: bool) -> String {
+        let marker = if active { "*" } else { " " };
+        format!(
+            "{marker} {} [{}] {} | {} widgets | focus: {}",
+            self.title,
+            self.id.slug(),
+            self.id.group(),
+            self.widget_count(),
+            self.widget_title_summary(3)
+        )
+    }
+
+    /// Render the widget list only, suitable for a targeted page selection.
+    #[must_use]
+    pub fn render_widget_list(&self) -> String {
+        let mut out = String::new();
+        let _ = writeln!(out, "{} [{}]", self.title, self.id.slug());
+        let _ = writeln!(out, "group: {}", self.id.group());
+        let _ = writeln!(out, "intent: {}", self.intent);
+        let _ = writeln!(out, "widgets ({}):", self.widget_count());
+        for widget in &self.widgets {
+            let _ = writeln!(out, "{}", widget.render_line());
+        }
+        out
+    }
+
     /// Render this page as plain text for command output.
     #[must_use]
     pub fn render_text(&self) -> String {
         let mut out = String::new();
         let _ = writeln!(out, "{} ({})", self.title, self.id.slug(),);
-        let _ = writeln!(out, "{}", self.intent);
-        out.push_str("widgets:\n");
+        let _ = writeln!(out, "group: {}", self.id.group());
+        let _ = writeln!(out, "intent: {}", self.intent);
+        let _ = writeln!(out, "focus: {}", self.widget_title_summary(3));
+        let _ = writeln!(out, "widgets ({}):", self.widget_count());
         for widget in &self.widgets {
             let _ = writeln!(out, "{}", widget.render_line());
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_page() -> PageScaffold {
+        PageScaffold::new(
+            PageId::Health,
+            "Health",
+            "Top-line efficiency gauges for current runs.",
+            vec![
+                WidgetScaffold::new("pass_rate", "Pass Rate", "Rolling gate pass rate."),
+                WidgetScaffold::new("cost_per_task", "Cost / Task", "Average spend per task."),
+                WidgetScaffold::new(
+                    "prompt_size",
+                    "Prompt Size",
+                    "Median prompt token footprint.",
+                ),
+            ],
+        )
+    }
+
+    #[test]
+    fn page_group_matches_expected_section() {
+        assert_eq!(PageId::Health.group(), "efficiency");
+        assert_eq!(PageId::PlanView.group(), "operations");
+    }
+
+    #[test]
+    fn summary_line_includes_slug_group_and_focus() {
+        let line = sample_page().render_summary_line(true);
+        assert!(line.contains("* Health [health] efficiency"));
+        assert!(line.contains("3 widgets"));
+        assert!(line.contains("Pass Rate, Cost / Task, Prompt Size"));
+    }
+
+    #[test]
+    fn widget_list_renders_count_and_purpose_lines() {
+        let rendered = sample_page().render_widget_list();
+        assert!(rendered.contains("widgets (3):"));
+        assert!(rendered.contains("- Pass Rate [pass_rate]: Rolling gate pass rate."));
+    }
+
+    #[test]
+    fn full_page_render_includes_group_and_focus() {
+        let rendered = sample_page().render_text();
+        assert!(rendered.contains("group: efficiency"));
+        assert!(rendered.contains("focus: Pass Rate, Cost / Task, Prompt Size"));
     }
 }

@@ -64,6 +64,7 @@ Structure every research output as:
 "#;
 
 /// Build the prompt for a research task.
+#[allow(clippy::too_many_lines)]
 pub fn build_research_prompt(
     workdir: &Path,
     topic: &str,
@@ -75,62 +76,133 @@ pub fn build_research_prompt(
     let _ = writeln!(prompt, "\n---\n");
     let _ = writeln!(prompt, "## Workspace: {}\n", workdir.display());
 
+    // Include master index so the agent knows what exists
+    let master_index = std::fs::read_to_string(workdir.join(".roko/INDEX.md")).unwrap_or_default();
+    if !master_index.is_empty() {
+        let _ = writeln!(prompt, "## What already exists (do NOT duplicate)\n{master_index}\n---\n");
+    }
+
     match mode {
         ResearchMode::Topic => {
             let _ = writeln!(prompt, "## Research task\n");
             let _ = writeln!(prompt, "Deep-dive research on: **{topic}**\n");
-            let _ = writeln!(prompt, "Produce a research document with 10-20 findings, each with citation, relevance, and recommendation.");
-            let _ = writeln!(prompt, "Save the output to .roko/research/{}.md", slug(topic));
+            let _ = writeln!(
+                prompt,
+                "Produce a research document with 10-20 findings, each with citation, relevance, and recommendation."
+            );
+            let _ = writeln!(
+                prompt,
+                "Save the output to .roko/research/{}.md",
+                slug(topic)
+            );
         }
         ResearchMode::EnhancePrd => {
             let _ = writeln!(prompt, "## Enhancement task\n");
             let _ = writeln!(prompt, "Read this PRD and enhance it with research:\n");
             let _ = writeln!(prompt, "{context}\n");
             let _ = writeln!(prompt, "For each section:");
-            let _ = writeln!(prompt, "1. Add missing citations (find real papers that support design decisions)");
-            let _ = writeln!(prompt, "2. Add mermaid diagrams where architecture would be clearer");
+            let _ = writeln!(
+                prompt,
+                "1. Add missing citations (find real papers that support design decisions)"
+            );
+            let _ = writeln!(
+                prompt,
+                "2. Add mermaid diagrams where architecture would be clearer"
+            );
             let _ = writeln!(prompt, "3. Identify improvements from recent research");
             let _ = writeln!(prompt, "4. Flag any claims that contradict recent findings");
-            let _ = writeln!(prompt, "\nUpdate the PRD file in place. Also save a research summary to .roko/research/{}.md", slug(topic));
+            let _ = writeln!(
+                prompt,
+                "\nUpdate the PRD file in place. Also save a research summary to .roko/research/{}.md",
+                slug(topic)
+            );
         }
         ResearchMode::EnhancePlan => {
             let _ = writeln!(prompt, "## Plan enhancement task\n");
             let _ = writeln!(prompt, "Read this implementation plan and optimize it:\n");
             let _ = writeln!(prompt, "{context}\n");
             let _ = writeln!(prompt, "Research and apply:");
-            let _ = writeln!(prompt, "1. Better task decomposition strategies (cite SWE-bench, Agentless, etc.)");
+            let _ = writeln!(
+                prompt,
+                "1. Better task decomposition strategies (cite SWE-bench, Agentless, etc.)"
+            );
             let _ = writeln!(prompt, "2. More precise context injection techniques");
             let _ = writeln!(prompt, "3. Stronger verification approaches");
-            let _ = writeln!(prompt, "4. Cost optimization (cheaper models for simple tasks)");
+            let _ = writeln!(
+                prompt,
+                "4. Cost optimization (cheaper models for simple tasks)"
+            );
             let _ = writeln!(prompt, "\nUpdate the plan files in place.");
         }
         ResearchMode::EnhanceTasks => {
             let _ = writeln!(prompt, "## Task optimization task\n");
-            let _ = writeln!(prompt, "Read these tasks and optimize for maximum efficiency:\n");
+            let _ = writeln!(
+                prompt,
+                "Read these tasks and optimize for maximum efficiency:\n"
+            );
             let _ = writeln!(prompt, "{context}\n");
             let _ = writeln!(prompt, "For each task:");
-            let _ = writeln!(prompt, "1. Can it be split into smaller Tier 0 (Haiku-capable) subtasks?");
-            let _ = writeln!(prompt, "2. Is the context surgical enough? Reduce to exact line ranges.");
-            let _ = writeln!(prompt, "3. Are acceptance criteria truly machine-verifiable?");
-            let _ = writeln!(prompt, "4. Can parallelism be increased by removing unnecessary dependencies?");
-            let _ = writeln!(prompt, "5. What anti-patterns should be added from research on common agent failures?");
+            let _ = writeln!(
+                prompt,
+                "1. Can it be split into smaller Tier 0 (Haiku-capable) subtasks?"
+            );
+            let _ = writeln!(
+                prompt,
+                "2. Is the context surgical enough? Reduce to exact line ranges."
+            );
+            let _ = writeln!(
+                prompt,
+                "3. Are acceptance criteria truly machine-verifiable?"
+            );
+            let _ = writeln!(
+                prompt,
+                "4. Can parallelism be increased by removing unnecessary dependencies?"
+            );
+            let _ = writeln!(
+                prompt,
+                "5. What anti-patterns should be added from research on common agent failures?"
+            );
             let _ = writeln!(prompt, "\nUpdate tasks.toml in place.");
         }
         ResearchMode::AnalyzeExecution => {
             let _ = writeln!(prompt, "## Execution analysis task\n");
-            let _ = writeln!(prompt, "Analyze the execution data and identify optimization opportunities:\n");
+            let _ = writeln!(
+                prompt,
+                "Analyze the execution data and identify optimization opportunities:\n"
+            );
             let _ = writeln!(prompt, "{context}\n");
             let _ = writeln!(prompt, "Compute and report:");
-            let _ = writeln!(prompt, "1. First-attempt pass rate (FAPR) by task tier and model");
-            let _ = writeln!(prompt, "2. Cost per task by tier — are we using expensive models for easy tasks?");
+            let _ = writeln!(
+                prompt,
+                "1. First-attempt pass rate (FAPR) by task tier and model"
+            );
+            let _ = writeln!(
+                prompt,
+                "2. Cost per task by tier — are we using expensive models for easy tasks?"
+            );
             let _ = writeln!(prompt, "3. Retry patterns — what kinds of tasks fail most?");
             let _ = writeln!(prompt, "4. Context size vs success rate correlation");
-            let _ = writeln!(prompt, "5. Recommendations: which bandit weights to adjust, which task types need better context");
-            let _ = writeln!(prompt, "\nSave analysis to .roko/research/execution-analysis-{}.md", chrono::Local::now().format("%Y%m%d"));
+            let _ = writeln!(
+                prompt,
+                "5. Recommendations: which bandit weights to adjust, which task types need better context"
+            );
+            let _ = writeln!(
+                prompt,
+                "\nSave analysis to .roko/research/execution-analysis-{}.md",
+                chrono::Local::now().format("%Y%m%d")
+            );
         }
     }
 
-    if !context.is_empty() && !matches!(mode, ResearchMode::EnhancePrd | ResearchMode::EnhancePlan | ResearchMode::EnhanceTasks | ResearchMode::AnalyzeExecution) {
+    if !context.is_empty()
+        && !matches!(
+            mode,
+            ResearchMode::EnhancePrd
+                | ResearchMode::EnhancePlan
+                | ResearchMode::EnhanceTasks
+                | ResearchMode::AnalyzeExecution
+        )
+    {
         let _ = writeln!(prompt, "\n## Additional context\n{context}");
     }
 
@@ -186,7 +258,10 @@ mod tests {
 
     #[test]
     fn slug_basic() {
-        assert_eq!(slug("Git Worktree Best Practices"), "git-worktree-best-practices");
+        assert_eq!(
+            slug("Git Worktree Best Practices"),
+            "git-worktree-best-practices"
+        );
     }
 
     #[test]

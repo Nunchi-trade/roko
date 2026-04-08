@@ -13,9 +13,55 @@ env = [
   ["ANTHROPIC_API_KEY", "mori-local-gateway"],
 ]
 
+# Per-tier model mapping (matches mori's band→model system)
+# Overrides the global model when tasks.toml specifies a tier.
+# mechanical = cheapest model for imports/renames (≤20 LOC)
+# focused = mid-tier for single functions/tests (≤50 LOC)
+# integrative = mid/high for multi-module wiring (≤150 LOC)
+# architectural = highest for API design (≤300 LOC)
+[agent.tier_models]
+mechanical = "claude-haiku-4-5"
+focused = "claude-sonnet-4-6"
+integrative = "claude-sonnet-4-6"
+architectural = "claude-opus-4-6"
+
+# Retry escalation: on failure, escalate to next tier's model
+# mechanical → focused → integrative → architectural → human
+[agent.escalation]
+max_retries = 3
+escalate_model = true
+
 [prompt]
 token_budget = 50000
 role = "You are a Roko agent working on the roko codebase at /Users/will/dev/nunchi/roko/roko/."
+
+# Per-role prompt budgets (chars, matching mori's PromptBudget)
+[prompt.budgets.implementer]
+plan = 50000
+prd = 12000
+brief = 8000
+file_context = 20000
+skills = 4000
+
+[prompt.budgets.reviewer]
+plan = 30000
+prd = 8000
+brief = 6000
+file_context = 8000
+skills = 2000
+
+[prompt.budgets.architect]
+plan = 50000
+prd = 15000
+brief = 8000
+file_context = 25000
+skills = 4000
+
+# Cost budgets
+[budget]
+max_plan_usd = 10.0
+max_task_usd = 1.0
+warn_at_percent = 80
 
 [[gate]]
 kind = "compile"

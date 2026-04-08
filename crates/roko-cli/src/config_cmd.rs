@@ -98,6 +98,7 @@ pub fn run_init_wizard(target: Option<PathBuf>, inputs: &WizardInputs) -> Result
             timeout_ms: None,
             env: None,
             clean_output: None,
+            mcp_config: None,
         }),
         prompt: Some(PromptLayer {
             token_budget: Some(token_budget),

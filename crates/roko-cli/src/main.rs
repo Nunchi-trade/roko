@@ -12,13 +12,16 @@ use anyhow::{Context as _, Result, anyhow};
 use clap::{Parser, Subcommand, ValueEnum};
 use roko_agent::process::{cleanup_orphaned_agents, reap_orphaned_children};
 use roko_cli::{
-    Config, DaemonMode, EditTarget, InjectKind, InjectRequest, OneshotMode, PipeMode, Plan,
-    PlanSummary, ReplMode, SessionStatus, Source, WizardInputs, config_cmd, load_layered,
-    run_init_wizard, run_once,
+    Config, DaemonMode, DashboardScaffold, EditTarget, InjectKind, InjectRequest, OneshotMode,
+    PageId, PipeMode, Plan, PlanSummary, ReplMode, SessionStatus, Source, WizardInputs, config_cmd,
+    load_layered, run_init_wizard, run_once,
 };
 use roko_core::{ContentHash, Context, Kind, Query, Substrate};
-use roko_fs::{FileSubstrate, RokoLayout};
+use roko_core::{Headlines, TaskMetric, compute_headlines};
+use roko_fs::{FileSubstrate, FsObservabilitySinks, RokoLayout};
+use roko_learn::episode_logger::{Episode, EpisodeLogger};
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use tracing_subscriber::EnvFilter;
@@ -180,6 +183,18 @@ enum Command {
     Research {
         #[command(subcommand)]
         cmd: ResearchCmd,
+    },
+    /// Render the dashboard scaffold in plain text.
+    Dashboard {
+        /// Specific dashboard page slug to render.
+        #[arg(long)]
+        page: Option<String>,
+        /// List all available page slugs.
+        #[arg(long)]
+        list_pages: bool,
+        /// Override the working directory (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
     },
 }
 
@@ -432,9 +447,26 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             payload,
             workdir,
         } => cmd_inject(cli, session, &kind, payload, workdir),
-        Command::Plan { cmd } => cmd_plan(cli, cmd).await,
-        Command::Prd { cmd } => cmd_prd(cli, cmd).await,
-        Command::Research { cmd } => cmd_research(cli, cmd).await,
+        Command::Plan { cmd } => {
+            let result = cmd_plan(cli, cmd).await;
+            let _ = roko_cli::index::rebuild_all(&std::env::current_dir().unwrap_or_default());
+            result
+        }
+        Command::Prd { cmd } => {
+            let result = cmd_prd(cli, cmd).await;
+            let _ = roko_cli::index::rebuild_all(&std::env::current_dir().unwrap_or_default());
+            result
+        }
+        Command::Research { cmd } => {
+            let result = cmd_research(cli, cmd).await;
+            let _ = roko_cli::index::rebuild_all(&std::env::current_dir().unwrap_or_default());
+            result
+        }
+        Command::Dashboard {
+            page,
+            list_pages,
+            workdir,
+        } => cmd_dashboard(cli, workdir, page, list_pages).await,
     }
 }
 
@@ -535,6 +567,282 @@ fn cmd_headless(cli: &Cli) -> i32 {
     daemon.mark_stopped();
 
     EXIT_SUCCESS
+}
+
+async fn cmd_dashboard(
+    cli: &Cli,
+    workdir: Option<PathBuf>,
+    page: Option<String>,
+    list_pages: bool,
+) -> Result<i32> {
+    let output = dashboard_output(cli, workdir, page, list_pages).await?;
+    print!("{output}");
+    Ok(EXIT_SUCCESS)
+}
+
+async fn dashboard_output(
+    cli: &Cli,
+    workdir: Option<PathBuf>,
+    page: Option<String>,
+    list_pages: bool,
+) -> Result<String> {
+    let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
+    prepare_runtime_hooks(&workdir, cli.quiet);
+
+    let dashboard = DashboardScaffold::new();
+    if list_pages {
+        let mut out = String::new();
+        for page in dashboard.pages() {
+            let _ = writeln!(out, "{:<16} {}", page.id.slug(), page.title);
+        }
+        return Ok(out);
+    }
+
+    let snapshot = DashboardSnapshot::load(&workdir).await?;
+
+    if let Some(page) = page {
+        let Some(page_id) = parse_dashboard_page(&page) else {
+            anyhow::bail!(
+                "unknown dashboard page `{page}`; available pages: {}",
+                dashboard_page_slugs().join(", ")
+            );
+        };
+        Ok(match page_id {
+            PageId::Health | PageId::Trends => snapshot
+                .render_page_text(page_id)
+                .unwrap_or_else(|| dashboard.render_active_page_text()),
+            _ => {
+                let mut dashboard = dashboard;
+                let _ = dashboard.set_active_page(page_id);
+                dashboard.render_active_page_text()
+            }
+        })
+    } else {
+        Ok(dashboard.render_overview_text())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct DashboardSnapshot {
+    episodes: Vec<Episode>,
+    task_metrics: Vec<TaskMetric>,
+    headlines: Headlines,
+}
+
+impl DashboardSnapshot {
+    async fn load(workdir: &Path) -> Result<Self> {
+        let layout = RokoLayout::for_project(workdir);
+        let episodes = EpisodeLogger::read_all_lossy(layout.episodes_path()).await?;
+        let task_metrics = load_task_metrics(layout.memory_dir().join("task-metrics.jsonl")).await;
+        let headlines = compute_headlines(&task_metrics);
+        Ok(Self {
+            episodes,
+            task_metrics,
+            headlines,
+        })
+    }
+
+    fn render_page_text(&self, page: PageId) -> Option<String> {
+        match page {
+            PageId::Health => Some(self.render_health_page_text()),
+            PageId::Trends => Some(self.render_trends_page_text()),
+            _ => None,
+        }
+    }
+
+    fn render_health_page_text(&self) -> String {
+        let summary = self.health_summary();
+        render_data_page(
+            "Health",
+            PageId::Health.slug(),
+            "Top-line health gauges derived from the latest snapshot.",
+            &[
+                format!(
+                    "focus: {} episodes, {} success, {} avg cost",
+                    summary.episode_count,
+                    format_percent(summary.success_rate),
+                    format_currency(summary.avg_cost_per_episode)
+                ),
+                format!("episodes: {}", summary.episode_count),
+                format!("success rate: {}", format_percent(summary.success_rate)),
+                format!(
+                    "avg cost / episode: {}",
+                    format_currency(summary.avg_cost_per_episode)
+                ),
+                format!(
+                    "avg wall time: {}",
+                    format_duration(summary.avg_wall_time_ms)
+                ),
+                format!("cache hit rate: {}", format_percent(summary.cache_hit_rate)),
+                format!("haiku share: {}", format_percent(summary.haiku_share)),
+            ],
+        )
+    }
+
+    fn render_trends_page_text(&self) -> String {
+        let summary = self.health_summary();
+        let headlines = self.headlines;
+        render_data_page(
+            "Trends",
+            PageId::Trends.slug(),
+            "Time-series learning signals from the current snapshot.",
+            &[
+                format!(
+                    "focus: {} records across {} plans, {} pass rate",
+                    headlines.n_records,
+                    headlines.n_plans,
+                    format_percent(headlines.first_attempt_pass_rate)
+                ),
+                format!(
+                    "first-attempt pass rate: {}",
+                    format_percent(headlines.first_attempt_pass_rate)
+                ),
+                format!(
+                    "avg iterations per plan: {:.2}",
+                    headlines.avg_iterations_per_plan
+                ),
+                format!(
+                    "avg cost per plan: {}",
+                    format_currency(headlines.avg_cost_per_plan)
+                ),
+                format!(
+                    "avg input tokens per spawn: {:.0}",
+                    headlines.avg_input_tokens_per_spawn
+                ),
+                format!("haiku share: {}", format_percent(summary.haiku_share)),
+                format!("cache hit rate: {}", format_percent(summary.cache_hit_rate)),
+            ],
+        )
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn health_summary(&self) -> DashboardHealthSummary {
+        let episode_count = self.episodes.len();
+        let success_count = self
+            .episodes
+            .iter()
+            .filter(|episode| episode.success)
+            .count();
+        let total_cost = self
+            .episodes
+            .iter()
+            .map(|episode| episode.usage.cost_usd)
+            .sum::<f64>();
+        let total_wall_ms = self
+            .episodes
+            .iter()
+            .map(|episode| episode.usage.wall_ms)
+            .sum::<u64>();
+        let total_input_tokens = self
+            .episodes
+            .iter()
+            .map(|episode| episode.usage.input_tokens)
+            .sum::<u64>();
+        let total_cache_read_tokens = self
+            .episodes
+            .iter()
+            .map(|episode| episode.usage.cache_read_tokens)
+            .sum::<u64>();
+        let avg_cost_per_episode = if episode_count == 0 {
+            0.0
+        } else {
+            total_cost / episode_count as f64
+        };
+        let avg_wall_time_ms = if episode_count == 0 {
+            0.0
+        } else {
+            total_wall_ms as f64 / episode_count as f64
+        };
+        let cache_hit_rate = if total_input_tokens == 0 {
+            0.0
+        } else {
+            total_cache_read_tokens as f64 / total_input_tokens as f64
+        };
+        let haiku_share = if self.task_metrics.is_empty() {
+            0.0
+        } else {
+            self.task_metrics
+                .iter()
+                .filter(|metric| metric.model.to_ascii_lowercase().contains("haiku"))
+                .count() as f64
+                / self.task_metrics.len() as f64
+        };
+
+        DashboardHealthSummary {
+            episode_count,
+            success_rate: if episode_count == 0 {
+                0.0
+            } else {
+                success_count as f64 / episode_count as f64
+            },
+            avg_cost_per_episode,
+            avg_wall_time_ms,
+            cache_hit_rate,
+            haiku_share,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct DashboardHealthSummary {
+    episode_count: usize,
+    success_rate: f64,
+    avg_cost_per_episode: f64,
+    avg_wall_time_ms: f64,
+    cache_hit_rate: f64,
+    haiku_share: f64,
+}
+
+fn render_data_page(title: &str, slug: &str, intent: &str, lines: &[String]) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "{title} ({slug})");
+    let _ = writeln!(out, "group: efficiency");
+    let _ = writeln!(out, "intent: {intent}");
+    let _ = writeln!(
+        out,
+        "focus: {}",
+        lines.first().map_or("n/a", String::as_str)
+    );
+    let _ = writeln!(out, "widgets ({}):", lines.len());
+    for (idx, line) in lines.iter().enumerate() {
+        let _ = writeln!(out, "- {}: {}", idx + 1, line);
+    }
+    out
+}
+
+fn format_percent(value: f64) -> String {
+    format!("{:.1}%", value * 100.0)
+}
+
+fn format_currency(value: f64) -> String {
+    format!("${value:.4}")
+}
+
+fn format_duration(ms: f64) -> String {
+    if ms >= 1000.0 {
+        let seconds = ms / 1000.0;
+        format!("{seconds:.2}s")
+    } else {
+        format!("{ms:.0}ms")
+    }
+}
+
+async fn load_task_metrics(path: PathBuf) -> Vec<TaskMetric> {
+    let Ok(text) = tokio::fs::read_to_string(&path).await else {
+        return Vec::new();
+    };
+
+    let mut records = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(metric) = TaskMetric::from_jsonl(line) {
+            records.push(metric);
+        }
+    }
+    records
 }
 
 // -----------------------------------------------------------------------
@@ -811,15 +1119,18 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
 // Existing subcommand handlers (init, run, status, replay)
 // -----------------------------------------------------------------------
 
-async fn cmd_research(_cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
-    use roko_cli::agent_exec::{run_agent, AgentExecOpts, load_gateway_env, model_from_config};
-    use roko_cli::research::{build_research_prompt, ResearchMode};
+async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
+    use roko_cli::agent_exec::{AgentExecOpts, load_gateway_env, model_from_config, run_agent};
+    use roko_cli::research::{ResearchMode, build_research_prompt};
 
-    let workdir = std::env::current_dir().context("resolve cwd")?;
+    let workdir = resolve_workdir(cli);
     roko_cli::research::ensure_dirs(&workdir)?;
     let gw = load_gateway_env(&workdir);
-    let model = model_from_config(&workdir);
+    let model = cli.model.clone().or_else(|| model_from_config(&workdir));
     let model_ref = model.as_deref();
+    let effort = cli.effort.map(|effort| effort.to_string());
+    let effort_ref = effort.as_deref();
+    let resume_session = cli.resume.as_deref();
 
     match cmd {
         ResearchCmd::Topic { topic } => {
@@ -836,9 +1147,12 @@ async fn cmd_research(_cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 prompt: &task_prompt,
                 workdir: &workdir,
                 model: model_ref,
+                effort: effort_ref,
                 system_prompt: Some(&system),
+                resume_session,
                 env_vars: &gw.vars,
-            }).await
+            })
+            .await
         }
         ResearchCmd::EnhancePrd { slug } => {
             let prd_path = find_prd(&workdir, &slug)?;
@@ -859,9 +1173,12 @@ async fn cmd_research(_cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 prompt: &task_prompt,
                 workdir: &workdir,
                 model: model_ref,
+                effort: effort_ref,
                 system_prompt: Some(&system),
+                resume_session,
                 env_vars: &gw.vars,
-            }).await
+            })
+            .await
         }
         ResearchCmd::EnhancePlan { plan } => {
             let plan_dir = workdir.join("plans").join(&plan);
@@ -883,17 +1200,21 @@ async fn cmd_research(_cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 let p = plan_dir.join(name);
                 if p.exists() {
                     let c = std::fs::read_to_string(&p).unwrap_or_default();
-                    context.push_str(&format!("### {name}\n```\n{c}\n```\n\n"));
+                    let _ = write!(context, "### {name}\n```\n{c}\n```\n\n");
                 }
             }
-            let system = build_research_prompt(&workdir, &plan, &context, ResearchMode::EnhancePlan);
+            let system =
+                build_research_prompt(&workdir, &plan, &context, ResearchMode::EnhancePlan);
             run_agent(AgentExecOpts {
                 prompt: &task_prompt,
                 workdir: &workdir,
                 model: model_ref,
+                effort: effort_ref,
                 system_prompt: Some(&system),
+                resume_session,
                 env_vars: &gw.vars,
-            }).await
+            })
+            .await
         }
         ResearchCmd::EnhanceTasks { plan } => {
             let tasks_path = workdir.join("plans").join(&plan).join("tasks.toml");
@@ -911,14 +1232,18 @@ async fn cmd_research(_cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                  (5) Assign tier (mechanical/focused/integrative/architectural) and model_hint. \
                  Search the codebase to verify file paths exist. Update tasks.toml in place."
             );
-            let system = build_research_prompt(&workdir, &plan, &content, ResearchMode::EnhanceTasks);
+            let system =
+                build_research_prompt(&workdir, &plan, &content, ResearchMode::EnhanceTasks);
             run_agent(AgentExecOpts {
                 prompt: &task_prompt,
                 workdir: &workdir,
                 model: model_ref,
+                effort: effort_ref,
                 system_prompt: Some(&system),
+                resume_session,
                 env_vars: &gw.vars,
-            }).await
+            })
+            .await
         }
         ResearchCmd::Analyze => {
             let episodes_path = workdir.join(".roko/memory/episodes.jsonl");
@@ -933,15 +1258,24 @@ async fn cmd_research(_cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                  (2) Cost per task — are expensive models used for easy tasks? \
                  (3) Retry patterns — what kinds of tasks fail most? \
                  (4) Recommendations: which bandit weights to adjust. \
-                 Save analysis to .roko/research/execution-analysis.md".to_string();
-            let system = build_research_prompt(&workdir, "execution-analysis", &context, ResearchMode::AnalyzeExecution);
+                 Save analysis to .roko/research/execution-analysis.md"
+                .to_string();
+            let system = build_research_prompt(
+                &workdir,
+                "execution-analysis",
+                &context,
+                ResearchMode::AnalyzeExecution,
+            );
             run_agent(AgentExecOpts {
                 prompt: &task_prompt,
                 workdir: &workdir,
                 model: model_ref,
+                effort: effort_ref,
                 system_prompt: Some(&system),
+                resume_session,
                 env_vars: &gw.vars,
-            }).await
+            })
+            .await
         }
         ResearchCmd::List => {
             let files = roko_cli::research::list_research(&workdir)?;
@@ -962,7 +1296,9 @@ async fn cmd_research(_cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
 
 /// Find a PRD by slug in either published or drafts.
 fn find_prd(workdir: &Path, slug: &str) -> Result<PathBuf> {
-    let published = workdir.join(".roko/prd/published").join(format!("{slug}.md"));
+    let published = workdir
+        .join(".roko/prd/published")
+        .join(format!("{slug}.md"));
     if published.exists() {
         return Ok(published);
     }
@@ -973,13 +1309,16 @@ fn find_prd(workdir: &Path, slug: &str) -> Result<PathBuf> {
     anyhow::bail!("PRD not found: {slug} (checked published/ and drafts/)");
 }
 
-async fn cmd_prd(_cli: &Cli, cmd: PrdCmd) -> Result<i32> {
-    use roko_cli::agent_exec::{run_agent, AgentExecOpts, load_gateway_env, model_from_config};
+async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
+    use roko_cli::agent_exec::{AgentExecOpts, load_gateway_env, model_from_config, run_agent};
 
-    let workdir = std::env::current_dir().context("resolve cwd")?;
+    let workdir = resolve_workdir(cli);
     let gw = load_gateway_env(&workdir);
-    let model = model_from_config(&workdir);
+    let model = cli.model.clone().or_else(|| model_from_config(&workdir));
     let model_ref = model.as_deref();
+    let effort = cli.effort.map(|effort| effort.to_string());
+    let effort_ref = effort.as_deref();
+    let resume_session = cli.resume.as_deref();
 
     match cmd {
         PrdCmd::Idea { text } => {
@@ -1038,9 +1377,12 @@ async fn cmd_prd(_cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                     prompt: &task_prompt,
                     workdir: &workdir,
                     model: model_ref,
+                    effort: effort_ref,
                     system_prompt: Some(&system),
+                    resume_session,
                     env_vars: &gw.vars,
-                }).await
+                })
+                .await
             }
             PrdDraftCmd::Edit { slug } => {
                 let draft = workdir.join(".roko/prd/drafts").join(format!("{slug}.md"));
@@ -1070,9 +1412,12 @@ async fn cmd_prd(_cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                     prompt: &task_prompt,
                     workdir: &workdir,
                     model: model_ref,
+                    effort: effort_ref,
                     system_prompt: Some(&system),
+                    resume_session,
                     env_vars: &gw.vars,
-                }).await
+                })
+                .await
             }
             PrdDraftCmd::Promote { slug } => {
                 roko_cli::prd::cmd_promote(&workdir, &slug)?;
@@ -1110,9 +1455,12 @@ async fn cmd_prd(_cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                 prompt: &task_prompt,
                 workdir: &workdir,
                 model: model_ref,
+                effort: effort_ref,
                 system_prompt: Some(system),
+                resume_session,
                 env_vars: &gw.vars,
-            }).await
+            })
+            .await
         }
         PrdCmd::Consolidate => {
             println!("🔄 Scanning all PRDs for duplicates, gaps, and inconsistencies...");
@@ -1122,11 +1470,12 @@ async fn cmd_prd(_cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                 for path in roko_cli::prd::list_md_files(&dir) {
                     if let Ok(c) = std::fs::read_to_string(&path) {
                         let truncated: String = c.lines().take(50).collect::<Vec<_>>().join("\n");
-                        all_context.push_str(&format!("### {}\n{truncated}\n---\n\n", path.display()));
+                        let _ = write!(all_context, "### {}\n{truncated}\n---\n\n", path.display());
                     }
                 }
             }
-            let ideas = std::fs::read_to_string(workdir.join(".roko/prd/ideas.md")).unwrap_or_default();
+            let ideas =
+                std::fs::read_to_string(workdir.join(".roko/prd/ideas.md")).unwrap_or_default();
             let task_prompt = format!(
                 "Review ALL existing PRDs and ideas. Report: \
                  (1) DUPLICATES: PRDs covering the same thing (propose merge). \
@@ -1142,9 +1491,12 @@ async fn cmd_prd(_cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                 prompt: &task_prompt,
                 workdir: &workdir,
                 model: model_ref,
+                effort: effort_ref,
                 system_prompt: Some(&system),
+                resume_session,
                 env_vars: &gw.vars,
-            }).await
+            })
+            .await
         }
     }
 }
@@ -1481,8 +1833,11 @@ fn bootstrap_observability_dirs(workdir: &Path) -> std::io::Result<()> {
     for dir in layout.top_level_dirs() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::create_dir_all(layout.root().join("traces"))?;
-    std::fs::create_dir_all(layout.root().join("metrics"))?;
+    let sinks = FsObservabilitySinks::for_workdir(workdir);
+    std::fs::create_dir_all(sinks.trace_sink.root())?;
+    if let Some(parent) = sinks.metrics_sink.path().parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     Ok(())
 }
 
@@ -1519,6 +1874,41 @@ fn process_registry_matches_workdir(workdir: &Path) -> bool {
     lhs == rhs
 }
 
+fn parse_dashboard_page(input: &str) -> Option<PageId> {
+    let normalized = input.trim().to_ascii_lowercase().replace(['_', ' '], "-");
+    Some(match normalized.as_str() {
+        "health" => PageId::Health,
+        "trends" => PageId::Trends,
+        "correlations" => PageId::Correlations,
+        "parameters" => PageId::Parameters,
+        "experiments" => PageId::Experiments,
+        "optimizer" => PageId::Optimizer,
+        "agent-status" | "agentstatus" => PageId::AgentStatus,
+        "plan-view" | "planview" => PageId::PlanView,
+        "log-view" | "logview" => PageId::LogView,
+        "config-view" | "configview" => PageId::ConfigView,
+        _ => return None,
+    })
+}
+
+fn dashboard_page_slugs() -> Vec<&'static str> {
+    [
+        PageId::Health,
+        PageId::Trends,
+        PageId::Correlations,
+        PageId::Parameters,
+        PageId::Experiments,
+        PageId::Optimizer,
+        PageId::AgentStatus,
+        PageId::PlanView,
+        PageId::LogView,
+        PageId::ConfigView,
+    ]
+    .into_iter()
+    .map(PageId::slug)
+    .collect()
+}
+
 // -----------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------
@@ -1527,6 +1917,9 @@ fn process_registry_matches_workdir(workdir: &Path) -> bool {
 mod tests {
     use super::*;
     use clap::Parser;
+    use roko_core::ConfigHash;
+    use tempfile::tempdir;
+    use tokio::fs;
 
     #[test]
     fn cli_parses_no_args() {
@@ -1718,6 +2111,130 @@ mod tests {
     fn cli_parses_replay_subcommand() {
         let cli = Cli::try_parse_from(["roko", "replay", "abcd1234"]).unwrap();
         assert!(matches!(cli.command, Some(Command::Replay { .. })));
+    }
+
+    #[test]
+    fn cli_parses_dashboard_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "dashboard", "--page", "plan-view", "--list-pages"])
+            .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Dashboard {
+                page: Some(_),
+                list_pages: true,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn parse_dashboard_page_accepts_known_slugs() {
+        assert_eq!(parse_dashboard_page("health"), Some(PageId::Health));
+        assert_eq!(
+            parse_dashboard_page("agent status"),
+            Some(PageId::AgentStatus)
+        );
+        assert_eq!(parse_dashboard_page("plan_view"), Some(PageId::PlanView));
+    }
+
+    #[test]
+    fn parse_dashboard_page_rejects_unknown_slugs() {
+        assert_eq!(parse_dashboard_page("unknown"), None);
+    }
+
+    async fn seed_dashboard_snapshot(workdir: &Path) {
+        let memory_dir = workdir.join(".roko").join("memory");
+        fs::create_dir_all(&memory_dir).await.unwrap();
+
+        let mut ep1 = Episode::new("agent-a", "task-a");
+        ep1.success = true;
+        ep1.usage.cost_usd = 1.25;
+        ep1.usage.wall_ms = 125;
+        ep1.usage.input_tokens = 100;
+        ep1.usage.cache_read_tokens = 25;
+
+        let mut ep2 = Episode::new("agent-b", "task-b");
+        ep2.success = false;
+        ep2.usage.cost_usd = 2.75;
+        ep2.usage.wall_ms = 225;
+        ep2.usage.input_tokens = 200;
+        ep2.usage.cache_read_tokens = 50;
+
+        let episodes_path = memory_dir.join("episodes.jsonl");
+        let episodes = [
+            serde_json::to_string(&ep1).unwrap(),
+            serde_json::to_string(&ep2).unwrap(),
+        ]
+        .join("\n")
+            + "\n";
+        fs::write(&episodes_path, episodes).await.unwrap();
+
+        let config_hash = ConfigHash::from("abcd1234".to_string());
+        let mut metric1 = TaskMetric::new(config_hash.clone(), "plan-a", "task-a");
+        metric1.model = "claude-haiku".to_string();
+        metric1.gate_passed = true;
+        metric1.cost_usd = 1.0;
+        metric1.input_tokens = 100;
+        metric1.iteration = 1;
+
+        let mut metric2 = TaskMetric::new(config_hash, "plan-b", "task-b");
+        metric2.model = "claude-sonnet".to_string();
+        metric2.gate_passed = false;
+        metric2.cost_usd = 3.0;
+        metric2.input_tokens = 200;
+        metric2.iteration = 1;
+
+        let task_metrics_path = memory_dir.join("task-metrics.jsonl");
+        let task_metrics =
+            [metric1.to_jsonl().unwrap(), metric2.to_jsonl().unwrap()].join("\n") + "\n";
+        fs::write(&task_metrics_path, task_metrics).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dashboard_output_renders_snapshot_for_health_and_falls_back_for_other_pages() {
+        let dir = tempdir().unwrap();
+        seed_dashboard_snapshot(dir.path()).await;
+
+        let cli = Cli::try_parse_from(["roko", "--quiet"]).unwrap();
+        let health = dashboard_output(
+            &cli,
+            Some(dir.path().to_path_buf()),
+            Some("health".to_string()),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(health.contains("Health (health)"));
+        assert!(health.contains("episodes: 2"));
+        assert!(health.contains("success rate: 50.0%"));
+        assert!(health.contains("avg cost / episode: $2.0000"));
+        assert!(health.contains("cache hit rate: 25.0%"));
+
+        let trends = dashboard_output(
+            &cli,
+            Some(dir.path().to_path_buf()),
+            Some("trends".to_string()),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(trends.contains("Trends (trends)"));
+        assert!(trends.contains("first-attempt pass rate: 50.0%"));
+        assert!(trends.contains("avg iterations per plan: 1.00"));
+        assert!(trends.contains("avg cost per plan: $2.0000"));
+        assert!(trends.contains("haiku share: 50.0%"));
+
+        let fallback = dashboard_output(
+            &cli,
+            Some(dir.path().to_path_buf()),
+            Some("plan-view".to_string()),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(fallback.contains("Plan View (plan-view)"));
+        assert!(fallback.contains("widgets (2):"));
+        assert!(fallback.contains("DAG [dag]"));
     }
 
     #[test]

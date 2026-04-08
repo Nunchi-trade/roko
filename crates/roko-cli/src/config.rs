@@ -83,6 +83,11 @@ pub struct AgentConfig {
     /// models like glm-4 / gemma-reasoning work out of the box).
     #[serde(default = "AgentConfig::default_clean")]
     pub clean_output: bool,
+    /// Optional path to an MCP config file (`.mcp.json`). When set, this
+    /// is passed to Claude via `--mcp-config`. If unset, `ClaudeCliAgent`
+    /// auto-discovers by walking up from the working directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_config: Option<PathBuf>,
 }
 
 impl AgentConfig {
@@ -116,6 +121,7 @@ impl Default for AgentConfig {
             timeout_ms: Self::default_timeout(),
             env: Vec::new(),
             clean_output: Self::default_clean(),
+            mcp_config: None,
         }
     }
 }
@@ -347,6 +353,7 @@ impl ConfigLayer {
                     timeout_ms: default_timeout_ms,
                     env: default_env,
                     clean_output: default_clean_output,
+                    mcp_config: default_mcp_config,
                 } = defaults;
                 AgentConfig {
                     command: a.command.unwrap_or(default_command),
@@ -358,6 +365,7 @@ impl ConfigLayer {
                     timeout_ms: a.timeout_ms.unwrap_or(default_timeout_ms),
                     env: a.env.unwrap_or(default_env),
                     clean_output: a.clean_output.unwrap_or(default_clean_output),
+                    mcp_config: a.mcp_config.or(default_mcp_config),
                 }
             }
             None => AgentConfig::default(),
@@ -412,6 +420,9 @@ pub struct AgentLayer {
     /// Whether to strip ANSI + thinking traces from agent output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clean_output: Option<bool>,
+    /// Optional explicit MCP config path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_config: Option<PathBuf>,
 }
 
 impl AgentLayer {
@@ -428,6 +439,7 @@ impl AgentLayer {
             timeout_ms: overlay.timeout_ms.or(self.timeout_ms),
             env: overlay.env.or(self.env),
             clean_output: overlay.clean_output.or(self.clean_output),
+            mcp_config: overlay.mcp_config.or(self.mcp_config),
         }
     }
 }

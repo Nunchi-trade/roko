@@ -5,6 +5,7 @@
 //! workspace root or an existing `.roko/` directory and exposes typed and
 //! trait-object handles.
 
+use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -50,6 +51,57 @@ impl FsObservabilitySinks {
         }
     }
 
+    /// Build sinks rooted at a workspace directory and create their
+    /// backing directories immediately.
+    ///
+    /// This is idempotent: calling it repeatedly only re-validates that the
+    /// directory structure exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the trace directory or metrics parent directory
+    /// cannot be created.
+    pub fn initialized_for_workdir(workdir: impl AsRef<Path>) -> io::Result<Self> {
+        let sinks = Self::for_workdir(workdir);
+        sinks.initialize()?;
+        Ok(sinks)
+    }
+
+    /// Build sinks rooted at an existing `.roko/` directory and create their
+    /// backing directories immediately.
+    ///
+    /// This is idempotent: calling it repeatedly only re-validates that the
+    /// directory structure exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the trace directory or metrics parent directory
+    /// cannot be created.
+    pub fn initialized_for_roko_dir(roko_dir: impl AsRef<Path>) -> io::Result<Self> {
+        let sinks = Self::for_roko_dir(roko_dir);
+        sinks.initialize()?;
+        Ok(sinks)
+    }
+
+    /// Create the backing directories for both sinks.
+    ///
+    /// This makes startup initialization explicit for callers that want to
+    /// prepare observability before the first trace or metrics write.
+    ///
+    /// The operation is idempotent: existing directories are left untouched.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the trace directory or metrics parent directory
+    /// cannot be created.
+    pub fn initialize(&self) -> io::Result<()> {
+        std::fs::create_dir_all(self.trace_sink.root())?;
+        if let Some(parent) = self.metrics_sink.path().parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        Ok(())
+    }
+
     /// Clone as a dynamic trace sink trait object.
     #[must_use]
     pub fn trace_sink_dyn(&self) -> Arc<dyn TraceSink> {
@@ -82,5 +134,29 @@ mod tests {
         let sinks = FsObservabilitySinks::for_roko_dir("/repo/.roko");
         let _trace: Arc<dyn TraceSink> = sinks.trace_sink_dyn();
         let _metrics: Arc<dyn MetricsSink> = sinks.metrics_sink_dyn();
+    }
+
+    #[test]
+    fn initialize_creates_trace_and_metrics_directories() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sinks = FsObservabilitySinks::for_workdir(tmp.path());
+
+        sinks.initialize().expect("initialize observability");
+
+        assert!(tmp.path().join(".roko").join("traces").is_dir());
+        assert!(tmp.path().join(".roko").join("metrics").is_dir());
+    }
+
+    #[test]
+    fn initialized_for_roko_dir_is_idempotent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let roko_dir = tmp.path().join(".roko");
+
+        let sinks = FsObservabilitySinks::initialized_for_roko_dir(&roko_dir)
+            .expect("initialize from roko dir");
+        sinks.initialize().expect("reinitialize");
+
+        assert!(roko_dir.join("traces").is_dir());
+        assert!(roko_dir.join("metrics").is_dir());
     }
 }

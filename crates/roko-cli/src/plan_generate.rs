@@ -28,11 +28,10 @@ pub enum TaskTier {
 impl TaskTier {
     /// Suggested model for this tier.
     #[must_use]
-    pub fn model_hint(&self) -> &'static str {
+    pub const fn model_hint(&self) -> &'static str {
         match self {
             Self::Mechanical => "claude-haiku-4-5",
-            Self::Focused => "claude-sonnet-4-6",
-            Self::Integrative => "claude-sonnet-4-6",
+            Self::Focused | Self::Integrative => "claude-sonnet-4-6",
             Self::Architectural => "claude-opus-4-6",
         }
     }
@@ -167,11 +166,7 @@ Before finalizing, verify your tasks against:
 "#;
 
 /// Build the full prompt for plan generation from a source input.
-pub fn build_generation_prompt(
-    workdir: &Path,
-    source: &str,
-    source_type: &str,
-) -> String {
+pub fn build_generation_prompt(workdir: &Path, source: &str, source_type: &str) -> String {
     let mut prompt = String::new();
     let _ = writeln!(prompt, "{PLAN_GENERATOR_SYSTEM_PROMPT}");
     let _ = writeln!(prompt, "\n---\n");

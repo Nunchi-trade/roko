@@ -1,14 +1,15 @@
-//! Agent execution helper — spawn Claude CLI for interactive tasks.
+//! Agent execution helper — drive the Claude CLI through the real runtime adapter.
 //!
 //! Used by `roko prd`, `roko research`, and `roko plan generate` to invoke
-//! an agent that can read/write files. Reads model config from `roko.toml`.
+//! an agent that can read/write files while preserving Roko's Claude wiring
+//! (system prompt, settings hooks, MCP discovery, resume, PID tracking, and
+//! stderr filtering).
 
 use std::path::Path;
-use std::process::Stdio;
 
-use anyhow::{Context as _, Result};
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
+use anyhow::Result;
+use roko_agent::{Agent, ClaudeCliAgent};
+use roko_core::{Body, Context, Kind, Signal};
 
 /// Options for agent execution.
 pub struct AgentExecOpts<'a> {
@@ -18,58 +19,47 @@ pub struct AgentExecOpts<'a> {
     pub workdir: &'a Path,
     /// Model to use (e.g. "claude-sonnet-4-6"). If None, uses CLI default.
     pub model: Option<&'a str>,
+    /// Reasoning effort label to pass to Claude.
+    pub effort: Option<&'a str>,
     /// Additional system prompt to append.
     pub system_prompt: Option<&'a str>,
+    /// Claude session id to resume, if any.
+    pub resume_session: Option<&'a str>,
     /// Extra env vars for the child process (gateway config, etc).
     pub env_vars: &'a [(String, String)],
 }
 
-/// Spawn `claude` CLI with the given prompt, streaming output to stdout.
+/// Drive `claude` with the given prompt and print the final text output.
 ///
-/// Returns the exit code. The agent has full tool access (Read, Write, Bash, Edit)
-/// via `--dangerously-skip-permissions`.
+/// Returns the exit code. The Claude CLI adapter handles system prompt wiring,
+/// settings hooks, MCP discovery, resume session threading, and stderr
+/// filtering.
 pub async fn run_agent(opts: AgentExecOpts<'_>) -> Result<i32> {
-    let mut cmd = Command::new("claude");
-    cmd.arg("-p").arg(opts.prompt);
-    cmd.arg("--dangerously-skip-permissions");
-
-    if let Some(model) = opts.model {
-        cmd.arg("--model").arg(model);
+    let model = opts.model.unwrap_or("claude-opus-4-6");
+    let mut agent = ClaudeCliAgent::new("claude", opts.workdir, model)
+        .with_dangerously_skip_permissions(true)
+        .with_effort(opts.effort.unwrap_or("medium"));
+    if let Some(system_prompt) = opts.system_prompt {
+        agent = agent.with_system_prompt(system_prompt);
+    }
+    if let Some(session_id) = opts.resume_session {
+        agent = agent.with_optional_resume(Some(session_id.to_string()));
+    }
+    for (key, value) in opts.env_vars {
+        agent = agent.with_env_var(key, value);
     }
 
-    if let Some(sys) = opts.system_prompt {
-        cmd.arg("--append-system-prompt").arg(sys);
+    let prompt = Signal::builder(Kind::Prompt)
+        .body(Body::text(opts.prompt))
+        .build();
+    let result = agent.run(&prompt, &Context::now()).await;
+
+    let rendered = result.output.body.as_text().unwrap_or("");
+    if !rendered.is_empty() {
+        print!("{rendered}");
     }
 
-    // Inherit gateway env vars from current process
-    if let Ok(base_url) = std::env::var("ANTHROPIC_BASE_URL") {
-        cmd.env("ANTHROPIC_BASE_URL", base_url);
-    }
-    if let Ok(api_key) = std::env::var("ANTHROPIC_API_KEY") {
-        cmd.env("ANTHROPIC_API_KEY", api_key);
-    }
-    // Plus any extras from config
-    for (k, v) in opts.env_vars {
-        cmd.env(k, v);
-    }
-
-    cmd.current_dir(opts.workdir);
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::inherit());
-
-    let mut child = cmd.spawn().context("spawn claude CLI — is `claude` in PATH?")?;
-
-    // Stream stdout to terminal
-    if let Some(stdout) = child.stdout.take() {
-        let reader = BufReader::new(stdout);
-        let mut lines = reader.lines();
-        while let Some(line) = lines.next_line().await? {
-            println!("{line}");
-        }
-    }
-
-    let status = child.wait().await.context("wait for claude")?;
-    Ok(status.code().unwrap_or(1))
+    Ok(i32::from(!result.success))
 }
 
 /// Read model from roko.toml config if available.
@@ -100,16 +90,15 @@ pub struct GatewayEnv {
 }
 
 /// Load gateway env vars from roko.toml's agent.env entries.
-/// Returns them as key-value pairs to pass to child processes (avoids unsafe set_var).
+/// Returns them as key-value pairs to pass to child processes (avoids unsafe `set_var`).
 pub fn load_gateway_env(workdir: &Path) -> GatewayEnv {
     let mut vars = Vec::new();
     let config_path = workdir.join("roko.toml");
     if !config_path.exists() {
         return GatewayEnv { vars };
     }
-    let content = match std::fs::read_to_string(&config_path) {
-        Ok(c) => c,
-        Err(_) => return GatewayEnv { vars },
+    let Ok(content) = std::fs::read_to_string(&config_path) else {
+        return GatewayEnv { vars };
     };
     for line in content.lines() {
         let line = line.trim();

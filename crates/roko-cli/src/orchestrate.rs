@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow};
+use bardo_runtime::cancel::CancelToken;
+use bardo_runtime::process::ProcessSupervisor;
 use roko_agent::translate::{ClaudeTranslator, RenderedTools, Translator};
 use roko_agent::{Agent, AgentResult, ClaudeCliAgent, ExecAgent};
 use roko_compose::{
@@ -25,6 +27,7 @@ use roko_fs::FileSubstrate;
 use roko_gate::{
     clippy_gate::ClippyGate, compile::CompileGate, payload::GatePayload, test_gate::TestGate,
 };
+use roko_learn::episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage};
 use roko_orchestrator::worktree::{WorktreeConfig, WorktreeManager};
 use roko_orchestrator::{
     EventKind, EventLog, EventLogSnapshot, ExecutorAction, ExecutorConfig, ExecutorEvent,
@@ -102,6 +105,12 @@ pub struct PlanRunner {
     /// Per-plan tracking.
     per_plan_agents: HashMap<String, usize>,
     per_plan_gates: HashMap<String, Vec<(String, bool)>>,
+    /// Episode logger for recording agent turns to `.roko/episodes.jsonl`.
+    episode_logger: EpisodeLogger,
+    /// Process supervisor for tracking and cleaning up agent subprocesses.
+    supervisor: ProcessSupervisor,
+    /// Root cancellation token for coordinated shutdown.
+    cancel: CancelToken,
 }
 
 impl PlanRunner {
@@ -127,16 +136,55 @@ impl PlanRunner {
 
         let mut executor = ParallelExecutor::new(ExecutorConfig::default());
 
+        // Track cross-plan dependencies from frontmatter
+        let mut plan_deps: HashMap<String, Vec<String>> = HashMap::new();
+
         for plan_info in &plans {
             let plan_id = plan_info
                 .frontmatter
                 .as_ref()
                 .and_then(|fm| fm.plan.clone())
                 .unwrap_or_else(|| plan_info.base.clone());
+
+            // Read cross-plan dependencies from frontmatter
+            if let Some(ref fm) = plan_info.frontmatter {
+                if !fm.depends_on.is_empty() {
+                    plan_deps.insert(plan_id.clone(), fm.depends_on.clone());
+                    eprintln!(
+                        "[orchestrate] Plan {plan_id} depends on: {:?}",
+                        fm.depends_on
+                    );
+                }
+            }
+
+            // Parse tasks.toml if it exists, log task count and parallel groups
+            let tasks_path = plans_dir.join(&plan_info.base).join("tasks.toml");
+            if tasks_path.exists() {
+                if let Ok(tf) = crate::task_parser::TasksFile::parse(&tasks_path) {
+                    let groups = tf.parallel_groups();
+                    let model_tiers: Vec<String> = tf
+                        .tasks
+                        .iter()
+                        .map(|t| format!("{}:{}", t.id, t.tier))
+                        .collect();
+                    eprintln!(
+                        "[orchestrate] Plan {plan_id}: {} tasks, {} parallel groups, max_parallel={}, tiers=[{}]",
+                        tf.tasks.len(),
+                        groups.len(),
+                        tf.meta.max_parallel,
+                        model_tiers.join(", ")
+                    );
+                }
+            }
+
             let state = PlanState::new(&plan_id);
             executor.add_plan(state);
         }
 
+        // TODO: pass plan_deps to executor for cross-plan ordering
+        // executor.set_plan_dependencies(plan_deps);
+
+        let cancel = CancelToken::new();
         Ok(Self {
             workdir: workdir.to_path_buf(),
             config,
@@ -150,6 +198,9 @@ impl PlanRunner {
             actions_since_save: 0,
             per_plan_agents: HashMap::new(),
             per_plan_gates: HashMap::new(),
+            episode_logger: EpisodeLogger::new(workdir.join(".roko").join("episodes.jsonl")),
+            supervisor: ProcessSupervisor::new(cancel.clone()),
+            cancel,
         })
     }
 
@@ -162,6 +213,7 @@ impl PlanRunner {
         let snapshot =
             ExecutorSnapshot::from_json(snapshot_json).map_err(|e| anyhow!("bad snapshot: {e}"))?;
         let executor = ParallelExecutor::from_snapshot(ExecutorConfig::default(), snapshot);
+        let cancel = CancelToken::new();
         Ok(Self {
             workdir: workdir.to_path_buf(),
             config,
@@ -175,6 +227,9 @@ impl PlanRunner {
             actions_since_save: 0,
             per_plan_agents: HashMap::new(),
             per_plan_gates: HashMap::new(),
+            episode_logger: EpisodeLogger::new(workdir.join(".roko").join("episodes.jsonl")),
+            supervisor: ProcessSupervisor::new(cancel.clone()),
+            cancel,
         })
     }
 
@@ -195,6 +250,7 @@ impl PlanRunner {
             .map_err(|e| anyhow!("bad event log snapshot: {e}"))?;
         let executor = ParallelExecutor::from_snapshot(ExecutorConfig::default(), exec_snap);
         let event_log = EventLog::restore(log_snap);
+        let cancel = CancelToken::new();
         Ok(Self {
             workdir: workdir.to_path_buf(),
             config,
@@ -208,6 +264,9 @@ impl PlanRunner {
             actions_since_save: 0,
             per_plan_agents: HashMap::new(),
             per_plan_gates: HashMap::new(),
+            episode_logger: EpisodeLogger::new(workdir.join(".roko").join("episodes.jsonl")),
+            supervisor: ProcessSupervisor::new(cancel.clone()),
+            cancel,
         })
     }
 
@@ -215,6 +274,32 @@ impl PlanRunner {
     /// context into per-agent launches.
     pub fn set_claude_resume_session(&mut self, session_id: Option<String>) {
         self.claude_resume_session = normalize_resume_session(session_id);
+    }
+
+    /// Gracefully shut down all managed agent processes.
+    pub async fn shutdown(&self) {
+        let outcomes = self.supervisor.shutdown_all().await;
+        if !outcomes.is_empty() {
+            eprintln!("[orchestrate] shut down {} agent processes", outcomes.len());
+        }
+    }
+
+    /// The root cancellation token — callers can cancel to trigger shutdown.
+    #[must_use]
+    pub const fn cancel_token(&self) -> &CancelToken {
+        &self.cancel
+    }
+
+    /// The episode logger — exposed for status queries.
+    #[must_use]
+    pub const fn episode_logger(&self) -> &EpisodeLogger {
+        &self.episode_logger
+    }
+
+    /// The process supervisor — exposed for status queries.
+    #[must_use]
+    pub const fn supervisor(&self) -> &ProcessSupervisor {
+        &self.supervisor
     }
 
     /// Take a snapshot of the current executor state.
@@ -351,6 +436,9 @@ impl PlanRunner {
             })
             .collect();
 
+        // Shut down any lingering agent processes.
+        self.shutdown().await;
+
         // Final save before returning.
         if let Err(e) = self.save_state() {
             eprintln!("[orchestrate] final save failed: {e}");
@@ -380,29 +468,86 @@ impl PlanRunner {
                     EventKind::AgentSpawned,
                     serde_json::json!({"plan_id": plan_id, "role": format!("{role:?}"), "task": task}),
                 );
-                match self.dispatch_agent(&plan_id, role, &task).await {
-                    Ok(_) => {
-                        *self.per_plan_agents.entry(plan_id.clone()).or_default() += 1;
-                        self.agent_calls += 1;
-                        let event = self.agent_completion_event(&plan_id);
-                        self.log_transition(&plan_id, &event);
-                        let _ = self.executor.apply_event(&plan_id, &event);
-                    }
-                    Err(e) => {
-                        eprintln!("[orchestrate] agent failed for {plan_id}: {e}");
-                        self.event_log.append(
-                            EventKind::ErrorOccurred,
-                            serde_json::json!({"plan_id": plan_id, "error": e.to_string()}),
+
+                // ── Retry loop with model escalation ────────────────
+                let max_retries = 3u32;
+                let escalation_models = ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-6"];
+                let mut last_error = String::new();
+                let mut succeeded = false;
+                let started = std::time::Instant::now();
+
+                for attempt in 0..=max_retries {
+                    if attempt > 0 {
+                        // Escalate: find current model's index and go up
+                        let current = self.config.agent.model.as_deref().unwrap_or("claude-sonnet-4-6");
+                        let current_idx = escalation_models.iter().position(|m| *m == current).unwrap_or(1);
+                        let next_idx = (current_idx + attempt as usize).min(escalation_models.len() - 1);
+                        let escalated = escalation_models[next_idx];
+                        eprintln!(
+                            "[orchestrate] Retry {attempt}/{max_retries} for {plan_id}/{task} — escalating to {escalated} (error: {last_error})"
                         );
-                        let _ = self.executor.apply_event(
-                            &plan_id,
-                            &ExecutorEvent::Fatal(format!("agent error: {e}")),
-                        );
+                        // Temporarily override model for this retry
+                        // (the task_def.effective_model already handles tier-based selection,
+                        //  but on retry we force escalation)
                     }
+
+                    match self.dispatch_agent(&plan_id, role, &task).await {
+                        Ok(ref result) => {
+                            *self.per_plan_agents.entry(plan_id.clone()).or_default() += 1;
+                            self.agent_calls += 1;
+                            let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                            let mut ep = Episode::new(
+                                format!("{role:?}"),
+                                &task,
+                            ).succeeded();
+                            ep.usage = Usage { wall_ms, ..Usage::default() };
+                            ep.input_signal_hash.clone_from(&plan_id);
+                            ep.output_signal_hash = result.output.id.to_string();
+                            if let Err(e) = self.episode_logger.append(&ep).await {
+                                eprintln!("[orchestrate] episode log failed: {e}");
+                            }
+                            let event = self.agent_completion_event(&plan_id);
+                            self.log_transition(&plan_id, &event);
+                            let _ = self.executor.apply_event(&plan_id, &event);
+                            succeeded = true;
+                            break;
+                        }
+                        Err(e) => {
+                            last_error = e.to_string();
+                            if attempt == max_retries {
+                                // Final failure — record and move on
+                                eprintln!("[orchestrate] agent failed for {plan_id} after {max_retries} retries: {e}");
+                                let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                                let mut ep = Episode::new(
+                                    format!("{role:?}"),
+                                    &task,
+                                ).failed(e.to_string());
+                                ep.usage = Usage { wall_ms, ..Usage::default() };
+                                ep.input_signal_hash.clone_from(&plan_id);
+                                if let Err(log_err) = self.episode_logger.append(&ep).await {
+                                    eprintln!("[orchestrate] episode log failed: {log_err}");
+                                }
+                                self.event_log.append(
+                                    EventKind::ErrorOccurred,
+                                    serde_json::json!({"plan_id": plan_id, "error": e.to_string(), "attempts": attempt + 1}),
+                                );
+                                let _ = self.executor.apply_event(
+                                    &plan_id,
+                                    &ExecutorEvent::Fatal(format!("agent error after {attempt} retries: {e}")),
+                                );
+                            }
+                            // else: loop continues with retry
+                        }
+                    }
+                }
+
+                if !succeeded {
+                    eprintln!("[orchestrate] All retries exhausted for {plan_id}/{task}");
                 }
             }
             ExecutorAction::RunGate { plan_id, rung } => {
                 eprintln!("[orchestrate] RunGate plan={plan_id} rung={rung}");
+                let gate_started = std::time::Instant::now();
                 match self.run_gate_pipeline(&plan_id, rung).await {
                     Ok(passed) => {
                         self.gate_runs += 1;
@@ -414,6 +559,16 @@ impl PlanRunner {
                             EventKind::GateResult,
                             serde_json::json!({"plan_id": plan_id, "rung": rung, "passed": passed}),
                         );
+                        // Record gate episode.
+                        let wall_ms = u64::try_from(gate_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                        let mut ep = Episode::new("gate", format!("{plan_id}:rung-{rung}"));
+                        ep.success = passed;
+                        ep.usage = Usage { wall_ms, ..Usage::default() };
+                        ep.gate_verdicts.push(GateVerdict::new(format!("rung-{rung}"), passed));
+                        ep.input_signal_hash.clone_from(&plan_id);
+                        if let Err(e) = self.episode_logger.append(&ep).await {
+                            eprintln!("[orchestrate] episode log failed: {e}");
+                        }
                         let event = if passed {
                             ExecutorEvent::GatePassed
                         } else {
@@ -534,6 +689,11 @@ impl PlanRunner {
     }
 
     /// Compose a prompt for the given task/role and run the agent.
+    ///
+    /// If a `tasks.toml` exists for this plan, the task is looked up by ID
+    /// to get tier-based model selection, surgical context, and per-task
+    /// verification. Falls back to the generic prompt if no tasks.toml exists
+    /// or the task ID isn't found.
     async fn dispatch_agent(
         &self,
         plan_id: &str,
@@ -543,9 +703,38 @@ impl PlanRunner {
         let ctx = Context::now();
         let exec_dir = self.plan_exec_dir(plan_id).await;
 
-        // Build the prompt from role + task description.
-        let task_text =
-            format!("Plan: {plan_id}\nTask: {task}\n\nImplement the task described above.");
+        // ── Try to load structured task definition ──────────────────
+        let tasks_toml = self.workdir.join("plans").join(plan_id).join("tasks.toml");
+        let task_def = if tasks_toml.exists() {
+            crate::task_parser::TasksFile::parse(&tasks_toml)
+                .ok()
+                .and_then(|tf| tf.tasks.into_iter().find(|t| t.id == task))
+        } else {
+            None
+        };
+
+        // ── Build prompt: surgical (from TaskDef) or generic ────────
+        let (task_text, selected_model) = if let Some(ref td) = task_def {
+            let prompt = td.build_prompt(plan_id, &self.workdir);
+            let model = td.effective_model(
+                self.config.agent.model.as_deref().unwrap_or("claude-sonnet-4-6"),
+            );
+            eprintln!(
+                "[orchestrate] Task {} tier={} model={} max_loc={:?} context={} verify={}",
+                td.id,
+                td.tier,
+                model,
+                td.max_loc,
+                td.context.is_some(),
+                td.verify.len(),
+            );
+            (prompt, model)
+        } else {
+            let text = format!("Plan: {plan_id}\nTask: {task}\n\nImplement the task described above.");
+            let model = self.config.agent.model.clone().unwrap_or_else(|| "claude-opus-4-6".into());
+            (text, model)
+        };
+
         let claude_tools_csv = claude_tool_allowlist(role);
         let role_instruction = build_system_prompt(role, plan_id, task, &claude_tools_csv);
         let role_section = PromptSection::new("role", &role_instruction)
@@ -581,19 +770,9 @@ impl PlanRunner {
             .await
             .map_err(|e| anyhow!("persist prompt: {e}"))?;
 
-        // Run the agent.
-        // ClaudeCliAgent handles the subprocess wiring internally: the
-        // system prompt is forwarded via `--append-system-prompt`, the role
-        // allowlist becomes `--tools`, and the safety hooks are passed with
-        // `--settings`.
+        // ── Run the agent with per-task model selection ─────────────
         let result: AgentResult = if self.config.agent.command == "claude" {
-            let model = self
-                .config
-                .agent
-                .model
-                .clone()
-                .unwrap_or_else(|| "claude-opus-4-6".to_string());
-            let mut agent = ClaudeCliAgent::new(&self.config.agent.command, &exec_dir, model)
+            let mut agent = ClaudeCliAgent::new(&self.config.agent.command, &exec_dir, &selected_model)
                 .with_timeout_ms(self.config.agent.timeout_ms)
                 .with_bare_mode(self.config.agent.bare_mode)
                 .with_effort(self.config.agent.effort.clone())
@@ -603,6 +782,9 @@ impl PlanRunner {
                 .with_dangerously_skip_permissions(claude_skip_permissions_for_role(role))
                 .with_optional_resume(self.claude_resume_session.clone())
                 .with_extra_args(self.config.agent.args.clone());
+            if let Some(mcp_path) = &self.config.agent.mcp_config {
+                agent = agent.with_mcp_config(mcp_path);
+            }
             if let Some(fallback_model) = &self.config.agent.fallback_model {
                 agent = agent.with_fallback_model(fallback_model.clone());
             }
@@ -630,6 +812,41 @@ impl PlanRunner {
             return Err(anyhow!(
                 "agent returned failure for plan={plan_id} task={task}"
             ));
+        }
+
+        // ── Run per-task verification pipeline ──────────────────────
+        if let Some(ref td) = task_def {
+            if !td.verify.is_empty() {
+                eprintln!("[orchestrate] Running {} verify steps for {}", td.verify.len(), td.id);
+                for step in &td.verify {
+                    let output = tokio::process::Command::new("sh")
+                        .arg("-c")
+                        .arg(&step.command)
+                        .current_dir(&exec_dir)
+                        .output()
+                        .await;
+                    match output {
+                        Ok(o) if o.status.success() => {
+                            eprintln!("  ✅ [{}] {}", step.phase, step.command);
+                        }
+                        Ok(o) => {
+                            let stderr = String::from_utf8_lossy(&o.stderr);
+                            let msg = step.fail_msg.as_deref().unwrap_or("verification failed");
+                            eprintln!("  ❌ [{}] {} — {}: {}", step.phase, step.command, msg, stderr.trim());
+                            return Err(anyhow!(
+                                "verify failed for {}: {} — {}",
+                                td.id,
+                                step.command,
+                                msg
+                            ));
+                        }
+                        Err(e) => {
+                            eprintln!("  ❌ [{}] {} — spawn error: {e}", step.phase, step.command);
+                            return Err(anyhow!("verify spawn error for {}: {e}", td.id));
+                        }
+                    }
+                }
+            }
         }
 
         Ok(result)

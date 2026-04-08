@@ -16,6 +16,7 @@ pub mod config;
 pub mod config_cmd;
 pub mod daemon;
 pub mod episode;
+pub mod index;
 pub mod inject;
 pub mod oneshot;
 pub mod orchestrate;
@@ -29,6 +30,7 @@ pub mod research;
 pub mod run;
 pub mod secrets;
 pub mod status;
+pub mod task_parser;
 pub mod tui;
 
 pub use config::{
