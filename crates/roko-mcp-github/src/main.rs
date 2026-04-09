@@ -140,6 +140,16 @@ struct ReviewPrArguments {
     event: GithubReviewEvent,
 }
 
+#[derive(Debug, Deserialize)]
+struct MergePrArguments {
+    owner: String,
+    repo: String,
+    number: u64,
+    merge_method: MergeMethod,
+    #[serde(default)]
+    commit_title: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum PullRequestState {
@@ -154,6 +164,14 @@ enum GithubReviewEvent {
     Approve,
     RequestChanges,
     Comment,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum MergeMethod {
+    Merge,
+    Squash,
+    Rebase,
 }
 
 impl GithubReviewEvent {
@@ -172,6 +190,16 @@ impl PullRequestState {
             Self::Open => "open",
             Self::Closed => "closed",
             Self::All => "all",
+        }
+    }
+}
+
+impl MergeMethod {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Merge => "merge",
+            Self::Squash => "squash",
+            Self::Rebase => "rebase",
         }
     }
 }
@@ -283,6 +311,13 @@ struct GithubPullRequestReview {
     user: Option<GithubUser>,
 }
 
+#[derive(Debug, Deserialize)]
+struct GithubMergePullRequestResponse {
+    merged: bool,
+    sha: Option<String>,
+    message: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 enum GithubReviewState {
@@ -361,7 +396,7 @@ fn handle_tools_list() -> Value {
                         "repo": {"type": "string"},
                         "number": {"type": "integer", "minimum": 1}
                     },
-                    "required": ["owner", "repo", "number"],
+                    "required": ["owner", "repo", "number", "merge_method"],
                     "additionalProperties": false
                 })
             ),
@@ -804,8 +839,23 @@ fn handle_review_pr(arguments: Value) -> Result<Value, JsonRpcError> {
 }
 
 fn handle_merge_pr(arguments: Value) -> Result<Value, JsonRpcError> {
-    let _ = arguments;
-    unsupported_tool("github.merge_pr")
+    let args: MergePrArguments = serde_json::from_value(arguments).map_err(|err| {
+        JsonRpcError::invalid_params(format!("invalid github.merge_pr args: {err}"))
+    })?;
+    let client = github_client()?;
+    let merge = merge_pull_request(&client, &args, "https://api.github.com")?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": serde_json::json!({
+                "merged": merge.merged,
+                "sha": merge.sha,
+                "message": merge.message
+            }).to_string()
+        }],
+        "isError": false
+    }))
 }
 
 fn handle_list_issues(arguments: Value) -> Result<Value, JsonRpcError> {
@@ -1135,6 +1185,48 @@ fn submit_pull_request_review(
 
     serde_json::from_str(&body).map_err(|err| {
         JsonRpcError::internal_error(format!("parse GitHub pull request review response: {err}"))
+    })
+}
+
+fn merge_pull_request(
+    client: &Client,
+    args: &MergePrArguments,
+    api_base_url: &str,
+) -> Result<GithubMergePullRequestResponse, JsonRpcError> {
+    let url = format!(
+        "{api_base_url}/repos/{}/{}/pulls/{}/merge",
+        args.owner, args.repo, args.number
+    );
+    let mut request = client.put(url);
+    if let Some(token) = github_token() {
+        request = request.bearer_auth(token);
+    }
+
+    let mut payload = serde_json::json!({
+        "merge_method": args.merge_method.as_str(),
+    });
+    if let Some(commit_title) = &args.commit_title {
+        payload["commit_title"] = Value::String(commit_title.clone());
+    }
+
+    let response = request
+        .json(&payload)
+        .send()
+        .map_err(|err| JsonRpcError::internal_error(format!("call GitHub API: {err}")))?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|err| JsonRpcError::internal_error(format!("read GitHub response: {err}")))?;
+    if !status.is_success() {
+        return Err(JsonRpcError::internal_error(format!(
+            "GitHub API returned {status}: {}",
+            body.trim()
+        )));
+    }
+
+    serde_json::from_str(&body).map_err(|err| {
+        JsonRpcError::internal_error(format!("parse GitHub pull request merge response: {err}"))
     })
 }
 
@@ -1782,6 +1874,83 @@ mod tests {
         assert_eq!(
             review.html_url.as_deref(),
             Some("https://github.com/octo/hello-world/pull/17#pullrequestreview-88")
+        );
+
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn merge_pull_request_puts_expected_payload_and_returns_merge_result() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept request");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+            let mut request_line = String::new();
+            reader
+                .read_line(&mut request_line)
+                .expect("read request line");
+            assert!(
+                request_line.starts_with("PUT /repos/octo/hello-world/pulls/17/merge HTTP/1.1")
+            );
+
+            let mut content_length = 0usize;
+            loop {
+                let mut header_line = String::new();
+                reader.read_line(&mut header_line).expect("read header");
+                let header = header_line.trim_end();
+                if header.is_empty() {
+                    break;
+                }
+                if let Some(value) = header.to_ascii_lowercase().strip_prefix("content-length: ") {
+                    content_length = value.parse().expect("parse content length");
+                }
+            }
+
+            let mut body = vec![0u8; content_length];
+            reader.read_exact(&mut body).expect("read request body");
+            let body_json: Value = serde_json::from_slice(&body).expect("parse request body");
+            assert_eq!(
+                body_json,
+                json!({
+                    "merge_method": "squash",
+                    "commit_title": "Release v1.2.3"
+                })
+            );
+
+            let mut writer = stream;
+            let response_body = json!({
+                "sha": "abc123",
+                "merged": true,
+                "message": "Pull Request successfully merged"
+            })
+            .to_string();
+            write!(
+                writer,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            )
+            .expect("write response");
+        });
+
+        let client = github_client().expect("client");
+        let args = MergePrArguments {
+            owner: "octo".to_string(),
+            repo: "hello-world".to_string(),
+            number: 17,
+            merge_method: MergeMethod::Squash,
+            commit_title: Some("Release v1.2.3".to_string()),
+        };
+
+        let merge =
+            merge_pull_request(&client, &args, &format!("http://{}", addr)).expect("merge pr");
+        assert!(merge.merged);
+        assert_eq!(merge.sha.as_deref(), Some("abc123"));
+        assert_eq!(
+            merge.message.as_deref(),
+            Some("Pull Request successfully merged")
         );
 
         server.join().expect("server thread");
