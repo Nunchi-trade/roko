@@ -6,12 +6,13 @@
 //! working global config with one interactive pass.
 
 use crate::config::{
-    AgentLayer, ConfigLayer, DetectedCli, GateConfig, PromptLayer, ResolvedConfig, Source,
-    detect_clis, global_config_path, load_layered,
+    AgentLayer, ConfigLayer, DetectedCli, ExecutorLayer, GateConfig, PromptLayer, ResolvedConfig,
+    Source, detect_clis, global_config_path, load_layered,
 };
 use anyhow::{Context as _, Result, anyhow};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
+use roko_orchestrator::ExecutorConfig;
 
 /// Non-interactive inputs for `config init` (used by CI / tests).
 #[derive(Clone, Debug, Default)]
@@ -106,7 +107,7 @@ pub fn run_init_wizard(target: Option<PathBuf>, inputs: &WizardInputs) -> Result
             files: None,
         }),
         gates,
-        executor: None,
+        executor: Some(default_executor_layer()),
     };
     let rendered = toml::to_string_pretty(&layer).context("serialize config")?;
 
@@ -135,6 +136,19 @@ pub fn run_init_wizard(target: Option<PathBuf>, inputs: &WizardInputs) -> Result
     std::fs::write(&path, rendered).with_context(|| format!("write {}", path.display()))?;
     println!("wrote {}", path.display());
     Ok(path)
+}
+
+fn default_executor_layer() -> ExecutorLayer {
+    let defaults = ExecutorConfig::default();
+    ExecutorLayer {
+        max_concurrent_plans: Some(defaults.max_concurrent_plans),
+        max_concurrent_tasks: Some(defaults.max_concurrent_tasks),
+        max_auto_fix_iterations: Some(defaults.max_auto_fix_iterations),
+        max_merge_attempts: Some(defaults.max_merge_attempts),
+        task_timeout_secs: Some(defaults.task_timeout_secs),
+        budget_usd: defaults.budget_usd,
+        auto_replan: Some(defaults.auto_replan),
+    }
 }
 
 /// Print the effective merged config with `[source]` tags on each field.
@@ -530,5 +544,9 @@ mod tests {
             Some("cat")
         );
         assert_eq!(layer.prompt.as_ref().unwrap().token_budget, Some(4000));
+        assert_eq!(
+            layer.executor.as_ref().unwrap().max_concurrent_plans,
+            Some(4)
+        );
     }
 }
