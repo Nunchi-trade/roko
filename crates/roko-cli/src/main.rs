@@ -26,8 +26,6 @@ use roko_learn::runtime_feedback::read_efficiency_events;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
-use tracing_subscriber::EnvFilter;
 
 // -----------------------------------------------------------------------
 // Exit codes
@@ -423,11 +421,25 @@ enum ConfigCmd {
     },
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let cli = Cli::parse();
-    init_tracing(&cli);
-    let code = match dispatch(cli).await {
+    if cli.json {
+        tracing_subscriber::fmt()
+            .json()
+            .with_env_filter("roko=info")
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter("roko=info")
+            .init();
+    }
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build Tokio runtime");
+
+    let code = match runtime.block_on(dispatch(cli)) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("error: {e:#}");
@@ -2042,31 +2054,6 @@ fn apply_resume_session_override(config: &mut Config, resume: Option<String>) {
             .env
             .push(("ROKO_SESSION_ID".to_string(), session_id));
     }
-}
-
-fn init_tracing(cli: &Cli) {
-    static INIT: OnceLock<()> = OnceLock::new();
-    INIT.get_or_init(|| {
-        let env_filter = if std::env::var_os("RUST_LOG").is_some() {
-            EnvFilter::from_default_env()
-        } else if cli.quiet {
-            EnvFilter::new("warn")
-        } else {
-            EnvFilter::new("info")
-        };
-
-        if cli.json {
-            let _ = tracing_subscriber::fmt()
-                .with_env_filter(env_filter)
-                .with_ansi(false)
-                .json()
-                .try_init();
-        } else {
-            let _ = tracing_subscriber::fmt()
-                .with_env_filter(env_filter)
-                .try_init();
-        }
-    });
 }
 
 fn prepare_runtime_hooks(workdir: &Path, quiet: bool) {
