@@ -35,6 +35,7 @@ members = [
     # posts insights back via HTTP JSON-RPC.
     "apps/roko-chain-watcher",
     # Standalone MCP servers used by agents via --mcp-config.
+    "crates/roko-mcp-stdio",
     "crates/roko-mcp-github",
 
     # Roko CLI: minimal user-facing binary that wires the universal loop
