@@ -9,13 +9,11 @@
 
 #![allow(clippy::too_many_lines)]
 
-#[path = "../../roko-serve/src/lib.rs"]
-mod roko_serve;
-pub use roko_serve::{deploy, error, event_bus, events, routes, state, templates};
 
 use anyhow::{Context as _, Result, anyhow};
 use clap::{Parser, Subcommand, ValueEnum};
 use roko_agent::process::{cleanup_orphaned_agents, reap_orphaned_children};
+use roko_cli::serve_runtime::RokoCliRuntime;
 use roko_cli::tui::App;
 use roko_cli::{
     Config, DaemonMode, DashboardScaffold, EditTarget, InjectKind, InjectRequest, OneshotMode,
@@ -643,7 +641,9 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             workdir,
         } => {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
-            roko_serve::run_server(wd, bind, port).await?;
+            let config = load_config(&wd);
+            let runtime = RokoCliRuntime::new(config).into_arc();
+            roko_serve::run_server(wd, runtime, bind, port).await?;
             Ok(EXIT_SUCCESS)
         }
         Command::Worker { port } => {

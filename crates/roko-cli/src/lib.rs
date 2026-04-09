@@ -36,34 +36,10 @@ pub mod task_parser;
 pub mod tui;
 pub mod worker;
 
-#[path = "../../roko-serve/src/deploy/mod.rs"]
-pub mod deploy;
-#[path = "../../roko-serve/src/event_bus.rs"]
-pub mod event_bus;
-#[path = "../../roko-serve/src/error.rs"]
-pub mod error;
-#[path = "../../roko-serve/src/events.rs"]
-pub mod events;
-#[path = "../../roko-serve/src/dispatch.rs"]
-pub mod dispatch;
-#[path = "../../roko-serve/src/routes/mod.rs"]
-pub mod routes;
-#[path = "../../roko-serve/src/state.rs"]
-pub mod state;
-#[path = "../../roko-serve/src/templates.rs"]
-pub mod templates;
+pub mod serve_runtime;
 
-/// Backwards-compatible namespace for server-related modules.
-pub mod serve {
-    pub use crate::deploy;
-    pub use crate::dispatch;
-    pub use crate::event_bus;
-    pub use crate::error;
-    pub use crate::events;
-    pub use crate::routes;
-    pub use crate::state;
-    pub use crate::templates;
-}
+/// Server modules re-exported from the `roko-serve` crate.
+pub use roko_serve as serve;
 
 pub use config::{
     AgentConfig, Config, ConfigLayer, ConfigPaths, ConfigSources, GateConfig, PromptConfig,

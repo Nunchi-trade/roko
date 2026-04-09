@@ -71,9 +71,21 @@ fn main() -> anyhow::Result<()> {
     serve_stdio(io::stdin().lock(), io::stdout().lock(), |request| {
         let _ = &request.params;
         match request.method.as_str() {
-            // Transport-only scaffold: the request loop is in place, but
-            // method handlers are added in later checklist items.
+            "initialize" => Ok(handle_initialize()),
             _ => Err(JsonRpcError::method_not_found(&request.method)),
+        }
+    })
+}
+
+fn handle_initialize() -> Value {
+    serde_json::json!({
+        "protocolVersion": "2024-11-05",
+        "capabilities": {
+            "tools": {}
+        },
+        "serverInfo": {
+            "name": "roko-mcp-github",
+            "version": env!("CARGO_PKG_VERSION")
         }
     })
 }
@@ -219,5 +231,15 @@ mod tests {
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["id"], Value::Null);
         assert_eq!(response["error"]["code"], JsonRpcError::PARSE_ERROR);
+    }
+
+    #[test]
+    fn initialize_returns_server_capabilities() {
+        let result = handle_initialize();
+
+        assert_eq!(result["protocolVersion"], "2024-11-05");
+        assert_eq!(result["capabilities"]["tools"], json!({}));
+        assert_eq!(result["serverInfo"]["name"], "roko-mcp-github");
+        assert_eq!(result["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
     }
 }
