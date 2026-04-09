@@ -154,14 +154,14 @@ async fn create_deployment(
         .insert(dep_id.clone(), deployment.clone());
 
     // Emit event
-    state.event_bus.emit(ServerEvent::DeploymentCreated {
+    state.event_bus.publish(ServerEvent::DeploymentCreated {
         id: dep_id.clone(),
         name: dep_name,
     });
 
     // Spawn background task to poll status until terminal
     let backend = Arc::clone(&backend);
-    let event_bus = state.event_bus.sender();
+    let event_bus = state.event_bus.clone();
     let state_for_poll = Arc::clone(&state);
     let poll_id = dep_id.clone();
 
@@ -189,14 +189,14 @@ async fn create_deployment(
                     match &status {
                         DeploymentStatus::Ready { url } => {
                             info!(%poll_id, %url, "deployment ready");
-                            event_bus.emit(ServerEvent::DeploymentReady {
+                            event_bus.publish(ServerEvent::DeploymentReady {
                                 id: poll_id.clone(),
                                 url: url.clone(),
                             });
                         }
                         DeploymentStatus::Failed { reason } => {
                             error!(%poll_id, %reason, "deployment failed");
-                            event_bus.emit(ServerEvent::DeploymentFailed {
+                            event_bus.publish(ServerEvent::DeploymentFailed {
                                 id: poll_id.clone(),
                                 reason: reason.clone(),
                             });
@@ -299,7 +299,7 @@ async fn teardown_deployment(
 
     state
         .event_bus
-        .emit(ServerEvent::DeploymentTornDown { id: id.clone() });
+        .publish(ServerEvent::DeploymentTornDown { id: id.clone() });
 
     Ok(Json(json!({ "id": id, "status": "torn_down" })))
 }
@@ -342,7 +342,7 @@ async fn proxy_task(
 
     let task_id = uuid::Uuid::new_v4().to_string();
 
-    state.event_bus.emit(ServerEvent::WorkerTaskStarted {
+    state.event_bus.publish(ServerEvent::WorkerTaskStarted {
         deployment_id: id.clone(),
         task_id: task_id.clone(),
     });
@@ -361,7 +361,7 @@ async fn proxy_task(
         .unwrap_or_else(|_| json!({"error": "failed to parse worker response"}));
 
     let success = status_code.is_success();
-    state.event_bus.emit(ServerEvent::WorkerTaskCompleted {
+    state.event_bus.publish(ServerEvent::WorkerTaskCompleted {
         deployment_id: id,
         task_id,
         success,
@@ -408,7 +408,7 @@ async fn receive_callback(
             });
     }
 
-    state.event_bus.emit(ServerEvent::WorkerTaskCompleted {
+    state.event_bus.publish(ServerEvent::WorkerTaskCompleted {
         deployment_id: id,
         task_id: body
             .get("task_id")

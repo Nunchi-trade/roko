@@ -15,11 +15,11 @@ use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
 use bardo_runtime::cancel::CancelToken;
-use bardo_runtime::event_bus::EventBus;
 use bardo_runtime::process::ProcessSupervisor;
 use roko_core::config::schema::RokoConfig;
 
 use crate::deploy::{DeployBackend, Deployment};
+use crate::event_bus::EventBus;
 use roko_core::obs::metrics::MetricRegistry;
 use roko_fs::layout::RokoLayout;
 
@@ -179,6 +179,6 @@ impl AppState {
         tracing::info!("server shutdown initiated");
         self.cancel.cancel();
         self.supervisor.shutdown_all().await;
-        self.event_bus.emit(ServerEvent::ServerShutdown);
+        self.event_bus.publish(ServerEvent::ServerShutdown);
     }
 }

@@ -105,7 +105,7 @@ async fn spawn_research_op(
     target: &str,
 ) -> Result<(axum::http::StatusCode, Json<Value>), ApiError> {
     let op_id = uuid::Uuid::new_v4().to_string();
-    let bus = state.event_bus.sender();
+    let bus = state.event_bus.clone();
     let kind_str = kind.to_string();
     let target_str = target.to_string();
 
@@ -114,7 +114,7 @@ async fn spawn_research_op(
         let kind_str = kind_str.clone();
         async move {
             // TODO: Wire actual research agent execution.
-            bus.emit(ServerEvent::OperationCompleted {
+            bus.publish(ServerEvent::OperationCompleted {
                 op_id,
                 kind: format!("research_{kind_str}"),
                 success: true,

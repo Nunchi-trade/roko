@@ -127,13 +127,13 @@ async fn draft_prd(
     Path(slug): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     let op_id = uuid::Uuid::new_v4().to_string();
-    let bus = state.event_bus.sender();
+    let bus = state.event_bus.clone();
 
     let handle = tokio::spawn({
         let op_id = op_id.clone();
         async move {
             // TODO: Wire agent-driven PRD drafting.
-            bus.emit(ServerEvent::OperationCompleted {
+            bus.publish(ServerEvent::OperationCompleted {
                 op_id,
                 kind: "prd_draft".into(),
                 success: true,
@@ -194,13 +194,13 @@ async fn plan_from_prd(
     let _content = read_prd_file(&state.workdir, &slug).await?;
 
     let op_id = uuid::Uuid::new_v4().to_string();
-    let bus = state.event_bus.sender();
+    let bus = state.event_bus.clone();
 
     let handle = tokio::spawn({
         let op_id = op_id.clone();
         async move {
             // TODO: Wire `prd plan <slug>` agent generation.
-            bus.emit(ServerEvent::OperationCompleted {
+            bus.publish(ServerEvent::OperationCompleted {
                 op_id,
                 kind: "prd_plan".into(),
                 success: true,

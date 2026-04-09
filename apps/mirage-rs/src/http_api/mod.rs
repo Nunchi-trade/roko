@@ -167,8 +167,9 @@ pub mod ws;
 pub struct ApiState {
     /// Chain context holding the knowledge store and pheromone field.
     pub chain: Arc<RwLock<ChainContext>>,
-    /// Mirage fork state — needed for current block number in heartbeat/liveness checks.
-    pub mirage_state: Arc<RwLock<crate::fork::MirageState>>,
+    /// Current block number, updated by the auto-miner. Used by heartbeat
+    /// and liveness endpoints to compute `blocks_since` accurately.
+    pub current_block: Arc<AtomicU64>,
     /// HDC projection cache for query endpoints.
     pub projection_cache: ProjectionCache,
     /// Server start time for uptime computation.
@@ -176,6 +177,20 @@ pub struct ApiState {
     /// Subscription manager for WebSocket streaming (roko feature only).
     #[cfg(feature = "roko")]
     pub subs: Option<crate::chain_rpc::SubscriptionManager>,
+}
+
+impl ApiState {
+    /// Creates an `ApiState` suitable for testing with block number starting at 0.
+    pub fn new(chain: Arc<RwLock<ChainContext>>) -> Self {
+        Self {
+            chain,
+            current_block: Arc::new(AtomicU64::new(0)),
+            projection_cache: ProjectionCache::new(128),
+            started_at: Instant::now(),
+            #[cfg(feature = "roko")]
+            subs: None,
+        }
+    }
 }
 
 /// Builds the `/api` router with all dashboard endpoints.

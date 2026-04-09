@@ -37,12 +37,12 @@ async fn start_run(
         .map_or_else(|| state.workdir.clone(), std::path::PathBuf::from);
     let config = state.config.read().await.clone();
     let prompt = body.prompt.clone();
-    let bus = state.event_bus.sender();
+    let bus = state.event_bus.clone();
 
     let handle = tokio::spawn({
         let run_id = run_id.clone();
         async move {
-            bus.emit(ServerEvent::RunStarted {
+            bus.publish(ServerEvent::RunStarted {
                 run_id: run_id.clone(),
                 prompt: prompt.clone(),
             });
@@ -50,13 +50,13 @@ async fn start_run(
             match roko_cli::run_once(&workdir, &config, &prompt).await {
                 Ok(report) => {
                     let success = report.overall_success();
-                    bus.emit(ServerEvent::RunCompleted { run_id, success });
+                    bus.publish(ServerEvent::RunCompleted { run_id, success });
                 }
                 Err(e) => {
-                    bus.emit(ServerEvent::Error {
+                    bus.publish(ServerEvent::Error {
                         message: format!("run failed: {e}"),
                     });
-                    bus.emit(ServerEvent::RunCompleted {
+                    bus.publish(ServerEvent::RunCompleted {
                         run_id,
                         success: false,
                     });

@@ -11,7 +11,7 @@
 
 #[path = "../../roko-serve/src/lib.rs"]
 mod roko_serve;
-pub use roko_serve::{deploy, error, events, routes, state, templates};
+pub use roko_serve::{deploy, error, event_bus, events, routes, state, templates};
 
 use anyhow::{Context as _, Result, anyhow};
 use clap::{Parser, Subcommand, ValueEnum};

@@ -1,5 +1,5 @@
 //! Server-side events emitted during plan execution, agent runs, and other
-//! operations. These flow through the [`EventBus`] and are streamed to
+//! operations. These flow through the shared event bus and are streamed to
 //! connected SSE / WebSocket clients.
 
 use serde::{Deserialize, Serialize};

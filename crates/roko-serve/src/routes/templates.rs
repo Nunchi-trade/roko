@@ -139,7 +139,7 @@ async fn deploy_template(
     let op_id = uuid::Uuid::new_v4().to_string();
     let workdir = state.workdir.clone();
     let config = state.config.read().await.clone();
-    let bus = state.event_bus.sender();
+    let bus = state.event_bus.clone();
 
     let handle = tokio::spawn({
         let op_id = op_id.clone();
@@ -159,7 +159,7 @@ async fn deploy_template(
                             trigger_kind: "template_deploy".into(),
                             success: report.overall_success(),
                         });
-                    bus.emit(ServerEvent::OperationCompleted {
+                    bus.publish(ServerEvent::OperationCompleted {
                         op_id,
                         kind: "template_deploy".into(),
                         success: report.overall_success(),
@@ -177,10 +177,10 @@ async fn deploy_template(
                             trigger_kind: "template_deploy".into(),
                             success: false,
                         });
-                    bus.emit(ServerEvent::Error {
+                    bus.publish(ServerEvent::Error {
                         message: format!("template deploy failed: {e}"),
                     });
-                    bus.emit(ServerEvent::OperationCompleted {
+                    bus.publish(ServerEvent::OperationCompleted {
                         op_id,
                         kind: "template_deploy".into(),
                         success: false,
@@ -269,7 +269,7 @@ async fn deploy_template_cloud(
         .await
         .insert(dep_id.clone(), deployment);
 
-    state.event_bus.emit(ServerEvent::DeploymentCreated {
+    state.event_bus.publish(ServerEvent::DeploymentCreated {
         id: dep_id.clone(),
         name: format!("roko-worker-{name}"),
     });

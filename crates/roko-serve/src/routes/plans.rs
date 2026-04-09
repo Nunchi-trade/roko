@@ -158,7 +158,7 @@ async fn execute_plan(
     }
 
     let run_id = uuid::Uuid::new_v4().to_string();
-    let bus = state.event_bus.sender();
+    let bus = state.event_bus.clone();
     let plan_id = id.clone();
 
     // Spawn a placeholder execution task. Full PlanRunner wiring is a
@@ -166,11 +166,11 @@ async fn execute_plan(
     let handle = tokio::spawn({
         let plan_id = plan_id.clone();
         async move {
-            bus.emit(ServerEvent::PlanStarted {
+            bus.publish(ServerEvent::PlanStarted {
                 plan_id: plan_id.clone(),
             });
             // TODO: Wire PlanRunner execution here.
-            bus.emit(ServerEvent::PlanCompleted {
+            bus.publish(ServerEvent::PlanCompleted {
                 plan_id,
                 success: true,
             });
@@ -227,14 +227,14 @@ async fn generate_plan(
     }
 
     let op_id = uuid::Uuid::new_v4().to_string();
-    let bus = state.event_bus.sender();
+    let bus = state.event_bus.clone();
     let slug = body.slug.clone();
 
     let handle = tokio::spawn({
         let op_id = op_id.clone();
         async move {
             // TODO: Wire actual plan generation (`prd plan <slug>`).
-            bus.emit(ServerEvent::OperationCompleted {
+            bus.publish(ServerEvent::OperationCompleted {
                 op_id,
                 kind: "plan_generate".into(),
                 success: true,
