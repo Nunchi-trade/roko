@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context as _, Result};
+use roko_orchestrator::ReplanStrategy;
 use roko_std::RESEARCHER_TOOL_PROFILE;
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -46,6 +47,9 @@ pub struct TaskDef {
     pub tier: String,
     /// Suggested model for this task.
     pub model_hint: Option<String>,
+    /// Explicit replan strategy override for this task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replan_strategy: Option<ReplanStrategy>,
     /// Maximum lines of change.
     pub max_loc: Option<u32>,
     /// Files this task modifies.
@@ -88,6 +92,8 @@ struct TaskDefSerde {
     #[serde(default)]
     pub model_hint: Option<String>,
     #[serde(default)]
+    pub replan_strategy: Option<ReplanStrategy>,
+    #[serde(default)]
     pub max_loc: Option<u32>,
     #[serde(default, alias = "write_files")]
     pub files: Vec<String>,
@@ -124,6 +130,7 @@ impl From<TaskDefSerde> for TaskDef {
             status: raw.status,
             tier: raw.tier,
             model_hint: raw.model_hint,
+            replan_strategy: raw.replan_strategy,
             max_loc: raw.max_loc,
             files: raw.files,
             allowed_tools: raw.allowed_tools,
@@ -595,6 +602,7 @@ title = "Wire module"
 role = "researcher"
 tier = "focused"
 model_hint = "claude-sonnet-4-6"
+replan_strategy = "decompose"
 max_loc = 50
 max_retries = 5
 write_files = ["src/main.rs"]
@@ -622,6 +630,7 @@ command = "cargo check -p roko-cli"
         let task = &parsed.tasks[0];
         assert_eq!(task.tier, "focused");
         assert_eq!(task.model_hint.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(task.replan_strategy, Some(ReplanStrategy::Decompose));
         assert_eq!(task.max_loc, Some(50));
         assert_eq!(task.files, vec!["src/main.rs"]);
         assert_eq!(
@@ -650,6 +659,8 @@ command = "cargo check -p roko-cli"
         assert_eq!(ctx.read_files[0].lines.as_deref(), Some("40-80"));
         assert_eq!(ctx.anti_patterns.len(), 1);
         assert_eq!(task.verify.len(), 2);
+        let rendered = toml::to_string(&parsed).unwrap();
+        assert!(rendered.contains("replan_strategy = \"decompose\""));
     }
 
     #[test]
@@ -661,6 +672,7 @@ command = "cargo check -p roko-cli"
             status: "ready".into(),
             tier: "mechanical".into(),
             model_hint: None,
+            replan_strategy: None,
             max_loc: None,
             files: vec![],
             allowed_tools: None,
@@ -686,6 +698,7 @@ command = "cargo check -p roko-cli"
         let t3 = TaskDef {
             tier: "focused".into(),
             model_hint: Some("custom-model".into()),
+            replan_strategy: None,
             ..task
         };
         assert_eq!(t3.effective_model("fallback", None), "custom-model");
@@ -799,6 +812,7 @@ depends_on = ["other-plan:T3"]
             status: "ready".into(),
             tier: "focused".into(),
             model_hint: None,
+            replan_strategy: None,
             max_loc: None,
             files: vec![],
             allowed_tools: None,
@@ -831,6 +845,7 @@ depends_on = ["other-plan:T3"]
             status: "ready".into(),
             tier: "focused".into(),
             model_hint: None,
+            replan_strategy: None,
             max_loc: None,
             files: vec![],
             allowed_tools: None,

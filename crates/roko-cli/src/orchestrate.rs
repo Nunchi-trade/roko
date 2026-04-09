@@ -4077,17 +4077,22 @@ impl PlanRunner {
             .cloned()
             .unwrap_or_else(|| "claude-opus-4-6".into());
 
-        let strategy = if total_tasks > 0 && terminal_count * 2 > total_tasks {
-            ReplanStrategy::RegeneratePlan
-        } else {
-            match failure_count {
-                0 | 1 => ReplanStrategy::RetrySame,
-                2 if task_model.contains("opus") => ReplanStrategy::Decompose,
-                2 => ReplanStrategy::RetryWithEscalation,
-                3 => ReplanStrategy::Decompose,
-                _ => ReplanStrategy::Skip,
-            }
-        };
+        let strategy = task_def
+            .as_ref()
+            .and_then(|task| task.replan_strategy)
+            .unwrap_or_else(|| {
+                if total_tasks > 0 && terminal_count * 2 > total_tasks {
+                    ReplanStrategy::RegeneratePlan
+                } else {
+                    match failure_count {
+                        0 | 1 => ReplanStrategy::RetrySame,
+                        2 if task_model.contains("opus") => ReplanStrategy::Decompose,
+                        2 => ReplanStrategy::RetryWithEscalation,
+                        3 => ReplanStrategy::Decompose,
+                        _ => ReplanStrategy::Skip,
+                    }
+                }
+            });
 
         tracing::info!(
             plan_id = %plan_id,
