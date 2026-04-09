@@ -11,14 +11,17 @@ use serde_json::Value;
 
 use crate::serve::error::ApiError;
 use crate::serve::state::AppState;
+use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_core::task::{TaskCategory, TaskComplexityBand};
 use roko_learn::cascade_router::CascadeStage;
 use roko_learn::model_router::COLD_START_THRESHOLD;
 use roko_learn::prompt_experiment::{ExperimentStatus, ExperimentStore, PromptExperiment};
+use roko_learn::runtime_feedback::read_efficiency_events;
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/learning/efficiency", get(efficiency))
+        .route("/learn/efficiency", get(efficiency))
         .route("/learning/cascade-router", get(cascade_router))
         .route("/learn/cascade", get(cascade))
         .route("/learn/experiments", get(experiments))
@@ -26,10 +29,13 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/learning/gate-thresholds", get(gate_thresholds))
 }
 
-/// `GET /api/learning/efficiency` — read `.roko/learn/efficiency.jsonl`.
-async fn efficiency(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+/// `GET /api/learn/efficiency` — aggregate `.roko/learn/efficiency.jsonl`.
+async fn efficiency(State(state): State<Arc<AppState>>) -> Result<Json<EfficiencyResponse>, ApiError> {
     let path = state.workdir.join(".roko/learn/efficiency.jsonl");
-    read_jsonl(&path).await
+    let events = read_efficiency_events(&path)
+        .await
+        .map_err(|e| ApiError::internal(format!("read {}: {e}", path.display())))?;
+    Ok(Json(build_efficiency_response(&events)))
 }
 
 /// `GET /api/learning/cascade-router` — read `.roko/learn/cascade-router.json`.
@@ -76,25 +82,6 @@ async fn read_json_file(path: &std::path::Path) -> Result<Json<Value>, ApiError>
     Ok(Json(value))
 }
 
-/// Read a JSONL file and return entries as a JSON array.
-async fn read_jsonl(path: &std::path::Path) -> Result<Json<Value>, ApiError> {
-    let content = match tokio::fs::read_to_string(path).await {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Json(Value::Array(Vec::new())));
-        }
-        Err(e) => {
-            return Err(ApiError::internal(format!("read {}: {e}", path.display())));
-        }
-    };
-    let entries: Vec<Value> = content
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect();
-    Ok(Json(Value::Array(entries)))
-}
-
 /// Read and parse the persisted experiment store, or return an empty store if missing.
 async fn read_experiment_store(path: &std::path::Path) -> Result<ExperimentStore, ApiError> {
     let content = match tokio::fs::read_to_string(path).await {
@@ -127,6 +114,79 @@ fn build_experiments_response(
         running_experiments: store.running_count(),
         concluded_experiments: store.concluded_count(),
         active_experiments,
+    }
+}
+
+/// Aggregate efficiency events into task-level cost and timing metrics.
+fn build_efficiency_response(events: &[AgentEfficiencyEvent]) -> EfficiencyResponse {
+    let mut tasks: HashMap<TaskKey, TaskEfficiencyAggregate> = HashMap::new();
+
+    for (index, event) in events.iter().enumerate() {
+        let key = TaskKey {
+            plan_id: event.plan_id.clone(),
+            task_id: event.task_id.clone(),
+        };
+        let aggregate = tasks.entry(key).or_insert_with(TaskEfficiencyAggregate::default);
+        aggregate.record(event, index);
+    }
+
+    let mut task_summaries: Vec<TaskEfficiencySummary> = tasks
+        .into_iter()
+        .map(|(key, aggregate)| TaskEfficiencySummary {
+            plan_id: key.plan_id,
+            task_id: key.task_id,
+            timestamp: aggregate.timestamp,
+            cost_usd: aggregate.cost_usd,
+            tokens: aggregate.tokens,
+            duration_ms: aggregate.duration_ms,
+            sequence: aggregate.sequence,
+        })
+        .collect();
+
+    task_summaries.sort_by(|a, b| {
+        a.timestamp
+            .cmp(&b.timestamp)
+            .then_with(|| a.sequence.cmp(&b.sequence))
+            .then_with(|| a.plan_id.cmp(&b.plan_id))
+            .then_with(|| a.task_id.cmp(&b.task_id))
+    });
+
+    let task_count = task_summaries.len() as f64;
+    let total_cost: f64 = task_summaries.iter().map(|task| task.cost_usd).sum();
+    let total_tokens: u64 = task_summaries.iter().map(|task| task.tokens).sum();
+    let total_duration_ms: u64 = task_summaries.iter().map(|task| task.duration_ms).sum();
+
+    let mut cumulative_cost = 0.0;
+    let cost_trend = task_summaries
+        .iter()
+        .map(|task| {
+            cumulative_cost += task.cost_usd;
+            CostTrendPoint {
+                timestamp: task.timestamp.clone(),
+                cost_usd: task.cost_usd,
+                cumulative_cost_usd: cumulative_cost,
+            }
+        })
+        .collect();
+
+    EfficiencyResponse {
+        total_cost,
+        cost_per_task: if task_count == 0.0 {
+            0.0
+        } else {
+            total_cost / task_count
+        },
+        tokens_per_task: if task_count == 0.0 {
+            0.0
+        } else {
+            total_tokens as f64 / task_count
+        },
+        avg_task_duration: if task_count == 0.0 {
+            0.0
+        } else {
+            total_duration_ms as f64 / task_count
+        },
+        cost_trend,
     }
 }
 
@@ -593,6 +653,67 @@ struct ExperimentSignificance {
     note: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Eq, Hash, PartialEq)]
+struct TaskKey {
+    plan_id: String,
+    task_id: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct TaskEfficiencyAggregate {
+    cost_usd: f64,
+    tokens: u64,
+    duration_ms: u64,
+    timestamp: String,
+    sequence: usize,
+}
+
+impl TaskEfficiencyAggregate {
+    fn record(&mut self, event: &AgentEfficiencyEvent, sequence: usize) {
+        self.cost_usd += event.cost_usd;
+        self.tokens += event.total_tokens();
+        self.duration_ms += event.duration_ms.max(event.wall_time_ms);
+
+        if self.timestamp.is_empty() || event.timestamp >= self.timestamp {
+            self.timestamp = event.timestamp.clone();
+            self.sequence = sequence;
+        }
+    }
+}
+
+/// Cost trend point derived from the aggregated efficiency events.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct CostTrendPoint {
+    timestamp: String,
+    cost_usd: f64,
+    cumulative_cost_usd: f64,
+}
+
+/// Task-level efficiency summary derived from the JSONL event stream.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct TaskEfficiencySummary {
+    plan_id: String,
+    task_id: String,
+    timestamp: String,
+    cost_usd: f64,
+    tokens: u64,
+    duration_ms: u64,
+    sequence: usize,
+}
+
+/// Structured API response for `GET /api/learn/efficiency`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct EfficiencyResponse {
+    total_cost: f64,
+    cost_per_task: f64,
+    tokens_per_task: f64,
+    avg_task_duration: f64,
+    cost_trend: Vec<CostTrendPoint>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -720,5 +841,62 @@ mod tests {
         assert_eq!(exp.variants[0].id, "baseline");
         assert!(exp.significance.best_variant_id.is_some());
         assert!(exp.significance.p_value.is_some());
+    }
+
+    fn efficiency_event(
+        plan_id: &str,
+        task_id: &str,
+        timestamp: &str,
+        cost_usd: f64,
+        input_tokens: u64,
+        output_tokens: u64,
+        wall_time_ms: u64,
+    ) -> AgentEfficiencyEvent {
+        AgentEfficiencyEvent {
+            agent_id: "agent-1".into(),
+            role: "Implementer".into(),
+            backend: "claude".into(),
+            model: "claude-sonnet-4-5".into(),
+            plan_id: plan_id.into(),
+            task_id: task_id.into(),
+            input_tokens,
+            output_tokens,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            cost_usd,
+            cost_usd_without_cache: cost_usd,
+            prompt_sections: Vec::new(),
+            total_prompt_tokens: input_tokens,
+            system_prompt_tokens: 0,
+            tools_available: 0,
+            tools_used: 0,
+            tool_calls: Vec::new(),
+            wall_time_ms,
+            duration_ms: wall_time_ms,
+            time_to_first_token_ms: 0,
+            was_warm_start: false,
+            iteration: 1,
+            gate_passed: true,
+            timestamp: timestamp.into(),
+        }
+    }
+
+    #[test]
+    fn efficiency_response_aggregates_task_level_metrics() {
+        let events = vec![
+            efficiency_event("plan-a", "task-1", "2026-04-08T10:00:00Z", 1.0, 100, 50, 1_000),
+            efficiency_event("plan-a", "task-1", "2026-04-08T10:05:00Z", 2.0, 120, 30, 2_000),
+            efficiency_event("plan-b", "task-2", "2026-04-08T11:00:00Z", 3.0, 80, 20, 500),
+        ];
+
+        let response = build_efficiency_response(&events);
+
+        assert!((response.total_cost - 6.0).abs() < 1e-9);
+        assert!((response.cost_per_task - 3.0).abs() < 1e-9);
+        assert!((response.tokens_per_task - 200.0).abs() < 1e-9);
+        assert!((response.avg_task_duration - 1750.0).abs() < 1e-9);
+        assert_eq!(response.cost_trend.len(), 2);
+        assert!((response.cost_trend[0].cumulative_cost_usd - 3.0).abs() < 1e-9);
+        assert!((response.cost_trend[1].cumulative_cost_usd - 6.0).abs() < 1e-9);
     }
 }
