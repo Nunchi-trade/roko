@@ -111,6 +111,18 @@ struct GetPrArguments {
     number: u64,
 }
 
+#[derive(Debug, Deserialize)]
+struct CreatePrArguments {
+    owner: String,
+    repo: String,
+    title: String,
+    body: String,
+    head: String,
+    base: String,
+    #[serde(default)]
+    draft: Option<bool>,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum PullRequestState {
@@ -209,6 +221,12 @@ struct GithubPullRequestDetails {
     requested_reviewers: Vec<GithubUser>,
     head: GithubBranchRef,
     base: GithubBranchRef,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubCreatePullRequestResponse {
+    number: u64,
+    html_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -671,8 +689,24 @@ fn handle_get_pr(arguments: Value) -> Result<Value, JsonRpcError> {
 }
 
 fn handle_create_pr(arguments: Value) -> Result<Value, JsonRpcError> {
-    let _ = arguments;
-    unsupported_tool("github.create_pr")
+    let args: CreatePrArguments = serde_json::from_value(arguments)
+        .map_err(|err| JsonRpcError::invalid_params(format!("invalid github.create_pr args: {err}")))?;
+    let client = github_client()?;
+    let pr = create_pull_request(&client, &args, "https://api.github.com")?;
+    let html_url = pr.html_url.ok_or_else(|| {
+        JsonRpcError::internal_error("GitHub API response missing html_url")
+    })?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": serde_json::json!({
+                "number": pr.number,
+                "html_url": html_url
+            }).to_string()
+        }],
+        "isError": false
+    }))
 }
 
 fn handle_comment_pr(arguments: Value) -> Result<Value, JsonRpcError> {
@@ -893,6 +927,47 @@ fn list_pull_request_reviews(
         .map_err(|err| JsonRpcError::internal_error(format!("parse GitHub pull request reviews: {err}")))
 }
 
+fn create_pull_request(
+    client: &Client,
+    args: &CreatePrArguments,
+    api_base_url: &str,
+) -> Result<GithubCreatePullRequestResponse, JsonRpcError> {
+    let url = format!("{api_base_url}/repos/{}/{}/pulls", args.owner, args.repo);
+    let mut request = client.post(url);
+    if let Some(token) = github_token() {
+        request = request.bearer_auth(token);
+    }
+
+    let mut payload = serde_json::json!({
+        "title": args.title,
+        "body": args.body,
+        "head": args.head,
+        "base": args.base,
+    });
+    if let Some(draft) = args.draft {
+        payload["draft"] = Value::Bool(draft);
+    }
+
+    let response = request
+        .json(&payload)
+        .send()
+        .map_err(|err| JsonRpcError::internal_error(format!("call GitHub API: {err}")))?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|err| JsonRpcError::internal_error(format!("read GitHub response: {err}")))?;
+    if !status.is_success() {
+        return Err(JsonRpcError::internal_error(format!(
+            "GitHub API returned {status}: {}",
+            body.trim()
+        )));
+    }
+
+    serde_json::from_str(&body)
+        .map_err(|err| JsonRpcError::internal_error(format!("parse GitHub pull request creation response: {err}")))
+}
+
 fn summarize_pull_request(
     pr: &GithubPullRequestDetails,
     reviews: &[GithubPullRequestReview],
@@ -1105,7 +1180,10 @@ fn write_response<W: Write>(writer: &mut W, response: JsonRpcResponse) -> anyhow
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::io::{BufRead, BufReader, Read, Write};
     use std::io::Cursor;
+    use std::net::TcpListener;
+    use std::thread;
 
     #[test]
     fn serve_stdio_writes_responses_for_requests() {
@@ -1353,5 +1431,80 @@ mod tests {
                 ]
             })
         );
+    }
+
+    #[test]
+    fn create_pull_request_posts_expected_payload_and_returns_url() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept request");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).expect("read request line");
+            assert!(request_line.starts_with("POST /repos/octo/hello-world/pulls HTTP/1.1"));
+
+            let mut content_length = 0usize;
+            loop {
+                let mut header_line = String::new();
+                reader.read_line(&mut header_line).expect("read header");
+                let header = header_line.trim_end();
+                if header.is_empty() {
+                    break;
+                }
+                if let Some(value) = header.strip_prefix("Content-Length: ") {
+                    content_length = value.parse().expect("parse content length");
+                }
+            }
+
+            let mut body = vec![0u8; content_length];
+            reader.read_exact(&mut body).expect("read request body");
+            let body_json: Value = serde_json::from_slice(&body).expect("parse request body");
+            assert_eq!(
+                body_json,
+                json!({
+                    "title": "Fix login flow",
+                    "body": "This fixes the login redirect.",
+                    "head": "feature/login-fix",
+                    "base": "main",
+                    "draft": true
+                })
+            );
+
+            let mut writer = stream;
+            let response_body = json!({
+                "number": 17,
+                "html_url": "https://github.com/octo/hello-world/pull/17"
+            })
+            .to_string();
+            write!(
+                writer,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            )
+            .expect("write response");
+        });
+
+        let client = github_client().expect("client");
+        let args = CreatePrArguments {
+            owner: "octo".to_string(),
+            repo: "hello-world".to_string(),
+            title: "Fix login flow".to_string(),
+            body: "This fixes the login redirect.".to_string(),
+            head: "feature/login-fix".to_string(),
+            base: "main".to_string(),
+            draft: Some(true),
+        };
+
+        let pr = create_pull_request(&client, &args, &format!("http://{}", addr)).expect("create pr");
+        assert_eq!(pr.number, 17);
+        assert_eq!(
+            pr.html_url.as_deref(),
+            Some("https://github.com/octo/hello-world/pull/17")
+        );
+
+        server.join().expect("server thread");
     }
 }
