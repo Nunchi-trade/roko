@@ -3542,7 +3542,7 @@ impl PlanRunner {
                                 if let Err(e) = crate::worker::cloud::git_push(
                                     &exec_dir,
                                     &cloud.branch_name(),
-                                    &cloud,
+                                    &cloud.github_token,
                                 )
                                 .await
                                 {

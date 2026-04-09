@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Output;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -47,19 +48,22 @@ impl CloudExecution {
         format!("impl/{}", self.plan_slug)
     }
 
+    /// Public repository URL without embedded credentials.
+    #[must_use]
+    pub fn repo_url(&self) -> String {
+        format!("https://github.com/{}/{}.git", self.owner, self.repo)
+    }
+
     /// Build the clone URL with embedded token authentication.
     #[must_use]
     pub fn clone_url(&self) -> String {
-        format!(
-            "https://x-access-token:{}@github.com/{}/{}.git",
-            self.github_token, self.owner, self.repo
-        )
+        rewrite_git_https_url(&self.repo_url(), &self.github_token)
     }
 
     /// Build the HTTPS push URL with embedded token authentication.
     #[must_use]
     pub fn push_url(&self) -> String {
-        self.clone_url()
+        rewrite_git_https_url(&self.repo_url(), &self.github_token)
     }
 }
 
@@ -209,15 +213,58 @@ fn parse_owner_repo(repo_url: &str) -> Result<(String, String)> {
     bail!("unable to parse GitHub owner/repo from repo_url: {repo_url}");
 }
 
+fn rewrite_git_https_url(url: &str, token: &str) -> String {
+    if token.is_empty() {
+        return url.to_string();
+    }
+
+    if let Some(rest) = url.strip_prefix("https://") {
+        let path = rest.split_once('@').map_or(rest, |(_, after_at)| after_at);
+        return format!("https://x-access-token:{token}@{path}");
+    }
+
+    url.to_string()
+}
+
+fn scrub_token(text: &str, token: &str) -> String {
+    if token.is_empty() {
+        return text.to_string();
+    }
+
+    text.replace(token, "***")
+}
+
+fn git_error(action: &str, output: &Output, token: Option<&str>) -> anyhow::Error {
+    let mut message = String::new();
+    if !output.stderr.is_empty() {
+        message.push_str(&String::from_utf8_lossy(&output.stderr));
+    }
+    if !output.stdout.is_empty() {
+        if !message.is_empty() {
+            message.push_str("\n");
+        }
+        message.push_str(&String::from_utf8_lossy(&output.stdout));
+    }
+    if message.trim().is_empty() {
+        message = format!("git exited with {}", output.status);
+    }
+
+    let message = match token {
+        Some(token) => scrub_token(&message, token),
+        None => message,
+    };
+    anyhow!("{action} failed: {message}")
+}
+
 /// Clone the repository into the target workspace.
-pub async fn git_clone(workspace: &Path, execution: &CloudExecution) -> Result<()> {
-    let url = execution.clone_url();
+pub async fn git_clone(url: &str, workspace: &Path, token: &str) -> Result<()> {
     if let Some(parent) = workspace.parent() {
         tokio::fs::create_dir_all(parent)
             .await
             .with_context(|| format!("create {}", parent.display()))?;
     }
 
+    let url = rewrite_git_https_url(url, token);
     let output = tokio::process::Command::new("git")
         .args(["clone", "--depth", "1", &url])
         .arg(workspace)
@@ -227,8 +274,19 @@ pub async fn git_clone(workspace: &Path, execution: &CloudExecution) -> Result<(
         .context("spawn git clone")?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git clone failed: {}", stderr.replace(&execution.github_token, "***"));
+        return Err(git_error("git clone", &output, Some(token)));
+    }
+
+    let reset_output = tokio::process::Command::new("git")
+        .args(["remote", "set-url", "origin", &url])
+        .current_dir(workspace)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .await
+        .context("spawn git remote set-url origin")?;
+
+    if !reset_output.status.success() {
+        return Err(git_error("git remote set-url origin", &reset_output, None));
     }
 
     Ok(())
@@ -239,13 +297,13 @@ pub async fn git_checkout_new_branch(workspace: &Path, branch: &str) -> Result<(
     let output = tokio::process::Command::new("git")
         .args(["checkout", "-b", branch])
         .current_dir(workspace)
+        .env("GIT_TERMINAL_PROMPT", "0")
         .output()
         .await
         .context("spawn git checkout -b")?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git checkout -b {branch} failed: {stderr}");
+        return Err(git_error("git checkout -b", &output, None));
     }
 
     Ok(())
@@ -256,18 +314,19 @@ pub async fn git_commit(workspace: &Path, message: &str) -> Result<()> {
     let add_output = tokio::process::Command::new("git")
         .args(["add", "-A"])
         .current_dir(workspace)
+        .env("GIT_TERMINAL_PROMPT", "0")
         .output()
         .await
         .context("spawn git add -A")?;
 
     if !add_output.status.success() {
-        let stderr = String::from_utf8_lossy(&add_output.stderr);
-        bail!("git add -A failed: {stderr}");
+        return Err(git_error("git add -A", &add_output, None));
     }
 
     let diff_output = tokio::process::Command::new("git")
         .args(["diff", "--cached", "--quiet"])
         .current_dir(workspace)
+        .env("GIT_TERMINAL_PROMPT", "0")
         .output()
         .await
         .context("spawn git diff --cached")?;
@@ -279,6 +338,7 @@ pub async fn git_commit(workspace: &Path, message: &str) -> Result<()> {
     let output = tokio::process::Command::new("git")
         .args(["commit", "-m", message])
         .current_dir(workspace)
+        .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_AUTHOR_NAME", "roko")
         .env("GIT_AUTHOR_EMAIL", "roko@nunchi.dev")
         .env("GIT_COMMITTER_NAME", "roko")
@@ -288,17 +348,30 @@ pub async fn git_commit(workspace: &Path, message: &str) -> Result<()> {
         .context("spawn git commit")?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git commit failed: {stderr}");
+        return Err(git_error("git commit", &output, None));
     }
 
     Ok(())
 }
 
 /// Push the implementation branch to origin.
-pub async fn git_push(workspace: &Path, branch: &str, execution: &CloudExecution) -> Result<()> {
+pub async fn git_push(workspace: &Path, branch: &str, token: &str) -> Result<()> {
+    let origin_output = tokio::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(workspace)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .await
+        .context("spawn git remote get-url origin")?;
+
+    if !origin_output.status.success() {
+        return Err(git_error("git remote get-url origin", &origin_output, None));
+    }
+
+    let origin = String::from_utf8_lossy(&origin_output.stdout).trim().to_string();
+    let push_url = rewrite_git_https_url(&origin, token);
     let output = tokio::process::Command::new("git")
-        .args(["push", "origin", branch])
+        .args(["push", &push_url, branch])
         .current_dir(workspace)
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()
@@ -306,8 +379,7 @@ pub async fn git_push(workspace: &Path, branch: &str, execution: &CloudExecution
         .context("spawn git push")?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git push failed: {}", stderr.replace(&execution.github_token, "***"));
+        return Err(git_error("git push", &output, Some(token)));
     }
 
     Ok(())
@@ -379,7 +451,7 @@ pub async fn run_code_implementer_cloud(
     }
 
     let result = async {
-        git_clone(&workspace, &execution).await?;
+        git_clone(&execution.repo_url(), &workspace, &execution.github_token).await?;
         git_checkout_new_branch(&workspace, &execution.branch_name()).await?;
 
         let config_path = workspace.join("roko.toml");
@@ -435,6 +507,7 @@ mod tests {
         };
         assert_eq!(execution.branch_name(), "impl/p07-autofix");
         assert!(execution.clone_url().contains("x-access-token:token@github.com/nunchi/roko.git"));
+        assert_eq!(execution.repo_url(), "https://github.com/nunchi/roko.git");
     }
 
     #[test]
