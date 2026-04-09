@@ -232,6 +232,21 @@ impl AffectEngine {
         self.adjust(task_id.into(), -0.2, 0.0, -0.15, -0.15)
     }
 
+    /// Dream-triggered appraisal: repeated failure in a task type lowers confidence.
+    ///
+    /// Dreams are a batch signal, so the confidence decay is proportional to
+    /// the number of failing episodes reviewed for the task type.
+    #[must_use]
+    pub fn on_dream_failure(
+        &mut self,
+        task_type: impl Into<String>,
+        failure_count: usize,
+    ) -> AffectState {
+        let failures = failure_count.max(1).min(5) as f64;
+        let confidence_drop = -(0.07 * failures).min(0.35);
+        self.adjust(task_type.into(), 0.0, 0.0, 0.0, confidence_drop)
+    }
+
     /// Appraisal trigger: gate passed.
     #[must_use]
     pub fn on_gate_pass(&mut self, task_id: impl Into<String>) -> AffectState {
@@ -878,6 +893,19 @@ mod tests {
             state.confidence < 0.3,
             "repeated failures should lower affect confidence enough to bias routing"
         );
+    }
+
+    #[test]
+    fn dream_failures_lower_task_type_confidence() {
+        let mut engine = AffectEngine::new();
+
+        let state = engine.on_dream_failure("implementation", 3);
+
+        assert!(state.confidence < 0.5);
+        assert!((state.confidence - 0.29).abs() < 1e-9);
+        assert_eq!(state.pleasure, 0.0);
+        assert_eq!(state.arousal, 0.0);
+        assert_eq!(state.dominance, 0.0);
     }
 
     #[test]

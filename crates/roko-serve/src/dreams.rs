@@ -4,6 +4,7 @@
 //! `roko-dreams` batch processor when enough new episodes have accumulated.
 
 use std::fs;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,7 +14,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use roko_agent::{Agent, AgentResult, ClaudeCliAgent, ExecAgent};
 use roko_core::{Context as RokoContext, Signal};
-use roko_dreams::cycle::DreamCycleReport;
+use roko_dreams::cycle::{DreamCycleReport, DreamOutcome};
 use roko_dreams::DreamCycle;
 use roko_learn::{
     episode_logger::EpisodeLogger,
@@ -157,6 +158,7 @@ pub async fn run_dream_cycle_now(
     let mut cycle = build_dream_cycle(&state, &config).await?;
     restore_last_dream_at(&state, &mut cycle)?;
     let report = cycle.run().await.context("run dream cycle")?;
+    apply_dream_affect_feedback(&state, &report);
     Ok(report)
 }
 
@@ -266,12 +268,37 @@ async fn maybe_run_dream_cycle(
         playbooks_created = report.playbooks_created,
         "dream cycle completed"
     );
+    apply_dream_affect_feedback(state, &report);
     Ok(())
 }
 
 enum DreamReviewAgent {
     Claude(ClaudeCliAgent),
     Exec(ExecAgent),
+}
+
+fn apply_dream_affect_feedback(state: &AppState, report: &DreamCycleReport) {
+    let mut engine = state.affect_engine.lock();
+    apply_dream_affect_feedback_to_engine(&mut engine, report);
+}
+
+fn apply_dream_affect_feedback_to_engine(
+    engine: &mut roko_golem::AffectEngine,
+    report: &DreamCycleReport,
+) {
+    let mut failing_task_types: BTreeMap<String, usize> = BTreeMap::new();
+    for cluster in &report.clusters {
+        if cluster.key.outcome != DreamOutcome::Failure || cluster.failure_count <= 2 {
+            continue;
+        }
+        *failing_task_types
+            .entry(cluster.key.task_type.clone())
+            .or_insert(0) += cluster.failure_count;
+    }
+
+    for (task_type, failure_count) in failing_task_types {
+        let _ = engine.on_dream_failure(task_type, failure_count);
+    }
 }
 
 #[async_trait]
@@ -295,5 +322,55 @@ impl Agent for DreamReviewAgent {
             Self::Claude(agent) => agent.supports_streaming(),
             Self::Exec(agent) => agent.supports_streaming(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use chrono::Duration as ChronoDuration;
+    use roko_dreams::cycle::{DreamClusterKey, DreamClusterReport, DreamOutcome};
+    use roko_golem::AffectEngine;
+
+    #[test]
+    fn dream_failures_reduce_confidence_by_task_type() {
+        let mut engine = AffectEngine::new();
+        let report = DreamCycleReport {
+            started_at: Utc::now() - ChronoDuration::minutes(10),
+            completed_at: Utc::now(),
+            total_episodes: 3,
+            processed_episodes: 3,
+            processed_through: None,
+            analysis: roko_neuro::tier_progression::TierProgression::default().analyze(&[]),
+            clusters: vec![DreamClusterReport {
+                key: DreamClusterKey {
+                    plan_id: "plan-a".to_string(),
+                    task_type: "implementation".to_string(),
+                    outcome: DreamOutcome::Failure,
+                    model: "claude-haiku-4-5".to_string(),
+                },
+                episode_count: 3,
+                success_count: 0,
+                failure_count: 3,
+                first_seen_at: Utc::now() - ChronoDuration::minutes(20),
+                last_seen_at: Utc::now() - ChronoDuration::minutes(5),
+                episode_ids: vec!["ep-1".to_string(), "ep-2".to_string(), "ep-3".to_string()],
+                knowledge_entries: Vec::new(),
+                playbook: None,
+                regression_entries: Vec::new(),
+                agent_review: None,
+                warnings: Vec::new(),
+            }],
+            knowledge_entries_written: 0,
+            playbooks_created: 0,
+            regressions_detected: Vec::new(),
+        };
+
+        apply_dream_affect_feedback_to_engine(&mut engine, &report);
+
+        let state = engine.get_state("implementation");
+        assert!(state.confidence < 0.5);
+        assert!(state.confidence > 0.25);
     }
 }
