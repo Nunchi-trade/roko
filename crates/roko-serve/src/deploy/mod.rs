@@ -9,6 +9,7 @@ pub mod railway_api;
 pub mod railway_cli;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -26,6 +27,54 @@ pub struct DeploySpec {
     pub env_vars: HashMap<String, String>,
     /// Target region (optional).
     pub region: Option<String>,
+}
+
+/// Runtime configuration for cloud execution workers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudExecutionConfig {
+    /// Workspace directory used for cloning and working copies.
+    #[serde(default = "default_cloud_workspace_dir")]
+    pub workspace_dir: PathBuf,
+    /// GitHub token used for cloning and pushing.
+    #[serde(default)]
+    pub github_token: String,
+    /// Maximum number of tasks to run in parallel.
+    #[serde(default = "default_cloud_max_parallel")]
+    pub max_parallel: usize,
+    /// Cost budget in cents.
+    #[serde(default = "default_cloud_cost_budget_cents")]
+    pub cost_budget_cents: u64,
+    /// Maximum allowed execution time in seconds.
+    #[serde(default = "default_cloud_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+fn default_cloud_workspace_dir() -> PathBuf {
+    PathBuf::from("/tmp/roko-workspace")
+}
+
+const fn default_cloud_max_parallel() -> usize {
+    2
+}
+
+const fn default_cloud_cost_budget_cents() -> u64 {
+    5_000
+}
+
+const fn default_cloud_timeout_secs() -> u64 {
+    3_600
+}
+
+impl Default for CloudExecutionConfig {
+    fn default() -> Self {
+        Self {
+            workspace_dir: default_cloud_workspace_dir(),
+            github_token: String::new(),
+            max_parallel: default_cloud_max_parallel(),
+            cost_budget_cents: default_cloud_cost_budget_cents(),
+            timeout_secs: default_cloud_timeout_secs(),
+        }
+    }
 }
 
 /// A live or completed deployment.
@@ -116,5 +165,20 @@ pub fn create_backend(
         ))),
         "manual" | "" => Ok(Box::new(manual::ManualBackend::default())),
         other => anyhow::bail!("unknown deploy backend: {other}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cloud_execution_config_defaults_match_spec() {
+        let cfg = CloudExecutionConfig::default();
+        assert_eq!(cfg.workspace_dir, PathBuf::from("/tmp/roko-workspace"));
+        assert!(cfg.github_token.is_empty());
+        assert_eq!(cfg.max_parallel, 2);
+        assert_eq!(cfg.cost_budget_cents, 5_000);
+        assert_eq!(cfg.timeout_secs, 3_600);
     }
 }
