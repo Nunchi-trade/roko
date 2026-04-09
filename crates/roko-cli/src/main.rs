@@ -708,8 +708,18 @@ async fn cmd_dashboard(
     let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
     prepare_runtime_hooks(&workdir, cli.quiet);
 
-    if !text && page.is_none() && !list_pages && std::io::stdout().is_terminal() {
-        if App::new(&workdir).run().is_ok() {
+    let initial_page = page.as_deref().map(|page| {
+        parse_dashboard_page(page).ok_or_else(|| {
+            anyhow!(
+                "unknown dashboard page `{page}`; available pages: {}",
+                dashboard_page_slugs().join(", ")
+            )
+        })
+    });
+    let initial_page = initial_page.transpose()?;
+
+    if !text && !list_pages && std::io::stdout().is_terminal() {
+        if App::new_with_page(&workdir, initial_page).run().is_ok() {
             return Ok(EXIT_SUCCESS);
         }
     }

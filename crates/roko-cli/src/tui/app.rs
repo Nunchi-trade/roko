@@ -94,13 +94,21 @@ impl App {
     /// Build a new app from a workspace root.
     #[must_use]
     pub fn new(root: impl AsRef<Path>) -> Self {
+        Self::new_with_page(root, None)
+    }
+
+    /// Build a new app from a workspace root with an initial page selection.
+    #[must_use]
+    pub fn new_with_page(root: impl AsRef<Path>, initial_page: Option<PageId>) -> Self {
         let workdir = root.as_ref().to_path_buf();
-        let scaffold = DashboardScaffold::new_in(&workdir);
-        let current_page = scaffold.active_page();
+        let mut scaffold = DashboardScaffold::new_in(&workdir);
+        if let Some(page) = initial_page {
+            let _ = scaffold.set_active_page(page);
+        }
         let data = DashboardData::load_best_effort(&workdir);
         Self {
             workdir,
-            current_page,
+            current_page: scaffold.active_page(),
             data,
             scaffold,
             running: true,
@@ -679,4 +687,17 @@ fn entry_timestamp_ms(entry: &Value) -> Option<i64> {
 
 fn is_gate_result_kind(kind: &str) -> bool {
     kind == "gate_verdict" || kind.starts_with("gate:") || kind.starts_with("gate_")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn app_starts_on_requested_page() {
+        let dir = tempdir().unwrap();
+        let app = App::new_with_page(dir.path(), Some(PageId::PlanView));
+        assert_eq!(app.current_page(), PageId::PlanView);
+    }
 }
