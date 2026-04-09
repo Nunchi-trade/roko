@@ -57,6 +57,8 @@ use crate::task_parser::TasksFile;
 /// Default number of actions between auto-saves.
 const AUTOSAVE_INTERVAL: usize = 5;
 const DEFAULT_WORKTREE_IDLE_TTL_SECS: u64 = 30 * 60;
+const WATCHER_INTERVAL_SECS: u64 = 30;
+const WATCHER_SIGNAL_TAIL: usize = 200;
 
 // ─── ContextAttributionTracker ────────────────────────────────────────────
 
@@ -262,6 +264,71 @@ struct LearnedContext {
     experiment_variant_id: Option<String>,
 }
 
+/// Background checker that tails `.roko/signals.jsonl` and periodically
+/// runs the conductor against the most recent signals.
+struct WatcherRunner {
+    conductor: Arc<Conductor>,
+    signals_path: PathBuf,
+    cancel: CancelToken,
+}
+
+impl WatcherRunner {
+    fn spawn(self) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move { self.run().await })
+    }
+
+    async fn run(self) {
+        let mut interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_secs(WATCHER_INTERVAL_SECS),
+            Duration::from_secs(WATCHER_INTERVAL_SECS),
+        );
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        loop {
+            tokio::select! {
+                _ = self.cancel.cancelled() => break,
+                _ = interval.tick() => {
+                    match load_recent_signals(&self.signals_path, WATCHER_SIGNAL_TAIL).await {
+                        Ok(recent_signals) => {
+                            let findings = self.conductor.check_all(&recent_signals);
+                            if !findings.is_empty() {
+                                eprintln!(
+                                    "[conductor] watcher runner observed {} intervention signal(s) from last {} signal(s)",
+                                    findings.len(),
+                                    recent_signals.len()
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[conductor] watcher runner failed to read {}: {e}",
+                                self.signals_path.display()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn load_recent_signals(path: &Path, tail_len: usize) -> std::io::Result<Vec<Signal>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let text = tokio::fs::read_to_string(path).await?;
+    let lines: Vec<&str> = text.lines().filter(|line| !line.trim().is_empty()).collect();
+    let start = lines.len().saturating_sub(tail_len);
+    let mut signals = Vec::with_capacity(lines.len().saturating_sub(start));
+    for line in &lines[start..] {
+        if let Ok(signal) = serde_json::from_str::<Signal>(line) {
+            signals.push(signal);
+        }
+    }
+    Ok(signals)
+}
+
 // ─── PlanRunner ───────────────────────────────────────────────────────────
 
 /// The runtime harness that drives plan execution end-to-end.
@@ -300,7 +367,7 @@ pub struct PlanRunner {
     /// Per-plan task tracking for granular Implementing → Gating progression.
     task_trackers: HashMap<String, TaskTracker>,
     /// Conductor for anomaly detection between phases.
-    conductor: Conductor,
+    conductor: Arc<Conductor>,
     /// Signals accumulated during the current plan run for conductor evaluation.
     conductor_signals: Vec<Signal>,
     /// Context attribution tracker for per-(tier, source_type) demotion decisions.
@@ -694,7 +761,7 @@ impl PlanRunner {
             supervisor: ProcessSupervisor::new(cancel.clone()),
             cancel,
             task_trackers,
-            conductor: Conductor::new(),
+            conductor: Arc::new(Conductor::new()),
             conductor_signals: Vec::new(),
             attribution_tracker: ContextAttributionTracker::load(
                 &workdir.join(".roko").join("context-attribution.jsonl"),
@@ -762,7 +829,7 @@ impl PlanRunner {
             supervisor: ProcessSupervisor::new(cancel.clone()),
             cancel,
             task_trackers,
-            conductor: Conductor::new(),
+            conductor: Arc::new(Conductor::new()),
             conductor_signals: Vec::new(),
             attribution_tracker: ContextAttributionTracker::load(
                 &workdir.join(".roko").join("context-attribution.jsonl"),
@@ -834,7 +901,7 @@ impl PlanRunner {
             supervisor: ProcessSupervisor::new(cancel.clone()),
             cancel,
             task_trackers,
-            conductor: Conductor::new(),
+            conductor: Arc::new(Conductor::new()),
             conductor_signals: Vec::new(),
             attribution_tracker: ContextAttributionTracker::load(
                 &workdir.join(".roko").join("context-attribution.jsonl"),
@@ -1248,6 +1315,13 @@ impl PlanRunner {
             }
         }
 
+        let watcher_task = WatcherRunner {
+            conductor: Arc::clone(&self.conductor),
+            signals_path: self.workdir.join(".roko").join("signals.jsonl"),
+            cancel: self.cancel.clone(),
+        }
+        .spawn();
+
         // Maximum iterations to prevent infinite loops.
         let max_iterations = 1000;
         let mut iteration = 0;
@@ -1298,6 +1372,9 @@ impl PlanRunner {
                 self.actions_since_save = 0;
             }
         }
+
+        watcher_task.abort();
+        let _ = watcher_task.await;
 
         // Clean up worktrees after completion (§6).
         if let Err(e) = self.worktrees.reclaim_idle().await {

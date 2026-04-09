@@ -84,6 +84,15 @@ impl Conductor {
         }
     }
 
+    /// Convenience helper for periodic watcher checks.
+    ///
+    /// Uses the current context and returns the intervention signals
+    /// produced by the conductor for the supplied signal stream.
+    #[must_use]
+    pub fn check_all(&self, stream: &[Signal]) -> Vec<Signal> {
+        self.decide(stream, &Context::now())
+    }
+
     /// Create a conductor with custom watchers.
     #[must_use]
     pub fn with_watchers(watchers: Vec<Box<dyn Policy>>) -> Self {
