@@ -1,5 +1,6 @@
 //! Plugin SDK for Roko event sources and feedback collectors.
 
+use chrono::{DateTime, Utc};
 use async_trait::async_trait;
 use roko_core::{Result, Signal};
 use tokio::sync::mpsc::UnboundedSender;
@@ -7,6 +8,12 @@ use tokio_util::sync::CancellationToken;
 
 /// Cloneable sender used by event sources to publish signals into Roko.
 pub type SignalSender = UnboundedSender<Signal>;
+
+/// Feedback emitted by collectors when they observe the outcome of past work.
+///
+/// For now this is the same envelope as a core [`Signal`], which keeps the SDK
+/// flexible while the daemon-side schema for feedback evolves.
+pub type FeedbackSignal = Signal;
 
 /// Kinds of event sources supported by the plugin SDK.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -39,12 +46,34 @@ pub trait EventSource: Send + Sync + 'static {
     async fn start(&self, sender: SignalSender, cancel: CancellationToken) -> Result<()>;
 }
 
+/// Periodically collects outcomes for previously emitted work.
+///
+/// Collectors poll external systems like GitHub, Slack, or CI at a fixed
+/// cadence and return typed feedback for any results found since the last run.
+#[async_trait]
+pub trait FeedbackCollector: Send + Sync + 'static {
+    /// Human-readable collector name.
+    fn name(&self) -> &str;
+
+    /// Services this collector talks to, such as `["github", "slack"]`.
+    fn services(&self) -> Vec<String>;
+
+    /// Poll interval for this collector.
+    fn interval(&self) -> std::time::Duration;
+
+    /// Collect feedback observed since the given timestamp.
+    async fn collect(&self, since: DateTime<Utc>) -> Result<Vec<FeedbackSignal>>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
     use roko_core::{Body, Kind, Signal};
 
     struct DummyEventSource;
+    struct DummyFeedbackCollector;
 
     #[async_trait]
     impl EventSource for DummyEventSource {
@@ -66,6 +95,29 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl FeedbackCollector for DummyFeedbackCollector {
+        fn name(&self) -> &str {
+            "dummy-feedback"
+        }
+
+        fn services(&self) -> Vec<String> {
+            vec!["github".to_string(), "slack".to_string()]
+        }
+
+        fn interval(&self) -> Duration {
+            Duration::from_secs(60)
+        }
+
+        async fn collect(&self, _since: DateTime<Utc>) -> Result<Vec<FeedbackSignal>> {
+            Ok(vec![
+                Signal::builder(Kind::Task)
+                    .body(Body::text("review approved"))
+                    .build(),
+            ])
+        }
+    }
+
     #[tokio::test]
     async fn event_source_is_object_safe() {
         let source: Box<dyn EventSource> = Box::new(DummyEventSource);
@@ -82,5 +134,20 @@ mod tests {
 
         cancel.cancel();
         runner.await.expect("task should complete").expect("source should exit cleanly");
+    }
+
+    #[tokio::test]
+    async fn feedback_collector_is_object_safe() {
+        let collector: Box<dyn FeedbackCollector> = Box::new(DummyFeedbackCollector);
+        assert_eq!(collector.name(), "dummy-feedback");
+        assert_eq!(collector.services(), vec!["github", "slack"]);
+        assert_eq!(collector.interval(), Duration::from_secs(60));
+
+        let feedback = collector
+            .collect(DateTime::<Utc>::UNIX_EPOCH)
+            .await
+            .expect("collector should succeed");
+        assert_eq!(feedback.len(), 1);
+        assert_eq!(feedback[0].body, Body::text("review approved"));
     }
 }
