@@ -141,7 +141,7 @@ struct AgentRunConfig {
     bare_mode: bool,
     effort: String,
     system_prompt: String,
-    tools_csv: String,
+    allowed_tools_csv: String,
     mcp_config: Option<PathBuf>,
     fallback_model: Option<String>,
     env_vars: Vec<(String, String)>,
@@ -166,7 +166,7 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
             .with_effort(cfg.effort)
             .with_system_prompt(cfg.system_prompt)
             .with_extra_args(cfg.read_args)
-            .with_tools(cfg.tools_csv)
+            .with_tools(cfg.allowed_tools_csv)
             .with_settings_json(roko_agent::claude_cli_agent::build_settings_json())
             .with_dangerously_skip_permissions(cfg.skip_permissions)
             .with_optional_resume(cfg.resume_session)
@@ -2405,7 +2405,21 @@ impl PlanRunner {
                 (p, m)
             };
 
-            let system_prompt = build_system_prompt(role, plan_id, tid, &claude_tools_csv);
+            let task_allowed_tools_csv = task_def
+                .as_ref()
+                .and_then(|task| task.allowed_tools.as_deref())
+                .map_or_else(
+                    || claude_tools_csv.clone(),
+                    |allowed_tools| {
+                        claude_task_tool_allowlist_with(
+                            role,
+                            allowed_tools,
+                            self.tool_registry.as_deref(),
+                        )
+                    },
+                );
+            let system_prompt =
+                build_system_prompt(role, plan_id, tid, &task_allowed_tools_csv);
             let env_vars: Vec<(String, String)> = self
                 .config
                 .agent
@@ -2428,7 +2442,7 @@ impl PlanRunner {
                     bare_mode: self.config.agent.bare_mode,
                     effort: self.config.agent.effort.clone(),
                     system_prompt,
-                    tools_csv: claude_tools_csv.clone(),
+                    allowed_tools_csv: task_allowed_tools_csv.clone(),
                     mcp_config: self.config.agent.mcp_config.clone(),
                     fallback_model: self.config.agent.fallback_model.clone(),
                     env_vars,
@@ -3865,9 +3879,22 @@ impl PlanRunner {
         };
 
         let claude_tools_csv = claude_tool_allowlist_with(role, self.tool_registry.as_deref());
+        let task_allowed_tools_csv = task_def
+            .as_ref()
+            .and_then(|task| task.allowed_tools.as_deref())
+            .map_or_else(
+                || claude_tools_csv.clone(),
+                |allowed_tools| {
+                    claude_task_tool_allowlist_with(
+                        role,
+                        allowed_tools,
+                        self.tool_registry.as_deref(),
+                    )
+                },
+            );
 
         // ── Adaptive format selection via bandit ─────────────────────
-        let tool_count = claude_tools_csv
+        let tool_count = task_allowed_tools_csv
             .split(',')
             .filter(|s| !s.is_empty())
             .count();
@@ -3892,7 +3919,7 @@ impl PlanRunner {
         );
 
         let role_instruction = system_prompt_override
-            .unwrap_or_else(|| build_system_prompt(role, plan_id, task, &claude_tools_csv));
+            .unwrap_or_else(|| build_system_prompt(role, plan_id, task, &task_allowed_tools_csv));
         let role_section = PromptSection::new("role", &role_instruction)
             .with_priority(SectionPriority::Critical)
             .with_placement(Placement::Start)
@@ -3986,7 +4013,7 @@ impl PlanRunner {
                     .with_effort(self.config.agent.effort.clone())
                     .with_system_prompt(role_instruction.clone())
                     .with_extra_args(task_read_args)
-                    .with_tools(claude_tools_csv)
+                    .with_tools(task_allowed_tools_csv)
                     .with_settings_json(roko_agent::claude_cli_agent::build_settings_json())
                     .with_dangerously_skip_permissions(claude_skip_permissions_for_role(role))
                     .with_optional_resume(self.claude_resume_session.clone())
@@ -5207,6 +5234,37 @@ fn claude_tool_allowlist_with(
     }
 }
 
+fn claude_task_tool_allowlist_with(
+    role: AgentRole,
+    allowed_tools: &[String],
+    dynamic_registry: Option<&roko_agent::mcp::DynamicToolRegistry>,
+) -> String {
+    use roko_core::tool::ToolRegistry;
+
+    let allowed: HashSet<&str> = allowed_tools.iter().map(String::as_str).collect();
+    let tools: Vec<roko_core::tool::ToolDef> = if let Some(registry) = dynamic_registry {
+        registry
+            .for_role(role)
+            .into_iter()
+            .filter(|tool| allowed.contains(tool.name.as_str()))
+            .cloned()
+            .collect()
+    } else {
+        let registry = StaticToolRegistry::new();
+        registry
+            .for_role(role)
+            .into_iter()
+            .filter(|tool| allowed.contains(tool.name.as_str()))
+            .cloned()
+            .collect()
+    };
+
+    match ClaudeTranslator.render_tools(&tools) {
+        RenderedTools::CliFlag(csv) => csv,
+        _ => String::new(),
+    }
+}
+
 /// Summary of how tightly a review output stays anchored to the task spec.
 #[derive(Debug, Clone, PartialEq)]
 struct ReviewDriftReport {
@@ -5627,6 +5685,26 @@ mod tests {
         ));
         assert!(!claude_skip_permissions_for_role(AgentRole::Auditor));
         assert!(!claude_skip_permissions_for_role(AgentRole::Strategist));
+    }
+
+    #[test]
+    fn claude_task_tool_allowlist_filters_to_task_subset() {
+        let csv = claude_task_tool_allowlist_with(
+            AgentRole::Implementer,
+            &["read_file".to_string(), "write_file".to_string()],
+            None,
+        );
+        assert_eq!(csv, "Read,Edit");
+    }
+
+    #[test]
+    fn claude_task_tool_allowlist_drops_unlisted_tools() {
+        let csv = claude_task_tool_allowlist_with(
+            AgentRole::Implementer,
+            &["definitely_not_a_real_tool".to_string()],
+            None,
+        );
+        assert!(csv.is_empty());
     }
 
     #[test]
