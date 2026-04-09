@@ -22,7 +22,6 @@ use crate::{KnowledgeEntry, KnowledgeKind};
 
 const DEFAULT_MODEL: &str = "claude-haiku-3-5";
 const DEFAULT_MAX_TOKENS: u32 = 2_048;
-const DEFAULT_HALF_LIFE_DAYS: f64 = 30.0;
 const DEFAULT_CONFIDENCE: f64 = 0.75;
 
 /// Backend contract for episode distillation.
@@ -173,8 +172,8 @@ struct DistillationCandidate {
     source_episodes: Vec<String>,
     #[serde(default)]
     tags: Vec<String>,
-    #[serde(default = "default_candidate_half_life_days")]
-    half_life_days: f64,
+    #[serde(default)]
+    half_life_days: Option<f64>,
 }
 
 impl DistillationCandidate {
@@ -201,11 +200,10 @@ impl DistillationCandidate {
         self.tags.dedup();
 
         let confidence = self.confidence.clamp(0.0, 1.0);
-        let half_life_days = if self.half_life_days.is_finite() && self.half_life_days > 0.0 {
-            self.half_life_days
-        } else {
-            DEFAULT_HALF_LIFE_DAYS
-        };
+        let half_life_days = self
+            .half_life_days
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .unwrap_or_else(|| self.kind.default_half_life_days());
 
         Some(KnowledgeEntry {
             id: derive_knowledge_id(self.kind, content, &self.source_episodes, &self.tags),
@@ -392,10 +390,6 @@ fn episode_source_id(episode: &Episode) -> &str {
 
 fn default_candidate_confidence() -> f64 {
     DEFAULT_CONFIDENCE
-}
-
-fn default_candidate_half_life_days() -> f64 {
-    DEFAULT_HALF_LIFE_DAYS
 }
 
 #[cfg(test)]

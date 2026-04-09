@@ -493,8 +493,16 @@ fn recency_factor(entry: &KnowledgeEntry, now: DateTime<Utc>) -> f64 {
         .num_seconds()
         .max(0) as f64
         / 86_400.0;
-    let half_life = entry.half_life_days.max(1e-6);
+    let half_life = effective_half_life_days(entry);
     0.5_f64.powf(age / half_life)
+}
+
+fn effective_half_life_days(entry: &KnowledgeEntry) -> f64 {
+    if entry.half_life_days.is_finite() && entry.half_life_days > 0.0 {
+        entry.half_life_days
+    } else {
+        entry.kind.default_half_life_days()
+    }
 }
 
 fn compare_scores(
@@ -547,16 +555,23 @@ mod tests {
     use crate::KnowledgeKind;
     use tempfile::TempDir;
 
-    fn entry(id: &str, content: &str, tags: &[&str], confidence: f64, created_at: DateTime<Utc>) -> KnowledgeEntry {
+    fn entry(
+        kind: KnowledgeKind,
+        id: &str,
+        content: &str,
+        tags: &[&str],
+        confidence: f64,
+        created_at: DateTime<Utc>,
+    ) -> KnowledgeEntry {
         KnowledgeEntry {
             id: id.to_owned(),
-            kind: KnowledgeKind::Fact,
+            kind,
             content: content.to_owned(),
             confidence,
             source_episodes: Vec::new(),
             tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
             created_at,
-            half_life_days: 30.0,
+            half_life_days: kind.default_half_life_days(),
             hdc_vector: None,
         }
     }
@@ -569,6 +584,7 @@ mod tests {
 
         store
             .add(entry(
+                KnowledgeKind::Fact,
                 "k1",
                 "Rust async actors and memory stores",
                 &["rust", "async"],
@@ -578,6 +594,7 @@ mod tests {
             .expect("add first");
         store
             .add(entry(
+                KnowledgeKind::Fact,
                 "k2",
                 "Rust data pipelines",
                 &["rust"],
@@ -587,6 +604,7 @@ mod tests {
             .expect("add second");
         store
             .add(entry(
+                KnowledgeKind::Fact,
                 "k3",
                 "Completely unrelated note",
                 &["misc"],
@@ -614,6 +632,7 @@ mod tests {
 
         store
             .add(entry(
+                KnowledgeKind::Insight,
                 "k1",
                 "A durable heuristic",
                 &["heuristic"],
@@ -626,6 +645,62 @@ mod tests {
         let all = store.read_all().expect("read");
         assert_eq!(all.len(), 1);
         assert!((all[0].confidence - 0.5).abs() < 0.05);
+    }
+
+    #[test]
+    fn decay_uses_kind_specific_half_lives() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let created_at = Utc::now() - Duration::days(30);
+
+        store
+            .add(entry(
+                KnowledgeKind::Fact,
+                "fact",
+                "Long-lived factual memory",
+                &["fact"],
+                1.0,
+                created_at,
+            ))
+            .expect("add fact");
+        store
+            .add(entry(
+                KnowledgeKind::Insight,
+                "insight",
+                "Short-lived insight",
+                &["insight"],
+                1.0,
+                created_at,
+            ))
+            .expect("add insight");
+        store
+            .add(entry(
+                KnowledgeKind::Heuristic,
+                "heuristic",
+                "Mid-lived heuristic",
+                &["heuristic"],
+                1.0,
+                created_at,
+            ))
+            .expect("add heuristic");
+
+        store.decay().expect("decay");
+        let all = store.read_all().expect("read");
+        let fact = all.iter().find(|entry| entry.id == "fact").expect("fact");
+        let insight = all
+            .iter()
+            .find(|entry| entry.id == "insight")
+            .expect("insight");
+        let heuristic = all
+            .iter()
+            .find(|entry| entry.id == "heuristic")
+            .expect("heuristic");
+
+        assert!(fact.confidence > heuristic.confidence);
+        assert!(heuristic.confidence > insight.confidence);
+        assert!((insight.confidence - 0.5).abs() < 0.05);
+        assert!(fact.confidence > 0.9);
+        assert!((heuristic.confidence - 0.79).abs() < 0.05);
     }
 
     #[test]
@@ -643,7 +718,7 @@ mod tests {
                 source_episodes: Vec::new(),
                 tags: Vec::new(),
                 created_at: now - Duration::days(3),
-                half_life_days: 30.0,
+                half_life_days: KnowledgeKind::Fact.default_half_life_days(),
                 hdc_vector: None,
             })
             .expect("add oldest");
@@ -656,7 +731,7 @@ mod tests {
                 source_episodes: Vec::new(),
                 tags: Vec::new(),
                 created_at: now - Duration::days(1),
-                half_life_days: 30.0,
+                half_life_days: KnowledgeKind::Procedure.default_half_life_days(),
                 hdc_vector: None,
             })
             .expect("add middle");
@@ -669,7 +744,7 @@ mod tests {
                 source_episodes: Vec::new(),
                 tags: Vec::new(),
                 created_at: now,
-                half_life_days: 30.0,
+                half_life_days: KnowledgeKind::Fact.default_half_life_days(),
                 hdc_vector: None,
             })
             .expect("add newest");
@@ -689,6 +764,7 @@ mod tests {
         let now = Utc::now();
         let index = MemoryIndex::from_entries(vec![
             entry(
+                KnowledgeKind::Fact,
                 "k1",
                 "rust async memory retrieval",
                 &["rust", "memory"],
@@ -696,6 +772,7 @@ mod tests {
                 now,
             ),
             entry(
+                KnowledgeKind::Fact,
                 "k2",
                 "postgres maintenance routine",
                 &["db"],
@@ -722,6 +799,7 @@ mod tests {
 
         store
             .add(entry(
+                KnowledgeKind::Fact,
                 "k1",
                 "semantic retrieval over durable knowledge",
                 &["memory"],
@@ -731,6 +809,7 @@ mod tests {
             .expect("add first");
         store
             .add(entry(
+                KnowledgeKind::Fact,
                 "k2",
                 "completely unrelated topic",
                 &["misc"],

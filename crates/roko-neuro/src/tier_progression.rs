@@ -328,7 +328,7 @@ impl From<&InsightRecord> for KnowledgeEntry {
                 "validated".to_string(),
             ],
             created_at: Utc::now(),
-            half_life_days: DEFAULT_HALF_LIFE_DAYS,
+            half_life_days: KnowledgeKind::Insight.default_half_life_days(),
             hdc_vector: None,
         }
     }
@@ -348,7 +348,7 @@ impl From<&HeuristicRule> for KnowledgeEntry {
                 "validated".to_string(),
             ],
             created_at: Utc::now(),
-            half_life_days: DEFAULT_HALF_LIFE_DAYS,
+            half_life_days: KnowledgeKind::Heuristic.default_half_life_days(),
             hdc_vector: None,
         }
     }
