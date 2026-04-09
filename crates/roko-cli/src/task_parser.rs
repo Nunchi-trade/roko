@@ -1,5 +1,6 @@
-//! Parse `tasks.toml` into structured task definitions with tiers, context,
-//! dependencies, model hints, and per-task verification pipelines.
+//! Parse `tasks.toml` into structured task definitions with tiers, operating
+//! frequencies, context, dependencies, model hints, and per-task verification
+//! pipelines.
 //!
 //! This is the bridge between the plan generator output and the orchestrator.
 //! It reads the extended task format (with `tier`, `model_hint`, `context`,
@@ -48,6 +49,9 @@ pub struct TaskDef {
     pub status: String,
     /// Task complexity tier: mechanical, focused, integrative, architectural.
     pub tier: String,
+    /// Optional operating frequency override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frequency: Option<OperatingFrequency>,
     /// Suggested model for this task.
     pub model_hint: Option<String>,
     /// Explicit replan strategy override for this task.
@@ -94,6 +98,8 @@ struct TaskDefSerde {
     pub status: String,
     #[serde(default = "default_tier")]
     pub tier: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frequency: Option<OperatingFrequency>,
     #[serde(default)]
     pub model_hint: Option<String>,
     #[serde(default)]
@@ -135,6 +141,7 @@ impl From<TaskDefSerde> for TaskDef {
             role: raw.role,
             status: raw.status,
             tier: raw.tier,
+            frequency: raw.frequency,
             model_hint: raw.model_hint,
             replan_strategy: raw.replan_strategy,
             max_loc: raw.max_loc,
@@ -306,21 +313,42 @@ fn default_max_retries() -> u32 {
     3
 }
 
+fn infer_operating_frequency(description: Option<&str>) -> OperatingFrequency {
+    let Some(description) = description else {
+        return OperatingFrequency::Theta;
+    };
+
+    let description = description.to_ascii_lowercase();
+    if description.contains("fix")
+        || description.contains("quick")
+        || description.contains("typo")
+        || description.contains("rename")
+    {
+        OperatingFrequency::Gamma
+    } else if description.contains("plan")
+        || description.contains("design")
+        || description.contains("architect")
+        || description.contains("consolidate")
+        || description.contains("dream")
+    {
+        OperatingFrequency::Delta
+    } else {
+        OperatingFrequency::Theta
+    }
+}
+
 impl TaskDef {
-    /// Map the task's declared tier to an operating frequency.
+    /// Map the task to an operating frequency.
     ///
-    /// The tier names already encode the intended cadence:
-    /// - `mechanical` → `Gamma`
-    /// - `focused` / `integrative` → `Theta`
-    /// - `architectural` → `Delta`
+    /// If the task declares a frequency, use it. Otherwise infer it from the
+    /// description:
+    /// - contains `fix`, `quick`, `typo`, or `rename` → `Gamma`
+    /// - contains `plan`, `design`, `architect`, `consolidate`, or `dream` → `Delta`
+    /// - otherwise → `Theta`
     #[must_use]
     pub fn operating_frequency(&self) -> OperatingFrequency {
-        match self.tier.as_str() {
-            "mechanical" => OperatingFrequency::Gamma,
-            "architectural" => OperatingFrequency::Delta,
-            "focused" | "integrative" => OperatingFrequency::Theta,
-            _ => OperatingFrequency::Theta,
-        }
+        self.frequency
+            .unwrap_or_else(|| infer_operating_frequency(self.description.as_deref()))
     }
 
     /// Get the model to use for this task, falling back through:
@@ -997,6 +1025,7 @@ id = "T1"
 title = "Wire module"
 role = "researcher"
 tier = "focused"
+frequency = "delta"
 model_hint = "claude-sonnet-4-6"
 replan_strategy = "decompose"
 max_loc = 50
@@ -1025,6 +1054,7 @@ command = "cargo check -p roko-cli"
         let parsed: TasksFile = toml::from_str(toml).unwrap();
         let task = &parsed.tasks[0];
         assert_eq!(task.tier, "focused");
+        assert_eq!(task.frequency, Some(OperatingFrequency::Delta));
         assert_eq!(task.model_hint.as_deref(), Some("claude-sonnet-4-6"));
         assert_eq!(task.replan_strategy, Some(ReplanStrategy::Decompose));
         assert_eq!(task.max_loc, Some(50));
@@ -1056,6 +1086,7 @@ command = "cargo check -p roko-cli"
         assert_eq!(ctx.anti_patterns.len(), 1);
         assert_eq!(task.verify.len(), 2);
         let rendered = toml::to_string(&parsed).unwrap();
+        assert!(rendered.contains("frequency = \"delta\""));
         assert!(rendered.contains("replan_strategy = \"decompose\""));
     }
 
@@ -1068,6 +1099,7 @@ command = "cargo check -p roko-cli"
             role: None,
             status: "ready".into(),
             tier: "mechanical".into(),
+            frequency: None,
             model_hint: None,
             replan_strategy: None,
             max_loc: None,
@@ -1102,7 +1134,7 @@ command = "cargo check -p roko-cli"
     }
 
     #[test]
-    fn operating_frequency_by_tier() {
+    fn operating_frequency_uses_explicit_frequency() {
         let task = TaskDef {
             id: "T1".into(),
             title: "test".into(),
@@ -1110,6 +1142,7 @@ command = "cargo check -p roko-cli"
             role: None,
             status: "ready".into(),
             tier: "mechanical".into(),
+            frequency: Some(OperatingFrequency::Gamma),
             model_hint: None,
             replan_strategy: None,
             max_loc: None,
@@ -1127,30 +1160,87 @@ command = "cargo check -p roko-cli"
             acceptance: vec![],
         };
         assert_eq!(task.operating_frequency(), OperatingFrequency::Gamma);
-        assert_eq!(
-            TaskDef {
-                tier: "focused".into(),
-                ..task.clone()
-            }
-            .operating_frequency(),
-            OperatingFrequency::Theta
-        );
-        assert_eq!(
-            TaskDef {
-                tier: "integrative".into(),
-                ..task.clone()
-            }
-            .operating_frequency(),
-            OperatingFrequency::Theta
-        );
-        assert_eq!(
-            TaskDef {
-                tier: "architectural".into(),
-                ..task
-            }
-            .operating_frequency(),
-            OperatingFrequency::Delta
-        );
+    }
+
+    #[test]
+    fn operating_frequency_infers_from_description() {
+        let reactive = TaskDef {
+            id: "T1".into(),
+            title: "test".into(),
+            description: Some("quick fix the typo in the rename flow".into()),
+            role: None,
+            status: "ready".into(),
+            tier: "mechanical".into(),
+            frequency: None,
+            model_hint: None,
+            replan_strategy: None,
+            max_loc: None,
+            files: vec![],
+            allowed_tools: None,
+            denied_tools: None,
+            mcp_servers: None,
+            depends_on: vec![],
+            depends_on_plan: vec![],
+            split_into: None,
+            context: None,
+            verify: vec![],
+            timeout_secs: 600,
+            max_retries: 3,
+            acceptance: vec![],
+        };
+        assert_eq!(reactive.operating_frequency(), OperatingFrequency::Gamma);
+
+        let reflective = TaskDef {
+            id: "T2".into(),
+            title: "plan".into(),
+            description: Some("plan and design a consolidation pass".into()),
+            role: None,
+            status: "ready".into(),
+            tier: "focused".into(),
+            frequency: None,
+            model_hint: None,
+            replan_strategy: None,
+            max_loc: None,
+            files: vec![],
+            allowed_tools: None,
+            denied_tools: None,
+            mcp_servers: None,
+            depends_on: vec![],
+            depends_on_plan: vec![],
+            split_into: None,
+            context: None,
+            verify: vec![],
+            timeout_secs: 600,
+            max_retries: 3,
+            acceptance: vec![],
+        };
+        assert_eq!(reflective.operating_frequency(), OperatingFrequency::Delta);
+
+        let deliberative = TaskDef {
+            id: "T3".into(),
+            title: "implement".into(),
+            description: Some("implement code change".into()),
+            role: None,
+            status: "ready".into(),
+            tier: "architectural".into(),
+            frequency: None,
+            model_hint: None,
+            replan_strategy: None,
+            max_loc: None,
+            files: vec![],
+            allowed_tools: None,
+            denied_tools: None,
+            mcp_servers: None,
+            depends_on: vec![],
+            depends_on_plan: vec![],
+            split_into: None,
+            context: None,
+            verify: vec![],
+            timeout_secs: 600,
+            max_retries: 3,
+            acceptance: vec![],
+        };
+        assert_eq!(deliberative.operating_frequency(), OperatingFrequency::Theta);
     }
 
     #[test]
@@ -1385,6 +1475,7 @@ depends_on = []
                 role: None,
                 status: "ready".into(),
                 tier: "focused".into(),
+                frequency: None,
                 model_hint: None,
                 replan_strategy: None,
                 max_loc: None,
@@ -1464,6 +1555,7 @@ depends_on = ["other-plan:T3"]
             role: None,
             status: "ready".into(),
             tier: "focused".into(),
+            frequency: None,
             model_hint: None,
             replan_strategy: None,
             max_loc: None,
@@ -1498,6 +1590,7 @@ depends_on = ["other-plan:T3"]
             role: None,
             status: "ready".into(),
             tier: "focused".into(),
+            frequency: None,
             model_hint: None,
             replan_strategy: None,
             max_loc: None,
