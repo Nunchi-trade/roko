@@ -356,7 +356,14 @@ mod tests {
         let db = CostsDb::new();
         assert!(db.is_empty());
 
-        db.insert(make_test_record("sonnet", "anthropic", "Impl", "p1", 0.50, true));
+        db.insert(make_test_record(
+            "sonnet",
+            "anthropic",
+            "Impl",
+            "p1",
+            0.50,
+            true,
+        ));
         assert_eq!(db.len(), 1);
         assert!(!db.is_empty());
     }
@@ -374,9 +381,30 @@ mod tests {
     #[test]
     fn costs_db_query_by_model() {
         let db = CostsDb::new();
-        db.insert(make_test_record("sonnet", "anthropic", "Impl", "p1", 0.50, true));
-        db.insert(make_test_record("haiku", "anthropic", "Impl", "p2", 0.10, true));
-        db.insert(make_test_record("sonnet", "anthropic", "Review", "p3", 0.30, true));
+        db.insert(make_test_record(
+            "sonnet",
+            "anthropic",
+            "Impl",
+            "p1",
+            0.50,
+            true,
+        ));
+        db.insert(make_test_record(
+            "haiku",
+            "anthropic",
+            "Impl",
+            "p2",
+            0.10,
+            true,
+        ));
+        db.insert(make_test_record(
+            "sonnet",
+            "anthropic",
+            "Review",
+            "p3",
+            0.30,
+            true,
+        ));
 
         let sonnet = db.by_model("sonnet");
         assert_eq!(sonnet.len(), 2);
@@ -413,7 +441,9 @@ mod tests {
     fn costs_db_query_by_provider() {
         let db = CostsDb::new();
         db.insert(make_test_record("s", "anthropic", "Impl", "p1", 0.50, true));
-        db.insert(make_test_record("gpt-4o", "openai", "Impl", "p2", 0.30, true));
+        db.insert(make_test_record(
+            "gpt-4o", "openai", "Impl", "p2", 0.30, true,
+        ));
 
         assert_eq!(db.by_provider("anthropic").len(), 1);
         assert_eq!(db.by_provider("openai").len(), 1);
@@ -522,8 +552,22 @@ mod tests {
     #[test]
     fn costs_db_jsonl_roundtrip() {
         let db = CostsDb::new();
-        db.insert(make_test_record("sonnet", "anthropic", "Impl", "p1", 0.50, true));
-        db.insert(make_test_record("haiku", "anthropic", "Review", "p2", 0.10, false));
+        db.insert(make_test_record(
+            "sonnet",
+            "anthropic",
+            "Impl",
+            "p1",
+            0.50,
+            true,
+        ));
+        db.insert(make_test_record(
+            "haiku",
+            "anthropic",
+            "Review",
+            "p2",
+            0.10,
+            false,
+        ));
 
         let jsonl = db.to_jsonl().expect("serialize");
 

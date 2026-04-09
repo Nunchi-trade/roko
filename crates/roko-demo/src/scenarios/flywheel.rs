@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use crate::bindings::InsightBoard;
 use crate::chain_ctx::ChainCtx;
 use crate::manifest::Scenario as ScenarioManifest;
-use crate::scenarios::llm::{LlmProvider, LlmRequest};
 use crate::scenarios::Scenario;
+use crate::scenarios::llm::{LlmProvider, LlmRequest};
 
 /// Flywheel scenario.
 pub struct Flywheel;
@@ -59,8 +59,7 @@ impl Scenario for Flywheel {
             // Confirmers each confirm the most recent insight posted by
             // each poster (unless that insight is their own post, which the
             // contract rejects).
-            let board_reader =
-                InsightBoard::new(board_addr, ctx.wallet_provider("validator0")?);
+            let board_reader = InsightBoard::new(board_addr, ctx.wallet_provider("validator0")?);
             let next_id = board_reader.nextInsightId().call().await?;
             let first_in_round = next_id - U256::from(POSTERS as u64);
             for c in 0..CONFIRMERS {

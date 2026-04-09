@@ -5,10 +5,41 @@
 //! mode is used by IDE integrations and CI pipelines that want to keep a
 //! long-lived agent session warm.
 
+use std::fs::{self, File as StdFile};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{Context, Result, anyhow};
+use axum::serve;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use sysinfo::{Pid, ProcessesToUpdate, System};
+use tokio::fs::File;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, SeekFrom};
+use tokio::net::{TcpListener, UnixListener, UnixStream};
+use tokio::task::JoinHandle;
+use tokio::time::{sleep, timeout};
+use tokio_util::sync::CancellationToken;
+#[cfg(unix)]
+use tokio::signal::unix::{signal, SignalKind};
+use tracing::{info, warn};
+
+/// macOS LaunchAgents plist helpers for daemon installation.
+pub mod launchd;
+
+use crate::config::RepoRegistry;
+use crate::load_layered;
+use crate::serve_runtime::RokoCliRuntime;
+use roko_core::config::load_config;
+use roko_serve::{self, deploy, dispatch, feedback, fswatcher, scheduler, state::AppState};
 
 /// State of the headless daemon.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DaemonState {
     /// Daemon is initializing.
     Starting,
@@ -44,14 +75,31 @@ impl DaemonConfig {
     /// Compute the socket path for this daemon session.
     #[must_use]
     pub fn socket_path(&self) -> PathBuf {
-        self.runtime_dir.join(format!("roko-{}.sock", self.session_id))
+        self.runtime_dir
+            .join(format!("roko-{}.sock", self.session_id))
     }
 
     /// Compute the PID file path for this daemon session.
     #[must_use]
     pub fn pid_path(&self) -> PathBuf {
-        self.runtime_dir.join(format!("roko-{}.pid", self.session_id))
+        self.runtime_dir
+            .join(format!("roko-{}.pid", self.session_id))
     }
+}
+
+/// Persistent daemon metadata stored in `.roko/daemon.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonInfo {
+    /// Process identifier.
+    pub pid: u32,
+    /// HTTP listen port.
+    pub port: u16,
+    /// Stable session identifier for this daemon instance.
+    pub session_id: String,
+    /// When the daemon started.
+    pub started_at: DateTime<Utc>,
+    /// Current daemon state.
+    pub state: DaemonState,
 }
 
 /// Headless daemon context.
@@ -147,6 +195,941 @@ impl std::fmt::Display for DaemonStatus {
         writeln!(f, "socket  : {}", self.socket_path.display())?;
         writeln!(f, "commands: {}", self.commands_processed)?;
         write!(f, "pid     : {}", self.pid)
+    }
+}
+
+/// Start the daemon in foreground or background mode.
+pub async fn daemon_start(foreground: bool, port: u16) -> Result<()> {
+    let workdir = std::env::current_dir().context("resolve current working directory")?;
+    ensure_runtime_dirs(&workdir)?;
+
+    if let Some(info) = read_daemon_info(&workdir)? {
+        if pid_is_alive(info.pid)? {
+            return Err(anyhow!(
+                "daemon already running (pid {}, port {})",
+                info.pid,
+                info.port
+            ));
+        }
+
+        cleanup_stale_runtime_files(&workdir);
+    }
+
+    if !foreground {
+        spawn_detached_child(&workdir, port)?;
+        return Ok(());
+    }
+
+    let core_config = load_config(&workdir)?;
+    let cli_config = load_layered(&workdir)?.config;
+    let repo_registry = RepoRegistry::load(&cli_config, &workdir).unwrap_or_default();
+    let runtime = RokoCliRuntime::new(cli_config, repo_registry).into_arc();
+    let deploy_backend = Arc::from(deploy::create_backend("manual", None, None, None)?);
+    let state = Arc::new(AppState::new(
+        workdir.clone(),
+        runtime,
+        core_config,
+        deploy_backend,
+    ));
+
+    let info = DaemonInfo {
+        pid: std::process::id(),
+        port,
+        session_id: format!("daemon-{}", uuid::Uuid::new_v4()),
+        started_at: Utc::now(),
+        state: DaemonState::Running,
+    };
+    write_daemon_info(&workdir, &info)?;
+
+    let _scheduler = scheduler::start_scheduler(Arc::clone(&state));
+    let _watchers = fswatcher::start_watchers(Arc::clone(&state));
+    let _dispatch = dispatch::start_dispatch_loop(Arc::clone(&state));
+    let _feedback = feedback::start_feedback_loop(Arc::clone(&state));
+    let shutdown_request = CancellationToken::new();
+    let http_shutdown = CancellationToken::new();
+    let ipc_server = match start_ipc_server(Arc::clone(&state), shutdown_request.clone()).await {
+        Ok(handle) => handle,
+        Err(err) => {
+            shutdown_request.cancel();
+            state.shutdown().await;
+            return Err(err);
+        }
+    };
+
+    let server_shutdown = shutdown_request.clone();
+    let server_state = Arc::clone(&state);
+    let server_http_shutdown = http_shutdown.clone();
+    let server = tokio::spawn(async move {
+        match run_daemon_http_server(server_state, port, server_http_shutdown).await {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                if !server_shutdown.is_cancelled() {
+                    server_shutdown.cancel();
+                }
+                Err(err)
+            }
+        }
+    });
+    let reload_signal_task = tokio::spawn(wait_for_reload_signal(Arc::clone(&state)));
+    let signal_task = tokio::spawn(wait_for_shutdown_signal());
+
+    tokio::select! {
+        _ = shutdown_request.cancelled() => {}
+        result = signal_task => {
+            match result {
+                Ok(()) => shutdown_request.cancel(),
+                Err(join_err) => {
+                    shutdown_request.cancel();
+                    state.shutdown().await;
+                    return Err(join_err.into());
+                }
+            }
+        }
+    }
+
+    graceful_shutdown_daemon(
+        &workdir,
+        Arc::clone(&state),
+        &info,
+        shutdown_request,
+        http_shutdown,
+        reload_signal_task,
+        server,
+        ipc_server,
+    )
+    .await
+}
+
+/// Stop the active daemon for the current working directory.
+pub async fn daemon_stop() -> Result<()> {
+    let workdir = std::env::current_dir().context("resolve current working directory")?;
+    let info = match read_daemon_info(&workdir)? {
+        Some(info) => info,
+        None => {
+            cleanup_daemon_files(&workdir);
+            return Ok(());
+        }
+    };
+
+    let socket_path = daemon_socket_path(&workdir);
+    let mut ipc_stopped = false;
+    if let Ok(mut stream) = UnixStream::connect(&socket_path).await {
+        if stream.write_all(b"stop").await.is_ok() {
+            let _ = stream.shutdown().await;
+            ipc_stopped = true;
+        }
+    }
+
+    if !ipc_stopped {
+        #[cfg(unix)]
+        {
+            if let Err(err) = send_signal(info.pid, "TERM") {
+                warn!(error = %err, pid = info.pid, "failed to send SIGTERM to daemon");
+            }
+        }
+    }
+
+    let graceful_timeout = Duration::from_secs(90);
+    let poll_interval = Duration::from_millis(250);
+    let started = std::time::Instant::now();
+    while started.elapsed() < graceful_timeout {
+        if !pid_is_alive(info.pid)? {
+            cleanup_shutdown_runtime_files(&workdir);
+            return Ok(());
+        }
+        sleep(poll_interval).await;
+    }
+
+    if pid_is_alive(info.pid)? {
+        #[cfg(unix)]
+        {
+            if let Err(err) = send_signal(info.pid, "KILL") {
+                warn!(error = %err, pid = info.pid, "failed to send SIGKILL to daemon");
+            }
+        }
+    }
+
+    cleanup_shutdown_runtime_files(&workdir);
+    Ok(())
+}
+
+/// Restart the active daemon for the current working directory.
+pub async fn daemon_restart(port: u16) -> Result<()> {
+    daemon_stop().await?;
+    daemon_start(false, port).await
+}
+
+/// Install the daemon as a macOS LaunchAgent.
+pub fn daemon_install() -> Result<()> {
+    let plist_path = launchd::plist_path();
+    let plist_dir = plist_path
+        .parent()
+        .context("resolve LaunchAgents directory")?;
+    fs::create_dir_all(plist_dir)
+        .with_context(|| format!("create {}", plist_dir.display()))?;
+
+    let home_dir = dirs::home_dir().context("resolve home directory")?;
+    let logs_dir = home_dir.join(".roko").join("logs");
+    fs::create_dir_all(&logs_dir).with_context(|| format!("create {}", logs_dir.display()))?;
+
+    let plist = launchd::generate_plist(9090);
+    fs::write(&plist_path, plist).with_context(|| format!("write {}", plist_path.display()))?;
+
+    let status = Command::new("launchctl")
+        .args(["load", "-w"])
+        .arg(&plist_path)
+        .status()
+        .with_context(|| format!("run launchctl load -w {}", plist_path.display()))?;
+
+    if !status.success() {
+        return Err(anyhow!(
+            "launchctl load -w {} failed with {}",
+            plist_path.display(),
+            status
+        ));
+    }
+
+    Ok(())
+}
+
+/// Uninstall the daemon LaunchAgent.
+pub fn daemon_uninstall() -> Result<()> {
+    let plist_path = launchd::plist_path();
+
+    let status = Command::new("launchctl")
+        .arg("unload")
+        .arg(&plist_path)
+        .status()
+        .with_context(|| format!("run launchctl unload {}", plist_path.display()))?;
+
+    if !status.success() {
+        return Err(anyhow!(
+            "launchctl unload {} failed with {}",
+            plist_path.display(),
+            status
+        ));
+    }
+
+    if plist_path.exists() {
+        fs::remove_file(&plist_path)
+            .with_context(|| format!("remove {}", plist_path.display()))?;
+    }
+
+    Ok(())
+}
+
+/// Print daemon status for the current working directory.
+pub async fn daemon_status() -> Result<()> {
+    let workdir = std::env::current_dir().context("resolve current working directory")?;
+    let info = match read_daemon_info(&workdir)? {
+        Some(info) => info,
+        None => {
+            print_daemon_status_table(
+                DaemonState::Stopped,
+                None,
+                None,
+                None,
+                None,
+                None,
+                count_signals_processed(&workdir).await?,
+            );
+            return Ok(());
+        }
+    };
+
+    let pid_alive = pid_is_alive(info.pid)?;
+    let state = if pid_alive {
+        info.state.clone()
+    } else {
+        DaemonState::Stopped
+    };
+    let port = Some(info.port);
+    let signals_processed = count_signals_processed(&workdir).await?;
+
+    if !pid_alive {
+        print_daemon_status_table(
+            state,
+            Some(info.pid),
+            port,
+            None,
+            None,
+            None,
+            signals_processed,
+        );
+        return Ok(());
+    }
+
+    let socket_path = daemon_socket_path(&workdir);
+    let mut stream = UnixStream::connect(&socket_path)
+        .await
+        .with_context(|| format!("connect {}", socket_path.display()))?;
+    stream
+        .write_all(b"status")
+        .await
+        .context("send daemon status request")?;
+    stream.shutdown().await.context("close daemon status request")?;
+
+    let mut buf = Vec::new();
+    stream
+        .read_to_end(&mut buf)
+        .await
+        .context("read daemon status response")?;
+    let response: DaemonStatusResponse = serde_json::from_slice(&buf)
+        .with_context(|| format!("parse daemon status response from {}", socket_path.display()))?;
+
+    print_daemon_status_table(
+        state,
+        Some(info.pid),
+        port,
+        Some(response.uptime_secs),
+        Some(response.active_agents),
+        Some(response.subscriptions),
+        signals_processed,
+    );
+    Ok(())
+}
+
+/// Reload daemon templates and subscriptions without restarting active agents.
+pub async fn daemon_reload() -> Result<()> {
+    let workdir = std::env::current_dir().context("resolve current working directory")?;
+    let socket_path = daemon_socket_path(&workdir);
+    let mut stream = UnixStream::connect(&socket_path)
+        .await
+        .with_context(|| format!("connect {}", socket_path.display()))?;
+    stream
+        .write_all(b"reload")
+        .await
+        .context("send daemon reload request")?;
+    stream
+        .shutdown()
+        .await
+        .context("close daemon reload request")?;
+
+    let mut buf = Vec::new();
+    stream
+        .read_to_end(&mut buf)
+        .await
+        .context("read daemon reload response")?;
+    let response: DaemonReloadResponse = serde_json::from_slice(&buf)
+        .with_context(|| format!("parse daemon reload response from {}", socket_path.display()))?;
+
+    println!(
+        "daemon {}: subscriptions={}, templates={}, loaded={}",
+        response.command,
+        response.subscriptions,
+        response.templates,
+        response.loaded
+    );
+
+    if response.ok {
+        Ok(())
+    } else {
+        Err(anyhow!("daemon reload failed"))
+    }
+}
+
+/// Print daemon logs for the current working directory.
+pub async fn daemon_logs(follow: bool, lines: usize) -> Result<()> {
+    let workdir = std::env::current_dir().context("resolve current working directory")?;
+    let path = log_path(&workdir, "daemon.log");
+
+    if follow {
+        follow_daemon_log(&path).await
+    } else {
+        print_recent_daemon_logs(&path, lines).await
+    }
+}
+
+fn ensure_runtime_dirs(workdir: &Path) -> Result<()> {
+    fs::create_dir_all(daemon_root_dir(workdir))
+        .with_context(|| format!("create {}", daemon_root_dir(workdir).display()))?;
+    fs::create_dir_all(daemon_logs_dir(workdir))
+        .with_context(|| format!("create {}", daemon_logs_dir(workdir).display()))?;
+    Ok(())
+}
+
+fn daemon_root_dir(workdir: &Path) -> PathBuf {
+    workdir.join(".roko")
+}
+
+fn daemon_logs_dir(workdir: &Path) -> PathBuf {
+    daemon_root_dir(workdir).join("logs")
+}
+
+fn daemon_json_path(workdir: &Path) -> PathBuf {
+    daemon_root_dir(workdir).join("daemon.json")
+}
+
+fn daemon_pid_path(workdir: &Path) -> PathBuf {
+    daemon_root_dir(workdir).join("daemon.pid")
+}
+
+fn daemon_socket_path(workdir: &Path) -> PathBuf {
+    daemon_root_dir(workdir).join("daemon.sock")
+}
+
+fn log_path(workdir: &Path, name: &str) -> PathBuf {
+    daemon_logs_dir(workdir).join(name)
+}
+
+fn spawn_detached_child(workdir: &Path, port: u16) -> Result<()> {
+    ensure_runtime_dirs(workdir)?;
+    let exe = std::env::current_exe().context("resolve current executable")?;
+    let port = port.to_string();
+    let stdout = StdFile::create(log_path(workdir, "daemon.log"))
+        .with_context(|| format!("open {}", log_path(workdir, "daemon.log").display()))?;
+    let stderr = StdFile::create(log_path(workdir, "daemon.err"))
+        .with_context(|| format!("open {}", log_path(workdir, "daemon.err").display()))?;
+
+    let child = Command::new(exe)
+        .current_dir(workdir)
+        .args(["daemon", "start", "--foreground", "--port", &port])
+        .stdin(Stdio::null())
+        .stdout(stdout)
+        .stderr(stderr)
+        .spawn()
+        .context("spawn detached daemon")?;
+
+    println!("daemon started (pid {})", child.id());
+    Ok(())
+}
+
+fn read_daemon_info(workdir: &Path) -> Result<Option<DaemonInfo>> {
+    let path = daemon_json_path(workdir);
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let text = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let info = serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
+    Ok(Some(info))
+}
+
+fn write_daemon_info(workdir: &Path, info: &DaemonInfo) -> Result<()> {
+    write_daemon_json(workdir, info)?;
+    let pid_path = daemon_pid_path(workdir);
+    fs::write(&pid_path, info.pid.to_string()).with_context(|| format!("write {}", pid_path.display()))?;
+    Ok(())
+}
+
+fn write_daemon_json(workdir: &Path, info: &DaemonInfo) -> Result<()> {
+    let json_path = daemon_json_path(workdir);
+    if let Some(parent) = json_path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let text = serde_json::to_string_pretty(info).context("serialize daemon metadata")?;
+    fs::write(&json_path, text).with_context(|| format!("write {}", json_path.display()))?;
+    Ok(())
+}
+
+fn cleanup_stale_runtime_files(workdir: &Path) {
+    let json_path = daemon_json_path(workdir);
+    let pid_path = daemon_pid_path(workdir);
+    let socket_path = daemon_socket_path(workdir);
+    let _ = fs::remove_file(json_path);
+    let _ = fs::remove_file(pid_path);
+    let _ = fs::remove_file(socket_path);
+}
+
+fn cleanup_daemon_files(workdir: &Path) {
+    let json_path = daemon_json_path(workdir);
+    let pid_path = daemon_pid_path(workdir);
+    let socket_path = daemon_socket_path(workdir);
+    let _ = fs::remove_file(json_path);
+    let _ = fs::remove_file(pid_path);
+    let _ = fs::remove_file(socket_path);
+}
+
+fn cleanup_shutdown_runtime_files(workdir: &Path) {
+    let pid_path = daemon_pid_path(workdir);
+    let socket_path = daemon_socket_path(workdir);
+    let _ = fs::remove_file(pid_path);
+    let _ = fs::remove_file(socket_path);
+}
+
+fn pid_is_alive(pid: u32) -> Result<bool> {
+    let mut system = System::new_all();
+    system.refresh_processes(ProcessesToUpdate::All, true);
+    Ok(system.process(Pid::from_u32(pid)).is_some())
+}
+
+async fn follow_daemon_log(path: &Path) -> Result<()> {
+    let poll_interval = Duration::from_millis(200);
+
+    loop {
+        let file = match File::open(path).await {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                sleep(poll_interval).await;
+                continue;
+            }
+            Err(err) => return Err(err).with_context(|| format!("open {}", path.display())),
+        };
+
+        let mut reader = BufReader::new(file);
+        reader
+            .seek(SeekFrom::End(0))
+            .await
+            .with_context(|| format!("seek {}", path.display()))?;
+
+        loop {
+            let mut line = String::new();
+            let bytes = reader
+                .read_line(&mut line)
+                .await
+                .with_context(|| format!("read {}", path.display()))?;
+            if bytes == 0 {
+                sleep(poll_interval).await;
+                continue;
+            }
+
+            print!("{line}");
+            std::io::stdout()
+                .flush()
+                .context("flush daemon log output")?;
+        }
+    }
+}
+
+async fn print_recent_daemon_logs(path: &Path, lines: usize) -> Result<()> {
+    if lines == 0 {
+        return Ok(());
+    }
+
+    let mut file = match File::open(path).await {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err).with_context(|| format!("open {}", path.display())),
+    };
+
+    let mut contents = Vec::new();
+    file
+        .read_to_end(&mut contents)
+        .await
+        .with_context(|| format!("read {}", path.display()))?;
+    if contents.is_empty() {
+        return Ok(());
+    }
+
+    let mut end = contents.len();
+    let mut out = Vec::new();
+
+    while end > 0 && contents[end - 1] == b'\n' {
+        end -= 1;
+    }
+
+    while out.len() < lines {
+        let start = contents[..end]
+            .iter()
+            .rposition(|&byte| byte == b'\n')
+            .map(|idx| idx + 1)
+            .unwrap_or(0);
+
+        let mut line = contents[start..end].to_vec();
+        if matches!(line.last(), Some(b'\r')) {
+            line.pop();
+        }
+        out.push(String::from_utf8_lossy(&line).into_owned());
+
+        if start == 0 {
+            break;
+        }
+        end = start - 1;
+    }
+
+    out.reverse();
+    for line in out {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct DaemonStatusResponse {
+    active_agents: usize,
+    subscriptions: usize,
+    uptime_secs: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DaemonReloadResponse {
+    ok: bool,
+    command: String,
+    subscriptions: usize,
+    templates: usize,
+    loaded: usize,
+}
+
+fn print_daemon_status_table(
+    state: DaemonState,
+    pid: Option<u32>,
+    port: Option<u16>,
+    uptime_secs: Option<u64>,
+    active_agents: Option<usize>,
+    subscriptions: Option<usize>,
+    total_signals_processed: usize,
+) {
+    println!("{:<26}{}", "field", "value");
+    println!("{:-<26}{}", "", "");
+    println!("{:<26}{}", "state", state);
+    println!(
+        "{:<26}{}",
+        "PID",
+        pid.map_or_else(|| "n/a".to_string(), |value| value.to_string())
+    );
+    println!(
+        "{:<26}{}",
+        "port",
+        port.map_or_else(|| "n/a".to_string(), |value| value.to_string())
+    );
+    println!(
+        "{:<26}{}",
+        "uptime",
+        uptime_secs.map_or_else(|| "n/a".to_string(), format_uptime)
+    );
+    println!(
+        "{:<26}{}",
+        "active agents",
+        active_agents.map_or_else(|| "n/a".to_string(), |value| value.to_string())
+    );
+    println!(
+        "{:<26}{}",
+        "subscriptions",
+        subscriptions.map_or_else(|| "n/a".to_string(), |value| value.to_string())
+    );
+    println!(
+        "{:<26}{}",
+        "total signals processed",
+        total_signals_processed
+    );
+}
+
+fn format_uptime(total_secs: u64) -> String {
+    let days = total_secs / 86_400;
+    let hours = (total_secs % 86_400) / 3_600;
+    let minutes = (total_secs % 3_600) / 60;
+    let seconds = total_secs % 60;
+
+    if days > 0 {
+        format!("{days}d {hours:02}h {minutes:02}m {seconds:02}s")
+    } else if hours > 0 {
+        format!("{hours}h {minutes:02}m {seconds:02}s")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds:02}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+async fn count_signals_processed(workdir: &Path) -> Result<usize> {
+    let path = workdir.join(".roko").join("signals.jsonl");
+    match tokio::fs::read_to_string(&path).await {
+        Ok(text) => Ok(text.lines().filter(|line| !line.trim().is_empty()).count()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(err) => Err(err).with_context(|| format!("read {}", path.display())),
+    }
+}
+
+#[cfg(unix)]
+fn send_signal(pid: u32, signal: &str) -> Result<()> {
+    let pid = pid.to_string();
+    let status = Command::new("kill")
+        .arg(format!("-{signal}"))
+        .arg(&pid)
+        .status()
+        .with_context(|| format!("run kill -{signal} {pid}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(anyhow!("kill -{signal} {pid} exited with {status}"))
+    }
+}
+
+async fn start_ipc_server(
+    state: Arc<AppState>,
+    shutdown_request: CancellationToken,
+) -> Result<JoinHandle<()>> {
+    let socket_path = daemon_socket_path(&state.workdir);
+    if let Some(parent) = socket_path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    if socket_path.exists() {
+        fs::remove_file(&socket_path).with_context(|| format!("remove {}", socket_path.display()))?;
+    }
+
+    let listener = UnixListener::bind(&socket_path)
+        .with_context(|| format!("bind {}", socket_path.display()))?;
+
+    Ok(tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = shutdown_request.cancelled() => {
+                    break;
+                }
+                result = listener.accept() => {
+                    let (stream, _) = match result {
+                        Ok(pair) => pair,
+                        Err(err) => {
+                            warn!(error = %err, path = %socket_path.display(), "daemon IPC accept failed");
+                            shutdown_request.cancel();
+                            break;
+                        }
+                    };
+
+                    let state = Arc::clone(&state);
+                    let shutdown_request = shutdown_request.clone();
+                    tokio::spawn(async move {
+                        if let Err(err) = handle_ipc_command(stream, state, shutdown_request).await {
+                            warn!(error = %err, "daemon IPC command failed");
+                        }
+                    });
+                }
+            }
+        }
+
+        let _ = tokio::fs::remove_file(&socket_path).await;
+    }))
+}
+
+async fn handle_ipc_command(
+    mut stream: UnixStream,
+    state: Arc<AppState>,
+    shutdown_request: CancellationToken,
+) -> Result<()> {
+    let mut buf = vec![0u8; 1024];
+    let n = stream
+        .read(&mut buf)
+        .await
+        .context("read daemon IPC request")?;
+    let request = String::from_utf8_lossy(&buf[..n]).trim().to_ascii_lowercase();
+
+    if request == "status" {
+        let active_agents = state.supervisor.count().await;
+        let subscriptions = state.subscriptions.all().len();
+        let uptime_secs = state.started_at.elapsed().as_secs();
+        let response = json!({
+            "pid": std::process::id(),
+            "active_agents": active_agents,
+            "subscriptions": subscriptions,
+            "uptime_secs": uptime_secs,
+        });
+        stream.write_all(response.to_string().as_bytes()).await?;
+        stream.write_all(b"\n").await?;
+        return Ok(());
+    }
+
+    if request == "reload" {
+        let response = reload_daemon_runtime(&state).await;
+        let response = serde_json::to_string(&response).context("serialize daemon reload response")?;
+        stream.write_all(response.as_bytes()).await?;
+        stream.write_all(b"\n").await?;
+        return Ok(());
+    }
+
+    if request == "stop" {
+        stream
+            .write_all(b"{\"ok\":true,\"command\":\"stop\"}\n")
+            .await?;
+        shutdown_request.cancel();
+        return Ok(());
+    }
+
+    if request == "shutdown" {
+        stream.write_all(b"{\"ok\":true,\"command\":\"shutdown\"}\n").await?;
+        shutdown_request.cancel();
+        return Ok(());
+    }
+
+    let response = json!({
+        "ok": false,
+        "error": format!("unknown command: {request}"),
+    });
+    stream.write_all(response.to_string().as_bytes()).await?;
+    stream.write_all(b"\n").await?;
+    Ok(())
+}
+
+async fn reload_daemon_runtime(state: &AppState) -> DaemonReloadResponse {
+    let subscriptions_report = {
+        let roko_config = state.roko_config.read().await.clone();
+        let registry =
+            roko_serve::dispatch::SubscriptionRegistry::load_from_project(&state.workdir, &roko_config);
+        state.subscriptions.replace_with(registry.all())
+    };
+
+    let templates_report = {
+        let mut templates = state.templates.write().await;
+        templates.scan()
+    };
+
+    DaemonReloadResponse {
+        ok: true,
+        command: "reload".to_string(),
+        subscriptions: subscriptions_report,
+        templates: templates_report.loaded,
+        loaded: subscriptions_report + templates_report.loaded,
+    }
+}
+
+async fn wait_for_reload_signal(state: Arc<AppState>) {
+    #[cfg(unix)]
+    {
+        let mut sighup = signal(SignalKind::hangup()).expect("install SIGHUP handler");
+        while sighup.recv().await.is_some() {
+            let response = reload_daemon_runtime(&state).await;
+            info!(
+                subscriptions = response.subscriptions,
+                templates = response.templates,
+                loaded = response.loaded,
+                "daemon reloaded after SIGHUP"
+            );
+        }
+        return;
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = state;
+    }
+}
+
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = sigterm.recv() => {}
+        }
+        return;
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+async fn run_daemon_http_server(
+    state: Arc<AppState>,
+    port: u16,
+    shutdown: CancellationToken,
+) -> Result<()> {
+    let roko_config = state.roko_config.read().await.clone();
+    let router = roko_serve::routes::build_router(
+        Arc::clone(&state),
+        &roko_config.server.cors_origins,
+        roko_config.serve.auth.clone(),
+    );
+    let addr = format!("0.0.0.0:{port}");
+    let listener = TcpListener::bind(&addr)
+        .await
+        .with_context(|| format!("bind to {addr}"))?;
+
+    info!("roko server listening on http://{addr}");
+    info!("workdir: {}", state.workdir.display());
+
+    let shutdown = shutdown.clone();
+    serve(listener, router)
+        .with_graceful_shutdown(async move {
+            shutdown.cancelled().await;
+        })
+        .await
+        .context("axum server error")?;
+
+    info!("server stopped");
+    Ok(())
+}
+
+async fn graceful_shutdown_daemon(
+    workdir: &Path,
+    state: Arc<AppState>,
+    info: &DaemonInfo,
+    shutdown_request: CancellationToken,
+    http_shutdown: CancellationToken,
+    reload_signal_task: JoinHandle<()>,
+    server: JoinHandle<Result<()>>,
+    ipc_server: JoinHandle<()>,
+) -> Result<()> {
+    let mut stopping = info.clone();
+    stopping.state = DaemonState::Stopping;
+    write_daemon_info(workdir, &stopping)?;
+
+    http_shutdown.cancel();
+
+    match timeout(Duration::from_secs(10), server).await {
+        Ok(join_result) => match join_result {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                warn!(error = %err, "daemon HTTP server stopped with error");
+            }
+            Err(join_err) => {
+                warn!(error = %join_err, "daemon HTTP server join failed");
+            }
+        },
+        Err(_) => {
+            warn!("daemon HTTP server did not stop within timeout");
+        }
+    }
+
+    shutdown_request.cancel();
+    state.cancel.cancel();
+    reload_signal_task.abort();
+    let _ = reload_signal_task.await;
+
+    let active_agents = state.supervisor.count().await;
+    if active_agents > 0 {
+        info!(active_agents, "waiting for active agents to complete");
+    }
+
+    let completed = state.supervisor.wait_all(Duration::from_secs(60)).await;
+    if !completed.is_empty() {
+        info!(
+            completed = completed.len(),
+            "active agents exited during graceful shutdown"
+        );
+    }
+
+    let remaining = state.supervisor.count().await;
+    if remaining > 0 {
+        info!(remaining, "killing remaining agents");
+        let killed = state.supervisor.kill_all().await;
+        if !killed.is_empty() {
+            info!(killed = killed.len(), "killed remaining agents");
+        }
+    }
+
+    flush_daemon_artifacts(workdir).await?;
+
+    cleanup_shutdown_runtime_files(workdir);
+
+    let _ = ipc_server.await;
+
+    let mut stopped = info.clone();
+    stopped.state = DaemonState::Stopped;
+    write_daemon_json(workdir, &stopped)?;
+
+    Ok(())
+}
+
+async fn flush_daemon_artifacts(workdir: &Path) -> Result<()> {
+    flush_file(workdir.join(".roko").join("signals.jsonl")).await?;
+    flush_file(workdir.join(".roko").join("episodes.jsonl")).await?;
+    flush_file(workdir.join(".roko").join("logs").join("daemon.log")).await?;
+    flush_file(workdir.join(".roko").join("logs").join("daemon.err")).await?;
+    std::io::stdout().flush().context("flush stdout")?;
+    std::io::stderr().flush().context("flush stderr")?;
+    Ok(())
+}
+
+async fn flush_file(path: PathBuf) -> Result<()> {
+    match File::open(&path).await {
+        Ok(file) => file
+            .sync_all()
+            .await
+            .with_context(|| format!("sync {}", path.display())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("open {}", path.display())),
     }
 }
 

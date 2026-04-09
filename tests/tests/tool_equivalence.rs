@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 
 use roko_core::tool::ToolRegistry;
-use roko_std::{StaticToolRegistry, ROKO_BUILTIN_TOOLS, TOOL_COUNT};
+use roko_std::{ROKO_BUILTIN_TOOLS, StaticToolRegistry, TOOL_COUNT};
 
 #[test]
 fn all_16_tools_present_in_static_registry() {
@@ -74,10 +74,7 @@ fn registry_get_matches_all_iteration() {
 fn builtin_tools_and_registry_agree() {
     let reg = StaticToolRegistry::new();
     let reg_names: HashSet<&str> = reg.all().iter().map(|d| d.name.as_str()).collect();
-    let builtin_names: HashSet<&str> = ROKO_BUILTIN_TOOLS
-        .iter()
-        .map(|d| d.name.as_str())
-        .collect();
+    let builtin_names: HashSet<&str> = ROKO_BUILTIN_TOOLS.iter().map(|d| d.name.as_str()).collect();
     assert_eq!(
         reg_names, builtin_names,
         "registry and ROKO_BUILTIN_TOOLS disagree on tool names"

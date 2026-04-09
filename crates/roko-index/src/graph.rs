@@ -217,11 +217,7 @@ pub fn pagerank(graph: &SymbolGraph, iterations: u32, damping: f64) -> HashMap<S
             if let Some(inbound) = graph.reverse.get(node) {
                 for (src, _) in inbound {
                     let src_rank = rank.get(src).copied().unwrap_or(0.0);
-                    let out_degree = graph
-                        .forward
-                        .get(src)
-                        .map_or(1, Vec::len)
-                        .max(1) as f64;
+                    let out_degree = graph.forward.get(src).map_or(1, Vec::len).max(1) as f64;
                     incoming_sum += src_rank / out_degree;
                 }
             }
@@ -238,9 +234,7 @@ pub fn pagerank(graph: &SymbolGraph, iterations: u32, damping: f64) -> HashMap<S
 mod tests {
     use super::*;
     use crate::parser::SourceFile;
-    use roko_core::language::{
-        Import, ImportKind, Symbol, SymbolKind, Visibility,
-    };
+    use roko_core::language::{Import, ImportKind, Symbol, SymbolKind, Visibility};
 
     fn make_file(path: &str, symbols: Vec<Symbol>, imports: Vec<Import>) -> SourceFile {
         SourceFile {

@@ -24,6 +24,9 @@
 
 use std::collections::HashMap;
 
+use crate::safety::audit_chain::{AuditChain, AuditEntry};
+use serde::{Deserialize, Serialize};
+
 use roko_core::PlanPhase;
 
 pub mod action;
@@ -40,23 +43,54 @@ pub use snapshot::ExecutorSnapshot;
 pub use state_machine::{ExecutorEvent, PlanStateMachine, TransitionError};
 
 /// Configuration for the parallel executor.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ExecutorConfig {
     /// Maximum number of plans executing concurrently.
     pub max_concurrent_plans: usize,
+    /// Maximum number of tasks executing concurrently within a plan.
+    #[serde(default = "ExecutorConfig::default_max_concurrent_tasks")]
+    pub max_concurrent_tasks: usize,
     /// Maximum auto-fix iterations before declaring failure.
     pub max_auto_fix_iterations: u32,
     /// Maximum merge retry attempts.
     pub max_merge_attempts: u32,
+    /// Per-task timeout in seconds.
+    #[serde(default = "ExecutorConfig::default_task_timeout_secs")]
+    pub task_timeout_secs: u64,
+    /// Optional per-session budget cap in USD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_usd: Option<f64>,
+    /// Whether to auto-replan after repeated gate failures.
+    #[serde(default = "ExecutorConfig::default_auto_replan")]
+    pub auto_replan: bool,
 }
 
 impl Default for ExecutorConfig {
     fn default() -> Self {
         Self {
             max_concurrent_plans: 4,
+            max_concurrent_tasks: Self::default_max_concurrent_tasks(),
             max_auto_fix_iterations: 5,
             max_merge_attempts: 3,
+            task_timeout_secs: Self::default_task_timeout_secs(),
+            budget_usd: None,
+            auto_replan: Self::default_auto_replan(),
         }
+    }
+}
+
+impl ExecutorConfig {
+    const fn default_max_concurrent_tasks() -> usize {
+        4
+    }
+
+    const fn default_task_timeout_secs() -> u64 {
+        600
+    }
+
+    const fn default_auto_replan() -> bool {
+        true
     }
 }
 
@@ -78,6 +112,10 @@ pub struct ParallelExecutor {
     plans: HashMap<String, PlanState>,
     /// Execution queue: `plan_id`s in priority order.
     queue: Vec<String>,
+    /// Cross-plan dependencies: `plan_id` → list of `plan_id`s it depends on.
+    plan_deps: HashMap<String, Vec<String>>,
+    /// Optional tamper-evident audit chain for lifecycle transitions.
+    audit_chain: Option<AuditChain>,
 }
 
 impl ParallelExecutor {
@@ -88,6 +126,8 @@ impl ParallelExecutor {
             config,
             plans: HashMap::new(),
             queue: Vec::new(),
+            plan_deps: HashMap::new(),
+            audit_chain: None,
         }
     }
 
@@ -98,6 +138,8 @@ impl ParallelExecutor {
             config,
             plans: snapshot.plan_states,
             queue: snapshot.queue_order,
+            plan_deps: HashMap::new(),
+            audit_chain: None,
         }
     }
 
@@ -115,12 +157,51 @@ impl ParallelExecutor {
         true
     }
 
+    /// Set cross-plan dependencies (`plan_id` → list of `plan_id`s it depends on).
+    ///
+    /// Plans whose dependencies are not all terminal will be skipped in `tick()`.
+    pub fn set_plan_dependencies(&mut self, deps: HashMap<String, Vec<String>>) {
+        self.plan_deps = deps;
+    }
+
+    /// Attach an audit chain to the executor.
+    #[must_use]
+    pub fn with_audit_chain(mut self, audit_chain: AuditChain) -> Self {
+        self.audit_chain = Some(audit_chain);
+        self
+    }
+
+    /// Inspect the attached audit chain, if any.
+    #[must_use]
+    pub fn audit_chain(&self) -> Option<&AuditChain> {
+        self.audit_chain.as_ref()
+    }
+
+    /// Check whether all dependency plans for `plan_id` are in a terminal state.
+    fn deps_satisfied(&self, plan_id: &str) -> bool {
+        let Some(deps) = self.plan_deps.get(plan_id) else {
+            return true; // no deps declared
+        };
+        deps.iter().all(|dep| {
+            self.plans
+                .get(dep.as_str())
+                .is_some_and(PlanState::is_terminal)
+        })
+    }
+
+    /// Public view of the dependency gate for a plan.
+    #[must_use]
+    pub fn can_dispatch(&self, plan_id: &str) -> bool {
+        self.deps_satisfied(plan_id)
+    }
+
     /// One iteration of the main orchestration loop.
     ///
     /// Examines every active (non-terminal, non-paused) plan and returns
     /// the actions the runtime should dispatch. The executor respects
     /// `max_concurrent_plans`: only the first N queued plans are
-    /// considered active.
+    /// considered active. Plans whose cross-plan dependencies are not yet
+    /// terminal are skipped.
     #[must_use]
     pub fn tick(&self) -> Vec<ExecutorAction> {
         let mut actions = Vec::new();
@@ -138,6 +219,11 @@ impl ParallelExecutor {
 
             // Skip paused plans.
             if state.paused {
+                continue;
+            }
+
+            // Skip plans whose cross-plan dependencies are not yet satisfied.
+            if !self.deps_satisfied(plan_id) {
                 continue;
             }
 
@@ -172,8 +258,10 @@ impl ParallelExecutor {
             to: roko_core::PhaseKind::Failed,
             reason: format!("plan '{plan_id}' not found"),
         })?;
+        let from_kind = state.current_phase.kind();
 
         let new_phase = PlanStateMachine::transition(state, event)?;
+        let to_kind = new_phase.kind();
 
         // Apply the transition — the plan was just looked up so this
         // branch is unreachable, but we handle it gracefully.
@@ -184,6 +272,12 @@ impl ParallelExecutor {
             if let PlanPhase::Failed { reason } = &new_phase {
                 state.last_error = Some(reason.to_string());
             }
+        }
+
+        if let Some(chain) = &self.audit_chain {
+            let kind = format!("phase.{from_kind:?}->{to_kind:?}");
+            let entry = AuditEntry::new([0u8; 32], kind, "executor", plan_id.to_string());
+            let _ = chain.append(entry);
         }
 
         Ok(new_phase)
@@ -228,6 +322,17 @@ impl ParallelExecutor {
             .map(|(id, ps)| (id.clone(), ps.priority))
             .collect();
         self.queue = priority_reorder(&self.queue, &priorities);
+    }
+
+    /// Reposition a plan in the queue. Returns `true` if the plan existed.
+    pub fn reorder_plan(&mut self, plan_id: &str, new_position: usize) -> bool {
+        let Some(current_index) = self.queue.iter().position(|id| id == plan_id) else {
+            return false;
+        };
+        let item = self.queue.remove(current_index);
+        let pos = new_position.min(self.queue.len());
+        self.queue.insert(pos, item);
+        true
     }
 
     /// List IDs of plans currently active (non-terminal, non-paused, within concurrency limit).
@@ -375,7 +480,9 @@ mod tests {
 
         let actions = ex.tick();
         assert_eq!(actions.len(), 1);
-        assert!(matches!(&actions[0], ExecutorAction::DispatchPlan { plan_id } if plan_id == "active"));
+        assert!(
+            matches!(&actions[0], ExecutorAction::DispatchPlan { plan_id } if plan_id == "active")
+        );
     }
 
     #[test]
@@ -546,7 +653,13 @@ mod tests {
         ex.apply_event("plan-42", &ExecutorEvent::EnrichmentDone)
             .unwrap();
         let actions = ex.tick();
-        assert!(matches!(&actions[0], ExecutorAction::SpawnAgent { role: roko_core::AgentRole::Implementer, .. }));
+        assert!(matches!(
+            &actions[0],
+            ExecutorAction::SpawnAgent {
+                role: roko_core::AgentRole::Implementer,
+                ..
+            }
+        ));
 
         // ImplementationDone -> Gating
         ex.apply_event("plan-42", &ExecutorEvent::ImplementationDone)
@@ -557,6 +670,8 @@ mod tests {
         // GatePassed -> Verifying
         ex.apply_event("plan-42", &ExecutorEvent::GatePassed)
             .unwrap();
+        let actions = ex.tick();
+        assert!(matches!(&actions[0], ExecutorAction::RunVerify { .. }));
 
         // VerifyPassed -> Reviewing
         ex.apply_event("plan-42", &ExecutorEvent::VerifyPassed)
@@ -583,7 +698,10 @@ mod tests {
     fn plan_state_mut_allows_modification() {
         let mut ex = default_executor();
         ex.add_plan(PlanState::new("p"));
-        ex.plan_state_mut("p").unwrap().files_changed.push("a.rs".into());
+        ex.plan_state_mut("p")
+            .unwrap()
+            .files_changed
+            .push("a.rs".into());
         assert_eq!(ex.plan_state("p").unwrap().files_changed, vec!["a.rs"]);
     }
 

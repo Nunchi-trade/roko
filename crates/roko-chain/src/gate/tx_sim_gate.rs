@@ -18,7 +18,7 @@
 //! gates can verify.
 
 use async_trait::async_trait;
-use roko_core::{traits::Gate, verdict::Verdict, Context, Signal};
+use roko_core::{Context, Signal, traits::Gate, verdict::Verdict};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -151,8 +151,7 @@ impl Gate for TxSimGate {
         let tx = match parse_tx_from_signal(input) {
             Ok(t) => t,
             Err(reason) => {
-                return Verdict::fail(self.name.clone(), reason)
-                    .with_duration(elapsed_ms(started));
+                return Verdict::fail(self.name.clone(), reason).with_duration(elapsed_ms(started));
             }
         };
 
@@ -276,7 +275,13 @@ mod tests {
         let verdict = gate.verify(&signal, &Context::now()).await;
         assert!(verdict.passed, "should pass: {verdict:?}");
         assert_eq!(verdict.gate, "tx_sim_gate");
-        assert!(verdict.detail.as_deref().unwrap().contains("gas_used=21000"));
+        assert!(
+            verdict
+                .detail
+                .as_deref()
+                .unwrap()
+                .contains("gas_used=21000")
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -306,7 +311,10 @@ mod tests {
         );
         let signal = tx_signal_json(serde_json::json!({"value": 1}));
         let verdict = gate.verify(&signal, &Context::now()).await;
-        assert!(verdict.passed, "revert OK when require_success=false: {verdict:?}");
+        assert!(
+            verdict.passed,
+            "revert OK when require_success=false: {verdict:?}"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -394,7 +402,11 @@ mod tests {
         let signal = tx_signal_json(serde_json::json!({"value": "nope"}));
         let verdict = gate.verify(&signal, &Context::now()).await;
         assert!(!verdict.passed);
-        assert!(verdict.reason.contains("body json does not match TxRequest"));
+        assert!(
+            verdict
+                .reason
+                .contains("body json does not match TxRequest")
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -182,7 +182,10 @@ pub fn scrub_secrets(content: &str, policy: &ScrubPolicy) -> String {
             // Silently skip invalid user-supplied patterns.
             continue;
         };
-        let extra = Pattern { re, replace_group: None };
+        let extra = Pattern {
+            re,
+            replace_group: None,
+        };
         result = apply_pattern(&result, &extra);
     }
 
@@ -322,7 +325,8 @@ mod tests {
     #[test]
     fn redacts_jwt() {
         // Three base64url segments, first two starting with eyJ (base64 of `{`)
-        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+        let jwt =
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
         let content = format!("Bearer {jwt}");
         let result = scrub_secrets(&content, &default_policy());
         assert!(result.contains(SCRUB_MARKER), "result: {result}");
@@ -385,7 +389,10 @@ mod tests {
         let aws = "AKIA".to_string() + &"B".repeat(16);
         let content = format!("github={gh_pat} aws={aws}");
         let result = scrub_secrets(&content, &default_policy());
-        assert!(!result.contains(&gh_pat), "github pat must be gone: {result}");
+        assert!(
+            !result.contains(&gh_pat),
+            "github pat must be gone: {result}"
+        );
         assert!(!result.contains(&aws), "aws key must be gone: {result}");
         assert!(
             result.matches(SCRUB_MARKER).count() >= 2,

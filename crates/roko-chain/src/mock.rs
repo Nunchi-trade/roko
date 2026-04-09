@@ -185,8 +185,8 @@ impl ChainClient for MockChainClient {
             .iter()
             .filter(|log| {
                 let addr_ok = addresses.is_empty() || addresses.iter().any(|a| a == &log.address);
-                let topic_ok = topics.is_empty()
-                    || log.topics.iter().any(|t| topics.iter().any(|w| w == t));
+                let topic_ok =
+                    topics.is_empty() || log.topics.iter().any(|t| topics.iter().any(|w| w == t));
                 addr_ok && topic_ok
             })
             .cloned()

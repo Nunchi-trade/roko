@@ -23,7 +23,10 @@ fn init_run_produces_expected_signals() {
 
     // Verify the init artifacts exist.
     assert!(workdir.join(".roko").is_dir(), ".roko directory missing");
-    assert!(workdir.join(".roko/signals.jsonl").exists(), "signals.jsonl missing");
+    assert!(
+        workdir.join(".roko/signals.jsonl").exists(),
+        "signals.jsonl missing"
+    );
     assert!(workdir.join("roko.toml").exists(), "roko.toml missing");
 
     // `roko run "hello"` with cat as the agent (the default in roko.toml) and
@@ -82,8 +85,14 @@ fn init_run_produces_expected_signals() {
         .assert()
         .success();
     let stdout = String::from_utf8_lossy(&status.get_output().stdout).into_owned();
-    assert!(stdout.contains("signal counts"), "status output missing header: {stdout}");
-    assert!(stdout.contains("episode"), "status output missing episode kind: {stdout}");
+    assert!(
+        stdout.contains("signal counts"),
+        "status output missing header: {stdout}"
+    );
+    assert!(
+        stdout.contains("episode"),
+        "status output missing episode kind: {stdout}"
+    );
     assert!(
         stdout.contains("most recent episode"),
         "status did not report an episode: {stdout}"
@@ -189,7 +198,10 @@ timeout_ms = 5000
 
     // The cat-echoed output should contain the injected file contents.
     let stdout = String::from_utf8_lossy(&out.get_output().stdout).into_owned();
-    assert!(stdout.contains("cat"), "expected agent output header: {stdout}");
+    assert!(
+        stdout.contains("cat"),
+        "expected agent output header: {stdout}"
+    );
 
     let log = fs::read_to_string(workdir.join(".roko/signals.jsonl")).unwrap();
     assert!(
@@ -198,7 +210,10 @@ timeout_ms = 5000
     );
     // There should be 3 prompt sections now (role + issue-file + task).
     let section_count = log.matches("\"prompt_section\"").count();
-    assert!(section_count >= 3, "expected >=3 prompt sections, got {section_count}");
+    assert!(
+        section_count >= 3,
+        "expected >=3 prompt sections, got {section_count}"
+    );
 }
 
 #[test]
@@ -246,11 +261,17 @@ timeout_ms = 5000
     // The cleaned AgentOutput should contain only "Final answer: 42".
     let log = fs::read_to_string(workdir.join(".roko/signals.jsonl")).unwrap();
     // Raw AgentMessage trace has the full thinking block
-    assert!(log.contains("...done thinking."), "raw trace not persisted: {log}");
+    assert!(
+        log.contains("...done thinking."),
+        "raw trace not persisted: {log}"
+    );
     // At least one AgentOutput signal must have cleaned=true and NOT contain 'step 1'.
     let has_cleaned = log
         .lines()
         .filter(|l| l.contains("\"cleaned\":\"true\""))
         .any(|l| l.contains("Final answer") && !l.contains("step 1"));
-    assert!(has_cleaned, "cleaned AgentOutput missing or not sanitized: {log}");
+    assert!(
+        has_cleaned,
+        "cleaned AgentOutput missing or not sanitized: {log}"
+    );
 }

@@ -5,8 +5,8 @@
 //! task checklist. On iteration 2+, it also processes prior review feedback
 //! and generates remediation instructions.
 
+use super::{PlanSlice, RolePromptTemplate, truncate};
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
-use super::{truncate, PlanSlice, RolePromptTemplate};
 
 /// Typed input for the strategist template. All fields are pre-read strings —
 /// no filesystem access.
@@ -218,6 +218,9 @@ title = "First task title"
 status = "pending"
 files = ["path/to/file.rs"]
 acceptance = ["Acceptance criterion 1"]
+allowed_tools = ["read_file", "grep"]
+denied_tools = []
+mcp_servers = ["filesystem"]
 depends_on = []
 parallel_group = "A"
 exclusive_files = true

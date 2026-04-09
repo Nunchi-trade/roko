@@ -263,10 +263,7 @@ mod tests {
             if let Some(ref err) = self.submit_error {
                 return Err(err.clone().into());
             }
-            self.submitted
-                .lock()
-                .unwrap()
-                .push(requests.to_vec());
+            self.submitted.lock().unwrap().push(requests.to_vec());
             Ok(BatchId::new("batch-001"))
         }
 
@@ -318,7 +315,10 @@ mod tests {
         let client = BatchClient::new(transport);
         let requests = vec![sample_request("req-1"), sample_request("req-2")];
 
-        let batch_id = client.submit(requests).await.expect("submit should succeed");
+        let batch_id = client
+            .submit(requests)
+            .await
+            .expect("submit should succeed");
         assert_eq!(batch_id.0, "batch-001");
     }
 

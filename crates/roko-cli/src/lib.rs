@@ -10,32 +10,56 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+extern crate self as roko_cli;
+
+pub mod agent_exec;
 pub mod clean;
 pub mod config;
 pub mod config_cmd;
 pub mod daemon;
+pub mod event_sources;
 pub mod episode;
+pub mod index;
 pub mod inject;
 pub mod oneshot;
+pub mod orchestrate;
 pub mod pipe;
 pub mod plan;
+pub mod plan_generate;
+pub mod prd;
+pub mod prd_prompt;
 pub mod repl;
+pub mod research;
 pub mod run;
 pub mod secrets;
+pub mod subscriptions;
 pub mod status;
+pub mod task_parser;
+pub mod tui;
+pub mod worker;
+
+pub mod serve_runtime;
+
+/// Server modules re-exported from the `roko-serve` crate.
+pub use roko_serve as serve;
 
 pub use config::{
-    load_layered, AgentConfig, Config, ConfigLayer, ConfigPaths, ConfigSources, GateConfig,
-    PromptConfig, PromptFile, ResolvedConfig, Source,
+    AgentConfig, Config, ConfigLayer, ConfigPaths, ConfigSources, GateConfig, PromptConfig,
+    PromptFile, RepoEntry, RepoRegistry, ResolvedConfig, ServeAuthLayer, ServeLayer, Source,
+    ToolsConfig, load_layered,
 };
-pub use config_cmd::{run_init_wizard, EditTarget, WizardInputs};
+pub use config_cmd::{EditTarget, WizardInputs, run_init_wizard};
 pub use daemon::{DaemonConfig, DaemonMode, DaemonState, DaemonStatus};
 pub use episode::EpisodePolicy;
 pub use inject::{InjectKind, InjectRequest};
 pub use oneshot::{OneshotMode, OneshotResult};
-pub use pipe::{stdin_is_tty, PipeInput, PipeMode};
+pub use orchestrate::{OrchestrationReport, PlanRunReport, PlanRunner};
+pub use pipe::{PipeInput, PipeMode, stdin_is_tty};
 pub use plan::{Plan, PlanSummary, PlanTask};
 pub use repl::{ReplCommand, ReplMode};
-pub use run::{run_once, RunReport};
+pub use run::{RunReport, run_once};
 pub use secrets::SecretsCmd;
 pub use status::SessionStatus;
+pub use tui::{
+    DashboardData, DashboardScaffold, DashboardSummary, PageId, PageScaffold, Theme, WidgetScaffold,
+};

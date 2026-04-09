@@ -24,7 +24,10 @@ use crate::AgentRole;
 /// are visible to every role.
 pub fn role_allowlist(role: AgentRole, tools: &[ToolDef]) -> Vec<&ToolDef> {
     let perms = role.tool_permissions();
-    tools.iter().filter(|t| t.permission.satisfied_by(&perms)).collect()
+    tools
+        .iter()
+        .filter(|t| t.permission.satisfied_by(&perms))
+        .collect()
 }
 
 #[cfg(test)]

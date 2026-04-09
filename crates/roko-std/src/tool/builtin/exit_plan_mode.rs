@@ -19,11 +19,16 @@ pub const DESCRIPTION: &str = "Exit plan-mode and submit the drafted plan for ap
 #[must_use]
 pub fn tool_def() -> ToolDef {
     // Meta-signal with no capability requirements.
-    ToolDef::new(NAME, DESCRIPTION, ToolCategory::Meta, ToolPermission::default())
-        .with_parameters(ToolSchema::any_object())
-        .with_concurrency(ToolConcurrency::Serial)
-        .with_idempotent(true)
-        .with_timeout_ms(5_000)
+    ToolDef::new(
+        NAME,
+        DESCRIPTION,
+        ToolCategory::Meta,
+        ToolPermission::default(),
+    )
+    .with_parameters(ToolSchema::any_object())
+    .with_concurrency(ToolConcurrency::Serial)
+    .with_idempotent(true)
+    .with_timeout_ms(5_000)
 }
 
 /// Handler for `exit_plan_mode` (§36.27).
@@ -42,7 +47,11 @@ impl ToolHandler for Handler {
     }
 
     async fn execute(&self, call: ToolCall, _ctx: &ToolContext) -> ToolResult {
-        let plan = match call.arguments.get("plan").and_then(serde_json::Value::as_str) {
+        let plan = match call
+            .arguments
+            .get("plan")
+            .and_then(serde_json::Value::as_str)
+        {
             Some(s) => s.to_string(),
             None => {
                 return ToolResult::Err(ToolError::SchemaInvalid(

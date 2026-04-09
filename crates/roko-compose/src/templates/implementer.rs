@@ -3,8 +3,8 @@
 //! Ports Mori's `implementer_sections` + `implementer_prompt` into a typed,
 //! I/O-free API. The most context-heavy template in the set.
 
+use super::{PlanSlice, RolePromptTemplate, TaskEnhancements, format_enhancements, truncate};
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
-use super::{format_enhancements, truncate, PlanSlice, RolePromptTemplate, TaskEnhancements};
 
 /// Typed input for the implementer template. All fields are pre-read strings.
 #[derive(Clone, Debug, Default)]

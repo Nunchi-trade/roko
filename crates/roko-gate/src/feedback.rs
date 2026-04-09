@@ -333,7 +333,8 @@ Finished dev [unoptimized]
 
     #[test]
     fn feedback_test_failure_detected() {
-        let output = "FAILED tests::my_test\nthread 'tests::my_test' panicked at 'assertion failed'\n";
+        let output =
+            "FAILED tests::my_test\nthread 'tests::my_test' panicked at 'assertion failed'\n";
         let fb = feedback_for_agent(output, 2);
         assert!(!fb.passed);
         assert_eq!(fb.errors.len(), 2);

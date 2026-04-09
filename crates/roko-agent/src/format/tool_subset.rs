@@ -75,7 +75,10 @@ mod tests {
 
     fn sample_tools() -> Vec<ToolDef> {
         vec![
-            def("read_file", "Read a UTF-8 text file with optional line range"),
+            def(
+                "read_file",
+                "Read a UTF-8 text file with optional line range",
+            ),
             def("write_file", "Write a text file, creating or overwriting"),
             def("edit_file", "Replace an exact string in a file"),
             def("grep", "Search file contents using regex pattern matching"),
@@ -111,8 +114,11 @@ mod tests {
     fn tool_subset_relevance_scored_with_context() {
         let tools = sample_tools();
         let profile = make_profile(3);
-        let result =
-            select_tools_for_call(&tools, &profile, Some("search for a regex pattern in files"));
+        let result = select_tools_for_call(
+            &tools,
+            &profile,
+            Some("search for a regex pattern in files"),
+        );
         assert_eq!(result.len(), 3);
         // grep should be ranked highly given the task context.
         let names: Vec<&str> = result.iter().map(|t| t.name.as_str()).collect();
@@ -150,8 +156,7 @@ mod tests {
     fn tool_subset_limit_one() {
         let tools = sample_tools();
         let profile = make_profile(1);
-        let result =
-            select_tools_for_call(&tools, &profile, Some("execute a shell command"));
+        let result = select_tools_for_call(&tools, &profile, Some("execute a shell command"));
         assert_eq!(result.len(), 1);
     }
 

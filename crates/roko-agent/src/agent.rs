@@ -118,7 +118,9 @@ mod tests {
 
     #[test]
     fn agent_result_ok_sets_success() {
-        let out = Signal::builder(Kind::AgentOutput).body(Body::text("ok")).build();
+        let out = Signal::builder(Kind::AgentOutput)
+            .body(Body::text("ok"))
+            .build();
         let r = AgentResult::ok(out);
         assert!(r.success);
         assert!(r.trace.is_empty());
@@ -135,9 +137,15 @@ mod tests {
 
     #[test]
     fn all_signals_is_trace_then_output() {
-        let trace1 = Signal::builder(Kind::AgentMessage).body(Body::text("1")).build();
-        let trace2 = Signal::builder(Kind::AgentMessage).body(Body::text("2")).build();
-        let out = Signal::builder(Kind::AgentOutput).body(Body::text("done")).build();
+        let trace1 = Signal::builder(Kind::AgentMessage)
+            .body(Body::text("1"))
+            .build();
+        let trace2 = Signal::builder(Kind::AgentMessage)
+            .body(Body::text("2"))
+            .build();
+        let out = Signal::builder(Kind::AgentOutput)
+            .body(Body::text("done"))
+            .build();
         let r = AgentResult::ok(out.clone()).with_trace(vec![trace1.clone(), trace2.clone()]);
         let all = r.all_signals();
         assert_eq!(all.len(), 3);
@@ -148,14 +156,14 @@ mod tests {
 
     #[test]
     fn builder_chain() {
-        let out = Signal::builder(Kind::AgentOutput).body(Body::text("x")).build();
-        let r = AgentResult::ok(out)
-            .with_trace(vec![])
-            .with_usage(Usage {
-                input_tokens: 100,
-                output_tokens: 50,
-                ..Default::default()
-            });
+        let out = Signal::builder(Kind::AgentOutput)
+            .body(Body::text("x"))
+            .build();
+        let r = AgentResult::ok(out).with_trace(vec![]).with_usage(Usage {
+            input_tokens: 100,
+            output_tokens: 50,
+            ..Default::default()
+        });
         assert_eq!(r.usage.input_tokens, 100);
     }
 }

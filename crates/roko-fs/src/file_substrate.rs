@@ -3,8 +3,8 @@
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use roko_core::{
+    ContentHash, Context, Query, Signal, Substrate,
     error::{Result, RokoError},
-    Context, ContentHash, Query, Signal, Substrate,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -335,10 +335,7 @@ mod tests {
         sub.put(sig(Kind::Episode, "e1", 150)).await.unwrap();
 
         let ctx = Context::at(500);
-        let tasks = sub
-            .query(&Query::of_kind(Kind::Task), &ctx)
-            .await
-            .unwrap();
+        let tasks = sub.query(&Query::of_kind(Kind::Task), &ctx).await.unwrap();
         assert_eq!(tasks.len(), 2);
 
         let in_range = sub
@@ -387,7 +384,9 @@ mod tests {
 
         // Write 5 signals with different content.
         for i in 0..5 {
-            sub.put(sig(Kind::Pheromone, &format!("p{i}"), 0)).await.unwrap();
+            sub.put(sig(Kind::Pheromone, &format!("p{i}"), 0))
+                .await
+                .unwrap();
         }
         let size_before = fs::metadata(sub.log_path()).await.unwrap().len();
 
@@ -454,7 +453,8 @@ mod tests {
         for i in 0..20 {
             let sub = sub.clone();
             handles.push(tokio::spawn(async move {
-                sub.put(sig(Kind::Task, &format!("concurrent_{i}"), i)).await
+                sub.put(sig(Kind::Task, &format!("concurrent_{i}"), i))
+                    .await
             }));
         }
         for h in handles {

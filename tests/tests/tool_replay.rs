@@ -50,11 +50,7 @@ fn replay_from_entries(entries: &[ReplayEntry], dispatcher: &MockToolDispatcher)
 
     // Phase 2: dispatch each call and verify results.
     for (i, entry) in entries.iter().enumerate() {
-        let call = ToolCall::new(
-            format!("replay-{i}"),
-            &entry.tool_name,
-            entry.input.clone(),
-        );
+        let call = ToolCall::new(format!("replay-{i}"), &entry.tool_name, entry.input.clone());
         let result = dispatcher.dispatch(call);
         match result {
             ToolResult::Ok { content, .. } => {
@@ -119,7 +115,11 @@ fn replay_multiple_entries() {
 fn replay_preserves_call_order() {
     let mock = MockToolDispatcher::new();
     let entries = vec![
-        ReplayEntry::new("glob", serde_json::json!({"pattern": "*.rs"}), "main.rs\nlib.rs"),
+        ReplayEntry::new(
+            "glob",
+            serde_json::json!({"pattern": "*.rs"}),
+            "main.rs\nlib.rs",
+        ),
         ReplayEntry::new("ls", serde_json::json!({"path": "."}), "src/\nCargo.toml"),
         ReplayEntry::new("read_file", serde_json::json!({"path": "a.rs"}), "// a"),
     ];

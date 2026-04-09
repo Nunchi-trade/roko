@@ -191,7 +191,9 @@ impl Gate for GatePipeline {
                 self.gates.len(),
                 self.short_circuit,
             );
-            let mut out = String::with_capacity(header.len() + detail_lines.iter().map(|l| l.len() + 1).sum::<usize>());
+            let mut out = String::with_capacity(
+                header.len() + detail_lines.iter().map(|l| l.len() + 1).sum::<usize>(),
+            );
             out.push_str(&header);
             for line in &detail_lines {
                 out.push('\n');
@@ -206,7 +208,11 @@ impl Gate for GatePipeline {
             let reason = if failed_names.len() == 1 {
                 format!("inner gate failed: {}", failed_names[0])
             } else {
-                format!("{} inner gates failed: {}", failed_names.len(), failed_names.join(", "))
+                format!(
+                    "{} inner gates failed: {}",
+                    failed_names.len(),
+                    failed_names.join(", ")
+                )
             };
             Verdict::fail(&self.name, reason).with_detail(detail)
         };
@@ -423,7 +429,11 @@ mod tests {
     impl Gate for OrderedGate {
         async fn verify(&self, _s: &Signal, _c: &Context) -> Verdict {
             let position = self.counter.fetch_add(1, Ordering::SeqCst);
-            assert_eq!(position, self.expected_position, "gate {} ran out of order", self.name);
+            assert_eq!(
+                position, self.expected_position,
+                "gate {} ran out of order",
+                self.name
+            );
             Verdict::pass(&self.name)
         }
         fn name(&self) -> &str {

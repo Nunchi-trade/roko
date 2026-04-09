@@ -62,7 +62,7 @@
 
 use parking_lot::RwLock;
 use roko_core::tool::bandit::{ArmEntry, BanditKey, FormatBandit};
-use roko_core::tool::format::{profile_for_model, ToolFormat, ToolFormatProfile};
+use roko_core::tool::format::{ToolFormat, ToolFormatProfile, profile_for_model};
 use roko_core::tool::trace::ToolOutcome;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -126,7 +126,10 @@ impl UcbBandit {
     /// Panics if `arm_names` is empty (construction-time invariant: at
     /// least one arm is required).
     pub fn new(arm_names: Vec<String>) -> Self {
-        assert!(!arm_names.is_empty(), "UcbBandit: arm_names must be non-empty");
+        assert!(
+            !arm_names.is_empty(),
+            "UcbBandit: arm_names must be non-empty"
+        );
         let arms = arm_names.into_iter().map(BanditArm::new).collect();
         Self {
             arms: RwLock::new(arms),
@@ -158,10 +161,7 @@ impl UcbBandit {
     ///
     /// Returns an I/O or parse error if the file exists but cannot be read
     /// or deserialized.
-    pub fn load(
-        path: impl AsRef<Path>,
-        arm_names: Vec<String>,
-    ) -> std::io::Result<Self> {
+    pub fn load(path: impl AsRef<Path>, arm_names: Vec<String>) -> std::io::Result<Self> {
         let path = path.as_ref();
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
@@ -202,9 +202,10 @@ impl UcbBandit {
     /// Returns an error if `persist_path` is `None`, or if any filesystem
     /// operation fails.
     pub fn save(&self) -> std::io::Result<()> {
-        let dest = self.persist_path.as_ref().ok_or_else(|| {
-            std::io::Error::other("UcbBandit: no persist_path set")
-        })?;
+        let dest = self
+            .persist_path
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("UcbBandit: no persist_path set"))?;
 
         // Snapshot under read lock, then release before doing any I/O.
         let json = {
@@ -663,7 +664,11 @@ impl TrackAndStopBandit {
     }
 
     /// D-tracking selection: returns the index of the arm to pull.
-    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
     fn d_tracking_select(arms: &[TasArm], total_pulls: u64) -> usize {
         let k = arms.len();
         let t = total_pulls as f64;
@@ -764,10 +769,10 @@ impl FormatBandit for TrackAndStopBandit {
 
         // Single arm → no exploration needed.
         if st.arms.len() <= 1 {
-            return st.arms.first().map_or_else(
-                || profile.preferred.clone(),
-                |a| a.format.clone(),
-            );
+            return st
+                .arms
+                .first()
+                .map_or_else(|| profile.preferred.clone(), |a| a.format.clone());
         }
 
         let idx = Self::d_tracking_select(&st.arms, st.total_pulls);
@@ -853,9 +858,9 @@ impl TrackAndStopBandit {
     #[must_use]
     pub fn stopped_winner(&self, key: &BanditKey) -> Option<ToolFormat> {
         let state_map = self.state.read();
-        state_map.get(key).and_then(|st| {
-            st.stopped_best.map(|idx| st.arms[idx].format.clone())
-        })
+        state_map
+            .get(key)
+            .and_then(|st| st.stopped_best.map(|idx| st.arms[idx].format.clone()))
     }
 
     /// Current confidence parameter.
@@ -877,9 +882,9 @@ impl TrackAndStopBandit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::Rng;
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
-    use rand::Rng;
     use tempfile::TempDir;
 
     fn three_arm_names() -> Vec<String> {
@@ -909,7 +914,10 @@ mod tests {
         // formula is deterministic, tiebreak returns first arm.
         let first = bandit.select();
         let second = bandit.select();
-        assert_eq!(first, second, "select must be deterministic given the same state");
+        assert_eq!(
+            first, second,
+            "select must be deterministic given the same state"
+        );
     }
 
     // ── Test 3 ───────────────────────────────────────────────────────────────
@@ -934,7 +942,10 @@ mod tests {
         bandit.update("arm0", 0.8);
         bandit.update("arm0", 0.2);
         let stats = bandit.arm_stats();
-        let arm0 = stats.iter().find(|a| a.name == "arm0").expect("arm0 exists");
+        let arm0 = stats
+            .iter()
+            .find(|a| a.name == "arm0")
+            .expect("arm0 exists");
         assert_eq!(arm0.pulls, 2);
         assert!((arm0.total_reward - 1.0).abs() < 1e-10);
         assert_eq!(bandit.total_pulls(), 2);
@@ -1024,12 +1035,18 @@ mod tests {
             ];
 
             let chosen_low = bandit_low.select();
-            let idx_low = arms.iter().position(|a| a == &chosen_low).expect("valid arm");
+            let idx_low = arms
+                .iter()
+                .position(|a| a == &chosen_low)
+                .expect("valid arm");
             bandit_low.update(&chosen_low, r[idx_low]);
             counts_low[idx_low] += 1;
 
             let chosen_high = bandit_high.select();
-            let idx_high = arms.iter().position(|a| a == &chosen_high).expect("valid arm");
+            let idx_high = arms
+                .iter()
+                .position(|a| a == &chosen_high)
+                .expect("valid arm");
             bandit_high.update(&chosen_high, r[idx_high]);
             counts_high[idx_high] += 1;
         }
@@ -1050,8 +1067,7 @@ mod tests {
         let dir = TempDir::new().expect("create tempdir");
         let path = dir.path().join("bandit.json");
 
-        let bandit = UcbBandit::new(three_arm_names())
-            .with_persist_path(&path);
+        let bandit = UcbBandit::new(three_arm_names()).with_persist_path(&path);
         bandit.update("arm0", 0.9);
         bandit.update("arm1", 0.3);
         bandit.save().expect("save");
@@ -1131,16 +1147,22 @@ mod tests {
         bank.update("ctx_b", "arm2", 0.9);
         bank.save(&path).expect("save");
 
-        let loaded = BanditBank::load(&path, three_arm_names(), std::f64::consts::SQRT_2)
-            .expect("load");
+        let loaded =
+            BanditBank::load(&path, three_arm_names(), std::f64::consts::SQRT_2).expect("load");
 
         // After select on ctx_a: arm2 is unpulled on ctx_a → it wins.
         let choice = loaded.select("ctx_a");
-        assert_eq!(choice, "arm2", "arm2 should be unpulled on ctx_a after roundtrip");
+        assert_eq!(
+            choice, "arm2",
+            "arm2 should be unpulled on ctx_a after roundtrip"
+        );
 
         // ctx_b had arm2 pulled once; arm0 and arm1 are unpulled → arm0 wins (first).
         let choice_b = loaded.select("ctx_b");
-        assert_eq!(choice_b, "arm0", "arm0 should be unpulled on ctx_b after roundtrip");
+        assert_eq!(
+            choice_b, "arm0",
+            "arm0 should be unpulled on ctx_b after roundtrip"
+        );
     }
 
     // ── Test 12 ──────────────────────────────────────────────────────────────
@@ -1167,8 +1189,11 @@ mod tests {
 
         let stats = bandit.arm_stats();
         assert_eq!(stats[0].pulls, 1000, "expected 1000 pulls");
-        assert!((stats[0].total_reward - 1000.0).abs() < 1e-6,
-            "expected total_reward = 1000.0, got {}", stats[0].total_reward);
+        assert!(
+            (stats[0].total_reward - 1000.0).abs() < 1e-6,
+            "expected total_reward = 1000.0, got {}",
+            stats[0].total_reward
+        );
         assert_eq!(bandit.total_pulls(), 1000);
     }
 
@@ -1190,8 +1215,10 @@ mod tests {
         // UCB(arm2) = 0.0 + sqrt(2) * sqrt(ln(3)/1) ≈ 1.554
         // arm0 wins.
         let choice = bandit.select();
-        assert_eq!(choice, "arm0",
-            "with default C=sqrt(2), arm0 (mean=1.0) should win by highest UCB");
+        assert_eq!(
+            choice, "arm0",
+            "with default C=sqrt(2), arm0 (mean=1.0) should win by highest UCB"
+        );
     }
 
     // =====================================================================
@@ -1231,14 +1258,22 @@ mod tests {
         // First few selects should cycle through all arms in profile
         // chain order (round-robin until each arm is pulled).
         let first = bandit.select(&k);
-        bandit.feedback(&k, first.clone(), &ToolOutcome::success(50, 0.001).with_reward(0.5));
+        bandit.feedback(
+            &k,
+            first.clone(),
+            &ToolOutcome::success(50, 0.001).with_reward(0.5),
+        );
 
         let second = bandit.select(&k);
         assert_ne!(
             first, second,
             "second select should pick a different arm (round-robin)"
         );
-        bandit.feedback(&k, second.clone(), &ToolOutcome::success(50, 0.001).with_reward(0.5));
+        bandit.feedback(
+            &k,
+            second.clone(),
+            &ToolOutcome::success(50, 0.001).with_reward(0.5),
+        );
 
         // After pulling two arms, the third should be the remaining unpulled arm.
         let third = bandit.select(&k);
@@ -1249,7 +1284,11 @@ mod tests {
         // All arms should now have exactly 1 pull.
         let table = bandit.arm_table(&k);
         for arm in &table {
-            assert_eq!(arm.pulls, 1, "arm {:?} should have 1 pull after round-robin", arm.format);
+            assert_eq!(
+                arm.pulls, 1,
+                "arm {:?} should have 1 pull after round-robin",
+                arm.format
+            );
         }
     }
 
@@ -1336,7 +1375,11 @@ mod tests {
         // Train k1 to convergence.
         for _ in 0..300 {
             let chosen = bandit.select(&k1);
-            let reward = if chosen == ToolFormat::AnthropicBlocks { 0.95 } else { 0.05 };
+            let reward = if chosen == ToolFormat::AnthropicBlocks {
+                0.95
+            } else {
+                0.05
+            };
             let outcome = if chosen == ToolFormat::AnthropicBlocks {
                 ToolOutcome::success(50, 0.001).with_reward(reward)
             } else {
@@ -1369,12 +1412,19 @@ mod tests {
 
         // Select + feedback populates the table.
         let chosen = bandit.select(&k);
-        bandit.feedback(&k, chosen.clone(), &ToolOutcome::success(100, 0.005).with_reward(0.8));
+        bandit.feedback(
+            &k,
+            chosen.clone(),
+            &ToolOutcome::success(100, 0.005).with_reward(0.8),
+        );
 
         let table = bandit.arm_table(&k);
         assert!(!table.is_empty());
 
-        let arm = table.iter().find(|a| a.format == chosen).expect("chosen arm in table");
+        let arm = table
+            .iter()
+            .find(|a| a.format == chosen)
+            .expect("chosen arm in table");
         assert_eq!(arm.pulls, 1);
         assert!((arm.cumulative_reward - 0.8).abs() < 0.01);
     }

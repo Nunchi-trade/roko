@@ -278,7 +278,8 @@ fn generate_research(inputs: &StepInputs) -> String {
         out.push_str("## Task Overview\n\n");
         // Count tasks.
         let task_count = tasks.matches("[[task]]").count();
-        let _ = std::fmt::Write::write_fmt(&mut out, format_args!("{task_count} tasks defined.\n\n"));
+        let _ =
+            std::fmt::Write::write_fmt(&mut out, format_args!("{task_count} tasks defined.\n\n"));
     }
 
     if let Some(ref brief) = inputs.brief_content {

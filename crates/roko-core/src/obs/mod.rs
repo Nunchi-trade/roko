@@ -15,7 +15,7 @@ pub use health::{
 };
 pub use histograms::{Histogram, HistogramSnapshot, LLM_LATENCY_BUCKETS};
 pub use metrics::{
-    register_standard_metrics, Counter, Gauge, LabelSet, MetricKind, MetricRegistry,
-    MetricSnapshot, STANDARD_METRICS,
+    Counter, Gauge, LabelSet, MetricKind, MetricRegistry, MetricSnapshot, STANDARD_METRICS,
+    register_standard_metrics,
 };
 pub use scrub::{LogScrubber, REDACTED};

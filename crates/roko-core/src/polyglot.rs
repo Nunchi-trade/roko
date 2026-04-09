@@ -107,10 +107,7 @@ pub fn detect_polyglot(file_names: &[&str]) -> PolyglotProject {
     }
 
     // Separate primary from secondary.
-    let secondary: Vec<Language> = languages
-        .into_iter()
-        .filter(|l| *l != primary)
-        .collect();
+    let secondary: Vec<Language> = languages.into_iter().filter(|l| *l != primary).collect();
 
     PolyglotProject {
         primary,

@@ -13,9 +13,9 @@ use bardo_primitives::HdcVector;
 use parking_lot::RwLock;
 
 use super::{
+    SubscriptionId,
     backpressure::{BackpressurePolicy, SubscriptionCounters, SubscriptionStats},
     sink::{SinkError, SubscriptionSink},
-    SubscriptionId,
 };
 
 use crate::chain::PheromoneKind;
@@ -458,12 +458,7 @@ mod tests {
 
         sink_a.close();
         // One broadcast to discover the close.
-        bus.broadcast(
-            PheromoneKind::Threat,
-            HdcVector::from_seed(b"x"),
-            1.0,
-            10,
-        );
+        bus.broadcast(PheromoneKind::Threat, HdcVector::from_seed(b"x"), 1.0, 10);
         let removed = bus.prune_closed();
         assert_eq!(removed, 1);
         assert_eq!(bus.len(), 1);
@@ -599,12 +594,7 @@ mod tests {
         let sink_b: Arc<VecSink<PheromoneEvent>> = Arc::new(VecSink::new());
         bus.register(sink_a, BackpressurePolicy::DropOldest);
         bus.register(sink_b, BackpressurePolicy::DropNewest);
-        bus.broadcast(
-            PheromoneKind::Threat,
-            HdcVector::from_seed(b"q"),
-            1.0,
-            0,
-        );
+        bus.broadcast(PheromoneKind::Threat, HdcVector::from_seed(b"q"), 1.0, 0);
         let stats = bus.all_stats();
         assert_eq!(stats.len(), 2);
         for (_, s) in stats {

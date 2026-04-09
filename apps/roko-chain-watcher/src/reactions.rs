@@ -97,12 +97,7 @@ impl Reaction {
 
     /// Constructs a `DepositPheromone` reaction.
     #[must_use]
-    pub fn deposit_pheromone(
-        kind: &str,
-        content: String,
-        intensity: f32,
-        reason: String,
-    ) -> Self {
+    pub fn deposit_pheromone(kind: &str, content: String, intensity: f32, reason: String) -> Self {
         Self {
             kind: ReactionKind::DepositPheromone,
             reason,
@@ -122,7 +117,15 @@ pub const OPPORTUNITY_THRESHOLD: f32 = 0.6;
 /// Keywords that flag an existing insight as potentially flawed.
 pub const ANTI_PATTERN_KEYWORDS: &[&str] = &["WRONG", "BUG", "INCORRECT"];
 /// Topic keywords for richer, category-aware reactions.
-const TOPIC_DEX: &[&str] = &["swap", "uniswap", "sushi", "curve", "router", "dex", "liquidity"];
+const TOPIC_DEX: &[&str] = &[
+    "swap",
+    "uniswap",
+    "sushi",
+    "curve",
+    "router",
+    "dex",
+    "liquidity",
+];
 const TOPIC_LENDING: &[&str] = &["aave", "lending", "borrow", "supply", "compound", "repay"];
 const TOPIC_MEV: &[&str] = &["mev", "sandwich", "priority", "tip", "flashbot", "bundle"];
 const TOPIC_GAS: &[&str] = &["gas", "base fee", "congestion", "saturation", "gwei"];
@@ -132,9 +135,7 @@ const TOPIC_BRIDGE: &[&str] = &["bridge", "cross-chain", "arbitrum", "optimism",
 const TOPIC_NFT: &[&str] = &["nft", "erc721", "erc1155", "marketplace", "opensea"];
 
 fn content_contains_anti_pattern(content: &str) -> bool {
-    ANTI_PATTERN_KEYWORDS
-        .iter()
-        .any(|kw| content.contains(kw))
+    ANTI_PATTERN_KEYWORDS.iter().any(|kw| content.contains(kw))
 }
 
 fn content_matches_topic(content: &str, keywords: &[&str]) -> bool {
@@ -143,14 +144,30 @@ fn content_matches_topic(content: &str, keywords: &[&str]) -> bool {
 }
 
 fn classify_topic(content: &str) -> &'static str {
-    if content_matches_topic(content, TOPIC_DEX) { return "dex"; }
-    if content_matches_topic(content, TOPIC_LENDING) { return "lending"; }
-    if content_matches_topic(content, TOPIC_MEV) { return "mev"; }
-    if content_matches_topic(content, TOPIC_WHALE) { return "whale"; }
-    if content_matches_topic(content, TOPIC_STABLE) { return "stablecoin"; }
-    if content_matches_topic(content, TOPIC_BRIDGE) { return "bridge"; }
-    if content_matches_topic(content, TOPIC_NFT) { return "nft"; }
-    if content_matches_topic(content, TOPIC_GAS) { return "gas"; }
+    if content_matches_topic(content, TOPIC_DEX) {
+        return "dex";
+    }
+    if content_matches_topic(content, TOPIC_LENDING) {
+        return "lending";
+    }
+    if content_matches_topic(content, TOPIC_MEV) {
+        return "mev";
+    }
+    if content_matches_topic(content, TOPIC_WHALE) {
+        return "whale";
+    }
+    if content_matches_topic(content, TOPIC_STABLE) {
+        return "stablecoin";
+    }
+    if content_matches_topic(content, TOPIC_BRIDGE) {
+        return "bridge";
+    }
+    if content_matches_topic(content, TOPIC_NFT) {
+        return "nft";
+    }
+    if content_matches_topic(content, TOPIC_GAS) {
+        return "gas";
+    }
     "general"
 }
 
@@ -162,6 +179,7 @@ fn find_warning_for_threat(insights: &[InsightHit]) -> Option<&InsightHit> {
 
 /// Produce a vector of reactions given current pheromones and insights.
 #[must_use]
+#[allow(clippy::cognitive_complexity)]
 pub fn decide(
     pheromones: &[PheromoneHit],
     insights: &[InsightHit],
@@ -233,15 +251,14 @@ pub fn decide(
             .filter(|i| i.confirmations == 0 && i.similarity >= 0.50)
             .collect();
         candidates.sort_by(|a, b| {
-            b.similarity.partial_cmp(&a.similarity).unwrap_or(std::cmp::Ordering::Equal)
+            b.similarity
+                .partial_cmp(&a.similarity)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
         for top in candidates.iter().take(3) {
             out.push(Reaction::confirm_insight(
                 top.id.clone(),
-                format!(
-                    "consensus confirm: {} (sim={:.2})",
-                    top.id, top.similarity
-                ),
+                format!("consensus confirm: {} (sim={:.2})", top.id, top.similarity),
             ));
         }
     }
@@ -268,7 +285,10 @@ pub fn decide(
             if (hash % 13) == 0 && watcher_id.contains("consensus") {
                 out.push(Reaction::challenge_insight(
                     i.id.clone(),
-                    format!("stress-test challenge: insight {} has {} confirmations", i.id, i.confirmations),
+                    format!(
+                        "stress-test challenge: insight {} has {} confirmations",
+                        i.id, i.confirmations
+                    ),
                 ));
             }
         }
@@ -285,13 +305,19 @@ pub fn decide(
         for (topic, hits) in &topic_counts {
             if hits.len() >= 3 && *topic != "general" {
                 // Synthesize a higher-level heuristic from converging signals.
-                let snippet: Vec<&str> = hits.iter().take(3).map(|h| {
-                    let end = h.content.len().min(40);
-                    &h.content[..end]
-                }).collect();
+                let snippet: Vec<&str> = hits
+                    .iter()
+                    .take(3)
+                    .map(|h| {
+                        let end = h.content.len().min(40);
+                        &h.content[..end]
+                    })
+                    .collect();
                 let content = format!(
                     "[{watcher_id}] convergence detected: {} signals on \"{}\": {}…",
-                    hits.len(), topic, snippet.join(" | ")
+                    hits.len(),
+                    topic,
+                    snippet.join(" | ")
                 );
                 out.push(Reaction::post_insight(
                     "heuristic",
@@ -304,7 +330,8 @@ pub fn decide(
                         "opportunity",
                         format!(
                             "[{watcher_id}] strong {} convergence: {} signals aligning",
-                            topic, hits.len()
+                            topic,
+                            hits.len()
                         ),
                         0.7,
                         format!("topic convergence: {} × {}", topic, hits.len()),
@@ -346,7 +373,8 @@ pub fn decide(
                 low_threats.iter().map(|p| p.intensity).sum::<f32>() / low_threats.len() as f32;
             let content = format!(
                 "[{watcher_id}] threat decay window: {} fading threats (avg intensity {:.2}) — recovery opportunity",
-                low_threats.len(), avg_int
+                low_threats.len(),
+                avg_int
             );
             out.push(Reaction::deposit_pheromone(
                 "opportunity",
@@ -364,7 +392,9 @@ pub fn decide(
         let all_same = insights.iter().take(8).all(|i| i.kind == *first_kind);
         if all_same {
             if let Some(weakest) = insights.iter().min_by(|a, b| {
-                a.weight.partial_cmp(&b.weight).unwrap_or(std::cmp::Ordering::Equal)
+                a.weight
+                    .partial_cmp(&b.weight)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             }) {
                 if weakest.confirmations >= 1 {
                     out.push(Reaction::challenge_insight(
@@ -382,18 +412,30 @@ pub fn decide(
     // Rule 5: wisdom summary — richer context from what we observed.
     if pheromones.len() + insights.len() >= 3 {
         let threat_count = pheromones.iter().filter(|p| p.kind == "threat").count();
-        let opp_count = pheromones.iter().filter(|p| p.kind == "opportunity").count();
+        let opp_count = pheromones
+            .iter()
+            .filter(|p| p.kind == "opportunity")
+            .count();
         let confirmed = insights.iter().filter(|i| i.confirmations >= 2).count();
         let top_topic = {
-            let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+            let mut counts: std::collections::HashMap<&str, usize> =
+                std::collections::HashMap::new();
             for i in insights {
                 *counts.entry(classify_topic(&i.content)).or_default() += 1;
             }
-            counts.into_iter().max_by_key(|(_, v)| *v).map(|(k, _)| k).unwrap_or("general")
+            counts
+                .into_iter()
+                .max_by_key(|(_, v)| *v)
+                .map_or("general", |(k, _)| k)
         };
         let content = format!(
             "[{watcher_id}] wisdom: {} pheromones ({} threats, {} opps), {} insights ({} confirmed), dominant topic: {}",
-            pheromones.len(), threat_count, opp_count, insights.len(), confirmed, top_topic
+            pheromones.len(),
+            threat_count,
+            opp_count,
+            insights.len(),
+            confirmed,
+            top_topic
         );
         out.push(Reaction::deposit_pheromone(
             "wisdom",
@@ -445,19 +487,21 @@ mod tests {
     fn high_threat_with_no_warning_triggers_post() {
         let phs = vec![pheromone(1, "threat", 0.85)];
         let reactions = decide(&phs, &[], "watcher-a");
-        assert!(reactions
-            .iter()
-            .any(|r| r.kind == ReactionKind::PostInsight
-                && r.insight_kind.as_deref() == Some("warning")));
+        assert!(
+            reactions.iter().any(|r| r.kind == ReactionKind::PostInsight
+                && r.insight_kind.as_deref() == Some("warning"))
+        );
     }
 
     #[test]
     fn threat_below_threshold_does_not_post_warning() {
         let phs = vec![pheromone(1, "threat", 0.5)];
         let reactions = decide(&phs, &[], "watcher-a");
-        assert!(reactions
-            .iter()
-            .all(|r| r.insight_kind.as_deref() != Some("warning")));
+        assert!(
+            reactions
+                .iter()
+                .all(|r| r.insight_kind.as_deref() != Some("warning"))
+        );
     }
 
     #[test]
@@ -471,35 +515,53 @@ mod tests {
             2,
         )];
         let reactions = decide(&phs, &insights, "watcher-a");
-        assert!(reactions
-            .iter()
-            .all(|r| r.insight_kind.as_deref() != Some("warning")));
+        assert!(
+            reactions
+                .iter()
+                .all(|r| r.insight_kind.as_deref() != Some("warning"))
+        );
     }
 
     #[test]
     fn opportunity_posts_strategy_fragment() {
         let phs = vec![pheromone(2, "opportunity", 0.72)];
         let reactions = decide(&phs, &[], "watcher-a");
-        assert!(reactions
-            .iter()
-            .any(|r| r.insight_kind.as_deref() == Some("strategy_fragment")));
+        assert!(
+            reactions
+                .iter()
+                .any(|r| r.insight_kind.as_deref() == Some("strategy_fragment"))
+        );
     }
 
     #[test]
     fn opportunity_below_threshold_no_post() {
         let phs = vec![pheromone(2, "opportunity", 0.3)];
         let reactions = decide(&phs, &[], "watcher-a");
-        assert!(reactions
-            .iter()
-            .all(|r| r.insight_kind.as_deref() != Some("strategy_fragment")));
+        assert!(
+            reactions
+                .iter()
+                .all(|r| r.insight_kind.as_deref() != Some("strategy_fragment"))
+        );
     }
 
     #[test]
     fn wisdom_confirms_top_insight() {
         let phs = vec![pheromone(3, "wisdom", 0.8)];
         let insights = vec![
-            insight("insight:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "insight", "ok", 0.6, 0),
-            insight("insight:cccccccccccccccccccccccccccccccc", "insight", "better", 0.82, 1),
+            insight(
+                "insight:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "insight",
+                "ok",
+                0.6,
+                0,
+            ),
+            insight(
+                "insight:cccccccccccccccccccccccccccccccc",
+                "insight",
+                "better",
+                0.82,
+                1,
+            ),
         ];
         let reactions = decide(&phs, &insights, "watcher-a");
         let confirm = reactions
@@ -523,9 +585,11 @@ mod tests {
             0,
         )];
         let reactions = decide(&phs, &insights, "watcher-a");
-        assert!(reactions
-            .iter()
-            .all(|r| r.kind != ReactionKind::ConfirmInsight));
+        assert!(
+            reactions
+                .iter()
+                .all(|r| r.kind != ReactionKind::ConfirmInsight)
+        );
     }
 
     #[test]
@@ -538,9 +602,11 @@ mod tests {
             2,
         )];
         let reactions = decide(&[], &insights, "watcher-a");
-        assert!(reactions
-            .iter()
-            .any(|r| r.kind == ReactionKind::ChallengeInsight));
+        assert!(
+            reactions
+                .iter()
+                .any(|r| r.kind == ReactionKind::ChallengeInsight)
+        );
     }
 
     #[test]
@@ -553,14 +619,21 @@ mod tests {
             0,
         )];
         let reactions = decide(&[], &insights, "watcher-a");
-        assert!(reactions
-            .iter()
-            .all(|r| r.kind != ReactionKind::ChallengeInsight));
+        assert!(
+            reactions
+                .iter()
+                .all(|r| r.kind != ReactionKind::ChallengeInsight)
+        );
     }
 
     #[test]
     fn summary_pheromone_deposited_when_observations_exist() {
-        let phs = vec![pheromone(1, "wisdom", 0.2)];
+        // The summary rule fires when pheromones.len() + insights.len() >= 3
+        let phs = vec![
+            pheromone(1, "wisdom", 0.2),
+            pheromone(2, "threat", 0.5),
+            pheromone(3, "opportunity", 0.3),
+        ];
         let reactions = decide(&phs, &[], "watcher-a");
         assert!(reactions.iter().any(|r| {
             r.kind == ReactionKind::DepositPheromone
@@ -571,9 +644,11 @@ mod tests {
     #[test]
     fn no_summary_pheromone_when_nothing_observed() {
         let reactions = decide(&[], &[], "watcher-a");
-        assert!(reactions
-            .iter()
-            .all(|r| r.kind != ReactionKind::DepositPheromone));
+        assert!(
+            reactions
+                .iter()
+                .all(|r| r.kind != ReactionKind::DepositPheromone)
+        );
     }
 
     #[test]

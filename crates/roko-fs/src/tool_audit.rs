@@ -56,7 +56,9 @@ pub struct ToolAuditLog {
 
 impl std::fmt::Debug for ToolAuditLog {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ToolAuditLog").field("path", &self.path).finish_non_exhaustive()
+        f.debug_struct("ToolAuditLog")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
     }
 }
 
@@ -93,7 +95,10 @@ impl ToolAuditLog {
             .append(true)
             .open(&path)
             .await?;
-        Ok(Self { path, writer: Mutex::new(BufWriter::new(file)) })
+        Ok(Self {
+            path,
+            writer: Mutex::new(BufWriter::new(file)),
+        })
     }
 
     /// Path to the underlying JSONL file.
@@ -207,10 +212,7 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let log = ToolAuditLog::open(dir.path()).await.expect("open");
 
-        assert_eq!(
-            log.path(),
-            dir.path().join(".roko/tool_audit.jsonl")
-        );
+        assert_eq!(log.path(), dir.path().join(".roko/tool_audit.jsonl"));
         // File is created eagerly (on open, not on first write).
         assert!(log.path().exists(), "file should exist after open");
     }
@@ -238,7 +240,9 @@ mod tests {
         let call = make_call("c2", "write_file");
         let result = make_result_ok();
 
-        log.record_result(&call, &result).await.expect("record_result");
+        log.record_result(&call, &result)
+            .await
+            .expect("record_result");
 
         let lines = read_lines(log.path()).await;
         assert_eq!(lines.len(), 1, "expected exactly 1 line, got: {lines:?}");
@@ -255,8 +259,7 @@ mod tests {
         log.record_admit(&call).await.expect("record_admit");
 
         let lines = read_lines(log.path()).await;
-        let json: serde_json::Value =
-            serde_json::from_str(&lines[0]).expect("parse line as JSON");
+        let json: serde_json::Value = serde_json::from_str(&lines[0]).expect("parse line as JSON");
 
         assert_eq!(json["kind"], "admit", "kind must be 'admit'");
         assert!(json["ts_ms"].is_i64(), "ts_ms must be an integer");
@@ -273,11 +276,12 @@ mod tests {
         let call = make_call("c4", "grep");
         let result = make_result_ok();
 
-        log.record_result(&call, &result).await.expect("record_result");
+        log.record_result(&call, &result)
+            .await
+            .expect("record_result");
 
         let lines = read_lines(log.path()).await;
-        let json: serde_json::Value =
-            serde_json::from_str(&lines[0]).expect("parse line as JSON");
+        let json: serde_json::Value = serde_json::from_str(&lines[0]).expect("parse line as JSON");
 
         assert_eq!(json["kind"], "result", "kind must be 'result'");
         assert_eq!(json["call_id"], "c4", "call_id must match");
@@ -359,7 +363,9 @@ mod tests {
             .await
             .expect("pre-create .roko");
 
-        let log = ToolAuditLog::open(dir.path()).await.expect("open with pre-existing dir");
+        let log = ToolAuditLog::open(dir.path())
+            .await
+            .expect("open with pre-existing dir");
         let call = make_call("pre", "bash");
         log.record_admit(&call).await.expect("record_admit");
 
@@ -375,7 +381,11 @@ mod tests {
         let explicit = dir.path().join("my_custom_audit.jsonl");
 
         let log = ToolAuditLog::open_at(&explicit).await.expect("open_at");
-        assert_eq!(log.path(), explicit, "path must match exactly — no .roko/ suffix");
+        assert_eq!(
+            log.path(),
+            explicit,
+            "path must match exactly — no .roko/ suffix"
+        );
 
         let call = make_call("e", "edit_file");
         log.record_admit(&call).await.expect("record_admit");
@@ -405,10 +415,7 @@ mod tests {
             let log = Arc::clone(&log);
             handles.push(tokio::spawn(async move {
                 for call_idx in 0..admits_per_task {
-                    let call = make_call(
-                        &format!("t{task_idx}-c{call_idx}"),
-                        "bash",
-                    );
+                    let call = make_call(&format!("t{task_idx}-c{call_idx}"), "bash");
                     log.record_admit(&call).await.expect("concurrent admit");
                 }
             }));
@@ -428,10 +435,8 @@ mod tests {
 
         // Every line must parse as valid JSON — no torn writes.
         for (i, line) in lines.iter().enumerate() {
-            let _: serde_json::Value =
-                serde_json::from_str(line).unwrap_or_else(|e| {
-                    panic!("line {i} is not valid JSON: {e}\nLine: {line}")
-                });
+            let _: serde_json::Value = serde_json::from_str(line)
+                .unwrap_or_else(|e| panic!("line {i} is not valid JSON: {e}\nLine: {line}"));
         }
     }
 
@@ -448,8 +453,7 @@ mod tests {
         let after = chrono::Utc::now().timestamp_millis();
 
         let lines = read_lines(log.path()).await;
-        let json: serde_json::Value =
-            serde_json::from_str(&lines[0]).expect("parse JSON");
+        let json: serde_json::Value = serde_json::from_str(&lines[0]).expect("parse JSON");
         let ts_ms = json["ts_ms"].as_i64().expect("ts_ms is i64");
 
         assert!(
@@ -469,17 +473,19 @@ mod tests {
         let result = ToolResult::err(roko_core::tool::ToolError::Cancelled);
 
         log.record_admit(&call_a).await.expect("admit a");
-        log.record_result(&call_a, &make_result_ok()).await.expect("result a");
+        log.record_result(&call_a, &make_result_ok())
+            .await
+            .expect("result a");
         log.record_admit(&call_b).await.expect("admit b");
-        log.record_result(&call_b, &result).await.expect("result b (err)");
+        log.record_result(&call_b, &result)
+            .await
+            .expect("result b (err)");
 
         let lines = read_lines(log.path()).await;
         assert_eq!(lines.len(), 4, "expected 4 lines");
         for (i, line) in lines.iter().enumerate() {
-            let _: serde_json::Value =
-                serde_json::from_str(line).unwrap_or_else(|e| {
-                    panic!("line {i} is invalid JSON: {e}\nLine: {line}")
-                });
+            let _: serde_json::Value = serde_json::from_str(line)
+                .unwrap_or_else(|e| panic!("line {i} is invalid JSON: {e}\nLine: {line}"));
         }
     }
 }

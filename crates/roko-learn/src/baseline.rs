@@ -159,10 +159,7 @@ pub fn compute_baseline(records: &[TaskMetric], min_records: usize) -> Baseline 
             }
         }
 
-        let iter_entry = acc
-            .plan_max_iters
-            .entry(r.plan_id.clone())
-            .or_insert(0);
+        let iter_entry = acc.plan_max_iters.entry(r.plan_id.clone()).or_insert(0);
         *iter_entry = (*iter_entry).max(r.iteration);
     }
 
@@ -241,9 +238,48 @@ mod tests {
     #[test]
     fn baseline_single_slice() {
         let records = vec![
-            make_rich_metric("p1", "t1", "Implementer", "sonnet", "standard", "compile", true, 1, 0.50, 1000, 200, 10000),
-            make_rich_metric("p1", "t2", "Implementer", "sonnet", "standard", "compile", false, 1, 0.30, 800, 150, 8000),
-            make_rich_metric("p2", "t1", "Implementer", "sonnet", "standard", "compile", true, 1, 0.40, 900, 180, 9000),
+            make_rich_metric(
+                "p1",
+                "t1",
+                "Implementer",
+                "sonnet",
+                "standard",
+                "compile",
+                true,
+                1,
+                0.50,
+                1000,
+                200,
+                10000,
+            ),
+            make_rich_metric(
+                "p1",
+                "t2",
+                "Implementer",
+                "sonnet",
+                "standard",
+                "compile",
+                false,
+                1,
+                0.30,
+                800,
+                150,
+                8000,
+            ),
+            make_rich_metric(
+                "p2",
+                "t1",
+                "Implementer",
+                "sonnet",
+                "standard",
+                "compile",
+                true,
+                1,
+                0.40,
+                900,
+                180,
+                9000,
+            ),
         ];
 
         let b = compute_baseline(&records, 2);
@@ -263,8 +299,23 @@ mod tests {
     #[test]
     fn baseline_multiple_slices() {
         let records = vec![
-            make_rich_metric("p1", "t1", "Implementer", "s", "simple", "compile", true, 1, 0.10, 100, 50, 1000),
-            make_rich_metric("p1", "t2", "Reviewer", "s", "complex", "review", false, 1, 0.20, 200, 100, 2000),
+            make_rich_metric(
+                "p1",
+                "t1",
+                "Implementer",
+                "s",
+                "simple",
+                "compile",
+                true,
+                1,
+                0.10,
+                100,
+                50,
+                1000,
+            ),
+            make_rich_metric(
+                "p1", "t2", "Reviewer", "s", "complex", "review", false, 1, 0.20, 200, 100, 2000,
+            ),
         ];
 
         let b = compute_baseline(&records, 1);
@@ -282,8 +333,12 @@ mod tests {
     #[test]
     fn baseline_overall_aggregates() {
         let records = vec![
-            make_rich_metric("p1", "t1", "Impl", "s", "std", "compile", true, 1, 0.20, 100, 50, 2000),
-            make_rich_metric("p2", "t1", "Impl", "s", "std", "compile", false, 1, 0.40, 200, 100, 4000),
+            make_rich_metric(
+                "p1", "t1", "Impl", "s", "std", "compile", true, 1, 0.20, 100, 50, 2000,
+            ),
+            make_rich_metric(
+                "p2", "t1", "Impl", "s", "std", "compile", false, 1, 0.40, 200, 100, 4000,
+            ),
         ];
 
         let b = compute_baseline(&records, 5);
@@ -296,9 +351,37 @@ mod tests {
     #[test]
     fn baseline_roles_and_bands() {
         let records = vec![
-            make_rich_metric("p1", "t1", "Implementer", "s", "simple", "compile", true, 1, 0.10, 100, 50, 1000),
-            make_rich_metric("p1", "t2", "Reviewer", "s", "complex", "review", true, 1, 0.20, 200, 100, 2000),
-            make_rich_metric("p2", "t1", "Implementer", "s", "complex", "test", false, 1, 0.30, 300, 150, 3000),
+            make_rich_metric(
+                "p1",
+                "t1",
+                "Implementer",
+                "s",
+                "simple",
+                "compile",
+                true,
+                1,
+                0.10,
+                100,
+                50,
+                1000,
+            ),
+            make_rich_metric(
+                "p1", "t2", "Reviewer", "s", "complex", "review", true, 1, 0.20, 200, 100, 2000,
+            ),
+            make_rich_metric(
+                "p2",
+                "t1",
+                "Implementer",
+                "s",
+                "complex",
+                "test",
+                false,
+                1,
+                0.30,
+                300,
+                150,
+                3000,
+            ),
         ];
 
         let b = compute_baseline(&records, 1);
@@ -315,10 +398,18 @@ mod tests {
         // Plan p2 has iteration 1 → max = 1
         // avg_iterations = (3 + 1) / 2 = 2.0
         let records = vec![
-            make_rich_metric("p1", "t1", "Impl", "s", "std", "compile", false, 1, 0.10, 100, 50, 1000),
-            make_rich_metric("p1", "t1", "Impl", "s", "std", "compile", false, 2, 0.10, 100, 50, 1000),
-            make_rich_metric("p1", "t1", "Impl", "s", "std", "compile", true, 3, 0.10, 100, 50, 1000),
-            make_rich_metric("p2", "t1", "Impl", "s", "std", "compile", true, 1, 0.10, 100, 50, 1000),
+            make_rich_metric(
+                "p1", "t1", "Impl", "s", "std", "compile", false, 1, 0.10, 100, 50, 1000,
+            ),
+            make_rich_metric(
+                "p1", "t1", "Impl", "s", "std", "compile", false, 2, 0.10, 100, 50, 1000,
+            ),
+            make_rich_metric(
+                "p1", "t1", "Impl", "s", "std", "compile", true, 3, 0.10, 100, 50, 1000,
+            ),
+            make_rich_metric(
+                "p2", "t1", "Impl", "s", "std", "compile", true, 1, 0.10, 100, 50, 1000,
+            ),
         ];
 
         let b = compute_baseline(&records, 1);
@@ -328,9 +419,9 @@ mod tests {
 
     #[test]
     fn baseline_serialization_roundtrip() {
-        let records = vec![
-            make_rich_metric("p1", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 10000),
-        ];
+        let records = vec![make_rich_metric(
+            "p1", "t1", "Impl", "s", "std", "compile", true, 1, 0.50, 1000, 200, 10000,
+        )];
         let b = compute_baseline(&records, 1);
 
         let json = serde_json::to_string(&b).expect("serialize");

@@ -194,10 +194,7 @@ impl GeneratedTestGate {
 
     /// Construct a generated-test gate for an explicit build system.
     #[must_use]
-    pub fn for_build_system(
-        build_system: BuildSystem,
-        artifacts: Arc<dyn ArtifactStore>,
-    ) -> Self {
+    pub fn for_build_system(build_system: BuildSystem, artifacts: Arc<dyn ArtifactStore>) -> Self {
         Self {
             build_system,
             artifacts,
@@ -258,11 +255,8 @@ impl Gate for GeneratedTestGate {
             Ok(p) => p,
             Err(e) => {
                 let elapsed = elapsed_ms(started);
-                return Verdict::fail(
-                    &self.name,
-                    format!("signal body is not a GatePayload: {e}"),
-                )
-                .with_duration(elapsed);
+                return Verdict::fail(&self.name, format!("signal body is not a GatePayload: {e}"))
+                    .with_duration(elapsed);
             }
         };
 
@@ -331,8 +325,8 @@ impl Gate for GeneratedTestGate {
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         let combined = format!("{stdout}\n{stderr}");
-        let counts = crate::test_gate::parse_test_counts(&combined, self.build_system)
-            .unwrap_or_default();
+        let counts =
+            crate::test_gate::parse_test_counts(&combined, self.build_system).unwrap_or_default();
 
         let mut verdict = if output.status.success() {
             Verdict::pass(&self.name)
@@ -379,7 +373,9 @@ fn resolve_plan_id(signal: &Signal) -> Option<String> {
     }
     // Fall back: look inside a JSON body for a "plan" field.
     let val: serde_json::Value = signal.body.as_json().ok()?;
-    let plan = val.get(PLAN_TAG_KEY).or_else(|| val.get(PLAN_TAG_KEY_ALT))?;
+    let plan = val
+        .get(PLAN_TAG_KEY)
+        .or_else(|| val.get(PLAN_TAG_KEY_ALT))?;
     plan.as_str().map(std::string::ToString::to_string)
 }
 
@@ -444,10 +440,14 @@ fn extract_failing_test_names(output: &str, build: BuildSystem, max: usize) -> V
                 .and_then(|s| s.split_whitespace().next()),
             _ => {
                 if t.starts_with("test ") && t.ends_with(" ... FAILED") {
-                    let mid = t.trim_start_matches("test ").trim_end_matches(" ... FAILED");
+                    let mid = t
+                        .trim_start_matches("test ")
+                        .trim_end_matches(" ... FAILED");
                     Some(mid.trim())
                 } else if t.starts_with("---- ") && t.ends_with(" stdout ----") {
-                    let mid = t.trim_start_matches("---- ").trim_end_matches(" stdout ----");
+                    let mid = t
+                        .trim_start_matches("---- ")
+                        .trim_end_matches(" stdout ----");
                     Some(mid.trim())
                 } else {
                     None
@@ -724,7 +724,10 @@ mod tests {
         let sig = signal_with_plan("plan-empty", &payload);
         let v = gate.verify(&sig, &Context::at(0)).await;
         assert!(v.passed, "empty artifact list must pass");
-        assert_eq!(v.detail.as_deref(), Some("no generated tests for this plan"));
+        assert_eq!(
+            v.detail.as_deref(),
+            Some("no generated tests for this plan")
+        );
         assert_eq!(v.test_count, Some(TestCount::default()));
         assert_eq!(v.gate, "generated_test:cargo");
     }
@@ -762,13 +765,20 @@ mod tests {
 
         let s = InMemoryArtifactStore::new()
             .with("plan-x", "generated-tests/other.rs", b"// noise".to_vec())
-            .with("plan-x", "generated-tests/garbage_y.rs", b"// noise".to_vec());
+            .with(
+                "plan-x",
+                "generated-tests/garbage_y.rs",
+                b"// noise".to_vec(),
+            );
 
         let gate = GeneratedTestGate::new(Arc::new(s)).with_test_prefix("gen_");
         let sig = signal_with_plan("plan-x", &payload);
         let v = gate.verify(&sig, &Context::at(0)).await;
         assert!(v.passed);
-        assert_eq!(v.detail.as_deref(), Some("no generated tests for this plan"));
+        assert_eq!(
+            v.detail.as_deref(),
+            Some("no generated tests for this plan")
+        );
     }
 
     #[tokio::test]

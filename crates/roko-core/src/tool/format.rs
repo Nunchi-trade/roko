@@ -189,10 +189,18 @@ pub fn profile_for_model(slug: &str) -> ToolFormatProfile {
     let slug = slug.trim();
 
     // Claude 4.x / 4.5 / 4.6 → Anthropic blocks
-    if slug.starts_with("claude-") || slug.starts_with("opus-") || slug.starts_with("sonnet-") || slug.starts_with("haiku-") {
+    if slug.starts_with("claude-")
+        || slug.starts_with("opus-")
+        || slug.starts_with("sonnet-")
+        || slug.starts_with("haiku-")
+    {
         return ToolFormatProfile {
             preferred: ToolFormat::AnthropicBlocks,
-            fallback_chain: vec![ToolFormat::OpenAiJson, ToolFormat::JsonMode, ToolFormat::ReActText],
+            fallback_chain: vec![
+                ToolFormat::OpenAiJson,
+                ToolFormat::JsonMode,
+                ToolFormat::ReActText,
+            ],
             supports_tools: true,
             parallel_safe: true,
             max_tools_before_degrade: 32,
@@ -203,7 +211,11 @@ pub fn profile_for_model(slug: &str) -> ToolFormatProfile {
     }
 
     // GPT-4 / GPT-5 / o1 / o3 → OpenAI JSON
-    if slug.starts_with("gpt-") || slug.starts_with("o1") || slug.starts_with("o3") || slug.starts_with("o4") {
+    if slug.starts_with("gpt-")
+        || slug.starts_with("o1")
+        || slug.starts_with("o3")
+        || slug.starts_with("o4")
+    {
         return ToolFormatProfile {
             preferred: ToolFormat::OpenAiJson,
             fallback_chain: vec![ToolFormat::JsonMode, ToolFormat::ReActText],
@@ -231,7 +243,11 @@ pub fn profile_for_model(slug: &str) -> ToolFormatProfile {
     }
 
     // Qwen 3.5 / Qwen3-coder → XML
-    if slug.starts_with("qwen3.5") || slug.starts_with("qwen-3.5") || slug.contains("qwen3-coder") || slug.contains("qwen-3-coder") {
+    if slug.starts_with("qwen3.5")
+        || slug.starts_with("qwen-3.5")
+        || slug.contains("qwen3-coder")
+        || slug.contains("qwen-3-coder")
+    {
         return ToolFormatProfile {
             preferred: ToolFormat::QwenXml,
             fallback_chain: vec![ToolFormat::HermesJson, ToolFormat::ReActText],
@@ -259,7 +275,11 @@ pub fn profile_for_model(slug: &str) -> ToolFormatProfile {
     }
 
     // Llama 4 → Pythonic
-    if slug.starts_with("llama4") || slug.starts_with("llama-4") || slug.contains("maverick") || slug.contains("scout") {
+    if slug.starts_with("llama4")
+        || slug.starts_with("llama-4")
+        || slug.contains("maverick")
+        || slug.contains("scout")
+    {
         return ToolFormatProfile {
             preferred: ToolFormat::Pythonic,
             fallback_chain: vec![ToolFormat::ReActText],

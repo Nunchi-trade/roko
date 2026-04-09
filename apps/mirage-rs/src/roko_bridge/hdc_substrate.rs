@@ -5,13 +5,12 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use bardo_primitives::HdcVector;
 use parking_lot::RwLock;
-use roko_core::{
-    Body, Context, ContentHash, Query, Signal,
-    error::Result,
-    traits::Substrate,
-};
+use roko_core::{Body, ContentHash, Context, Query, Signal, error::Result, traits::Substrate};
 
-use crate::chain::{HdcIndex, InsightId, projection::{project_bytes, project_tokens}};
+use crate::chain::{
+    HdcIndex, InsightId,
+    projection::{project_bytes, project_tokens},
+};
 
 /// Roko-compatible [`Substrate`] backed by mirage's [`HdcIndex`].
 ///

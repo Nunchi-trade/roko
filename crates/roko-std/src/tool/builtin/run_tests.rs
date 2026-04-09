@@ -21,11 +21,16 @@ pub const DESCRIPTION: &str = "Run the project's test suite (or a filtered subse
 /// Build the [`ToolDef`] for `run_tests`.
 #[must_use]
 pub fn tool_def() -> ToolDef {
-    ToolDef::new(NAME, DESCRIPTION, ToolCategory::Exec, ToolPermission::executes())
-        .with_parameters(ToolSchema::any_object())
-        .with_concurrency(ToolConcurrency::Serial)
-        .with_idempotent(false)
-        .with_timeout_ms(600_000)
+    ToolDef::new(
+        NAME,
+        DESCRIPTION,
+        ToolCategory::Exec,
+        ToolPermission::executes(),
+    )
+    .with_parameters(ToolSchema::any_object())
+    .with_concurrency(ToolConcurrency::Serial)
+    .with_idempotent(false)
+    .with_timeout_ms(600_000)
 }
 
 /// Handler for `run_tests` (§36.29).
@@ -61,7 +66,10 @@ impl ToolHandler for Handler {
             .get("build")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("cargo");
-        let filter = call.arguments.get("filter").and_then(serde_json::Value::as_str);
+        let filter = call
+            .arguments
+            .get("filter")
+            .and_then(serde_json::Value::as_str);
         let (program, args) = match build {
             "cargo" => ("cargo", vec!["test", "--workspace"]),
             "npm" => ("npm", vec!["test"]),

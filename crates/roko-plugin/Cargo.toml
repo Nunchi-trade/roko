@@ -1,0 +1,23 @@
+[package]
+name = "roko-plugin"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Plugin SDK for Roko event sources and feedback collectors."
+
+[lints]
+workspace = true
+
+[dependencies]
+roko-core = { path = "../roko-core" }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+globset = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+cron = "0.12"
+notify = "8.2.0"
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }
+tokio-util = { workspace = true }

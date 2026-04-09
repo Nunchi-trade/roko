@@ -173,6 +173,9 @@ mod tests {
 
     #[test]
     fn default_policy_is_drop_oldest() {
-        assert_eq!(BackpressurePolicy::default(), BackpressurePolicy::DropOldest);
+        assert_eq!(
+            BackpressurePolicy::default(),
+            BackpressurePolicy::DropOldest
+        );
     }
 }

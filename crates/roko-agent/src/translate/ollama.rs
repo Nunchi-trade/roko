@@ -74,10 +74,7 @@ impl Translator for OllamaTranslator {
         RenderedTools::JsonArray(serde_json::Value::Array(arr))
     }
 
-    fn parse_calls(
-        &self,
-        response: &BackendResponse,
-    ) -> Result<Vec<ToolCall>, TranslatorError> {
+    fn parse_calls(&self, response: &BackendResponse) -> Result<Vec<ToolCall>, TranslatorError> {
         let BackendResponse::Json(json) = response else {
             return Err(TranslatorError::Malformed("expected json".into()));
         };
@@ -106,9 +103,7 @@ impl Translator for OllamaTranslator {
             let args = match call.pointer("/function/arguments") {
                 // Ollama commonly sends arguments as a JSON-encoded string.
                 Some(serde_json::Value::String(s)) => serde_json::from_str::<serde_json::Value>(s)
-                    .map_err(|e| {
-                        TranslatorError::Malformed(format!("bad arguments json: {e}"))
-                    })?,
+                    .map_err(|e| TranslatorError::Malformed(format!("bad arguments json: {e}")))?,
                 // Some servers pass it through as an inline object.
                 Some(other) => other.clone(),
                 // Absent → `{}`.
@@ -119,6 +114,13 @@ impl Translator for OllamaTranslator {
         }
 
         Ok(out)
+    }
+
+    fn render_assistant_message(&self, response: &BackendResponse) -> Option<serde_json::Value> {
+        let BackendResponse::Json(json) = response else {
+            return None;
+        };
+        json.get("message").cloned()
     }
 
     fn render_results(&self, results: &[(ToolCall, ToolResult)]) -> RenderedResults {
@@ -322,11 +324,8 @@ mod tests {
     fn parse_accepts_object_arguments() {
         // Some servers pass arguments through as an inline object instead of
         // a JSON-encoded string.
-        let resp = ollama_response_with_call(
-            "call_obj",
-            "read_file",
-            serde_json::json!({ "path": "x" }),
-        );
+        let resp =
+            ollama_response_with_call("call_obj", "read_file", serde_json::json!({ "path": "x" }));
         let calls = OllamaTranslator
             .parse_calls(&resp)
             .expect("object arguments must be accepted");
@@ -434,15 +433,9 @@ mod tests {
 
     #[test]
     fn render_results_uses_role_tool_and_tool_call_id() {
-        let call = ToolCall::at(
-            "call_xyz",
-            "read_file",
-            serde_json::json!({"path": "x"}),
-            1,
-        );
+        let call = ToolCall::at("call_xyz", "read_file", serde_json::json!({"path": "x"}), 1);
         let result = ToolResult::text("file contents");
-        let RenderedResults::JsonMessages(v) =
-            OllamaTranslator.render_results(&[(call, result)])
+        let RenderedResults::JsonMessages(v) = OllamaTranslator.render_results(&[(call, result)])
         else {
             panic!("expected JsonMessages");
         };
@@ -457,8 +450,7 @@ mod tests {
     fn render_results_stringifies_err_variants() {
         let call = ToolCall::at("c1", "bash", serde_json::json!({}), 1);
         let result = ToolResult::err(ToolError::Other("boom".into()));
-        let RenderedResults::JsonMessages(v) =
-            OllamaTranslator.render_results(&[(call, result)])
+        let RenderedResults::JsonMessages(v) = OllamaTranslator.render_results(&[(call, result)])
         else {
             panic!("expected JsonMessages");
         };
@@ -477,8 +469,7 @@ mod tests {
     fn render_results_stringifies_timeout_error() {
         let call = ToolCall::at("c1", "bash", serde_json::json!({}), 1);
         let result = ToolResult::err(ToolError::Timeout { after_ms: 2_000 });
-        let RenderedResults::JsonMessages(v) =
-            OllamaTranslator.render_results(&[(call, result)])
+        let RenderedResults::JsonMessages(v) = OllamaTranslator.render_results(&[(call, result)])
         else {
             panic!("expected JsonMessages");
         };
@@ -492,8 +483,7 @@ mod tests {
     fn render_results_ok_copies_content() {
         let call = ToolCall::at("c1", "read_file", serde_json::json!({}), 1);
         let result = ToolResult::text("exact payload");
-        let RenderedResults::JsonMessages(v) =
-            OllamaTranslator.render_results(&[(call, result)])
+        let RenderedResults::JsonMessages(v) = OllamaTranslator.render_results(&[(call, result)])
         else {
             panic!("expected JsonMessages");
         };

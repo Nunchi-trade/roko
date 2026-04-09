@@ -242,12 +242,7 @@ impl PheromoneField {
     /// Ranking: `score = similarity × current_intensity`. Pheromones whose
     /// current intensity is below `prune_threshold × base` are skipped.
     #[must_use]
-    pub fn query_top_k(
-        &self,
-        query: &HdcVector,
-        k: usize,
-        now_secs: u64,
-    ) -> Vec<PheromoneHit> {
+    pub fn query_top_k(&self, query: &HdcVector, k: usize, now_secs: u64) -> Vec<PheromoneHit> {
         if k == 0 || self.pheromones.is_empty() {
             return Vec::new();
         }
@@ -308,7 +303,10 @@ mod tests {
     #[test]
     fn kind_half_lives_match_doc_table() {
         assert_eq!(PheromoneKind::Threat.default_half_life_seconds(), 7200);
-        assert_eq!(PheromoneKind::Opportunity.default_half_life_seconds(), 14400);
+        assert_eq!(
+            PheromoneKind::Opportunity.default_half_life_seconds(),
+            14400
+        );
         assert_eq!(PheromoneKind::Wisdom.default_half_life_seconds(), 86400);
     }
 
@@ -323,10 +321,7 @@ mod tests {
         );
         let p = field.get(id).unwrap();
         let at_half = p.current_intensity(p.half_life_seconds);
-        assert!(
-            (at_half - 0.5).abs() < 1e-4,
-            "expected ~0.5, got {at_half}"
-        );
+        assert!((at_half - 0.5).abs() < 1e-4, "expected ~0.5, got {at_half}");
     }
 
     #[test]

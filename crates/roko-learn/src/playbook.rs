@@ -244,6 +244,14 @@ impl PlaybookStore {
         }
     }
 
+    /// Look up a playbook by task type.
+    ///
+    /// This is a thin alias for [`PlaybookStore::load`] used by the
+    /// orchestrator's pre-dispatch learning hook.
+    pub async fn lookup(&self, task_type: &str) -> io::Result<Option<Playbook>> {
+        self.load(task_type).await
+    }
+
     /// List all playbooks in the store. Returns an empty vector if the
     /// directory does not yet exist.
     ///
@@ -308,6 +316,15 @@ impl PlaybookStore {
         pb.last_used_ms = Some(Utc::now().timestamp_millis());
         self.save(&pb).await?;
         Ok(true)
+    }
+
+    /// Record an outcome for the playbook identified by `id`.
+    ///
+    /// This is a convenience wrapper around [`PlaybookStore::record_outcome`]
+    /// for call sites that already have the originating task definition and
+    /// only need to persist the success/failure result.
+    pub async fn record(&self, id: &str, success: bool) -> io::Result<bool> {
+        self.record_outcome(id, success).await
     }
 
     /// Delete the playbook stored under `id`. Returns `Ok(true)` if a file

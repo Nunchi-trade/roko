@@ -101,11 +101,7 @@ impl PointerGcPolicy {
     ///
     /// Returns the IDs of pointers to evict.
     #[must_use]
-    pub fn select_evictions(
-        &self,
-        pointers: &[PointerMeta],
-        current_turn: u32,
-    ) -> Vec<String> {
+    pub fn select_evictions(&self, pointers: &[PointerMeta], current_turn: u32) -> Vec<String> {
         let mut evict_ids: Vec<String> = Vec::new();
 
         // Phase 1: age-based eviction.
@@ -207,9 +203,9 @@ mod tests {
         // No age eviction, but total exceeds budget.
         let policy = PointerGcPolicy::new(0, 500);
         let pointers = vec![
-            meta("lru-1", 200, 1, 1),   // least recently accessed
-            meta("lru-2", 200, 2, 3),   // mid
-            meta("recent", 200, 3, 5),  // most recently accessed
+            meta("lru-1", 200, 1, 1),  // least recently accessed
+            meta("lru-2", 200, 2, 3),  // mid
+            meta("recent", 200, 3, 5), // most recently accessed
         ];
         // Total = 600, budget = 500. Need to evict 100+ bytes.
         // LRU order: lru-1 (accessed=1), lru-2 (accessed=3), recent (accessed=5).
@@ -222,9 +218,9 @@ mod tests {
     fn select_evictions_combined_age_and_size() {
         let policy = PointerGcPolicy::new(5, 300);
         let pointers = vec![
-            meta("ancient", 100, 1, 1),  // age=9 > 5 => evicted by age
-            meta("p1", 200, 6, 6),       // within age, accessed=6
-            meta("p2", 200, 7, 8),       // within age, accessed=8
+            meta("ancient", 100, 1, 1), // age=9 > 5 => evicted by age
+            meta("p1", 200, 6, 6),      // within age, accessed=6
+            meta("p2", 200, 7, 8),      // within age, accessed=8
         ];
         // After age eviction: survivors = [p1, p2], total = 400 > 300.
         // LRU: p1 (accessed=6). Evict p1 => remaining 200 <= 300.
@@ -237,10 +233,7 @@ mod tests {
     #[test]
     fn select_evictions_nothing_to_evict() {
         let policy = PointerGcPolicy::new(10, 10_000);
-        let pointers = vec![
-            meta("a", 100, 5, 5),
-            meta("b", 200, 6, 7),
-        ];
+        let pointers = vec![meta("a", 100, 5, 5), meta("b", 200, 6, 7)];
         let evicted = policy.select_evictions(&pointers, 8);
         assert!(evicted.is_empty());
     }
@@ -281,7 +274,7 @@ mod tests {
         let policy = PointerGcPolicy::new(0, 300);
         let pointers = vec![
             meta("small", 100, 1, 3),
-            meta("big", 300, 2, 3),    // same access turn but bigger
+            meta("big", 300, 2, 3), // same access turn but bigger
             meta("recent", 100, 3, 5),
         ];
         // Total = 500, budget = 300. LRU sort by (accessed, -size):

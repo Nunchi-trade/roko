@@ -189,8 +189,17 @@ impl Gate for VerifyChainGate {
                     return fb.verify(signal, ctx).await;
                 }
                 let reason = script.as_ref().map_or_else(
-                    || format!("signal is missing '{VERIFY_SCRIPT_TAG}' tag (no fallback configured)"),
-                    |s| format!("verify script not found at {} (no fallback configured)", s.display()),
+                    || {
+                        format!(
+                            "signal is missing '{VERIFY_SCRIPT_TAG}' tag (no fallback configured)"
+                        )
+                    },
+                    |s| {
+                        format!(
+                            "verify script not found at {} (no fallback configured)",
+                            s.display()
+                        )
+                    },
                 );
                 let elapsed = elapsed_ms(started);
                 return Verdict::fail(&self.name, reason).with_duration(elapsed);
@@ -198,9 +207,7 @@ impl Gate for VerifyChainGate {
         };
 
         // First attempt.
-        let attempt = self
-            .attempt(&script, payload.as_ref(), started)
-            .await;
+        let attempt = self.attempt(&script, payload.as_ref(), started).await;
 
         let mut attempt = match attempt {
             Ok(a) => a,
@@ -304,17 +311,15 @@ impl VerifyChainGate {
         payload: Option<&GatePayload>,
         started: Instant,
     ) -> Result<Attempt, Verdict> {
-        let remaining = self
-            .timeout_ms
-            .saturating_sub(elapsed_ms(started))
-            .max(1);
+        let remaining = self.timeout_ms.saturating_sub(elapsed_ms(started)).max(1);
         let fut = self.run_once(script, payload);
         let output = match timeout(Duration::from_millis(remaining), fut).await {
             Ok(Ok(out)) => out,
             Ok(Err(e)) => {
                 let elapsed = elapsed_ms(started);
-                return Err(Verdict::fail(&self.name, format!("spawn failed: {e}"))
-                    .with_duration(elapsed));
+                return Err(
+                    Verdict::fail(&self.name, format!("spawn failed: {e}")).with_duration(elapsed)
+                );
             }
             Err(_) => {
                 let elapsed = elapsed_ms(started);
@@ -574,10 +579,7 @@ mod tests {
         let v = gate.verify(&sig, &Context::at(0)).await;
         assert!(!v.passed);
         assert!(
-            v.error_digest
-                .as_deref()
-                .unwrap_or("")
-                .contains("FAIL"),
+            v.error_digest.as_deref().unwrap_or("").contains("FAIL"),
             "digest: {:?}",
             v.error_digest
         );
@@ -605,11 +607,7 @@ mod tests {
         let gate = VerifyChainGate::strict();
         let v = gate.verify(&sig, &Context::at(0)).await;
         assert!(!v.passed);
-        assert!(
-            v.reason.contains("not found"),
-            "reason: {}",
-            v.reason
-        );
+        assert!(v.reason.contains("not found"), "reason: {}", v.reason);
     }
 
     #[tokio::test]
@@ -619,11 +617,7 @@ mod tests {
         let gate = VerifyChainGate::strict();
         let v = gate.verify(&sig, &Context::at(0)).await;
         assert!(!v.passed);
-        assert!(
-            v.reason.contains("verify_script"),
-            "reason: {}",
-            v.reason
-        );
+        assert!(v.reason.contains("verify_script"), "reason: {}", v.reason);
     }
 
     #[tokio::test]
@@ -647,8 +641,7 @@ mod tests {
             "#!/usr/bin/env bash\necho '[FAIL] x'\nexit 1\n",
         );
         let sig = signal_with_script(tmp.path(), "verify.sh");
-        let gate =
-            VerifyChainGate::with_fallback(Arc::new(NoOpGate)).with_retry(false);
+        let gate = VerifyChainGate::with_fallback(Arc::new(NoOpGate)).with_retry(false);
         let v = gate.verify(&sig, &Context::at(0)).await;
         // The real script ran and failed; fallback (which would pass) was not used.
         assert!(!v.passed);
@@ -676,7 +669,9 @@ mod tests {
             ),
         );
         let sig = signal_with_script(tmp.path(), "verify.sh");
-        let gate = VerifyChainGate::strict().with_retry(true).with_retry_delay_ms(10);
+        let gate = VerifyChainGate::strict()
+            .with_retry(true)
+            .with_retry_delay_ms(10);
         let v = gate.verify(&sig, &Context::at(0)).await;
         assert!(v.passed, "reason: {}", v.reason);
         assert!(v.reason.contains("retry"), "reason: {}", v.reason);
@@ -706,14 +701,12 @@ mod tests {
             "#!/usr/bin/env bash\necho '[FAIL] always'\nexit 1\n",
         );
         let sig = signal_with_script(tmp.path(), "verify.sh");
-        let gate = VerifyChainGate::strict().with_retry(true).with_retry_delay_ms(10);
+        let gate = VerifyChainGate::strict()
+            .with_retry(true)
+            .with_retry_delay_ms(10);
         let v = gate.verify(&sig, &Context::at(0)).await;
         assert!(!v.passed);
-        assert!(
-            v.reason.contains("both attempts"),
-            "reason: {}",
-            v.reason,
-        );
+        assert!(v.reason.contains("both attempts"), "reason: {}", v.reason,);
     }
 
     #[tokio::test]
@@ -735,11 +728,7 @@ mod tests {
             .with_zero_test_guard(true);
         let v = gate.verify(&sig, &Context::at(0)).await;
         assert!(!v.passed, "reason: {}", v.reason);
-        assert!(
-            v.reason.contains("zero-test"),
-            "reason: {}",
-            v.reason
-        );
+        assert!(v.reason.contains("zero-test"), "reason: {}", v.reason);
     }
 
     #[tokio::test]
@@ -765,22 +754,14 @@ mod tests {
     #[tokio::test]
     async fn timeout_kills_long_running_script() {
         let tmp = TempDir::new().expect("tmpdir");
-        write_script(
-            tmp.path(),
-            "verify.sh",
-            "#!/usr/bin/env bash\nsleep 10\n",
-        );
+        write_script(tmp.path(), "verify.sh", "#!/usr/bin/env bash\nsleep 10\n");
         let sig = signal_with_script(tmp.path(), "verify.sh");
         let gate = VerifyChainGate::strict()
             .with_retry(false)
             .with_timeout_ms(150);
         let v = gate.verify(&sig, &Context::at(0)).await;
         assert!(!v.passed);
-        assert!(
-            v.reason.contains("timed out"),
-            "reason: {}",
-            v.reason
-        );
+        assert!(v.reason.contains("timed out"), "reason: {}", v.reason);
     }
 
     #[tokio::test]
@@ -838,7 +819,8 @@ mod tests {
 
     #[test]
     fn parse_zero_test_steps_ignores_positive_runs() {
-        let out = "[lib]\nrunning 5 tests\ntest result: ok. 5 passed; 0 failed; 0 ignored\n[lib] PASS\n";
+        let out =
+            "[lib]\nrunning 5 tests\ntest result: ok. 5 passed; 0 failed; 0 ignored\n[lib] PASS\n";
         assert!(parse_zero_test_steps(out).is_empty());
     }
 

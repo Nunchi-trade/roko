@@ -27,7 +27,11 @@ pub const TRUNCATION_MARKER: &str = "\n...[truncated]";
 #[must_use]
 pub fn truncate_result(res: ToolResult, max_bytes: usize) -> ToolResult {
     match res {
-        ToolResult::Ok { content, is_structured, artifacts } if content.len() > max_bytes => {
+        ToolResult::Ok {
+            content,
+            is_structured,
+            artifacts,
+        } if content.len() > max_bytes => {
             // Find the largest position ≤ `max_bytes` that is a valid
             // UTF-8 char boundary (walk backwards from `max_bytes`).
             // `String::truncate` panics on a non-boundary, so we can't
@@ -40,7 +44,11 @@ pub fn truncate_result(res: ToolResult, max_bytes: usize) -> ToolResult {
             let mut trimmed = content;
             trimmed.truncate(cut);
             trimmed.push_str(TRUNCATION_MARKER);
-            ToolResult::Ok { content: trimmed, is_structured, artifacts }
+            ToolResult::Ok {
+                content: trimmed,
+                is_structured,
+                artifacts,
+            }
         }
         other => other,
     }

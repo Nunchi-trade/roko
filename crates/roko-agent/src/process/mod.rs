@@ -30,12 +30,12 @@ pub mod registry;
 pub mod stderr;
 
 // Re-export the primary public API surface for convenience.
-pub use env::{apply_agent_env, AgentEnv};
+pub use env::{AgentEnv, apply_agent_env};
 pub use group::{collect_descendants, kill_process_group, set_process_group};
-pub use kill::kill_tree;
-pub use mcp::{find_mcp_launch, normalize_mcp_launch, write_mcp_config, McpLaunch};
+pub use kill::{GRACE_SIGTERM_MS, GRACE_STDIN_CLOSE_MS, kill_tree};
+pub use mcp::{McpLaunch, find_mcp_launch, normalize_mcp_launch, write_mcp_config};
 pub use registry::{
     cleanup_orphaned_agents, reap_orphaned_children, register_spawned_pid, registered_pids,
     unregister_pid,
 };
-pub use stderr::{benign_stderr_warn_once, classify_benign_stderr, BenignStderr};
+pub use stderr::{BenignStderr, benign_stderr_warn_once, classify_benign_stderr};

@@ -96,7 +96,9 @@ async fn compile_gate_fails_on_missing_dir() {
 async fn compile_gate_rejects_malformed_payload() {
     let gate = CompileGate::new(BuildSystem::Cargo);
     // A signal with no body, or a non-GatePayload body, should be rejected.
-    let signal = Signal::builder(Kind::Task).body(Body::text("not a payload")).build();
+    let signal = Signal::builder(Kind::Task)
+        .body(Body::text("not a payload"))
+        .build();
 
     let verdict = gate.verify(&signal, &Context::now()).await;
     assert!(!verdict.passed);
@@ -125,10 +127,7 @@ async fn verdict_flows_back_into_substrate_as_signal() {
 
     // 3. Wrap the verdict as a GateVerdict signal derived from the task.
     let verdict_signal = task_signal
-        .derive(
-            Kind::GateVerdict,
-            Body::from_json(&verdict).unwrap(),
-        )
+        .derive(Kind::GateVerdict, Body::from_json(&verdict).unwrap())
         .tag("gate", &verdict.gate)
         .tag("passed", &verdict.passed.to_string())
         .build();
@@ -193,7 +192,10 @@ async fn gate_composes_with_substrate_as_adapter() {
 
     // The gate persisted its own verdict as a signal.
     let stored = substrate
-        .query(&roko_core::Query::of_kind(Kind::GateVerdict), &Context::now())
+        .query(
+            &roko_core::Query::of_kind(Kind::GateVerdict),
+            &Context::now(),
+        )
         .await
         .unwrap();
     assert_eq!(stored.len(), 1);

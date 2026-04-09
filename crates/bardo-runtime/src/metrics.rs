@@ -11,12 +11,12 @@
 //! - Crash-safe: every `record()` call flushes to disk.
 //! - Zero dependencies on mori domain types.
 
+use parking_lot::Mutex;
 use std::{
     fs::{File, OpenOptions},
     io::{BufWriter, Write},
     path::{Path, PathBuf},
 };
-use parking_lot::Mutex;
 
 use chrono::Utc;
 use serde::Serialize;
@@ -59,10 +59,7 @@ impl MetricRecorder {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
         debug!(path = %path.display(), "opened metric recorder");
         Ok(Self {
             path,

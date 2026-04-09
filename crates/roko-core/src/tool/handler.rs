@@ -17,12 +17,36 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::call::{ToolCall, ToolResult};
 use super::def::ToolPermission;
 use super::metrics::{MetricsSink, NoopMetricsSink};
 use super::trace::{NoopTraceSink, TraceSink};
 use crate::Signal;
+
+/// A mutating side effect performed by a tool during agent execution.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExternalAction {
+    /// External service that received the action.
+    #[serde(default)]
+    pub service: String,
+    /// Service-specific action name, such as `review_pr` or `post_message`.
+    #[serde(default)]
+    pub action_type: String,
+    /// Resource identifier the action targeted.
+    #[serde(default)]
+    pub resource_id: String,
+    /// Additional structured metadata for the action.
+    #[serde(default)]
+    pub metadata: Value,
+    /// Time when the action was performed.
+    #[serde(default = "Utc::now")]
+    pub performed_at: DateTime<Utc>,
+}
 
 // ─── AuditSink ────────────────────────────────────────────────────────────
 
@@ -79,7 +103,9 @@ impl AtomicCancel {
     /// Construct a fresh, un-tripped token.
     #[must_use]
     pub const fn new() -> Self {
-        Self { flag: std::sync::atomic::AtomicBool::new(false) }
+        Self {
+            flag: std::sync::atomic::AtomicBool::new(false),
+        }
     }
 
     /// Trip the token. Subsequent [`Self::is_cancelled`] calls return true.
@@ -122,6 +148,10 @@ pub struct ToolContext {
     /// role's [`ToolPermissions`](crate::ToolPermissions) and any
     /// per-call restrictions).
     pub capabilities: ToolPermission,
+    /// Optional allowlist of tool names for the current task.
+    pub allowed_tools: Option<Vec<String>>,
+    /// Optional denylist of tool names for the current task.
+    pub denied_tools: Option<Vec<String>>,
     /// Where to publish audit signals (coarse-grained orchestration events).
     pub audit_sink: Arc<dyn AuditSink>,
     /// Where to publish execution trace events (fine-grained per-call timelines).
@@ -130,6 +160,8 @@ pub struct ToolContext {
     pub metrics_sink: Arc<dyn MetricsSink>,
     /// Cancellation signal from the conductor.
     pub cancel_token: Arc<dyn CancelToken>,
+    /// Shared log of external side effects produced during execution.
+    pub external_actions: Arc<RwLock<Vec<ExternalAction>>>,
 }
 
 impl ToolContext {
@@ -148,10 +180,13 @@ impl ToolContext {
             worktree_path: worktree_path.into(),
             timeout,
             capabilities,
+            allowed_tools: None,
+            denied_tools: None,
             audit_sink,
             trace_sink,
             metrics_sink,
             cancel_token,
+            external_actions: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -169,10 +204,13 @@ impl ToolContext {
                 git: true,
                 network: false,
             },
+            allowed_tools: None,
+            denied_tools: None,
             audit_sink: Arc::new(NoopAuditSink),
             trace_sink: Arc::new(NoopTraceSink),
             metrics_sink: Arc::new(NoopMetricsSink),
             cancel_token: Arc::new(NeverCancel),
+            external_actions: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -204,6 +242,30 @@ impl ToolContext {
         self
     }
 
+    /// Replace the external-action buffer (builder-style for shared ownership).
+    #[must_use]
+    pub fn with_external_actions(
+        mut self,
+        external_actions: Arc<RwLock<Vec<ExternalAction>>>,
+    ) -> Self {
+        self.external_actions = external_actions;
+        self
+    }
+
+    /// Replace the task-level tool allowlist.
+    #[must_use]
+    pub fn with_allowed_tools(mut self, allowed_tools: Option<Vec<String>>) -> Self {
+        self.allowed_tools = allowed_tools;
+        self
+    }
+
+    /// Replace the task-level tool denylist.
+    #[must_use]
+    pub fn with_denied_tools(mut self, denied_tools: Option<Vec<String>>) -> Self {
+        self.denied_tools = denied_tools;
+        self
+    }
+
     /// Short-cut: is the context's [`CancelToken`] tripped?
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
@@ -215,6 +277,11 @@ impl ToolContext {
     pub fn worktree(&self) -> &Path {
         &self.worktree_path
     }
+
+    /// Record a mutating external side-effect for later inspection.
+    pub fn record_external_action(&self, action: ExternalAction) {
+        self.external_actions.write().push(action);
+    }
 }
 
 impl std::fmt::Debug for ToolContext {
@@ -223,10 +290,13 @@ impl std::fmt::Debug for ToolContext {
             .field("worktree_path", &self.worktree_path)
             .field("timeout", &self.timeout)
             .field("capabilities", &self.capabilities)
+            .field("allowed_tools", &self.allowed_tools)
+            .field("denied_tools", &self.denied_tools)
             .field("audit_sink", &"Arc<dyn AuditSink>")
             .field("trace_sink", &"Arc<dyn TraceSink>")
             .field("metrics_sink", &"Arc<dyn MetricsSink>")
             .field("cancel_token", &"Arc<dyn CancelToken>")
+            .field("external_actions", &"Arc<RwLock<Vec<ExternalAction>>>")
             .finish()
     }
 }
@@ -326,6 +396,23 @@ mod tests {
         let s = format!("{ctx:?}");
         assert!(s.contains("ToolContext"));
         assert!(s.contains("/tmp/debug"));
+    }
+
+    #[test]
+    fn record_external_action_appends_to_shared_buffer() {
+        let ctx = ToolContext::testing("/tmp/actions");
+        let action = ExternalAction {
+            service: "github".into(),
+            action_type: "review_pr".into(),
+            resource_id: "pr-123".into(),
+            metadata: serde_json::json!({"state": "approved"}),
+            performed_at: DateTime::<Utc>::UNIX_EPOCH,
+        };
+
+        ctx.record_external_action(action.clone());
+
+        let actions = ctx.external_actions.read();
+        assert_eq!(actions.as_slice(), &[action]);
     }
 
     // Compile-time check that a ToolHandler impl is accepted by

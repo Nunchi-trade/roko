@@ -22,6 +22,7 @@
 
 pub mod agent;
 pub mod claude_agent;
+pub mod claude_cli_agent;
 pub mod codex_agent;
 pub mod cursor_agent;
 pub mod dispatcher;
@@ -34,6 +35,7 @@ pub mod multi_pool;
 pub mod nl_to_format;
 pub mod ollama;
 pub mod ollama_agent;
+pub mod ollama_backend;
 pub mod openai_agent;
 pub mod pointer;
 pub mod pool;
@@ -44,8 +46,11 @@ pub mod translate;
 pub mod usage;
 
 pub use agent::{Agent, AgentResult};
+pub use claude_cli_agent::ClaudeCliAgent;
 pub use exec::ExecAgent;
 pub use mock::MockAgent;
 pub use multi_pool::MultiAgentPool;
+pub use ollama_backend::OllamaLlmBackend;
 pub use pool::{AgentInstanceId, AgentPool};
+pub use safety::SafetyLayer;
 pub use usage::Usage;

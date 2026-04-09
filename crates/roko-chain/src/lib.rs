@@ -20,7 +20,7 @@ pub use gate::{
     MockTxSimulator, SimulationOutcome, TxSimGate, TxSimGateConfig, TxSimulator, WalletCheck,
     WalletGate, WalletGateConfig,
 };
-pub use mock::{paired_mocks, MockChainClient, MockChainWallet};
+pub use mock::{MockChainClient, MockChainWallet, paired_mocks};
 pub use types::{
     BlockNumber, CallResult, ChainError, ChainHeader, ChainResult, LogEntry, Receipt, TxHash,
     TxRequest,

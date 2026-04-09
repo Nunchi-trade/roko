@@ -12,8 +12,8 @@ use async_trait::async_trait;
 use crate::bindings::{BountyMarket, ConsortiumValidator, MockERC20, WorkerRegistry};
 use crate::chain_ctx::ChainCtx;
 use crate::manifest::Scenario as ScenarioManifest;
-use crate::scenarios::llm::{LlmProvider, LlmRequest, VoteDecision};
 use crate::scenarios::Scenario;
+use crate::scenarios::llm::{LlmProvider, LlmRequest, VoteDecision};
 
 /// Consortium validation scenario.
 pub struct Consortium;
@@ -140,7 +140,12 @@ async fn post_and_submit_job(ctx: &ChainCtx) -> anyhow::Result<U256> {
     let deadline = current_timestamp() + 3600;
     let spec = keccak256(b"consortium-job");
     market
-        .postJob(spec.into(), U256::from(100u128 * 10u128.pow(18)), deadline, 1)
+        .postJob(
+            spec.into(),
+            U256::from(100u128 * 10u128.pow(18)),
+            deadline,
+            1,
+        )
         .send()
         .await?
         .watch()
@@ -186,10 +191,7 @@ async fn assemble_and_vote(
         .watch()
         .await?;
     let members = consortium.getMembers(job_id).call().await?;
-    tracing::info!(
-        "committee: {} {} {}",
-        members[0], members[1], members[2]
-    );
+    tracing::info!("committee: {} {} {}", members[0], members[1], members[2]);
 
     // Each selected validator votes. Match the on-chain address back to the
     // wallet name by brute-force lookup (small set).
@@ -217,7 +219,10 @@ async fn assemble_and_vote(
     Ok(())
 }
 
-fn find_wallet_by_address(ctx: &ChainCtx, addr: alloy::primitives::Address) -> anyhow::Result<String> {
+fn find_wallet_by_address(
+    ctx: &ChainCtx,
+    addr: alloy::primitives::Address,
+) -> anyhow::Result<String> {
     for w in &ctx.wallets.wallets {
         let derived = ctx.wallet_address(&w.name)?;
         if derived == addr {
@@ -245,4 +250,3 @@ async fn mine_block(rpc_url: &str) -> anyhow::Result<()> {
         .await?;
     Ok(())
 }
-

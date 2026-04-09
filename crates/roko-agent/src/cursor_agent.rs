@@ -222,9 +222,15 @@ impl CursorAgent {
 
     fn headers(&self) -> Vec<(String, String)> {
         vec![
-            ("authorization".to_owned(), format!("Bearer {}", self.api_key)),
+            (
+                "authorization".to_owned(),
+                format!("Bearer {}", self.api_key),
+            ),
             ("content-type".to_owned(), "application/json".to_owned()),
-            ("x-cursor-protocol".to_owned(), self.protocol_version.clone()),
+            (
+                "x-cursor-protocol".to_owned(),
+                self.protocol_version.clone(),
+            ),
         ]
     }
 
@@ -236,7 +242,10 @@ impl CursorAgent {
             .tag("agent", &self.name)
             .tag("failed", "true")
             .build();
-        AgentResult::fail(output).with_usage(Usage { wall_ms, ..Default::default() })
+        AgentResult::fail(output).with_usage(Usage {
+            wall_ms,
+            ..Default::default()
+        })
     }
 }
 
@@ -262,7 +271,10 @@ impl Agent for CursorAgent {
         let req = PromptRequest {
             protocol: &self.protocol_version,
             model: &self.model,
-            prompt: RequestPrompt { role: "user", content: &prompt_text },
+            prompt: RequestPrompt {
+                role: "user",
+                content: &prompt_text,
+            },
         };
         let body = match serde_json::to_string(&req) {
             Ok(s) => s,
@@ -308,11 +320,7 @@ impl Agent for CursorAgent {
             .map(|m| m.content.clone());
 
         let Some(assistant_text) = assistant_text else {
-            return self.fail(
-                input,
-                "response contained no assistant message",
-                started,
-            );
+            return self.fail(input, "response contained no assistant message", started);
         };
 
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -481,12 +489,14 @@ mod tests {
         let agent = agent_with(poster);
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(!result.success);
-        assert!(result
-            .output
-            .body
-            .as_text()
-            .unwrap_or("")
-            .contains("http 503"));
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .unwrap_or("")
+                .contains("http 503")
+        );
     }
 
     #[tokio::test]
@@ -495,12 +505,14 @@ mod tests {
         let agent = agent_with(poster);
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(!result.success);
-        assert!(result
-            .output
-            .body
-            .as_text()
-            .unwrap_or("")
-            .contains("transport error"));
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .unwrap_or("")
+                .contains("transport error")
+        );
     }
 
     #[tokio::test]
@@ -509,12 +521,14 @@ mod tests {
         let agent = agent_with(poster);
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(!result.success);
-        assert!(result
-            .output
-            .body
-            .as_text()
-            .unwrap_or("")
-            .contains("malformed response JSON"));
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .unwrap_or("")
+                .contains("malformed response JSON")
+        );
     }
 
     #[tokio::test]
@@ -523,12 +537,14 @@ mod tests {
         let agent = agent_with(poster);
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(!result.success);
-        assert!(result
-            .output
-            .body
-            .as_text()
-            .unwrap_or("")
-            .contains("empty response body"));
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .unwrap_or("")
+                .contains("empty response body")
+        );
     }
 
     #[tokio::test]
@@ -544,12 +560,14 @@ mod tests {
         let agent = agent_with(poster);
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(!result.success);
-        assert!(result
-            .output
-            .body
-            .as_text()
-            .unwrap_or("")
-            .contains("no assistant message"));
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .unwrap_or("")
+                .contains("no assistant message")
+        );
     }
 
     #[tokio::test]
@@ -564,12 +582,14 @@ mod tests {
         let agent = agent_with(poster);
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(!result.success);
-        assert!(result
-            .output
-            .body
-            .as_text()
-            .unwrap_or("")
-            .contains("no assistant message"));
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .unwrap_or("")
+                .contains("no assistant message")
+        );
     }
 
     #[tokio::test]
@@ -615,8 +635,7 @@ mod tests {
         })
         .to_string();
         let poster = MockPoster::ok(body);
-        let agent = CursorAgent::new("secret-key", "cursor-x")
-            .with_http_poster(poster.clone());
+        let agent = CursorAgent::new("secret-key", "cursor-x").with_http_poster(poster.clone());
         let _ = agent.run(&prompt("x"), &Context::now()).await;
         let call = poster.last_call().expect("call recorded");
         let header_map: std::collections::HashMap<String, String> =

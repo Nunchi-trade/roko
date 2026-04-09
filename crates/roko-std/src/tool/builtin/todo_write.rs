@@ -23,11 +23,16 @@ pub fn tool_def() -> ToolDef {
     // `todo_write` mutates only in-memory agent state (the todo list),
     // so it intentionally requires *no* capability flags — any role can
     // call it regardless of its `ToolPermissions`.
-    ToolDef::new(NAME, DESCRIPTION, ToolCategory::Meta, ToolPermission::default())
-        .with_parameters(ToolSchema::any_object())
-        .with_concurrency(ToolConcurrency::Serial)
-        .with_idempotent(true)
-        .with_timeout_ms(5_000)
+    ToolDef::new(
+        NAME,
+        DESCRIPTION,
+        ToolCategory::Meta,
+        ToolPermission::default(),
+    )
+    .with_parameters(ToolSchema::any_object())
+    .with_concurrency(ToolConcurrency::Serial)
+    .with_idempotent(true)
+    .with_timeout_ms(5_000)
 }
 
 /// Handler for `todo_write` (§36.25).
@@ -47,7 +52,11 @@ impl ToolHandler for Handler {
     }
 
     async fn execute(&self, call: ToolCall, _ctx: &ToolContext) -> ToolResult {
-        let Some(todos) = call.arguments.get("todos").and_then(serde_json::Value::as_array) else {
+        let Some(todos) = call
+            .arguments
+            .get("todos")
+            .and_then(serde_json::Value::as_array)
+        else {
             return ToolResult::Err(ToolError::SchemaInvalid(
                 "todo_write: missing required array argument `todos`".into(),
             ));

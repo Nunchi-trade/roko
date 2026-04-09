@@ -25,6 +25,7 @@ use std::{
 use tokio::{
     process::{Child, Command},
     sync::Mutex,
+    task::JoinSet,
     time::timeout,
 };
 use tracing::{debug, info, warn};
@@ -106,6 +107,39 @@ pub struct ProcessHandle {
 }
 
 impl ProcessHandle {
+    fn outcome(&self, exit_status: Option<ExitStatus>, was_killed: bool) -> ProcessOutcome {
+        ProcessOutcome {
+            id: self.id,
+            label: self.label.clone(),
+            exit_status,
+            was_killed,
+        }
+    }
+
+    async fn wait_for_graceful_exit(&mut self) -> Option<ProcessOutcome> {
+        match timeout(self.grace_period, self.child.wait()).await {
+            Ok(Ok(status)) => {
+                info!(id = %self.id, label = %self.label, code = ?status.code(), "process exited within grace period");
+                Some(self.outcome(Some(status), false))
+            }
+            Ok(Err(e)) => {
+                warn!(id = %self.id, label = %self.label, error = %e, "error waiting for process");
+                None
+            }
+            Err(_) => {
+                debug!(id = %self.id, label = %self.label, "grace period expired, force killing");
+                None
+            }
+        }
+    }
+
+    async fn force_kill(&mut self) -> ProcessOutcome {
+        let _ = self.child.kill().await;
+        let status = self.child.wait().await.ok();
+        warn!(id = %self.id, label = %self.label, "process force-killed");
+        self.outcome(status, true)
+    }
+
     /// The OS-level PID, if available.
     pub const fn os_pid(&self) -> Option<u32> {
         self.os_pid
@@ -147,42 +181,21 @@ impl ProcessHandle {
     pub async fn shutdown(&mut self) -> ProcessOutcome {
         debug!(id = %self.id, label = %self.label, "shutting down process");
         self.cancel.cancel();
-
-        // First try waiting briefly — the process may already be exiting.
-        match timeout(self.grace_period, self.child.wait()).await {
-            Ok(Ok(status)) => {
-                info!(id = %self.id, label = %self.label, code = ?status.code(), "process exited within grace period");
-                return ProcessOutcome {
-                    id: self.id,
-                    label: self.label.clone(),
-                    exit_status: Some(status),
-                    was_killed: false,
-                };
-            }
-            Ok(Err(e)) => {
-                warn!(id = %self.id, label = %self.label, error = %e, "error waiting for process");
-            }
-            Err(_) => {
-                debug!(id = %self.id, label = %self.label, "grace period expired, force killing");
-            }
+        if let Some(outcome) = self.wait_for_graceful_exit().await {
+            return outcome;
         }
-
-        // Grace period expired — force kill.
-        let _ = self.child.kill().await;
-        let status = self.child.wait().await.ok();
-        warn!(id = %self.id, label = %self.label, "process force-killed");
-        ProcessOutcome {
-            id: self.id,
-            label: self.label.clone(),
-            exit_status: status,
-            was_killed: true,
-        }
+        self.force_kill().await
     }
 
     /// The cancellation token associated with this process.
     pub const fn cancel_token(&self) -> &CancelToken {
         &self.cancel
     }
+}
+
+enum WaitResult {
+    Completed(ProcessOutcome),
+    TimedOut(ProcessHandle),
 }
 
 impl fmt::Debug for ProcessHandle {
@@ -275,6 +288,72 @@ impl ProcessSupervisor {
         let mut outcomes = Vec::with_capacity(handles.len());
         for mut handle in handles {
             outcomes.push(handle.shutdown().await);
+        }
+        outcomes
+    }
+
+    /// Wait for all managed processes to exit within `timeout` per process.
+    ///
+    /// Any process that does not exit in time is reinserted into the
+    /// supervisor so a subsequent [`ProcessSupervisor::kill_all`] call can
+    /// forcefully terminate it.
+    pub async fn wait_all(&self, wait_timeout: Duration) -> Vec<ProcessOutcome> {
+        let handles: Vec<_> = {
+            let mut map = self.handles.lock().await;
+            map.drain().map(|(_, handle)| handle).collect()
+        };
+
+        let mut waiters = JoinSet::new();
+        for mut handle in handles {
+            waiters.spawn(async move {
+                let id = handle.id;
+                match timeout(wait_timeout, handle.wait()).await {
+                    Ok(Ok(status)) => WaitResult::Completed(handle.outcome(Some(status), false)),
+                    Ok(Err(err)) => {
+                        warn!(id = %id, label = %handle.label, error = %err, "error waiting for process during shutdown");
+                        WaitResult::TimedOut(handle)
+                    }
+                    Err(_) => {
+                        debug!(id = %id, label = %handle.label, "process wait timed out during shutdown");
+                        WaitResult::TimedOut(handle)
+                    }
+                }
+            });
+        }
+
+        let mut completed = Vec::new();
+        let mut timed_out = Vec::new();
+        while let Some(result) = waiters.join_next().await {
+            match result {
+                Ok(WaitResult::Completed(outcome)) => completed.push(outcome),
+                Ok(WaitResult::TimedOut(handle)) => timed_out.push(handle),
+                Err(err) => {
+                    warn!(error = %err, "process shutdown wait task failed");
+                }
+            }
+        }
+
+        if !timed_out.is_empty() {
+            let mut map = self.handles.lock().await;
+            for handle in timed_out {
+                map.insert(handle.id, handle);
+            }
+        }
+
+        completed
+    }
+
+    /// Force-kill all managed processes and return their outcomes.
+    pub async fn kill_all(&self) -> Vec<ProcessOutcome> {
+        self.cancel.cancel();
+        let handles: Vec<_> = {
+            let mut map = self.handles.lock().await;
+            map.drain().map(|(_, handle)| handle).collect()
+        };
+
+        let mut outcomes = Vec::with_capacity(handles.len());
+        for mut handle in handles {
+            outcomes.push(handle.force_kill().await);
         }
         outcomes
     }

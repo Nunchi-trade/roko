@@ -24,7 +24,9 @@ impl InjectKind {
             "directive" | "d" => Ok(Self::Directive),
             "abort" | "a" => Ok(Self::Abort),
             "context" | "ctx" | "c" => Ok(Self::Context),
-            other => Err(format!("unknown inject kind: {other} (expected: directive, abort, context)")),
+            other => Err(format!(
+                "unknown inject kind: {other} (expected: directive, abort, context)"
+            )),
         }
     }
 
@@ -61,7 +63,12 @@ pub struct InjectRequest {
 impl InjectRequest {
     /// Create a new injection request.
     #[must_use]
-    pub const fn new(session_id: String, kind: InjectKind, payload: String, workdir: PathBuf) -> Self {
+    pub const fn new(
+        session_id: String,
+        kind: InjectKind,
+        payload: String,
+        workdir: PathBuf,
+    ) -> Self {
         Self {
             session_id,
             kind,
@@ -117,7 +124,10 @@ mod tests {
 
     #[test]
     fn parse_inject_kind_variants() {
-        assert_eq!(InjectKind::parse("directive").unwrap(), InjectKind::Directive);
+        assert_eq!(
+            InjectKind::parse("directive").unwrap(),
+            InjectKind::Directive
+        );
         assert_eq!(InjectKind::parse("d").unwrap(), InjectKind::Directive);
         assert_eq!(InjectKind::parse("abort").unwrap(), InjectKind::Abort);
         assert_eq!(InjectKind::parse("a").unwrap(), InjectKind::Abort);
@@ -128,7 +138,10 @@ mod tests {
 
     #[test]
     fn parse_inject_kind_case_insensitive() {
-        assert_eq!(InjectKind::parse("DIRECTIVE").unwrap(), InjectKind::Directive);
+        assert_eq!(
+            InjectKind::parse("DIRECTIVE").unwrap(),
+            InjectKind::Directive
+        );
         assert_eq!(InjectKind::parse("Abort").unwrap(), InjectKind::Abort);
     }
 

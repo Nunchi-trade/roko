@@ -124,11 +124,7 @@ impl GateEnvBuilder {
 /// | 5    | Property test | Higher timeout tolerance                   |
 /// | 6    | Integration   | `INTEGRATION=1` marker                     |
 #[must_use]
-pub fn build_for_rung(
-    rung: u8,
-    build_system: &str,
-    working_dir: impl Into<PathBuf>,
-) -> GateEnv {
+pub fn build_for_rung(rung: u8, build_system: &str, working_dir: impl Into<PathBuf>) -> GateEnv {
     let wd = working_dir.into();
     let mut builder = GateEnvBuilder::new(wd).build_system_name(build_system);
 

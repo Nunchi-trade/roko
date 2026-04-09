@@ -28,7 +28,9 @@ pub fn mcp_to_tool_def(mcp_tool: &McpToolDef, server_prefix: &str) -> ToolDef {
     let schema = mcp_tool
         .input_schema
         .as_ref()
-        .map_or_else(ToolSchema::any_object, |v| ToolSchema::from_value(v.clone()));
+        .map_or_else(ToolSchema::any_object, |v| {
+            ToolSchema::from_value(v.clone())
+        });
 
     ToolDef {
         name: prefixed_name,

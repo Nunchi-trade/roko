@@ -8,7 +8,7 @@
 //! See [crate docs](crate) for the universal loop that composes them.
 
 use crate::{
-    error::Result, Budget, Context, ContentHash, Outcome, Query, Score, Selection, Signal, Verdict,
+    Budget, ContentHash, Context, Outcome, Query, Score, Selection, Signal, Verdict, error::Result,
 };
 use async_trait::async_trait;
 

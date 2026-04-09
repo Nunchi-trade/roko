@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -39,6 +40,10 @@ pub struct RokoConfig {
     #[serde(default)]
     pub project: ProjectConfig,
 
+    /// PRD lifecycle settings.
+    #[serde(default)]
+    pub prd: PrdConfig,
+
     /// Agent / model settings (including per-role overrides).
     #[serde(default)]
     pub agent: AgentConfig,
@@ -59,6 +64,10 @@ pub struct RokoConfig {
     #[serde(default)]
     pub conductor: ConductorConfig,
 
+    /// File-system watcher settings.
+    #[serde(default, skip_serializing_if = "WatcherConfig::is_empty")]
+    pub watcher: WatcherConfig,
+
     /// Learning subsystem toggles.
     #[serde(default)]
     pub learning: LearningConfig,
@@ -67,9 +76,29 @@ pub struct RokoConfig {
     #[serde(default)]
     pub tui: TuiConfig,
 
+    /// HTTP API serving options.
+    #[serde(default)]
+    pub serve: ServeConfig,
+
+    /// Cron scheduler settings.
+    #[serde(default)]
+    pub scheduler: SchedulerConfig,
+
+    /// Webhook ingress configuration.
+    #[serde(default)]
+    pub webhooks: WebhooksConfig,
+
+    /// Event subscriptions loaded at server startup.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subscriptions: Vec<SubscriptionConfig>,
+
     /// HTTP server / gateway settings.
     #[serde(default)]
     pub server: ServerConfig,
+
+    /// Cloud deployment settings (Railway, etc.).
+    #[serde(default)]
+    pub deploy: DeployConfig,
 }
 
 const fn default_schema_version() -> u32 {
@@ -81,19 +110,203 @@ impl Default for RokoConfig {
         Self {
             schema_version: CURRENT_SCHEMA_VERSION,
             project: ProjectConfig::default(),
+            prd: PrdConfig::default(),
             agent: AgentConfig::default(),
             gates: GatesConfig::default(),
             routing: RoutingConfig::default(),
             budget: BudgetConfig::default(),
             conductor: ConductorConfig::default(),
+            watcher: WatcherConfig::default(),
             learning: LearningConfig::default(),
             tui: TuiConfig::default(),
+            serve: ServeConfig::default(),
+            scheduler: SchedulerConfig::default(),
+            webhooks: WebhooksConfig::default(),
+            subscriptions: Vec::new(),
             server: ServerConfig::default(),
+            deploy: DeployConfig::default(),
         }
     }
 }
 
 impl RokoConfig {
+    fn write_example_prelude(out: &mut String) {
+        let _ = writeln!(
+            out,
+            "# Roko configuration -- all fields shown with defaults."
+        );
+        let _ = writeln!(
+            out,
+            "# Delete any section you don't need; defaults apply.\n"
+        );
+        let _ = writeln!(out, "schema_version = {CURRENT_SCHEMA_VERSION}\n");
+    }
+
+    fn write_example_project(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "# -- Project metadata --");
+        let _ = writeln!(out, "[project]");
+        let _ = writeln!(out, "name = \"{}\"", cfg.project.name);
+        let _ = writeln!(out, "root = \"{}\"", cfg.project.root);
+        let _ = writeln!(
+            out,
+            "fresh_base_branch = \"{}\"\n",
+            cfg.project.fresh_base_branch
+        );
+    }
+
+    fn write_example_prd(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "# -- PRD lifecycle settings --");
+        let _ = writeln!(out, "[prd]");
+        let _ = writeln!(out, "auto_plan = {}\n", cfg.prd.auto_plan);
+    }
+
+    fn write_example_agent(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "# -- Agent / model settings --");
+        let _ = writeln!(out, "[agent]");
+        let _ = writeln!(out, "default_model = \"{}\"", cfg.agent.default_model);
+        let _ = writeln!(out, "default_backend = \"{}\"", cfg.agent.default_backend);
+        let _ = writeln!(out, "default_effort = \"{}\"", cfg.agent.default_effort);
+        let _ = writeln!(out, "context_limit_k = {}", cfg.agent.context_limit_k);
+        let _ = writeln!(out, "bare_mode = {}\n", cfg.agent.bare_mode);
+
+        let _ = writeln!(out, "# Per-role overrides (repeat for each role):");
+        let _ = writeln!(out, "# [agent.roles.implementer]");
+        let _ = writeln!(out, "# model = \"claude-opus-4-6\"");
+        let _ = writeln!(out, "# effort = \"high\"");
+        let _ = writeln!(out, "# context_limit_k = 200\n");
+    }
+
+    fn write_example_gates(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "# -- Verification gates --");
+        let _ = writeln!(out, "[gates]");
+        let _ = writeln!(out, "clippy_enabled = {}", cfg.gates.clippy_enabled);
+        let _ = writeln!(out, "skip_tests = {}", cfg.gates.skip_tests);
+        let _ = writeln!(out, "max_iterations = {}\n", cfg.gates.max_iterations);
+    }
+
+    fn write_example_routing(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "# -- Model routing --");
+        let _ = writeln!(out, "[routing]");
+        let _ = writeln!(out, "mode = \"{}\"", cfg.routing.mode);
+        let _ = writeln!(out, "fast_task_model = \"{}\"", cfg.routing.fast_task_model);
+        let _ = writeln!(
+            out,
+            "standard_task_model = \"{}\"",
+            cfg.routing.standard_task_model
+        );
+        let _ = writeln!(
+            out,
+            "complex_task_model = \"{}\"\n",
+            cfg.routing.complex_task_model
+        );
+    }
+
+    fn write_example_budget(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "# -- Spend / token budgets --");
+        let _ = writeln!(out, "[budget]");
+        let _ = writeln!(out, "max_plan_usd = {:.1}", cfg.budget.max_plan_usd);
+        let _ = writeln!(out, "max_turn_usd = {:.1}", cfg.budget.max_turn_usd);
+        let _ = writeln!(
+            out,
+            "prompt_token_budget = {}\n",
+            cfg.budget.prompt_token_budget
+        );
+    }
+
+    fn write_example_conductor(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "# -- Conductor (meta-orchestrator) --");
+        let _ = writeln!(out, "[conductor]");
+        let _ = writeln!(out, "max_agents = {}", cfg.conductor.max_agents);
+        let _ = writeln!(
+            out,
+            "max_parallel_plans = {}",
+            cfg.conductor.max_parallel_plans
+        );
+        let _ = writeln!(out, "parallel_enabled = {}", cfg.conductor.parallel_enabled);
+        let _ = writeln!(out, "express_mode = {}", cfg.conductor.express_mode);
+        let _ = writeln!(
+            out,
+            "auto_advance_batch = {}",
+            cfg.conductor.auto_advance_batch
+        );
+        let _ = writeln!(
+            out,
+            "auto_merge_on_complete = {}",
+            cfg.conductor.auto_merge_on_complete
+        );
+        let _ = writeln!(out, "pre_plan = {}", cfg.conductor.pre_plan);
+        let _ = writeln!(
+            out,
+            "max_auto_fix_attempts = {}\n",
+            cfg.conductor.max_auto_fix_attempts
+        );
+    }
+
+    fn write_example_learning(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "# -- Learning subsystem --");
+        let _ = writeln!(out, "[learning]");
+        let _ = writeln!(
+            out,
+            "auto_playbook_refresh = {}",
+            cfg.learning.auto_playbook_refresh
+        );
+        let _ = writeln!(
+            out,
+            "knowledge_warnings = {}",
+            cfg.learning.knowledge_warnings
+        );
+        let _ = writeln!(
+            out,
+            "learning_min_occurrences = {}\n",
+            cfg.learning.learning_min_occurrences
+        );
+    }
+
+    fn write_example_tui_and_server(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "# -- TUI preferences --");
+        let _ = writeln!(out, "[tui]");
+        let _ = writeln!(out, "refresh_rate_ms = {}\n", cfg.tui.refresh_rate_ms);
+
+        let _ = writeln!(out, "# -- API auth --");
+        let _ = writeln!(out, "[serve.auth]");
+        let _ = writeln!(out, "enabled = {}", cfg.serve.auth.enabled);
+        let _ = writeln!(out, "api_key = \"{}\"\n", cfg.serve.auth.api_key);
+
+        let _ = writeln!(out, "# -- HTTP server / gateway --");
+        let _ = writeln!(out, "[server]");
+        let _ = writeln!(out, "bind = \"{}\"", cfg.server.bind);
+        let _ = writeln!(out, "port = {}", cfg.server.port);
+    }
+
+    fn write_example_scheduler(out: &mut String, _cfg: &Self) {
+        let _ = writeln!(out, "\n# -- Cron scheduler --");
+        let _ = writeln!(out, "[scheduler]");
+        let _ = writeln!(out, "[[scheduler.cron]]");
+        let _ = writeln!(out, "name = \"weekly-digest\"");
+        let _ = writeln!(out, "expression = \"0 9 * * MON\"");
+        let _ = writeln!(out, "signal_kind = \"scheduler:cron:weekly-digest\"");
+    }
+
+    fn write_example_webhooks(out: &mut String, _cfg: &Self) {
+        let _ = writeln!(out, "\n# -- Webhooks --");
+        let _ = writeln!(out, "[webhooks.github]");
+        let _ = writeln!(out, "secret = \"change-me\"");
+    }
+
+    fn write_example_deploy(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "\n# -- Cloud deployment (Railway, etc.) --");
+        let _ = writeln!(out, "[deploy]");
+        let _ = writeln!(out, "backend = \"{}\"", cfg.deploy.backend);
+        let _ = writeln!(out, "# railway_api_token = \"...\"");
+        let _ = writeln!(out, "# project_id = \"...\"");
+        let _ = writeln!(out, "# environment_id = \"...\"");
+        let _ = writeln!(
+            out,
+            "# worker_image = \"ghcr.io/example/roko-worker:latest\""
+        );
+        let _ = writeln!(out, "# default_region = \"us-west1\"");
+    }
+
     /// Parse from a TOML string.
     pub fn from_toml(s: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(s)
@@ -178,85 +391,91 @@ impl RokoConfig {
         let cfg = Self::default();
         let mut out = String::with_capacity(4096);
 
-        // Infallible writes to String -- unwrap is safe.
-        let _ = writeln!(out, "# Roko configuration -- all fields shown with defaults.");
-        let _ = writeln!(out, "# Delete any section you don't need; defaults apply.\n");
-        let _ = writeln!(out, "schema_version = {CURRENT_SCHEMA_VERSION}\n");
-
-        let _ = writeln!(out, "# -- Project metadata --");
-        let _ = writeln!(out, "[project]");
-        let _ = writeln!(out, "name = \"{}\"", cfg.project.name);
-        let _ = writeln!(out, "root = \"{}\"", cfg.project.root);
-        let _ = writeln!(out, "fresh_base_branch = \"{}\"\n", cfg.project.fresh_base_branch);
-
-        let _ = writeln!(out, "# -- Agent / model settings --");
-        let _ = writeln!(out, "[agent]");
-        let _ = writeln!(out, "default_model = \"{}\"", cfg.agent.default_model);
-        let _ = writeln!(out, "default_backend = \"{}\"", cfg.agent.default_backend);
-        let _ = writeln!(out, "default_effort = \"{}\"", cfg.agent.default_effort);
-        let _ = writeln!(out, "context_limit_k = {}", cfg.agent.context_limit_k);
-        let _ = writeln!(out, "bare_mode = {}\n", cfg.agent.bare_mode);
-
-        let _ = writeln!(out, "# Per-role overrides (repeat for each role):");
-        let _ = writeln!(out, "# [agent.roles.implementer]");
-        let _ = writeln!(out, "# model = \"claude-opus-4-6\"");
-        let _ = writeln!(out, "# effort = \"high\"");
-        let _ = writeln!(out, "# context_limit_k = 200\n");
-
-        let _ = writeln!(out, "# -- Verification gates --");
-        let _ = writeln!(out, "[gates]");
-        let _ = writeln!(out, "clippy_enabled = {}", cfg.gates.clippy_enabled);
-        let _ = writeln!(out, "skip_tests = {}", cfg.gates.skip_tests);
-        let _ = writeln!(out, "max_iterations = {}\n", cfg.gates.max_iterations);
-
-        let _ = writeln!(out, "# -- Model routing --");
-        let _ = writeln!(out, "[routing]");
-        let _ = writeln!(out, "mode = \"{}\"", cfg.routing.mode);
-        let _ = writeln!(out, "fast_task_model = \"{}\"", cfg.routing.fast_task_model);
-        let _ = writeln!(out, "standard_task_model = \"{}\"", cfg.routing.standard_task_model);
-        let _ = writeln!(out, "complex_task_model = \"{}\"\n", cfg.routing.complex_task_model);
-
-        let _ = writeln!(out, "# -- Spend / token budgets --");
-        let _ = writeln!(out, "[budget]");
-        let _ = writeln!(out, "max_plan_usd = {:.1}", cfg.budget.max_plan_usd);
-        let _ = writeln!(out, "max_turn_usd = {:.1}", cfg.budget.max_turn_usd);
-        let _ = writeln!(out, "prompt_token_budget = {}\n", cfg.budget.prompt_token_budget);
-
-        let _ = writeln!(out, "# -- Conductor (meta-orchestrator) --");
-        let _ = writeln!(out, "[conductor]");
-        let _ = writeln!(out, "max_agents = {}", cfg.conductor.max_agents);
-        let _ = writeln!(out, "max_parallel_plans = {}", cfg.conductor.max_parallel_plans);
-        let _ = writeln!(out, "parallel_enabled = {}", cfg.conductor.parallel_enabled);
-        let _ = writeln!(out, "express_mode = {}", cfg.conductor.express_mode);
-        let _ = writeln!(out, "auto_advance_batch = {}", cfg.conductor.auto_advance_batch);
-        let _ = writeln!(out, "auto_merge_on_complete = {}", cfg.conductor.auto_merge_on_complete);
-        let _ = writeln!(out, "pre_plan = {}", cfg.conductor.pre_plan);
-        let _ = writeln!(out, "max_auto_fix_attempts = {}\n", cfg.conductor.max_auto_fix_attempts);
-
-        let _ = writeln!(out, "# -- Learning subsystem --");
-        let _ = writeln!(out, "[learning]");
-        let _ = writeln!(out, "auto_playbook_refresh = {}", cfg.learning.auto_playbook_refresh);
-        let _ = writeln!(out, "knowledge_warnings = {}", cfg.learning.knowledge_warnings);
-        let _ = writeln!(out, "learning_min_occurrences = {}\n", cfg.learning.learning_min_occurrences);
-
-        let _ = writeln!(out, "# -- TUI preferences --");
-        let _ = writeln!(out, "[tui]");
-        let _ = writeln!(out, "refresh_rate_ms = {}\n", cfg.tui.refresh_rate_ms);
-
-        let _ = writeln!(out, "# -- HTTP server / gateway --");
-        let _ = writeln!(out, "[server]");
-        let _ = writeln!(out, "bind = \"{}\"", cfg.server.bind);
-        let _ = writeln!(out, "port = {}", cfg.server.port);
+        Self::write_example_prelude(&mut out);
+        Self::write_example_project(&mut out, &cfg);
+        Self::write_example_prd(&mut out, &cfg);
+        Self::write_example_agent(&mut out, &cfg);
+        Self::write_example_gates(&mut out, &cfg);
+        Self::write_example_routing(&mut out, &cfg);
+        Self::write_example_budget(&mut out, &cfg);
+        Self::write_example_conductor(&mut out, &cfg);
+        Self::write_example_learning(&mut out, &cfg);
+        Self::write_example_tui_and_server(&mut out, &cfg);
+        Self::write_example_scheduler(&mut out, &cfg);
+        Self::write_example_webhooks(&mut out, &cfg);
+        Self::write_example_deploy(&mut out, &cfg);
 
         out
     }
 }
 
 fn parse_bool_env(s: &str) -> bool {
-    matches!(s.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+    matches!(
+        s.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn deserialize_glob_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::de::Deserializer<'de>,
+{
+    use serde::de::{SeqAccess, Visitor};
+    use std::fmt;
+
+    struct GlobListVisitor;
+
+    impl<'de> Visitor<'de> for GlobListVisitor {
+        type Value = Vec<String>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a string or a list of strings")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(vec![value.to_owned()])
+        }
+
+        fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(vec![value])
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut items = Vec::new();
+            while let Some(value) = seq.next_element::<String>()? {
+                items.push(value);
+            }
+            Ok(items)
+        }
+    }
+
+    deserializer.deserialize_any(GlobListVisitor)
 }
 
 // ---- [project] -----------------------------------------------------------
+
+/// PRD lifecycle settings.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrdConfig {
+    /// Automatically generate a plan when a PRD is promoted.
+    #[serde(default)]
+    pub auto_plan: bool,
+}
+
+impl Default for PrdConfig {
+    fn default() -> Self {
+        Self { auto_plan: false }
+    }
+}
 
 /// Project-level metadata.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -696,6 +915,276 @@ impl Default for TuiConfig {
     }
 }
 
+// ---- [serve] -------------------------------------------------------------
+
+/// API serving options.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServeConfig {
+    /// Authentication settings for `/api/*`.
+    #[serde(default)]
+    pub auth: ServeAuthConfig,
+}
+
+impl Default for ServeConfig {
+    fn default() -> Self {
+        Self {
+            auth: ServeAuthConfig::default(),
+        }
+    }
+}
+
+/// Cron scheduler configuration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchedulerConfig {
+    /// Cron jobs configured at startup.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cron: Vec<SchedulerCronConfig>,
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self { cron: Vec::new() }
+    }
+}
+
+impl SchedulerConfig {
+    /// Returns `true` when no cron jobs are configured.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.cron.is_empty()
+    }
+}
+
+/// One cron job configuration entry.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchedulerCronConfig {
+    /// Human-readable schedule name.
+    pub name: String,
+    /// Standard cron expression.
+    pub expression: String,
+    /// Signal kind emitted when the schedule fires.
+    pub signal_kind: String,
+    /// Extra structured metadata included in the emitted signal body.
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+}
+
+impl Default for SchedulerCronConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            expression: String::new(),
+            signal_kind: String::new(),
+            metadata: serde_json::Value::Null,
+        }
+    }
+}
+
+/// Webhook ingress configuration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebhooksConfig {
+    /// GitHub webhook configuration.
+    #[serde(default)]
+    pub github: GithubWebhookConfig,
+}
+
+impl Default for WebhooksConfig {
+    fn default() -> Self {
+        Self {
+            github: GithubWebhookConfig::default(),
+        }
+    }
+}
+
+/// GitHub webhook configuration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubWebhookConfig {
+    /// Shared secret used to verify `X-Hub-Signature-256`.
+    #[serde(default)]
+    pub secret: String,
+}
+
+impl Default for GithubWebhookConfig {
+    fn default() -> Self {
+        Self {
+            secret: String::new(),
+        }
+    }
+}
+
+/// Subscription configuration loaded from `roko.toml` and `.roko/subscriptions/*.toml`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubscriptionConfig {
+    /// Agent template name associated with this subscription.
+    pub template: String,
+    /// Signal kind glob used to match webhook signals.
+    pub trigger: String,
+    /// Optional repo / branch / path filters.
+    #[serde(default, skip_serializing_if = "SubscriptionFilterConfig::is_empty")]
+    pub filter: SubscriptionFilterConfig,
+    /// Maximum number of concurrent dispatches for this subscription.
+    #[serde(default = "default_subscription_concurrency_limit")]
+    pub concurrency_limit: usize,
+    /// Minimum interval between dispatches, in seconds.
+    #[serde(default)]
+    pub cooldown_secs: u64,
+    /// Whether the subscription is enabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for SubscriptionConfig {
+    fn default() -> Self {
+        Self {
+            template: String::new(),
+            trigger: String::new(),
+            filter: SubscriptionFilterConfig::default(),
+            concurrency_limit: default_subscription_concurrency_limit(),
+            cooldown_secs: 0,
+            enabled: default_true(),
+        }
+    }
+}
+
+fn default_subscription_concurrency_limit() -> usize {
+    1
+}
+
+/// Optional filter applied after the trigger pattern matches.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubscriptionFilterConfig {
+    /// Repo glob(s) to match against webhook payload repository fields.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_glob_list",
+        skip_serializing_if = "Vec::is_empty",
+        alias = "repos"
+    )]
+    pub repo: Vec<String>,
+    /// Branch glob(s) to match against webhook payload branch/ref fields.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_glob_list",
+        skip_serializing_if = "Vec::is_empty",
+        alias = "branches"
+    )]
+    pub branch: Vec<String>,
+    /// Path glob(s) to match against changed file paths.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_glob_list",
+        skip_serializing_if = "Vec::is_empty",
+        alias = "paths"
+    )]
+    pub path: Vec<String>,
+    /// Label names to match against webhook payload label fields.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_glob_list",
+        skip_serializing_if = "Vec::is_empty",
+        alias = "labels"
+    )]
+    pub label: Vec<String>,
+    /// Author logins to match against webhook payload author fields.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_glob_list",
+        skip_serializing_if = "Vec::is_empty",
+        alias = "authors"
+    )]
+    pub author: Vec<String>,
+}
+
+impl SubscriptionFilterConfig {
+    /// Returns `true` when no filter criteria are configured.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.repo.is_empty()
+            && self.branch.is_empty()
+            && self.path.is_empty()
+            && self.label.is_empty()
+            && self.author.is_empty()
+    }
+}
+
+/// File-system watcher configuration.
+///
+/// Each watch path can narrow the observed file set with include/exclude
+/// glob patterns.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WatcherConfig {
+    /// Watch roots configured by the user.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<WatcherPathConfig>,
+}
+
+impl WatcherConfig {
+    /// Returns `true` when no watch paths are configured.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
+}
+
+/// One watched directory and its path filters.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WatcherPathConfig {
+    /// Directory to watch recursively.
+    pub directory: PathBuf,
+    /// Glob patterns that opt paths into emission.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_glob_list",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub include: Vec<String>,
+    /// Glob patterns that suppress paths even if they match `include`.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_glob_list",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub exclude: Vec<String>,
+}
+
+impl Default for WatcherPathConfig {
+    fn default() -> Self {
+        Self {
+            directory: PathBuf::from("."),
+            include: Vec::new(),
+            exclude: Vec::new(),
+        }
+    }
+}
+
+impl WatcherPathConfig {
+    /// Returns `true` when no include/exclude filters are configured.
+    #[must_use]
+    pub fn filters_are_empty(&self) -> bool {
+        self.include.is_empty() && self.exclude.is_empty()
+    }
+}
+
+/// Authentication settings for the HTTP API.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServeAuthConfig {
+    /// Whether `/api/*` routes require an `X-Api-Key` header.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Shared API key expected in `X-Api-Key`.
+    #[serde(default)]
+    pub api_key: String,
+}
+
+impl Default for ServeAuthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            api_key: String::new(),
+        }
+    }
+}
+
 // ---- [server] ------------------------------------------------------------
 
 /// HTTP server / gateway settings.
@@ -707,6 +1196,12 @@ pub struct ServerConfig {
     /// Port number.
     #[serde(default = "default_port")]
     pub port: u16,
+    /// Allowed CORS origins. Empty = permissive.
+    #[serde(default)]
+    pub cors_origins: Vec<String>,
+    /// Optional bearer token for API authentication.
+    #[serde(default)]
+    pub auth_token: Option<String>,
 }
 
 fn default_bind() -> String {
@@ -722,6 +1217,65 @@ impl Default for ServerConfig {
         Self {
             bind: default_bind(),
             port: default_port(),
+            cors_origins: Vec::new(),
+            auth_token: None,
+        }
+    }
+}
+
+// ---- deploy ---------------------------------------------------------------
+
+/// Cloud deployment configuration.
+///
+/// ```toml
+/// [deploy]
+/// backend = "railway-api"
+/// railway_api_token = "..."
+/// project_id = "..."
+/// environment_id = "..."
+/// worker_image = "ghcr.io/example/roko-worker:latest"
+/// default_region = "us-west1"
+/// ```
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DeployConfig {
+    /// Which deploy backend to use: `"railway-api"`, `"railway-cli"`, `"manual"`.
+    #[serde(default = "default_deploy_backend")]
+    pub backend: String,
+
+    /// Railway API token (for the `railway-api` backend).
+    #[serde(default)]
+    pub railway_api_token: Option<String>,
+
+    /// Railway project ID.
+    #[serde(default)]
+    pub project_id: Option<String>,
+
+    /// Railway environment ID.
+    #[serde(default)]
+    pub environment_id: Option<String>,
+
+    /// Docker image for worker containers.
+    #[serde(default)]
+    pub worker_image: Option<String>,
+
+    /// Default region for deployments.
+    #[serde(default)]
+    pub default_region: Option<String>,
+}
+
+fn default_deploy_backend() -> String {
+    "manual".into()
+}
+
+impl Default for DeployConfig {
+    fn default() -> Self {
+        Self {
+            backend: default_deploy_backend(),
+            railway_api_token: None,
+            project_id: None,
+            environment_id: None,
+            worker_image: None,
+            default_region: None,
         }
     }
 }
@@ -777,6 +1331,53 @@ fresh_base_branch = "develop"
         assert_eq!(cfg.project.name, "my-dapp");
         assert_eq!(cfg.project.root, "/home/user/code");
         assert_eq!(cfg.project.fresh_base_branch, "develop");
+    }
+
+    #[test]
+    fn watcher_section_parses_include_and_exclude_globs() {
+        let toml = r#"
+[watcher]
+[[watcher.paths]]
+directory = "call-notes"
+include = ["*.md", "*.txt"]
+exclude = [".git/**", "**/*.swp"]
+"#;
+        let cfg = RokoConfig::from_toml(toml).expect("parse");
+        assert_eq!(cfg.watcher.paths.len(), 1);
+        let path = &cfg.watcher.paths[0];
+        assert_eq!(path.directory, std::path::PathBuf::from("call-notes"));
+        assert_eq!(path.include, vec!["*.md".to_string(), "*.txt".to_string()]);
+        assert_eq!(
+            path.exclude,
+            vec![".git/**".to_string(), "**/*.swp".to_string()]
+        );
+    }
+
+    #[test]
+    fn scheduler_section_parses_cron_jobs() {
+        let toml = r#"
+[scheduler]
+[[scheduler.cron]]
+name = "weekly-digest"
+expression = "0 9 * * MON"
+signal_kind = "scheduler:cron:weekly-digest"
+"#;
+        let cfg = RokoConfig::from_toml(toml).expect("parse");
+        assert_eq!(cfg.scheduler.cron.len(), 1);
+        let cron = &cfg.scheduler.cron[0];
+        assert_eq!(cron.name, "weekly-digest");
+        assert_eq!(cron.expression, "0 9 * * MON");
+        assert_eq!(cron.signal_kind, "scheduler:cron:weekly-digest");
+    }
+
+    #[test]
+    fn prd_section_parses() {
+        let toml = r#"
+[prd]
+auto_plan = true
+"#;
+        let cfg = RokoConfig::from_toml(toml).expect("parse");
+        assert!(cfg.prd.auto_plan);
     }
 
     #[test]
@@ -912,6 +1513,18 @@ port = 8080
     }
 
     #[test]
+    fn serve_auth_section_parses() {
+        let toml = r#"
+[serve.auth]
+enabled = true
+api_key = "secret"
+"#;
+        let cfg = RokoConfig::from_toml(toml).expect("parse");
+        assert!(cfg.serve.auth.enabled);
+        assert_eq!(cfg.serve.auth.api_key, "secret");
+    }
+
+    #[test]
     fn env_overrides_apply() {
         let mut cfg = RokoConfig::default();
         let env = |key: &str| -> Option<String> {
@@ -993,6 +1606,10 @@ auto_playbook_refresh = false
 [tui]
 refresh_rate_ms = 100
 
+[serve.auth]
+enabled = true
+api_key = "secret"
+
 [server]
 port = 3000
 "#;
@@ -1006,6 +1623,7 @@ port = 3000
     fn example_toml_contains_all_sections() {
         let example = RokoConfig::example_toml();
         assert!(example.contains("[project]"));
+        assert!(example.contains("[prd]"));
         assert!(example.contains("[agent]"));
         assert!(example.contains("[gates]"));
         assert!(example.contains("[routing]"));
@@ -1013,6 +1631,7 @@ port = 3000
         assert!(example.contains("[conductor]"));
         assert!(example.contains("[learning]"));
         assert!(example.contains("[tui]"));
+        assert!(example.contains("[serve.auth]"));
         assert!(example.contains("[server]"));
     }
 

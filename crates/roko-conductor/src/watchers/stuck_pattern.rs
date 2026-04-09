@@ -13,10 +13,7 @@ pub const MAX_IDENTICAL_ACTIONS: usize = 4;
 pub const WATCHER_NAME: &str = "stuck-pattern";
 
 /// Kinds considered as "actions" for stuck detection.
-const ACTION_KINDS: &[Kind] = &[
-    Kind::AgentOutput,
-    Kind::AgentMessage,
-];
+const ACTION_KINDS: &[Kind] = &[Kind::AgentOutput, Kind::AgentMessage];
 
 /// Detects repeated identical actions without progress.
 ///
@@ -103,17 +100,17 @@ impl Policy for StuckPatternWatcher {
 
         if consecutive >= self.max_actions {
             let desc = last_fingerprint.unwrap_or_default();
-            vec![Signal::builder(Kind::Custom(
-                "conductor.intervention".into(),
-            ))
-            .body(Body::text(format!(
-                "{consecutive} consecutive identical actions: {}",
-                truncate(&desc, 80)
-            )))
-            .tag("watcher", WATCHER_NAME)
-            .tag("severity", "warning")
-            .tag("consecutive", consecutive.to_string())
-            .build()]
+            vec![
+                Signal::builder(Kind::Custom("conductor.intervention".into()))
+                    .body(Body::text(format!(
+                        "{consecutive} consecutive identical actions: {}",
+                        truncate(&desc, 80)
+                    )))
+                    .tag("watcher", WATCHER_NAME)
+                    .tag("severity", "warning")
+                    .tag("consecutive", consecutive.to_string())
+                    .build(),
+            ]
         } else {
             Vec::new()
         }
@@ -228,10 +225,7 @@ mod tests {
     #[test]
     fn custom_threshold() {
         let w = StuckPatternWatcher::new(2);
-        let stream = vec![
-            action_signal("stuck"),
-            action_signal("stuck"),
-        ];
+        let stream = vec![action_signal("stuck"), action_signal("stuck")];
         let out = w.decide(&stream, &Context::at(0));
         assert_eq!(out.len(), 1);
     }

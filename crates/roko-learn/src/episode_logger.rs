@@ -160,6 +160,9 @@ impl Usage {
 /// after new fields are added.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Episode {
+    /// Logical episode kind (for example `"agent_turn"`, `"gate"`, `"replan"`).
+    #[serde(default)]
+    pub kind: String,
     /// Stable episode identifier (hash-derived).
     #[serde(default)]
     pub id: String,
@@ -178,6 +181,30 @@ pub struct Episode {
     /// Hash of the output signal the agent produced.
     #[serde(default)]
     pub output_signal_hash: String,
+    /// Stable identifier for the episode record.
+    #[serde(default)]
+    pub episode_id: String,
+    /// Template or role name used to dispatch the agent.
+    #[serde(default)]
+    pub agent_template: String,
+    /// Model slug used for the dispatch.
+    #[serde(default)]
+    pub model: String,
+    /// Trigger kind that caused the dispatch.
+    #[serde(default)]
+    pub trigger_kind: String,
+    /// Hash of the trigger signal.
+    #[serde(default)]
+    pub trigger_signal_hash: String,
+    /// Time when the dispatch started.
+    #[serde(default = "Utc::now")]
+    pub started_at: DateTime<Utc>,
+    /// Time when the dispatch completed.
+    #[serde(default = "Utc::now")]
+    pub completed_at: DateTime<Utc>,
+    /// Dispatch duration in seconds.
+    #[serde(default)]
+    pub duration_secs: f64,
     /// Individual gate verdicts observed for the turn.
     #[serde(default)]
     pub gate_verdicts: Vec<GateVerdict>,
@@ -187,6 +214,15 @@ pub struct Episode {
     /// Whether the turn is considered successful overall.
     #[serde(default)]
     pub success: bool,
+    /// Number of agent turns observed for this episode.
+    #[serde(default)]
+    pub turns: u64,
+    /// Total tokens consumed by the agent run.
+    #[serde(default)]
+    pub tokens_used: u64,
+    /// External actions emitted while handling the trigger.
+    #[serde(default)]
+    pub external_actions: Vec<serde_json::Value>,
     /// Optional short failure reason (hashed, never raw output).
     #[serde(default)]
     pub failure_reason: Option<String>,
@@ -209,17 +245,31 @@ impl Episode {
         let agent_id = agent_id.into();
         let task_id = task_id.into();
         let timestamp = Utc::now();
-        let id = derive_id(&agent_id, &task_id, timestamp);
+        let started_at = timestamp.clone();
+        let completed_at = timestamp;
+        let id = derive_id(&agent_id, &task_id, completed_at.clone());
         Self {
+            kind: String::new(),
             id,
             timestamp,
             agent_id,
             task_id,
             input_signal_hash: String::new(),
             output_signal_hash: String::new(),
+            episode_id: String::new(),
+            agent_template: String::new(),
+            model: String::new(),
+            trigger_kind: String::new(),
+            trigger_signal_hash: String::new(),
+            started_at,
+            completed_at,
+            duration_secs: 0.0,
             gate_verdicts: Vec::new(),
             usage: Usage::default(),
             success: false,
+            turns: 0,
+            tokens_used: 0,
+            external_actions: Vec::new(),
             failure_reason: None,
             headline: false,
             extra: HashMap::new(),
@@ -250,7 +300,10 @@ fn derive_id(agent_id: &str, task_id: &str, timestamp: DateTime<Utc>) -> String 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     agent_id.hash(&mut hasher);
     task_id.hash(&mut hasher);
-    timestamp.timestamp_nanos_opt().unwrap_or(0).hash(&mut hasher);
+    timestamp
+        .timestamp_nanos_opt()
+        .unwrap_or(0)
+        .hash(&mut hasher);
     format!("ep_{:016x}", hasher.finish())
 }
 
@@ -371,12 +424,11 @@ impl EpisodeLogger {
             if raw.trim().is_empty() {
                 continue;
             }
-            let episode: Episode = serde_json::from_str(raw).map_err(|source| {
-                LoggerError::Parse {
+            let episode: Episode =
+                serde_json::from_str(raw).map_err(|source| LoggerError::Parse {
                     line: idx + 1,
                     source,
-                }
-            })?;
+                })?;
             out.push(episode);
         }
         Ok(out)
@@ -685,10 +737,8 @@ mod tests {
         let logger = EpisodeLogger::new(&path);
         let mut ep = sample("a", "big", true);
         let big_string: String = "x".repeat(MAX_EXTRA_BYTES + 1);
-        ep.extra.insert(
-            "payload".to_string(),
-            serde_json::Value::String(big_string),
-        );
+        ep.extra
+            .insert("payload".to_string(), serde_json::Value::String(big_string));
         let err = logger.append(&ep).await.unwrap_err();
         match err {
             LoggerError::ExtraTooLarge { size, max } => {
@@ -757,7 +807,11 @@ mod tests {
             max_age_days: 365,
         };
         for i in 0..5u32 {
-            let ep = episode_at("a", &format!("t{i}"), now - chrono::Duration::hours(i64::from(i)));
+            let ep = episode_at(
+                "a",
+                &format!("t{i}"),
+                now - chrono::Duration::hours(i64::from(i)),
+            );
             logger.append(&ep).await.unwrap();
         }
         let stats = logger.compact(now, &policy).await.unwrap();
@@ -779,7 +833,11 @@ mod tests {
             max_age_days: 365,
         };
         for i in 0..6u32 {
-            let ep = episode_at("a", &format!("t{i}"), now - chrono::Duration::hours(i64::from(5 - i)));
+            let ep = episode_at(
+                "a",
+                &format!("t{i}"),
+                now - chrono::Duration::hours(i64::from(5 - i)),
+            );
             logger.append(&ep).await.unwrap();
         }
         let stats = logger.compact(now, &policy).await.unwrap();
@@ -805,7 +863,11 @@ mod tests {
             max_age_days: 365,
         };
         for i in 0..4u32 {
-            let ep = episode_at("a", &format!("t{i}"), now - chrono::Duration::hours(i64::from(i)));
+            let ep = episode_at(
+                "a",
+                &format!("t{i}"),
+                now - chrono::Duration::hours(i64::from(i)),
+            );
             logger.append(&ep).await.unwrap();
         }
         let stats = logger.compact(now, &policy).await.unwrap();
@@ -825,11 +887,19 @@ mod tests {
         };
         // 3 recent, 2 old (> 30 days).
         for i in 0..3u32 {
-            let ep = episode_at("a", &format!("recent-{i}"), now - chrono::Duration::days(i64::from(i)));
+            let ep = episode_at(
+                "a",
+                &format!("recent-{i}"),
+                now - chrono::Duration::days(i64::from(i)),
+            );
             logger.append(&ep).await.unwrap();
         }
         for i in 0..2u32 {
-            let ep = episode_at("a", &format!("old-{i}"), now - chrono::Duration::days(31 + i64::from(i)));
+            let ep = episode_at(
+                "a",
+                &format!("old-{i}"),
+                now - chrono::Duration::days(31 + i64::from(i)),
+            );
             logger.append(&ep).await.unwrap();
         }
         let stats = logger.compact(now, &policy).await.unwrap();
@@ -854,7 +924,11 @@ mod tests {
         headline_ep.headline = true;
         logger.append(&headline_ep).await.unwrap();
         for i in 0..3u32 {
-            let ep = episode_at("a", &format!("normal-{i}"), now - chrono::Duration::hours(i64::from(i)));
+            let ep = episode_at(
+                "a",
+                &format!("normal-{i}"),
+                now - chrono::Duration::hours(i64::from(i)),
+            );
             logger.append(&ep).await.unwrap();
         }
         let stats = logger.compact(now, &policy).await.unwrap();
@@ -882,13 +956,21 @@ mod tests {
         };
         // 2 old episodes (pruned by age).
         for i in 0..2u32 {
-            let ep = episode_at("a", &format!("old-{i}"), now - chrono::Duration::days(60 + i64::from(i)));
+            let ep = episode_at(
+                "a",
+                &format!("old-{i}"),
+                now - chrono::Duration::days(60 + i64::from(i)),
+            );
             logger.append(&ep).await.unwrap();
         }
         // 5 recent episodes → after age pruning only 5 remain, then
         // size cap prunes to 3.
         for i in 0..5u32 {
-            let ep = episode_at("a", &format!("recent-{i}"), now - chrono::Duration::hours(i64::from(i)));
+            let ep = episode_at(
+                "a",
+                &format!("recent-{i}"),
+                now - chrono::Duration::hours(i64::from(i)),
+            );
             logger.append(&ep).await.unwrap();
         }
         let stats = logger.compact(now, &policy).await.unwrap();
@@ -928,7 +1010,11 @@ mod tests {
         };
         // Write 5 episodes with ascending timestamps.
         for i in 0..5u32 {
-            let ep = episode_at("a", &format!("t{i}"), now - chrono::Duration::hours(i64::from(4 - i)));
+            let ep = episode_at(
+                "a",
+                &format!("t{i}"),
+                now - chrono::Duration::hours(i64::from(4 - i)),
+            );
             logger.append(&ep).await.unwrap();
         }
         logger.compact(now, &policy).await.unwrap();

@@ -136,7 +136,11 @@ impl ModelSpec {
     pub fn from_slug(slug: impl Into<String>) -> Self {
         let slug = slug.into();
         let backend = AgentBackend::from_model(&slug);
-        Self { slug, backend, effort: ReasoningEffort::default() }
+        Self {
+            slug,
+            backend,
+            effort: ReasoningEffort::default(),
+        }
     }
 
     /// Set the reasoning effort.
@@ -194,7 +198,10 @@ impl TurnBudget {
     /// Construct a budget with multiplier 1.0.
     #[must_use]
     pub const fn new(base_usd: f32) -> Self {
-        Self { base_usd, multiplier: 1.0 }
+        Self {
+            base_usd,
+            multiplier: 1.0,
+        }
     }
 
     /// Effective ceiling after applying multiplier.
@@ -237,25 +244,49 @@ impl ToolPermissions {
     /// Full access (for implementers, refactorers).
     #[must_use]
     pub const fn full() -> Self {
-        Self { read: true, write: true, exec: true, git: true, network: false }
+        Self {
+            read: true,
+            write: true,
+            exec: true,
+            git: true,
+            network: false,
+        }
     }
 
     /// Read-only (for reviewers, auditors, critics).
     #[must_use]
     pub const fn read_only() -> Self {
-        Self { read: true, write: false, exec: false, git: false, network: false }
+        Self {
+            read: true,
+            write: false,
+            exec: false,
+            git: false,
+            network: false,
+        }
     }
 
     /// Read + exec (for validators, testers — can run code but not edit).
     #[must_use]
     pub const fn read_exec() -> Self {
-        Self { read: true, write: false, exec: true, git: false, network: false }
+        Self {
+            read: true,
+            write: false,
+            exec: true,
+            git: false,
+            network: false,
+        }
     }
 
     /// Full access including network (for researchers).
     #[must_use]
     pub const fn networked() -> Self {
-        Self { read: true, write: false, exec: true, git: false, network: true }
+        Self {
+            read: true,
+            write: false,
+            exec: true,
+            git: false,
+            network: true,
+        }
     }
 }
 
@@ -653,7 +684,10 @@ mod tests {
 
     #[test]
     fn backend_from_claude_slug() {
-        assert_eq!(AgentBackend::from_model("claude-sonnet-4-5"), AgentBackend::Claude);
+        assert_eq!(
+            AgentBackend::from_model("claude-sonnet-4-5"),
+            AgentBackend::Claude
+        );
     }
 
     #[test]
@@ -666,7 +700,10 @@ mod tests {
 
     #[test]
     fn backend_from_ollama_slug() {
-        assert_eq!(AgentBackend::from_model("ollama/llama3"), AgentBackend::Ollama);
+        assert_eq!(
+            AgentBackend::from_model("ollama/llama3"),
+            AgentBackend::Ollama
+        );
         assert_eq!(AgentBackend::from_model("llama3-8b"), AgentBackend::Ollama);
     }
 
@@ -788,7 +825,10 @@ mod tests {
 
     #[test]
     fn model_spec_short_strips_prefixes() {
-        assert_eq!(ModelSpec::from_slug("claude-sonnet-4-5").short(), "cl-sonnet-4-5");
+        assert_eq!(
+            ModelSpec::from_slug("claude-sonnet-4-5").short(),
+            "cl-sonnet-4-5"
+        );
         assert_eq!(ModelSpec::from_slug("composer-1").short(), "cx-1");
         assert_eq!(ModelSpec::from_slug("gpt-5-high").short(), "5-high");
     }

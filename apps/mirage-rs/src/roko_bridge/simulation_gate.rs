@@ -24,11 +24,7 @@
 //!   - `detail`: JSON summary with gas_used and hex-encoded output
 
 use async_trait::async_trait;
-use roko_core::{
-    Body, Context, Signal,
-    traits::Gate,
-    verdict::Verdict,
-};
+use roko_core::{Body, Context, Signal, traits::Gate, verdict::Verdict};
 use serde::Deserialize;
 
 use crate::{
@@ -77,7 +73,11 @@ impl SimulationGate {
 
     /// Constructs a new simulation gate with a custom config and name.
     #[must_use]
-    pub fn with_config(fork: MirageFork, config: SimulationGateConfig, name: impl Into<String>) -> Self {
+    pub fn with_config(
+        fork: MirageFork,
+        config: SimulationGateConfig,
+        name: impl Into<String>,
+    ) -> Self {
         Self {
             fork,
             config,

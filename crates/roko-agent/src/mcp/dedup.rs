@@ -102,14 +102,8 @@ mod tests {
     #[test]
     fn mcp_dedup_preserves_insertion_order() {
         let tools = vec![
-            (
-                "a".to_string(),
-                vec![tool("a__x", "x"), tool("a__y", "y")],
-            ),
-            (
-                "b".to_string(),
-                vec![tool("b__z", "z"), tool("b__w", "w")],
-            ),
+            ("a".to_string(), vec![tool("a__x", "x"), tool("a__y", "y")]),
+            ("b".to_string(), vec![tool("b__z", "z"), tool("b__w", "w")]),
         ];
         let result = dedup_tools(tools);
         let names: Vec<&str> = result.iter().map(|t| t.name.as_str()).collect();

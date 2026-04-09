@@ -22,11 +22,16 @@ pub const DESCRIPTION: &str = "Execute a shell command via `bash -c` and return 
 /// Build the [`ToolDef`] for `bash`.
 #[must_use]
 pub fn tool_def() -> ToolDef {
-    ToolDef::new(NAME, DESCRIPTION, ToolCategory::Exec, ToolPermission::executes())
-        .with_parameters(ToolSchema::any_object())
-        .with_concurrency(ToolConcurrency::Serial)
-        .with_idempotent(false)
-        .with_timeout_ms(120_000)
+    ToolDef::new(
+        NAME,
+        DESCRIPTION,
+        ToolCategory::Exec,
+        ToolPermission::executes(),
+    )
+    .with_parameters(ToolSchema::any_object())
+    .with_concurrency(ToolConcurrency::Serial)
+    .with_idempotent(false)
+    .with_timeout_ms(120_000)
 }
 
 /// Default blocklist: patterns this handler refuses outright. Agents can
@@ -95,7 +100,11 @@ impl ToolHandler for Handler {
         };
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        let combined = if stderr.is_empty() { stdout } else { format!("{stdout}{stderr}") };
+        let combined = if stderr.is_empty() {
+            stdout
+        } else {
+            format!("{stdout}{stderr}")
+        };
         if output.status.success() {
             ToolResult::text(combined)
         } else {

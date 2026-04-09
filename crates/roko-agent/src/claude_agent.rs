@@ -37,9 +37,60 @@ pub const DEFAULT_MAX_TOKENS: u32 = 4096;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ContentBlock {
-    Text { text: String },
+    Text {
+        text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        #[serde(default)]
+        input: serde_json::Value,
+    },
     #[serde(other)]
     Other,
+}
+
+/// A native Anthropic tool definition passed to `tools`.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct AnthropicTool {
+    /// Tool name.
+    pub name: String,
+    /// Human-readable description.
+    pub description: String,
+    /// JSON Schema object for tool input.
+    pub input_schema: serde_json::Value,
+}
+
+impl AnthropicTool {
+    /// Construct a new Anthropic tool definition.
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        input_schema: serde_json::Value,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            input_schema,
+        }
+    }
+}
+
+/// Anthropic `tool_choice` policy.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolChoice {
+    /// Let the model decide whether to call tools.
+    Auto,
+    /// Force at least one tool call.
+    Any,
+    /// Force a specific named tool.
+    Tool {
+        /// Tool name to force.
+        name: String,
+    },
 }
 
 /// Usage block returned by Anthropic.
@@ -81,6 +132,12 @@ struct RequestMessage<'a> {
 struct MessagesRequest<'a> {
     model: &'a str,
     max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<AnthropicTool>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<ToolChoice>,
     messages: Vec<RequestMessage<'a>>,
 }
 
@@ -106,6 +163,9 @@ pub struct ClaudeAgent {
     name: String,
     max_tokens: u32,
     anthropic_version: String,
+    system_prompt: Option<String>,
+    tools: Option<Vec<AnthropicTool>>,
+    tool_choice: Option<ToolChoice>,
     poster: Arc<dyn HttpPoster>,
 }
 
@@ -136,6 +196,9 @@ impl ClaudeAgent {
             name,
             max_tokens: DEFAULT_MAX_TOKENS,
             anthropic_version: DEFAULT_ANTHROPIC_VERSION.to_owned(),
+            system_prompt: None,
+            tools: None,
+            tool_choice: None,
             poster: Arc::new(ReqwestPoster::new()),
         }
     }
@@ -174,6 +237,27 @@ impl ClaudeAgent {
         self
     }
 
+    /// Attach a system prompt to the request payload.
+    #[must_use]
+    pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
+        self.system_prompt = Some(prompt.into());
+        self
+    }
+
+    /// Attach native Anthropic tool definitions.
+    #[must_use]
+    pub fn with_tools(mut self, tools: Vec<AnthropicTool>) -> Self {
+        self.tools = Some(tools);
+        self
+    }
+
+    /// Attach Anthropic `tool_choice` policy.
+    #[must_use]
+    pub fn with_tool_choice(mut self, tool_choice: ToolChoice) -> Self {
+        self.tool_choice = Some(tool_choice);
+        self
+    }
+
     /// Override the `anthropic-version` header sent on each request.
     #[must_use]
     pub fn with_anthropic_version(mut self, version: impl Into<String>) -> Self {
@@ -207,7 +291,10 @@ impl ClaudeAgent {
     fn headers(&self) -> Vec<(String, String)> {
         vec![
             ("x-api-key".to_owned(), self.api_key.clone()),
-            ("anthropic-version".to_owned(), self.anthropic_version.clone()),
+            (
+                "anthropic-version".to_owned(),
+                self.anthropic_version.clone(),
+            ),
         ]
     }
 
@@ -219,12 +306,16 @@ impl ClaudeAgent {
             .tag("agent", &self.name)
             .tag("failed", "true")
             .build();
-        AgentResult::fail(output).with_usage(Usage { wall_ms, ..Default::default() })
+        AgentResult::fail(output).with_usage(Usage {
+            wall_ms,
+            ..Default::default()
+        })
     }
 }
 
 #[async_trait]
 impl Agent for ClaudeAgent {
+    #[allow(clippy::too_many_lines)]
     async fn run(&self, input: &Signal, _ctx: &Context) -> AgentResult {
         let started = Instant::now();
 
@@ -245,7 +336,13 @@ impl Agent for ClaudeAgent {
         let req = MessagesRequest {
             model: &self.model,
             max_tokens: self.max_tokens,
-            messages: vec![RequestMessage { role: "user", content: &prompt_text }],
+            system: self.system_prompt.clone(),
+            tools: self.tools.clone(),
+            tool_choice: self.tool_choice.clone(),
+            messages: vec![RequestMessage {
+                role: "user",
+                content: &prompt_text,
+            }],
         };
         let body = match serde_json::to_string(&req) {
             Ok(s) => s,
@@ -284,21 +381,39 @@ impl Agent for ClaudeAgent {
         };
 
         let mut combined = String::new();
+        let mut trace = Vec::new();
         for block in &parsed.content {
-            if let ContentBlock::Text { text } = block {
-                if !combined.is_empty() {
-                    combined.push('\n');
+            match block {
+                ContentBlock::Text { text } => {
+                    if !combined.is_empty() {
+                        combined.push('\n');
+                    }
+                    combined.push_str(text);
                 }
-                combined.push_str(text);
+                ContentBlock::ToolUse { id, name, input } => {
+                    let input_json =
+                        serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string());
+                    trace.push(
+                        Signal::builder(Kind::AgentMessage)
+                            .body(Body::text(format!(
+                                "tool_use id={id} name={name} input={input_json}"
+                            )))
+                            .provenance(Provenance::agent(&self.name))
+                            .tag("stream", "tool_use")
+                            .tag("tool_id", id)
+                            .tag("tool_name", name)
+                            .build(),
+                    );
+                }
+                ContentBlock::Other => {}
             }
         }
 
         if combined.is_empty() {
-            return self.fail(
-                input,
-                "response contained no text content blocks",
-                started,
-            );
+            if trace.is_empty() {
+                return self.fail(input, "response contained no text content blocks", started);
+            }
+            combined = "assistant requested tool use".to_string();
         }
 
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -324,7 +439,7 @@ impl Agent for ClaudeAgent {
         }
         let output = builder.build();
 
-        AgentResult::ok(output).with_usage(usage)
+        AgentResult::ok(output).with_trace(trace).with_usage(usage)
     }
 
     fn name(&self) -> &str {
@@ -454,6 +569,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn serialized_request_includes_system_prompt() {
+        let poster = MockPoster::ok(
+            serde_json::json!({
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": {}
+            })
+            .to_string(),
+        );
+        let agent = agent_with(poster.clone()).with_system_prompt("system guidance");
+        let _ = agent.run(&prompt("hi"), &Context::now()).await;
+
+        let call = poster.last_call().expect("expected one HTTP call");
+        let body: serde_json::Value = serde_json::from_slice(&call.body).expect("valid json");
+        assert_eq!(
+            body.get("system").and_then(serde_json::Value::as_str),
+            Some("system guidance")
+        );
+        assert_eq!(
+            body.get("model").and_then(serde_json::Value::as_str),
+            Some("claude-test-model")
+        );
+    }
+
+    #[tokio::test]
+    async fn serialized_request_includes_tools_and_tool_choice() {
+        let poster = MockPoster::ok(
+            serde_json::json!({
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": {}
+            })
+            .to_string(),
+        );
+        let tools = vec![AnthropicTool::new(
+            "read_file",
+            "Read a file",
+            serde_json::json!({
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"]
+            }),
+        )];
+        let agent = agent_with(poster.clone())
+            .with_tools(tools)
+            .with_tool_choice(ToolChoice::Tool {
+                name: "read_file".to_string(),
+            });
+        let _ = agent.run(&prompt("hi"), &Context::now()).await;
+
+        let call = poster.last_call().expect("expected one HTTP call");
+        let body: serde_json::Value = serde_json::from_slice(&call.body).expect("valid json");
+        assert_eq!(body["tools"][0]["name"], "read_file");
+        assert_eq!(body["tool_choice"]["type"], "tool");
+        assert_eq!(body["tool_choice"]["name"], "read_file");
+    }
+
+    #[tokio::test]
     async fn http_4xx_returns_failure() {
         let poster = MockPoster::err(Some(401), r#"{"error": "unauthorized"}"#);
         let agent = agent_with(poster);
@@ -470,12 +641,14 @@ mod tests {
         let agent = agent_with(poster);
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(!result.success);
-        assert!(result
-            .output
-            .body
-            .as_text()
-            .unwrap_or("")
-            .contains("http 503"));
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .unwrap_or("")
+                .contains("http 503")
+        );
     }
 
     #[tokio::test]
@@ -484,12 +657,14 @@ mod tests {
         let agent = agent_with(poster);
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(!result.success);
-        assert!(result
-            .output
-            .body
-            .as_text()
-            .unwrap_or("")
-            .contains("transport error"));
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .unwrap_or("")
+                .contains("transport error")
+        );
     }
 
     #[tokio::test]
@@ -498,12 +673,14 @@ mod tests {
         let agent = agent_with(poster);
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(!result.success);
-        assert!(result
-            .output
-            .body
-            .as_text()
-            .unwrap_or("")
-            .contains("malformed response JSON"));
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .unwrap_or("")
+                .contains("malformed response JSON")
+        );
     }
 
     #[tokio::test]
@@ -512,12 +689,14 @@ mod tests {
         let agent = agent_with(poster);
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(!result.success);
-        assert!(result
-            .output
-            .body
-            .as_text()
-            .unwrap_or("")
-            .contains("empty response body"));
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .unwrap_or("")
+                .contains("empty response body")
+        );
     }
 
     #[tokio::test]
@@ -532,12 +711,14 @@ mod tests {
         let agent = agent_with(poster);
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(!result.success);
-        assert!(result
-            .output
-            .body
-            .as_text()
-            .unwrap_or("")
-            .contains("no text content blocks"));
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .unwrap_or("")
+                .contains("no text content blocks")
+        );
     }
 
     #[tokio::test]
@@ -554,7 +735,33 @@ mod tests {
         let agent = agent_with(poster);
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(result.success);
-        assert_eq!(result.output.body.as_text().unwrap_or(""), "only text survives");
+        assert_eq!(
+            result.output.body.as_text().unwrap_or(""),
+            "only text survives"
+        );
+        assert_eq!(result.trace.len(), 1);
+        assert_eq!(result.trace[0].tag("stream"), Some("tool_use"));
+    }
+
+    #[tokio::test]
+    async fn tool_use_only_response_is_not_failed() {
+        let body = serde_json::json!({
+            "content": [
+                {"type": "tool_use", "id": "t1", "name": "calc", "input": {"x": 1}}
+            ],
+            "usage": {"input_tokens": 1, "output_tokens": 2}
+        })
+        .to_string();
+        let poster = MockPoster::ok(body);
+        let agent = agent_with(poster);
+        let result = agent.run(&prompt("x"), &Context::now()).await;
+        assert!(result.success);
+        assert_eq!(
+            result.output.body.as_text().unwrap_or(""),
+            "assistant requested tool use"
+        );
+        assert_eq!(result.trace.len(), 1);
+        assert_eq!(result.trace[0].tag("tool_name"), Some("calc"));
     }
 
     #[tokio::test]
@@ -603,9 +810,13 @@ mod tests {
             .with_anthropic_version("2024-01-01");
         let _ = agent.run(&prompt("x"), &Context::now()).await;
         let call = poster.last_call().expect("call recorded");
-        let header_map: std::collections::HashMap<String, String> = call.headers.into_iter().collect();
+        let header_map: std::collections::HashMap<String, String> =
+            call.headers.into_iter().collect();
         assert_eq!(header_map.get("x-api-key"), Some(&"secret-key".to_owned()));
-        assert_eq!(header_map.get("anthropic-version"), Some(&"2024-01-01".to_owned()));
+        assert_eq!(
+            header_map.get("anthropic-version"),
+            Some(&"2024-01-01".to_owned())
+        );
     }
 
     #[tokio::test]

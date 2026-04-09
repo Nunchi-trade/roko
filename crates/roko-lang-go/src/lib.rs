@@ -11,9 +11,7 @@
 #![allow(clippy::unnecessary_literal_bound)]
 
 use roko_core::build::{BuildCommand, BuildSystem};
-use roko_core::language::{
-    Import, ImportKind, LanguageProvider, Symbol, SymbolKind, Visibility,
-};
+use roko_core::language::{Import, ImportKind, LanguageProvider, Symbol, SymbolKind, Visibility};
 use std::path::Path;
 
 // ─── GoBuildSystem ──────────────────────────────────────────────────────
@@ -182,8 +180,7 @@ fn extract_go_symbol(line: &str, line_num: usize) -> Option<Symbol> {
     // Skip comments, blank lines, and indented lines (method bodies, etc.).
     if trimmed.starts_with("//")
         || trimmed.is_empty()
-        || (line.starts_with('\t') || line.starts_with("    "))
-            && !trimmed.starts_with("func ")
+        || (line.starts_with('\t') || line.starts_with("    ")) && !trimmed.starts_with("func ")
     {
         // Indented `func` declarations can be methods — skip truly indented code.
         // But we do accept top-level lines that start at column 0.
@@ -220,15 +217,13 @@ fn extract_go_symbol(line: &str, line_num: usize) -> Option<Symbol> {
 /// Determine Go visibility from a name. In Go, exported names start with an
 /// uppercase letter.
 fn go_visibility(name: &str) -> Visibility {
-    name.chars()
-        .next()
-        .map_or(Visibility::Private, |c| {
-            if c.is_uppercase() {
-                Visibility::Public
-            } else {
-                Visibility::Private
-            }
-        })
+    name.chars().next().map_or(Visibility::Private, |c| {
+        if c.is_uppercase() {
+            Visibility::Public
+        } else {
+            Visibility::Private
+        }
+    })
 }
 
 /// Extract a Go function or method.
@@ -300,11 +295,7 @@ fn try_extract_go_type(trimmed: &str, line_num: usize) -> Option<Symbol> {
 /// - `const Name Type = value`
 /// - `const (` — we treat this as a group opener and extract the keyword itself
 /// - `var Name Type`
-fn try_extract_go_const_or_var(
-    trimmed: &str,
-    line_num: usize,
-    keyword: &str,
-) -> Option<Symbol> {
+fn try_extract_go_const_or_var(trimmed: &str, line_num: usize, keyword: &str) -> Option<Symbol> {
     let prefix = format!("{keyword} ");
     let rest = trimmed.strip_prefix(&prefix)?;
 
@@ -513,7 +504,8 @@ import (
     #[test]
     fn extract_type_interface() {
         let lang = GoLanguageProvider;
-        let syms = lang.extract_symbols("type Reader interface {\n\tRead(p []byte) (int, error)\n}\n");
+        let syms =
+            lang.extract_symbols("type Reader interface {\n\tRead(p []byte) (int, error)\n}\n");
         assert_eq!(syms.len(), 1);
         assert_eq!(syms[0].name, "Reader");
         assert_eq!(syms[0].kind, SymbolKind::Trait);

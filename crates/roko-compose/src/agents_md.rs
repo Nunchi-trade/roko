@@ -78,7 +78,10 @@ impl AgentsMd {
         }
 
         // Remove empty preamble if it has no body.
-        if sections.first().is_some_and(|s| s.heading == "preamble" && s.body.is_empty()) {
+        if sections
+            .first()
+            .is_some_and(|s| s.heading == "preamble" && s.body.is_empty())
+        {
             sections.remove(0);
         }
 
@@ -140,7 +143,11 @@ fn parse_heading(line: &str) -> Option<(usize, String)> {
         return Some((depth, String::new()));
     }
     // Check there's whitespace right after the `#`s.
-    if !trimmed.as_bytes().get(depth).is_some_and(|&b| b == b' ' || b == b'\t') {
+    if !trimmed
+        .as_bytes()
+        .get(depth)
+        .is_some_and(|&b| b == b' ' || b == b'\t')
+    {
         return None;
     }
     // Strip optional trailing `#` markers.

@@ -23,8 +23,9 @@ use parking_lot::Mutex;
 use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
 
-use crate::model_router::{LinUCBRouter, RoutingContext, COLD_START_THRESHOLD};
+use crate::model_router::{COLD_START_THRESHOLD, CONTEXT_DIM, LinUCBRouter, RoutingContext};
 
 // ─── CascadeStage ───────────────────────────────────────────────────────────
 
@@ -69,6 +70,17 @@ pub struct CascadeModel {
     /// Latency SLA in milliseconds.
     pub latency_sla_ms: u64,
     /// Which cascade stage produced this recommendation.
+    pub stage: CascadeStage,
+}
+
+/// Selection result for raw-context routing.
+#[derive(Debug, Clone)]
+pub struct CascadeSelection {
+    /// Model chosen by the router.
+    pub model: ModelSpec,
+    /// Total observations accumulated by the router when this selection was made.
+    pub observations: u64,
+    /// Which cascade stage produced the recommendation.
     pub stage: CascadeStage,
 }
 
@@ -194,7 +206,10 @@ impl CascadeRouter {
     ///
     /// Panics if `model_slugs` is empty.
     pub fn new(model_slugs: Vec<String>) -> Self {
-        assert!(!model_slugs.is_empty(), "CascadeRouter: need at least one model");
+        assert!(
+            !model_slugs.is_empty(),
+            "CascadeRouter: need at least one model"
+        );
         Self {
             linucb: LinUCBRouter::new(model_slugs.clone()),
             confidence_stats: Mutex::new(HashMap::new()),
@@ -229,6 +244,25 @@ impl CascadeRouter {
         self.linucb.total_observations()
     }
 
+    /// Select a model from a raw context vector.
+    #[must_use]
+    pub fn select(&self, context_vec: Vec<f64>) -> CascadeSelection {
+        let observations = self.total_observations();
+        let stage = stage_for_observations(observations);
+        let model = self.linucb.select_features(&context_vec);
+        CascadeSelection {
+            model,
+            observations,
+            stage,
+        }
+    }
+
+    /// Return the index of `slug` in the router's model list.
+    #[must_use]
+    pub fn model_index_for_slug(&self, slug: &str) -> Option<usize> {
+        self.linucb.model_index(slug)
+    }
+
     /// Route a context through the cascade, returning a recommendation.
     pub fn route(&self, ctx: &RoutingContext) -> CascadeModel {
         match self.current_stage() {
@@ -246,9 +280,43 @@ impl CascadeRouter {
         reward: f64,
         success: bool,
     ) {
+        let Some(model_idx) = self.model_index_for_slug(model_slug) else {
+            return;
+        };
+        self.observe_internal(&ctx.to_features(), model_idx, reward, success);
+    }
+
+    /// Record a binary outcome for `model_slug` without a full routing context.
+    ///
+    /// This is used by event-driven feedback paths that only know which model
+    /// produced the episode, not the original routing features.
+    pub fn record_outcome(&self, model_slug: &str, success: bool) -> bool {
+        let Some(model_idx) = self.model_index_for_slug(model_slug) else {
+            return false;
+        };
+
+        let reward = if success { 1.0 } else { 0.0 };
+        let context = [0.0; CONTEXT_DIM];
+        self.observe_internal(&context, model_idx, reward, success);
+        true
+    }
+
+    /// Record a successful observation from a raw 17-dim context vector.
+    ///
+    /// This is the success-path entry point used by orchestration when the
+    /// caller already has the model index in the router's arm list.
+    pub fn observe(&self, context_vec: Vec<f64>, model_idx: usize, reward: f64) {
+        self.observe_internal(&context_vec, model_idx, reward, true);
+    }
+
+    fn observe_internal(&self, context_vec: &[f64], model_idx: usize, reward: f64, success: bool) {
+        let Some(slug) = self.model_slugs.get(model_idx) else {
+            return;
+        };
+
         // Update confidence stats.
         let mut stats = self.confidence_stats.lock();
-        let entry = stats.entry(model_slug.to_string()).or_default();
+        let entry = stats.entry(slug.clone()).or_default();
         entry.trials += 1;
         if success {
             entry.successes += 1;
@@ -256,7 +324,7 @@ impl CascadeRouter {
         drop(stats);
 
         // Update LinUCB (always, so it's ready when stage transitions).
-        self.linucb.update(ctx, model_slug, reward);
+        self.linucb.update_features(context_vec, model_idx, reward);
     }
 
     /// Access the underlying `LinUCB` router (for introspection / persistence).
@@ -271,6 +339,87 @@ impl CascadeRouter {
             .iter()
             .map(|(k, v)| (k.clone(), (v.trials, v.successes)))
             .collect()
+    }
+
+    /// Save confidence stats + model slugs to a JSON file.
+    ///
+    /// `LinUCB` state is not persisted (it re-learns from new observations).
+    /// Only confidence stats are saved because they represent the accumulated
+    /// pass-rate history needed for stage-2 routing.
+    pub fn save(&self, path: &Path) -> Result<(), std::io::Error> {
+        let snapshot = CascadeSnapshot {
+            model_slugs: self.model_slugs.clone(),
+            confidence_stats: self
+                .confidence_stats
+                .lock()
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        PersistedModelStats {
+                            trials: v.trials,
+                            successes: v.successes,
+                        },
+                    )
+                })
+                .collect(),
+        };
+        let json = serde_json::to_string_pretty(&snapshot)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, json)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    /// Load a cascade router from a persisted JSON file, or create a new one.
+    ///
+    /// If the file exists and parses correctly, the confidence stats are restored
+    /// and the model slugs from the file are merged with the provided `model_slugs`
+    /// (the union is used). If the file doesn't exist or fails to parse, a fresh
+    /// router is created with the given `model_slugs`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `model_slugs` is empty and no persisted state exists.
+    pub fn load_or_new(path: &Path, model_slugs: Vec<String>) -> Self {
+        let snapshot = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<CascadeSnapshot>(&s).ok());
+
+        match snapshot {
+            Some(snap) => {
+                // Merge model sets: union of persisted + provided.
+                let mut slugs: Vec<String> = snap.model_slugs;
+                for s in &model_slugs {
+                    if !slugs.contains(s) {
+                        slugs.push(s.clone());
+                    }
+                }
+                if slugs.is_empty() {
+                    slugs = model_slugs;
+                }
+                assert!(!slugs.is_empty(), "CascadeRouter: need at least one model");
+                let router = Self::new(slugs);
+                // Restore confidence stats.
+                let mut stats = router.confidence_stats.lock();
+                for (model, persisted) in snap.confidence_stats {
+                    stats.insert(
+                        model,
+                        ModelStats {
+                            trials: persisted.trials,
+                            successes: persisted.successes,
+                        },
+                    );
+                }
+                drop(stats);
+                router
+            }
+            None => Self::new(model_slugs),
+        }
     }
 
     // ── Internal routing per stage ──────────────────────────────────────
@@ -351,7 +500,23 @@ const fn stage_for_observations(obs: u64) -> CascadeStage {
     }
 }
 
-// ─── Tests ──────────────────────────────────────────────────────────────────
+// ─── Persistence ────────────────────────────────────────────────────────────
+
+/// Persisted snapshot of cascade router state.
+#[derive(Serialize, Deserialize)]
+struct CascadeSnapshot {
+    model_slugs: Vec<String>,
+    confidence_stats: HashMap<String, PersistedModelStats>,
+}
+
+/// Serializable form of per-model confidence stats.
+#[derive(Serialize, Deserialize)]
+struct PersistedModelStats {
+    trials: u64,
+    successes: u64,
+}
+
+// ─── Tests ────────────────────────────────────────��─────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -576,9 +741,18 @@ mod tests {
 
     #[test]
     fn confidence_width_shrinks() {
-        let s10 = ModelStats { trials: 10, successes: 7 };
-        let s100 = ModelStats { trials: 100, successes: 70 };
-        let s1000 = ModelStats { trials: 1000, successes: 700 };
+        let s10 = ModelStats {
+            trials: 10,
+            successes: 7,
+        };
+        let s100 = ModelStats {
+            trials: 100,
+            successes: 70,
+        };
+        let s1000 = ModelStats {
+            trials: 1000,
+            successes: 700,
+        };
 
         assert!(s10.confidence_width() > s100.confidence_width());
         assert!(s100.confidence_width() > s1000.confidence_width());
@@ -641,5 +815,16 @@ mod tests {
         let result = cascade.route(&ctx);
         // LinUCB should prefer the highly-rewarded arm
         assert_eq!(result.primary.slug, "claude-haiku-3-5");
+    }
+
+    #[test]
+    fn record_outcome_updates_model_statistics() {
+        let cascade = CascadeRouter::new(test_slugs());
+
+        assert!(cascade.record_outcome("claude-sonnet-4-5", true));
+        assert_eq!(cascade.total_observations(), 1);
+
+        let stats = cascade.confidence_snapshot();
+        assert_eq!(stats.get("claude-sonnet-4-5"), Some(&(1, 1)));
     }
 }

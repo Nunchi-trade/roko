@@ -4,8 +4,8 @@
 //! or empty (marker signals). The body's format is explicit — consumers can
 //! inspect `body.kind_hint()` before decoding.
 
-use crate::error::{RokoError, Result};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use crate::error::{Result, RokoError};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 /// The payload carried by a [`Signal`](crate::Signal).
 ///
@@ -249,7 +249,10 @@ mod tests {
             name: String,
             count: u32,
         }
-        let orig = Thing { name: "x".into(), count: 7 };
+        let orig = Thing {
+            name: "x".into(),
+            count: 7,
+        };
         let body = Body::from_json(&orig).unwrap();
         let decoded: Thing = body.as_json().unwrap();
         assert_eq!(orig, decoded);

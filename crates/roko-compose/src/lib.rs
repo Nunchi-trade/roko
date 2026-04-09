@@ -17,25 +17,39 @@
 
 pub mod agents_md;
 pub mod budget;
+pub mod context_provider;
 pub mod conventions;
 pub mod enrichment;
 pub mod prompt;
 pub mod prompt_hints;
+pub mod role_prompts;
 pub mod scorer;
+pub mod symbol_resolver;
 pub mod system_prompt_builder;
+pub mod task_brief;
 pub mod templates;
 
 pub use agents_md::AgentsMd;
-pub use budget::{adjusted_budget_for, AdjustedBudget, Complexity};
-pub use conventions::{detect_conventions, ProjectConventions};
+pub use budget::{AdjustedBudget, Complexity, adjusted_budget_for};
+pub use context_provider::{
+    ContextBudgets, ContextProvider, ContextSection, ContextSource, ContextTier, PlanArtifacts,
+    PriorTaskOutput, ReadFileSpec, ResolvedContext, SiblingTask, TaskInput, VerifySpec,
+    is_local_model,
+};
+pub use conventions::{ProjectConventions, detect_conventions};
 pub use prompt::{
-    estimate_tokens, CacheLayer, ContextStrategy, Placement, PromptBuild,
-    PromptComposer, PromptSection, SectionPriority,
+    CacheLayer, ContextStrategy, Placement, PromptBuild, PromptComposer, PromptSection,
+    SectionPriority, estimate_tokens,
 };
 pub use prompt_hints::prompt_hints_for;
+pub use role_prompts::{
+    DEFAULT_CONVENTIONS_SUFFIX, RoleSystemPromptSpec, TaskContext, role_identity_for,
+    tool_allowlist_instructions,
+};
 pub use scorer::SectionScorer;
 pub use system_prompt_builder::SystemPromptBuilder;
 pub use templates::{
-    PromptAssembler, PromptBudget, budget_for,
-    QuickFixInput, QuickFixTemplate, QuickReviewerInput, QuickReviewerTemplate,
+    PlanSlice, PromptAssembler, PromptBudget, QuickFixInput, QuickFixTemplate, QuickReviewerInput,
+    QuickReviewerTemplate, Reviewer, ReviewerInput, ReviewerTemplate, RolePromptTemplate,
+    ScribeInput, ScribeTemplate, budget_for, scribe::ScribeVariant,
 };

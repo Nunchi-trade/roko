@@ -48,7 +48,10 @@ pub struct DagConfig {
 
 impl Default for DagConfig {
     fn default() -> Self {
-        Self { infer_file_overlap: true, max_wave_width: 0 }
+        Self {
+            infer_file_overlap: true,
+            max_wave_width: 0,
+        }
     }
 }
 
@@ -119,6 +122,7 @@ impl UnifiedTaskDag {
     /// - [`DagError::DanglingDepRef`] if a task's `depends_on` entry
     ///   does not resolve to any other task.
     /// - [`DagError::Cycle`] if the resulting graph is cyclic.
+    #[allow(clippy::too_many_lines)]
     pub fn build(
         plan_tasks: &BTreeMap<String, Vec<Task>>,
         plan_deps: &HashMap<String, HashSet<String>>,
@@ -144,7 +148,9 @@ impl UnifiedTaskDag {
                     .map(move |t| GlobalTaskId::new(plan.clone(), t.id.clone()))
             })
             .collect();
-        nodes.sort_by(|a, b| (a.plan.as_str(), a.task.as_str()).cmp(&(b.plan.as_str(), b.task.as_str())));
+        nodes.sort_by(|a, b| {
+            (a.plan.as_str(), a.task.as_str()).cmp(&(b.plan.as_str(), b.task.as_str()))
+        });
         let node_set: HashSet<GlobalTaskId> = nodes.iter().cloned().collect();
         let mut edges: HashMap<GlobalTaskId, BTreeSet<GlobalTaskId>> = HashMap::new();
         let mut estimates: HashMap<GlobalTaskId, u32> = HashMap::new();
@@ -180,10 +186,7 @@ impl UnifiedTaskDag {
                 for dep_task in &plan_tasks[dep_plan] {
                     let dep_id = GlobalTaskId::new(dep_plan.clone(), dep_task.id.clone());
                     for id in &plan_ids {
-                        edges
-                            .entry(id.clone())
-                            .or_default()
-                            .insert(dep_id.clone());
+                        edges.entry(id.clone()).or_default().insert(dep_id.clone());
                     }
                 }
             }
@@ -193,10 +196,7 @@ impl UnifiedTaskDag {
             let mut by_file: HashMap<String, BTreeSet<GlobalTaskId>> = HashMap::new();
             for (id, fs) in &files {
                 for f in fs {
-                    by_file
-                        .entry(f.clone())
-                        .or_default()
-                        .insert(id.clone());
+                    by_file.entry(f.clone()).or_default().insert(id.clone());
                 }
             }
             for (_, tasks) in by_file {
@@ -229,7 +229,13 @@ impl UnifiedTaskDag {
                     .insert(from.clone());
             }
         }
-        let dag = Self { edges, reverse_edges, nodes, estimates, config };
+        let dag = Self {
+            edges,
+            reverse_edges,
+            nodes,
+            estimates,
+            config,
+        };
         // Reject cycles eagerly so callers never hold a bad DAG.
         let _ = dag.topological_sort()?;
         Ok(dag)
@@ -239,7 +245,9 @@ impl UnifiedTaskDag {
     #[must_use]
     pub fn deps_of(&self, id: &GlobalTaskId) -> &BTreeSet<GlobalTaskId> {
         static EMPTY: std::sync::OnceLock<BTreeSet<GlobalTaskId>> = std::sync::OnceLock::new();
-        self.edges.get(id).unwrap_or_else(|| EMPTY.get_or_init(BTreeSet::new))
+        self.edges
+            .get(id)
+            .unwrap_or_else(|| EMPTY.get_or_init(BTreeSet::new))
     }
 
     /// Tasks that depend on `id`.
@@ -266,8 +274,11 @@ impl UnifiedTaskDag {
     ///
     /// [`DagError::Cycle`] if the graph is not acyclic.
     pub fn topological_sort(&self) -> Result<Vec<GlobalTaskId>, DagError> {
-        let mut remaining_deps: HashMap<GlobalTaskId, usize> =
-            self.edges.iter().map(|(k, v)| (k.clone(), v.len())).collect();
+        let mut remaining_deps: HashMap<GlobalTaskId, usize> = self
+            .edges
+            .iter()
+            .map(|(k, v)| (k.clone(), v.len()))
+            .collect();
         let mut ready: BTreeSet<GlobalTaskId> = remaining_deps
             .iter()
             .filter_map(|(k, n)| if *n == 0 { Some(k.clone()) } else { None })
@@ -442,12 +453,8 @@ mod tests {
 
     #[test]
     fn empty_input_builds_empty_dag() {
-        let dag = UnifiedTaskDag::build(
-            &BTreeMap::new(),
-            &HashMap::new(),
-            DagConfig::default(),
-        )
-        .unwrap();
+        let dag =
+            UnifiedTaskDag::build(&BTreeMap::new(), &HashMap::new(), DagConfig::default()).unwrap();
         assert!(dag.nodes().is_empty());
         assert!(dag.waves().unwrap().is_empty());
         assert_eq!(dag.stats().nodes, 0);
@@ -547,10 +554,7 @@ mod tests {
         plans.insert("a".to_string(), vec![mk_task("t1", &[], &[], None)]);
         plans.insert(
             "b".to_string(),
-            vec![
-                mk_task("t1", &[], &[], None),
-                mk_task("t2", &[], &[], None),
-            ],
+            vec![mk_task("t1", &[], &[], None), mk_task("t2", &[], &[], None)],
         );
         let mut deps = HashMap::new();
         deps.insert("b".to_string(), HashSet::from(["a".to_string()]));
@@ -594,7 +598,10 @@ mod tests {
                 mk_task("t2", &[], &["src/lib.rs"], None),
             ],
         );
-        let cfg = DagConfig { infer_file_overlap: false, max_wave_width: 0 };
+        let cfg = DagConfig {
+            infer_file_overlap: false,
+            max_wave_width: 0,
+        };
         let dag = UnifiedTaskDag::build(&plans, &HashMap::new(), cfg).unwrap();
         let waves = dag.waves().unwrap();
         assert_eq!(waves.len(), 1, "with inference off they run in parallel");
@@ -612,7 +619,10 @@ mod tests {
         ];
         let mut plans = BTreeMap::new();
         plans.insert("p".to_string(), tasks);
-        let cfg = DagConfig { infer_file_overlap: false, max_wave_width: 2 };
+        let cfg = DagConfig {
+            infer_file_overlap: false,
+            max_wave_width: 2,
+        };
         let dag = UnifiedTaskDag::build(&plans, &HashMap::new(), cfg).unwrap();
         let waves = dag.waves().unwrap();
         assert_eq!(waves.len(), 3);
@@ -675,7 +685,11 @@ mod tests {
         assert_eq!(w1, w2);
         // Wave 0 should be sorted by task id.
         assert_eq!(
-            w1[0].tasks.iter().map(|i| i.task.as_str()).collect::<Vec<_>>(),
+            w1[0]
+                .tasks
+                .iter()
+                .map(|i| i.task.as_str())
+                .collect::<Vec<_>>(),
             vec!["t1", "t2", "t3"]
         );
     }

@@ -18,7 +18,8 @@
 //! - Complexity band (scalar 0.0 / 0.5 / 1.0)
 //! - Iteration (normalized: iteration / 10, capped at 1.0)
 //! - Agent role (hashed to 4-dim float vector)
-//! - Crate familiarity (0.0 - 1.0)
+//! - Crate familiarity for the crate being modified
+//!   (`success_count / total_count`, clamped to `[0.0, 1.0]`)
 //! - Has prior failure (0.0 or 1.0)
 //! - Bias term (always 1.0)
 //!
@@ -109,7 +110,7 @@ impl RoutingContext {
         x[idx..idx + 4].copy_from_slice(&role_hash);
         idx += 4;
 
-        // Crate familiarity
+        // Per-crate familiarity score for the crate being modified.
         x[idx] = self.crate_familiarity.clamp(0.0, 1.0);
         idx += 1;
 
@@ -331,7 +332,10 @@ impl LinUCBRouter {
     ///
     /// Panics if `model_slugs` is empty.
     pub fn new(model_slugs: Vec<String>) -> Self {
-        assert!(!model_slugs.is_empty(), "LinUCBRouter: need at least one model");
+        assert!(
+            !model_slugs.is_empty(),
+            "LinUCBRouter: need at least one model"
+        );
         let arms: Vec<ArmState> = model_slugs
             .into_iter()
             .map(|slug| ArmState::new(slug, CONTEXT_DIM))
@@ -380,11 +384,19 @@ impl LinUCBRouter {
     /// If `total_observations < COLD_START_THRESHOLD`, returns the static
     /// fallback model for the context's complexity band tier.
     pub fn select_model(&self, ctx: &RoutingContext) -> ModelSpec {
+        self.select_features(&ctx.to_features())
+    }
+
+    /// Select the best model for a raw 17-dim context vector.
+    ///
+    /// This is the lower-level entry point used by the cascade router when it
+    /// already has the encoded feature vector.
+    pub fn select_features(&self, x: &[f64]) -> ModelSpec {
         let state = self.state.lock();
 
         // Cold start: use static routing.
         if state.total_observations < COLD_START_THRESHOLD {
-            let tier = complexity_to_tier(ctx.complexity);
+            let tier = context_vec_to_tier(x);
             drop(state);
             let slug = self
                 .static_table
@@ -395,7 +407,6 @@ impl LinUCBRouter {
         }
 
         let alpha = alpha_for_observations(state.total_observations);
-        let x = ctx.to_features();
 
         let mut best_slug = state.arms[0].slug.clone();
         let mut best_score = f64::NEG_INFINITY;
@@ -419,22 +430,48 @@ impl LinUCBRouter {
     /// - `b_a = b_a + reward * x`
     pub fn update(&self, ctx: &RoutingContext, model_slug: &str, reward: f64) {
         let x = ctx.to_features();
-        let mut state = self.state.lock();
+        let Some(model_idx) = self.model_index(model_slug) else {
+            return;
+        };
+        self.update_features(&x, model_idx, reward);
+    }
 
-        if let Some(arm) = state.arms.iter_mut().find(|a| a.slug == model_slug) {
-            // A = A + x * x^T
-            for (i, row) in arm.a_matrix.iter_mut().enumerate() {
-                for (j, cell) in row.iter_mut().enumerate() {
-                    *cell += x[i] * x[j];
-                }
-            }
-            // b = b + reward * x
-            for (bi, xi) in arm.b_vector.iter_mut().zip(&x) {
-                *bi += reward * xi;
-            }
-            arm.observations += 1;
-            state.total_observations += 1;
+    /// Update the arm identified by `model_idx` with a precomputed feature vector.
+    ///
+    /// This is the lower-level observation entry point used by the cascade router
+    /// when it already has the raw context vector.
+    pub fn update_features(&self, x: &[f64], model_idx: usize, reward: f64) {
+        if x.len() != CONTEXT_DIM {
+            return;
         }
+
+        let mut state = self.state.lock();
+        let Some(arm) = state.arms.get_mut(model_idx) else {
+            return;
+        };
+
+        // A = A + x * x^T
+        for (i, row) in arm.a_matrix.iter_mut().enumerate() {
+            for (j, cell) in row.iter_mut().enumerate() {
+                *cell += x[i] * x[j];
+            }
+        }
+        // b = b + reward * x
+        for (bi, xi) in arm.b_vector.iter_mut().zip(x) {
+            *bi += reward * xi;
+        }
+        arm.observations += 1;
+        state.total_observations += 1;
+    }
+
+    /// Return the index of the arm for `model_slug`.
+    #[must_use]
+    pub fn model_index(&self, model_slug: &str) -> Option<usize> {
+        self.state
+            .lock()
+            .arms
+            .iter()
+            .position(|arm| slugs_match(&arm.slug, model_slug))
     }
 
     /// Snapshot of all arm statistics (clone under lock).
@@ -449,9 +486,10 @@ impl LinUCBRouter {
     /// Returns an I/O error if no persist path is set or filesystem
     /// operations fail.
     pub fn save(&self) -> std::io::Result<()> {
-        let dest = self.persist_path.as_ref().ok_or_else(|| {
-            std::io::Error::other("LinUCBRouter: no persist_path set")
-        })?;
+        let dest = self
+            .persist_path
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("LinUCBRouter: no persist_path set"))?;
 
         let snapshot = {
             let state = self.state.lock();
@@ -482,10 +520,7 @@ impl LinUCBRouter {
     ///
     /// Returns an I/O or deserialization error if the file exists but cannot
     /// be read.
-    pub fn load(
-        path: impl AsRef<Path>,
-        model_slugs: Vec<String>,
-    ) -> std::io::Result<Self> {
+    pub fn load(path: impl AsRef<Path>, model_slugs: Vec<String>) -> std::io::Result<Self> {
         let path = path.as_ref();
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
@@ -573,6 +608,32 @@ const fn complexity_to_tier(band: TaskComplexityBand) -> ModelTier {
         TaskComplexityBand::Complex => ModelTier::Premium,
         // Standard and forward-compat
         _ => ModelTier::Standard,
+    }
+}
+
+/// Map a raw context vector back to a model tier for cold-start routing.
+fn context_vec_to_tier(x: &[f64]) -> ModelTier {
+    let band = match x.get(8).copied().unwrap_or(0.5) {
+        v if v <= 0.25 => TaskComplexityBand::Fast,
+        v if v >= 0.75 => TaskComplexityBand::Complex,
+        _ => TaskComplexityBand::Standard,
+    };
+    complexity_to_tier(band)
+}
+
+fn slugs_match(lhs: &str, rhs: &str) -> bool {
+    lhs == rhs || slug_family(lhs).is_some_and(|family| slug_family(rhs) == Some(family))
+}
+
+fn slug_family(slug: &str) -> Option<&'static str> {
+    if slug.contains("haiku") {
+        Some("haiku")
+    } else if slug.contains("sonnet") {
+        Some("sonnet")
+    } else if slug.contains("opus") {
+        Some("opus")
+    } else {
+        None
     }
 }
 
@@ -770,16 +831,25 @@ mod tests {
     fn reward_formula_basic() {
         // Perfect outcome
         let r = compute_routing_reward(1.0, 0.0, 0.0);
-        assert!((r - 1.0).abs() < 1e-10, "perfect reward should be 1.0, got {r}");
+        assert!(
+            (r - 1.0).abs() < 1e-10,
+            "perfect reward should be 1.0, got {r}"
+        );
 
         // Worst outcome
         let r = compute_routing_reward(0.0, 1.0, 1.0);
-        assert!((r - 0.0).abs() < 1e-10, "worst reward should be 0.0, got {r}");
+        assert!(
+            (r - 0.0).abs() < 1e-10,
+            "worst reward should be 0.0, got {r}"
+        );
 
         // Mixed
         let r = compute_routing_reward(0.5, 0.5, 0.5);
         // 0.5*0.5 + 0.5*0.3 + 0.5*0.2 = 0.25 + 0.15 + 0.10 = 0.50
-        assert!((r - 0.5).abs() < 1e-10, "mixed reward should be 0.5, got {r}");
+        assert!(
+            (r - 0.5).abs() < 1e-10,
+            "mixed reward should be 0.5, got {r}"
+        );
     }
 
     // ── Test 14: reward clamps inputs ───────────────────────────────────
@@ -788,7 +858,10 @@ mod tests {
     fn reward_clamps_out_of_range() {
         let r = compute_routing_reward(2.0, -1.0, 3.0);
         // clamped to (1.0, 0.0, 1.0) -> 1.0*0.5 + 1.0*0.3 + 0.0*0.2 = 0.80
-        assert!((r - 0.8).abs() < 1e-10, "clamped reward should be 0.8, got {r}");
+        assert!(
+            (r - 0.8).abs() < 1e-10,
+            "clamped reward should be 0.8, got {r}"
+        );
     }
 
     // ── Test 15: update increases arm observations ──────────────────────
@@ -804,7 +877,10 @@ mod tests {
         assert_eq!(router.total_observations(), 2);
 
         let stats = router.arm_stats();
-        let sonnet = stats.iter().find(|a| a.slug == "claude-sonnet-4-5").unwrap();
+        let sonnet = stats
+            .iter()
+            .find(|a| a.slug == "claude-sonnet-4-5")
+            .unwrap();
         assert_eq!(sonnet.observations, 2);
     }
 
@@ -816,14 +892,20 @@ mod tests {
         let ctx = default_ctx();
 
         let before = router.arm_stats();
-        let arm_before = before.iter().find(|a| a.slug == "claude-sonnet-4-5").unwrap();
+        let arm_before = before
+            .iter()
+            .find(|a| a.slug == "claude-sonnet-4-5")
+            .unwrap();
         let a_diag_before = arm_before.a_matrix[0][0];
         let b0_before = arm_before.b_vector[0];
 
         router.update(&ctx, "claude-sonnet-4-5", 1.0);
 
         let after = router.arm_stats();
-        let arm_after = after.iter().find(|a| a.slug == "claude-sonnet-4-5").unwrap();
+        let arm_after = after
+            .iter()
+            .find(|a| a.slug == "claude-sonnet-4-5")
+            .unwrap();
 
         // A should have changed (x * x^T added)
         let a_diag_after = arm_after.a_matrix[0][0];
@@ -898,9 +980,21 @@ mod tests {
         let a = vec![vec![4.0, 2.0], vec![2.0, 3.0]];
         let inv = cholesky_inverse(&a).expect("should be invertible");
 
-        assert!((inv[0][0] - 0.375).abs() < 1e-10, "inv[0][0] = {}", inv[0][0]);
-        assert!((inv[0][1] - (-0.25)).abs() < 1e-10, "inv[0][1] = {}", inv[0][1]);
-        assert!((inv[1][0] - (-0.25)).abs() < 1e-10, "inv[1][0] = {}", inv[1][0]);
+        assert!(
+            (inv[0][0] - 0.375).abs() < 1e-10,
+            "inv[0][0] = {}",
+            inv[0][0]
+        );
+        assert!(
+            (inv[0][1] - (-0.25)).abs() < 1e-10,
+            "inv[0][1] = {}",
+            inv[0][1]
+        );
+        assert!(
+            (inv[1][0] - (-0.25)).abs() < 1e-10,
+            "inv[1][0] = {}",
+            inv[1][0]
+        );
         assert!((inv[1][1] - 0.5).abs() < 1e-10, "inv[1][1] = {}", inv[1][1]);
     }
 
@@ -921,7 +1015,10 @@ mod tests {
         assert_eq!(loaded.total_observations(), 2);
 
         let stats = loaded.arm_stats();
-        let sonnet = stats.iter().find(|a| a.slug == "claude-sonnet-4-5").unwrap();
+        let sonnet = stats
+            .iter()
+            .find(|a| a.slug == "claude-sonnet-4-5")
+            .unwrap();
         assert_eq!(sonnet.observations, 1);
     }
 

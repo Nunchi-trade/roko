@@ -133,13 +133,7 @@ impl KnowledgeStore {
         stake_wei: u128,
     ) -> PostOutcome {
         let mut entry = InsightEntry::new(
-            author,
-            kind,
-            content,
-            vector,
-            enabled_by,
-            now_secs,
-            stake_wei,
+            author, kind, content, vector, enabled_by, now_secs, stake_wei,
         );
 
         if self.entries.contains_key(&entry.id) {
@@ -202,10 +196,7 @@ impl KnowledgeStore {
             .entries
             .get_mut(&id)
             .ok_or(KnowledgeError::NotFound(id))?;
-        if matches!(
-            entry.state,
-            KnowledgeState::Pruned | KnowledgeState::Stale
-        ) {
+        if matches!(entry.state, KnowledgeState::Pruned | KnowledgeState::Stale) {
             return Err(KnowledgeError::Immutable(id, entry.state));
         }
         if !entry.add_confirmation(confirmer) {
@@ -225,10 +216,7 @@ impl KnowledgeStore {
             .entries
             .get_mut(&id)
             .ok_or(KnowledgeError::NotFound(id))?;
-        if matches!(
-            entry.state,
-            KnowledgeState::Pruned | KnowledgeState::Stale
-        ) {
+        if matches!(entry.state, KnowledgeState::Pruned | KnowledgeState::Stale) {
             return Err(KnowledgeError::Immutable(id, entry.state));
         }
         if !entry.add_challenge(challenger) {
@@ -281,10 +269,7 @@ impl KnowledgeStore {
     /// Returns entries matching the given kind.
     #[must_use]
     pub fn by_kind(&self, kind: KnowledgeKind) -> Vec<&InsightEntry> {
-        self.entries
-            .values()
-            .filter(|e| e.kind == kind)
-            .collect()
+        self.entries.values().filter(|e| e.kind == kind).collect()
     }
 
     /// Snapshots the store for persistence.
@@ -535,8 +520,7 @@ mod tests {
         // Pruned entries are removed from the search index.
         let hits = store.search(&v, 5);
         assert!(
-            !hits.iter().any(|h| h.id == id)
-                || entry.state == KnowledgeState::Stale,
+            !hits.iter().any(|h| h.id == id) || entry.state == KnowledgeState::Stale,
             "pruned entry must not appear in search results"
         );
     }

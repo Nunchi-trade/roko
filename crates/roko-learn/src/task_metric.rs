@@ -23,7 +23,7 @@ use roko_core::metric::{ConfigHash, TaskMetric};
 use serde::{Deserialize, Serialize};
 
 // Re-export the core type so downstream code can `use roko_learn::task_metric::TaskMetric`.
-pub use roko_core::metric::{compute_headlines, Headlines, TaskMetric as CoreTaskMetric};
+pub use roko_core::metric::{Headlines, TaskMetric as CoreTaskMetric, compute_headlines};
 
 // ─── MetricFilter ───────────────────────────────────────────────────────────
 
@@ -68,7 +68,8 @@ impl MetricFilter {
         if !self.roles.is_empty() && !self.roles.contains(&r.role) {
             return false;
         }
-        if !self.complexity_bands.is_empty() && !self.complexity_bands.contains(&r.complexity_band) {
+        if !self.complexity_bands.is_empty() && !self.complexity_bands.contains(&r.complexity_band)
+        {
             return false;
         }
         if !self.plan_ids.is_empty() && !self.plan_ids.contains(&r.plan_id) {
@@ -111,7 +112,11 @@ impl MetricFilter {
 
     /// Filter a slice in-place, retaining only matching records.
     pub fn apply(&self, records: &[TaskMetric]) -> Vec<TaskMetric> {
-        records.iter().filter(|r| self.matches(r)).cloned().collect()
+        records
+            .iter()
+            .filter(|r| self.matches(r))
+            .cloned()
+            .collect()
     }
 }
 
@@ -418,7 +423,20 @@ mod tests {
 
     #[test]
     fn task_metric_filter_combined_and() {
-        let m = make_rich_metric("p1", "t1", "Implementer", "sonnet", "standard", "compile", true, 1, 0.50, 1000, 200, 5000);
+        let m = make_rich_metric(
+            "p1",
+            "t1",
+            "Implementer",
+            "sonnet",
+            "standard",
+            "compile",
+            true,
+            1,
+            0.50,
+            1000,
+            200,
+            5000,
+        );
 
         let mut f = MetricFilter::all();
         f.roles.insert("Implementer".into());
@@ -434,9 +452,37 @@ mod tests {
     #[test]
     fn task_metric_filter_apply_filters_vec() {
         let records = vec![
-            make_rich_metric("p1", "t1", "Implementer", "s", "simple", "compile", true, 1, 0.10, 100, 50, 1000),
-            make_rich_metric("p1", "t2", "Reviewer", "s", "simple", "compile", false, 1, 0.20, 200, 100, 2000),
-            make_rich_metric("p2", "t1", "Implementer", "s", "complex", "test", true, 1, 0.30, 300, 150, 3000),
+            make_rich_metric(
+                "p1",
+                "t1",
+                "Implementer",
+                "s",
+                "simple",
+                "compile",
+                true,
+                1,
+                0.10,
+                100,
+                50,
+                1000,
+            ),
+            make_rich_metric(
+                "p1", "t2", "Reviewer", "s", "simple", "compile", false, 1, 0.20, 200, 100, 2000,
+            ),
+            make_rich_metric(
+                "p2",
+                "t1",
+                "Implementer",
+                "s",
+                "complex",
+                "test",
+                true,
+                1,
+                0.30,
+                300,
+                150,
+                3000,
+            ),
         ];
 
         let mut f = MetricFilter::all();
@@ -518,7 +564,11 @@ mod tests {
     fn task_metric_parse_valid_lines() {
         let m1 = make_test_metric("p1", "t1");
         let m2 = make_test_metric("p2", "t2");
-        let text = format!("{}\n{}\n", m1.to_jsonl().expect("ok"), m2.to_jsonl().expect("ok"));
+        let text = format!(
+            "{}\n{}\n",
+            m1.to_jsonl().expect("ok"),
+            m2.to_jsonl().expect("ok")
+        );
 
         let result = parse_metrics_jsonl(&text);
         assert_eq!(result.records.len(), 2);
@@ -529,7 +579,11 @@ mod tests {
     #[test]
     fn task_metric_parse_tolerates_bad_lines() {
         let m1 = make_test_metric("p1", "t1");
-        let text = format!("{}\nnot-valid-json\n{}\n", m1.to_jsonl().expect("ok"), m1.to_jsonl().expect("ok"));
+        let text = format!(
+            "{}\nnot-valid-json\n{}\n",
+            m1.to_jsonl().expect("ok"),
+            m1.to_jsonl().expect("ok")
+        );
 
         let result = parse_metrics_jsonl(&text);
         assert_eq!(result.records.len(), 2);
@@ -553,7 +607,20 @@ mod tests {
     #[test]
     fn task_metric_roundtrip_through_writer_and_parser() {
         let writer = MetricsWriter::new();
-        let m = make_rich_metric("p1", "t1", "Implementer", "sonnet", "standard", "compile", true, 1, 0.42, 1500, 300, 45000);
+        let m = make_rich_metric(
+            "p1",
+            "t1",
+            "Implementer",
+            "sonnet",
+            "standard",
+            "compile",
+            true,
+            1,
+            0.42,
+            1500,
+            300,
+            45000,
+        );
         writer.append(&m).expect("ok");
 
         let mut buf = Vec::new();
@@ -566,7 +633,20 @@ mod tests {
 
     #[test]
     fn task_metric_rich_metric_has_all_fields() {
-        let m = make_rich_metric("p1", "t1", "Implementer", "sonnet", "standard", "compile", true, 2, 0.42, 1500, 300, 45000);
+        let m = make_rich_metric(
+            "p1",
+            "t1",
+            "Implementer",
+            "sonnet",
+            "standard",
+            "compile",
+            true,
+            2,
+            0.42,
+            1500,
+            300,
+            45000,
+        );
         assert_eq!(m.role, "Implementer");
         assert_eq!(m.model, "sonnet");
         assert_eq!(m.complexity_band, "standard");

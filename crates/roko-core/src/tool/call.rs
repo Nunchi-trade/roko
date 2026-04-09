@@ -68,7 +68,12 @@ impl ToolCall {
         arguments: serde_json::Value,
         request_ts_ms: i64,
     ) -> Self {
-        Self { id: id.into(), name: name.into(), arguments, request_ts_ms }
+        Self {
+            id: id.into(),
+            name: name.into(),
+            arguments,
+            request_ts_ms,
+        }
     }
 }
 
@@ -94,7 +99,11 @@ impl Artifact {
     /// Construct an artifact.
     #[must_use]
     pub fn new(name: impl Into<String>, mime_type: impl Into<String>, body: Body) -> Self {
-        Self { name: name.into(), mime_type: mime_type.into(), body }
+        Self {
+            name: name.into(),
+            mime_type: mime_type.into(),
+            body,
+        }
     }
 }
 
@@ -264,7 +273,11 @@ mod tests {
     fn tool_result_text_has_no_artifacts() {
         let r = ToolResult::text("hello");
         match r {
-            ToolResult::Ok { content, is_structured, artifacts } => {
+            ToolResult::Ok {
+                content,
+                is_structured,
+                artifacts,
+            } => {
                 assert_eq!(content, "hello");
                 assert!(!is_structured);
                 assert!(artifacts.is_empty());
@@ -276,7 +289,13 @@ mod tests {
     #[test]
     fn tool_result_structured_sets_flag() {
         let r = ToolResult::structured(r#"{"x":1}"#);
-        assert!(matches!(r, ToolResult::Ok { is_structured: true, .. }));
+        assert!(matches!(
+            r,
+            ToolResult::Ok {
+                is_structured: true,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -297,7 +316,11 @@ mod tests {
 
     #[test]
     fn tool_result_with_artifacts_roundtrips() {
-        let artifacts = vec![Artifact::new("a.json", "application/json", Body::text("{}"))];
+        let artifacts = vec![Artifact::new(
+            "a.json",
+            "application/json",
+            Body::text("{}"),
+        )];
         let r = ToolResult::with_artifacts("done", artifacts);
         let json = serde_json::to_string(&r).unwrap();
         let decoded: ToolResult = serde_json::from_str(&json).unwrap();

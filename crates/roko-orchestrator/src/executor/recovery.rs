@@ -16,8 +16,8 @@ use std::collections::HashMap;
 use roko_core::{PhaseKind, PlanPhase};
 use serde::{Deserialize, Serialize};
 
-use crate::event_log::{EventEntry, EventKind};
 use super::snapshot::ExecutorSnapshot;
+use crate::event_log::{EventEntry, EventKind};
 
 // ─── Error types ────────────────────────────────────────────────────────
 
@@ -148,9 +148,8 @@ impl RecoveryEngine {
         &self,
         snapshot_json: &str,
     ) -> Result<RecoveredState, RecoveryError> {
-        let snapshot: ExecutorSnapshot = serde_json::from_str(snapshot_json).map_err(|e| {
-            RecoveryError::CorruptedSnapshot(format!("JSON parse error: {e}"))
-        })?;
+        let snapshot: ExecutorSnapshot = serde_json::from_str(snapshot_json)
+            .map_err(|e| RecoveryError::CorruptedSnapshot(format!("JSON parse error: {e}")))?;
 
         let now_ms = current_timestamp_ms();
 
@@ -218,15 +217,15 @@ impl RecoveryEngine {
         for event in events {
             last_sequence = event.sequence_number;
             if let Some(plan_id) = extract_plan_id(&event.payload) {
-                let info = plan_states.entry(plan_id.clone()).or_insert_with(|| {
-                    PlanPhaseInfo {
+                let info = plan_states
+                    .entry(plan_id.clone())
+                    .or_insert_with(|| PlanPhaseInfo {
                         plan_id: plan_id.clone(),
                         phase: PlanPhase::Queued,
                         iteration: 1,
                         last_gate_result: None,
                         files_changed: Vec::new(),
-                    }
-                });
+                    });
 
                 apply_event_to_plan(event, &plan_id, info, &mut queue_order);
             }
@@ -385,7 +384,11 @@ fn apply_event_to_plan(
             }
         }
         EventKind::TaskAssigned | EventKind::AgentSpawned => {
-            if let Some(arr) = event.payload.get("files").and_then(serde_json::Value::as_array) {
+            if let Some(arr) = event
+                .payload
+                .get("files")
+                .and_then(serde_json::Value::as_array)
+            {
                 for f in arr {
                     if let Some(s) = f.as_str() {
                         if !info.files_changed.contains(&s.to_owned()) {
@@ -413,9 +416,7 @@ fn apply_event_to_plan(
             };
         }
         EventKind::MergeAttempted => {
-            if info.phase.kind() != PhaseKind::Complete
-                && info.phase.kind() != PhaseKind::Failed
-            {
+            if info.phase.kind() != PhaseKind::Complete && info.phase.kind() != PhaseKind::Failed {
                 info.phase = PlanPhase::Merging;
             }
         }
@@ -424,7 +425,11 @@ fn apply_event_to_plan(
     }
 
     // Track iteration bumps from payload.
-    if let Some(iter) = event.payload.get("iteration").and_then(serde_json::Value::as_u64) {
+    if let Some(iter) = event
+        .payload
+        .get("iteration")
+        .and_then(serde_json::Value::as_u64)
+    {
         let iter32 = u32::try_from(iter).unwrap_or(u32::MAX);
         if iter32 > info.iteration {
             info.iteration = iter32;
@@ -880,7 +885,10 @@ mod tests {
         };
 
         let warnings = RecoveryEngine::validate_recovery(&state);
-        assert!(warnings.is_empty(), "expected no warnings, got {warnings:?}");
+        assert!(
+            warnings.is_empty(),
+            "expected no warnings, got {warnings:?}"
+        );
     }
 
     // ── 12. End-to-end recovery pipeline ────────────────────────────────
@@ -1059,10 +1067,8 @@ mod tests {
         };
 
         let warnings = RecoveryEngine::validate_recovery(&state);
-        assert!(warnings
-            .iter()
-            .any(|w| w.plan_id == "dup"
-                && w.severity == WarningSeverity::Critical
-                && w.message.contains("duplicate")));
+        assert!(warnings.iter().any(|w| w.plan_id == "dup"
+            && w.severity == WarningSeverity::Critical
+            && w.message.contains("duplicate")));
     }
 }

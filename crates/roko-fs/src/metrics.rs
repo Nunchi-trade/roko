@@ -36,12 +36,44 @@ pub struct MetricsLog {
 }
 
 impl MetricsLog {
+    /// Construct a run-scoped log from a workspace root.
+    ///
+    /// Path: `<workdir>/.roko/runs/{run_id}/metrics.jsonl`.
+    #[must_use]
+    pub fn for_workdir_run(workdir: impl AsRef<Path>, run_id: &str) -> Self {
+        Self::at(
+            workdir
+                .as_ref()
+                .join(".roko")
+                .join("runs")
+                .join(run_id)
+                .join("metrics.jsonl"),
+        )
+    }
+
+    /// Construct a run-scoped log from an existing `.roko/` directory.
+    ///
+    /// Path: `<roko_dir>/runs/{run_id}/metrics.jsonl`.
+    #[must_use]
+    pub fn for_roko_run(roko_dir: impl AsRef<Path>, run_id: &str) -> Self {
+        Self::at(
+            roko_dir
+                .as_ref()
+                .join("runs")
+                .join(run_id)
+                .join("metrics.jsonl"),
+        )
+    }
+
     /// Create a log pointed at `path`. The file is created on first
     /// `append` if it doesn't exist. Parent directories must already
     /// exist — use [`MetricsLog::open_creating`] to create them.
     #[must_use]
     pub fn at(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into(), fsync: true }
+        Self {
+            path: path.into(),
+            fsync: true,
+        }
     }
 
     /// Like [`at`], but creates parent directories as a side-effect.
@@ -233,17 +265,40 @@ mod tests {
         assert!(nested.exists());
     }
 
+    #[test]
+    fn for_workdir_run_builds_expected_path() {
+        let log = MetricsLog::for_workdir_run("/repo", "run-1");
+        assert_eq!(
+            log.path(),
+            Path::new("/repo/.roko/runs/run-1/metrics.jsonl")
+        );
+    }
+
+    #[test]
+    fn for_roko_run_builds_expected_path() {
+        let log = MetricsLog::for_roko_run("/repo/.roko", "run-1");
+        assert_eq!(
+            log.path(),
+            Path::new("/repo/.roko/runs/run-1/metrics.jsonl")
+        );
+    }
+
     #[tokio::test]
     async fn read_skips_malformed_lines() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("m.jsonl");
         let log = MetricsLog::at(&path);
-        log.append(&make_record("h", "p1", "t1", true)).await.unwrap();
+        log.append(&make_record("h", "p1", "t1", true))
+            .await
+            .unwrap();
 
         // Corrupt the file: append a partial line at the end.
         tokio::fs::write(
             &path,
-            format!("{}{{\"timestamp\"", tokio::fs::read_to_string(&path).await.unwrap()),
+            format!(
+                "{}{{\"timestamp\"",
+                tokio::fs::read_to_string(&path).await.unwrap()
+            ),
         )
         .await
         .unwrap();

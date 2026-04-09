@@ -74,23 +74,24 @@ pub mod relevance;
 pub mod role_allowlist;
 pub mod trace;
 
-pub use aliases::{ToolAlias, ALIASES};
+pub use aliases::{ALIASES, ToolAlias};
 pub use bandit::{ArmEntry, BanditKey, EpsilonGreedyBandit, FormatBandit, ProfileBandit};
 pub use call::{Artifact, ToolCall, ToolError, ToolResult};
 pub use def::{ToolCategory, ToolConcurrency, ToolDef, ToolPermission, ToolSchema};
-pub use format::{profile_for_model, ToolFormat, ToolFormatProfile};
+pub use format::{ToolFormat, ToolFormatProfile, profile_for_model};
 pub use handler::{
-    AtomicCancel, AuditSink, CancelToken, NeverCancel, NoopAuditSink, ToolContext, ToolHandler,
+    AtomicCancel, AuditSink, CancelToken, ExternalAction, NeverCancel, NoopAuditSink, ToolContext,
+    ToolHandler,
 };
 pub use metrics::{
-    compute_reward, galileo_tsq, MetricsKey, MetricsSink, NoopMetricsSink, RewardConfig,
-    ToolMetrics,
+    MetricsKey, MetricsSink, NoopMetricsSink, RewardConfig, ToolMetrics, compute_reward,
+    galileo_tsq,
 };
 pub use pointer::MemoryPointer;
 pub use registry::{ToolRegistry, VecToolRegistry};
 pub use relevance::{KeywordOverlapScorer, ToolRelevanceScorer};
 pub use role_allowlist::role_allowlist;
 pub use trace::{
-    CancelSource, FailureKind, FailureTrace, NoopTraceSink, ToolOutcome, ToolTrace,
-    ToolTraceEvent, TraceBuilder, TraceId, TraceSink, TraceStep,
+    CancelSource, FailureKind, FailureTrace, NoopTraceSink, ToolOutcome, ToolTrace, ToolTraceEvent,
+    TraceBuilder, TraceId, TraceSink, TraceStep,
 };

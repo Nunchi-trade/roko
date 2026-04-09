@@ -311,9 +311,7 @@ mod tests {
             allow_prefixes: vec!["sudo systemctl restart roko-approved".to_string()],
             max_command_len: 8192,
         };
-        assert!(
-            check_command_with_policy("sudo systemctl restart roko-approved", &policy).is_ok()
-        );
+        assert!(check_command_with_policy("sudo systemctl restart roko-approved", &policy).is_ok());
         // A different sudo invocation still gets blocked.
         assert!(
             check_command_with_policy("sudo rm -rf /etc", &policy).is_err(),
@@ -364,9 +362,7 @@ mod tests {
     fn deny_pattern_name_includes_rule_text() {
         let sub = DenyPattern::Substring("danger".to_string());
         assert!(sub.name().contains("danger"));
-        let re = DenyPattern::Regex(
-            Regex::new(r"bad\d+").expect("test regex compiles"),
-        );
+        let re = DenyPattern::Regex(Regex::new(r"bad\d+").expect("test regex compiles"));
         assert!(re.name().contains(r"bad\d+"));
     }
 

@@ -391,7 +391,10 @@ mod tests {
     /// must equal 100.
     #[tokio::test]
     async fn concurrent_failures_are_consistent() {
-        let tracker = Arc::new(ProviderHealthTracker::with_config(200, Duration::from_secs(600)));
+        let tracker = Arc::new(ProviderHealthTracker::with_config(
+            200,
+            Duration::from_secs(600),
+        ));
         let mut handles = Vec::new();
 
         for _ in 0..100 {
@@ -418,7 +421,10 @@ mod tests {
     /// Concurrent mixed operations: successes and failures interleaved.
     #[tokio::test]
     async fn concurrent_mixed_operations() {
-        let tracker = Arc::new(ProviderHealthTracker::with_config(200, Duration::from_secs(600)));
+        let tracker = Arc::new(ProviderHealthTracker::with_config(
+            200,
+            Duration::from_secs(600),
+        ));
         let mut handles = Vec::new();
 
         for i in 0..100 {

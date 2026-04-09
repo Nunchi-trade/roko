@@ -204,8 +204,7 @@ mod tests {
 
     #[test]
     fn complex_with_extras_appends_extra_steps() {
-        let selector = StepSelector::new()
-            .with_complex_extras(vec![EnrichStep::Verify]);
+        let selector = StepSelector::new().with_complex_extras(vec![EnrichStep::Verify]);
 
         let selected = selector.select_steps(TaskComplexityBand::Complex, ALL_ORDERED);
 
@@ -216,8 +215,7 @@ mod tests {
     #[test]
     fn custom_fast_skip_list() {
         // Only skip Research for fast tasks.
-        let selector = StepSelector::new()
-            .with_fast_skip(vec![EnrichStep::Research]);
+        let selector = StepSelector::new().with_fast_skip(vec![EnrichStep::Research]);
 
         let selected = selector.select_steps(TaskComplexityBand::Fast, ALL_ORDERED);
 
@@ -270,8 +268,7 @@ mod tests {
     fn complex_extras_novel_step_appended() {
         // Use a subset of steps and add an extra that isn't in the subset.
         let subset = &[EnrichStep::Prd, EnrichStep::Briefs, EnrichStep::Tasks];
-        let selector = StepSelector::new()
-            .with_complex_extras(vec![EnrichStep::Verify]);
+        let selector = StepSelector::new().with_complex_extras(vec![EnrichStep::Verify]);
 
         let selected = selector.select_steps(TaskComplexityBand::Complex, subset);
 
@@ -284,17 +281,11 @@ mod tests {
         let selector = StepSelector::new();
 
         // Research is in the fast skip list.
-        let selected = selector.select_steps(
-            TaskComplexityBand::Fast,
-            &[EnrichStep::Research],
-        );
+        let selected = selector.select_steps(TaskComplexityBand::Fast, &[EnrichStep::Research]);
         assert!(selected.is_empty());
 
         // Prd is not in the fast skip list.
-        let selected = selector.select_steps(
-            TaskComplexityBand::Fast,
-            &[EnrichStep::Prd],
-        );
+        let selected = selector.select_steps(TaskComplexityBand::Fast, &[EnrichStep::Prd]);
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0], EnrichStep::Prd);
     }

@@ -111,7 +111,9 @@ impl Gate for CompileGate {
         };
 
         if output.status.success() {
-            Verdict::pass(&self.name).with_detail(detail).with_duration(elapsed)
+            Verdict::pass(&self.name)
+                .with_detail(detail)
+                .with_duration(elapsed)
         } else {
             let reason = summarize_errors(&stderr, 3);
             Verdict::fail(&self.name, reason)

@@ -84,6 +84,15 @@ impl Conductor {
         }
     }
 
+    /// Convenience helper for periodic watcher checks.
+    ///
+    /// Uses the current context and returns the intervention signals
+    /// produced by the conductor for the supplied signal stream.
+    #[must_use]
+    pub fn check_all(&self, stream: &[Signal]) -> Vec<Signal> {
+        self.decide(stream, &Context::now())
+    }
+
     /// Create a conductor with custom watchers.
     #[must_use]
     pub fn with_watchers(watchers: Vec<Box<dyn Policy>>) -> Self {
@@ -140,8 +149,11 @@ impl Conductor {
         // Record failures in circuit breaker.
         if let ConductorDecision::Fail { watcher, reason } = &decision {
             if let Some(plan_id) = extract_plan_id(stream) {
-                self.circuit_breaker
-                    .record_failure(&plan_id, format!("{watcher}: {reason}"), ctx.now_ms);
+                self.circuit_breaker.record_failure(
+                    &plan_id,
+                    format!("{watcher}: {reason}"),
+                    ctx.now_ms,
+                );
             }
         }
 
@@ -219,13 +231,32 @@ impl Policy for Conductor {
 mod tests {
     use super::*;
 
+    fn ghost_turn_signal(cost_usd: f64) -> Signal {
+        Signal::builder(Kind::Custom(
+            crate::watchers::ghost_turn::TURN_SIGNAL_KIND.into(),
+        ))
+        .body(
+            Body::from_json(&serde_json::json!({
+                "plan_id": "plan-1",
+                "task": "task-1",
+                "role": "Implementer",
+                "model": "claude-sonnet-4-6",
+                "cost_usd": cost_usd,
+                "duration_ms": 1234,
+                "changed_files_before": [],
+                "changed_files_after": [],
+                "net_new_changes": 0,
+                "output_meaningful": false,
+                "wasted_cost": true,
+            }))
+            .expect("serialize ghost turn event"),
+        )
+        .build()
+    }
+
     fn ghost_stream(count: usize) -> Vec<Signal> {
         (0..count)
-            .map(|_| {
-                Signal::builder(Kind::AgentOutput)
-                    .body(Body::text("   "))
-                    .build()
-            })
+            .map(|i| ghost_turn_signal(1.0 - (i as f64 * 0.1)))
             .collect()
     }
 
@@ -241,12 +272,14 @@ mod tests {
     }
 
     fn plan_phase_stream(plan_id: &str) -> Vec<Signal> {
-        vec![Signal::builder(Kind::PlanPhase)
-            .body(Body::text("implementing"))
-            .tag(PLAN_ID_TAG, plan_id)
-            .tag("phase", "implementing")
-            .tag("phase_entered_ms", "0")
-            .build()]
+        vec![
+            Signal::builder(Kind::PlanPhase)
+                .body(Body::text("implementing"))
+                .tag(PLAN_ID_TAG, plan_id)
+                .tag("phase", "implementing")
+                .tag("phase_entered_ms", "0")
+                .build(),
+        ]
     }
 
     #[test]
@@ -314,15 +347,26 @@ mod tests {
 
     #[test]
     fn multiple_watchers_worst_wins() {
-        use crate::watchers::iteration_loop::IMPL_RESTART_TAG;
-
         // Stream that triggers both ghost-turn (warning) and iteration-loop (critical).
         let mut stream: Vec<Signal> = ghost_stream(3);
         for _ in 0..3 {
             stream.push(
+                Signal::builder(Kind::GateVerdict)
+                    .body(Body::Json(serde_json::json!({
+                        "plan_id": "plan-1",
+                        "gate": "compile",
+                        "passed": false,
+                    })))
+                    .tag("plan_id", "plan-1")
+                    .build(),
+            );
+            stream.push(
                 Signal::builder(Kind::PlanPhase)
-                    .body(Body::text("restarting"))
-                    .tag(IMPL_RESTART_TAG, "true")
+                    .body(Body::Json(serde_json::json!({
+                        "plan_id": "plan-1",
+                        "event": "GateFailed",
+                    })))
+                    .tag("plan_id", "plan-1")
                     .build(),
             );
         }

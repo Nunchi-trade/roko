@@ -20,11 +20,16 @@ pub const DESCRIPTION: &str = "Read the contents of a UTF-8 file from the worktr
 /// Build the [`ToolDef`] for `read_file`.
 #[must_use]
 pub fn tool_def() -> ToolDef {
-    ToolDef::new(NAME, DESCRIPTION, ToolCategory::Read, ToolPermission::read_only())
-        .with_parameters(ToolSchema::any_object())
-        .with_concurrency(ToolConcurrency::Parallel)
-        .with_idempotent(true)
-        .with_timeout_ms(30_000)
+    ToolDef::new(
+        NAME,
+        DESCRIPTION,
+        ToolCategory::Read,
+        ToolPermission::read_only(),
+    )
+    .with_parameters(ToolSchema::any_object())
+    .with_concurrency(ToolConcurrency::Parallel)
+    .with_idempotent(true)
+    .with_timeout_ms(30_000)
 }
 
 /// Handler for `read_file` (§36.14).

@@ -6,7 +6,8 @@
 //! need not distinguish between static and dynamic registries.
 
 use roko_core::tool::{ToolDef, ToolRegistry};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use tracing::warn;
 
 /// A registry that combines a static base set of tools with
 /// dynamically-added MCP server tools.
@@ -19,6 +20,8 @@ pub struct DynamicToolRegistry {
     base: Vec<ToolDef>,
     /// MCP tools keyed by server name.
     mcp_servers: HashMap<String, Vec<ToolDef>>,
+    /// If true, prefer MCP tools over built-ins when names collide.
+    prefer_mcp: bool,
     /// Flattened view of base + all MCP tools, rebuilt on mutation.
     all_tools: Vec<ToolDef>,
 }
@@ -29,11 +32,18 @@ impl DynamicToolRegistry {
     /// Accepts any [`ToolRegistry`] -- copies its tools into the base
     /// set so the dynamic registry owns all data.
     pub fn new(base: &dyn ToolRegistry) -> Self {
+        Self::with_preference(base, false)
+    }
+
+    /// Create a new registry with explicit collision preference.
+    #[must_use]
+    pub fn with_preference(base: &dyn ToolRegistry, prefer_mcp: bool) -> Self {
         let base_tools: Vec<ToolDef> = base.all().to_vec();
         let all_tools = base_tools.clone();
         Self {
             base: base_tools,
             mcp_servers: HashMap::new(),
+            prefer_mcp,
             all_tools,
         }
     }
@@ -44,6 +54,7 @@ impl DynamicToolRegistry {
         Self {
             base: Vec::new(),
             mcp_servers: HashMap::new(),
+            prefer_mcp: false,
             all_tools: Vec::new(),
         }
     }
@@ -76,10 +87,55 @@ impl DynamicToolRegistry {
 
     /// Rebuild the flattened `all_tools` vector after a mutation.
     fn rebuild(&mut self) {
-        self.all_tools = self.base.clone();
-        for tools in self.mcp_servers.values() {
-            self.all_tools.extend(tools.iter().cloned());
+        let mut all_tools = Vec::with_capacity(
+            self.base.len()
+                + self
+                    .mcp_servers
+                    .values()
+                    .map(std::vec::Vec::len)
+                    .sum::<usize>(),
+        );
+        let mut seen = HashSet::new();
+
+        if self.prefer_mcp {
+            for tools in self.mcp_servers.values() {
+                for tool in tools {
+                    if seen.insert(tool.name.clone()) {
+                        all_tools.push(tool.clone());
+                    }
+                }
+            }
+            for tool in &self.base {
+                if seen.contains(&tool.name) {
+                    warn!(
+                        "builtin tool '{}' is shadowed by an MCP tool; prefer_mcp=true keeps the MCP version",
+                        tool.name
+                    );
+                } else {
+                    seen.insert(tool.name.clone());
+                    all_tools.push(tool.clone());
+                }
+            }
+        } else {
+            for tool in &self.base {
+                seen.insert(tool.name.clone());
+                all_tools.push(tool.clone());
+            }
+            for tools in self.mcp_servers.values() {
+                for tool in tools {
+                    if seen.contains(&tool.name) {
+                        warn!(
+                            "MCP tool '{}' duplicates a builtin tool; keeping the builtin version",
+                            tool.name
+                        );
+                    } else {
+                        seen.insert(tool.name.clone());
+                        all_tools.push(tool.clone());
+                    }
+                }
+            }
         }
+        self.all_tools = all_tools;
     }
 }
 
@@ -99,11 +155,21 @@ mod tests {
     use roko_core::tool::{ToolCategory, ToolPermission, VecToolRegistry};
 
     fn base_tool(name: &str) -> ToolDef {
-        ToolDef::new(name, "base tool", ToolCategory::Read, ToolPermission::read_only())
+        ToolDef::new(
+            name,
+            "base tool",
+            ToolCategory::Read,
+            ToolPermission::read_only(),
+        )
     }
 
     fn mcp_tool(name: &str) -> ToolDef {
-        ToolDef::new(name, "mcp tool", ToolCategory::Mcp, ToolPermission::read_only())
+        ToolDef::new(
+            name,
+            "mcp tool",
+            ToolCategory::Mcp,
+            ToolPermission::read_only(),
+        )
     }
 
     #[test]
@@ -120,10 +186,7 @@ mod tests {
     fn mcp_dynamic_registry_add_mcp_tools() {
         let base = VecToolRegistry::from_tools(vec![base_tool("read_file")]);
         let mut reg = DynamicToolRegistry::new(&base);
-        reg.add_mcp_tools(
-            "fs",
-            vec![mcp_tool("fs__list"), mcp_tool("fs__stat")],
-        );
+        reg.add_mcp_tools("fs", vec![mcp_tool("fs__list"), mcp_tool("fs__stat")]);
         assert_eq!(reg.all().len(), 3);
         assert!(reg.get("read_file").is_some());
         assert!(reg.get("fs__list").is_some());
@@ -207,5 +270,27 @@ mod tests {
         let reg = DynamicToolRegistry::new(&base);
         let result = reg.validate_args("read_file", &serde_json::json!({}));
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn mcp_dynamic_registry_prefers_builtin_by_default() {
+        let base = VecToolRegistry::from_tools(vec![base_tool("read_file")]);
+        let mut reg = DynamicToolRegistry::new(&base);
+        reg.add_mcp_tools("fs", vec![mcp_tool("read_file"), mcp_tool("fs__list")]);
+
+        assert_eq!(reg.all().len(), 2);
+        let def = reg.get("read_file").expect("builtin tool should win");
+        assert_eq!(def.category, ToolCategory::Read);
+    }
+
+    #[test]
+    fn mcp_dynamic_registry_can_prefer_mcp_tools() {
+        let base = VecToolRegistry::from_tools(vec![base_tool("read_file")]);
+        let mut reg = DynamicToolRegistry::with_preference(&base, true);
+        reg.add_mcp_tools("fs", vec![mcp_tool("read_file"), mcp_tool("fs__list")]);
+
+        assert_eq!(reg.all().len(), 2);
+        let def = reg.get("read_file").expect("mcp tool should win");
+        assert_eq!(def.category, ToolCategory::Mcp);
     }
 }

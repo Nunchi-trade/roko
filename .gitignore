@@ -60,6 +60,10 @@ demo/.runtime/
 /tmp/
 # mirage/roko test output piped into /tmp/mirage.log during dev — safe to ignore.
 
+# Temporary / work-in-progress (will be refined later) ----------------------
+CLAUDE.md
+scripts/
+
 # Docker volumes (local dev overlays) ----------------------------------------
 docker/.env
 docker/*.override.yml

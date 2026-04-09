@@ -8,6 +8,9 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::process::{Child, ChildStdin, ChildStdout};
+use tokio::sync::Mutex;
 
 // ── Wire types ──────────────────────────────────────────────────────────
 
@@ -119,6 +122,88 @@ pub enum McpError {
     },
 }
 
+// ── StdioTransport ──────────────────────────────────────────────────────
+
+/// Transport that spawns a child process and communicates over stdin/stdout
+/// using newline-delimited JSON-RPC.
+pub struct StdioTransport {
+    stdin: Mutex<BufWriter<ChildStdin>>,
+    stdout: Mutex<BufReader<ChildStdout>>,
+    /// Keep child handle alive so the process is not dropped.
+    _child: Mutex<Child>,
+}
+
+impl StdioTransport {
+    /// Spawn a child MCP server process.
+    ///
+    /// The process is started with stdin/stdout piped for JSON-RPC communication.
+    /// Stderr is inherited so server logs appear in the parent's stderr.
+    pub fn spawn(command: &str, args: &[String]) -> Result<Self, McpError> {
+        let mut child = tokio::process::Command::new(command)
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| McpError::Transport(format!("failed to spawn {command}: {e}")))?;
+
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| McpError::Transport("child stdin not available".into()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| McpError::Transport("child stdout not available".into()))?;
+
+        Ok(Self {
+            stdin: Mutex::new(BufWriter::new(stdin)),
+            stdout: Mutex::new(BufReader::new(stdout)),
+            _child: Mutex::new(child),
+        })
+    }
+}
+
+#[async_trait]
+impl Transport for StdioTransport {
+    async fn roundtrip(&self, request: &McpRequest) -> Result<McpResponse, McpError> {
+        // Serialize request as a single JSON line
+        let mut line = serde_json::to_string(request)?;
+        line.push('\n');
+
+        // Write to child stdin
+        let mut stdin = self.stdin.lock().await;
+        stdin
+            .write_all(line.as_bytes())
+            .await
+            .map_err(|e| McpError::Transport(format!("write to stdin: {e}")))?;
+        stdin
+            .flush()
+            .await
+            .map_err(|e| McpError::Transport(format!("flush stdin: {e}")))?;
+        drop(stdin);
+
+        // Read one line from child stdout
+        let mut response_line = String::new();
+        self.stdout
+            .lock()
+            .await
+            .read_line(&mut response_line)
+            .await
+            .map_err(|e| McpError::Transport(format!("read from stdout: {e}")))?;
+
+        if response_line.is_empty() {
+            return Err(McpError::Transport(
+                "child process closed stdout (EOF)".into(),
+            ));
+        }
+
+        let resp: McpResponse = serde_json::from_str(&response_line)?;
+        Ok(resp)
+    }
+}
+
 // ── McpClient ───────────────────────────────────────────────────────────
 
 /// JSON-RPC client for a single MCP server.
@@ -188,7 +273,10 @@ impl<T: Transport> McpClient<T> {
     /// List available tools from the MCP server.
     pub async fn list_tools(&self) -> Result<Vec<McpToolDef>, McpError> {
         let result = self.call("tools/list", serde_json::json!({})).await?;
-        let tools_value = result.get("tools").cloned().unwrap_or(serde_json::Value::Array(vec![]));
+        let tools_value = result
+            .get("tools")
+            .cloned()
+            .unwrap_or(serde_json::Value::Array(vec![]));
         let tools: Vec<McpToolDef> = serde_json::from_value(tools_value)?;
         Ok(tools)
     }
@@ -277,7 +365,10 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_initialize_sends_correct_method() {
-        let transport = MockTransport::new(vec![ok_response(1, serde_json::json!({"capabilities": {}}))]);
+        let transport = MockTransport::new(vec![ok_response(
+            1,
+            serde_json::json!({"capabilities": {}}),
+        )]);
         let client = McpClient::new(transport);
         let result = client.initialize().await.unwrap();
         assert!(result.get("capabilities").is_some());

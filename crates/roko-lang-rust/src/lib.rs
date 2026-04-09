@@ -13,9 +13,7 @@
 #![allow(clippy::unnecessary_literal_bound)]
 
 use roko_core::build::{BuildCommand, BuildSystem};
-use roko_core::language::{
-    Import, ImportKind, LanguageProvider, Symbol, SymbolKind, Visibility,
-};
+use roko_core::language::{Import, ImportKind, LanguageProvider, Symbol, SymbolKind, Visibility};
 use std::path::Path;
 
 // ─── CargoBuildSystem ────────────────────────────────────────────────────
@@ -31,13 +29,19 @@ impl BuildSystem for CargoBuildSystem {
     fn compile_cmd(&self, target_dir: &Path) -> BuildCommand {
         BuildCommand::new("cargo")
             .args(["check", "--workspace", "--all-targets"])
-            .env("CARGO_TARGET_DIR", target_dir.to_string_lossy().into_owned())
+            .env(
+                "CARGO_TARGET_DIR",
+                target_dir.to_string_lossy().into_owned(),
+            )
     }
 
     fn test_cmd(&self, target_dir: &Path, filter: Option<&str>) -> BuildCommand {
         let mut cmd = BuildCommand::new("cargo")
             .args(["test", "--workspace"])
-            .env("CARGO_TARGET_DIR", target_dir.to_string_lossy().into_owned());
+            .env(
+                "CARGO_TARGET_DIR",
+                target_dir.to_string_lossy().into_owned(),
+            );
         if let Some(f) = filter {
             cmd = cmd.arg("--").arg(f);
         }
@@ -46,8 +50,18 @@ impl BuildSystem for CargoBuildSystem {
 
     fn lint_cmd(&self, target_dir: &Path) -> BuildCommand {
         BuildCommand::new("cargo")
-            .args(["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"])
-            .env("CARGO_TARGET_DIR", target_dir.to_string_lossy().into_owned())
+            .args([
+                "clippy",
+                "--workspace",
+                "--all-targets",
+                "--",
+                "-D",
+                "warnings",
+            ])
+            .env(
+                "CARGO_TARGET_DIR",
+                target_dir.to_string_lossy().into_owned(),
+            )
     }
 
     fn format_cmd(&self, _target_dir: &Path, check_only: bool) -> BuildCommand {
@@ -209,28 +223,68 @@ fn extract_symbol_from_line(line: &str, line_num: usize) -> Option<Symbol> {
 
     // Try each symbol kind.
     if let Some(name) = try_extract_fn(rest) {
-        return Some(Symbol { name, kind: SymbolKind::Function, visibility: vis, line: line_num });
+        return Some(Symbol {
+            name,
+            kind: SymbolKind::Function,
+            visibility: vis,
+            line: line_num,
+        });
     }
     if let Some(name) = try_extract_keyword(rest, "struct") {
-        return Some(Symbol { name, kind: SymbolKind::Struct, visibility: vis, line: line_num });
+        return Some(Symbol {
+            name,
+            kind: SymbolKind::Struct,
+            visibility: vis,
+            line: line_num,
+        });
     }
     if let Some(name) = try_extract_keyword(rest, "enum") {
-        return Some(Symbol { name, kind: SymbolKind::Enum, visibility: vis, line: line_num });
+        return Some(Symbol {
+            name,
+            kind: SymbolKind::Enum,
+            visibility: vis,
+            line: line_num,
+        });
     }
     if let Some(name) = try_extract_keyword(rest, "trait") {
-        return Some(Symbol { name, kind: SymbolKind::Trait, visibility: vis, line: line_num });
+        return Some(Symbol {
+            name,
+            kind: SymbolKind::Trait,
+            visibility: vis,
+            line: line_num,
+        });
     }
     if let Some(name) = try_extract_impl(rest) {
-        return Some(Symbol { name, kind: SymbolKind::Impl, visibility: vis, line: line_num });
+        return Some(Symbol {
+            name,
+            kind: SymbolKind::Impl,
+            visibility: vis,
+            line: line_num,
+        });
     }
     if let Some(name) = try_extract_const(rest) {
-        return Some(Symbol { name, kind: SymbolKind::Const, visibility: vis, line: line_num });
+        return Some(Symbol {
+            name,
+            kind: SymbolKind::Const,
+            visibility: vis,
+            line: line_num,
+        });
     }
     if let Some(name) = try_extract_type_alias(rest) {
-        return Some(Symbol { name, kind: SymbolKind::Type, visibility: vis, line: line_num });
+        return Some(Symbol {
+            name,
+            kind: SymbolKind::Type,
+            visibility: vis,
+            line: line_num,
+        });
     }
     if let Some(name) = try_extract_mod_block(rest) {
-        return Some(Symbol { name, kind: SymbolKind::Module, visibility: vis, line: line_num });
+        return Some(Symbol {
+            name,
+            kind: SymbolKind::Module,
+            visibility: vis,
+            line: line_num,
+        });
     }
 
     None
@@ -423,7 +477,10 @@ mod tests {
         assert_eq!(cmd.program, "cargo");
         assert!(cmd.args.contains(&"check".to_string()));
         assert!(cmd.args.contains(&"--workspace".to_string()));
-        assert_eq!(cmd.env.get("CARGO_TARGET_DIR").map(String::as_str), Some("/tmp/target"));
+        assert_eq!(
+            cmd.env.get("CARGO_TARGET_DIR").map(String::as_str),
+            Some("/tmp/target")
+        );
     }
 
     #[test]

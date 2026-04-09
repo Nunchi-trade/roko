@@ -16,9 +16,7 @@
 #![allow(clippy::unnecessary_literal_bound)]
 
 use roko_core::build::{BuildCommand, BuildSystem};
-use roko_core::language::{
-    Import, ImportKind, LanguageProvider, Symbol, SymbolKind, Visibility,
-};
+use roko_core::language::{Import, ImportKind, LanguageProvider, Symbol, SymbolKind, Visibility};
 use std::path::Path;
 
 // ─── NpmBuildSystem ─────────────────────────────────────────────────────
@@ -38,9 +36,7 @@ impl BuildSystem for NpmBuildSystem {
     }
 
     fn test_cmd(&self, target_dir: &Path, filter: Option<&str>) -> BuildCommand {
-        let mut cmd = BuildCommand::new("npm")
-            .arg("test")
-            .working_dir(target_dir);
+        let mut cmd = BuildCommand::new("npm").arg("test").working_dir(target_dir);
         if let Some(f) = filter {
             cmd = cmd.arg("--").arg(f);
         }
@@ -241,7 +237,10 @@ fn parse_es_import(trimmed: &str) -> Option<Import> {
 
     // Side-effect import: `import 'module';`
     let rest_no_semi = rest.trim_end_matches(';').trim();
-    if rest_no_semi.starts_with('\'') || rest_no_semi.starts_with('"') || rest_no_semi.starts_with('`') {
+    if rest_no_semi.starts_with('\'')
+        || rest_no_semi.starts_with('"')
+        || rest_no_semi.starts_with('`')
+    {
         let path = extract_quoted_string(rest_no_semi)?;
         return Some(Import {
             path: path.to_string(),
@@ -388,7 +387,11 @@ fn extract_ts_symbol(line: &str, line_num: usize) -> Option<Symbol> {
     let trimmed = line.trim();
 
     // Skip comments.
-    if trimmed.starts_with("//") || trimmed.starts_with('*') || trimmed.starts_with("/*") || trimmed.is_empty() {
+    if trimmed.starts_with("//")
+        || trimmed.starts_with('*')
+        || trimmed.starts_with("/*")
+        || trimmed.is_empty()
+    {
         return None;
     }
 
@@ -397,26 +400,61 @@ fn extract_ts_symbol(line: &str, line_num: usize) -> Option<Symbol> {
 
     // Try each symbol kind in order.
     if let Some(name) = try_extract_ts_function(rest) {
-        return Some(Symbol { name, kind: SymbolKind::Function, visibility: vis, line: line_num });
+        return Some(Symbol {
+            name,
+            kind: SymbolKind::Function,
+            visibility: vis,
+            line: line_num,
+        });
     }
     if let Some(name) = try_extract_ts_class(rest) {
-        return Some(Symbol { name, kind: SymbolKind::Struct, visibility: vis, line: line_num });
+        return Some(Symbol {
+            name,
+            kind: SymbolKind::Struct,
+            visibility: vis,
+            line: line_num,
+        });
     }
     if let Some(name) = try_extract_ts_interface(rest) {
-        return Some(Symbol { name, kind: SymbolKind::Trait, visibility: vis, line: line_num });
+        return Some(Symbol {
+            name,
+            kind: SymbolKind::Trait,
+            visibility: vis,
+            line: line_num,
+        });
     }
     if let Some(name) = try_extract_ts_type_alias(rest) {
-        return Some(Symbol { name, kind: SymbolKind::Type, visibility: vis, line: line_num });
+        return Some(Symbol {
+            name,
+            kind: SymbolKind::Type,
+            visibility: vis,
+            line: line_num,
+        });
     }
     if let Some(name) = try_extract_ts_const(rest) {
-        return Some(Symbol { name, kind: SymbolKind::Const, visibility: vis, line: line_num });
+        return Some(Symbol {
+            name,
+            kind: SymbolKind::Const,
+            visibility: vis,
+            line: line_num,
+        });
     }
     if let Some(name) = try_extract_ts_enum(rest) {
-        return Some(Symbol { name, kind: SymbolKind::Enum, visibility: vis, line: line_num });
+        return Some(Symbol {
+            name,
+            kind: SymbolKind::Enum,
+            visibility: vis,
+            line: line_num,
+        });
     }
     // `export default` as a symbol
     if let Some(name) = try_extract_export_default(trimmed) {
-        return Some(Symbol { name, kind: SymbolKind::Module, visibility: Visibility::Public, line: line_num });
+        return Some(Symbol {
+            name,
+            kind: SymbolKind::Module,
+            visibility: Visibility::Public,
+            line: line_num,
+        });
     }
 
     None
@@ -831,8 +869,8 @@ enum Status {
 ";
         let syms = lang.extract_symbols(src);
         let kinds: Vec<&SymbolKind> = syms.iter().map(|s| &s.kind).collect();
-        assert!(kinds.contains(&&SymbolKind::Trait));   // interface
-        assert!(kinds.contains(&&SymbolKind::Struct));  // class
+        assert!(kinds.contains(&&SymbolKind::Trait)); // interface
+        assert!(kinds.contains(&&SymbolKind::Struct)); // class
         assert!(kinds.contains(&&SymbolKind::Const));
         assert!(kinds.contains(&&SymbolKind::Function));
         assert!(kinds.contains(&&SymbolKind::Enum));

@@ -122,10 +122,7 @@ impl Default for GitPolicy {
 ///
 /// Returns [`ToolError::CommandNotAllowed`] if any segment violates the
 /// policy.
-pub fn check_git_command_with_policy(
-    command: &str,
-    policy: &GitPolicy,
-) -> Result<(), ToolError> {
+pub fn check_git_command_with_policy(command: &str, policy: &GitPolicy) -> Result<(), ToolError> {
     for segment in split_shell_segments(command) {
         let trimmed = strip_leading_prefixes(segment.trim());
         check_segment(trimmed, policy)?;
@@ -405,7 +402,11 @@ fn check_branch(segment: &str, args: &[&str], policy: &GitPolicy) -> Result<(), 
         return Ok(());
     }
     // Branch names are the non-flag tokens after the delete flag.
-    let branch_names: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
+    let branch_names: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .copied()
+        .collect();
     for branch in branch_names {
         if is_protected(branch, policy) {
             return Err(blocked(
@@ -440,9 +441,7 @@ fn segment_contains_branch(segment: &str, branch: &str) -> bool {
 /// Construct a [`ToolError::CommandNotAllowed`] with a consistent format:
 /// `[<rule>] <reason> — in segment: <segment>`.
 fn blocked(rule: &str, segment: &str, reason: &str) -> ToolError {
-    ToolError::CommandNotAllowed(format!(
-        "[{rule}] {reason} — in segment: `{segment}`"
-    ))
+    ToolError::CommandNotAllowed(format!("[{rule}] {reason} — in segment: `{segment}`"))
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────────────
@@ -463,10 +462,7 @@ mod tests {
 
     fn assert_allowed(cmd: &str) {
         let res = check_git_command(cmd);
-        assert!(
-            res.is_ok(),
-            "expected `{cmd}` to be allowed, got {res:?}"
-        );
+        assert!(res.is_ok(), "expected `{cmd}` to be allowed, got {res:?}");
     }
 
     fn assert_blocked_with_policy(cmd: &str, policy: &GitPolicy) {
@@ -593,8 +589,7 @@ mod tests {
 
     #[test]
     fn non_git_command_passes() {
-        let res = check_git_command("ls -la")
-            .expect("ls -la should pass through git policy");
+        let res = check_git_command("ls -la").expect("ls -la should pass through git policy");
         let _ = res; // res is () — just confirming Ok
     }
 
@@ -633,7 +628,10 @@ mod tests {
             p.protected_branches.contains(&"master".to_string()),
             "default policy must protect master"
         );
-        assert!(p.allow_force_push_on.is_empty(), "allow list must start empty");
+        assert!(
+            p.allow_force_push_on.is_empty(),
+            "allow list must start empty"
+        );
         assert!(p.block_force_push, "block_force_push must default to true");
         assert!(
             p.block_hard_reset_on_protected,

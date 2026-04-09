@@ -67,6 +67,7 @@ impl Watcher {
     }
 
     /// Executes one poll+react iteration. Returns the count of reactions executed.
+    #[allow(clippy::cognitive_complexity)]
     async fn tick(&self) -> anyhow::Result<usize> {
         let pheromones = match self
             .client
@@ -101,8 +102,10 @@ impl Watcher {
         }
 
         let observed = pheromones.len() + insights.len();
-        self.events_seen
-            .fetch_add(u64::try_from(observed).unwrap_or(u64::MAX), Ordering::Relaxed);
+        self.events_seen.fetch_add(
+            u64::try_from(observed).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
 
         debug!(
             pheromones = pheromones.len(),
@@ -152,18 +155,13 @@ impl Watcher {
     }
 
     /// Executes a single reaction against the RPC client.
+    #[allow(clippy::cognitive_complexity)]
     async fn execute(&self, reaction: &Reaction) -> anyhow::Result<()> {
         let started = Instant::now();
         match reaction.kind {
             ReactionKind::PostInsight => {
-                let kind = reaction
-                    .insight_kind
-                    .as_deref()
-                    .unwrap_or("insight");
-                let content = reaction
-                    .content
-                    .as_deref()
-                    .unwrap_or("");
+                let kind = reaction.insight_kind.as_deref().unwrap_or("insight");
+                let content = reaction.content.as_deref().unwrap_or("");
                 let result = self
                     .client
                     .chain_post_insight(&self.cli.watcher_id, kind, content, 0)
@@ -178,14 +176,8 @@ impl Watcher {
                 );
             }
             ReactionKind::DepositPheromone => {
-                let kind = reaction
-                    .pheromone_kind
-                    .as_deref()
-                    .unwrap_or("wisdom");
-                let content = reaction
-                    .content
-                    .as_deref()
-                    .unwrap_or("");
+                let kind = reaction.pheromone_kind.as_deref().unwrap_or("wisdom");
+                let content = reaction.content.as_deref().unwrap_or("");
                 let intensity = reaction.intensity.unwrap_or(0.2);
                 let id = self
                     .client
@@ -231,6 +223,7 @@ impl Watcher {
     }
 
     /// Run the watcher loop until `max_events` is hit (if nonzero).
+    #[allow(clippy::cognitive_complexity)]
     pub async fn run(self) -> anyhow::Result<()> {
         let interval = Duration::from_millis(self.cli.poll_interval_ms);
         info!(

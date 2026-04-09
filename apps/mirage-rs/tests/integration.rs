@@ -27,6 +27,14 @@ async fn spawn_mirage_serial(
     spawn_mirage_test_instance(rpc_url, port).await
 }
 
+fn reserve_free_local_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind ephemeral port")
+        .local_addr()
+        .expect("resolve ephemeral port")
+        .port()
+}
+
 #[tokio::test]
 async fn integration_spawn_and_ready() {
     let port = 18_545_u16;
@@ -146,7 +154,10 @@ async fn test_local_tx_event_sequence() {
 
 #[tokio::test]
 async fn integration_unknown_method_returns_32601_and_status_matches_server() {
-    let port = 18_552;
+    // Use an ephemeral port so this test doesn't collide with
+    // `rpc::mirage_instance_or_env()`'s default fallback (`18552`) when
+    // workspace tests run in parallel.
+    let port = reserve_free_local_port();
     let status_path = PathBuf::from(format!("/tmp/mirage-{port}-status.json"));
     let _ = tokio::fs::remove_file(&status_path).await;
 
@@ -232,7 +243,7 @@ async fn test_mirage_client_status_matches_server() {
 
 #[tokio::test]
 async fn test_pool_slot0_matches_expected_price() {
-    // Dedicated port: `integration_unknown_method_*` binds 18552.
+    // Dedicated port: keep distinct from the unknown-method/status coverage.
     let mut instance = spawn_mirage_serial(None, Some(18_553))
         .await
         .expect("spawn test instance");

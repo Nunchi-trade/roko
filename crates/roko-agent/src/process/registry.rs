@@ -143,7 +143,10 @@ pub fn cleanup_orphaned_agents() {
 
     let _ = std::fs::remove_file(&path);
     if killed > 0 {
-        tracing::warn!(killed, "Cleaned up {killed} orphaned agent process(es) from previous run");
+        tracing::warn!(
+            killed,
+            "Cleaned up {killed} orphaned agent process(es) from previous run"
+        );
     }
 }
 

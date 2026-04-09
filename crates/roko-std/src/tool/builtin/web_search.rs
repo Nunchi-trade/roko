@@ -29,11 +29,16 @@ pub const DESCRIPTION: &str = "Query a configured web search provider and return
 /// Build the [`ToolDef`] for `web_search`.
 #[must_use]
 pub fn tool_def() -> ToolDef {
-    ToolDef::new(NAME, DESCRIPTION, ToolCategory::Network, ToolPermission::networked())
-        .with_parameters(ToolSchema::any_object())
-        .with_concurrency(ToolConcurrency::Parallel)
-        .with_idempotent(true)
-        .with_timeout_ms(30_000)
+    ToolDef::new(
+        NAME,
+        DESCRIPTION,
+        ToolCategory::Network,
+        ToolPermission::networked(),
+    )
+    .with_parameters(ToolSchema::any_object())
+    .with_concurrency(ToolConcurrency::Parallel)
+    .with_idempotent(true)
+    .with_timeout_ms(30_000)
 }
 
 /// Handler for `web_search` (§36.23).
@@ -91,13 +96,12 @@ mod tests {
     #[tokio::test]
     async fn network_capability_gate_denies_when_off() {
         let ctx = testing_ctx_no_net();
-        let call = ToolCall::new(
-            "c",
-            NAME,
-            serde_json::json!({ "query": "claude code" }),
-        );
+        let call = ToolCall::new("c", NAME, serde_json::json!({ "query": "claude code" }));
         let res = Handler.execute(call, &ctx).await;
-        assert!(matches!(res, ToolResult::Err(ToolError::PermissionDenied(_))));
+        assert!(matches!(
+            res,
+            ToolResult::Err(ToolError::PermissionDenied(_))
+        ));
     }
 
     #[tokio::test]

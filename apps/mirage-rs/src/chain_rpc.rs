@@ -97,6 +97,14 @@ pub struct ChainContext {
     /// `InsightEvent`s to every registered subscriber.
     #[cfg(feature = "roko")]
     pub insight_bus: Option<Arc<InsightBus>>,
+    /// Agent registry for identity, trace, and stats tracking.
+    pub agent_registry: crate::chain::AgentRegistry,
+    /// Broadcast bus for agent lifecycle events (WebSocket streaming).
+    pub agent_bus: tokio::sync::broadcast::Sender<crate::chain::AgentEvent>,
+    /// Task store for agent work coordination.
+    pub task_store: crate::chain::TaskStore,
+    /// Broadcast bus for task lifecycle events (WebSocket streaming).
+    pub task_bus: tokio::sync::broadcast::Sender<crate::chain::TaskEvent>,
 }
 
 impl ChainContext {
@@ -111,6 +119,10 @@ impl ChainContext {
             pheromone_bus: None,
             #[cfg(feature = "roko")]
             insight_bus: None,
+            agent_registry: crate::chain::AgentRegistry::new(),
+            agent_bus: tokio::sync::broadcast::channel(1_024).0,
+            task_store: crate::chain::TaskStore::new(),
+            task_bus: tokio::sync::broadcast::channel(1_024).0,
         }
     }
 
@@ -125,6 +137,10 @@ impl ChainContext {
             pheromone_bus: None,
             #[cfg(feature = "roko")]
             insight_bus: None,
+            agent_registry: crate::chain::AgentRegistry::new(),
+            agent_bus: tokio::sync::broadcast::channel(1_024).0,
+            task_store: crate::chain::TaskStore::new(),
+            task_bus: tokio::sync::broadcast::channel(1_024).0,
         }
     }
 
@@ -143,6 +159,10 @@ impl ChainContext {
             toggles,
             pheromone_bus: Some(Arc::new(PheromoneBus::new())),
             insight_bus: Some(Arc::new(InsightBus::new())),
+            agent_registry: crate::chain::AgentRegistry::new(),
+            agent_bus: tokio::sync::broadcast::channel(1_024).0,
+            task_store: crate::chain::TaskStore::new(),
+            task_bus: tokio::sync::broadcast::channel(1_024).0,
         }
     }
 
@@ -150,11 +170,7 @@ impl ChainContext {
     /// context. Useful when the buses must outlive the context (e.g. handed
     /// down from the RPC server entry point).
     #[cfg(feature = "roko")]
-    pub fn set_buses(
-        &mut self,
-        pheromone_bus: Arc<PheromoneBus>,
-        insight_bus: Arc<InsightBus>,
-    ) {
+    pub fn set_buses(&mut self, pheromone_bus: Arc<PheromoneBus>, insight_bus: Arc<InsightBus>) {
         self.pheromone_bus = Some(pheromone_bus);
         self.insight_bus = Some(insight_bus);
     }
@@ -165,7 +181,8 @@ impl std::fmt::Debug for ChainContext {
         let mut dbg = f.debug_struct("ChainContext");
         dbg.field("toggles", &self.toggles)
             .field("insights", &self.knowledge.len())
-            .field("pheromones", &self.pheromones.len());
+            .field("pheromones", &self.pheromones.len())
+            .field("tasks", &self.task_store.len());
         #[cfg(feature = "roko")]
         {
             dbg.field("pheromone_bus", &self.pheromone_bus.is_some())
@@ -198,7 +215,9 @@ fn rpc_err(code: i32, message: impl Into<String>) -> ErrorObjectOwned {
 fn disabled(subsystem: &str) -> ErrorObjectOwned {
     rpc_err(
         err_code::DISABLED,
-        format!("chain subsystem '{subsystem}' is disabled (set --enable-{subsystem} or override via toggles)"),
+        format!(
+            "chain subsystem '{subsystem}' is disabled (set --enable-{subsystem} or override via toggles)"
+        ),
     )
 }
 
@@ -327,7 +346,11 @@ pub fn handle_post_insight(
         return Err(disabled("knowledge"));
     }
     let kind = parse_kind(&params.kind)?;
-    let enabled_by: Result<Vec<_>, _> = params.enabled_by.iter().map(|s| parse_insight_id(s)).collect();
+    let enabled_by: Result<Vec<_>, _> = params
+        .enabled_by
+        .iter()
+        .map(|s| parse_insight_id(s))
+        .collect();
     let enabled_by = enabled_by?;
     let vector = project_tokens(&params.content);
     let author_bytes = params.author.into_bytes();
@@ -363,7 +386,10 @@ pub fn handle_post_insight(
             id: id.to_hex(),
             similarity: None,
         },
-        PostOutcome::Duplicate { existing_id, similarity } => PostInsightResult {
+        PostOutcome::Duplicate {
+            existing_id,
+            similarity,
+        } => PostInsightResult {
             outcome: "duplicate".into(),
             id: existing_id.to_hex(),
             similarity: Some(similarity),
@@ -480,7 +506,9 @@ pub fn handle_confirm_insight(
         .knowledge
         .confirm(id, confirmer_bytes)
         .map_err(|e| match e {
-            crate::chain::KnowledgeError::NotFound(_) => rpc_err(err_code::NOT_FOUND, e.to_string()),
+            crate::chain::KnowledgeError::NotFound(_) => {
+                rpc_err(err_code::NOT_FOUND, e.to_string())
+            }
             crate::chain::KnowledgeError::DuplicateConfirmation(_) => {
                 rpc_err(err_code::DUPLICATE, e.to_string())
             }
@@ -527,7 +555,9 @@ pub fn handle_challenge_insight(
         .knowledge
         .challenge(id, challenger_bytes)
         .map_err(|e| match e {
-            crate::chain::KnowledgeError::NotFound(_) => rpc_err(err_code::NOT_FOUND, e.to_string()),
+            crate::chain::KnowledgeError::NotFound(_) => {
+                rpc_err(err_code::NOT_FOUND, e.to_string())
+            }
             crate::chain::KnowledgeError::DuplicateChallenge(_) => {
                 rpc_err(err_code::DUPLICATE, e.to_string())
             }
@@ -821,10 +851,7 @@ impl SubscriptionManager {
     /// Constructs a manager whose buses are fresh (process-local) instances.
     /// Useful for tests and standalone invocations.
     pub fn with_fresh_buses() -> Self {
-        Self::new(
-            Arc::new(PheromoneBus::new()),
-            Arc::new(InsightBus::new()),
-        )
+        Self::new(Arc::new(PheromoneBus::new()), Arc::new(InsightBus::new()))
     }
 
     /// Returns the underlying pheromone bus.
@@ -1376,6 +1403,105 @@ static METHOD_SCHEMAS: LazyLock<HashMap<&'static str, JsonValue>> = LazyLock::ne
     m
 });
 
+// ─── Agent registry handlers ────────────────────────────────────────────────
+
+/// Handle `chain_registerAgent(id, address_hex, role)`.
+pub fn handle_register_agent(
+    chain: &Arc<RwLock<ChainContext>>,
+    id: String,
+    address_hex: String,
+    role: String,
+) -> Result<bool, ErrorObjectOwned> {
+    let address = alloy_primitives::hex::decode(address_hex.trim_start_matches("0x"))
+        .map_err(|e| ErrorObjectOwned::owned(err_code::INVALID, e.to_string(), None::<()>))?;
+    let mut chain = chain.write();
+    let timestamp = crate::http_api::now_secs();
+    let registered = chain
+        .agent_registry
+        .register(id.clone(), address, role.clone(), timestamp);
+    if registered {
+        let _ = chain
+            .agent_bus
+            .send(crate::chain::AgentEvent::Registered { agent_id: id, role });
+    }
+    Ok(registered)
+}
+
+/// Handle `chain_agentHeartbeat(id)`.
+pub fn handle_agent_heartbeat(
+    chain: &Arc<RwLock<ChainContext>>,
+    id: String,
+    current_block: u64,
+) -> bool {
+    let mut chain = chain.write();
+    let timestamp = crate::http_api::now_secs();
+    let ok = chain
+        .agent_registry
+        .heartbeat(&id, current_block, timestamp);
+    if ok {
+        let _ = chain.agent_bus.send(crate::chain::AgentEvent::Heartbeat {
+            agent_id: id,
+            block: current_block,
+            timestamp,
+        });
+    }
+    ok
+}
+
+/// Handle `chain_agentTrace(id, phase, reads, reasoning, action)`.
+pub fn handle_agent_trace(
+    chain: &Arc<RwLock<ChainContext>>,
+    id: String,
+    phase: String,
+    reads: Vec<String>,
+    reasoning: String,
+    action: String,
+) -> Result<bool, ErrorObjectOwned> {
+    let cognitive_phase = match phase.as_str() {
+        "retrieve" => crate::chain::CognitivePhase::Retrieve,
+        "reason" => crate::chain::CognitivePhase::Reason,
+        "act" => crate::chain::CognitivePhase::Act,
+        "verify" => crate::chain::CognitivePhase::Verify,
+        _ => {
+            return Err(ErrorObjectOwned::owned(
+                err_code::INVALID,
+                format!("invalid phase: {phase}; expected retrieve, reason, act, or verify"),
+                None::<()>,
+            ));
+        }
+    };
+    let mut chain = chain.write();
+    let timestamp = crate::http_api::now_secs();
+    let trace = crate::chain::AgentTrace {
+        cycle: 0,
+        phase: cognitive_phase,
+        reads,
+        reasoning,
+        action,
+        action_id: format!("{id}-{timestamp}"),
+        timestamp,
+    };
+    let _ = chain.agent_bus.send(crate::chain::AgentEvent::Trace {
+        agent_id: id.clone(),
+        trace: trace.clone(),
+    });
+    Ok(chain.agent_registry.add_trace(&id, trace))
+}
+
+/// Handle `chain_agentStats(id, stats_delta)`.
+pub fn handle_agent_stats(
+    chain: &Arc<RwLock<ChainContext>>,
+    id: String,
+    delta: crate::chain::AgentStats,
+) -> bool {
+    let mut chain = chain.write();
+    let _ = chain.agent_bus.send(crate::chain::AgentEvent::Stats {
+        agent_id: id.clone(),
+        delta: delta.clone(),
+    });
+    chain.agent_registry.add_stats_delta(&id, &delta)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1412,7 +1538,10 @@ mod tests {
         .unwrap();
         let results = search.get("results").and_then(|r| r.as_array()).unwrap();
         assert!(!results.is_empty());
-        assert_eq!(results[0]["content"], "uniswap v3 STF revert means insufficient allowance");
+        assert_eq!(
+            results[0]["content"],
+            "uniswap v3 STF revert means insufficient allowance"
+        );
     }
 
     #[test]
@@ -1475,11 +1604,7 @@ mod tests {
         .unwrap();
         assert!(dep.get("id").is_some());
 
-        let q = handle_query_pheromones(
-            &c,
-            json!({ "query": "rug in pool X", "k": 3 }),
-        )
-        .unwrap();
+        let q = handle_query_pheromones(&c, json!({ "query": "rug in pool X", "k": 3 })).unwrap();
         let results = q.get("results").and_then(|r| r.as_array()).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["kind"], "threat");
@@ -1568,8 +1693,8 @@ mod tests {
 
     #[test]
     fn method_schema_known_method_returns_schema() {
-        let s = handle_method_schema(json!({ "method": "chain_postInsight" }))
-            .expect("known method");
+        let s =
+            handle_method_schema(json!({ "method": "chain_postInsight" })).expect("known method");
         assert_eq!(s["method"], "chain_postInsight");
         assert_eq!(s["params"]["type"], "object");
         let required = s["params"]["required"].as_array().expect("required array");
@@ -1604,10 +1729,7 @@ mod tests {
                 "missing description for {name}"
             );
             assert!(schema["params"].is_object(), "missing params for {name}");
-            assert!(
-                !schema["result"].is_null(),
-                "missing result for {name}"
-            );
+            assert!(!schema["result"].is_null(), "missing result for {name}");
         }
     }
 
@@ -1623,14 +1745,12 @@ mod tests {
         //! payloads.
 
         use super::*;
-        use crate::roko_bridge::{
-            BackpressurePolicy, InsightEvent, PheromoneEvent, VecSink,
-        };
+        use crate::roko_bridge::{BackpressurePolicy, InsightEvent, PheromoneEvent, VecSink};
 
         fn ctx_with_subs() -> Arc<RwLock<ChainContext>> {
-            Arc::new(RwLock::new(ChainContext::new_with_subs(
-                ChainToggles::all(),
-            )))
+            Arc::new(RwLock::new(
+                ChainContext::new_with_subs(ChainToggles::all()),
+            ))
         }
 
         #[test]
@@ -1679,7 +1799,12 @@ mod tests {
             let events = sink.events();
             assert_eq!(events.len(), 1);
             match &events[0] {
-                InsightEvent::Posted { kind, content, author, .. } => {
+                InsightEvent::Posted {
+                    kind,
+                    content,
+                    author,
+                    ..
+                } => {
                     assert_eq!(*kind, KnowledgeKind::Insight);
                     assert_eq!(content, "rebalance before 18:00 UTC");
                     assert_eq!(author, b"alice");
@@ -1805,8 +1930,7 @@ mod tests {
         fn subscription_manager_register_unregister_pheromone() {
             let manager = SubscriptionManager::with_fresh_buses();
             let sink: Arc<VecSink<PheromoneEvent>> = Arc::new(VecSink::new());
-            let id = manager
-                .register_pheromone_sink(sink, BackpressurePolicy::DropOldest);
+            let id = manager.register_pheromone_sink(sink, BackpressurePolicy::DropOldest);
             assert!(id.starts_with(PHEROMONE_SUB_PREFIX));
             assert_eq!(manager.pheromones().len(), 1);
 
@@ -1820,8 +1944,7 @@ mod tests {
         fn subscription_manager_register_unregister_insight() {
             let manager = SubscriptionManager::with_fresh_buses();
             let sink: Arc<VecSink<InsightEvent>> = Arc::new(VecSink::new());
-            let id =
-                manager.register_insight_sink(sink, BackpressurePolicy::DropOldest);
+            let id = manager.register_insight_sink(sink, BackpressurePolicy::DropOldest);
             assert!(id.starts_with(INSIGHT_SUB_PREFIX));
             assert_eq!(manager.insights().len(), 1);
 
@@ -1836,8 +1959,8 @@ mod tests {
                 .expect_err("should error");
             assert_eq!(err.code(), err_code::NOT_FOUND);
 
-            let err2 = handle_unsubscribe(&manager, json!({}))
-                .expect_err("should error on missing field");
+            let err2 =
+                handle_unsubscribe(&manager, json!({})).expect_err("should error on missing field");
             assert_eq!(err2.code(), err_code::INVALID);
         }
 
@@ -1846,13 +1969,10 @@ mod tests {
             let manager = SubscriptionManager::with_fresh_buses();
             let p_sink: Arc<VecSink<PheromoneEvent>> = Arc::new(VecSink::new());
             let i_sink: Arc<VecSink<InsightEvent>> = Arc::new(VecSink::new());
-            let p_id =
-                manager.register_pheromone_sink(p_sink, BackpressurePolicy::DropOldest);
-            let i_id =
-                manager.register_insight_sink(i_sink, BackpressurePolicy::DropOldest);
+            let p_id = manager.register_pheromone_sink(p_sink, BackpressurePolicy::DropOldest);
+            let i_id = manager.register_insight_sink(i_sink, BackpressurePolicy::DropOldest);
 
-            let ok =
-                handle_unsubscribe(&manager, json!({"subscriptionId": p_id})).unwrap();
+            let ok = handle_unsubscribe(&manager, json!({"subscriptionId": p_id})).unwrap();
             assert_eq!(ok, json!({"ok": true}));
             assert_eq!(manager.pheromones().len(), 0);
             assert_eq!(manager.insights().len(), 1);

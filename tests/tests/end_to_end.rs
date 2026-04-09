@@ -17,7 +17,7 @@
 use roko_agent::{Agent, ExecAgent, MockAgent};
 use roko_compose::{CacheLayer, Placement, PromptComposer, PromptSection, SectionPriority};
 use roko_core::{
-    Body, Budget, Composer, Context, ContentHash, Decay, Gate, Kind, Policy, Provenance, Query,
+    Body, Budget, Composer, ContentHash, Context, Decay, Gate, Kind, Policy, Provenance, Query,
     Signal, Substrate, Verdict,
 };
 use roko_fs::FileSubstrate;
@@ -38,11 +38,14 @@ impl Policy for EpisodePolicy {
             .filter(|s| s.kind == Kind::GateVerdict)
             .map(|v| {
                 Signal::builder(Kind::Episode)
-                    .body(Body::from_json(&serde_json::json!({
-                        "verdict_id": v.id.to_hex(),
-                        "passed": v.tag("passed").unwrap_or("unknown"),
-                        "logged_at_ms": ctx.now_ms,
-                    })).unwrap_or(Body::empty()))
+                    .body(
+                        Body::from_json(&serde_json::json!({
+                            "verdict_id": v.id.to_hex(),
+                            "passed": v.tag("passed").unwrap_or("unknown"),
+                            "logged_at_ms": ctx.now_ms,
+                        }))
+                        .unwrap_or(Body::empty()),
+                    )
                     .provenance(Provenance::trusted("episode_policy"))
                     .lineage([v.id])
                     .decay(Decay::WISDOM)
@@ -71,9 +74,12 @@ path = "src/lib.rs"
     .await
     .unwrap();
     fs::create_dir_all(root.join("src")).await.unwrap();
-    fs::write(root.join("src/lib.rs"), "pub fn greet() -> &'static str { \"hi\" }\n")
-        .await
-        .unwrap();
+    fs::write(
+        root.join("src/lib.rs"),
+        "pub fn greet() -> &'static str { \"hi\" }\n",
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -152,9 +158,7 @@ async fn coding_agent_full_loop() {
     // 5. Gate verifies the project actually compiles.
     let compile_gate = CompileGate::new(BuildSystem::Cargo).with_timeout_ms(120_000);
     let gate_input_sig = Signal::builder(Kind::Task)
-        .body(
-            Body::from_json(&GatePayload::in_dir(&project).with_label("e2e-test")).unwrap(),
-        )
+        .body(Body::from_json(&GatePayload::in_dir(&project).with_label("e2e-test")).unwrap())
         .lineage([agent_result.output.id]) // chain back to the agent run
         .build();
     substrate.put(gate_input_sig.clone()).await.unwrap();
@@ -198,7 +202,10 @@ async fn coding_agent_full_loop() {
             .await
             .unwrap()
             .len();
-        assert_eq!(count, expected, "kind {kind:?} had {count} signals, expected {expected}");
+        assert_eq!(
+            count, expected,
+            "kind {kind:?} had {count} signals, expected {expected}"
+        );
     }
 
     // 8. Trace the lineage chain: Episode → GateVerdict → Task → AgentOutput → Prompt → PromptSection(x3)
@@ -265,7 +272,12 @@ path = "src/lib.rs"
     .await
     .unwrap();
     fs::create_dir_all(project.join("src")).await.unwrap();
-    fs::write(project.join("src/lib.rs"), "fn broken() { this doesn't parse }").await.unwrap();
+    fs::write(
+        project.join("src/lib.rs"),
+        "fn broken() { this doesn't parse }",
+    )
+    .await
+    .unwrap();
 
     let substrate = FileSubstrate::open(tmp.path().join(".roko")).await.unwrap();
     let gate = CompileGate::new(BuildSystem::Cargo).with_timeout_ms(60_000);
@@ -309,12 +321,7 @@ async fn exec_agent_integrates_with_composer() {
         .unwrap();
 
     let prompt = composer
-        .compose(
-            &[sec],
-            &Budget::unlimited(),
-            &NoOpScorer,
-            &Context::at(0),
-        )
+        .compose(&[sec], &Budget::unlimited(), &NoOpScorer, &Context::at(0))
         .unwrap();
 
     // ExecAgent with `cat` echoes the prompt back.
@@ -356,11 +363,7 @@ mod parking_lot_fork {
 }
 
 impl roko_core::Router for FeedbackCounter {
-    fn select(
-        &self,
-        candidates: &[Signal],
-        _ctx: &Context,
-    ) -> Option<roko_core::Selection> {
+    fn select(&self, candidates: &[Signal], _ctx: &Context) -> Option<roko_core::Selection> {
         candidates
             .first()
             .map(|s| roko_core::Selection::new(s.id, "feedback_counter"))

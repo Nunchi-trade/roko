@@ -12,9 +12,9 @@
 //! Ports Mori's `quick_reviewer_prompt` and `quick_fix_prompt` from
 //! `prompts.rs:3468` and `prompts.rs:3622`.
 
-use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
-use super::{truncate, PlanSlice, RolePromptTemplate};
 use super::common::{format_prior_review, format_verdict_instructions};
+use super::{PlanSlice, RolePromptTemplate, truncate};
+use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
 
 // ─── Quick Reviewer ──────────────────────────────────────────────────────────
 
@@ -173,10 +173,7 @@ impl RolePromptTemplate for QuickFixTemplate {
         let mut sections = Vec::with_capacity(3);
 
         // 1. fix_directive — Task / Critical / Start
-        let directive = format!(
-            "## Fix Directive\n\n{}\n",
-            input.compressed_feedback
-        );
+        let directive = format!("## Fix Directive\n\n{}\n", input.compressed_feedback);
         sections.push(
             PromptSection::new("fix_directive", directive)
                 .with_priority(SectionPriority::Critical)

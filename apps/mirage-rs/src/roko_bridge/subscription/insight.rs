@@ -13,9 +13,9 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use super::{
+    SubscriptionId,
     backpressure::{BackpressurePolicy, SubscriptionCounters, SubscriptionStats},
     sink::{SinkError, SubscriptionSink},
-    SubscriptionId,
 };
 
 use crate::chain::{InsightId, KnowledgeKind, KnowledgeState};

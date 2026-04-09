@@ -86,7 +86,10 @@ impl RateLimiter {
     /// Construct a limiter with the given policy.
     #[must_use]
     pub fn new(policy: RateLimitPolicy) -> Self {
-        Self { policy, state: Mutex::new(HashMap::new()) }
+        Self {
+            policy,
+            state: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Construct a limiter with the default policy (60 calls / 60 s).
@@ -104,9 +107,7 @@ impl RateLimiter {
     #[allow(clippy::significant_drop_tightening)]
     pub fn check(&self, key: &RateLimitKey) -> Result<(), ToolError> {
         let now = Instant::now();
-        let window_start = now
-            .checked_sub(self.policy.window_duration)
-            .unwrap_or(now);
+        let window_start = now.checked_sub(self.policy.window_duration).unwrap_or(now);
         let (len, cap) = {
             let mut guard = self.state.lock();
             let deque = guard.entry(key.clone()).or_default();
@@ -125,9 +126,7 @@ impl RateLimiter {
     #[allow(clippy::significant_drop_tightening)]
     pub fn record(&self, key: &RateLimitKey) {
         let now = Instant::now();
-        let window_start = now
-            .checked_sub(self.policy.window_duration)
-            .unwrap_or(now);
+        let window_start = now.checked_sub(self.policy.window_duration).unwrap_or(now);
         let mut guard = self.state.lock();
         let deque = guard.entry(key.clone()).or_default();
         prune(deque, window_start);
@@ -145,9 +144,7 @@ impl RateLimiter {
     #[allow(clippy::significant_drop_tightening)]
     pub fn check_and_record(&self, key: &RateLimitKey) -> Result<(), ToolError> {
         let now = Instant::now();
-        let window_start = now
-            .checked_sub(self.policy.window_duration)
-            .unwrap_or(now);
+        let window_start = now.checked_sub(self.policy.window_duration).unwrap_or(now);
         let (len, cap) = {
             let mut guard = self.state.lock();
             let deque = guard.entry(key.clone()).or_default();
@@ -173,9 +170,7 @@ impl RateLimiter {
     #[allow(clippy::significant_drop_tightening)]
     pub fn window_size(&self, key: &RateLimitKey) -> usize {
         let now = Instant::now();
-        let window_start = now
-            .checked_sub(self.policy.window_duration)
-            .unwrap_or(now);
+        let window_start = now.checked_sub(self.policy.window_duration).unwrap_or(now);
         let mut guard = self.state.lock();
         let deque = guard.entry(key.clone()).or_default();
         prune(deque, window_start);
@@ -210,8 +205,8 @@ fn prune(deque: &mut VecDeque<Instant>, window_start: Instant) {
 mod tests {
     use std::{
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
         thread,
         time::Duration,
@@ -220,7 +215,10 @@ mod tests {
     use super::*;
 
     fn key(role: &str, tool: &str) -> RateLimitKey {
-        RateLimitKey { role: role.into(), tool: tool.into() }
+        RateLimitKey {
+            role: role.into(),
+            tool: tool.into(),
+        }
     }
 
     // 1 — admit under cap
@@ -232,7 +230,9 @@ mod tests {
         });
         let k = key("role", "tool");
         for _ in 0..4 {
-            limiter.check_and_record(&k).expect("should be admitted under cap");
+            limiter
+                .check_and_record(&k)
+                .expect("should be admitted under cap");
         }
     }
 
@@ -249,8 +249,13 @@ mod tests {
                 .check_and_record(&k)
                 .unwrap_or_else(|e| panic!("call {i} should succeed: {e}"));
         }
-        let err = limiter.check_and_record(&k).expect_err("6th call should be rejected");
-        assert!(matches!(err, ToolError::Other(_)), "expected Other, got {err:?}");
+        let err = limiter
+            .check_and_record(&k)
+            .expect_err("6th call should be rejected");
+        assert!(
+            matches!(err, ToolError::Other(_)),
+            "expected Other, got {err:?}"
+        );
     }
 
     // 3 — window expiry re-admits
@@ -264,10 +269,14 @@ mod tests {
         limiter.check_and_record(&k).expect("1st ok");
         limiter.check_and_record(&k).expect("2nd ok");
         // At cap — should fail now.
-        limiter.check_and_record(&k).expect_err("3rd should fail before expiry");
+        limiter
+            .check_and_record(&k)
+            .expect_err("3rd should fail before expiry");
         // Wait for window to expire.
         thread::sleep(Duration::from_millis(100));
-        limiter.check_and_record(&k).expect("3rd ok after window expired");
+        limiter
+            .check_and_record(&k)
+            .expect("3rd ok after window expired");
     }
 
     // 4 — different keys are independent
@@ -284,7 +293,9 @@ mod tests {
         // A is at cap.
         limiter.check_and_record(&ka).expect_err("A:3 should fail");
         // B is independent — should still admit.
-        limiter.check_and_record(&kb).expect("B:1 ok regardless of A");
+        limiter
+            .check_and_record(&kb)
+            .expect("B:1 ok regardless of A");
     }
 
     // 5 — check without record doesn't increment
@@ -297,10 +308,14 @@ mod tests {
         let k = key("role", "tool");
         // call check() cap times — none should record.
         for i in 0..3 {
-            limiter.check(&k).unwrap_or_else(|e| panic!("check {i} failed: {e}"));
+            limiter
+                .check(&k)
+                .unwrap_or_else(|e| panic!("check {i} failed: {e}"));
         }
         // A real check_and_record should still succeed (window is empty).
-        limiter.check_and_record(&k).expect("should admit: check() never incremented");
+        limiter
+            .check_and_record(&k)
+            .expect("should admit: check() never incremented");
     }
 
     // 6 — record without check does increment
@@ -379,8 +394,7 @@ mod tests {
         let a = RateLimiter::new(RateLimitPolicy::default());
         let b = RateLimiter::with_defaults();
         assert_eq!(
-            a.policy.max_calls_per_window,
-            b.policy.max_calls_per_window,
+            a.policy.max_calls_per_window, b.policy.max_calls_per_window,
             "cap must match"
         );
         assert_eq!(
@@ -435,7 +449,10 @@ mod tests {
             total_calls,
             "all calls must be tallied: {got_suc} + {got_fail} != {total_calls}"
         );
-        assert_eq!(got_suc, CAP, "exactly cap={CAP} must succeed, got {got_suc}");
+        assert_eq!(
+            got_suc, CAP,
+            "exactly cap={CAP} must succeed, got {got_suc}"
+        );
         assert_eq!(
             got_fail,
             total_calls - CAP,

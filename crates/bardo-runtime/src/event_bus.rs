@@ -41,15 +41,15 @@
 //! assert_eq!(events.len(), 2);
 //! ```
 
+use parking_lot::Mutex;
 use std::{
     collections::VecDeque,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
 };
-use parking_lot::Mutex;
 
 use tokio::sync::broadcast;
 use tracing::trace;

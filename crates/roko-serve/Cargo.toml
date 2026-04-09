@@ -1,0 +1,50 @@
+[package]
+name = "roko-serve"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+authors = ["Roko <engineering@bardo.run>"]
+description = "HTTP server crate for the roko API."
+
+[lints]
+workspace = true
+
+[dependencies]
+roko-core = { path = "../roko-core" }
+roko-agent = { path = "../roko-agent" }
+roko-learn = { path = "../roko-learn" }
+roko-gate = { path = "../roko-gate" }
+roko-fs = { path = "../roko-fs" }
+roko-compose = { path = "../roko-compose" }
+roko-std = { path = "../roko-std" }
+roko-orchestrator = { path = "../roko-orchestrator" }
+roko-conductor = { path = "../roko-conductor" }
+roko-plugin = { path = "../roko-plugin" }
+bardo-runtime = { path = "../bardo-runtime" }
+
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+hmac = { workspace = true }
+regex = { workspace = true }
+reqwest = { workspace = true }
+octocrab = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true }
+tokio-tungstenite = { workspace = true }
+toml = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+parking_lot = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

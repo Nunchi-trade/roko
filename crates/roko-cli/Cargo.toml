@@ -21,13 +21,42 @@ roko-fs = { path = "../roko-fs" }
 roko-compose = { path = "../roko-compose" }
 roko-agent = { path = "../roko-agent" }
 roko-gate = { path = "../roko-gate" }
+roko-orchestrator = { path = "../roko-orchestrator" }
+roko-learn = { path = "../roko-learn" }
+roko-conductor = { path = "../roko-conductor" }
+roko-plugin = { path = "../roko-plugin" }
+bardo-runtime = { path = "../bardo-runtime" }
+roko-serve = { path = "../roko-serve" }
 
 clap = { workspace = true, features = ["derive"] }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "net", "signal", "io-util"] }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+parking_lot = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 toml = { workspace = true }
 anyhow = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+regex = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["json", "env-filter"] }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+uuid = { workspace = true }
+tokio-tungstenite = { workspace = true }
+reqwest = { workspace = true }
+octocrab = { workspace = true }
+base64 = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+sysinfo = { workspace = true }
+ratatui = "0.29"
+crossterm = "0.28"
+dotenvy = "0.15"
+dirs = "6"
 
 [dev-dependencies]
 tempfile = { workspace = true }

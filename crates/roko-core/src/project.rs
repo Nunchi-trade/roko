@@ -136,7 +136,7 @@ const RULES: &[Rule] = &[
 
 /// Workspace marker files per language.
 const WORKSPACE_MARKERS: &[(&str, Language)] = &[
-    ("Cargo.toml", Language::Rust),     // checked for [workspace] below
+    ("Cargo.toml", Language::Rust), // checked for [workspace] below
     ("pnpm-workspace.yaml", Language::TypeScript),
     ("lerna.json", Language::TypeScript),
     ("go.work", Language::Go),

@@ -72,7 +72,10 @@ async fn main() -> anyhow::Result<()> {
     let observer_task = if cli.disable_block_observer {
         None
     } else {
-        let eth_url = cli.eth_rpc_url.clone().unwrap_or_else(|| cli.rpc_url.clone());
+        let eth_url = cli
+            .eth_rpc_url
+            .clone()
+            .unwrap_or_else(|| cli.rpc_url.clone());
         let mirage_for_obs = rpc_client::MirageRpcClient::new(cli.rpc_url.clone());
         let watcher_id = cli.watcher_id.clone();
         let interval = Duration::from_millis(cli.block_poll_interval_ms);

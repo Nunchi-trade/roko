@@ -21,11 +21,16 @@ pub const DESCRIPTION: &str = "Find files in the worktree matching a glob patter
 /// Build the [`ToolDef`] for `glob`.
 #[must_use]
 pub fn tool_def() -> ToolDef {
-    ToolDef::new(NAME, DESCRIPTION, ToolCategory::Read, ToolPermission::read_only())
-        .with_parameters(ToolSchema::any_object())
-        .with_concurrency(ToolConcurrency::Parallel)
-        .with_idempotent(true)
-        .with_timeout_ms(30_000)
+    ToolDef::new(
+        NAME,
+        DESCRIPTION,
+        ToolCategory::Read,
+        ToolPermission::read_only(),
+    )
+    .with_parameters(ToolSchema::any_object())
+    .with_concurrency(ToolConcurrency::Parallel)
+    .with_idempotent(true)
+    .with_timeout_ms(30_000)
 }
 
 /// Handler for `glob` (§36.18).
@@ -51,8 +56,9 @@ impl ToolHandler for Handler {
             Err(e) => return ToolResult::Err(e),
         };
         let root = ctx.worktree().to_path_buf();
-        let matches =
-            tokio::task::spawn_blocking(move || walk_and_match(&root, &pattern)).await.ok();
+        let matches = tokio::task::spawn_blocking(move || walk_and_match(&root, &pattern))
+            .await
+            .ok();
         let mut entries = match matches {
             Some(Ok(m)) => m,
             Some(Err(e)) => return ToolResult::Err(ToolError::Other(e)),
@@ -73,7 +79,8 @@ fn walk_and_match(root: &std::path::Path, pattern: &str) -> Result<Vec<Match>, S
     let mut out = Vec::new();
     let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let rd = std::fs::read_dir(&dir).map_err(|e| format!("read_dir({}): {e}", dir.display()))?;
+        let rd =
+            std::fs::read_dir(&dir).map_err(|e| format!("read_dir({}): {e}", dir.display()))?;
         for entry in rd.flatten() {
             let path = entry.path();
             let Ok(meta) = entry.metadata() else { continue };
@@ -86,11 +93,16 @@ fn walk_and_match(root: &std::path::Path, pattern: &str) -> Result<Vec<Match>, S
                 stack.push(path);
                 continue;
             }
-            let Ok(rel) = path.strip_prefix(root) else { continue };
+            let Ok(rel) = path.strip_prefix(root) else {
+                continue;
+            };
             let rel_str = rel.to_string_lossy().replace('\\', "/");
             if glob_matches(pattern, &rel_str) {
                 let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
-                out.push(Match { rel: rel_str, mtime });
+                out.push(Match {
+                    rel: rel_str,
+                    mtime,
+                });
             }
         }
     }

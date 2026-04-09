@@ -199,7 +199,10 @@ impl PatternMiner {
                 Some(Pattern {
                     id: format!("trigram:{:016x}", s.signature),
                     signature: s.signature,
-                    description: format!("{} -> {} -> {}", s.trigram[0], s.trigram[1], s.trigram[2]),
+                    description: format!(
+                        "{} -> {} -> {}",
+                        s.trigram[0], s.trigram[1], s.trigram[2]
+                    ),
                     support_count: s.support,
                     confidence,
                     first_seen_ms: s.first_seen_ms,
@@ -327,11 +330,17 @@ mod tests {
         miner.ingest_episode(&ep(&["read", "edit", "test", "revert"], true));
         miner.ingest_episode(&ep(&["plan", "spike", "abandon"], false));
         let patterns = miner.discover();
-        assert!(patterns.iter().any(|p| p.description == "read -> edit -> test"));
-        assert!(patterns
-            .iter()
-            .find(|p| p.description == "read -> edit -> test")
-            .is_some_and(|p| p.support_count == 2));
+        assert!(
+            patterns
+                .iter()
+                .any(|p| p.description == "read -> edit -> test")
+        );
+        assert!(
+            patterns
+                .iter()
+                .find(|p| p.description == "read -> edit -> test")
+                .is_some_and(|p| p.support_count == 2)
+        );
     }
 
     #[test]
@@ -427,21 +436,9 @@ mod tests {
 
     #[test]
     fn signatures_are_deterministic_and_distinct() {
-        let t1 = [
-            "read".to_string(),
-            "edit".to_string(),
-            "test".to_string(),
-        ];
-        let t2 = [
-            "read".to_string(),
-            "edit".to_string(),
-            "test".to_string(),
-        ];
-        let t3 = [
-            "read".to_string(),
-            "test".to_string(),
-            "edit".to_string(),
-        ];
+        let t1 = ["read".to_string(), "edit".to_string(), "test".to_string()];
+        let t2 = ["read".to_string(), "edit".to_string(), "test".to_string()];
+        let t3 = ["read".to_string(), "test".to_string(), "edit".to_string()];
         assert_eq!(hash_trigram(&t1), hash_trigram(&t2));
         assert_ne!(hash_trigram(&t1), hash_trigram(&t3));
     }

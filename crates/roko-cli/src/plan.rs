@@ -17,14 +17,17 @@ pub struct PlanSummary {
     pub task_count: usize,
     /// Whether the plan has been completed.
     pub completed: bool,
+    /// Whether the plan's `tasks.toml` is missing modern fields.
+    pub old_format: bool,
 }
 
 impl std::fmt::Display for PlanSummary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let status = if self.completed { "done" } else { "pending" };
+        let icon = if self.old_format { "⚠ " } else { "" };
         write!(
             f,
-            "{:<16} {:<40} tasks={:<4} [{}]",
+            "{icon}{:<16} {:<40} tasks={:<4} [{}]",
             self.id, self.title, self.task_count, status
         )
     }
@@ -84,6 +87,7 @@ impl Plan {
             title: self.title.clone(),
             task_count: self.tasks.len(),
             completed,
+            old_format: false,
         }
     }
 
@@ -137,7 +141,10 @@ pub fn list_plan_files(workdir: &Path) -> std::io::Result<Vec<PathBuf>> {
     for entry in std::fs::read_dir(&dir)? {
         let entry = entry?;
         let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "toml" || ext == "json") {
+        if path
+            .extension()
+            .is_some_and(|ext| ext == "toml" || ext == "json")
+        {
             plans.push(path);
         }
     }
@@ -168,11 +175,12 @@ pub fn format_plan_list_json(plans: &[PlanSummary]) -> String {
         .iter()
         .map(|p| {
             format!(
-                r#"{{"id":"{}","title":"{}","task_count":{},"completed":{}}}"#,
+                r#"{{"id":"{}","title":"{}","task_count":{},"completed":{},"old_format":{}}}"#,
                 p.id,
                 p.title.replace('"', "\\\""),
                 p.task_count,
                 p.completed,
+                p.old_format,
             )
         })
         .collect();
@@ -267,6 +275,7 @@ mod tests {
             title: "Test".into(),
             task_count: 3,
             completed: false,
+            old_format: false,
         }];
         let text = format_plan_list(&summaries);
         assert!(text.contains("p1"));
@@ -282,12 +291,14 @@ mod tests {
                 title: "Alpha".into(),
                 task_count: 1,
                 completed: true,
+                old_format: false,
             },
             PlanSummary {
                 id: "b".into(),
                 title: "Beta".into(),
                 task_count: 2,
                 completed: false,
+                old_format: true,
             },
         ];
         let json = format_plan_list_json(&summaries);
@@ -295,6 +306,7 @@ mod tests {
         assert!(json.ends_with(']'));
         assert!(json.contains(r#""id":"a""#));
         assert!(json.contains(r#""completed":false"#));
+        assert!(json.contains(r#""old_format":true"#));
     }
 
     #[test]
@@ -332,10 +344,12 @@ mod tests {
             title: "My Plan".into(),
             task_count: 5,
             completed: true,
+            old_format: true,
         };
         let text = summary.to_string();
         assert!(text.contains("p1"));
         assert!(text.contains("My Plan"));
         assert!(text.contains("done"));
+        assert!(text.contains("⚠"));
     }
 }

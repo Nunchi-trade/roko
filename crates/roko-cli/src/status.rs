@@ -49,7 +49,11 @@ impl SessionStatus {
 
         lines.push(format!(
             "daemon : {}",
-            if self.daemon_running { "running" } else { "not running" }
+            if self.daemon_running {
+                "running"
+            } else {
+                "not running"
+            }
         ));
 
         if let Some(n) = self.signal_count {

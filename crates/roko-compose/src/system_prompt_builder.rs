@@ -459,10 +459,7 @@ mod tests {
 
     #[test]
     fn layer_count_reflects_populated_layers() {
-        assert_eq!(
-            SystemPromptBuilder::new("Role").layer_count(),
-            1
-        );
+        assert_eq!(SystemPromptBuilder::new("Role").layer_count(), 1);
         assert_eq!(
             SystemPromptBuilder::new("Role")
                 .with_conventions("conv")
@@ -572,7 +569,11 @@ mod tests {
         assert!(start_sections.iter().any(|s| s.name == "role_identity"));
         assert!(start_sections.iter().any(|s| s.name == "conventions"));
         // Tools at Middle.
-        assert!(middle_sections.iter().any(|s| s.name == "tool_instructions"));
+        assert!(
+            middle_sections
+                .iter()
+                .any(|s| s.name == "tool_instructions")
+        );
         // Task and anti-patterns at End.
         assert!(end_sections.iter().any(|s| s.name == "task_context"));
         assert!(end_sections.iter().any(|s| s.name == "anti_patterns"));

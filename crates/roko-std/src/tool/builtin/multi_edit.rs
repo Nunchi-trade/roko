@@ -15,16 +15,22 @@ use super::sandbox::{require_string, require_within_worktree};
 pub const NAME: &str = "multi_edit";
 
 /// Human-readable description sent to the LLM.
-pub const DESCRIPTION: &str = "Apply multiple exact-string replacements to a single file atomically.";
+pub const DESCRIPTION: &str =
+    "Apply multiple exact-string replacements to a single file atomically.";
 
 /// Build the [`ToolDef`] for `multi_edit`.
 #[must_use]
 pub fn tool_def() -> ToolDef {
-    ToolDef::new(NAME, DESCRIPTION, ToolCategory::Write, ToolPermission::writes())
-        .with_parameters(ToolSchema::any_object())
-        .with_concurrency(ToolConcurrency::Serial)
-        .with_idempotent(false)
-        .with_timeout_ms(30_000)
+    ToolDef::new(
+        NAME,
+        DESCRIPTION,
+        ToolCategory::Write,
+        ToolPermission::writes(),
+    )
+    .with_parameters(ToolSchema::any_object())
+    .with_concurrency(ToolConcurrency::Serial)
+    .with_idempotent(false)
+    .with_timeout_ms(30_000)
 }
 
 /// Handler for `multi_edit` (§36.17).
@@ -48,7 +54,11 @@ impl ToolHandler for Handler {
             Ok(p) => p,
             Err(e) => return ToolResult::Err(e),
         };
-        let Some(edits) = call.arguments.get("edits").and_then(serde_json::Value::as_array) else {
+        let Some(edits) = call
+            .arguments
+            .get("edits")
+            .and_then(serde_json::Value::as_array)
+        else {
             return ToolResult::Err(ToolError::SchemaInvalid(
                 "multi_edit: missing required array argument `edits`".into(),
             ));
@@ -68,12 +78,14 @@ impl ToolHandler for Handler {
         };
         let mut working = original;
         for (idx, edit) in edits.iter().enumerate() {
-            let Some(old_string) = edit.get("old_string").and_then(serde_json::Value::as_str) else {
+            let Some(old_string) = edit.get("old_string").and_then(serde_json::Value::as_str)
+            else {
                 return ToolResult::Err(ToolError::SchemaInvalid(format!(
                     "multi_edit: edits[{idx}].old_string is required"
                 )));
             };
-            let Some(new_string) = edit.get("new_string").and_then(serde_json::Value::as_str) else {
+            let Some(new_string) = edit.get("new_string").and_then(serde_json::Value::as_str)
+            else {
                 return ToolResult::Err(ToolError::SchemaInvalid(format!(
                     "multi_edit: edits[{idx}].new_string is required"
                 )));

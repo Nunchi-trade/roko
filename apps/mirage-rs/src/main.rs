@@ -82,19 +82,19 @@ struct Cli {
     #[arg(long)]
     block_interval_ms: Option<u64>,
     /// Enable the HDC index subsystem (required for chain_searchInsights / chain_postInsight).
-    /// Only effective with --features chain.
+    /// Only effective with --features chain. Enabled by default.
     #[cfg(feature = "chain")]
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = true)]
     enable_hdc: bool,
     /// Enable the knowledge layer (InsightEntry state machine, confirmations, challenges, decay).
-    /// Only effective with --features chain.
+    /// Only effective with --features chain. Enabled by default.
     #[cfg(feature = "chain")]
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = true)]
     enable_knowledge: bool,
     /// Enable stigmergy (THREAT/OPPORTUNITY/WISDOM pheromones with time decay).
-    /// Only effective with --features chain.
+    /// Only effective with --features chain. Enabled by default.
     #[cfg(feature = "chain")]
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = true)]
     enable_stigmergy: bool,
     /// Switchover threshold — above this entry count, the HDC index auto-upgrades to HNSW.
     /// Only effective with --features chain.
@@ -178,6 +178,7 @@ fn main() {
     }
 }
 
+#[allow(clippy::cognitive_complexity)]
 async fn run(cli: Cli, upstream: Arc<UpstreamRpc>) -> anyhow::Result<()> {
     let follower_upstream = Arc::clone(&upstream);
     let resource_model = ResourceModel::for_profile(
@@ -209,9 +210,6 @@ async fn run(cli: Cli, upstream: Arc<UpstreamRpc>) -> anyhow::Result<()> {
     let mode = MirageMode::from(cli.mode);
     let telemetry_bus = EventBus::<MirageTelemetryEvent>::new(TELEMETRY_BUS_CAPACITY);
     let mirage = MirageFork::with_telemetry(fork, resource_model, mode, telemetry_bus.sender());
-    // Keep the bus alive for the lifetime of the process so late-attaching observers can
-    // subscribe() / replay_from() via a future telemetry RPC.
-    let _telemetry_bus = telemetry_bus;
     let (shutdown_tx, mut shutdown_rx) = broadcast::channel(8);
     let bind = format!("{}:{}", cli.host, cli.port);
 
@@ -224,8 +222,10 @@ async fn run(cli: Cli, upstream: Arc<UpstreamRpc>) -> anyhow::Result<()> {
         };
         if toggles.any_enabled() {
             let chain_ctx = {
-                let mut ctx =
-                    mirage_rs::chain_rpc::ChainContext::with_hnsw(toggles, cli.chain_hnsw_threshold);
+                let mut ctx = mirage_rs::chain_rpc::ChainContext::with_hnsw(
+                    toggles,
+                    cli.chain_hnsw_threshold,
+                );
                 // Install subscription buses so WebSocket streaming (/api/ws) and
                 // JSON-RPC chain_subscribe* methods are available.
                 #[cfg(feature = "roko")]

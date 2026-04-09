@@ -14,6 +14,8 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+pub mod adaptive_threshold;
+
 pub mod artifact_store;
 pub mod clippy_gate;
 pub mod compile;
@@ -36,10 +38,10 @@ pub mod verify_chain_gate;
 pub use artifact_store::ArtifactStore;
 pub use clippy_gate::ClippyGate;
 pub use compile::CompileGate;
-pub use diff_gate::{analyze_diff, DiffAnalysis, DiffGate, DiffPayload};
-pub use env_builder::{build_for_rung, GateEnv, GateEnvBuilder};
-pub use feedback::{feedback_for_agent, GateFeedback, Severity};
+pub use diff_gate::{DiffAnalysis, DiffGate, DiffPayload, analyze_diff};
+pub use env_builder::{GateEnv, GateEnvBuilder, build_for_rung};
+pub use feedback::{GateFeedback, Severity, feedback_for_agent};
 pub use payload::{BuildSystem, GatePayload, TestSelector};
 pub use ratchet::GateRatchet;
 pub use shell::ShellGate;
-pub use test_gate::{parse_test_counts, TestGate};
+pub use test_gate::{TestGate, parse_test_counts};

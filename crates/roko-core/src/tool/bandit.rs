@@ -192,18 +192,15 @@ impl ProfileBandit {
             .chain(profile.fallback_chain.iter())
             .collect();
         for f in &chain {
-            let demoted = arms
-                .iter()
-                .find(|a| a.format == **f)
-                .is_some_and(|a| a.consecutive_failures >= u32::from(profile.demotion_after_failures));
+            let demoted = arms.iter().find(|a| a.format == **f).is_some_and(|a| {
+                a.consecutive_failures >= u32::from(profile.demotion_after_failures)
+            });
             if !demoted {
                 return (*f).clone();
             }
         }
         // Everything demoted — return the last arm (ReAct by convention).
-        chain
-            .last()
-            .map_or(ToolFormat::ReActText, |f| (*f).clone())
+        chain.last().map_or(ToolFormat::ReActText, |f| (*f).clone())
     }
 
     /// Ensure an arm entry exists for each format in the profile's chain.
@@ -311,7 +308,11 @@ impl FormatBandit for EpsilonGreedyBandit {
         ProfileBandit::ensure_arms(&profile, entry);
         let r = self.next_random();
         // Explore.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
         if r < self.epsilon {
             let idx = (self.next_random() * entry.len() as f32) as usize;
             let idx = idx.min(entry.len() - 1);
@@ -429,11 +430,7 @@ mod tests {
             b.feedback(
                 &k,
                 chosen,
-                &ToolOutcome::failure(
-                    super::super::trace::FailureKind::MalformedJson,
-                    100,
-                    0.001,
-                ),
+                &ToolOutcome::failure(super::super::trace::FailureKind::MalformedJson, 100, 0.001),
             );
         }
         // Now the preferred is demoted → next fallback (JsonMode for qwen3).
@@ -448,11 +445,11 @@ mod tests {
         // 2 failures.
         for _ in 0..2 {
             let f = b.select(&k);
-            b.feedback(&k, f, &ToolOutcome::failure(
-                super::super::trace::FailureKind::MalformedJson,
-                100,
-                0.0,
-            ));
+            b.feedback(
+                &k,
+                f,
+                &ToolOutcome::failure(super::super::trace::FailureKind::MalformedJson, 100, 0.0),
+            );
         }
         // One success resets.
         let f = b.select(&k);
@@ -460,11 +457,11 @@ mod tests {
         // Two more failures — still not demoted (was reset).
         for _ in 0..2 {
             let f = b.select(&k);
-            b.feedback(&k, f, &ToolOutcome::failure(
-                super::super::trace::FailureKind::MalformedJson,
-                100,
-                0.0,
-            ));
+            b.feedback(
+                &k,
+                f,
+                &ToolOutcome::failure(super::super::trace::FailureKind::MalformedJson, 100, 0.0),
+            );
         }
         assert_eq!(b.select(&k), ToolFormat::HermesJson);
     }
@@ -477,7 +474,10 @@ mod tests {
         b.feedback(&k, f, &ToolOutcome::success(100, 0.001).with_reward(0.95));
         let table = b.arm_table(&k);
         assert!(!table.is_empty());
-        let preferred = table.iter().find(|a| a.format == ToolFormat::AnthropicBlocks).unwrap();
+        let preferred = table
+            .iter()
+            .find(|a| a.format == ToolFormat::AnthropicBlocks)
+            .unwrap();
         assert_eq!(preferred.pulls, 1);
         assert!((preferred.cumulative_reward - 0.95).abs() < 0.01);
     }
@@ -497,14 +497,18 @@ mod tests {
         let k = key_claude();
         // Train the fallback arm (OpenAiJson) to win.
         for _ in 0..5 {
-            b.feedback(&k, ToolFormat::OpenAiJson, &ToolOutcome::success(100, 0.001).with_reward(0.9));
+            b.feedback(
+                &k,
+                ToolFormat::OpenAiJson,
+                &ToolOutcome::success(100, 0.001).with_reward(0.9),
+            );
         }
         for _ in 0..5 {
-            b.feedback(&k, ToolFormat::AnthropicBlocks, &ToolOutcome::failure(
-                super::super::trace::FailureKind::Timeout,
-                5000,
-                0.05,
-            ));
+            b.feedback(
+                &k,
+                ToolFormat::AnthropicBlocks,
+                &ToolOutcome::failure(super::super::trace::FailureKind::Timeout, 5000, 0.05),
+            );
         }
         // OpenAiJson now has higher mean → should be selected.
         assert_eq!(b.select(&k), ToolFormat::OpenAiJson);

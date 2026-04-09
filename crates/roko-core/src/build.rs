@@ -129,7 +129,9 @@ mod tests {
         }
 
         fn test_cmd(&self, target_dir: &Path, filter: Option<&str>) -> BuildCommand {
-            let mut cmd = BuildCommand::new("fake-cc").arg("test").working_dir(target_dir);
+            let mut cmd = BuildCommand::new("fake-cc")
+                .arg("test")
+                .working_dir(target_dir);
             if let Some(f) = filter {
                 cmd = cmd.arg(f);
             }

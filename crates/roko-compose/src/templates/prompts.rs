@@ -148,6 +148,9 @@ title = "descriptive title"
 status = "pending"
 files = ["path/to/file.ext"]
 acceptance = ["criterion 1", "criterion 2"]
+allowed_tools = ["read_file", "grep"]
+denied_tools = []
+mcp_servers = ["filesystem", "git"]
 depends_on = []
 parallel_group = "A"
 exclusive_files = true
@@ -158,6 +161,7 @@ Rules:
 - Extract implementation units from ## headings in the plan.
 - Each task maps to a logical unit of work with specific files.
 - Acceptance criteria come from the plan's requirements, checkpoints, and verification steps.
+- Use `mcp_servers` to list the MCP server names a task needs before it runs.
 - Group independent tasks into parallel groups (A, B, C...).
 - Tasks that modify the same files must NOT be in the same parallel group.
 - Estimate seconds conservatively (300-1800 per task).

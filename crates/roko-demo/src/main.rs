@@ -84,11 +84,7 @@ async fn main() -> anyhow::Result<()> {
     match &cli.cmd {
         Cmd::List => {
             for s in &loaded.manifest.scenarios {
-                println!(
-                    "{:20}  {}",
-                    s.name,
-                    s.description.as_deref().unwrap_or("")
-                );
+                println!("{:20}  {}", s.name, s.description.as_deref().unwrap_or(""));
             }
         }
         Cmd::Deploy { scenario } => {
@@ -97,7 +93,10 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Seed { scenario } => {
             seed_cmd(&cli, &loaded, scenario).await?;
         }
-        Cmd::Up { scenario, no_agents } => {
+        Cmd::Up {
+            scenario,
+            no_agents,
+        } => {
             deploy_cmd(&cli, &loaded, scenario).await?;
             seed_cmd(&cli, &loaded, scenario).await?;
             if !no_agents {
@@ -111,11 +110,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn deploy_cmd(
-    cli: &Cli,
-    loaded: &LoadedManifest,
-    scenario_name: &str,
-) -> anyhow::Result<()> {
+async fn deploy_cmd(cli: &Cli, loaded: &LoadedManifest, scenario_name: &str) -> anyhow::Result<()> {
     let scenario = loaded.load_scenario(scenario_name)?;
     let ctx = loaded.build_deploy_ctx(cli.rpc_url.clone())?;
     tracing::info!(
@@ -140,11 +135,7 @@ async fn deploy_cmd(
     Ok(())
 }
 
-async fn seed_cmd(
-    cli: &Cli,
-    loaded: &LoadedManifest,
-    scenario_name: &str,
-) -> anyhow::Result<()> {
+async fn seed_cmd(cli: &Cli, loaded: &LoadedManifest, scenario_name: &str) -> anyhow::Result<()> {
     let scenario = loaded.load_scenario(scenario_name)?;
     let deploy_ctx = loaded.build_deploy_ctx(cli.rpc_url.clone())?;
     let deployments = load_deployments(&cli.runtime_dir, scenario_name)?;
@@ -156,16 +147,18 @@ async fn seed_cmd(
         deployed_at_block: deployments.deployed_at_block,
     };
     let registry = FixtureRegistry::new();
-    run_fixtures(&ctx, &registry, &scenario.fixtures, &deploy_ctx.contracts_dir).await?;
+    run_fixtures(
+        &ctx,
+        &registry,
+        &scenario.fixtures,
+        &deploy_ctx.contracts_dir,
+    )
+    .await?;
     tracing::info!("fixtures complete: {} step(s)", scenario.fixtures.len());
     Ok(())
 }
 
-async fn agents_cmd(
-    cli: &Cli,
-    loaded: &LoadedManifest,
-    scenario_name: &str,
-) -> anyhow::Result<()> {
+async fn agents_cmd(cli: &Cli, loaded: &LoadedManifest, scenario_name: &str) -> anyhow::Result<()> {
     let scenario_manifest = loaded.load_scenario(scenario_name)?;
     let deploy_ctx = loaded.build_deploy_ctx(cli.rpc_url.clone())?;
     let deployments = load_deployments(&cli.runtime_dir, scenario_name)?;
@@ -199,11 +192,7 @@ async fn agents_cmd(
     Ok(())
 }
 
-async fn verify_cmd(
-    cli: &Cli,
-    loaded: &LoadedManifest,
-    scenario_name: &str,
-) -> anyhow::Result<()> {
+async fn verify_cmd(cli: &Cli, loaded: &LoadedManifest, scenario_name: &str) -> anyhow::Result<()> {
     let scenario = loaded.load_scenario(scenario_name)?;
     let deploy_ctx = loaded.build_deploy_ctx(cli.rpc_url.clone())?;
     let deployments = load_deployments(&cli.runtime_dir, scenario_name)?;
@@ -226,10 +215,7 @@ async fn verify_cmd(
     }
 }
 
-fn load_deployments(
-    runtime_dir: &PathBuf,
-    scenario: &str,
-) -> anyhow::Result<verify::Deployments> {
+fn load_deployments(runtime_dir: &PathBuf, scenario: &str) -> anyhow::Result<verify::Deployments> {
     let path = runtime_dir.join(scenario).join("deployments.json");
     verify::Deployments::load(&path)
 }

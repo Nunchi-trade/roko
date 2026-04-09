@@ -12,8 +12,8 @@ use async_trait::async_trait;
 use crate::bindings::{BountyMarket, MockERC20, WorkerRegistry};
 use crate::chain_ctx::ChainCtx;
 use crate::manifest::Scenario as ScenarioManifest;
-use crate::scenarios::llm::{LlmProvider, LlmRequest};
 use crate::scenarios::Scenario;
+use crate::scenarios::llm::{LlmProvider, LlmRequest};
 
 /// DeFi routing benchmark scenario.
 pub struct DefiRouting;
@@ -89,7 +89,12 @@ async fn race(ctx: &ChainCtx, llm: Arc<dyn LlmProvider>) -> anyhow::Result<()> {
     let deadline = current_timestamp() + 3600;
     let spec = keccak256(b"defi-routing-benchmark");
     market
-        .postJob(spec.into(), U256::from(200u128 * 10u128.pow(18)), deadline, 1)
+        .postJob(
+            spec.into(),
+            U256::from(200u128 * 10u128.pow(18)),
+            deadline,
+            1,
+        )
         .send()
         .await?
         .watch()
@@ -122,12 +127,7 @@ async fn race(ctx: &ChainCtx, llm: Arc<dyn LlmProvider>) -> anyhow::Result<()> {
         .await?
         .watch()
         .await?;
-    market_d
-        .resolve(job_id, true)
-        .send()
-        .await?
-        .watch()
-        .await?;
+    market_d.resolve(job_id, true).send().await?.watch().await?;
     Ok(())
 }
 

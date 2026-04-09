@@ -35,8 +35,7 @@ pub use batch_client::{
 pub use client::LlmClient;
 pub use config::EnrichmentConfig;
 pub use direct_client::{
-    DirectClient, DirectRequest, DirectResponse, DirectTransport, DirectUsage, Message,
-    StreamChunk,
+    DirectClient, DirectRequest, DirectResponse, DirectTransport, DirectUsage, Message, StreamChunk,
 };
 pub use estimate::{EnrichmentEstimate, PlanInfo, estimate_enrichment};
 pub use inputs::step_dependency_paths;

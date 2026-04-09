@@ -29,8 +29,8 @@
 //! [`SubscriptionSink::is_closed`] returns `true` for every subsequent call.
 
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Push interface from mirage → subscriber.
 ///

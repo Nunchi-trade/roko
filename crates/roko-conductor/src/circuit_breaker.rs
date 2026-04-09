@@ -52,12 +52,7 @@ impl CircuitBreaker {
     ///
     /// Returns `true` if this failure trips the circuit (i.e. the plan
     /// has now reached `max_failures`).
-    pub fn record_failure(
-        &self,
-        plan_id: &str,
-        reason: impl Into<String>,
-        now_ms: i64,
-    ) -> bool {
+    pub fn record_failure(&self, plan_id: &str, reason: impl Into<String>, now_ms: i64) -> bool {
         let mut entry = self.records.entry(plan_id.to_owned()).or_default();
         entry.count += 1;
         entry.last_failure_ms = Some(now_ms);
@@ -73,6 +68,15 @@ impl CircuitBreaker {
         self.records
             .get(plan_id)
             .is_some_and(|r| r.count >= self.max_failures)
+    }
+
+    /// Check if the circuit is broken for this plan.
+    ///
+    /// Alias for [`Self::is_tripped`]; kept for the runtime wiring
+    /// described in the checklist.
+    #[must_use]
+    pub fn is_broken(&self, plan_id: &str) -> bool {
+        self.is_tripped(plan_id)
     }
 
     /// Get the current failure count for a plan.
@@ -144,6 +148,7 @@ mod tests {
         assert!(!cb.record_failure("plan-1", "first", 1000));
         assert!(cb.record_failure("plan-1", "second", 2000));
         assert!(cb.is_tripped("plan-1"));
+        assert!(cb.is_broken("plan-1"));
         assert_eq!(cb.failure_count("plan-1"), 2);
     }
 

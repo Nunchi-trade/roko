@@ -104,7 +104,12 @@ impl MultiAgentPool {
     ///
     /// Agents added to the warm pool are ready to be promoted to active
     /// immediately when work arrives, avoiding cold-start latency.
-    pub fn pre_spawn_warm(&mut self, role: AgentRole, count: usize, agent_fn: &dyn Fn() -> Arc<dyn Agent>) {
+    pub fn pre_spawn_warm(
+        &mut self,
+        role: AgentRole,
+        count: usize,
+        agent_fn: &dyn Fn() -> Arc<dyn Agent>,
+    ) {
         let now = Instant::now();
         for i in 0..count {
             let instance = format!("warm-{i}");
@@ -139,11 +144,7 @@ impl MultiAgentPool {
     /// active set with `InstanceStatus::Active`.
     pub fn promote_warm(&mut self, role: AgentRole) -> Option<AgentInstanceId> {
         // Find the first warm entry for this role.
-        let key = self
-            .warm
-            .keys()
-            .find(|(r, _)| *r == role)?
-            .clone();
+        let key = self.warm.keys().find(|(r, _)| *r == role)?.clone();
 
         let entry = self.warm.remove(&key)?;
         let id = AgentInstanceId::new(role, key.1);
@@ -159,7 +160,11 @@ impl MultiAgentPool {
     }
 
     /// Promote a warm agent with a specific instance name.
-    pub fn promote_warm_named(&mut self, role: AgentRole, instance: &str) -> Option<AgentInstanceId> {
+    pub fn promote_warm_named(
+        &mut self,
+        role: AgentRole,
+        instance: &str,
+    ) -> Option<AgentInstanceId> {
         let key = (role, instance.to_string());
         let entry = self.warm.remove(&key)?;
         let id = AgentInstanceId::new(role, instance);
@@ -174,6 +179,72 @@ impl MultiAgentPool {
         Some(id)
     }
 
+    /// Promote a warm agent to active status only when role capacity allows it.
+    ///
+    /// Returns `None` when no warm entry is available or the role is already at
+    /// capacity.
+    pub fn promote_warm_if_capacity(&mut self, role: AgentRole) -> Option<AgentInstanceId> {
+        if self.at_capacity(role) {
+            return None;
+        }
+        self.promote_warm(role)
+    }
+
+    /// Promote a named warm agent to active status only when role capacity
+    /// allows it.
+    pub fn promote_warm_named_if_capacity(
+        &mut self,
+        role: AgentRole,
+        instance: &str,
+    ) -> Option<AgentInstanceId> {
+        if self.at_capacity(role) {
+            return None;
+        }
+        self.promote_warm_named(role, instance)
+    }
+
+    /// Ensure that an instance is active for the given role/instance name.
+    ///
+    /// Activation strategy:
+    /// 1. Reuse an already-active matching instance.
+    /// 2. Promote a named warm instance.
+    /// 3. Promote any warm instance for the role.
+    /// 4. Spawn and add a fresh active instance.
+    ///
+    /// Returns `None` when no activation path is possible (usually capacity).
+    pub fn ensure_active_instance<F>(
+        &mut self,
+        role: AgentRole,
+        instance: &str,
+        agent_fn: &F,
+    ) -> Option<AgentInstanceId>
+    where
+        F: Fn(AgentRole, &str) -> Arc<dyn Agent> + Send + Sync + ?Sized,
+    {
+        let id = AgentInstanceId::new(role, instance);
+        if self.active.contains_key(&id) {
+            return Some(id);
+        }
+
+        if let Some(promoted) = self.promote_warm_named_if_capacity(role, instance) {
+            return Some(promoted);
+        }
+        if let Some(promoted) = self.promote_warm_if_capacity(role) {
+            return Some(promoted);
+        }
+
+        if self.at_capacity(role) {
+            return None;
+        }
+
+        let spawned = agent_fn(role, instance);
+        if self.add_active(id.clone(), spawned) {
+            Some(id)
+        } else {
+            None
+        }
+    }
+
     /// Evict warm agents for a role that have been idle longer than `max_idle`.
     ///
     /// Returns the number of agents evicted.
@@ -182,7 +253,9 @@ impl MultiAgentPool {
         let keys_to_remove: Vec<(AgentRole, String)> = self
             .warm
             .iter()
-            .filter(|((r, _), entry)| *r == role && now.duration_since(entry.spawned_at) >= max_idle)
+            .filter(|((r, _), entry)| {
+                *r == role && now.duration_since(entry.spawned_at) >= max_idle
+            })
             .map(|(k, _)| k.clone())
             .collect();
         let count = keys_to_remove.len();
@@ -315,6 +388,87 @@ impl MultiAgentPool {
                 used_fallback: false,
             }
         }
+    }
+
+    /// Ensure an active instance exists for `task.id`, then run the task.
+    ///
+    /// When activation fails (for example because concurrency limits are
+    /// saturated), this returns a failed outcome with no result payload.
+    pub async fn run_task_with_auto_activation<F>(
+        &mut self,
+        task: AgentTask,
+        agent_fn: &F,
+    ) -> TaskOutcome
+    where
+        F: Fn(AgentRole, &str) -> Arc<dyn Agent> + Send + Sync + ?Sized,
+    {
+        let id = task.id.clone();
+        let role = id.role;
+        let instance = id.instance.clone();
+
+        if self
+            .ensure_active_instance(role, &instance, agent_fn)
+            .is_none()
+        {
+            return TaskOutcome {
+                id,
+                result: None,
+                status: InstanceStatus::Failed,
+                used_fallback: false,
+            };
+        }
+
+        self.run_task(task).await
+    }
+
+    /// Move a terminal active instance (`done`, `failed`, `cancelled`) back
+    /// into the warm pool for potential reuse.
+    ///
+    /// Returns `true` when an instance was recycled.
+    pub fn recycle_terminal_to_warm(&mut self, id: &AgentInstanceId) -> bool {
+        let Some(entry) = self.active.get(id) else {
+            return false;
+        };
+        if !matches!(
+            entry.status,
+            InstanceStatus::Done | InstanceStatus::Failed | InstanceStatus::Cancelled
+        ) {
+            return false;
+        }
+
+        let Some(entry) = self.active.remove(id) else {
+            return false;
+        };
+        self.warm.insert(
+            (id.role, id.instance.clone()),
+            WarmEntry {
+                agent: entry.agent,
+                spawned_at: Instant::now(),
+            },
+        );
+        true
+    }
+
+    /// Remove active instances that are in a terminal state.
+    ///
+    /// Returns the number of instances removed.
+    pub fn reap_terminal_active(&mut self) -> usize {
+        let ids: Vec<AgentInstanceId> = self
+            .active
+            .iter()
+            .filter(|(_, entry)| {
+                matches!(
+                    entry.status,
+                    InstanceStatus::Done | InstanceStatus::Failed | InstanceStatus::Cancelled
+                )
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        let removed = ids.len();
+        for id in ids {
+            self.active.remove(&id);
+        }
+        removed
     }
 
     // ── Kill operations ──────────────────────────────────────────────────
@@ -729,10 +883,29 @@ mod tests {
         let mut pool = MultiAgentPool::new();
         pool.pre_spawn_warm_named(AgentRole::Auditor, "reviewer-plan7", mock_ok());
 
-        let id = pool.promote_warm_named(AgentRole::Auditor, "reviewer-plan7").unwrap();
+        let id = pool
+            .promote_warm_named(AgentRole::Auditor, "reviewer-plan7")
+            .unwrap();
         assert_eq!(id.instance, "reviewer-plan7");
         assert!(pool.is_active(&id));
         assert_eq!(pool.warm_count(AgentRole::Auditor), 0);
+    }
+
+    #[test]
+    fn multi_pool_promote_warm_if_capacity_blocks_when_full() {
+        let mut pool = MultiAgentPool::new();
+        pool.set_concurrency_limit(AgentRole::Implementer, 1);
+        assert!(pool.add_active(
+            AgentInstanceId::new(AgentRole::Implementer, "active"),
+            mock_ok()
+        ));
+        pool.pre_spawn_warm_named(AgentRole::Implementer, "warm-a", mock_ok());
+
+        assert!(
+            pool.promote_warm_if_capacity(AgentRole::Implementer)
+                .is_none()
+        );
+        assert_eq!(pool.warm_count(AgentRole::Implementer), 1);
     }
 
     #[test]
@@ -742,6 +915,84 @@ mod tests {
         let evicted = pool.evict_warm_all(AgentRole::Implementer);
         assert_eq!(evicted, 5);
         assert_eq!(pool.warm_count(AgentRole::Implementer), 0);
+    }
+
+    #[test]
+    fn multi_pool_ensure_active_instance_reuses_named_warm() {
+        let mut pool = MultiAgentPool::new();
+        pool.pre_spawn_warm_named(AgentRole::Implementer, "plan-7-task-2", mock_ok());
+
+        let id = pool
+            .ensure_active_instance(AgentRole::Implementer, "plan-7-task-2", &|_, _| mock_fail())
+            .unwrap();
+        assert_eq!(id.instance, "plan-7-task-2");
+        assert!(pool.is_active(&id));
+        assert_eq!(pool.warm_count(AgentRole::Implementer), 0);
+    }
+
+    #[test]
+    fn multi_pool_ensure_active_instance_spawns_when_no_warm_available() {
+        let mut pool = MultiAgentPool::new();
+        let id = pool
+            .ensure_active_instance(AgentRole::Auditor, "fresh", &|_, _| mock_ok())
+            .unwrap();
+        assert_eq!(id.role, AgentRole::Auditor);
+        assert!(pool.is_active(&id));
+    }
+
+    #[tokio::test]
+    async fn multi_pool_run_task_with_auto_activation_runs_without_pre_registration() {
+        let mut pool = MultiAgentPool::new();
+        let id = AgentInstanceId::new(AgentRole::Implementer, "auto-1");
+        let task = AgentTask::new(id.clone(), prompt("auto"), ctx());
+
+        let outcome = pool
+            .run_task_with_auto_activation(task, &|_, _| mock_ok())
+            .await;
+        assert_eq!(outcome.id, id);
+        assert_eq!(outcome.status, InstanceStatus::Done);
+        assert!(outcome.result.is_some());
+    }
+
+    #[tokio::test]
+    async fn multi_pool_run_task_with_auto_activation_fails_when_capacity_blocked() {
+        let mut pool = MultiAgentPool::new();
+        pool.set_concurrency_limit(AgentRole::Implementer, 0);
+        let id = AgentInstanceId::new(AgentRole::Implementer, "blocked");
+        let task = AgentTask::new(id.clone(), prompt("auto"), ctx());
+
+        let outcome = pool
+            .run_task_with_auto_activation(task, &|_, _| mock_ok())
+            .await;
+        assert_eq!(outcome.id, id);
+        assert_eq!(outcome.status, InstanceStatus::Failed);
+        assert!(outcome.result.is_none());
+    }
+
+    #[tokio::test]
+    async fn multi_pool_recycle_terminal_to_warm_moves_done_instance() {
+        let mut pool = MultiAgentPool::new();
+        let id = AgentInstanceId::new(AgentRole::Implementer, "recycle-me");
+        pool.add_active(id.clone(), mock_ok());
+        let task = AgentTask::new(id.clone(), prompt("x"), ctx());
+        let _ = pool.run_task(task).await;
+
+        assert!(pool.recycle_terminal_to_warm(&id));
+        assert!(!pool.is_active(&id));
+        assert_eq!(pool.warm_count(AgentRole::Implementer), 1);
+    }
+
+    #[tokio::test]
+    async fn multi_pool_reap_terminal_active_removes_done_entries() {
+        let mut pool = MultiAgentPool::new();
+        let id = AgentInstanceId::new(AgentRole::Implementer, "reap-me");
+        pool.add_active(id.clone(), mock_ok());
+        let task = AgentTask::new(id.clone(), prompt("x"), ctx());
+        let _ = pool.run_task(task).await;
+
+        let removed = pool.reap_terminal_active();
+        assert_eq!(removed, 1);
+        assert!(!pool.is_active(&id));
     }
 
     #[test]

@@ -5,11 +5,7 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
-use roko_core::{
-    Body, Context, ContentHash, Query, Signal,
-    error::Result,
-    traits::Substrate,
-};
+use roko_core::{Body, ContentHash, Context, Query, Signal, error::Result, traits::Substrate};
 
 use crate::{
     chain::{
@@ -129,7 +125,9 @@ impl ChainSubstrate {
         let Some(&insight_id) = st.routing.get(&signal_hash) else {
             return false;
         };
-        st.knowledge.challenge(insight_id, challenger.into()).is_ok()
+        st.knowledge
+            .challenge(insight_id, challenger.into())
+            .is_ok()
     }
 
     /// Applies knowledge-layer decay using `ctx.now_ms`.
@@ -164,7 +162,9 @@ impl Substrate for ChainSubstrate {
         );
         let insight_id = match outcome {
             PostOutcome::Accepted { id }
-            | PostOutcome::Duplicate { existing_id: id, .. }
+            | PostOutcome::Duplicate {
+                existing_id: id, ..
+            }
             | PostOutcome::ExactMatch { id } => id,
         };
         st.routing.insert(hash, insight_id);
@@ -322,10 +322,7 @@ mod tests {
             sub.put(signal(Kind::Insight, text, "alice")).await.unwrap();
         }
         let q = Query::all()
-            .with_tag(
-                "text_query",
-                "deploy eip-1967 upgradable proxy on optimism",
-            )
+            .with_tag("text_query", "deploy eip-1967 upgradable proxy on optimism")
             .limit(1);
         let ctx = Context::now();
         let results = sub.query(&q, &ctx).await.unwrap();

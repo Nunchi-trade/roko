@@ -10,6 +10,7 @@
 //!     {plan_id}/
 //!   runs/           # per-run metrics, traces, snapshots
 //!     {run_id}/
+//!   state/          # orchestrator snapshots, event logs, session state
 //!   config/         # config.toml, presets
 //!   cache/          # cargo-target, context-pack-cache
 //! ```
@@ -28,7 +29,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum LayoutVersion {
     /// Initial layout: `runtime/`, `memory/`, `plans/`, `runs/`,
-    /// `config/`, `cache/`.
+    /// `state/`, `config/`, `cache/`.
     V1 = 1,
 }
 
@@ -79,6 +80,21 @@ impl RokoLayout {
         Self::new(project_root.as_ref().join(".roko"))
     }
 
+    /// Construct a layout for a named repo under the project's `.roko/repos/{name}/`.
+    ///
+    /// Repo-specific signals, episodes, state, etc. are stored in their own
+    /// subdirectory so they don't intermingle with the global data.
+    #[must_use]
+    pub fn for_repo(project_root: impl AsRef<Path>, repo_name: &str) -> Self {
+        Self::new(
+            project_root
+                .as_ref()
+                .join(".roko")
+                .join("repos")
+                .join(repo_name),
+        )
+    }
+
     // ── root accessors ────────────────────────────────────────────────────
 
     /// The `.roko/` root directory.
@@ -117,6 +133,12 @@ impl RokoLayout {
     #[must_use]
     pub fn runs_dir(&self) -> PathBuf {
         self.root.join("runs")
+    }
+
+    /// `.roko/state/` — orchestrator snapshots, event logs, session state.
+    #[must_use]
+    pub fn state_dir(&self) -> PathBuf {
+        self.root.join("state")
     }
 
     /// `.roko/config/` — config.toml, presets.
@@ -193,6 +215,30 @@ impl RokoLayout {
         self.cache_dir().join("context-pack-cache")
     }
 
+    /// `.roko/state/executor.json` — executor snapshot for crash recovery.
+    #[must_use]
+    pub fn executor_snapshot(&self) -> PathBuf {
+        self.state_dir().join("executor.json")
+    }
+
+    /// `.roko/state/events.json` — event log snapshot for crash recovery.
+    #[must_use]
+    pub fn event_log_snapshot(&self) -> PathBuf {
+        self.state_dir().join("events.json")
+    }
+
+    /// `.roko/state/sessions/` — per-session directories.
+    #[must_use]
+    pub fn sessions_dir(&self) -> PathBuf {
+        self.state_dir().join("sessions")
+    }
+
+    /// `.roko/state/sessions/{session_id}/` — one session's state.
+    #[must_use]
+    pub fn session_dir(&self, session_id: &str) -> PathBuf {
+        self.sessions_dir().join(session_id)
+    }
+
     /// `.roko/runtime/roko.pid` — the PID file for the running process.
     #[must_use]
     pub fn pid_file(&self) -> PathBuf {
@@ -215,6 +261,7 @@ impl RokoLayout {
             self.memory_dir(),
             self.plans_dir(),
             self.runs_dir(),
+            self.state_dir(),
             self.config_dir(),
             self.cache_dir(),
         ]
@@ -234,8 +281,7 @@ impl RokoLayout {
         }
         let version_path = self.version_file();
         if !version_path.exists() {
-            tokio::fs::write(&version_path, LayoutVersion::CURRENT.as_u32().to_string())
-                .await?;
+            tokio::fs::write(&version_path, LayoutVersion::CURRENT.as_u32().to_string()).await?;
         }
         Ok(())
     }
@@ -281,14 +327,15 @@ mod tests {
     }
 
     #[test]
-    fn top_level_dirs_returns_six() {
+    fn top_level_dirs_returns_seven() {
         let layout = RokoLayout::new("/tmp/.roko");
         let dirs = layout.top_level_dirs();
-        assert_eq!(dirs.len(), 6);
+        assert_eq!(dirs.len(), 7);
         assert!(dirs.contains(&PathBuf::from("/tmp/.roko/runtime")));
         assert!(dirs.contains(&PathBuf::from("/tmp/.roko/memory")));
         assert!(dirs.contains(&PathBuf::from("/tmp/.roko/plans")));
         assert!(dirs.contains(&PathBuf::from("/tmp/.roko/runs")));
+        assert!(dirs.contains(&PathBuf::from("/tmp/.roko/state")));
         assert!(dirs.contains(&PathBuf::from("/tmp/.roko/config")));
         assert!(dirs.contains(&PathBuf::from("/tmp/.roko/cache")));
     }
@@ -296,7 +343,10 @@ mod tests {
     #[test]
     fn plan_dir_is_under_plans() {
         let layout = RokoLayout::new("/p/.roko");
-        assert_eq!(layout.plan_dir("plan-42"), PathBuf::from("/p/.roko/plans/plan-42"));
+        assert_eq!(
+            layout.plan_dir("plan-42"),
+            PathBuf::from("/p/.roko/plans/plan-42")
+        );
     }
 
     #[test]
@@ -316,16 +366,28 @@ mod tests {
     #[test]
     fn memory_paths() {
         let layout = RokoLayout::new("/x/.roko");
-        assert_eq!(layout.episodes_path(), PathBuf::from("/x/.roko/memory/episodes.jsonl"));
-        assert_eq!(layout.playbook_path(), PathBuf::from("/x/.roko/memory/playbook.toml"));
+        assert_eq!(
+            layout.episodes_path(),
+            PathBuf::from("/x/.roko/memory/episodes.jsonl")
+        );
+        assert_eq!(
+            layout.playbook_path(),
+            PathBuf::from("/x/.roko/memory/playbook.toml")
+        );
         assert_eq!(layout.skills_dir(), PathBuf::from("/x/.roko/memory/skills"));
     }
 
     #[test]
     fn config_and_cache_paths() {
         let layout = RokoLayout::new("/c/.roko");
-        assert_eq!(layout.config_file(), PathBuf::from("/c/.roko/config/config.toml"));
-        assert_eq!(layout.cargo_target_dir(), PathBuf::from("/c/.roko/cache/cargo-target"));
+        assert_eq!(
+            layout.config_file(),
+            PathBuf::from("/c/.roko/config/config.toml")
+        );
+        assert_eq!(
+            layout.cargo_target_dir(),
+            PathBuf::from("/c/.roko/cache/cargo-target")
+        );
         assert_eq!(
             layout.context_pack_cache_dir(),
             PathBuf::from("/c/.roko/cache/context-pack-cache")
@@ -335,8 +397,14 @@ mod tests {
     #[test]
     fn runtime_paths() {
         let layout = RokoLayout::new("/r/.roko");
-        assert_eq!(layout.pid_file(), PathBuf::from("/r/.roko/runtime/roko.pid"));
-        assert_eq!(layout.lock_file(), PathBuf::from("/r/.roko/runtime/roko.lock"));
+        assert_eq!(
+            layout.pid_file(),
+            PathBuf::from("/r/.roko/runtime/roko.pid")
+        );
+        assert_eq!(
+            layout.lock_file(),
+            PathBuf::from("/r/.roko/runtime/roko.lock")
+        );
     }
 
     #[test]

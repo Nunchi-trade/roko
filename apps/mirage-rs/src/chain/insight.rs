@@ -99,12 +99,12 @@ impl KnowledgeKind {
     pub const fn default_half_life_seconds(self) -> u64 {
         // 216,000 blocks per day × block_secs = seconds.
         match self {
-            Self::Warning => 180,                     // 3 minutes
-            Self::Insight => 7 * 86_400,              // 7 days
-            Self::Heuristic => 15 * 86_400,           // 15 days
-            Self::CausalLink => 15 * 86_400,          // 15 days
-            Self::StrategyFragment => 15 * 86_400,    // 15 days
-            Self::AntiKnowledge => 15 * 86_400,       // 15 days
+            Self::Warning => 180,                  // 3 minutes
+            Self::Insight => 7 * 86_400,           // 7 days
+            Self::Heuristic => 15 * 86_400,        // 15 days
+            Self::CausalLink => 15 * 86_400,       // 15 days
+            Self::StrategyFragment => 15 * 86_400, // 15 days
+            Self::AntiKnowledge => 15 * 86_400,    // 15 days
         }
     }
 
@@ -116,9 +116,9 @@ impl KnowledgeKind {
     #[must_use]
     pub const fn base_reward_wei(self) -> u128 {
         match self {
-            Self::Warning => 75_000_000_000_000,      // 0.000075 ETH
-            Self::Insight => 50_000_000_000_000,      // 0.00005  ETH
-            Self::CausalLink => 65_000_000_000_000,   // 0.000065 ETH
+            Self::Warning => 75_000_000_000_000,        // 0.000075 ETH
+            Self::Insight => 50_000_000_000_000,        // 0.00005  ETH
+            Self::CausalLink => 65_000_000_000_000,     // 0.000065 ETH
             Self::AntiKnowledge => 100_000_000_000_000, // 0.0001 ETH
             Self::Heuristic | Self::StrategyFragment => 60_000_000_000_000,
         }
@@ -159,10 +159,20 @@ impl KnowledgeState {
     pub const fn can_transition_to(self, next: Self) -> bool {
         match (self, next) {
             (Self::Created, Self::Active | Self::Stale) => true,
-            (Self::Active, Self::Confirmed | Self::Decaying | Self::Challenged | Self::Stale) => true,
-            (Self::Confirmed, Self::Active | Self::Decaying | Self::Challenged | Self::Stale) => true,
-            (Self::Decaying, Self::Active | Self::Confirmed | Self::Stale | Self::Challenged | Self::Pruned) => true,
-            (Self::Challenged, Self::Active | Self::Confirmed | Self::Pruned | Self::Decaying | Self::Stale) => true,
+            (Self::Active, Self::Confirmed | Self::Decaying | Self::Challenged | Self::Stale) => {
+                true
+            }
+            (Self::Confirmed, Self::Active | Self::Decaying | Self::Challenged | Self::Stale) => {
+                true
+            }
+            (
+                Self::Decaying,
+                Self::Active | Self::Confirmed | Self::Stale | Self::Challenged | Self::Pruned,
+            ) => true,
+            (
+                Self::Challenged,
+                Self::Active | Self::Confirmed | Self::Pruned | Self::Decaying | Self::Stale,
+            ) => true,
             (Self::Pruned | Self::Stale, _) => false,
             _ => false,
         }
@@ -294,7 +304,10 @@ impl InsightEntry {
             return false;
         }
         self.challenges.push(challenger);
-        if !matches!(self.state, KnowledgeState::Challenged | KnowledgeState::Pruned) {
+        if !matches!(
+            self.state,
+            KnowledgeState::Challenged | KnowledgeState::Pruned
+        ) {
             self.state = KnowledgeState::Challenged;
         }
         true
@@ -350,16 +363,30 @@ mod tests {
 
     #[test]
     fn insight_id_is_deterministic() {
-        let a = InsightId::derive(b"alice", b"the router reverts with STF", KnowledgeKind::Insight);
-        let b = InsightId::derive(b"alice", b"the router reverts with STF", KnowledgeKind::Insight);
+        let a = InsightId::derive(
+            b"alice",
+            b"the router reverts with STF",
+            KnowledgeKind::Insight,
+        );
+        let b = InsightId::derive(
+            b"alice",
+            b"the router reverts with STF",
+            KnowledgeKind::Insight,
+        );
         assert_eq!(a, b);
     }
 
     #[test]
     fn insight_id_depends_on_author_content_and_kind() {
         let base = InsightId::derive(b"alice", b"hello", KnowledgeKind::Insight);
-        assert_ne!(base, InsightId::derive(b"bob", b"hello", KnowledgeKind::Insight));
-        assert_ne!(base, InsightId::derive(b"alice", b"world", KnowledgeKind::Insight));
+        assert_ne!(
+            base,
+            InsightId::derive(b"bob", b"hello", KnowledgeKind::Insight)
+        );
+        assert_ne!(
+            base,
+            InsightId::derive(b"alice", b"world", KnowledgeKind::Insight)
+        );
         assert_ne!(
             base,
             InsightId::derive(b"alice", b"hello", KnowledgeKind::Warning)
@@ -444,7 +471,10 @@ mod tests {
 
     #[test]
     fn challenge_sets_challenged_state() {
-        let mut entry = mk_entry(KnowledgeKind::AntiKnowledge, "WRONG: erc20 needs approve(0)");
+        let mut entry = mk_entry(
+            KnowledgeKind::AntiKnowledge,
+            "WRONG: erc20 needs approve(0)",
+        );
         entry.state = KnowledgeState::Active;
         assert!(entry.add_challenge(b"challenger".to_vec()));
         assert_eq!(entry.state, KnowledgeState::Challenged);

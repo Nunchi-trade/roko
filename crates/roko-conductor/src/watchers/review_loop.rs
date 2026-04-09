@@ -1,28 +1,20 @@
-//! Review loop watcher: detects review cycling.
+//! Review loop watcher: detects repeated review rejects without progress.
 //!
-//! When the same review feedback appears [`MAX_REVIEW_CYCLES`] times,
-//! the reviewer and implementer are looping without convergence. This
-//! watcher fires a warning so the conductor can restart or escalate.
+//! When the same plan is rejected repeatedly without advancing to a later
+//! phase, this watcher fires a warning so the conductor can restart or
+//! escalate.
 
 use roko_core::{Body, Context, Kind, Policy, Signal};
-use std::collections::HashMap;
 
 /// Maximum times the same review feedback can appear before firing.
 pub const MAX_REVIEW_CYCLES: usize = 3;
 
 /// Tag key marking signals from this watcher.
 pub const WATCHER_NAME: &str = "review-loop";
+const PLAN_ID_TAG: &str = "plan_id";
+const PLAN_EVENT_FIELD: &str = "event";
 
-/// Tag value identifying review feedback signals in the stream.
-pub const REVIEW_TAG_KEY: &str = "role";
-/// Tag value identifying review signals.
-pub const REVIEW_TAG_VALUE: &str = "reviewer";
-
-/// Detects review cycling: same feedback repeated N times.
-///
-/// Scans all `AgentMessage` signals tagged `role=reviewer` and counts
-/// duplicate body text. Fires when any single feedback text appears
-/// [`MAX_REVIEW_CYCLES`] times.
+/// Detects repeated review rejects for a single plan.
 #[derive(Debug, Clone)]
 pub struct ReviewLoopWatcher {
     /// Max identical review feedbacks before firing.
@@ -45,51 +37,83 @@ impl ReviewLoopWatcher {
     }
 }
 
-/// Extract a comparable key from a review signal's body.
-fn review_body_key(signal: &Signal) -> Option<String> {
-    match &signal.body {
-        Body::Text(s) => {
-            let trimmed = s.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_owned())
-            }
+fn signal_plan_id(signal: &Signal) -> Option<String> {
+    signal.tag(PLAN_ID_TAG).map(str::to_owned).or_else(|| {
+        if signal.kind != Kind::PlanPhase {
+            return None;
         }
-        _ => None,
+
+        signal
+            .body
+            .as_json::<serde_json::Value>()
+            .ok()
+            .and_then(|body| {
+                body.get(PLAN_ID_TAG)
+                    .and_then(|plan_id| plan_id.as_str())
+                    .map(str::to_owned)
+            })
+    })
+}
+
+fn latest_plan_id(stream: &[Signal]) -> Option<String> {
+    stream.iter().rev().find_map(signal_plan_id)
+}
+
+fn plan_event(signal: &Signal) -> Option<String> {
+    if signal.kind != Kind::PlanPhase {
+        return None;
     }
+
+    signal
+        .body
+        .as_json::<serde_json::Value>()
+        .ok()
+        .and_then(|body| {
+            body.get(PLAN_EVENT_FIELD)
+                .and_then(|event| event.as_str())
+                .map(str::to_owned)
+        })
 }
 
 impl Policy for ReviewLoopWatcher {
     fn decide(&self, stream: &[Signal], _ctx: &Context) -> Vec<Signal> {
-        let mut counts: HashMap<String, usize> = HashMap::new();
+        let Some(plan_id) = latest_plan_id(stream) else {
+            return Vec::new();
+        };
+
+        let mut review_rejects = 0usize;
 
         for s in stream {
-            // Only consider review signals.
-            let is_review = s.kind == Kind::AgentMessage
-                && s.tag(REVIEW_TAG_KEY) == Some(REVIEW_TAG_VALUE);
-            if !is_review {
+            if signal_plan_id(s).as_deref() != Some(plan_id.as_str()) {
                 continue;
             }
-            if let Some(key) = review_body_key(s) {
-                *counts.entry(key).or_insert(0) += 1;
-            }
-        }
 
-        // Find the most repeated feedback.
-        if let Some((feedback, count)) = counts.iter().max_by_key(|(_, c)| **c) {
-            if *count >= self.max_cycles {
-                return vec![Signal::builder(Kind::Custom(
-                    "conductor.intervention".into(),
-                ))
-                .body(Body::text(format!(
-                    "review feedback repeated {count} times: {}",
-                    truncate(feedback, 80)
-                )))
-                .tag("watcher", WATCHER_NAME)
-                .tag("severity", "warning")
-                .tag("count", count.to_string())
-                .build()];
+            match s.kind {
+                Kind::PlanPhase => match plan_event(s).as_deref() {
+                    Some("ReviewRejected") => {
+                        review_rejects += 1;
+                        if review_rejects >= self.max_cycles {
+                            return vec![
+                                Signal::builder(Kind::Custom(
+                                    "conductor.intervention".into(),
+                                ))
+                                .body(Body::text(format!(
+                                    "plan {plan_id} repeated review rejects {review_rejects} times without progress"
+                                )))
+                                .tag("watcher", WATCHER_NAME)
+                                .tag("severity", "warning")
+                                .tag("plan_id", plan_id)
+                                .tag("count", review_rejects.to_string())
+                                .build(),
+                            ];
+                        }
+                    }
+                    Some("ReviewApproved") | Some("DocRevisionDone") | Some("MergeSucceeded") => {
+                        review_rejects = 0;
+                    }
+                    _ => {}
+                },
+                _ => {}
             }
         }
 
@@ -101,32 +125,27 @@ impl Policy for ReviewLoopWatcher {
     }
 }
 
-/// Truncate a string to `max_len` characters, appending "..." if truncated.
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_owned()
-    } else {
-        let mut t = s[..max_len].to_owned();
-        t.push_str("...");
-        t
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn review_signal(text: &str) -> Signal {
-        Signal::builder(Kind::AgentMessage)
-            .body(Body::text(text))
-            .tag(REVIEW_TAG_KEY, REVIEW_TAG_VALUE)
+    fn review_phase(event: &str) -> Signal {
+        Signal::builder(Kind::PlanPhase)
+            .body(Body::Json(serde_json::json!({
+                "plan_id": "plan-1",
+                "event": event,
+            })))
+            .tag(PLAN_ID_TAG, "plan-1")
             .build()
     }
 
-    fn non_review_signal(text: &str) -> Signal {
-        Signal::builder(Kind::AgentMessage)
-            .body(Body::text(text))
-            .tag("role", "implementer")
+    fn other_plan_phase(event: &str) -> Signal {
+        Signal::builder(Kind::PlanPhase)
+            .body(Body::Json(serde_json::json!({
+                "plan_id": "plan-2",
+                "event": event,
+            })))
+            .tag(PLAN_ID_TAG, "plan-2")
             .build()
     }
 
@@ -140,9 +159,9 @@ mod tests {
     fn unique_reviews_no_fire() {
         let w = ReviewLoopWatcher::default();
         let stream = vec![
-            review_signal("fix the error handling"),
-            review_signal("add tests for edge cases"),
-            review_signal("rename the variable"),
+            review_phase("ReviewRejected"),
+            review_phase("ReviewApproved"),
+            review_phase("DocRevisionDone"),
         ];
         assert!(w.decide(&stream, &Context::at(0)).is_empty());
     }
@@ -151,9 +170,9 @@ mod tests {
     fn repeated_reviews_fires() {
         let w = ReviewLoopWatcher::default();
         let stream = vec![
-            review_signal("fix the error handling"),
-            review_signal("fix the error handling"),
-            review_signal("fix the error handling"),
+            review_phase("ReviewRejected"),
+            review_phase("ReviewRejected"),
+            review_phase("ReviewRejected"),
         ];
         let out = w.decide(&stream, &Context::at(0));
         assert_eq!(out.len(), 1);
@@ -164,9 +183,9 @@ mod tests {
     fn non_review_signals_ignored() {
         let w = ReviewLoopWatcher::default();
         let stream = vec![
-            non_review_signal("same text"),
-            non_review_signal("same text"),
-            non_review_signal("same text"),
+            other_plan_phase("ImplementationDone"),
+            other_plan_phase("GateFailed"),
+            other_plan_phase("AutoFixDone"),
         ];
         assert!(w.decide(&stream, &Context::at(0)).is_empty());
     }
@@ -175,35 +194,35 @@ mod tests {
     fn below_threshold_no_fire() {
         let w = ReviewLoopWatcher::new(3);
         let stream = vec![
-            review_signal("same"),
-            review_signal("same"),
+            review_phase("ReviewRejected"),
+            review_phase("ReviewRejected"),
         ];
         assert!(w.decide(&stream, &Context::at(0)).is_empty());
     }
 
     #[test]
-    fn whitespace_trimmed() {
+    fn approved_review_resets_loop() {
         let w = ReviewLoopWatcher::new(2);
         let stream = vec![
-            review_signal("  fix it  "),
-            review_signal("fix it"),
+            review_phase("ReviewRejected"),
+            review_phase("ReviewApproved"),
+            review_phase("ReviewRejected"),
         ];
         let out = w.decide(&stream, &Context::at(0));
-        assert_eq!(out.len(), 1);
+        assert!(out.is_empty());
     }
 
     #[test]
     fn interleaved_reviews_still_count() {
         let w = ReviewLoopWatcher::new(3);
         let stream = vec![
-            review_signal("fix A"),
-            review_signal("fix B"),
-            review_signal("fix A"),
-            review_signal("fix B"),
-            review_signal("fix A"),
+            review_phase("ReviewRejected"),
+            other_plan_phase("GateFailed"),
+            review_phase("ReviewRejected"),
+            other_plan_phase("AutoFixDone"),
+            review_phase("ReviewRejected"),
         ];
         let out = w.decide(&stream, &Context::at(0));
         assert_eq!(out.len(), 1);
-        // "fix A" appeared 3 times
     }
 }

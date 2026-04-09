@@ -4,13 +4,16 @@ use std::collections::{BTreeMap, HashMap};
 
 use axum::{
     Json,
-    extract::{Query, State},
+    extract::{Path, Query, State},
+    response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
 
-use super::{ApiError, ApiState, now_secs};
+use super::{
+    ApiError, ApiState, MAX_K, MAX_LIMIT, MIN_BUCKET_WIDTH, PaginatedResponse, now_secs,
+    with_cache_control,
+};
 use crate::chain::{PheromoneKind, pheromone::PheromoneId};
-use crate::chain::projection::project_tokens;
 
 // ---------------------------------------------------------------------------
 // GET /api/pheromones
@@ -55,22 +58,14 @@ pub struct PheromoneItem {
     pub decay_projection: DecayProjection,
 }
 
-#[derive(Serialize)]
-pub struct PheromoneListResponse {
-    pub pheromones: Vec<PheromoneItem>,
-    pub total: usize,
-    pub offset: usize,
-    pub limit: usize,
-    pub timestamp: u64,
-}
-
 pub async fn list_pheromones(
     State(state): State<ApiState>,
     Query(filter): Query<PheromoneFilter>,
-) -> Json<PheromoneListResponse> {
+) -> impl IntoResponse {
     let now = now_secs();
     let chain = state.chain.read();
 
+    let limit = filter.limit.min(MAX_LIMIT);
     let kind_filter = filter.kind.as_deref().and_then(parse_pheromone_kind);
     let min_intensity = filter.min_intensity.unwrap_or(0.0);
 
@@ -130,16 +125,9 @@ pub async fn list_pheromones(
 
     let total = items.len();
     let offset = filter.offset;
-    let limit = filter.limit;
     let items: Vec<_> = items.into_iter().skip(offset).take(limit).collect();
 
-    Json(PheromoneListResponse {
-        pheromones: items,
-        total,
-        offset,
-        limit,
-        timestamp: now,
-    })
+    with_cache_control(PaginatedResponse::new(items, total, offset, limit), 2)
 }
 
 // ---------------------------------------------------------------------------
@@ -163,7 +151,7 @@ pub struct PheromoneSummaryResponse {
     pub timestamp: u64,
 }
 
-pub async fn pheromone_summary(State(state): State<ApiState>) -> Json<PheromoneSummaryResponse> {
+pub async fn pheromone_summary(State(state): State<ApiState>) -> impl IntoResponse {
     let now = now_secs();
     let chain = state.chain.read();
 
@@ -190,11 +178,7 @@ pub async fn pheromone_summary(State(state): State<ApiState>) -> Json<PheromoneS
     let by_kind = by_kind
         .into_iter()
         .map(|(k, (count, total, min, max))| {
-            let avg = if count > 0 {
-                total / count as f64
-            } else {
-                0.0
-            };
+            let avg = if count > 0 { total / count as f64 } else { 0.0 };
             (
                 k.to_owned(),
                 KindSummary {
@@ -208,12 +192,15 @@ pub async fn pheromone_summary(State(state): State<ApiState>) -> Json<PheromoneS
         })
         .collect();
 
-    Json(PheromoneSummaryResponse {
-        by_kind,
-        total_count,
-        total_intensity,
-        timestamp: now,
-    })
+    with_cache_control(
+        PheromoneSummaryResponse {
+            by_kind,
+            total_count,
+            total_intensity,
+            timestamp: now,
+        },
+        5,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -259,9 +246,10 @@ pub async fn query_pheromones(
         code: 400,
     })?;
     let now = now_secs();
-    let vector = project_tokens(&query_text);
+    let vector = state.projection_cache.get_or_insert(&query_text);
     let chain = state.chain.read();
-    let hits = chain.pheromones.query_top_k(&vector, req.k, now);
+    let k = req.k.min(MAX_K);
+    let hits = chain.pheromones.query_top_k(&vector, k, now);
 
     let results = hits
         .into_iter()
@@ -324,7 +312,7 @@ pub async fn pheromone_heatmap(
 ) -> Json<HeatmapResponse> {
     let now = now_secs();
     let since = params.since.unwrap_or(now.saturating_sub(24 * 3600));
-    let bucket_secs = params.bucket_seconds.max(60);
+    let bucket_secs = params.bucket_seconds.max(MIN_BUCKET_WIDTH);
     let chain = state.chain.read();
 
     let mut bucket_map: BTreeMap<u64, (usize, usize, usize, f64)> = BTreeMap::new();
@@ -380,4 +368,141 @@ fn pheromone_kind_str(kind: PheromoneKind) -> &'static str {
         PheromoneKind::Opportunity => "opportunity",
         PheromoneKind::Wisdom => "wisdom",
     }
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/pheromones — deposit a pheromone
+// ---------------------------------------------------------------------------
+
+fn default_half_life() -> Option<u64> {
+    None
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DepositRequest {
+    /// Pheromone kind: "threat", "opportunity", or "wisdom".
+    pub kind: String,
+    /// Text content to project into HDC vector.
+    pub content: String,
+    /// Initial intensity.
+    pub intensity: f32,
+    /// Optional custom half-life in seconds (defaults to kind default).
+    #[serde(default = "default_half_life")]
+    pub half_life_secs: Option<u64>,
+}
+
+/// `POST /api/pheromones` — deposit a new pheromone.
+pub async fn deposit_pheromone(
+    State(state): State<ApiState>,
+    Json(req): Json<DepositRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let kind = parse_pheromone_kind(&req.kind).ok_or(ApiError {
+        error: format!("unknown pheromone kind: {}", req.kind),
+        code: 400,
+    })?;
+    if req.content.is_empty() {
+        return Err(ApiError {
+            error: "content must not be empty".into(),
+            code: 400,
+        });
+    }
+    let vector = state.projection_cache.get_or_insert(&req.content);
+    let now = now_secs();
+
+    let mut chain = state.chain.write();
+    if !chain.toggles.stigmergy {
+        return Err(ApiError {
+            error: "stigmergy subsystem is disabled".into(),
+            code: 503,
+        });
+    }
+
+    #[cfg(feature = "roko")]
+    let broadcast_vector = vector.clone();
+
+    let id = if let Some(tau) = req.half_life_secs {
+        chain
+            .pheromones
+            .deposit_with_half_life(kind, vector, req.intensity, now, tau)
+    } else {
+        chain.pheromones.deposit(kind, vector, req.intensity, now)
+    };
+
+    #[cfg(feature = "roko")]
+    if let Some(bus) = &chain.pheromone_bus {
+        bus.broadcast(kind, broadcast_vector, req.intensity, now);
+    }
+
+    Ok(Json(serde_json::json!({
+        "id": id.0,
+        "kind": pheromone_kind_str(kind),
+        "intensity": req.intensity,
+        "deposited_at": now,
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/pheromones/:id/projection — decay projection for a single pheromone
+// ---------------------------------------------------------------------------
+
+fn default_projection_duration() -> u64 {
+    3600
+}
+
+fn default_projection_steps() -> usize {
+    12
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProjectionQuery {
+    /// Projection duration in seconds (default 3600).
+    #[serde(default = "default_projection_duration")]
+    pub duration_secs: u64,
+    /// Number of steps in the projection (default 12).
+    #[serde(default = "default_projection_steps")]
+    pub steps: usize,
+}
+
+/// `GET /api/pheromones/:id/projection` — project decay over time for a pheromone.
+pub async fn pheromone_projection(
+    State(state): State<ApiState>,
+    Path(id): Path<u64>,
+    Query(params): Query<ProjectionQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let chain = state.chain.read();
+    let pheromone = chain.pheromones.get(PheromoneId(id)).ok_or(ApiError {
+        error: format!("pheromone {id} not found"),
+        code: 404,
+    })?;
+
+    let steps = params.steps.max(1).min(100);
+    let duration = params.duration_secs.max(1);
+    let step_secs = duration / steps as u64;
+    let now = now_secs();
+    let tau = pheromone.effective_half_life_seconds() as f64;
+
+    let points: Vec<serde_json::Value> = (0..=steps)
+        .map(|i| {
+            let offset = step_secs * i as u64;
+            let elapsed = now.saturating_sub(pheromone.deposited_at) as f64 + offset as f64;
+            let projected = if tau > 0.0 {
+                pheromone.base_intensity as f64 * (-elapsed / tau * std::f64::consts::LN_2).exp()
+            } else {
+                0.0
+            };
+            serde_json::json!({
+                "offset_secs": offset,
+                "projected_intensity": projected,
+            })
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({
+        "id": id,
+        "kind": pheromone_kind_str(pheromone.kind),
+        "base_intensity": pheromone.base_intensity,
+        "half_life_secs": pheromone.half_life_seconds,
+        "effective_half_life_secs": pheromone.effective_half_life_seconds(),
+        "points": points,
+    })))
 }

@@ -33,8 +33,7 @@ impl Translator for ReActTranslator {
     fn render_tools(&self, tools: &[ToolDef]) -> RenderedTools {
         let mut block = String::from("You have access to the following tools:\n\n");
         for t in tools {
-            let schema = serde_json::to_string_pretty(t.parameters.as_value())
-                .unwrap_or_default();
+            let schema = serde_json::to_string_pretty(t.parameters.as_value()).unwrap_or_default();
             block.push_str("### ");
             block.push_str(&t.name);
             block.push('\n');
@@ -55,10 +54,7 @@ impl Translator for ReActTranslator {
         RenderedTools::SystemPromptBlock(block)
     }
 
-    fn parse_calls(
-        &self,
-        response: &BackendResponse,
-    ) -> Result<Vec<ToolCall>, TranslatorError> {
+    fn parse_calls(&self, response: &BackendResponse) -> Result<Vec<ToolCall>, TranslatorError> {
         let BackendResponse::Text(text) = response else {
             return Err(TranslatorError::Malformed("expected text".into()));
         };
@@ -167,13 +163,22 @@ mod tests {
         let RenderedTools::SystemPromptBlock(block) = rendered else {
             panic!("expected SystemPromptBlock");
         };
-        assert!(block.contains("### read_file"), "block missing read_file heading: {block}");
-        assert!(block.contains("### edit_file"), "block missing edit_file heading: {block}");
+        assert!(
+            block.contains("### read_file"),
+            "block missing read_file heading: {block}"
+        );
+        assert!(
+            block.contains("### edit_file"),
+            "block missing edit_file heading: {block}"
+        );
         assert!(
             block.contains("Read the contents of a UTF-8 file from the worktree."),
             "block missing read_file description"
         );
-        assert!(block.contains("Action:"), "block missing Action: instruction");
+        assert!(
+            block.contains("Action:"),
+            "block missing Action: instruction"
+        );
         assert!(
             block.contains("Final Answer:"),
             "block missing Final Answer: instruction"
@@ -190,7 +195,10 @@ mod tests {
         let RenderedTools::SystemPromptBlock(block) = rendered else {
             panic!("expected SystemPromptBlock");
         };
-        assert!(block.contains("Action:"), "instructions missing from empty block");
+        assert!(
+            block.contains("Action:"),
+            "instructions missing from empty block"
+        );
         assert!(
             block.contains("Final Answer:"),
             "final answer cue missing from empty block"

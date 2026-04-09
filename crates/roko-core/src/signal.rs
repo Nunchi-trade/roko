@@ -355,7 +355,9 @@ mod tests {
     fn serde_roundtrip() {
         let s = Signal::builder(Kind::Episode)
             .body(Body::text("an episode happened"))
-            .decay(Decay::HalfLife { half_life_ms: 60_000 })
+            .decay(Decay::HalfLife {
+                half_life_ms: 60_000,
+            })
             .tag("run", "42")
             .build();
         let json = serde_json::to_string(&s).unwrap();

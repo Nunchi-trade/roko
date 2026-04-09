@@ -17,8 +17,8 @@ use crate::bindings::{BountyMarket, MockERC20, WorkerRegistry};
 use crate::chain_ctx::ChainCtx;
 use crate::fixtures::FixtureRegistry;
 use crate::manifest::Scenario as ScenarioManifest;
-use crate::scenarios::{LlmProvider, Scenario};
 use crate::scenarios::llm::LlmRequest;
+use crate::scenarios::{LlmProvider, Scenario};
 
 /// Job-board scenario implementation.
 pub struct JobBoard;

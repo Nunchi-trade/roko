@@ -262,8 +262,7 @@ fn try_parse_frontmatter(contents: &str) -> Result<Option<PlanFrontmatter>, Stri
         return Ok(None);
     };
     let block = &after_open[..close_pos];
-    let fm: PlanFrontmatter =
-        serde_yaml_ng::from_str(block).map_err(|e| e.to_string())?;
+    let fm: PlanFrontmatter = serde_yaml_ng::from_str(block).map_err(|e| e.to_string())?;
     Ok(Some(fm))
 }
 
@@ -303,7 +302,9 @@ pub fn validate_frontmatter(fm: &PlanFrontmatter) -> Result<(), ValidationError>
 
 /// Does `name` start with an ASCII alphanumeric character (plan prefix)?
 fn starts_with_plan_prefix(name: &str) -> bool {
-    name.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+    name.chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric())
 }
 
 /// Extract the num prefix from a base name.
@@ -315,8 +316,7 @@ fn plan_num(base: &str) -> &str {
 
 /// Case-insensitive check for a `.md` suffix.
 fn has_md_extension(name: &str) -> bool {
-    name.len() >= 3
-        && name.as_bytes()[name.len() - 3..].eq_ignore_ascii_case(b".md")
+    name.len() >= 3 && name.as_bytes()[name.len() - 3..].eq_ignore_ascii_case(b".md")
 }
 
 /// Strip a trailing `.md` / `.MD` / `.Md` suffix.
@@ -360,7 +360,11 @@ mod tests {
     #[test]
     fn discovers_new_layout_plan() {
         let dir = TempDir::new().unwrap();
-        write_plan(dir.path(), "01-workspace", "---\nplan: 01-workspace\n---\nBody");
+        write_plan(
+            dir.path(),
+            "01-workspace",
+            "---\nplan: 01-workspace\n---\nBody",
+        );
         let plans = discover_plans(dir.path()).unwrap();
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].base, "01-workspace");
@@ -404,11 +408,7 @@ mod tests {
     #[test]
     fn bad_yaml_fails_loud() {
         let dir = TempDir::new().unwrap();
-        write_plan(
-            dir.path(),
-            "05-broken",
-            "---\nplan: [oops: unclosed\n---\n",
-        );
+        write_plan(dir.path(), "05-broken", "---\nplan: [oops: unclosed\n---\n");
         let err = discover_plans(dir.path()).unwrap_err();
         assert!(matches!(err, DiscoveryError::BadFrontmatter { .. }));
     }

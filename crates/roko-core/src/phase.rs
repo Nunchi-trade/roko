@@ -97,7 +97,10 @@ impl std::fmt::Display for FailureKind {
                 write!(f, "vacuous implementation (no code written after retries)")
             }
             Self::VerifyScriptBroken => {
-                write!(f, "verify script broken (impossible conditions after regen)")
+                write!(
+                    f,
+                    "verify script broken (impossible conditions after regen)"
+                )
             }
             Self::Other(s) => write!(f, "{s}"),
         }
@@ -210,7 +213,10 @@ impl PlanPhase {
     /// Terminal phases cannot transition further.
     #[must_use]
     pub const fn is_terminal(&self) -> bool {
-        matches!(self.kind(), PhaseKind::Complete | PhaseKind::Failed | PhaseKind::Skipped)
+        matches!(
+            self.kind(),
+            PhaseKind::Complete | PhaseKind::Failed | PhaseKind::Skipped
+        )
     }
 
     /// True when the phase can legally transition to `next`.
@@ -308,7 +314,12 @@ mod tests {
     fn terminal_phases_have_no_successors() {
         assert!(PlanPhase::Complete.is_terminal());
         assert!(PlanPhase::Skipped.is_terminal());
-        assert!(PlanPhase::Failed { reason: FailureKind::Deadlock }.is_terminal());
+        assert!(
+            PlanPhase::Failed {
+                reason: FailureKind::Deadlock
+            }
+            .is_terminal()
+        );
         assert!(valid_transitions(PhaseKind::Complete).is_empty());
         assert!(valid_transitions(PhaseKind::Failed).is_empty());
         assert!(valid_transitions(PhaseKind::Skipped).is_empty());
@@ -353,7 +364,9 @@ mod tests {
 
     #[test]
     fn kind_discriminant_roundtrip() {
-        let p = PlanPhase::Failed { reason: FailureKind::Deadlock };
+        let p = PlanPhase::Failed {
+            reason: FailureKind::Deadlock,
+        };
         assert_eq!(p.kind(), PhaseKind::Failed);
         assert_eq!(PlanPhase::Queued.kind(), PhaseKind::Queued);
         assert_eq!(PlanPhase::Merging.kind(), PhaseKind::Merging);
@@ -361,7 +374,9 @@ mod tests {
 
     #[test]
     fn failed_phase_serializes_reason() {
-        let p = PlanPhase::Failed { reason: FailureKind::AutoFixExhausted };
+        let p = PlanPhase::Failed {
+            reason: FailureKind::AutoFixExhausted,
+        };
         let json = serde_json::to_string(&p).unwrap();
         assert!(json.contains("failed"));
         assert!(json.contains("AutoFixExhausted"));
@@ -372,7 +387,10 @@ mod tests {
     #[test]
     fn display_formats_failure_kinds() {
         assert_eq!(FailureKind::Deadlock.to_string(), "deadlock");
-        assert_eq!(FailureKind::AutoFixExhausted.to_string(), "auto-fix attempts exhausted");
+        assert_eq!(
+            FailureKind::AutoFixExhausted.to_string(),
+            "auto-fix attempts exhausted"
+        );
         assert_eq!(FailureKind::Other("custom".into()).to_string(), "custom");
     }
 }

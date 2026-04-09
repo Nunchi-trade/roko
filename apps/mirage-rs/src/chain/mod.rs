@@ -21,23 +21,28 @@
 //! richer demurrage / slash schedules can build those on top of the plain
 //! `stake_wei` / `base_reward_wei` scalars.
 
+pub mod agent;
 pub mod hdc_index;
 pub mod hnsw;
 pub mod insight;
 pub mod knowledge;
 pub mod pheromone;
 pub mod projection;
+pub mod task;
 
+pub use agent::{AgentEntry, AgentEvent, AgentRegistry, AgentStats, AgentTrace, CognitivePhase};
 pub use hdc_index::{HdcIndex, Hit, IndexedVector};
 pub use hnsw::{HnswBinaryIndex, HnswConfig};
 pub use insight::{InsightEntry, InsightId, KnowledgeKind, KnowledgeState};
 pub use knowledge::{
-    DUPLICATE_SIMILARITY_THRESHOLD, KnowledgeError, KnowledgeSnapshot, KnowledgeStore,
-    PostOutcome,
+    DUPLICATE_SIMILARITY_THRESHOLD, KnowledgeError, KnowledgeSnapshot, KnowledgeStore, PostOutcome,
 };
 pub use pheromone::{
     DECAY_BUCKETS, Pheromone, PheromoneField, PheromoneHit, PheromoneId, PheromoneKind,
 };
 pub use projection::{
     DEFAULT_EMBEDDING_DIM, HDC_BITS, ProjectionMatrix, project_bytes, project_tokens,
+};
+pub use task::{
+    TaskEntry, TaskError, TaskEvent, TaskId, TaskPriority, TaskState, TaskStats, TaskStore,
 };

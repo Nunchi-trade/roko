@@ -120,13 +120,21 @@ impl Gate for ClippyGate {
         let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        let detail = if stdout.is_empty() { stderr.clone() } else { format!("{stdout}\n{stderr}") };
+        let detail = if stdout.is_empty() {
+            stderr.clone()
+        } else {
+            format!("{stdout}\n{stderr}")
+        };
 
         if output.status.success() {
-            Verdict::pass(&self.name).with_detail(detail).with_duration(elapsed)
+            Verdict::pass(&self.name)
+                .with_detail(detail)
+                .with_duration(elapsed)
         } else {
             let reason = summarize_lint_issues(&stderr, 3);
-            Verdict::fail(&self.name, reason).with_detail(detail).with_duration(elapsed)
+            Verdict::fail(&self.name, reason)
+                .with_detail(detail)
+                .with_duration(elapsed)
         }
     }
 
@@ -168,7 +176,10 @@ mod tests {
 
     #[test]
     fn summarize_limits_count() {
-        let err = (0..10).map(|i| format!("warning: issue {i}")).collect::<Vec<_>>().join("\n");
+        let err = (0..10)
+            .map(|i| format!("warning: issue {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let s = summarize_lint_issues(&err, 2);
         assert_eq!(s.matches("issue").count(), 2);
     }

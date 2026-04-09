@@ -39,8 +39,13 @@ mod tests {
     use roko_core::tool::{ToolCategory, ToolDef, ToolPermission, VecToolRegistry};
 
     fn read_file() -> ToolDef {
-        ToolDef::new("read_file", "r", ToolCategory::Read, ToolPermission::read_only())
-            .with_concurrency(ToolConcurrency::Parallel)
+        ToolDef::new(
+            "read_file",
+            "r",
+            ToolCategory::Read,
+            ToolPermission::read_only(),
+        )
+        .with_concurrency(ToolConcurrency::Parallel)
     }
 
     fn bash() -> ToolDef {

@@ -204,7 +204,10 @@ impl CodexAgent {
 
     fn headers(&self) -> Vec<(String, String)> {
         vec![
-            ("authorization".to_owned(), format!("Bearer {}", self.api_key)),
+            (
+                "authorization".to_owned(),
+                format!("Bearer {}", self.api_key),
+            ),
             ("content-type".to_owned(), "application/json".to_owned()),
         ]
     }
@@ -217,7 +220,10 @@ impl CodexAgent {
             .tag("agent", &self.name)
             .tag("failed", "true")
             .build();
-        AgentResult::fail(output).with_usage(Usage { wall_ms, ..Default::default() })
+        AgentResult::fail(output).with_usage(Usage {
+            wall_ms,
+            ..Default::default()
+        })
     }
 }
 
@@ -243,7 +249,10 @@ impl Agent for CodexAgent {
         let req = ChatRequest {
             model: &self.model,
             max_tokens: self.max_tokens,
-            messages: vec![RequestMessage { role: "user", content: &prompt_text }],
+            messages: vec![RequestMessage {
+                role: "user",
+                content: &prompt_text,
+            }],
         };
         let body = match serde_json::to_vec(&req) {
             Ok(v) => v,
@@ -466,12 +475,14 @@ mod tests {
         let agent = agent_with(poster);
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(!result.success);
-        assert!(result
-            .output
-            .body
-            .as_text()
-            .unwrap_or("")
-            .contains("http 503"));
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .unwrap_or("")
+                .contains("http 503")
+        );
     }
 
     #[tokio::test]
@@ -480,12 +491,14 @@ mod tests {
         let agent = agent_with(poster);
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(!result.success);
-        assert!(result
-            .output
-            .body
-            .as_text()
-            .unwrap_or("")
-            .contains("transport error"));
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .unwrap_or("")
+                .contains("transport error")
+        );
     }
 
     #[tokio::test]
@@ -494,12 +507,14 @@ mod tests {
         let agent = agent_with(poster);
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(!result.success);
-        assert!(result
-            .output
-            .body
-            .as_text()
-            .unwrap_or("")
-            .contains("malformed response JSON"));
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .unwrap_or("")
+                .contains("malformed response JSON")
+        );
     }
 
     #[tokio::test]
@@ -508,12 +523,14 @@ mod tests {
         let agent = agent_with(poster);
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(!result.success);
-        assert!(result
-            .output
-            .body
-            .as_text()
-            .unwrap_or("")
-            .contains("empty response body"));
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .unwrap_or("")
+                .contains("empty response body")
+        );
     }
 
     #[tokio::test]
@@ -529,12 +546,14 @@ mod tests {
         let agent = agent_with(poster);
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(!result.success);
-        assert!(result
-            .output
-            .body
-            .as_text()
-            .unwrap_or("")
-            .contains("no content"));
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .unwrap_or("")
+                .contains("no content")
+        );
     }
 
     #[tokio::test]
@@ -550,12 +569,14 @@ mod tests {
         let agent = agent_with(poster);
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(!result.success);
-        assert!(result
-            .output
-            .body
-            .as_text()
-            .unwrap_or("")
-            .contains("no content"));
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .unwrap_or("")
+                .contains("no content")
+        );
     }
 
     #[tokio::test]
@@ -596,8 +617,8 @@ mod tests {
     #[tokio::test]
     async fn headers_include_bearer_auth_token() {
         let poster = MockPoster::ok(canned_ok("ok", 1, 1));
-        let agent = CodexAgent::new("sk-secret-xyz", "gpt-5-codex")
-            .with_http_poster(poster.clone());
+        let agent =
+            CodexAgent::new("sk-secret-xyz", "gpt-5-codex").with_http_poster(poster.clone());
         let _ = agent.run(&prompt("x"), &Context::now()).await;
         let call = poster.last_call().expect("call recorded");
         let auth = call

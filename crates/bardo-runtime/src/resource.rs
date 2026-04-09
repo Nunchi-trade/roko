@@ -35,10 +35,21 @@ pub struct BudgetEntry<T> {
 
 impl ResourceAccount {
     /// Create a new account with the given limits.
-    pub fn new(label: impl Into<String>, token_limit: u64, cost_limit: f64, time_limit: Duration) -> Self {
+    pub fn new(
+        label: impl Into<String>,
+        token_limit: u64,
+        cost_limit: f64,
+        time_limit: Duration,
+    ) -> Self {
         Self {
-            tokens: BudgetEntry { limit: token_limit, used: 0 },
-            cost: BudgetEntry { limit: cost_limit, used: 0.0 },
+            tokens: BudgetEntry {
+                limit: token_limit,
+                used: 0,
+            },
+            cost: BudgetEntry {
+                limit: cost_limit,
+                used: 0.0,
+            },
             time_limit,
             started_at: Some(Instant::now()),
             label: label.into(),
@@ -79,20 +90,26 @@ impl ResourceAccount {
     /// Token utilisation as a fraction (0.0 to 1.0).
     #[allow(clippy::cast_precision_loss)]
     pub fn token_utilisation(&self) -> f64 {
-        if self.tokens.limit == 0 { return 0.0; }
+        if self.tokens.limit == 0 {
+            return 0.0;
+        }
         self.tokens.used as f64 / self.tokens.limit as f64
     }
 
     /// Cost utilisation as a fraction (0.0–1.0).
     pub fn cost_utilisation(&self) -> f64 {
-        if self.cost.limit == 0.0 { return 0.0; }
+        if self.cost.limit == 0.0 {
+            return 0.0;
+        }
         self.cost.used / self.cost.limit
     }
 
     /// Time utilisation as a fraction (0.0–1.0).
     pub fn time_utilisation(&self) -> f64 {
         let elapsed = self.started_at.map(|s| s.elapsed()).unwrap_or_default();
-        if self.time_limit.is_zero() { return 0.0; }
+        if self.time_limit.is_zero() {
+            return 0.0;
+        }
         elapsed.as_secs_f64() / self.time_limit.as_secs_f64()
     }
 

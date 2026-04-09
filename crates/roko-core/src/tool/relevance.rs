@@ -139,51 +139,66 @@ const TASK_EXPANSIONS: &[(&[&str], &[&str])] = &[
     // Implementation / creation → file read + write + edit
     (
         &[
-            "implement", "create", "build", "develop", "add", "code",
+            "implement",
+            "create",
+            "build",
+            "develop",
+            "add",
+            "code",
             "program",
         ],
         &[
-            "read", "file", "write", "edit", "replace", "string",
-            "contents",
+            "read", "file", "write", "edit", "replace", "string", "contents",
         ],
     ),
     // Fixing / debugging → search + edit + execute
     (
         &["fix", "debug", "repair", "resolve", "diagnose"],
         &[
-            "read", "file", "edit", "replace", "search", "contents",
-            "string", "execute", "command",
+            "read", "file", "edit", "replace", "search", "contents", "string", "execute", "command",
         ],
     ),
     // Testing → run + execute
     (
         &["test", "verify", "validate"],
         &[
-            "run", "test", "execute", "shell", "command", "file", "read",
-            "suite",
+            "run", "test", "execute", "shell", "command", "file", "read", "suite",
         ],
     ),
     // Refactoring → read + edit + search
     (
         &["refactor", "rename", "restructure", "reorganize", "extract"],
         &[
-            "read", "file", "edit", "replace", "string", "write",
-            "contents", "search",
+            "read", "file", "edit", "replace", "string", "write", "contents", "search",
         ],
     ),
     // Searching / investigating → search tools
     (
         &["locate", "investigate", "analyze", "explore"],
         &[
-            "search", "file", "contents", "read", "pattern", "matching",
+            "search",
+            "file",
+            "contents",
+            "read",
+            "pattern",
+            "matching",
             "directory",
         ],
     ),
     // Common CS/software nouns that imply file I/O
     (
         &[
-            "parser", "compiler", "module", "function", "class", "struct",
-            "component", "service", "handler", "endpoint", "schema",
+            "parser",
+            "compiler",
+            "module",
+            "function",
+            "class",
+            "struct",
+            "component",
+            "service",
+            "handler",
+            "endpoint",
+            "schema",
             "config",
         ],
         &["read", "file", "write", "edit", "contents", "string"],
@@ -211,8 +226,8 @@ fn expand_terms(task_terms: &[String]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::def::{ToolCategory, ToolPermission};
+    use super::*;
 
     fn def(name: &str, desc: &str) -> ToolDef {
         ToolDef::new(name, desc, ToolCategory::Read, ToolPermission::read_only())
@@ -220,7 +235,10 @@ mod tests {
 
     fn all() -> Vec<ToolDef> {
         vec![
-            def("read_file", "Read a UTF-8 text file with optional line range"),
+            def(
+                "read_file",
+                "Read a UTF-8 text file with optional line range",
+            ),
             def("write_file", "Write a text file, creating or overwriting"),
             def("grep", "Search file contents using regex"),
             def("bash", "Execute a shell command and capture stdout"),
@@ -302,8 +320,14 @@ mod tests {
     #[test]
     fn expansion_boosts_implementation_tools() {
         let s = KeywordOverlapScorer;
-        let edit = def("edit_file", "Replace an exact string in a file with a new string");
-        let bash = def("bash", "Execute a shell command via bash -c and return its output");
+        let edit = def(
+            "edit_file",
+            "Replace an exact string in a file with a new string",
+        );
+        let bash = def(
+            "bash",
+            "Execute a shell command via bash -c and return its output",
+        );
         let edit_score = s.score("implement a parser", &edit);
         let bash_score = s.score("implement a parser", &bash);
         assert!(
@@ -344,6 +368,9 @@ mod tests {
     fn no_expansion_for_non_trigger_terms() {
         let terms = vec!["xyz".to_string(), "qwerty".to_string()];
         let expanded = expand_terms(&terms);
-        assert!(expanded.is_empty(), "non-trigger terms should produce no expansion");
+        assert!(
+            expanded.is_empty(),
+            "non-trigger terms should produce no expansion"
+        );
     }
 }

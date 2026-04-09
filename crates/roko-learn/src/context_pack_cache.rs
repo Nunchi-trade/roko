@@ -356,10 +356,7 @@ impl ContextPackCache {
     /// A missing file yields an empty cache — this is the "cold start" case
     /// and is not an error. Malformed JSON is surfaced as
     /// [`RokoError::Json`].
-    pub async fn load(
-        path: impl Into<PathBuf>,
-        fallback_capacity: usize,
-    ) -> Result<Self> {
+    pub async fn load(path: impl Into<PathBuf>, fallback_capacity: usize) -> Result<Self> {
         let path = path.into();
         let bytes = match tokio::fs::read(&path).await {
             Ok(b) => b,
@@ -368,8 +365,7 @@ impl ContextPackCache {
             }
             Err(e) => return Err(RokoError::from(e)),
         };
-        let snapshot: DiskSnapshot =
-            serde_json::from_slice(&bytes).map_err(RokoError::from)?;
+        let snapshot: DiskSnapshot = serde_json::from_slice(&bytes).map_err(RokoError::from)?;
         let capacity = if snapshot.capacity == 0 {
             fallback_capacity
         } else {

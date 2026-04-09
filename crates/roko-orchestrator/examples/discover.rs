@@ -13,7 +13,7 @@ use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use roko_orchestrator::{discover_plans, PlanInfo};
+use roko_orchestrator::{PlanInfo, discover_plans};
 
 fn main() -> ExitCode {
     let arg = env::args().nth(1);
@@ -45,7 +45,13 @@ fn main() -> ExitCode {
     }
 
     println!("Discovered {} plan(s):\n", plans.len());
-    for PlanInfo { num, base, frontmatter, .. } in &plans {
+    for PlanInfo {
+        num,
+        base,
+        frontmatter,
+        ..
+    } in &plans
+    {
         let (priority, depends_on, crates) = frontmatter.as_ref().map_or_else(
             || ("-".to_string(), 0_usize, 0_usize),
             |fm| {

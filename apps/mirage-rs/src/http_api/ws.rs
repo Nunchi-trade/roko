@@ -15,9 +15,13 @@
 //! ```
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::{
-    extract::{Query, State, WebSocketUpgrade, ws::{Message, WebSocket}},
+    extract::{
+        Query, State, WebSocketUpgrade,
+        ws::{Message, WebSocket},
+    },
     response::IntoResponse,
 };
 use serde::Deserialize;
@@ -25,6 +29,11 @@ use serde::Deserialize;
 use super::ApiState;
 use crate::chain_rpc::{insight_event_to_json, pheromone_event_to_json};
 use crate::roko_bridge::{BackpressurePolicy, BroadcastSink, InsightEvent, PheromoneEvent};
+
+/// Interval between server-initiated pings.
+const PING_INTERVAL: Duration = Duration::from_secs(30);
+/// If no pong is received within this duration, the connection is considered dead.
+const PONG_TIMEOUT: Duration = Duration::from_secs(90);
 
 #[derive(Debug, Deserialize)]
 pub struct WsParams {
@@ -34,6 +43,12 @@ pub struct WsParams {
     /// Subscribe to insight events (default true).
     #[serde(default = "default_true")]
     pub insights: bool,
+    /// Subscribe to agent events (default false).
+    #[serde(default)]
+    pub agents: bool,
+    /// Optional agent ID filter for agent events.
+    #[serde(default)]
+    pub agent_id: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -69,10 +84,7 @@ async fn handle_ws(mut socket: WebSocket, state: ApiState, params: WsParams) {
     let mut pher_sub_id = None;
     if params.pheromones {
         let (sink, rx) = BroadcastSink::<PheromoneEvent>::new(256);
-        let id = subs.register_pheromone_sink(
-            Arc::new(sink),
-            BackpressurePolicy::DropOldest,
-        );
+        let id = subs.register_pheromone_sink(Arc::new(sink), BackpressurePolicy::DropOldest);
         pher_rx = Some(rx);
         pher_sub_id = Some(id);
     }
@@ -81,13 +93,18 @@ async fn handle_ws(mut socket: WebSocket, state: ApiState, params: WsParams) {
     let mut insi_sub_id = None;
     if params.insights {
         let (sink, rx) = BroadcastSink::<InsightEvent>::new(256);
-        let id = subs.register_insight_sink(
-            Arc::new(sink),
-            BackpressurePolicy::DropOldest,
-        );
+        let id = subs.register_insight_sink(Arc::new(sink), BackpressurePolicy::DropOldest);
         insi_rx = Some(rx);
         insi_sub_id = Some(id);
     }
+
+    // Subscribe to agent events if requested.
+    let mut agent_rx = if params.agents {
+        Some(state.chain.read().agent_bus.subscribe())
+    } else {
+        None
+    };
+    let agent_id_filter = params.agent_id.clone();
 
     // Send initial confirmation.
     let _ = socket
@@ -96,11 +113,17 @@ async fn handle_ws(mut socket: WebSocket, state: ApiState, params: WsParams) {
                 "type": "connected",
                 "pheromones": params.pheromones,
                 "insights": params.insights,
+                "agents": params.agents,
             })
             .to_string()
             .into(),
         ))
         .await;
+
+    // Heartbeat state.
+    let mut ping_interval = tokio::time::interval(PING_INTERVAL);
+    ping_interval.tick().await; // consume the immediate first tick
+    let mut last_pong = Instant::now();
 
     // Forward events from the buses to the WebSocket.
     loop {
@@ -159,12 +182,64 @@ async fn handle_ws(mut socket: WebSocket, state: ApiState, params: WsParams) {
                 }
             }
 
+            // Agent events
+            event = async {
+                match agent_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match event {
+                    Ok(ev) => {
+                        let event_agent_id = match &ev {
+                            crate::chain::AgentEvent::Trace { agent_id, .. }
+                            | crate::chain::AgentEvent::Heartbeat { agent_id, .. }
+                            | crate::chain::AgentEvent::Stats { agent_id, .. }
+                            | crate::chain::AgentEvent::Registered { agent_id, .. } => agent_id,
+                        };
+                        if let Some(ref wanted) = agent_id_filter {
+                            if wanted != event_agent_id {
+                                continue;
+                            }
+                        }
+                        let payload = serde_json::json!({
+                            "channel": "agent",
+                            "data": ev,
+                        });
+                        if socket.send(Message::Text(payload.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        let _ = socket.send(Message::Text(
+                            serde_json::json!({"type": "lagged", "channel": "agent", "missed": n})
+                                .to_string().into()
+                        )).await;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
+            // Server-initiated ping / dead-connection check
+            _ = ping_interval.tick() => {
+                if last_pong.elapsed() > PONG_TIMEOUT {
+                    tracing::debug!("WebSocket client failed pong timeout, closing");
+                    break;
+                }
+                if socket.send(Message::Ping(vec![].into())).await.is_err() {
+                    break;
+                }
+            }
+
             // Client message or disconnect
             msg = socket.recv() => {
                 match msg {
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(Message::Ping(data))) => {
                         let _ = socket.send(Message::Pong(data)).await;
+                    }
+                    Some(Ok(Message::Pong(_))) => {
+                        last_pong = Instant::now();
                     }
                     _ => {} // ignore other messages
                 }

@@ -148,7 +148,10 @@ impl MergeQueue {
         let plan_id = request.plan_id.clone();
         guard.entries.insert(
             plan_id,
-            QueueEntry { request, status: MergeStatus::Queued },
+            QueueEntry {
+                request,
+                status: MergeStatus::Queued,
+            },
         );
         guard.rebuild_order();
     }
@@ -203,10 +206,7 @@ impl MergeQueue {
             return false;
         }
         // Collect files before mutating.
-        let files: Vec<String> = guard.entries[plan_id]
-            .request
-            .files_changed
-            .clone();
+        let files: Vec<String> = guard.entries[plan_id].request.files_changed.clone();
         // Now mutate.
         if let Some(entry) = guard.entries.get_mut(plan_id) {
             entry.status = MergeStatus::Merging;
@@ -242,10 +242,7 @@ impl MergeQueue {
             return false;
         }
         // Collect files to unlock before mutating entries.
-        let files: Vec<String> = guard.entries[plan_id]
-            .request
-            .files_changed
-            .clone();
+        let files: Vec<String> = guard.entries[plan_id].request.files_changed.clone();
         for file in &files {
             guard.locked_files.remove(file);
         }

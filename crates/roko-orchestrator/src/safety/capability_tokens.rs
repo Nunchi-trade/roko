@@ -80,22 +80,34 @@ pub struct GitMutate;
 pub struct SignalEmit;
 
 impl CapabilityKind for FileWrite {
-    fn name() -> &'static str { "FileWrite" }
+    fn name() -> &'static str {
+        "FileWrite"
+    }
 }
 impl CapabilityKind for FileRead {
-    fn name() -> &'static str { "FileRead" }
+    fn name() -> &'static str {
+        "FileRead"
+    }
 }
 impl CapabilityKind for NetworkEgress {
-    fn name() -> &'static str { "NetworkEgress" }
+    fn name() -> &'static str {
+        "NetworkEgress"
+    }
 }
 impl CapabilityKind for SubprocessSpawn {
-    fn name() -> &'static str { "SubprocessSpawn" }
+    fn name() -> &'static str {
+        "SubprocessSpawn"
+    }
 }
 impl CapabilityKind for GitMutate {
-    fn name() -> &'static str { "GitMutate" }
+    fn name() -> &'static str {
+        "GitMutate"
+    }
 }
 impl CapabilityKind for SignalEmit {
-    fn name() -> &'static str { "SignalEmit" }
+    fn name() -> &'static str {
+        "SignalEmit"
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -127,23 +139,33 @@ pub struct Capability<K: CapabilityKind> {
 impl<K: CapabilityKind> Capability<K> {
     /// Unique id of this token (stable across the token's lifetime).
     #[must_use]
-    pub const fn id(&self) -> Uuid { self.id }
+    pub const fn id(&self) -> Uuid {
+        self.id
+    }
 
     /// Target that this capability authorises (path, URL, repo, etc.).
     #[must_use]
-    pub fn target(&self) -> &str { &self.target }
+    pub fn target(&self) -> &str {
+        &self.target
+    }
 
     /// Name of the privilege kind (`"FileWrite"`, `"NetworkEgress"`, …).
     #[must_use]
-    pub fn kind_name(&self) -> &'static str { K::name() }
+    pub fn kind_name(&self) -> &'static str {
+        K::name()
+    }
 
     /// Wall-clock millisecond when this capability was issued.
     #[must_use]
-    pub const fn issued_at_ms(&self) -> i64 { self.issued_at_ms }
+    pub const fn issued_at_ms(&self) -> i64 {
+        self.issued_at_ms
+    }
 
     /// Time-to-live, in milliseconds.
     #[must_use]
-    pub const fn ttl_ms(&self) -> u64 { self.ttl_ms }
+    pub const fn ttl_ms(&self) -> u64 {
+        self.ttl_ms
+    }
 
     /// Returns `true` if the capability's TTL has passed at `now_ms`.
     #[must_use]
@@ -591,13 +613,7 @@ mod tests {
         // Manually construct a second capability with the SAME id to
         // prove the burn set rejects reuse. (The only place this is
         // possible is inside this module; real callers can't.)
-        let msg_sig = sign_capability::<FileRead>(
-            &[7u8; 32],
-            id,
-            "/tmp/x",
-            now_ms(),
-            5_000,
-        );
+        let msg_sig = sign_capability::<FileRead>(&[7u8; 32], id, "/tmp/x", now_ms(), 5_000);
         let forged_reuse = Capability::<FileRead> {
             id,
             target: "/tmp/x".into(),
@@ -618,13 +634,7 @@ mod tests {
         let target = "/tmp/old".to_string();
         let issued_at_ms = now_ms() - 10_000;
         let ttl_ms: u64 = 100;
-        let signature = sign_capability::<FileWrite>(
-            &[7u8; 32],
-            id,
-            &target,
-            issued_at_ms,
-            ttl_ms,
-        );
+        let signature = sign_capability::<FileWrite>(&[7u8; 32], id, &target, issued_at_ms, ttl_ms);
         let cap = Capability::<FileWrite> {
             id,
             target,
@@ -732,13 +742,7 @@ mod tests {
         let issued_at_ms = now_ms();
         let ttl_ms: u64 = 60_000;
         let target = "/tmp/race".to_string();
-        let sig = sign_capability::<FileWrite>(
-            &[7u8; 32],
-            id,
-            &target,
-            issued_at_ms,
-            ttl_ms,
-        );
+        let sig = sign_capability::<FileWrite>(&[7u8; 32], id, &target, issued_at_ms, ttl_ms);
         let make = || Capability::<FileWrite> {
             id,
             target: target.clone(),
@@ -757,15 +761,9 @@ mod tests {
         let r2 = t2.join().unwrap();
         let successes = [&r1, &r2].iter().filter(|r| r.is_ok()).count();
         assert_eq!(successes, 1, "exactly one concurrent burn must win");
-        let failures: Vec<_> = [&r1, &r2]
-            .iter()
-            .filter_map(|r| r.as_ref().err())
-            .collect();
+        let failures: Vec<_> = [&r1, &r2].iter().filter_map(|r| r.as_ref().err()).collect();
         assert_eq!(failures.len(), 1);
-        assert!(matches!(
-            failures[0],
-            CapabilityError::AlreadyBurned(_)
-        ));
+        assert!(matches!(failures[0], CapabilityError::AlreadyBurned(_)));
     }
 
     #[test]

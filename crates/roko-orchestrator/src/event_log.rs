@@ -101,12 +101,10 @@ impl EventEntry {
         // for Value (keys are sorted in BTreeMap-backed maps, but we use
         // the default HashMap-backed Value whose key order is
         // insertion-order; callers should use consistent construction).
-        let payload_bytes =
-            serde_json::to_vec(payload).unwrap_or_default();
+        let payload_bytes = serde_json::to_vec(payload).unwrap_or_default();
 
-        let mut buf: Vec<u8> = Vec::with_capacity(
-            8 + 8 + 32 + kind_str.len() + payload_bytes.len() + 16,
-        );
+        let mut buf: Vec<u8> =
+            Vec::with_capacity(8 + 8 + 32 + kind_str.len() + payload_bytes.len() + 16);
         buf.extend_from_slice(b"eventv1|");
         buf.extend_from_slice(&seq.to_be_bytes());
         buf.extend_from_slice(&ts_ms.to_be_bytes());
@@ -199,17 +197,12 @@ impl EventLog {
     }
 
     /// Append a new event to the log. Returns the fully constructed entry.
-    pub fn append(
-        &self,
-        event_kind: EventKind,
-        payload: serde_json::Value,
-    ) -> EventEntry {
+    pub fn append(&self, event_kind: EventKind, payload: serde_json::Value) -> EventEntry {
         let mut guard = self.inner.lock();
         let seq = guard.entries.len() as u64;
         let ts_ms = chrono::Utc::now().timestamp_millis();
         let prev_hash = guard.tip;
-        let content_hash =
-            EventEntry::compute_hash(seq, ts_ms, &event_kind, &payload, &prev_hash);
+        let content_hash = EventEntry::compute_hash(seq, ts_ms, &event_kind, &payload, &prev_hash);
 
         let entry = EventEntry {
             sequence_number: seq,
@@ -481,14 +474,21 @@ mod tests {
 
         let errors = log.entries_by_kind(&EventKind::ErrorOccurred);
         assert_eq!(errors.len(), 2);
-        assert!(errors.iter().all(|e| e.event_kind == EventKind::ErrorOccurred));
+        assert!(
+            errors
+                .iter()
+                .all(|e| e.event_kind == EventKind::ErrorOccurred)
+        );
     }
 
     #[test]
     fn event_kind_display() {
         assert_eq!(EventKind::PlanStarted.to_string(), "plan.started");
         assert_eq!(EventKind::ErrorOccurred.to_string(), "error.occurred");
-        assert_eq!(EventKind::InterventionFired.to_string(), "intervention.fired");
+        assert_eq!(
+            EventKind::InterventionFired.to_string(),
+            "intervention.fired"
+        );
     }
 
     #[test]
@@ -501,10 +501,7 @@ mod tests {
             let l = log.clone();
             handles.push(thread::spawn(move || {
                 for i in 0..25 {
-                    l.append(
-                        EventKind::TaskAssigned,
-                        json!({"thread": t, "iter": i}),
-                    );
+                    l.append(EventKind::TaskAssigned, json!({"thread": t, "iter": i}));
                 }
             }));
         }

@@ -180,7 +180,9 @@ fn seed_medoids(dist: &[f32], n: usize, k: usize) -> Vec<usize> {
         .min_by(|&a, &b| {
             let sum_a: f32 = (0..n).map(|j| dist[a * n + j]).sum();
             let sum_b: f32 = (0..n).map(|j| dist[b * n + j]).sum();
-            sum_a.partial_cmp(&sum_b).unwrap_or(core::cmp::Ordering::Equal)
+            sum_a
+                .partial_cmp(&sum_b)
+                .unwrap_or(core::cmp::Ordering::Equal)
         })
         .unwrap_or(0);
 
@@ -238,9 +240,7 @@ fn assign(dist: &[f32], medoids: &[usize], assignments: &mut [usize]) {
 /// other members of the same cluster.
 fn find_best_medoid(dist: &[f32], assignments: &[usize], cluster_id: usize) -> usize {
     let n = assignments.len();
-    let members: Vec<usize> = (0..n)
-        .filter(|&i| assignments[i] == cluster_id)
-        .collect();
+    let members: Vec<usize> = (0..n).filter(|&i| assignments[i] == cluster_id).collect();
 
     if members.is_empty() {
         return 0;
@@ -252,7 +252,9 @@ fn find_best_medoid(dist: &[f32], assignments: &[usize], cluster_id: usize) -> u
         .min_by(|&a, &b| {
             let cost_a: f32 = members.iter().map(|&m| dist[a * n + m]).sum();
             let cost_b: f32 = members.iter().map(|&m| dist[b * n + m]).sum();
-            cost_a.partial_cmp(&cost_b).unwrap_or(core::cmp::Ordering::Equal)
+            cost_a
+                .partial_cmp(&cost_b)
+                .unwrap_or(core::cmp::Ordering::Equal)
         })
         .unwrap_or(members[0])
 }
@@ -264,7 +266,13 @@ mod tests {
 
     #[test]
     fn empty_input_returns_empty() {
-        let result = k_medoids(&[], &KMedoidsConfig { k: 3, max_iterations: 10 });
+        let result = k_medoids(
+            &[],
+            &KMedoidsConfig {
+                k: 3,
+                max_iterations: 10,
+            },
+        );
         assert!(result.clusters.is_empty());
         assert_eq!(result.iterations, 0);
         assert!(result.converged);
@@ -273,7 +281,13 @@ mod tests {
     #[test]
     fn k_zero_returns_empty() {
         let vecs = vec![HdcVector::from_seed(b"a")];
-        let result = k_medoids(&vecs, &KMedoidsConfig { k: 0, max_iterations: 10 });
+        let result = k_medoids(
+            &vecs,
+            &KMedoidsConfig {
+                k: 0,
+                max_iterations: 10,
+            },
+        );
         assert!(result.clusters.is_empty());
         assert!(result.converged);
     }
@@ -281,7 +295,13 @@ mod tests {
     #[test]
     fn single_vector_single_cluster() {
         let vecs = vec![HdcVector::from_seed(b"only")];
-        let result = k_medoids(&vecs, &KMedoidsConfig { k: 1, max_iterations: 10 });
+        let result = k_medoids(
+            &vecs,
+            &KMedoidsConfig {
+                k: 1,
+                max_iterations: 10,
+            },
+        );
         assert_eq!(result.clusters.len(), 1);
         assert_eq!(result.clusters[0].members.len(), 1);
         assert_eq!(result.clusters[0].members[0], 0);
@@ -293,7 +313,13 @@ mod tests {
         let vecs: Vec<HdcVector> = (0..4)
             .map(|i| HdcVector::from_seed(format!("pt-{i}").as_bytes()))
             .collect();
-        let result = k_medoids(&vecs, &KMedoidsConfig { k: 100, max_iterations: 50 });
+        let result = k_medoids(
+            &vecs,
+            &KMedoidsConfig {
+                k: 100,
+                max_iterations: 50,
+            },
+        );
         // Should have exactly 4 clusters (one per point).
         assert_eq!(result.clusters.len(), 4);
         for c in &result.clusters {
@@ -306,7 +332,13 @@ mod tests {
         // 10 copies of the same vector should all end up in 1 cluster when k=1.
         let v = HdcVector::from_seed(b"same");
         let vecs = vec![v; 10];
-        let result = k_medoids(&vecs, &KMedoidsConfig { k: 1, max_iterations: 10 });
+        let result = k_medoids(
+            &vecs,
+            &KMedoidsConfig {
+                k: 1,
+                max_iterations: 10,
+            },
+        );
         assert_eq!(result.clusters.len(), 1);
         assert_eq!(result.clusters[0].members.len(), 10);
         assert!(result.converged);

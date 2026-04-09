@@ -144,18 +144,15 @@ impl NlToFormatConverter {
             delimited.to_string()
         } else {
             // Fallback: try to find a JSON object/array in the raw text
-            find_json_in_text(trimmed)
-                .ok_or_else(|| {
-                    ConvertError::ParseFailed(
-                        "no CRANE delimiters found and no JSON object detected in response"
-                            .to_string(),
-                    )
-                })?
+            find_json_in_text(trimmed).ok_or_else(|| {
+                ConvertError::ParseFailed(
+                    "no CRANE delimiters found and no JSON object detected in response".to_string(),
+                )
+            })?
         };
 
-        let parsed: serde_json::Value = serde_json::from_str(&json_str).map_err(|e| {
-            ConvertError::ParseFailed(format!("invalid JSON: {e}"))
-        })?;
+        let parsed: serde_json::Value = serde_json::from_str(&json_str)
+            .map_err(|e| ConvertError::ParseFailed(format!("invalid JSON: {e}")))?;
 
         // Validate required fields from schema
         validate_required_fields(&parsed, target_schema)?;
@@ -364,10 +361,7 @@ mod tests {
 
     #[test]
     fn convert_error_display() {
-        assert_eq!(
-            ConvertError::EmptyResponse.to_string(),
-            "empty response"
-        );
+        assert_eq!(ConvertError::EmptyResponse.to_string(), "empty response");
         assert_eq!(
             ConvertError::ParseFailed("bad".into()).to_string(),
             "parse failed: bad"

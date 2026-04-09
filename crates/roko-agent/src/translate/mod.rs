@@ -41,7 +41,7 @@ pub mod ollama;
 pub mod openai;
 pub mod react;
 
-pub use capability::{capabilities_for, translator_for, ModelCapabilities};
+pub use capability::{ModelCapabilities, capabilities_for, translator_for};
 pub use claude::ClaudeTranslator;
 pub use ollama::OllamaTranslator;
 pub use openai::OpenAiTranslator;
@@ -67,14 +67,17 @@ pub trait Translator: Send + Sync {
     /// Returns an empty `Vec` if the response has no tool calls (the LLM
     /// answered directly). Returns `Err(TranslatorError::Malformed)` if
     /// the response *claims* tool calls but can't be parsed.
-    fn parse_calls(
-        &self,
-        response: &BackendResponse,
-    ) -> Result<Vec<ToolCall>, TranslatorError>;
+    fn parse_calls(&self, response: &BackendResponse) -> Result<Vec<ToolCall>, TranslatorError>;
 
     /// Serialize tool results back into the shape the backend consumes
     /// on the next turn (typically role=`"tool"`, `tool_call_id`, content).
     fn render_results(&self, results: &[(ToolCall, ToolResult)]) -> RenderedResults;
+
+    /// Extract the assistant message from a backend response for injection
+    /// into conversation history. Returns `None` by default.
+    fn render_assistant_message(&self, _response: &BackendResponse) -> Option<serde_json::Value> {
+        None
+    }
 }
 
 // ─── Payload enums ────────────────────────────────────────────────────────
@@ -142,14 +145,10 @@ impl BackendResponse {
             Self::StreamJson(events) => {
                 let mut buf = String::new();
                 for ev in events {
-                    if let Some(delta) = ev
-                        .pointer("/delta/text")
-                        .and_then(|x| x.as_str())
-                    {
+                    if let Some(delta) = ev.pointer("/delta/text").and_then(|x| x.as_str()) {
                         buf.push_str(delta);
-                    } else if let Some(text) = ev
-                        .pointer("/content_block/text")
-                        .and_then(|x| x.as_str())
+                    } else if let Some(text) =
+                        ev.pointer("/content_block/text").and_then(|x| x.as_str())
                     {
                         buf.push_str(text);
                     }

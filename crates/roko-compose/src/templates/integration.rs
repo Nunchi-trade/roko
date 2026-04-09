@@ -4,8 +4,8 @@
 //! The integration tester runs workspace-wide tests after batch merges
 //! and reports failures without fixing them.
 
+use super::{RolePromptTemplate, truncate};
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
-use super::{truncate, RolePromptTemplate};
 
 /// Typed input for the integration tester template. All fields are pre-read
 /// strings — no filesystem access.
@@ -163,11 +163,7 @@ mod tests {
         IntegrationInput {
             agents_md: "# AGENTS.md\nConventions.".into(),
             batch_branch: "batch/current".into(),
-            completed_plans: vec![
-                "plan-041".into(),
-                "plan-042".into(),
-                "plan-043".into(),
-            ],
+            completed_plans: vec!["plan-041".into(), "plan-042".into(), "plan-043".into()],
             integration_memo: Some("## Integration\nCross-crate wiring notes.".into()),
             fixture_manifest: Some("[fixture]\nname = \"anvil\"\nport = 8545".into()),
             dependency_manifest: Some("[dep]\ncrate = \"golem-core\"\nversion = \"0.1\"".into()),
@@ -250,7 +246,10 @@ mod tests {
         let mut input = full_input();
         input.integration_memo = Some("x".repeat(20_000));
         let sections = template.sections(&input);
-        let memo = sections.iter().find(|s| s.name == "integration_memo").unwrap();
+        let memo = sections
+            .iter()
+            .find(|s| s.name == "integration_memo")
+            .unwrap();
         assert!(memo.content.len() < 5_000);
         assert!(memo.content.contains("truncated"));
     }

@@ -202,9 +202,8 @@ mod tests {
 
     #[test]
     fn phase_transition_with_reason() {
-        let t =
-            PhaseTransition::new("plan-2", PhaseKind::Gating, PhaseKind::AutoFixing, 1000)
-                .with_reason("compile failure");
+        let t = PhaseTransition::new("plan-2", PhaseKind::Gating, PhaseKind::AutoFixing, 1000)
+            .with_reason("compile failure");
         assert_eq!(t.reason.as_deref(), Some("compile failure"));
     }
 

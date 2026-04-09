@@ -164,10 +164,7 @@ mod tests {
 
     #[test]
     fn parse_trims_whitespace() {
-        assert_eq!(
-            ReplMode::parse_input("  :quit  "),
-            ReplCommand::Quit
-        );
+        assert_eq!(ReplMode::parse_input("  :quit  "), ReplCommand::Quit);
         assert_eq!(
             ReplMode::parse_input("  some prompt  "),
             ReplCommand::Prompt("some prompt".to_string())
@@ -186,10 +183,7 @@ mod tests {
         assert_eq!(commands.len(), 4);
         assert_eq!(commands[0], ReplCommand::Help);
         assert_eq!(commands[1], ReplCommand::Status);
-        assert_eq!(
-            commands[2],
-            ReplCommand::Prompt("hello agent".to_string())
-        );
+        assert_eq!(commands[2], ReplCommand::Prompt("hello agent".to_string()));
         assert_eq!(commands[3], ReplCommand::Quit);
         assert_eq!(repl.prompt_count, 1);
     }
@@ -217,10 +211,7 @@ mod tests {
         let commands = repl.run(&mut reader, &mut output).unwrap();
 
         assert_eq!(commands.len(), 2);
-        assert_eq!(
-            commands[0],
-            ReplCommand::Prompt("hello".to_string())
-        );
+        assert_eq!(commands[0], ReplCommand::Prompt("hello".to_string()));
         assert_eq!(commands[1], ReplCommand::Quit);
     }
 

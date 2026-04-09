@@ -94,11 +94,7 @@ impl OllamaAgent {
 
     /// Execute one chat turn against the given poster. Shared by the real
     /// `Agent::run` and the unit tests.
-    async fn run_with_poster(
-        &self,
-        poster: &dyn HttpPoster,
-        input: &Signal,
-    ) -> AgentResult {
+    async fn run_with_poster(&self, poster: &dyn HttpPoster, input: &Signal) -> AgentResult {
         let started = Instant::now();
 
         let prompt_text = match input.body.as_text() {
@@ -142,11 +138,7 @@ impl OllamaAgent {
         {
             Ok(raw) => raw,
             Err(e) => {
-                return self.failure_signal(
-                    input,
-                    &format!("http error: {e}"),
-                    started,
-                );
+                return self.failure_signal(input, &format!("http error: {e}"), started);
             }
         };
 
@@ -164,11 +156,7 @@ impl OllamaAgent {
         let message = resp.message.unwrap_or_default();
         let content = message.content;
         if content.is_empty() {
-            return self.failure_signal(
-                input,
-                "ollama returned empty assistant content",
-                started,
-            );
+            return self.failure_signal(input, "ollama returned empty assistant content", started);
         }
 
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -340,10 +328,7 @@ mod tests {
         let poster = MockPoster::ok(canned_ok_response());
         let result = agent.run_with_poster(&poster, &prompt("hi")).await;
         assert!(result.success);
-        assert_eq!(
-            result.output.body.as_text().unwrap(),
-            "Hello from Ollama."
-        );
+        assert_eq!(result.output.body.as_text().unwrap(), "Hello from Ollama.");
         assert_eq!(result.output.kind, Kind::AgentOutput);
         assert_eq!(result.output.tag("model"), Some("llama3.1:8b"));
     }
@@ -368,28 +353,30 @@ mod tests {
         let poster = MockPoster::ok("this is not json {{{");
         let result = agent.run_with_poster(&poster, &prompt("hi")).await;
         assert!(!result.success);
-        assert!(result
-            .output
-            .body
-            .as_text()
-            .unwrap()
-            .contains("failed to parse ollama response"));
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .unwrap()
+                .contains("failed to parse ollama response")
+        );
     }
 
     #[tokio::test]
     async fn empty_content_marks_result_failed() {
         let agent = OllamaAgent::new("llama3.1:8b");
-        let poster = MockPoster::ok(
-            r#"{"message":{"role":"assistant","content":""},"done":true}"#,
-        );
+        let poster = MockPoster::ok(r#"{"message":{"role":"assistant","content":""},"done":true}"#);
         let result = agent.run_with_poster(&poster, &prompt("hi")).await;
         assert!(!result.success);
-        assert!(result
-            .output
-            .body
-            .as_text()
-            .unwrap()
-            .contains("empty assistant content"));
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .unwrap()
+                .contains("empty assistant content")
+        );
     }
 
     #[tokio::test]
@@ -406,9 +393,8 @@ mod tests {
     async fn missing_counts_default_to_zero() {
         let agent = OllamaAgent::new("llama3.1:8b");
         // No prompt_eval_count / eval_count fields.
-        let poster = MockPoster::ok(
-            r#"{"message":{"role":"assistant","content":"ok"},"done":true}"#,
-        );
+        let poster =
+            MockPoster::ok(r#"{"message":{"role":"assistant","content":"ok"},"done":true}"#);
         let result = agent.run_with_poster(&poster, &prompt("hi")).await;
         assert!(result.success);
         assert_eq!(result.usage.input_tokens, 0);
@@ -417,8 +403,8 @@ mod tests {
 
     #[tokio::test]
     async fn custom_base_url_is_used() {
-        let agent = OllamaAgent::new("qwen2.5-coder:7b")
-            .with_base_url("http://ollama.internal:11434");
+        let agent =
+            OllamaAgent::new("qwen2.5-coder:7b").with_base_url("http://ollama.internal:11434");
         let poster = MockPoster::ok(canned_ok_response());
         let _ = agent.run_with_poster(&poster, &prompt("hi")).await;
         assert_eq!(
@@ -429,8 +415,7 @@ mod tests {
 
     #[tokio::test]
     async fn trailing_slash_in_base_url_is_normalized() {
-        let agent =
-            OllamaAgent::new("llama3.1:8b").with_base_url("http://host.local:11434/");
+        let agent = OllamaAgent::new("llama3.1:8b").with_base_url("http://host.local:11434/");
         let poster = MockPoster::ok(canned_ok_response());
         let _ = agent.run_with_poster(&poster, &prompt("hi")).await;
         assert_eq!(

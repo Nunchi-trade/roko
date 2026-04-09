@@ -130,11 +130,14 @@ pub fn outputs_to_signals(outputs: &[WatcherOutput]) -> Vec<Signal> {
             }
             let body = roko_core::Body::from_json(o).ok()?;
             Some(
-                Signal::builder(roko_core::Kind::Custom("conductor.intervention".into()))
-                    .body(body)
-                    .tag("watcher", &o.watcher)
-                    .tag("severity", format!("{:?}", o.severity))
-                    .build(),
+                Signal::builder(roko_core::Kind::Custom(format!(
+                    "conductor:alert:{}",
+                    o.watcher
+                )))
+                .body(body)
+                .tag("watcher", &o.watcher)
+                .tag("severity", format!("{:?}", o.severity))
+                .build(),
             )
         })
         .collect()
@@ -214,6 +217,10 @@ mod tests {
         let signals = outputs_to_signals(&outputs);
         assert_eq!(signals.len(), 1);
         assert_eq!(signals[0].tag("watcher"), Some("b"));
+        assert_eq!(
+            signals[0].kind,
+            roko_core::Kind::Custom("conductor:alert:b".into())
+        );
     }
 
     #[test]

@@ -50,7 +50,10 @@ impl TestGate {
     /// Run only the quick (lib/unit) tier.
     #[must_use]
     pub fn quick(build_system: BuildSystem) -> Self {
-        Self { selector: TestSelector::Quick, ..Self::new(build_system) }
+        Self {
+            selector: TestSelector::Quick,
+            ..Self::new(build_system)
+        }
     }
 
     /// Run only tests matching the given patterns.
@@ -140,7 +143,9 @@ impl Gate for TestGate {
         let counts = parse_test_counts(&combined, self.build_system);
 
         let mut verdict = if output.status.success() {
-            Verdict::pass(&self.name).with_detail(combined).with_duration(elapsed)
+            Verdict::pass(&self.name)
+                .with_detail(combined)
+                .with_duration(elapsed)
         } else {
             let reason = summarize_test_failures(&combined, 3);
             Verdict::fail(&self.name, reason)
@@ -213,7 +218,11 @@ fn parse_go_test_counts(output: &str) -> Option<TestCount> {
             saw_any = true;
         }
     }
-    if saw_any { Some(TestCount::new(passed, failed, ignored)) } else { None }
+    if saw_any {
+        Some(TestCount::new(passed, failed, ignored))
+    } else {
+        None
+    }
 }
 
 fn extract_count(line: &str, label: &str) -> u32 {
@@ -302,9 +311,18 @@ mod tests {
 
     #[test]
     fn extract_count_reads_labeled_numbers() {
-        assert_eq!(extract_count("test result: ok. 5 passed; 2 failed", "passed"), 5);
-        assert_eq!(extract_count("test result: ok. 5 passed; 2 failed", "failed"), 2);
-        assert_eq!(extract_count("test result: ok. 0 passed; 0 failed", "passed"), 0);
+        assert_eq!(
+            extract_count("test result: ok. 5 passed; 2 failed", "passed"),
+            5
+        );
+        assert_eq!(
+            extract_count("test result: ok. 5 passed; 2 failed", "failed"),
+            2
+        );
+        assert_eq!(
+            extract_count("test result: ok. 0 passed; 0 failed", "passed"),
+            0
+        );
     }
 
     #[test]
@@ -357,6 +375,9 @@ mod tests {
     fn test_selector_patterns_go_joins_with_pipe() {
         let sel = TestSelector::Patterns(vec!["TestFoo".into(), "TestBar".into()]);
         let args = sel.extra_args(BuildSystem::Go);
-        assert_eq!(args, vec!["-run".to_string(), "TestFoo|TestBar".to_string()]);
+        assert_eq!(
+            args,
+            vec!["-run".to_string(), "TestFoo|TestBar".to_string()]
+        );
     }
 }

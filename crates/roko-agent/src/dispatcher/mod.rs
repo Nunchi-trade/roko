@@ -31,11 +31,13 @@
 //! crate free of that dependency. See M19 in MISTAKES-LEARNED.md.
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use roko_core::tool::{
-    ToolCall, ToolContext, ToolError, ToolHandler, ToolRegistry, ToolResult,
-};
-use roko_core::ToolPermissions;
+use roko_core::tool::{ToolCall, ToolContext, ToolError, ToolHandler, ToolRegistry, ToolResult};
+use roko_core::{Body, Kind, Provenance, Signal, ToolPermissions};
+use serde_json::{Value, json};
+
+use crate::safety::SafetyLayer;
 
 pub mod alert;
 pub mod cancel;
@@ -74,11 +76,12 @@ where
     }
 }
 
-/// Dispatches [`ToolCall`]s through validation → authorization → handler.
+/// Dispatches [`ToolCall`]s through validation → safety → authorization → handler.
 pub struct ToolDispatcher {
     registry: Arc<dyn ToolRegistry>,
     resolver: Arc<dyn HandlerResolver>,
     max_result_bytes: usize,
+    safety: Option<SafetyLayer>,
 }
 
 impl ToolDispatcher {
@@ -86,7 +89,12 @@ impl ToolDispatcher {
     /// handler resolver.
     #[must_use]
     pub fn new(registry: Arc<dyn ToolRegistry>, resolver: Arc<dyn HandlerResolver>) -> Self {
-        Self { registry, resolver, max_result_bytes: DEFAULT_MAX_RESULT_BYTES }
+        Self {
+            registry,
+            resolver,
+            max_result_bytes: DEFAULT_MAX_RESULT_BYTES,
+            safety: None,
+        }
     }
 
     /// Override the default result-byte cap.
@@ -94,6 +102,20 @@ impl ToolDispatcher {
     pub const fn with_max_result_bytes(mut self, n: usize) -> Self {
         self.max_result_bytes = n;
         self
+    }
+
+    /// Attach a [`SafetyLayer`] so every dispatched call passes through
+    /// pre-execution safety checks and post-execution output scrubbing.
+    #[must_use]
+    pub fn with_safety(mut self, layer: SafetyLayer) -> Self {
+        self.safety = Some(layer);
+        self
+    }
+
+    /// Returns the configured safety layer, if any.
+    #[must_use]
+    pub const fn safety(&self) -> Option<&SafetyLayer> {
+        self.safety.as_ref()
     }
 
     /// Configured cap on content bytes for a single `Ok` result.
@@ -109,16 +131,67 @@ impl ToolDispatcher {
     }
 
     /// Dispatch a single tool call end-to-end.
+    #[allow(clippy::too_many_lines)]
     pub async fn dispatch(&self, call: ToolCall, ctx: &ToolContext) -> ToolResult {
+        let timeout = ctx.timeout;
+        let timeout_ms = duration_to_ms(timeout);
+
         // 1. Validate args.
         if let Err(e) = validate(&call, self.registry.as_ref()) {
+            Self::emit_audit(
+                ctx,
+                &call,
+                "validation",
+                "failed",
+                &json!({
+                    "error": e.to_string(),
+                    "error_kind": tool_error_kind(&e),
+                }),
+            );
+            Self::emit_terminal_audit(ctx, &call, &ToolResult::err(e.clone()), timeout_ms);
             return ToolResult::err(e);
         }
+        Self::emit_audit(ctx, &call, "validation", "passed", &argument_summary(&call));
         // 2. Resolve the def.
         let Some(def) = self.registry.get(&call.name) else {
-            return ToolResult::err(ToolError::Other(format!("unknown tool: {}", call.name)));
+            let err = ToolError::Other(format!("unknown tool: {}", call.name));
+            Self::emit_audit(
+                ctx,
+                &call,
+                "handler",
+                "missing_definition",
+                &json!({
+                    "error": err.to_string(),
+                    "error_kind": tool_error_kind(&err),
+                }),
+            );
+            Self::emit_terminal_audit(ctx, &call, &ToolResult::err(err.clone()), timeout_ms);
+            return ToolResult::err(err);
         };
-        // 3. Authorize against the role's capabilities. The `satisfied_by`
+        // 3. Apply task-level tool filters before capability checks.
+        if let Some(reason) = tool_filter_block_reason(
+            &call.name,
+            ctx.allowed_tools.as_deref(),
+            ctx.denied_tools.as_deref(),
+        ) {
+            let err = ToolError::PermissionDenied(reason.clone());
+            Self::emit_audit(
+                ctx,
+                &call,
+                "tool_filter",
+                "denied",
+                &json!({
+                    "tool": call.name,
+                    "allowed_tools": ctx.allowed_tools.clone(),
+                    "denied_tools": ctx.denied_tools.clone(),
+                    "error": err.to_string(),
+                    "error_kind": tool_error_kind(&err),
+                }),
+            );
+            Self::emit_terminal_audit(ctx, &call, &ToolResult::err(err.clone()), timeout_ms);
+            return ToolResult::err(err);
+        }
+        // 4. Authorize against the role's capabilities. The `satisfied_by`
         //    method wants `ToolPermissions` (what the role grants); we
         //    build one from `ctx.capabilities` (a `ToolPermission` — same
         //    flags, different type).
@@ -130,18 +203,83 @@ impl ToolDispatcher {
             network: ctx.capabilities.network,
         };
         if !def.permission.satisfied_by(&role_perms) {
-            return ToolResult::err(ToolError::PermissionDenied(format!(
+            let err = ToolError::PermissionDenied(format!(
                 "{} requires {:?}, role grants {:?}",
                 call.name, def.permission, role_perms
-            )));
+            ));
+            Self::emit_audit(
+                ctx,
+                &call,
+                "permission",
+                "denied",
+                &json!({
+                    "required": format!("{:?}", def.permission),
+                    "granted": format!("{:?}", role_perms),
+                    "error": err.to_string(),
+                    "error_kind": tool_error_kind(&err),
+                }),
+            );
+            Self::emit_terminal_audit(ctx, &call, &ToolResult::err(err.clone()), timeout_ms);
+            return ToolResult::err(err);
+        }
+        Self::emit_audit(
+            ctx,
+            &call,
+            "permission",
+            "granted",
+            &json!({
+                "required": format!("{:?}", def.permission),
+                "granted": format!("{:?}", role_perms),
+            }),
+        );
+        // 3b. Safety checks — if a SafetyLayer is attached, run all
+        //     pre-execution policies. First failure short-circuits.
+        if let Some(ref safety) = self.safety {
+            if let Err(e) = safety.check_pre_execution(&call, ctx) {
+                Self::emit_audit(
+                    ctx,
+                    &call,
+                    "safety",
+                    "blocked",
+                    &json!({
+                        "error": e.to_string(),
+                        "error_kind": tool_error_kind(&e),
+                    }),
+                );
+                Self::emit_terminal_audit(ctx, &call, &ToolResult::err(e.clone()), timeout_ms);
+                return ToolResult::err(e);
+            }
         }
         // 4. Resolve handler.
         let Some(handler) = self.resolver.resolve(&call.name) else {
-            return ToolResult::err(ToolError::Other(format!("no handler: {}", call.name)));
+            let err = ToolError::Other(format!("no handler: {}", call.name));
+            Self::emit_audit(
+                ctx,
+                &call,
+                "handler",
+                "missing",
+                &json!({
+                    "error": err.to_string(),
+                    "error_kind": tool_error_kind(&err),
+                }),
+            );
+            Self::emit_terminal_audit(ctx, &call, &ToolResult::err(err.clone()), timeout_ms);
+            return ToolResult::err(err);
         };
+        let handler_name = handler.name().to_string();
+        Self::emit_audit(
+            ctx,
+            &call,
+            "handler",
+            "started",
+            &json!({
+                "handler": handler_name,
+                "timeout_ms": timeout_ms,
+            }),
+        );
         // 5. Race handler.execute against timeout + cancellation.
-        let timeout = ctx.timeout;
-        let exec_fut = async move { handler.execute(call, ctx).await };
+        let call_for_exec = call.clone();
+        let exec_fut = async move { handler.execute(call_for_exec, ctx).await };
         let result = tokio::select! {
             r = with_timeout(timeout, exec_fut) => r,
             () = wait_cancelled(ctx.cancel_token.as_ref()) => {
@@ -149,7 +287,15 @@ impl ToolDispatcher {
             }
         };
         // 6. Truncate oversized output.
-        truncate_result(result, self.max_result_bytes)
+        let result = truncate_result(result, self.max_result_bytes);
+        // 7. Scrub secrets from output.
+        let result = if let Some(ref safety) = self.safety {
+            safety.scrub_output(result)
+        } else {
+            result
+        };
+        Self::emit_terminal_audit(ctx, &call, &result, timeout_ms);
+        result
     }
 
     /// Dispatch a batch of tool calls, grouping by concurrency policy.
@@ -182,6 +328,164 @@ impl ToolDispatcher {
 
         out
     }
+
+    fn emit_audit(
+        ctx: &ToolContext,
+        call: &ToolCall,
+        phase: &'static str,
+        status: &'static str,
+        details: &Value,
+    ) {
+        let signal = Signal::builder(Kind::ToolInvocation)
+            .body(audit_body(call, phase, status, details))
+            .provenance(Provenance::trusted("tool_dispatcher"))
+            .tag("call_id", &call.id)
+            .tag("tool", &call.name)
+            .tag("phase", phase)
+            .tag("status", status)
+            .build();
+        ctx.audit_sink.emit(signal);
+    }
+
+    fn emit_terminal_audit(
+        ctx: &ToolContext,
+        call: &ToolCall,
+        result: &ToolResult,
+        timeout_ms: u64,
+    ) {
+        match result {
+            ToolResult::Ok {
+                content,
+                artifacts,
+                is_structured,
+            } => Self::emit_audit(
+                ctx,
+                call,
+                "completion",
+                "succeeded",
+                &json!({
+                    "content_bytes": content.len(),
+                    "artifacts": artifacts.len(),
+                    "is_structured": is_structured,
+                    "timeout_ms": timeout_ms,
+                }),
+            ),
+            ToolResult::Err(err) => Self::emit_audit(
+                ctx,
+                call,
+                "completion",
+                "failed",
+                &json!({
+                    "error": err.to_string(),
+                    "error_kind": tool_error_kind(err),
+                    "timeout_ms": timeout_ms,
+                }),
+            ),
+        }
+    }
+}
+
+fn audit_body(call: &ToolCall, phase: &str, status: &str, details: &Value) -> Body {
+    let payload = json!({
+        "call_id": call.id,
+        "tool": call.name,
+        "phase": phase,
+        "status": status,
+        "request_ts_ms": call.request_ts_ms,
+        "details": details,
+    });
+    Body::from_json(&payload).unwrap_or_else(|_| Body::text(payload.to_string()))
+}
+
+fn argument_summary(call: &ToolCall) -> Value {
+    match &call.arguments {
+        Value::Object(map) => {
+            let mut keys: Vec<&str> = map.keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            json!({
+                "argument_kind": "object",
+                "argument_keys": keys,
+                "argument_count": map.len(),
+            })
+        }
+        Value::Array(items) => json!({
+            "argument_kind": "array",
+            "argument_count": items.len(),
+        }),
+        Value::Null => json!({
+            "argument_kind": "null",
+            "argument_count": 0,
+        }),
+        other => json!({
+            "argument_kind": json_value_kind(other),
+            "argument_count": 1,
+        }),
+    }
+}
+
+const fn json_value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+#[allow(
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::missing_const_for_fn
+)]
+fn duration_to_ms(duration: Duration) -> u64 {
+    let millis = duration.as_millis();
+    if millis > u128::from(u64::MAX) {
+        u64::MAX
+    } else {
+        millis as u64
+    }
+}
+
+fn tool_filter_block_reason(
+    tool_name: &str,
+    allowed_tools: Option<&[String]>,
+    denied_tools: Option<&[String]>,
+) -> Option<String> {
+    if let Some(denied_tools) = denied_tools {
+        if denied_tools.iter().any(|name| name == tool_name) {
+            return Some(format!(
+                "tool '{tool_name}' is blocked because it is listed in denied_tools: [{}]",
+                denied_tools.join(", ")
+            ));
+        }
+    }
+
+    if let Some(allowed_tools) = allowed_tools {
+        if !allowed_tools.iter().any(|name| name == tool_name) {
+            return Some(format!(
+                "tool '{tool_name}' is blocked because it is not listed in allowed_tools: [{}]",
+                allowed_tools.join(", ")
+            ));
+        }
+    }
+
+    None
+}
+
+const fn tool_error_kind(err: &ToolError) -> &'static str {
+    match err {
+        ToolError::PermissionDenied(_) => "permission_denied",
+        ToolError::SchemaInvalid(_) => "schema_invalid",
+        ToolError::HandlerPanic(_) => "handler_panic",
+        ToolError::Timeout { .. } => "timeout",
+        ToolError::PathOutsideWorktree(_) => "path_outside_worktree",
+        ToolError::CommandNotAllowed(_) => "command_not_allowed",
+        ToolError::NetworkBlocked(_) => "network_blocked",
+        ToolError::Cancelled => "cancelled",
+        _ => "other",
+    }
 }
 
 impl std::fmt::Debug for ToolDispatcher {
@@ -190,6 +494,7 @@ impl std::fmt::Debug for ToolDispatcher {
             .field("max_result_bytes", &self.max_result_bytes)
             .field("registry", &"Arc<dyn ToolRegistry>")
             .field("resolver", &"Arc<dyn HandlerResolver>")
+            .field("safety", &self.safety.is_some())
             .finish()
     }
 }
@@ -199,9 +504,11 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use roko_core::tool::{
-        AtomicCancel, CancelToken, ToolCall, ToolCategory, ToolConcurrency, ToolContext, ToolDef,
-        ToolError, ToolHandler, ToolPermission, ToolResult, VecToolRegistry,
+        AtomicCancel, AuditSink, CancelToken, NoopMetricsSink, NoopTraceSink, ToolCall,
+        ToolCategory, ToolConcurrency, ToolContext, ToolDef, ToolError, ToolHandler,
+        ToolPermission, ToolResult, VecToolRegistry,
     };
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
@@ -258,11 +565,7 @@ mod tests {
         })
     }
 
-    fn tool(
-        name: &str,
-        perm: ToolPermission,
-        conc: ToolConcurrency,
-    ) -> ToolDef {
+    fn tool(name: &str, perm: ToolPermission, conc: ToolConcurrency) -> ToolDef {
         ToolDef::new(name, "x", ToolCategory::Meta, perm).with_concurrency(conc)
     }
 
@@ -298,16 +601,47 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct CollectAuditSink {
+        signals: Mutex<Vec<Signal>>,
+    }
+
+    impl CollectAuditSink {
+        fn snapshot(&self) -> Vec<Signal> {
+            self.signals.lock().expect("audit signals lock").clone()
+        }
+    }
+
+    impl AuditSink for CollectAuditSink {
+        fn emit(&self, signal: Signal) {
+            self.signals
+                .lock()
+                .expect("audit signals lock")
+                .push(signal);
+        }
+    }
+
+    fn status_phases(signals: &[Signal]) -> Vec<(String, String)> {
+        signals
+            .iter()
+            .map(|signal| {
+                (
+                    signal.tag("phase").unwrap_or_default().to_string(),
+                    signal.tag("status").unwrap_or_default().to_string(),
+                )
+            })
+            .collect()
+    }
+
     // ─── Tests ────────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn unknown_tool_returns_other_error() {
-        let registry: Arc<dyn ToolRegistry> =
-            Arc::new(VecToolRegistry::from_tools(vec![tool(
-                "echo",
-                ToolPermission::read_only(),
-                ToolConcurrency::Parallel,
-            )]));
+        let registry: Arc<dyn ToolRegistry> = Arc::new(VecToolRegistry::from_tools(vec![tool(
+            "echo",
+            ToolPermission::read_only(),
+            ToolConcurrency::Parallel,
+        )]));
         let resolver = resolver_from([("echo", Arc::new(EchoHandler) as Arc<dyn ToolHandler>)]);
         let d = ToolDispatcher::new(registry, resolver);
         let call = ToolCall::new("c", "no_such_tool", serde_json::json!({}));
@@ -341,12 +675,11 @@ mod tests {
     #[tokio::test]
     async fn missing_permission_returns_permission_denied() {
         // Tool requires write, context only grants read.
-        let registry: Arc<dyn ToolRegistry> =
-            Arc::new(VecToolRegistry::from_tools(vec![tool(
-                "echo",
-                ToolPermission::writes(),
-                ToolConcurrency::Parallel,
-            )]));
+        let registry: Arc<dyn ToolRegistry> = Arc::new(VecToolRegistry::from_tools(vec![tool(
+            "echo",
+            ToolPermission::writes(),
+            ToolConcurrency::Parallel,
+        )]));
         let resolver = resolver_from([("echo", Arc::new(EchoHandler) as Arc<dyn ToolHandler>)]);
         let d = ToolDispatcher::new(registry, resolver);
         let call = ToolCall::new("c", "echo", serde_json::json!({}));
@@ -371,13 +704,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn allowlist_blocks_unlisted_tool_with_clear_error() {
+        let registry: Arc<dyn ToolRegistry> = Arc::new(VecToolRegistry::from_tools(vec![tool(
+            "echo",
+            ToolPermission::read_only(),
+            ToolConcurrency::Parallel,
+        )]));
+        let resolver = resolver_from([("echo", Arc::new(EchoHandler) as Arc<dyn ToolHandler>)]);
+        let d = ToolDispatcher::new(registry, resolver);
+        let ctx = ToolContext::testing("/tmp")
+            .with_allowed_tools(Some(vec!["read_file".into(), "grep".into()]));
+        let res = d
+            .dispatch(ToolCall::new("c", "echo", serde_json::json!({})), &ctx)
+            .await;
+        match res {
+            ToolResult::Err(ToolError::PermissionDenied(msg)) => {
+                assert!(msg.contains("echo"), "msg should name the tool: {msg}");
+                assert!(
+                    msg.contains("allowed_tools"),
+                    "msg should explain the allowlist reason: {msg}"
+                );
+            }
+            other => panic!("expected PermissionDenied, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn denylist_blocks_listed_tool_with_clear_error() {
+        let registry: Arc<dyn ToolRegistry> = Arc::new(VecToolRegistry::from_tools(vec![tool(
+            "echo",
+            ToolPermission::read_only(),
+            ToolConcurrency::Parallel,
+        )]));
+        let resolver = resolver_from([("echo", Arc::new(EchoHandler) as Arc<dyn ToolHandler>)]);
+        let d = ToolDispatcher::new(registry, resolver);
+        let ctx = ToolContext::testing("/tmp")
+            .with_allowed_tools(Some(vec!["echo".into(), "grep".into()]))
+            .with_denied_tools(Some(vec!["echo".into()]));
+        let res = d
+            .dispatch(ToolCall::new("c", "echo", serde_json::json!({})), &ctx)
+            .await;
+        match res {
+            ToolResult::Err(ToolError::PermissionDenied(msg)) => {
+                assert!(msg.contains("echo"), "msg should name the tool: {msg}");
+                assert!(
+                    msg.contains("denied_tools"),
+                    "msg should explain the denylist reason: {msg}"
+                );
+            }
+            other => panic!("expected PermissionDenied, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn handler_timeout_returns_timeout_error_with_ms() {
-        let registry: Arc<dyn ToolRegistry> =
-            Arc::new(VecToolRegistry::from_tools(vec![tool(
-                "sleep",
-                ToolPermission::read_only(),
-                ToolConcurrency::Parallel,
-            )]));
+        let registry: Arc<dyn ToolRegistry> = Arc::new(VecToolRegistry::from_tools(vec![tool(
+            "sleep",
+            ToolPermission::read_only(),
+            ToolConcurrency::Parallel,
+        )]));
         let resolver = resolver_from([(
             "sleep",
             Arc::new(SleepHandler { ms: 500 }) as Arc<dyn ToolHandler>,
@@ -407,12 +792,11 @@ mod tests {
 
     #[tokio::test]
     async fn cancellation_returns_cancelled() {
-        let registry: Arc<dyn ToolRegistry> =
-            Arc::new(VecToolRegistry::from_tools(vec![tool(
-                "sleep",
-                ToolPermission::read_only(),
-                ToolConcurrency::Parallel,
-            )]));
+        let registry: Arc<dyn ToolRegistry> = Arc::new(VecToolRegistry::from_tools(vec![tool(
+            "sleep",
+            ToolPermission::read_only(),
+            ToolConcurrency::Parallel,
+        )]));
         let resolver = resolver_from([(
             "sleep",
             Arc::new(SleepHandler { ms: 2_000 }) as Arc<dyn ToolHandler>,
@@ -444,12 +828,11 @@ mod tests {
 
     #[tokio::test]
     async fn successful_call_returns_ok() {
-        let registry: Arc<dyn ToolRegistry> =
-            Arc::new(VecToolRegistry::from_tools(vec![tool(
-                "echo",
-                ToolPermission::read_only(),
-                ToolConcurrency::Parallel,
-            )]));
+        let registry: Arc<dyn ToolRegistry> = Arc::new(VecToolRegistry::from_tools(vec![tool(
+            "echo",
+            ToolPermission::read_only(),
+            ToolConcurrency::Parallel,
+        )]));
         let resolver = resolver_from([("echo", Arc::new(EchoHandler) as Arc<dyn ToolHandler>)]);
         let d = ToolDispatcher::new(registry, resolver);
         let call = ToolCall::new("c", "echo", serde_json::json!({"x": 1}));
@@ -461,16 +844,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn successful_call_emits_audit_signals_for_each_phase() {
+        let registry: Arc<dyn ToolRegistry> = Arc::new(VecToolRegistry::from_tools(vec![tool(
+            "echo",
+            ToolPermission::read_only(),
+            ToolConcurrency::Parallel,
+        )]));
+        let resolver = resolver_from([("echo", Arc::new(EchoHandler) as Arc<dyn ToolHandler>)]);
+        let d = ToolDispatcher::new(registry, resolver);
+        let audit_sink = Arc::new(CollectAuditSink::default());
+        let ctx = ToolContext::testing("/tmp").with_audit_sink(audit_sink.clone());
+
+        let res = d
+            .dispatch(
+                ToolCall::new("c", "echo", serde_json::json!({"x": 1})),
+                &ctx,
+            )
+            .await;
+        assert!(res.is_ok(), "expected successful tool call, got {res:?}");
+
+        let phases = status_phases(&audit_sink.snapshot());
+        assert_eq!(
+            phases,
+            vec![
+                ("validation".to_string(), "passed".to_string()),
+                ("permission".to_string(), "granted".to_string()),
+                ("handler".to_string(), "started".to_string()),
+                ("completion".to_string(), "succeeded".to_string()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn permission_denial_emits_failure_audit_signals() {
+        let registry: Arc<dyn ToolRegistry> = Arc::new(VecToolRegistry::from_tools(vec![tool(
+            "echo",
+            ToolPermission::writes(),
+            ToolConcurrency::Parallel,
+        )]));
+        let resolver = resolver_from([("echo", Arc::new(EchoHandler) as Arc<dyn ToolHandler>)]);
+        let d = ToolDispatcher::new(registry, resolver);
+        let audit_sink = Arc::new(CollectAuditSink::default());
+        let ctx = ToolContext::new(
+            "/tmp",
+            Duration::from_secs(5),
+            ToolPermission::read_only(),
+            audit_sink.clone(),
+            Arc::new(NoopTraceSink),
+            Arc::new(NoopMetricsSink),
+            Arc::new(roko_core::tool::NeverCancel),
+        );
+
+        let res = d
+            .dispatch(ToolCall::new("c", "echo", serde_json::json!({})), &ctx)
+            .await;
+        assert!(matches!(
+            res,
+            ToolResult::Err(ToolError::PermissionDenied(_))
+        ));
+
+        let phases = status_phases(&audit_sink.snapshot());
+        assert_eq!(
+            phases,
+            vec![
+                ("validation".to_string(), "passed".to_string()),
+                ("permission".to_string(), "denied".to_string()),
+                ("completion".to_string(), "failed".to_string()),
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn oversized_content_truncated_with_marker() {
-        let registry: Arc<dyn ToolRegistry> =
-            Arc::new(VecToolRegistry::from_tools(vec![tool(
-                "huge",
-                ToolPermission::read_only(),
-                ToolConcurrency::Parallel,
-            )]));
+        let registry: Arc<dyn ToolRegistry> = Arc::new(VecToolRegistry::from_tools(vec![tool(
+            "huge",
+            ToolPermission::read_only(),
+            ToolConcurrency::Parallel,
+        )]));
         let resolver = resolver_from([(
             "huge",
-            Arc::new(HugeHandler { payload_bytes: 5_000 }) as Arc<dyn ToolHandler>,
+            Arc::new(HugeHandler {
+                payload_bytes: 5_000,
+            }) as Arc<dyn ToolHandler>,
         )]);
         let d = ToolDispatcher::new(registry, resolver).with_max_result_bytes(1_024);
         let call = ToolCall::new("c", "huge", serde_json::json!({}));
@@ -478,7 +933,10 @@ mod tests {
         match res {
             ToolResult::Ok { content, .. } => {
                 assert!(content.contains("[truncated]"));
-                assert!(content.len() < 5_000, "content should be shorter than the handler output");
+                assert!(
+                    content.len() < 5_000,
+                    "content should be shorter than the handler output"
+                );
             }
             other => panic!("expected Ok, got {other:?}"),
         }
@@ -498,14 +956,12 @@ mod tests {
                 ToolResult::text(chunk.repeat(500)) // 500*9 = 4500 bytes
             }
         }
-        let registry: Arc<dyn ToolRegistry> =
-            Arc::new(VecToolRegistry::from_tools(vec![tool(
-                "mb",
-                ToolPermission::read_only(),
-                ToolConcurrency::Parallel,
-            )]));
-        let resolver =
-            resolver_from([("mb", Arc::new(MultibyteHandler) as Arc<dyn ToolHandler>)]);
+        let registry: Arc<dyn ToolRegistry> = Arc::new(VecToolRegistry::from_tools(vec![tool(
+            "mb",
+            ToolPermission::read_only(),
+            ToolConcurrency::Parallel,
+        )]));
+        let resolver = resolver_from([("mb", Arc::new(MultibyteHandler) as Arc<dyn ToolHandler>)]);
         let d = ToolDispatcher::new(registry, resolver).with_max_result_bytes(100);
         let call = ToolCall::new("c", "mb", serde_json::json!({}));
         let res = d.dispatch(call, &ToolContext::testing("/tmp")).await;
@@ -522,12 +978,11 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_batch_runs_parallel_tools_concurrently() {
-        let registry: Arc<dyn ToolRegistry> =
-            Arc::new(VecToolRegistry::from_tools(vec![tool(
-                "sleep",
-                ToolPermission::read_only(),
-                ToolConcurrency::Parallel,
-            )]));
+        let registry: Arc<dyn ToolRegistry> = Arc::new(VecToolRegistry::from_tools(vec![tool(
+            "sleep",
+            ToolPermission::read_only(),
+            ToolConcurrency::Parallel,
+        )]));
         let resolver = resolver_from([(
             "sleep",
             Arc::new(SleepHandler { ms: 100 }) as Arc<dyn ToolHandler>,
@@ -577,14 +1032,12 @@ mod tests {
             }
         }
         COUNTER.store(0, Ordering::SeqCst);
-        let registry: Arc<dyn ToolRegistry> =
-            Arc::new(VecToolRegistry::from_tools(vec![tool(
-                "ser",
-                ToolPermission::read_only(),
-                ToolConcurrency::Serial,
-            )]));
-        let resolver =
-            resolver_from([("ser", Arc::new(SerialHandler) as Arc<dyn ToolHandler>)]);
+        let registry: Arc<dyn ToolRegistry> = Arc::new(VecToolRegistry::from_tools(vec![tool(
+            "ser",
+            ToolPermission::read_only(),
+            ToolConcurrency::Serial,
+        )]));
+        let resolver = resolver_from([("ser", Arc::new(SerialHandler) as Arc<dyn ToolHandler>)]);
         let d = ToolDispatcher::new(registry, resolver);
         let ctx = ToolContext::testing("/tmp");
         let calls = vec![
@@ -607,9 +1060,7 @@ mod tests {
         let observations: Vec<usize> = out
             .iter()
             .map(|(_, r)| match r {
-                ToolResult::Ok { content, .. } => {
-                    content.parse().expect("observation is usize")
-                }
+                ToolResult::Ok { content, .. } => content.parse().expect("observation is usize"),
                 ToolResult::Err(e) => panic!("handler failed: {e}"),
             })
             .collect();

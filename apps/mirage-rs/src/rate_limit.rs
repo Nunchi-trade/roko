@@ -92,9 +92,9 @@ pub fn classify_method(method: &str) -> MethodClass {
         | "chain_challengeInsight"
         | "chain_depositPheromone"
         | "chain_applyDecay" => MethodClass::Write,
-        "chain_subscribePheromones"
-        | "chain_subscribeInsights"
-        | "chain_unsubscribe" => MethodClass::Subscription,
+        "chain_subscribePheromones" | "chain_subscribeInsights" | "chain_unsubscribe" => {
+            MethodClass::Subscription
+        }
         _ => MethodClass::Read,
     }
 }
@@ -251,7 +251,6 @@ impl TokenBucket {
             Err(wait_ms.max(1))
         }
     }
-
 }
 
 /// Token-bucket rate limiter with per-method and per-author enforcement.
@@ -318,11 +317,7 @@ impl RateLimiter {
     }
 
     /// Gets or creates the per-author bucket.
-    fn with_author_bucket<R>(
-        &self,
-        author: &str,
-        f: impl FnOnce(&mut TokenBucket) -> R,
-    ) -> R {
+    fn with_author_bucket<R>(&self, author: &str, f: impl FnOnce(&mut TokenBucket) -> R) -> R {
         let capacity = self.config.author_writes_per_hour;
         let map = self.author_buckets.lock();
         if let Some(cell) = map.get(author) {
@@ -353,11 +348,7 @@ impl RateLimiter {
     ///   is exhausted.
     /// * [`RateLimitError::AuthorQuotaExceeded`] — the per-author writes/hour
     ///   quota is exhausted.
-    pub fn check_method(
-        &self,
-        method: &str,
-        author: Option<&str>,
-    ) -> Result<(), RateLimitError> {
+    pub fn check_method(&self, method: &str, author: Option<&str>) -> Result<(), RateLimitError> {
         let class = classify_method(method);
         if matches!(class, MethodClass::Subscription) {
             self.total_allowed.fetch_add(1, Ordering::Relaxed);
@@ -368,7 +359,8 @@ impl RateLimiter {
         let now = Instant::now();
 
         // Per-method RPS check. On denial, bail — nothing else was mutated.
-        let method_res = self.with_method_bucket(method, limit_rps, |bucket| bucket.try_consume(now));
+        let method_res =
+            self.with_method_bucket(method, limit_rps, |bucket| bucket.try_consume(now));
         if let Err(retry_after_ms) = method_res {
             self.total_denied.fetch_add(1, Ordering::Relaxed);
             return Err(RateLimitError::MethodBudgetExceeded {
@@ -566,10 +558,7 @@ mod tests {
         let err = limiter
             .check_method("chain_confirmInsight", Some("authorX"))
             .unwrap_err();
-        assert!(matches!(
-            err,
-            RateLimitError::MethodBudgetExceeded { .. }
-        ));
+        assert!(matches!(err, RateLimitError::MethodBudgetExceeded { .. }));
     }
 
     #[test]
@@ -617,11 +606,7 @@ mod tests {
                 .check_method("chain_searchInsights", None)
                 .expect("override raises budget to 200");
         }
-        assert!(
-            limiter
-                .check_method("chain_searchInsights", None)
-                .is_err()
-        );
+        assert!(limiter.check_method("chain_searchInsights", None).is_err());
     }
 
     #[test]
@@ -689,9 +674,7 @@ mod tests {
     fn stats_reports_accurate_counters() {
         let limiter = RateLimiter::new(tight_config());
         for _ in 0..3 {
-            limiter
-                .check_method("chain_searchInsights", None)
-                .unwrap();
+            limiter.check_method("chain_searchInsights", None).unwrap();
         }
         for _ in 0..2 {
             limiter
@@ -701,8 +684,16 @@ mod tests {
         let stats = limiter.stats();
         assert_eq!(stats.total_allowed, 5);
         assert_eq!(stats.total_denied, 0);
-        assert!(stats.per_method_budget_remaining.contains_key("chain_searchInsights"));
-        assert!(stats.per_method_budget_remaining.contains_key("chain_confirmInsight"));
+        assert!(
+            stats
+                .per_method_budget_remaining
+                .contains_key("chain_searchInsights")
+        );
+        assert!(
+            stats
+                .per_method_budget_remaining
+                .contains_key("chain_confirmInsight")
+        );
         // chain_searchInsights: 100 capacity - 3 used ~= 97 remaining.
         let search_remaining = stats
             .per_method_budget_remaining

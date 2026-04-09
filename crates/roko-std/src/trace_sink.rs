@@ -66,7 +66,12 @@ impl InMemoryTraceSink {
     /// Snapshot of all retained events (cloned).
     #[must_use]
     pub fn events(&self) -> Vec<ToolTraceEvent> {
-        self.inner.lock().events.iter().map(|r| r.event.clone()).collect()
+        self.inner
+            .lock()
+            .events
+            .iter()
+            .map(|r| r.event.clone())
+            .collect()
     }
 
     /// Snapshot of retained events for one trace id (cloned).
@@ -144,9 +149,9 @@ impl TraceSink for InMemoryTraceSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roko_core::tool::trace::{ToolOutcome, TraceId};
-    use roko_core::tool::ToolFormat;
     use roko_core::AgentRole;
+    use roko_core::tool::ToolFormat;
+    use roko_core::tool::trace::{ToolOutcome, TraceId};
 
     fn trace_id(byte: u8) -> TraceId {
         TraceId::from_bytes([byte; 16])

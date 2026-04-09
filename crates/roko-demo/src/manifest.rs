@@ -247,10 +247,7 @@ impl LoadedManifest {
                 manifest.schema_version
             ));
         }
-        Ok(Self {
-            manifest,
-            demo_dir,
-        })
+        Ok(Self { manifest, demo_dir })
     }
 
     /// Resolve a scenario by name and load its full definition.

@@ -8,8 +8,8 @@
 
 use async_trait::async_trait;
 use roko_core::{
-    error::Result, Body, Budget, Composer, Context, Gate, Kind, Outcome, Policy, Router, Score,
-    Scorer, Selection, Signal, Verdict,
+    Body, Budget, Composer, Context, Gate, Kind, Outcome, Policy, Router, Score, Scorer, Selection,
+    Signal, Verdict, error::Result,
 };
 
 /// A scorer that returns `Score::NEUTRAL` for every signal.
@@ -102,10 +102,7 @@ mod tests {
     #[test]
     fn noop_scorer_is_neutral() {
         let s = NoOpScorer;
-        assert_eq!(
-            s.score(&mk_signal(), &Context::at(0)),
-            Score::NEUTRAL
-        );
+        assert_eq!(s.score(&mk_signal(), &Context::at(0)), Score::NEUTRAL);
     }
 
     #[tokio::test]

@@ -8,7 +8,7 @@
 //! These are definition-level golden tests — they do NOT execute handlers.
 
 use roko_core::tool::ToolRegistry;
-use roko_std::{StaticToolRegistry, ROKO_BUILTIN_TOOLS};
+use roko_std::{ROKO_BUILTIN_TOOLS, StaticToolRegistry};
 
 /// Helper: look up a tool by name and assert its definition is well-formed.
 fn assert_golden(name: &str) {

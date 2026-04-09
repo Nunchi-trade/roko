@@ -57,11 +57,7 @@ impl RpcError {
 
     /// Create a new RPC error with structured data.
     #[must_use]
-    pub fn with_data(
-        code: i64,
-        message: impl Into<String>,
-        data: serde_json::Value,
-    ) -> Self {
+    pub fn with_data(code: i64, message: impl Into<String>, data: serde_json::Value) -> Self {
         Self {
             code,
             message: message.into(),
@@ -99,9 +95,7 @@ pub fn to_rpc_error(error: &RokoError) -> RpcError {
         RokoError::Json(_) => (PARSE_ERROR, format!("{error}")),
 
         // Standard: invalid params
-        RokoError::Invalid(_) | RokoError::User(_) => {
-            (INVALID_PARAMS, format!("{error}"))
-        }
+        RokoError::Invalid(_) | RokoError::User(_) => (INVALID_PARAMS, format!("{error}")),
 
         // Standard: method not found (signal lookup miss)
         RokoError::NotFound(_) => (METHOD_NOT_FOUND, format!("{error}")),
@@ -110,9 +104,7 @@ pub fn to_rpc_error(error: &RokoError) -> RpcError {
         RokoError::Agent { .. } => (AGENT_FAILURE, format!("{error}")),
 
         // Custom: gate failure
-        RokoError::Gate { .. } | RokoError::Rejected(_) => {
-            (GATE_FAILURE, format!("{error}"))
-        }
+        RokoError::Gate { .. } | RokoError::Rejected(_) => (GATE_FAILURE, format!("{error}")),
 
         // Custom: timeout
         RokoError::Timeout { .. } => (TIMEOUT, format!("{error}")),
@@ -137,9 +129,7 @@ mod tests {
 
     #[test]
     fn rpc_json_error_maps_to_parse_error() {
-        let err = RokoError::Json(
-            serde_json::from_str::<serde_json::Value>("{ bad").unwrap_err(),
-        );
+        let err = RokoError::Json(serde_json::from_str::<serde_json::Value>("{ bad").unwrap_err());
         let rpc = to_rpc_error(&err);
         assert_eq!(rpc.code, PARSE_ERROR);
     }

@@ -15,6 +15,7 @@
 
 pub mod memory;
 pub mod noop;
+pub mod roles;
 pub mod router;
 pub mod scorer;
 pub mod tool;
@@ -22,7 +23,11 @@ pub mod trace_sink;
 
 pub use memory::MemorySubstrate;
 pub use noop::{NoOpComposer, NoOpGate, NoOpPolicy, NoOpRouter, NoOpScorer};
+pub use roles::{
+    IMPLEMENTER_TOOL_PROFILE, RESEARCHER_TOOL_PROFILE, REVIEWER_TOOL_PROFILE, RoleToolProfile,
+    RoleToolProfileKind, STRATEGIST_TOOL_PROFILE,
+};
 pub use router::{FirstRouter, HighestScoreRouter, RoundRobinRouter};
 pub use scorer::{ConstScorer, MulScorer, SumScorer};
-pub use tool::{MockToolDispatcher, StaticToolRegistry, ROKO_BUILTIN_TOOLS, TOOL_COUNT};
+pub use tool::{MockToolDispatcher, ROKO_BUILTIN_TOOLS, StaticToolRegistry, TOOL_COUNT};
 pub use trace_sink::InMemoryTraceSink;

@@ -84,7 +84,6 @@ pub struct Skill {
     pub usage_count: u64,
 
     // ── Voyager-style extraction fields (§16.3.2-16.3.4) ───────────
-
     /// Longer description (1-2 sentences) of the skill's purpose.
     #[serde(default)]
     pub description: String,
@@ -194,6 +193,72 @@ pub struct SkillQuery {
     pub category: Option<String>,
     /// File paths that hint at relevance (each match adds +0.2 to relevance).
     pub files_hint: Vec<String>,
+}
+
+/// One gate result passed into skill extraction.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkillGateResult {
+    /// Gate name.
+    pub gate: String,
+    /// Whether the gate passed.
+    pub passed: bool,
+    /// Numeric gate score.
+    pub score: f64,
+}
+
+impl SkillGateResult {
+    /// Construct a new extraction gate result.
+    pub fn new(gate: impl Into<String>, passed: bool, score: f64) -> Self {
+        Self {
+            gate: gate.into(),
+            passed,
+            score,
+        }
+    }
+}
+
+/// Input payload for [`SkillLibrary::extract_skill`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkillExtractionRequest {
+    /// Files the task touched.
+    pub task_files: Vec<String>,
+    /// Complexity tier from `tasks.toml`.
+    pub task_tier: String,
+    /// Symbol names referenced by the task description.
+    pub symbols: Vec<String>,
+    /// Model used for the task.
+    pub model: String,
+    /// Hash of the rendered system prompt.
+    pub prompt_hash: String,
+    /// Gate results that passed the task.
+    pub gate_results: Vec<SkillGateResult>,
+}
+
+impl SkillExtractionRequest {
+    /// Construct a new request.
+    pub fn new(
+        task_files: Vec<String>,
+        task_tier: impl Into<String>,
+        symbols: Vec<String>,
+        model: impl Into<String>,
+        prompt_hash: impl Into<String>,
+        gate_results: Vec<SkillGateResult>,
+    ) -> Self {
+        Self {
+            task_files,
+            task_tier: task_tier.into(),
+            symbols,
+            model: model.into(),
+            prompt_hash: prompt_hash.into(),
+            gate_results,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DispatchSkillOutcome {
+    Success,
+    Failure,
 }
 
 /// Produces the `pattern` text from an [`Episode`](crate::episode_logger::Episode).
@@ -353,11 +418,7 @@ impl SkillLibrary {
     ///
     /// Returns [`SkillLibraryError::NotFound`] if `name` is not registered.
     #[allow(clippy::significant_drop_tightening)]
-    pub async fn record_use(
-        &self,
-        name: &str,
-        success: bool,
-    ) -> Result<(), SkillLibraryError> {
+    pub async fn record_use(&self, name: &str, success: bool) -> Result<(), SkillLibraryError> {
         {
             let mut guard = self.skills.write();
             let Some(skill) = guard.get_mut(name) else {
@@ -370,8 +431,7 @@ impl SkillLibrary {
             // only beyond 2^53 which we clamp at below.
             #[allow(clippy::cast_precision_loss)]
             let prior_f = prior as f64;
-            skill.success_rate =
-                (skill.success_rate.mul_add(prior_f, outcome)) / (prior_f + 1.0);
+            skill.success_rate = (skill.success_rate.mul_add(prior_f, outcome)) / (prior_f + 1.0);
             skill.usage_count = prior.saturating_add(1);
         }
         self.persist().await
@@ -390,6 +450,24 @@ impl SkillLibrary {
     /// On-disk path backing this library.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Query for dispatch-time skill suggestions using task metadata.
+    ///
+    /// The inputs map to [`SkillQuery`] as follows:
+    /// - `task_files` -> file hints
+    /// - `task_tier` -> category filter
+    /// - `symbols` -> tags
+    ///
+    /// Returns the top matching skills so callers can pick the most suitable
+    /// one for prompt injection.
+    pub fn query(&self, task_files: &[String], task_tier: &str, symbols: &[String]) -> Vec<Skill> {
+        let query = SkillQuery {
+            tags: symbols.to_vec(),
+            category: (!task_tier.is_empty()).then(|| task_tier.to_string()),
+            files_hint: task_files.to_vec(),
+        };
+        self.select(&query, usize::MAX)
     }
 
     // ── Voyager-style extraction & selection (§16.3.2-16.3.4) ──────
@@ -413,7 +491,6 @@ impl SkillLibrary {
             return None;
         }
 
-        // Generate and bound pattern text
         let pattern = generator.generate(episode);
         if pattern.is_empty() {
             return None;
@@ -427,14 +504,208 @@ impl SkillLibrary {
         let tags = extra_strings(episode, "task_tags");
         let category = extra_str(episode, "task_category");
 
-        // Dedup: no existing skill with ≥70% tag overlap AND same category
         if self.is_duplicate(&tags, &category) {
             return None;
         }
 
         let skill = Self::build_skill_from_episode(episode, pattern, tags, category);
 
-        // Register (reject on name collision)
+        {
+            let mut guard = self.skills.write();
+            if guard.contains_key(&skill.name) {
+                return None;
+            }
+            guard.insert(skill.name.clone(), skill.clone());
+        }
+        self.persist().await.ok()?;
+        Some(skill)
+    }
+
+    /// Extract a skill from a successful task dispatch.
+    ///
+    /// The request carries the task's touched files, complexity tier,
+    /// referenced symbols, model, prompt hash, and gate results. The
+    /// extraction is intentionally compact: it persists one reusable skill
+    /// record and returns `None` if the request is incomplete or a near
+    /// duplicate already exists.
+    pub async fn extract_skill(&self, request: SkillExtractionRequest) -> Option<Skill> {
+        self.record_dispatch_skill(request, DispatchSkillOutcome::Success)
+            .await
+    }
+
+    /// Record a failed task dispatch using the same structural inputs as
+    /// [`SkillLibrary::extract_skill`]. Failure records are stored as
+    /// low-score skills tagged with `outcome:failure` so they can be kept
+    /// for later analysis without affecting normal selection.
+    pub async fn record_failure(&self, request: SkillExtractionRequest) -> Option<Skill> {
+        self.record_dispatch_skill(request, DispatchSkillOutcome::Failure)
+            .await
+    }
+
+    async fn record_dispatch_skill(
+        &self,
+        request: SkillExtractionRequest,
+        outcome: DispatchSkillOutcome,
+    ) -> Option<Skill> {
+        if request.task_files.is_empty() && request.symbols.is_empty() {
+            return None;
+        }
+        if request.task_tier.is_empty()
+            || request.model.is_empty()
+            || request.prompt_hash.is_empty()
+        {
+            return None;
+        }
+
+        let SkillExtractionRequest {
+            task_files,
+            task_tier,
+            symbols,
+            model,
+            prompt_hash,
+            gate_results,
+        } = request;
+
+        let task_files = dedup_strings(task_files);
+        let symbols = dedup_strings(symbols);
+        let mut tags = Vec::with_capacity(symbols.len() + 3);
+        tags.extend(symbols.iter().cloned());
+        tags.push(format!("model:{}", model));
+        tags.push(format!("prompt:{}", short_hash(&prompt_hash)));
+        if matches!(outcome, DispatchSkillOutcome::Failure) {
+            tags.push("outcome:failure".into());
+        }
+        let category = task_tier.clone();
+
+        if matches!(outcome, DispatchSkillOutcome::Success) {
+            if gate_results.is_empty() || gate_results.iter().any(|g| !g.passed) {
+                return None;
+            }
+            if self.is_duplicate(&tags, &category) {
+                return None;
+            }
+        }
+
+        let (name, summary, description, score, pattern) = match outcome {
+            DispatchSkillOutcome::Success => {
+                let passed_scores: Vec<f64> = gate_results
+                    .iter()
+                    .filter(|gate| gate.passed)
+                    .map(|gate| gate.score.clamp(0.0, 1.0))
+                    .collect();
+                let score = if passed_scores.is_empty() {
+                    1.0
+                } else {
+                    passed_scores.iter().sum::<f64>() / passed_scores.len() as f64
+                };
+
+                let gate_summary = gate_results
+                    .iter()
+                    .map(|gate| {
+                        format!(
+                            "{}:{}:{:.2}",
+                            gate.gate,
+                            if gate.passed { "pass" } else { "fail" },
+                            gate.score
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                let pattern = format!(
+                    "1. Touched files: {}\n\
+                     2. Symbols: {}\n\
+                     3. Model: {}\n\
+                     4. Prompt hash: {}\n\
+                     5. Gates: {}",
+                    task_files.join(", "),
+                    symbols.join(", "),
+                    model,
+                    prompt_hash,
+                    gate_summary
+                );
+                let pattern = if pattern.len() > MAX_PATTERN_CHARS {
+                    pattern[..MAX_PATTERN_CHARS].to_string()
+                } else {
+                    pattern
+                };
+
+                (
+                    format!(
+                        "skill_{}_{}",
+                        sanitize_component(&task_tier),
+                        short_hash(&prompt_hash)
+                    ),
+                    format!("Successful {} task on {}", task_tier, model),
+                    format!(
+                        "Extracted from a successful {} task using {}.",
+                        task_tier, model
+                    ),
+                    score,
+                    pattern,
+                )
+            }
+            DispatchSkillOutcome::Failure => {
+                let gate_summary = if gate_results.is_empty() {
+                    "none".to_string()
+                } else {
+                    gate_results
+                        .iter()
+                        .map(|gate| {
+                            format!(
+                                "{}:{}:{:.2}",
+                                gate.gate,
+                                if gate.passed { "pass" } else { "fail" },
+                                gate.score
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+
+                let pattern = format!(
+                    "1. Outcome: failure\n\
+                     2. Touched files: {}\n\
+                     3. Symbols: {}\n\
+                     4. Model: {}\n\
+                     5. Prompt hash: {}\n\
+                     6. Gates: {}",
+                    task_files.join(", "),
+                    symbols.join(", "),
+                    model,
+                    prompt_hash,
+                    gate_summary
+                );
+                let pattern = if pattern.len() > MAX_PATTERN_CHARS {
+                    pattern[..MAX_PATTERN_CHARS].to_string()
+                } else {
+                    pattern
+                };
+
+                (
+                    format!(
+                        "failure_{}_{}",
+                        sanitize_component(&task_tier),
+                        short_hash(&prompt_hash)
+                    ),
+                    format!("Failed {} task on {}", task_tier, model),
+                    format!("Failure pattern from a {} task using {}.", task_tier, model),
+                    0.0,
+                    pattern,
+                )
+            }
+        };
+
+        let mut skill = Skill::new(name, summary, pattern.clone());
+        skill.description = description;
+        skill.tags = tags;
+        skill.plan_id = String::new();
+        skill.files = task_files;
+        skill.pattern = pattern;
+        skill.score = score;
+        skill.first_seen = Some(Utc::now());
+        skill.task_category = category;
+
         {
             let mut guard = self.skills.write();
             if guard.contains_key(&skill.name) {
@@ -552,20 +823,18 @@ impl SkillLibrary {
                     overlap as f64 / query.tags.len().max(1) as f64
                 };
 
-                let file_hint =
-                    if query.files_hint.iter().any(|f| skill.files.contains(f)) {
-                        0.2
-                    } else {
-                        0.0
-                    };
+                let file_hint = if query.files_hint.iter().any(|f| skill.files.contains(f)) {
+                    0.2
+                } else {
+                    0.0
+                };
 
                 let relevance = tag_overlap + file_hint;
                 if relevance <= 0.0 {
                     return None;
                 }
 
-                let validated_bonus =
-                    0.1_f64.mul_add(f64::from(skill.validated_count).sqrt(), 1.0);
+                let validated_bonus = 0.1_f64.mul_add(f64::from(skill.validated_count).sqrt(), 1.0);
                 let final_score = skill.score * relevance * validated_bonus;
 
                 Some((final_score, skill))
@@ -672,6 +941,37 @@ impl SkillLibrary {
         tokio::fs::write(&tmp, &bytes).await?;
         tokio::fs::rename(&tmp, &self.path).await?;
         Ok(())
+    }
+}
+
+fn dedup_strings(values: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for value in values {
+        if seen.insert(value.clone()) {
+            out.push(value);
+        }
+    }
+    out
+}
+
+fn short_hash(hash: &str) -> String {
+    hash.chars().take(12).collect()
+}
+
+fn sanitize_component(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "unknown".to_string()
+    } else {
+        out
     }
 }
 
@@ -850,11 +1150,7 @@ mod tests {
         for i in 0..16 {
             let lib = Arc::clone(&library);
             handles.push(tokio::spawn(async move {
-                let s = Skill::new(
-                    format!("skill_{i:02}"),
-                    "summary",
-                    "template",
-                );
+                let s = Skill::new(format!("skill_{i:02}"), "summary", "template");
                 lib.register(&s).await
             }));
         }
@@ -938,8 +1234,7 @@ mod tests {
             .insert("iteration".into(), serde_json::json!(iteration));
         ep.extra
             .insert("complexity_band".into(), serde_json::json!(band));
-        ep.extra
-            .insert("task_tags".into(), serde_json::json!(tags));
+        ep.extra.insert("task_tags".into(), serde_json::json!(tags));
         ep.extra
             .insert("task_category".into(), serde_json::json!(category));
         ep.extra
@@ -950,8 +1245,7 @@ mod tests {
             .insert("model".into(), serde_json::json!("claude-4"));
         ep.extra
             .insert("verbal_reflection".into(), serde_json::json!("worked well"));
-        ep.extra
-            .insert("score".into(), serde_json::json!(0.9));
+        ep.extra.insert("score".into(), serde_json::json!(0.9));
         ep
     }
 
@@ -1023,15 +1317,23 @@ mod tests {
 
         // First extraction succeeds
         let ep1 = make_episode(
-            "task-1", true, 1, "standard",
-            &["rust", "async", "tokio"], "backend",
+            "task-1",
+            true,
+            1,
+            "standard",
+            &["rust", "async", "tokio"],
+            "backend",
         );
         assert!(library.extract(&ep1, &pg).await.is_some());
 
         // 2/3 tags overlap = 66.7% < 70% — should succeed
         let mut ep2 = make_episode(
-            "task-2", true, 1, "standard",
-            &["rust", "async", "serde"], "backend",
+            "task-2",
+            true,
+            1,
+            "standard",
+            &["rust", "async", "serde"],
+            "backend",
         );
         ep2.id = "ep_dedup_test_002".into();
         assert!(library.extract(&ep2, &pg).await.is_some());
@@ -1039,8 +1341,12 @@ mod tests {
 
         // 3/3 tags overlap = 100% ≥ 70% + same category — rejected
         let mut ep3 = make_episode(
-            "task-3", true, 1, "standard",
-            &["rust", "async", "tokio"], "backend",
+            "task-3",
+            true,
+            1,
+            "standard",
+            &["rust", "async", "tokio"],
+            "backend",
         );
         ep3.id = "ep_dedup_test_003".into();
         assert!(library.extract(&ep3, &pg).await.is_none());
@@ -1049,8 +1355,12 @@ mod tests {
         // Same tags but different category — should succeed (dedup requires
         // BOTH tag overlap ≥70% AND same category)
         let mut ep4 = make_episode(
-            "task-4", true, 1, "standard",
-            &["rust", "async", "tokio"], "frontend",
+            "task-4",
+            true,
+            1,
+            "standard",
+            &["rust", "async", "tokio"],
+            "frontend",
         );
         ep4.id = "ep_dedup_test_004".into();
         assert!(library.extract(&ep4, &pg).await.is_some());
@@ -1129,6 +1439,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_maps_task_metadata_to_selection() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("skills.json");
+        let library = SkillLibrary::new(&path).await.unwrap();
+
+        let mut matched = Skill::new("matched", "sum", "tmpl");
+        matched.tags = vec!["resolve_symbols".into()];
+        matched.task_category = "implementation".into();
+        matched.files = vec!["src/lib.rs".into()];
+        matched.score = 0.9;
+        library.register(&matched).await.unwrap();
+
+        let mut other = Skill::new("other", "sum", "tmpl");
+        other.tags = vec!["unrelated".into()];
+        other.task_category = "docs".into();
+        other.files = vec!["README.md".into()];
+        other.score = 0.9;
+        library.register(&other).await.unwrap();
+
+        let results = library.query(
+            &["src/lib.rs".into()],
+            "implementation",
+            &["resolve_symbols".into()],
+        );
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "matched");
+    }
+
+    #[tokio::test]
     async fn record_outcome_updates_counters() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("skills.json");
@@ -1146,6 +1486,36 @@ mod tests {
         assert_eq!(s.match_count, 3);
         assert_eq!(s.validated_count, 2);
         assert!(s.last_matched.is_some());
+    }
+
+    #[tokio::test]
+    async fn extract_skill_persists_to_disk() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("skills.json");
+        let library = SkillLibrary::new(&path).await.unwrap();
+
+        let request = SkillExtractionRequest::new(
+            vec!["src/lib.rs".into()],
+            "implementation",
+            vec!["extract_skill".into()],
+            "gpt-5".to_string(),
+            "prompt-hash-1234".to_string(),
+            vec![
+                SkillGateResult::new("compile", true, 0.98),
+                SkillGateResult::new("test", true, 0.93),
+            ],
+        );
+
+        let extracted = library.extract_skill(request).await;
+        assert!(extracted.is_some());
+
+        let reloaded = SkillLibrary::new(&path).await.unwrap();
+        assert_eq!(reloaded.len(), 1);
+        assert!(
+            reloaded
+                .get(extracted.as_ref().unwrap().name.as_str())
+                .is_some()
+        );
     }
 
     #[tokio::test]
