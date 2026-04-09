@@ -27,6 +27,8 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::env;
 use std::path::{Path, PathBuf};
+use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
+use tracing_subscriber::registry::LookupSpan;
 
 // -----------------------------------------------------------------------
 // Exit codes
@@ -441,15 +443,19 @@ fn main() {
         env::var("ROKO_LOG").unwrap_or_else(|_| "info".to_string()),
     )
     .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    if cli.log_format == LogFormat::Json {
-        tracing_subscriber::fmt()
-            .json()
-            .with_env_filter(filter)
-            .init();
-    } else {
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .init();
+    match cli.log_format {
+        LogFormat::Json => {
+            tracing_subscriber::fmt()
+                .event_format(RedactingFormat::new(tracing_subscriber::fmt::format().json()))
+                .with_env_filter(filter)
+                .init();
+        }
+        LogFormat::Text => {
+            tracing_subscriber::fmt()
+                .event_format(RedactingFormat::new(tracing_subscriber::fmt::format()))
+                .with_env_filter(filter)
+                .init();
+        }
     }
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -465,6 +471,41 @@ fn main() {
         }
     };
     std::process::exit(code);
+}
+
+#[derive(Debug)]
+struct RedactingFormat<E> {
+    inner: E,
+    scrubber: roko_core::obs::LogScrubber,
+}
+
+impl<E> RedactingFormat<E> {
+    fn new(inner: E) -> Self {
+        Self {
+            inner,
+            scrubber: roko_core::obs::LogScrubber::new(),
+        }
+    }
+}
+
+impl<S, N, E> FormatEvent<S, N> for RedactingFormat<E>
+where
+    S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'writer> FormatFields<'writer> + 'static,
+    E: FormatEvent<S, N>,
+{
+    fn format_event(
+        &self,
+        ctx: &FmtContext<'_, S, N>,
+        mut writer: tracing_subscriber::fmt::format::Writer<'_>,
+        event: &tracing::Event<'_>,
+    ) -> std::fmt::Result {
+        let mut buffer = String::new();
+        let buffer_writer = tracing_subscriber::fmt::format::Writer::new(&mut buffer);
+        self.inner.format_event(ctx, buffer_writer, event)?;
+        let scrubbed = self.scrubber.scrub(&buffer);
+        writer.write_str(&scrubbed)
+    }
 }
 
 async fn dispatch(mut cli: Cli) -> Result<i32> {

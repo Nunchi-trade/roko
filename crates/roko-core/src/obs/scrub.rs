@@ -8,6 +8,7 @@
 //! Built-in patterns cover the most common leak vectors:
 //! - `sk-...` (Anthropic / `OpenAI` API keys)
 //! - `ghp_...` / `gho_...` / `ghs_...` / `ghu_...` / `ghr_...` (`GitHub` tokens)
+//! - `xoxb-...` (`Slack` bot tokens)
 //! - `Bearer ...` (Authorization headers)
 //! - `ANTHROPIC_API_KEY=...` / `OPENAI_API_KEY=...` (env-var leaks)
 //!
@@ -58,6 +59,8 @@ fn builtin_patterns() -> Vec<ScrubPattern> {
     let raw = [
         // Anthropic / OpenAI API keys: sk-ant-..., sk-proj-..., sk-... (20+ chars)
         r"sk-[A-Za-z0-9_-]{20,}",
+        // Slack bot tokens.
+        r"xoxb-[A-Za-z0-9-]{10,}",
         // GitHub personal access tokens (classic & fine-grained)
         r"gh[pousr]_[A-Za-z0-9_]{16,}",
         // Bearer tokens in authorization headers (value after "Bearer ")
@@ -163,6 +166,15 @@ mod tests {
         let input = "Authorization: token ghp_ABCDEFGHIJKLMNOPqrstuvwxyz1234567890";
         let output = scrubber.scrub(input);
         assert!(!output.contains("ghp_"));
+        assert!(output.contains(REDACTED));
+    }
+
+    #[test]
+    fn scrubs_slack_bot_token() {
+        let scrubber = LogScrubber::new();
+        let input = "Authorization: Bearer xoxb-1234567890-abcdefghijklmnopqrstuv";
+        let output = scrubber.scrub(input);
+        assert!(!output.contains("xoxb-"));
         assert!(output.contains(REDACTED));
     }
 
