@@ -6,6 +6,7 @@
 
 pub mod deploy;
 pub mod dispatch;
+pub mod feedback;
 pub mod event_bus;
 pub mod error;
 pub mod events;
@@ -123,6 +124,7 @@ impl ServerBuilder {
             state.workdir.clone(),
         ));
         tokio::spawn(dispatch::dispatch_loop(Arc::clone(&state), dispatcher));
+        let _feedback_loop = feedback::start_feedback_loop(Arc::clone(&state));
         let router = routes::build_router(
             Arc::clone(&state),
             &self.config.roko_config.server.cors_origins,
