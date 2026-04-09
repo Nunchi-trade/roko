@@ -345,15 +345,26 @@ mod tests {
 
     #[test]
     fn multiple_watchers_worst_wins() {
-        use crate::watchers::iteration_loop::IMPL_RESTART_TAG;
-
         // Stream that triggers both ghost-turn (warning) and iteration-loop (critical).
         let mut stream: Vec<Signal> = ghost_stream(3);
         for _ in 0..3 {
             stream.push(
+                Signal::builder(Kind::GateVerdict)
+                    .body(Body::Json(serde_json::json!({
+                        "plan_id": "plan-1",
+                        "gate": "compile",
+                        "passed": false,
+                    })))
+                    .tag("plan_id", "plan-1")
+                    .build(),
+            );
+            stream.push(
                 Signal::builder(Kind::PlanPhase)
-                    .body(Body::text("restarting"))
-                    .tag(IMPL_RESTART_TAG, "true")
+                    .body(Body::Json(serde_json::json!({
+                        "plan_id": "plan-1",
+                        "event": "GateFailed",
+                    })))
+                    .tag("plan_id", "plan-1")
                     .build(),
             );
         }
