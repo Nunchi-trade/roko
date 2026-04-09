@@ -10,7 +10,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context as _, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
+use roko_std::RESEARCHER_TOOL_PROFILE;
 
 /// Parsed `[meta]` section of tasks.toml.
 #[derive(Debug, Clone, Deserialize)]
@@ -35,48 +36,104 @@ fn default_max_parallel() -> u32 {
 }
 
 /// A single task definition.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TaskDef {
     pub id: String,
     pub title: String,
-    #[serde(default = "default_status")]
+    pub role: Option<String>,
     pub status: String,
     /// Task complexity tier: mechanical, focused, integrative, architectural.
-    #[serde(default = "default_tier")]
     pub tier: String,
     /// Suggested model for this task.
-    #[serde(default)]
     pub model_hint: Option<String>,
     /// Maximum lines of change.
-    #[serde(default)]
     pub max_loc: Option<u32>,
     /// Files this task modifies.
-    #[serde(default, alias = "write_files")]
     pub files: Vec<String>,
     /// Tool names this task is allowed to use.
-    #[serde(default)]
     pub allowed_tools: Option<Vec<String>>,
     /// Tool names this task is forbidden to use.
-    #[serde(default)]
     pub denied_tools: Option<Vec<String>>,
     /// Task IDs this task depends on.
-    #[serde(default)]
     pub depends_on: Vec<String>,
     /// Plan IDs this task depends on before dispatching.
-    #[serde(default)]
     pub depends_on_plan: Vec<String>,
     /// Surgical context specification.
-    #[serde(default)]
     pub context: Option<TaskContext>,
     /// Verification pipeline.
-    #[serde(default)]
     pub verify: Vec<VerifyStep>,
     /// Per-task timeout in seconds.
-    #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
     /// Free-form acceptance criteria (legacy format, strings).
+    pub acceptance: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TaskDefSerde {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default = "default_status")]
+    pub status: String,
+    #[serde(default = "default_tier")]
+    pub tier: String,
+    #[serde(default)]
+    pub model_hint: Option<String>,
+    #[serde(default)]
+    pub max_loc: Option<u32>,
+    #[serde(default, alias = "write_files")]
+    pub files: Vec<String>,
+    #[serde(default)]
+    pub allowed_tools: Option<Vec<String>>,
+    #[serde(default)]
+    pub denied_tools: Option<Vec<String>>,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    #[serde(default)]
+    pub depends_on_plan: Vec<String>,
+    #[serde(default)]
+    pub context: Option<TaskContext>,
+    #[serde(default)]
+    pub verify: Vec<VerifyStep>,
+    #[serde(default = "default_timeout_secs")]
+    pub timeout_secs: u64,
     #[serde(default)]
     pub acceptance: Vec<String>,
+}
+
+impl From<TaskDefSerde> for TaskDef {
+    fn from(raw: TaskDefSerde) -> Self {
+        let mut task = Self {
+            id: raw.id,
+            title: raw.title,
+            role: raw.role,
+            status: raw.status,
+            tier: raw.tier,
+            model_hint: raw.model_hint,
+            max_loc: raw.max_loc,
+            files: raw.files,
+            allowed_tools: raw.allowed_tools,
+            denied_tools: raw.denied_tools,
+            depends_on: raw.depends_on,
+            depends_on_plan: raw.depends_on_plan,
+            context: raw.context,
+            verify: raw.verify,
+            timeout_secs: raw.timeout_secs,
+            acceptance: raw.acceptance,
+        };
+        task.apply_role_tool_defaults();
+        task
+    }
+}
+
+impl<'de> Deserialize<'de> for TaskDef {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        TaskDefSerde::deserialize(deserializer).map(Into::into)
+    }
 }
 
 fn default_status() -> String {
@@ -234,6 +291,29 @@ impl TaskDef {
             Fix the issue and ensure all verification steps pass.",
             original_prompt, failing_phase, truncated
         )
+    }
+
+    /// Apply role-specific tool defaults after TOML parsing.
+    ///
+    /// Explicit task settings take precedence over role defaults.
+    fn apply_role_tool_defaults(&mut self) {
+        if self.denied_tools.is_some() {
+            return;
+        }
+
+        if self
+            .role
+            .as_deref()
+            .is_some_and(|role| role.eq_ignore_ascii_case("researcher"))
+        {
+            self.denied_tools = Some(
+                RESEARCHER_TOOL_PROFILE
+                    .denied_tools
+                    .iter()
+                    .map(|tool| (*tool).to_string())
+                    .collect(),
+            );
+        }
     }
 }
 
@@ -446,12 +526,12 @@ total = 1
 [[task]]
 id = "T1"
 title = "Wire module"
+role = "researcher"
 tier = "focused"
 model_hint = "claude-sonnet-4-6"
 max_loc = 50
 write_files = ["src/main.rs"]
 allowed_tools = ["read_file", "grep"]
-denied_tools = ["write_file"]
 depends_on = []
 
 [task.context]
@@ -480,7 +560,16 @@ command = "cargo check -p roko-cli"
             task.allowed_tools,
             Some(vec!["read_file".into(), "grep".into()])
         );
-        assert_eq!(task.denied_tools, Some(vec!["write_file".into()]));
+        assert_eq!(
+            task.denied_tools,
+            Some(
+                RESEARCHER_TOOL_PROFILE
+                    .denied_tools
+                    .iter()
+                    .map(|tool| (*tool).to_string())
+                    .collect()
+            )
+        );
         assert_eq!(task.timeout_secs, 600);
         assert!(task.context.is_some());
         let ctx = task.context.as_ref().unwrap();
@@ -495,6 +584,7 @@ command = "cargo check -p roko-cli"
         let task = TaskDef {
             id: "T1".into(),
             title: "test".into(),
+            role: None,
             status: "ready".into(),
             tier: "mechanical".into(),
             model_hint: None,
@@ -629,6 +719,7 @@ depends_on = ["other-plan:T3"]
         let task = TaskDef {
             id: "T1".into(),
             title: "test task".into(),
+            role: None,
             status: "ready".into(),
             tier: "focused".into(),
             model_hint: None,
@@ -657,6 +748,7 @@ depends_on = ["other-plan:T3"]
         let task = TaskDef {
             id: "T1".into(),
             title: "test task".into(),
+            role: None,
             status: "ready".into(),
             tier: "focused".into(),
             model_hint: None,
@@ -681,5 +773,25 @@ depends_on = ["other-plan:T3"]
         assert!(!prompt.contains(&long_error));
         // But should contain a 4000-char substring of it
         assert!(prompt.contains(&"x".repeat(4000)));
+    }
+
+    #[test]
+    fn explicit_denied_tools_override_role_defaults() {
+        let toml = r#"
+[meta]
+plan = "test"
+total = 1
+
+[[task]]
+id = "R1"
+title = "Research"
+role = "researcher"
+denied_tools = ["custom_block"]
+depends_on = []
+"#;
+        let parsed: TasksFile = toml::from_str(toml).unwrap();
+        let task = &parsed.tasks[0];
+        assert_eq!(task.role.as_deref(), Some("researcher"));
+        assert_eq!(task.denied_tools, Some(vec!["custom_block".into()]));
     }
 }

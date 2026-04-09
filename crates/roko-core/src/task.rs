@@ -285,6 +285,9 @@ pub struct Task {
     /// Files this task will create or modify.
     #[serde(default)]
     pub files: Vec<String>,
+    /// Optional role hint for task-specific tool policy defaults.
+    #[serde(default)]
+    pub role: Option<String>,
     /// Acceptance criteria (human-readable bullets the auditor checks).
     #[serde(default)]
     pub acceptance: Vec<String>,
@@ -392,6 +395,7 @@ impl Task {
             title: title.into(),
             status: TaskStatus::Pending,
             files: Vec::new(),
+            role: None,
             acceptance: Vec::new(),
             depends_on: Vec::new(),
             parallel_group: None,
@@ -692,6 +696,7 @@ mod tests {
     fn task_serde_roundtrip_with_optional_fields() {
         let mut t = Task::new("t1", "implement login");
         t.files = vec!["src/auth.rs".into()];
+        t.role = Some("researcher".into());
         t.acceptance = vec!["login succeeds".into()];
         t.depends_on = vec!["t0".into()];
         t.category = Some(TaskCategory::Implementation);

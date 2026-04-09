@@ -2405,19 +2405,16 @@ impl PlanRunner {
                 (p, m)
             };
 
-            let task_allowed_tools_csv = task_def
-                .as_ref()
-                .and_then(|task| task.allowed_tools.as_deref())
-                .map_or_else(
-                    || claude_tools_csv.clone(),
-                    |allowed_tools| {
-                        claude_task_tool_allowlist_with(
-                            role,
-                            allowed_tools,
-                            self.tool_registry.as_deref(),
-                        )
-                    },
-                );
+            let task_allowed_tools_csv = if let Some(task) = task_def.as_ref() {
+                claude_task_tool_allowlist_with(
+                    role,
+                    task.allowed_tools.as_deref(),
+                    task.denied_tools.as_deref(),
+                    self.tool_registry.as_deref(),
+                )
+            } else {
+                claude_tools_csv.clone()
+            };
             let system_prompt =
                 build_system_prompt(role, plan_id, tid, &task_allowed_tools_csv);
             let env_vars: Vec<(String, String)> = self
@@ -3879,19 +3876,16 @@ impl PlanRunner {
         };
 
         let claude_tools_csv = claude_tool_allowlist_with(role, self.tool_registry.as_deref());
-        let task_allowed_tools_csv = task_def
-            .as_ref()
-            .and_then(|task| task.allowed_tools.as_deref())
-            .map_or_else(
-                || claude_tools_csv.clone(),
-                |allowed_tools| {
-                    claude_task_tool_allowlist_with(
-                        role,
-                        allowed_tools,
-                        self.tool_registry.as_deref(),
-                    )
-                },
-            );
+        let task_allowed_tools_csv = if let Some(task) = task_def.as_ref() {
+            claude_task_tool_allowlist_with(
+                role,
+                task.allowed_tools.as_deref(),
+                task.denied_tools.as_deref(),
+                self.tool_registry.as_deref(),
+            )
+        } else {
+            claude_tools_csv.clone()
+        };
 
         // ── Adaptive format selection via bandit ─────────────────────
         let tool_count = task_allowed_tools_csv
@@ -3969,7 +3963,10 @@ impl PlanRunner {
         // prompt so the agent knows which tools are available.
         let is_exec_agent = self.config.agent.command != "claude";
         if is_exec_agent {
-            let tool_manifest = self.build_tool_manifest(role);
+            let tool_manifest = self.build_tool_manifest(
+                role,
+                task_def.as_ref().and_then(|task| task.denied_tools.as_deref()),
+            );
             if !tool_manifest.is_empty() {
                 let tool_section = PromptSection::new("available-tools", &tool_manifest)
                     .with_priority(SectionPriority::Normal)
@@ -4961,14 +4958,26 @@ impl PlanRunner {
     /// falling back to `StaticToolRegistry`. The result is a human-readable
     /// list of tool names and descriptions suitable for injection into a
     /// system prompt.
-    fn build_tool_manifest(&self, role: AgentRole) -> String {
+    fn build_tool_manifest(&self, role: AgentRole, denied_tools: Option<&[String]>) -> String {
         use roko_core::tool::ToolRegistry;
+        let denied: Option<HashSet<&str>> =
+            denied_tools.map(|tools| tools.iter().map(String::as_str).collect());
 
         let tools: Vec<roko_core::tool::ToolDef> = if let Some(ref registry) = self.tool_registry {
-            registry.for_role(role).into_iter().cloned().collect()
+            registry
+                .for_role(role)
+                .into_iter()
+                .filter(|tool| denied.as_ref().is_none_or(|set| !set.contains(tool.name.as_str())))
+                .cloned()
+                .collect()
         } else {
             let static_reg = StaticToolRegistry::new();
-            static_reg.for_role(role).into_iter().cloned().collect()
+            static_reg
+                .for_role(role)
+                .into_iter()
+                .filter(|tool| denied.as_ref().is_none_or(|set| !set.contains(tool.name.as_str())))
+                .cloned()
+                .collect()
         };
 
         if tools.is_empty() {
@@ -5236,17 +5245,22 @@ fn claude_tool_allowlist_with(
 
 fn claude_task_tool_allowlist_with(
     role: AgentRole,
-    allowed_tools: &[String],
+    allowed_tools: Option<&[String]>,
+    denied_tools: Option<&[String]>,
     dynamic_registry: Option<&roko_agent::mcp::DynamicToolRegistry>,
 ) -> String {
     use roko_core::tool::ToolRegistry;
 
-    let allowed: HashSet<&str> = allowed_tools.iter().map(String::as_str).collect();
+    let allowed: Option<HashSet<&str>> =
+        allowed_tools.map(|tools| tools.iter().map(String::as_str).collect());
+    let denied: Option<HashSet<&str>> =
+        denied_tools.map(|tools| tools.iter().map(String::as_str).collect());
     let tools: Vec<roko_core::tool::ToolDef> = if let Some(registry) = dynamic_registry {
         registry
             .for_role(role)
             .into_iter()
-            .filter(|tool| allowed.contains(tool.name.as_str()))
+            .filter(|tool| allowed.as_ref().is_none_or(|set| set.contains(tool.name.as_str())))
+            .filter(|tool| denied.as_ref().is_none_or(|set| !set.contains(tool.name.as_str())))
             .cloned()
             .collect()
     } else {
@@ -5254,7 +5268,8 @@ fn claude_task_tool_allowlist_with(
         registry
             .for_role(role)
             .into_iter()
-            .filter(|tool| allowed.contains(tool.name.as_str()))
+            .filter(|tool| allowed.as_ref().is_none_or(|set| set.contains(tool.name.as_str())))
+            .filter(|tool| denied.as_ref().is_none_or(|set| !set.contains(tool.name.as_str())))
             .cloned()
             .collect()
     };
@@ -5691,7 +5706,8 @@ mod tests {
     fn claude_task_tool_allowlist_filters_to_task_subset() {
         let csv = claude_task_tool_allowlist_with(
             AgentRole::Implementer,
-            &["read_file".to_string(), "write_file".to_string()],
+            Some(&["read_file".to_string(), "write_file".to_string()]),
+            None,
             None,
         );
         assert_eq!(csv, "Read,Edit");
@@ -5701,10 +5717,23 @@ mod tests {
     fn claude_task_tool_allowlist_drops_unlisted_tools() {
         let csv = claude_task_tool_allowlist_with(
             AgentRole::Implementer,
-            &["definitely_not_a_real_tool".to_string()],
+            Some(&["definitely_not_a_real_tool".to_string()]),
+            None,
             None,
         );
         assert!(csv.is_empty());
+    }
+
+    #[test]
+    fn claude_task_tool_allowlist_respects_denied_tools() {
+        let csv = claude_task_tool_allowlist_with(
+            AgentRole::Implementer,
+            None,
+            Some(&["write_file".to_string(), "edit_file".to_string()]),
+            None,
+        );
+        assert!(csv.contains("Read"));
+        assert!(!csv.contains("Edit"));
     }
 
     #[test]
