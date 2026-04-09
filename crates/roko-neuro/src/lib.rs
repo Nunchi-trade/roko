@@ -68,5 +68,8 @@ pub struct KnowledgeEntry {
 }
 
 pub mod knowledge_store;
+/// Episode distillation into durable knowledge candidates.
+pub mod distiller;
 
+pub use distiller::{DistillationBackend, Distiller};
 pub use knowledge_store::KnowledgeStore;

@@ -19,12 +19,16 @@ hdc = ["dep:bardo-primitives"]
 [dependencies]
 roko-core = { path = "../roko-core" }
 roko-fs = { path = "../roko-fs" }
+roko-agent = { path = "../roko-agent" }
+roko-learn = { path = "../roko-learn" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 chrono = { workspace = true }
 anyhow = { workspace = true }
 parking_lot = { workspace = true }
+async-trait = { workspace = true }
 bardo-primitives = { path = "../bardo-primitives", optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["full", "test-util"] }

@@ -5316,14 +5316,18 @@ name = "roko-neuro"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "bardo-primitives",
  "chrono",
  "parking_lot",
+ "roko-agent",
  "roko-core",
  "roko-fs",
+ "roko-learn",
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
