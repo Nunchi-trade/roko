@@ -726,6 +726,35 @@ mod tests {
     }
 
     #[test]
+    fn decay_drops_below_half_after_two_half_lives() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let created_at = Utc::now() - Duration::days(60);
+
+        store
+            .add(entry(
+                KnowledgeKind::Insight,
+                "old-insight",
+                "A stale but valid insight",
+                &["insight"],
+                1.0,
+                &["ep-a", "ep-b"],
+                created_at,
+            ))
+            .expect("add");
+
+        store.decay().expect("decay");
+        let all = store.read_all().expect("read");
+        let confidence = all
+            .iter()
+            .find(|entry| entry.id == "old-insight")
+            .expect("old insight")
+            .confidence;
+        assert!(confidence < 0.5);
+        assert!((confidence - 0.25).abs() < 0.05);
+    }
+
+    #[test]
     fn confirmation_boost_retains_validated_entries_through_gc() {
         let tmp = TempDir::new().expect("tempdir");
         let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));

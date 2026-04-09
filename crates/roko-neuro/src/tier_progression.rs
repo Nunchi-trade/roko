@@ -2,7 +2,7 @@
 //!
 //! This module compresses the episode log in three stages:
 //! - D1: raw episodes -> insights
-//! - D2: insights -> heuristics
+//! - D2: insights with at least five supporting episodes -> heuristics
 //! - D3: heuristics -> `PLAYBOOK.md`
 //!
 //! The implementation is deterministic and uses the existing episode and
@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use crate::{KnowledgeEntry, KnowledgeKind};
 
 const DEFAULT_MIN_SUPPORT: usize = 3;
+const DEFAULT_MIN_HEURISTIC_SUPPORT: usize = 5;
 const DEFAULT_MIN_CONFIDENCE: f64 = 0.7;
 const DEFAULT_PLAYBOOK_LIMIT: usize = 12;
 const DEFAULT_HALF_LIFE_DAYS: f64 = 45.0;
@@ -121,6 +122,7 @@ pub struct TierProgressionReport {
 #[derive(Debug, Clone, Copy)]
 pub struct TierProgression {
     min_support: usize,
+    min_heuristic_support: usize,
     min_confidence: f64,
     playbook_limit: usize,
 }
@@ -129,6 +131,7 @@ impl Default for TierProgression {
     fn default() -> Self {
         Self {
             min_support: DEFAULT_MIN_SUPPORT,
+            min_heuristic_support: DEFAULT_MIN_HEURISTIC_SUPPORT,
             min_confidence: DEFAULT_MIN_CONFIDENCE,
             playbook_limit: DEFAULT_PLAYBOOK_LIMIT,
         }
@@ -141,6 +144,7 @@ impl TierProgression {
     pub const fn new(min_support: usize, min_confidence: f64, playbook_limit: usize) -> Self {
         Self {
             min_support: if min_support == 0 { 1 } else { min_support },
+            min_heuristic_support: DEFAULT_MIN_HEURISTIC_SUPPORT,
             min_confidence: if min_confidence.is_finite() && min_confidence > 0.0 {
                 min_confidence.min(1.0)
             } else {
@@ -254,7 +258,7 @@ impl TierProgression {
         let mut heuristics: Vec<HeuristicRule> = insights
             .iter()
             .filter(|insight| {
-                insight.source_episodes.len() >= self.min_support
+                insight.source_episodes.len() >= self.min_heuristic_support
                     && insight.confidence >= self.min_confidence
             })
             .map(|insight| HeuristicRule {
@@ -712,6 +716,7 @@ mod tests {
             episode("ep-2", "gate_failure", "Implementer", "compile", false, false),
             episode("ep-3", "gate_failure", "Implementer", "compile", false, false),
             episode("ep-4", "gate_failure", "Implementer", "compile", false, false),
+            episode("ep-5", "gate_failure", "Implementer", "compile", false, false),
         ];
 
         let progression = TierProgression::default();
@@ -720,14 +725,34 @@ mod tests {
         assert!(!report.insights.is_empty());
         assert!(!report.heuristics.is_empty());
         let insight = &report.insights[0];
-        assert!(insight.support_count >= 3);
+        assert!(insight.support_count >= 5);
         assert!(insight.confidence >= 0.7);
         assert!(insight.summary().contains("When"));
 
         let heuristic = &report.heuristics[0];
-        assert!(heuristic.confirmations >= 3);
+        assert!(heuristic.confirmations >= 5);
         assert!(heuristic.confidence >= 0.7);
         assert!(heuristic.summary().starts_with("If "));
+    }
+
+    #[test]
+    fn four_episode_insights_stay_at_insight_tier() {
+        let episodes = vec![
+            episode("ep-1", "gate_failure", "Implementer", "compile", false, false),
+            episode("ep-2", "gate_failure", "Implementer", "compile", false, false),
+            episode("ep-3", "gate_failure", "Implementer", "compile", false, false),
+            episode("ep-4", "gate_failure", "Implementer", "compile", false, false),
+        ];
+
+        let progression = TierProgression::default();
+        let report = progression.analyze(&episodes);
+
+        assert!(!report.insights.is_empty());
+        assert!(report.heuristics.is_empty());
+        assert!(report
+            .insights
+            .iter()
+            .all(|insight| insight.source_episodes.len() < 5));
     }
 
     #[test]
