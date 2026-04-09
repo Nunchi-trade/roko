@@ -75,6 +75,26 @@ pub struct WebhookEpisodeMetadata {
     pub external_actions: Vec<ExternalAction>,
 }
 
+impl WebhookEpisodeMetadata {
+    fn new(
+        trigger_kind: impl Into<String>,
+        trigger_signal_hash: impl Into<String>,
+        trigger_source: impl Into<String>,
+        agent_template: impl Into<String>,
+        experiment_variant: Option<String>,
+        external_actions: Vec<ExternalAction>,
+    ) -> Self {
+        Self {
+            trigger_kind: trigger_kind.into(),
+            trigger_signal_hash: trigger_signal_hash.into(),
+            trigger_source: trigger_source.into(),
+            agent_template: agent_template.into(),
+            experiment_variant,
+            external_actions,
+        }
+    }
+}
+
 /// Template-backed agent runner used by the webhook dispatch loop.
 #[derive(Clone, Debug)]
 pub struct TemplateAgentDispatcher {
@@ -1190,7 +1210,20 @@ async fn append_dispatch_episode(
     episode.turns = turns;
     episode.tokens_used = tokens_used;
     episode.external_actions = Vec::new();
-    if let Some(variant) = outcome.result.output.tag("experiment_variant") {
+    let webhook_metadata = WebhookEpisodeMetadata::new(
+        episode.trigger_kind.clone(),
+        episode.trigger_signal_hash.clone(),
+        signal.provenance.author.clone(),
+        episode.agent_template.clone(),
+        outcome
+            .result
+            .output
+            .tag("experiment_variant")
+            .map(ToString::to_string),
+        Vec::new(),
+    );
+
+    if let Some(variant) = webhook_metadata.experiment_variant.as_deref() {
         episode
             .extra
             .insert("experiment_variant".into(), Value::String(variant.to_string()));
