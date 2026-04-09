@@ -6,16 +6,16 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use reqwest::StatusCode;
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::header::{ACCEPT, HeaderMap, HeaderValue, RETRY_AFTER, USER_AGENT};
-use reqwest::StatusCode;
+use roko_mcp_stdio::{JsonRpcError, JsonRpcRequest, serve_stdio};
 use serde::Deserialize;
 use serde_json::Value;
 use std::env;
 use std::io;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use roko_mcp_stdio::{serve_stdio, JsonRpcError, JsonRpcRequest};
 
 #[derive(Debug, Deserialize)]
 struct ToolsCallParams {
@@ -1039,9 +1039,9 @@ fn github_token() -> Result<String, JsonRpcError> {
         Ok(_) => Err(JsonRpcError::internal_error(
             "GITHUB_TOKEN is set but empty",
         )),
-        Err(env::VarError::NotPresent) => Err(JsonRpcError::internal_error(
-            "GITHUB_TOKEN is not set",
-        )),
+        Err(env::VarError::NotPresent) => {
+            Err(JsonRpcError::internal_error("GITHUB_TOKEN is not set"))
+        }
         Err(err) => Err(JsonRpcError::internal_error(format!(
             "read GITHUB_TOKEN from environment: {err}"
         ))),
@@ -1060,16 +1060,16 @@ where
     let mut attempt = 0;
 
     loop {
-        let response = build_request()
-            .send()
-            .map_err(|err| JsonRpcError::internal_error(format!("call GitHub API ({context}): {err}")))?;
+        let response = build_request().send().map_err(|err| {
+            JsonRpcError::internal_error(format!("call GitHub API ({context}): {err}"))
+        })?;
 
         if response.status() == StatusCode::TOO_MANY_REQUESTS {
             if attempt >= RATE_LIMIT_MAX_RETRIES {
                 let status = response.status();
-                let body = response
-                    .text()
-                    .unwrap_or_else(|err| format!("failed to read rate limit response body: {err}"));
+                let body = response.text().unwrap_or_else(|err| {
+                    format!("failed to read rate limit response body: {err}")
+                });
                 return Err(JsonRpcError::internal_error(format!(
                     "GitHub API returned {status}: {}",
                     body.trim()

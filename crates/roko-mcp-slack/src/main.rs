@@ -5,12 +5,12 @@
 
 use reqwest::blocking::Client;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
+use roko_mcp_stdio::{JsonRpcError, JsonRpcRequest, serve_stdio};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::env;
 use std::io;
-use roko_mcp_stdio::{serve_stdio, JsonRpcError, JsonRpcRequest};
 
 #[derive(Debug, Deserialize)]
 struct ToolsCallParams {
@@ -56,6 +56,12 @@ struct SlackListChannelsArguments {
 #[derive(Debug, Deserialize)]
 struct SlackLookupUserArguments {
     email_or_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SlackDmArguments {
+    user_id: String,
+    text: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -122,6 +128,20 @@ struct SlackMutationResponse {
     ok: bool,
     #[serde(default)]
     error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SlackOpenConversationResponse {
+    ok: bool,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    channel: Option<SlackConversation>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SlackConversation {
+    id: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -286,6 +306,19 @@ fn handle_tools_list() -> Value {
                     "required": ["email_or_name"],
                     "additionalProperties": false
                 }
+            }),
+            serde_json::json!({
+                "name": "slack_dm",
+                "description": "Send a direct message to a Slack user.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "user_id": {"type": "string"},
+                        "text": {"type": "string"}
+                    },
+                    "required": ["user_id", "text"],
+                    "additionalProperties": false
+                }
             })
         ]
     })
@@ -305,6 +338,7 @@ fn dispatch_tool_call(name: &str, arguments: Value) -> Result<Value, JsonRpcErro
         "slack_react" => handle_slack_react(arguments),
         "slack.list_channels" => handle_slack_list_channels(arguments),
         "slack_lookup_user" => handle_slack_lookup_user(arguments),
+        "slack_dm" => handle_slack_dm(arguments),
         _ => Err(JsonRpcError::invalid_params(format!(
             "unknown tool: {name}"
         ))),
@@ -331,8 +365,7 @@ fn handle_slack_post_message(arguments: Value) -> Result<Value, JsonRpcError> {
     } = response;
     let channel = channel
         .ok_or_else(|| JsonRpcError::internal_error("Slack API response missing channel"))?;
-    let ts = ts
-        .ok_or_else(|| JsonRpcError::internal_error("Slack API response missing ts"))?;
+    let ts = ts.ok_or_else(|| JsonRpcError::internal_error("Slack API response missing ts"))?;
 
     Ok(serde_json::json!({
         "content": [{
@@ -348,9 +381,8 @@ fn handle_slack_post_message(arguments: Value) -> Result<Value, JsonRpcError> {
 }
 
 fn handle_slack_reply(arguments: Value) -> Result<Value, JsonRpcError> {
-    let args: SlackReplyArguments = serde_json::from_value(arguments).map_err(|err| {
-        JsonRpcError::invalid_params(format!("invalid slack_reply args: {err}"))
-    })?;
+    let args: SlackReplyArguments = serde_json::from_value(arguments)
+        .map_err(|err| JsonRpcError::invalid_params(format!("invalid slack_reply args: {err}")))?;
 
     let client = SlackClient::from_env()?;
     let response = client.post_message(&args.channel, &args.text, Some(&args.thread_ts))?;
@@ -363,8 +395,7 @@ fn handle_slack_reply(arguments: Value) -> Result<Value, JsonRpcError> {
     } = response;
     let channel = channel
         .ok_or_else(|| JsonRpcError::internal_error("Slack API response missing channel"))?;
-    let ts = ts
-        .ok_or_else(|| JsonRpcError::internal_error("Slack API response missing ts"))?;
+    let ts = ts.ok_or_else(|| JsonRpcError::internal_error("Slack API response missing ts"))?;
 
     Ok(serde_json::json!({
         "content": [{
@@ -401,9 +432,8 @@ fn handle_slack_get_thread(arguments: Value) -> Result<Value, JsonRpcError> {
 }
 
 fn handle_slack_react(arguments: Value) -> Result<Value, JsonRpcError> {
-    let args: SlackReactArguments = serde_json::from_value(arguments).map_err(|err| {
-        JsonRpcError::invalid_params(format!("invalid slack_react args: {err}"))
-    })?;
+    let args: SlackReactArguments = serde_json::from_value(arguments)
+        .map_err(|err| JsonRpcError::invalid_params(format!("invalid slack_react args: {err}")))?;
 
     let client = SlackClient::from_env()?;
     client.add_reaction(&args.channel, &args.ts, &args.emoji)?;
@@ -470,6 +500,38 @@ fn handle_slack_lookup_user(arguments: Value) -> Result<Value, JsonRpcError> {
     }))
 }
 
+fn handle_slack_dm(arguments: Value) -> Result<Value, JsonRpcError> {
+    let args: SlackDmArguments = serde_json::from_value(arguments)
+        .map_err(|err| JsonRpcError::invalid_params(format!("invalid slack_dm args: {err}")))?;
+
+    let client = SlackClient::from_env()?;
+    let channel_id = client.open_dm_channel(&args.user_id)?;
+    let response = client.post_message(&channel_id, &args.text, None)?;
+    let SlackPostMessageResponse {
+        ok: _,
+        error: _,
+        channel,
+        ts,
+        message,
+    } = response;
+    let channel = channel
+        .ok_or_else(|| JsonRpcError::internal_error("Slack API response missing channel"))?;
+    let ts = ts.ok_or_else(|| JsonRpcError::internal_error("Slack API response missing ts"))?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": serde_json::json!({
+                "user_id": args.user_id,
+                "channel": channel,
+                "ts": ts,
+                "message": message
+            }).to_string()
+        }],
+        "isError": false
+    }))
+}
+
 #[derive(Debug)]
 struct SlackLookupUserResult {
     id: String,
@@ -484,9 +546,7 @@ impl SlackClient {
         let token = env::var("SLACK_BOT_TOKEN")
             .or_else(|_| env::var("SLACK_TOKEN"))
             .map_err(|_| {
-                JsonRpcError::internal_error(
-                    "SLACK_BOT_TOKEN or SLACK_TOKEN env var required",
-                )
+                JsonRpcError::internal_error("SLACK_BOT_TOKEN or SLACK_TOKEN env var required")
             })?;
 
         Ok(Self {
@@ -498,10 +558,39 @@ impl SlackClient {
     fn auth_headers(&self) -> Result<HeaderMap, JsonRpcError> {
         let mut headers = HeaderMap::new();
         let auth_value = format!("Bearer {}", self.token);
-        let auth_value = HeaderValue::from_str(&auth_value)
-            .map_err(|err| JsonRpcError::internal_error(format!("invalid slack auth header: {err}")))?;
+        let auth_value = HeaderValue::from_str(&auth_value).map_err(|err| {
+            JsonRpcError::internal_error(format!("invalid slack auth header: {err}"))
+        })?;
         headers.insert(AUTHORIZATION, auth_value);
         Ok(headers)
+    }
+
+    fn open_dm_channel(&self, user_id: &str) -> Result<String, JsonRpcError> {
+        let headers = self.auth_headers()?;
+
+        let response = self
+            .client
+            .post("https://slack.com/api/conversations.open")
+            .headers(headers)
+            .form(&[("users", user_id)])
+            .send()
+            .map_err(|err| JsonRpcError::internal_error(format!("slack request failed: {err}")))?;
+
+        let parsed: SlackOpenConversationResponse = response.json().map_err(|err| {
+            JsonRpcError::internal_error(format!("invalid slack response: {err}"))
+        })?;
+
+        if !parsed.ok {
+            let error = parsed.error.as_deref().unwrap_or("unknown");
+            return Err(JsonRpcError::internal_error(format!(
+                "Slack API error: {error}"
+            )));
+        }
+
+        parsed
+            .channel
+            .map(|channel| channel.id)
+            .ok_or_else(|| JsonRpcError::internal_error("Slack API response missing channel"))
     }
 
     fn post_message(
@@ -511,7 +600,10 @@ impl SlackClient {
         thread_ts: Option<&str>,
     ) -> Result<SlackPostMessageResponse, JsonRpcError> {
         let mut headers = self.auth_headers()?;
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json; charset=utf-8"));
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/json; charset=utf-8"),
+        );
 
         let mut body = serde_json::json!({
             "channel": channel,
@@ -529,9 +621,9 @@ impl SlackClient {
             .send()
             .map_err(|err| JsonRpcError::internal_error(format!("slack request failed: {err}")))?;
 
-        let parsed: SlackPostMessageResponse = response
-            .json()
-            .map_err(|err| JsonRpcError::internal_error(format!("invalid slack response: {err}")))?;
+        let parsed: SlackPostMessageResponse = response.json().map_err(|err| {
+            JsonRpcError::internal_error(format!("invalid slack response: {err}"))
+        })?;
 
         if !parsed.ok {
             let error = parsed.error.as_deref().unwrap_or("unknown");
@@ -555,17 +647,13 @@ impl SlackClient {
             .client
             .post("https://slack.com/api/reactions.add")
             .headers(headers)
-            .form(&[
-                ("channel", channel),
-                ("timestamp", ts),
-                ("name", emoji),
-            ])
+            .form(&[("channel", channel), ("timestamp", ts), ("name", emoji)])
             .send()
             .map_err(|err| JsonRpcError::internal_error(format!("slack request failed: {err}")))?;
 
-        let parsed: SlackMutationResponse = response
-            .json()
-            .map_err(|err| JsonRpcError::internal_error(format!("invalid slack response: {err}")))?;
+        let parsed: SlackMutationResponse = response.json().map_err(|err| {
+            JsonRpcError::internal_error(format!("invalid slack response: {err}"))
+        })?;
 
         if !parsed.ok {
             let error = parsed.error.as_deref().unwrap_or("unknown");
@@ -577,13 +665,13 @@ impl SlackClient {
         Ok(parsed)
     }
 
-    fn list_channels(
-        &self,
-        limit: Option<u32>,
-    ) -> Result<SlackListChannelsResponse, JsonRpcError> {
+    fn list_channels(&self, limit: Option<u32>) -> Result<SlackListChannelsResponse, JsonRpcError> {
         let headers = self.auth_headers()?;
 
-        let mut request = self.client.get("https://slack.com/api/conversations.list").headers(headers);
+        let mut request = self
+            .client
+            .get("https://slack.com/api/conversations.list")
+            .headers(headers);
         if let Some(limit) = limit {
             request = request.query(&[("limit", limit)]);
         }
@@ -592,9 +680,9 @@ impl SlackClient {
             .send()
             .map_err(|err| JsonRpcError::internal_error(format!("slack request failed: {err}")))?;
 
-        let parsed: SlackListChannelsResponse = response
-            .json()
-            .map_err(|err| JsonRpcError::internal_error(format!("invalid slack response: {err}")))?;
+        let parsed: SlackListChannelsResponse = response.json().map_err(|err| {
+            JsonRpcError::internal_error(format!("invalid slack response: {err}"))
+        })?;
 
         if !parsed.ok {
             let error = parsed.error.as_deref().unwrap_or("unknown");
@@ -612,7 +700,11 @@ impl SlackClient {
             return Ok(SlackLookupUserResult {
                 id: user.id,
                 name: user.name,
-                real_name: user.real_name.or(user.profile.real_name).unwrap_or_default().into(),
+                real_name: user
+                    .real_name
+                    .or(user.profile.real_name)
+                    .unwrap_or_default()
+                    .into(),
                 email: user.profile.email,
                 matched_by: "email".to_string(),
             });
@@ -632,9 +724,9 @@ impl SlackClient {
             .send()
             .map_err(|err| JsonRpcError::internal_error(format!("slack request failed: {err}")))?;
 
-        let parsed: SlackLookupUserResponse = response
-            .json()
-            .map_err(|err| JsonRpcError::internal_error(format!("invalid slack response: {err}")))?;
+        let parsed: SlackLookupUserResponse = response.json().map_err(|err| {
+            JsonRpcError::internal_error(format!("invalid slack response: {err}"))
+        })?;
 
         if !parsed.ok {
             let error = parsed.error.as_deref().unwrap_or("unknown");
@@ -665,13 +757,13 @@ impl SlackClient {
                 request = request.query(&[("cursor", cursor)]);
             }
 
-            let response = request
-                .send()
-                .map_err(|err| JsonRpcError::internal_error(format!("slack request failed: {err}")))?;
+            let response = request.send().map_err(|err| {
+                JsonRpcError::internal_error(format!("slack request failed: {err}"))
+            })?;
 
-            let parsed: SlackUsersListResponse = response
-                .json()
-                .map_err(|err| JsonRpcError::internal_error(format!("invalid slack response: {err}")))?;
+            let parsed: SlackUsersListResponse = response.json().map_err(|err| {
+                JsonRpcError::internal_error(format!("invalid slack response: {err}"))
+            })?;
 
             if !parsed.ok {
                 let error = parsed.error.as_deref().unwrap_or("unknown");
@@ -703,16 +795,18 @@ impl SlackClient {
                 }
             }
 
-            cursor = parsed.response_metadata.next_cursor.filter(|cursor| !cursor.is_empty());
+            cursor = parsed
+                .response_metadata
+                .next_cursor
+                .filter(|cursor| !cursor.is_empty());
             if cursor.is_none() {
                 break;
             }
         }
 
-        let user = matches
-            .into_iter()
-            .next()
-            .ok_or_else(|| JsonRpcError::internal_error(format!("no Slack user found for {name}")))?;
+        let user = matches.into_iter().next().ok_or_else(|| {
+            JsonRpcError::internal_error(format!("no Slack user found for {name}"))
+        })?;
 
         Ok(SlackLookupUserResult {
             id: user.id,
@@ -735,22 +829,18 @@ impl SlackClient {
                 .client
                 .get("https://slack.com/api/conversations.replies")
                 .headers(headers.clone())
-                .query(&[
-                    ("channel", channel),
-                    ("ts", thread_ts),
-                    ("limit", "1000"),
-                ]);
+                .query(&[("channel", channel), ("ts", thread_ts), ("limit", "1000")]);
             if let Some(cursor) = cursor.as_deref() {
                 request = request.query(&[("cursor", cursor)]);
             }
 
-            let response = request
-                .send()
-                .map_err(|err| JsonRpcError::internal_error(format!("slack request failed: {err}")))?;
+            let response = request.send().map_err(|err| {
+                JsonRpcError::internal_error(format!("slack request failed: {err}"))
+            })?;
 
-            let parsed: SlackThreadResponse = response
-                .json()
-                .map_err(|err| JsonRpcError::internal_error(format!("invalid slack response: {err}")))?;
+            let parsed: SlackThreadResponse = response.json().map_err(|err| {
+                JsonRpcError::internal_error(format!("invalid slack response: {err}"))
+            })?;
 
             if !parsed.ok {
                 let error = parsed.error.as_deref().unwrap_or("unknown");
@@ -769,7 +859,10 @@ impl SlackClient {
                 }
             }
 
-            cursor = parsed.response_metadata.next_cursor.filter(|cursor| !cursor.is_empty());
+            cursor = parsed
+                .response_metadata
+                .next_cursor
+                .filter(|cursor| !cursor.is_empty());
             if cursor.is_none() {
                 break;
             }
@@ -785,19 +878,41 @@ mod tests {
 
     #[test]
     fn tools_list_contains_post_message() {
-        let tools = handle_tools_list()["tools"].as_array().expect("tools array");
-        assert_eq!(tools.len(), 6);
+        let tools = handle_tools_list()["tools"]
+            .as_array()
+            .expect("tools array");
+        assert_eq!(tools.len(), 7);
         assert_eq!(tools[0]["name"], "slack.post_message");
-        assert_eq!(tools[0]["inputSchema"]["required"], serde_json::json!(["channel", "text"]));
+        assert_eq!(
+            tools[0]["inputSchema"]["required"],
+            serde_json::json!(["channel", "text"])
+        );
         assert_eq!(tools[1]["name"], "slack_reply");
-        assert_eq!(tools[1]["inputSchema"]["required"], serde_json::json!(["channel", "thread_ts", "text"]));
+        assert_eq!(
+            tools[1]["inputSchema"]["required"],
+            serde_json::json!(["channel", "thread_ts", "text"])
+        );
         assert_eq!(tools[2]["name"], "slack_get_thread");
-        assert_eq!(tools[2]["inputSchema"]["required"], serde_json::json!(["channel", "thread_ts"]));
+        assert_eq!(
+            tools[2]["inputSchema"]["required"],
+            serde_json::json!(["channel", "thread_ts"])
+        );
         assert_eq!(tools[3]["name"], "slack_react");
-        assert_eq!(tools[3]["inputSchema"]["required"], serde_json::json!(["channel", "ts", "emoji"]));
+        assert_eq!(
+            tools[3]["inputSchema"]["required"],
+            serde_json::json!(["channel", "ts", "emoji"])
+        );
         assert_eq!(tools[4]["name"], "slack.list_channels");
         assert_eq!(tools[5]["name"], "slack_lookup_user");
-        assert_eq!(tools[5]["inputSchema"]["required"], serde_json::json!(["email_or_name"]));
+        assert_eq!(
+            tools[5]["inputSchema"]["required"],
+            serde_json::json!(["email_or_name"])
+        );
+        assert_eq!(tools[6]["name"], "slack_dm");
+        assert_eq!(
+            tools[6]["inputSchema"]["required"],
+            serde_json::json!(["user_id", "text"])
+        );
     }
 
     #[test]
