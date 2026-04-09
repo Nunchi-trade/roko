@@ -520,6 +520,15 @@ enum DeployCmd {
         #[arg(long)]
         workdir: Option<PathBuf>,
     },
+    /// Build the local Docker image and tag it for the configured registry.
+    Docker {
+        /// Working directory / repository root (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+        /// Registry namespace to tag the image under.
+        #[arg(long)]
+        registry: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -2695,6 +2704,9 @@ async fn cmd_deploy(cli: &Cli, cmd: DeployCmd) -> Result<i32> {
     match cmd {
         DeployCmd::Railway { workdir } => cmd_deploy_railway(cli, workdir).await,
         DeployCmd::Fly { workdir } => cmd_deploy_fly(cli, workdir).await,
+        DeployCmd::Docker { workdir, registry } => {
+            cmd_deploy_docker(cli, workdir, registry).await
+        }
     }
 }
 
@@ -2703,6 +2715,21 @@ async fn cmd_deploy_fly(cli: &Cli, workdir: Option<PathBuf>) -> Result<i32> {
 
     write_fly_toml(&workdir)?;
     run_command_status(&workdir, "flyctl", &["deploy", "--remote-only"])?;
+
+    Ok(EXIT_SUCCESS)
+}
+
+async fn cmd_deploy_docker(
+    cli: &Cli,
+    workdir: Option<PathBuf>,
+    registry: Option<String>,
+) -> Result<i32> {
+    let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
+    let registry = resolve_docker_registry(&workdir, registry)?;
+    let tagged_image = format!("{registry}/roko:latest");
+
+    run_command_status(&workdir, "docker", &["build", "-t", "roko", "."])?;
+    run_command_status(&workdir, "docker", &["tag", "roko:latest", &tagged_image])?;
 
     Ok(EXIT_SUCCESS)
 }
@@ -2768,6 +2795,35 @@ fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
     RokoConfig::from_toml(&text).with_context(|| format!("parse {}", path.display()))
+}
+
+fn resolve_docker_registry(workdir: &Path, registry: Option<String>) -> Result<String> {
+    if let Some(registry) = registry {
+        let registry = registry.trim().trim_end_matches('/');
+        if registry.is_empty() {
+            bail!("deploy.docker.registry cannot be empty");
+        }
+        return Ok(registry.to_string());
+    }
+
+    let config = load_roko_config(workdir)?;
+    let worker_image = config
+        .deploy
+        .worker_image
+        .as_deref()
+        .ok_or_else(|| anyhow!("deploy.docker.registry is required or set deploy.worker_image"))?;
+
+    let registry = worker_image
+        .rsplit_once('/')
+        .map(|(registry, _)| registry)
+        .filter(|registry| !registry.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow!(
+                "unable to derive Docker registry from deploy.worker_image: {worker_image}"
+            )
+        })?;
+
+    Ok(registry.trim().trim_end_matches('/').to_string())
 }
 
 async fn run_release_build(workdir: &Path) -> Result<()> {
@@ -3369,6 +3425,17 @@ mod tests {
             cli.command,
             Some(Command::Deploy {
                 cmd: DeployCmd::Fly { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_parses_deploy_docker_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "deploy", "docker"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Deploy {
+                cmd: DeployCmd::Docker { .. }
             })
         ));
     }
