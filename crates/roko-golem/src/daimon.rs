@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::io;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -93,6 +95,9 @@ pub struct AffectEngine {
     /// Half-life in hours for explicit decay operations.
     #[serde(default = "default_half_life_hours")]
     half_life_hours: f64,
+    /// Optional on-disk persistence target.
+    #[serde(skip, default)]
+    persistence_path: Option<PathBuf>,
 }
 
 fn default_half_life_hours() -> f64 {
@@ -112,6 +117,7 @@ impl AffectEngine {
         Self {
             states: HashMap::new(),
             half_life_hours: default_half_life_hours(),
+            persistence_path: None,
         }
     }
 
@@ -121,7 +127,27 @@ impl AffectEngine {
         Self {
             states: HashMap::new(),
             half_life_hours,
+            persistence_path: None,
         }
+    }
+
+    /// Load persisted affect state from disk, or fall back to a fresh engine.
+    #[must_use]
+    pub fn load_or_new(path: impl AsRef<Path>) -> Self {
+        let path = path.as_ref();
+        let mut engine = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|json| serde_json::from_str::<Self>(&json).ok())
+            .unwrap_or_default();
+        engine.persistence_path = Some(path.to_path_buf());
+        engine
+    }
+
+    /// Attach a persistence target to this engine.
+    #[must_use]
+    pub fn with_persistence_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.persistence_path = Some(path.into());
+        self
     }
 
     /// Return the configured decay half-life in hours.
@@ -135,20 +161,33 @@ impl AffectEngine {
     pub fn get_state(&mut self, task_id: impl AsRef<str>) -> AffectState {
         let task_id = task_id.as_ref();
         let now = Utc::now();
-        let state = self
-            .states
-            .entry(task_id.to_owned())
-            .or_insert_with(|| AffectState::neutral(now));
+        let (state, dirty) = {
+            let mut dirty = false;
+            let state = self
+                .states
+                .entry(task_id.to_owned())
+                .or_insert_with(|| {
+                    dirty = true;
+                    AffectState::neutral(now)
+                });
 
-        let elapsed_hours = now
-            .signed_duration_since(state.updated_at)
-            .num_seconds() as f64
-            / 3600.0;
-        if elapsed_hours > 0.0 {
-            decay_state(state, elapsed_hours, self.half_life_hours);
+            let elapsed_hours = now
+                .signed_duration_since(state.updated_at)
+                .num_seconds() as f64
+                / 3600.0;
+            if elapsed_hours > 0.0 {
+                decay_state(state, elapsed_hours, self.half_life_hours);
+                dirty = true;
+            }
+
+            (state.clone(), dirty)
+        };
+
+        if dirty {
+            self.persist();
         }
 
-        state.clone()
+        state
     }
 
     /// Appraisal trigger: task succeeded.
@@ -222,6 +261,8 @@ impl AffectEngine {
         for state in self.states.values_mut() {
             state.decay_by_factor(factor);
         }
+
+        self.persist();
     }
 
     fn adjust(
@@ -233,21 +274,46 @@ impl AffectEngine {
         confidence: f64,
     ) -> AffectState {
         let now = Utc::now();
-        let state = self
-            .states
-            .entry(task_id)
-            .or_insert_with(|| AffectState::neutral(now));
+        let state = {
+            let state = self
+                .states
+                .entry(task_id)
+                .or_insert_with(|| AffectState::neutral(now));
 
-        let elapsed_hours = now
-            .signed_duration_since(state.updated_at)
-            .num_seconds() as f64
-            / 3600.0;
-        if elapsed_hours > 0.0 {
-            decay_state(state, elapsed_hours, self.half_life_hours);
+            let elapsed_hours = now
+                .signed_duration_since(state.updated_at)
+                .num_seconds() as f64
+                / 3600.0;
+            if elapsed_hours > 0.0 {
+                decay_state(state, elapsed_hours, self.half_life_hours);
+            }
+
+            state.apply_delta(pleasure, arousal, dominance, confidence);
+            state.clone()
+        };
+
+        self.persist();
+        state
+    }
+
+    fn persist(&self) {
+        let Some(path) = self.persistence_path.as_ref() else {
+            return;
+        };
+
+        let _ = self.save_to(path);
+    }
+
+    fn save_to(&self, path: &Path) -> io::Result<()> {
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
         }
-
-        state.apply_delta(pleasure, arousal, dominance, confidence);
-        state.clone()
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, json)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
     }
 
 }

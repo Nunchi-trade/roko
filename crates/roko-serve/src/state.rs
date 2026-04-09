@@ -6,7 +6,7 @@
 //! runs, plans, and operations.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -31,6 +31,10 @@ use roko_fs::layout::RokoLayout;
 
 use crate::events::ServerEvent;
 use crate::templates::TemplateRegistry;
+
+fn affect_state_path(layout_root: &Path) -> PathBuf {
+    layout_root.join("daimon").join("affect.json")
+}
 
 // ---------------------------------------------------------------------------
 // Handle types for tracked async work
@@ -158,6 +162,7 @@ impl AppState {
     ) -> Self {
         let layout = RokoLayout::for_project(&workdir);
         let signal_root = layout.root().to_path_buf();
+        let affect_path = affect_state_path(layout.root());
         let cancel = CancelToken::new();
         let supervisor = Arc::new(ProcessSupervisor::new(cancel.child()));
         let subscriptions = SubscriptionRegistry::load_from_project(&workdir, &roko_config);
@@ -173,7 +178,7 @@ impl AppState {
             started_at: Instant::now(),
             metrics: Arc::new(MetricRegistry::new()),
             supervisor,
-            affect_engine: Mutex::new(AffectEngine::new()),
+            affect_engine: Mutex::new(AffectEngine::load_or_new(&affect_path)),
             event_bus: EventBus::new(1024),
             subscriptions,
             runtime,

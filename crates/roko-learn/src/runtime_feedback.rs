@@ -52,6 +52,11 @@ impl EpisodeActions {
     }
 }
 
+fn affect_state_path(learn_root: &Path) -> PathBuf {
+    let root = learn_root.parent().unwrap_or(learn_root);
+    root.join("daimon").join("affect.json")
+}
+
 impl EpisodeView for EpisodeActions {
     fn actions(&self) -> &[String] {
         &self.actions
@@ -263,6 +268,10 @@ impl LearningRuntime {
     ) -> Result<Self, LearningRuntimeError> {
         tokio::fs::create_dir_all(&paths.root).await?;
         tokio::fs::create_dir_all(&paths.playbooks_dir).await?;
+        let affect_path = affect_state_path(&paths.root);
+        if let Some(parent) = affect_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
 
         let episode_logger = EpisodeLogger::new(&paths.episodes_jsonl);
         let costs_log = CostsLog::open_creating(&paths.costs_jsonl).await?;
@@ -289,7 +298,7 @@ impl LearningRuntime {
         Ok(Self {
             paths,
             episode_logger,
-            affect_engine: parking_lot::Mutex::new(AffectEngine::new()),
+            affect_engine: parking_lot::Mutex::new(AffectEngine::load_or_new(&affect_path)),
             costs_log,
             costs_db,
             provider_health: ProviderHealthTracker::new(),
@@ -318,6 +327,10 @@ impl LearningRuntime {
     ) -> Result<Self, LearningRuntimeError> {
         tokio::fs::create_dir_all(&paths.root).await?;
         tokio::fs::create_dir_all(&paths.playbooks_dir).await?;
+        let affect_path = affect_state_path(&paths.root);
+        if let Some(parent) = affect_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
 
         let episode_logger = EpisodeLogger::new(&paths.episodes_jsonl);
         let costs_log = CostsLog::open_creating(&paths.costs_jsonl).await?;
@@ -338,7 +351,7 @@ impl LearningRuntime {
         Ok(Self {
             paths,
             episode_logger,
-            affect_engine: parking_lot::Mutex::new(AffectEngine::new()),
+            affect_engine: parking_lot::Mutex::new(AffectEngine::load_or_new(&affect_path)),
             costs_log,
             costs_db,
             provider_health: ProviderHealthTracker::new(),
