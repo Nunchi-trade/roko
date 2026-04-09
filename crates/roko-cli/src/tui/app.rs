@@ -15,13 +15,13 @@ use crossterm::terminal::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use serde_json::Value;
 
-use super::dashboard::{DashboardData, DashboardScaffold};
+use super::dashboard::{DashboardData, DashboardScaffold, Theme};
 use super::event::{Event, EventHandler};
 use super::pages::{PageId, PageRegistry};
 use super::widgets;
@@ -188,6 +188,7 @@ impl App {
             self.scroll_for(self.current_page),
             self.signal_selection,
             self.gate_failure_selection,
+            &Theme::from_env(),
         );
         if let Some(overlay) = &self.overlay {
             self.render_overlay(frame, overlay);
@@ -487,6 +488,7 @@ impl App {
     }
 
     fn render_overlay(&self, frame: &mut Frame<'_>, overlay: &OverlayState) {
+        let theme = Theme::from_env();
         let area = centered_rect(86, 84, frame.area());
         frame.render_widget(Clear, area);
 
@@ -496,12 +498,12 @@ impl App {
                 let block = Block::default()
                     .borders(Borders::ALL)
                     .title("help")
-                    .border_style(Style::default().fg(Color::Cyan));
+                    .border_style(theme.accent());
                 let inner = block.inner(area);
                 frame.render_widget(block, area);
                 let paragraph = Paragraph::new(lines)
                     .alignment(Alignment::Left)
-                    .style(Style::default().fg(Color::White))
+                    .style(theme.text())
                     .wrap(Wrap { trim: false });
                 frame.render_widget(paragraph, inner);
             }
@@ -509,14 +511,14 @@ impl App {
                 let block = Block::default()
                     .borders(Borders::ALL)
                     .title(detail.title.as_str())
-                    .border_style(Style::default().fg(Color::Yellow));
+                    .border_style(theme.warning());
                 let inner = block.inner(area);
                 frame.render_widget(block, area);
 
                 let body = Paragraph::new(detail.body.as_str())
                     .style(
-                        Style::default()
-                            .fg(Color::White)
+                        theme
+                            .text()
                             .add_modifier(Modifier::BOLD),
                     )
                     .wrap(Wrap { trim: false })
@@ -557,6 +559,7 @@ fn render_page(frame: &mut Frame<'_>, app: &App) {
         app.scroll_for(app.current_page),
         app.signal_selection,
         app.gate_failure_selection,
+        &Theme::from_env(),
     );
 }
 
@@ -611,12 +614,11 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 }
 
 fn help_lines() -> Vec<Line<'static>> {
+    let theme = Theme::from_env();
     vec![
         Line::from(Span::styled(
             "dashboard keybindings",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            theme.accent_bold(),
         )),
         Line::from(""),
         Line::from("1-6      jump to dashboard pages 1 through 6"),

@@ -11,6 +11,6 @@ pub mod pages;
 pub mod widgets;
 
 pub use app::App;
-pub use dashboard::{DashboardData, DashboardScaffold, DashboardSummary};
+pub use dashboard::{DashboardData, DashboardScaffold, DashboardSummary, Theme};
 pub use event::{Event, EventHandler};
 pub use pages::{Page, PageId, PageRegistry, PageScaffold, WidgetScaffold};

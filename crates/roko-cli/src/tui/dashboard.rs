@@ -15,6 +15,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use ratatui::style::{Color, Modifier, Style};
 
 use crate::plan::{PlanSummary, plans_dir};
 use crate::task_parser::{TaskDef, TasksFile};
@@ -59,6 +60,150 @@ impl FileStamp {
 struct JsonlState {
     stamp: FileStamp,
     offset: u64,
+}
+
+/// Color palette for the dashboard TUI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Theme {
+    /// Primary foreground text color.
+    pub foreground: Color,
+    /// Secondary or muted text color.
+    pub muted: Color,
+    /// Default background color.
+    pub background: Color,
+    /// Primary accent color.
+    pub accent: Color,
+    /// Accent foreground color for contrast.
+    pub accent_foreground: Color,
+    /// Success or completed state color.
+    pub success: Color,
+    /// Warning or gating state color.
+    pub warning: Color,
+    /// Error or failed state color.
+    pub danger: Color,
+    /// Informational or active state color.
+    pub info: Color,
+    /// Selection background color.
+    pub selection_background: Color,
+    /// Selection foreground color.
+    pub selection_foreground: Color,
+}
+
+impl Theme {
+    /// Build the default dark palette that matches a typical terminal theme.
+    #[must_use]
+    pub const fn dark() -> Self {
+        Self {
+            foreground: Color::White,
+            muted: Color::DarkGray,
+            background: Color::Black,
+            accent: Color::Cyan,
+            accent_foreground: Color::Black,
+            success: Color::Green,
+            warning: Color::Yellow,
+            danger: Color::Red,
+            info: Color::Blue,
+            selection_background: Color::Cyan,
+            selection_foreground: Color::Black,
+        }
+    }
+
+    /// Build an uncolored palette for `NO_COLOR` environments.
+    #[must_use]
+    pub const fn no_color() -> Self {
+        Self {
+            foreground: Color::Reset,
+            muted: Color::Reset,
+            background: Color::Reset,
+            accent: Color::Reset,
+            accent_foreground: Color::Reset,
+            success: Color::Reset,
+            warning: Color::Reset,
+            danger: Color::Reset,
+            info: Color::Reset,
+            selection_background: Color::Reset,
+            selection_foreground: Color::Reset,
+        }
+    }
+
+    /// Build the active palette from the current environment.
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self::from_no_color(std::env::var_os("NO_COLOR").is_some())
+    }
+
+    /// Build the active palette from an explicit `NO_COLOR` flag.
+    #[must_use]
+    pub const fn from_no_color(no_color: bool) -> Self {
+        if no_color {
+            Self::no_color()
+        } else {
+            Self::dark()
+        }
+    }
+
+    /// A plain foreground style.
+    #[must_use]
+    pub fn text(self) -> Style {
+        Style::default().fg(self.foreground)
+    }
+
+    /// A muted foreground style.
+    #[must_use]
+    pub fn muted(self) -> Style {
+        Style::default().fg(self.muted)
+    }
+
+    /// An accent style used for titles and highlights.
+    #[must_use]
+    pub fn accent(self) -> Style {
+        Style::default().fg(self.accent)
+    }
+
+    /// A bold accent style for selected content.
+    #[must_use]
+    pub fn accent_bold(self) -> Style {
+        self.accent().add_modifier(Modifier::BOLD)
+    }
+
+    /// A selected-item style with readable contrast.
+    #[must_use]
+    pub fn selection(self) -> Style {
+        Style::default()
+            .fg(self.selection_foreground)
+            .bg(self.selection_background)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    /// A success style for completed or healthy states.
+    #[must_use]
+    pub fn success(self) -> Style {
+        Style::default().fg(self.success).add_modifier(Modifier::BOLD)
+    }
+
+    /// A warning style for gating or degraded states.
+    #[must_use]
+    pub fn warning(self) -> Style {
+        Style::default().fg(self.warning).add_modifier(Modifier::BOLD)
+    }
+
+    /// A danger style for failed or critical states.
+    #[must_use]
+    pub fn danger(self) -> Style {
+        Style::default().fg(self.danger).add_modifier(Modifier::BOLD)
+    }
+
+    /// An informational style for active or in-flight states.
+    #[must_use]
+    pub fn info(self) -> Style {
+        Style::default().fg(self.info).add_modifier(Modifier::BOLD)
+    }
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Self::from_env()
+    }
 }
 
 /// In-memory scaffold of all placeholder dashboard pages.
@@ -4086,6 +4231,26 @@ mod tests {
         let mut dashboard = DashboardScaffold::new();
         assert!(dashboard.set_active_page(PageId::PlanView));
         assert_eq!(dashboard.active_page(), PageId::PlanView);
+    }
+
+    #[test]
+    fn theme_defaults_to_a_dark_terminal_palette() {
+        let theme = Theme::from_no_color(false);
+        assert_eq!(theme.foreground, Color::White);
+        assert_eq!(theme.background, Color::Black);
+        assert_eq!(theme.accent, Color::Cyan);
+        assert_eq!(theme.selection_background, Color::Cyan);
+        assert_eq!(theme.selection_foreground, Color::Black);
+    }
+
+    #[test]
+    fn theme_disables_color_when_requested() {
+        let theme = Theme::from_no_color(true);
+        assert_eq!(theme.foreground, Color::Reset);
+        assert_eq!(theme.background, Color::Reset);
+        assert_eq!(theme.accent, Color::Reset);
+        assert_eq!(theme.selection_background, Color::Reset);
+        assert_eq!(theme.selection_foreground, Color::Reset);
     }
 
     #[test]

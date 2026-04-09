@@ -20,7 +20,7 @@ use serde_json::Value;
 use super::dashboard::{
     AgentActivitySnapshot, CFactor, CascadeRouterState, DashboardData, DashboardScaffold,
     GateFailureRow, GateSummaryRow, GateThresholdRow, GateTrend, PlanExecutionSnapshot,
-    SignalSummary, build_agent_activity_snapshot, read_json_value, read_jsonl_values,
+    SignalSummary, Theme, build_agent_activity_snapshot, read_json_value, read_jsonl_values,
 };
 use super::pages::{PageId, PageRegistry};
 
@@ -34,23 +34,20 @@ pub fn render_dashboard(
     scroll: u16,
     signal_selected: usize,
     gate_failure_selected: usize,
+    theme: &Theme,
 ) {
     let areas = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(5),
-            Constraint::Min(0),
-            Constraint::Length(2),
-        ])
+        .constraints([Constraint::Length(5), Constraint::Min(0), Constraint::Length(2)])
         .split(frame.area());
 
-    render_header(frame, areas[0], dashboard, pages, active_page);
+    render_header(frame, areas[0], dashboard, pages, active_page, theme);
 
     let body = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(34), Constraint::Min(0)])
         .split(areas[1]);
-    render_sidebar(frame, body[0], pages, active_page);
+    render_sidebar(frame, body[0], pages, active_page, theme);
     render_page(
         frame,
         body[1],
@@ -61,9 +58,10 @@ pub fn render_dashboard(
         scroll,
         signal_selected,
         gate_failure_selected,
+        theme,
     );
 
-    render_footer(frame, areas[2], pages, active_page);
+    render_footer_themed(frame, areas[2], pages, active_page, theme);
 }
 
 /// Render the top shell header and page tabs.
@@ -73,6 +71,7 @@ pub fn render_header(
     dashboard: &DashboardScaffold,
     pages: &PageRegistry,
     active_page: PageId,
+    theme: &Theme,
 ) {
     let header = Layout::default()
         .direction(Direction::Vertical)
@@ -84,9 +83,7 @@ pub fn render_header(
         Line::from(vec![
             Span::styled(
                 "roko ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
+                theme.accent_bold(),
             ),
             Span::raw("dashboard"),
         ]),
@@ -107,13 +104,8 @@ pub fn render_header(
     let tabs = Tabs::new(titles)
         .select(active_index)
         .block(Block::default().borders(Borders::ALL).title("pages"))
-        .style(Style::default().fg(Color::Gray))
-        .highlight_style(
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        );
+        .style(theme.muted())
+        .highlight_style(theme.selection());
     frame.render_widget(tabs, header[1]);
 }
 
@@ -123,18 +115,16 @@ pub fn render_sidebar(
     area: Rect,
     pages: &PageRegistry,
     active_page: PageId,
+    theme: &Theme,
 ) {
     let items: Vec<ListItem<'_>> = pages
         .iter()
         .map(|page| {
             ListItem::new(page.render_summary_line(page.id == active_page)).style(
                 if page.id == active_page {
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD)
+                    theme.selection()
                 } else {
-                    Style::default().fg(Color::White)
+                    theme.text()
                 },
             )
         })
@@ -142,12 +132,7 @@ pub fn render_sidebar(
 
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title("navigation"))
-        .highlight_style(
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        );
+        .highlight_style(theme.selection());
 
     frame.render_widget(list, area);
 }
@@ -163,10 +148,17 @@ pub fn render_page(
     scroll: u16,
     signal_selected: usize,
     gate_failure_selected: usize,
+    theme: &Theme,
 ) {
     let Some(page) = pages.page(active_page) else {
         let placeholder = Paragraph::new("missing page")
-            .block(Block::default().borders(Borders::ALL).title("content"));
+            .style(theme.muted())
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("content")
+                    .border_style(theme.muted()),
+            );
         frame.render_widget(placeholder, area);
         return;
     };
@@ -2384,79 +2376,64 @@ fn is_gate_kind(kind: &str) -> bool {
 }
 
 fn status_style(status: &str, completed: bool) -> Style {
+    let theme = Theme::from_env();
     if completed {
-        return Style::default()
-            .fg(Color::Green)
-            .add_modifier(Modifier::BOLD);
+        return theme.success();
     }
 
     match status.to_ascii_lowercase().as_str() {
-        "done" | "complete" | "completed" => Style::default()
-            .fg(Color::Green)
-            .add_modifier(Modifier::BOLD),
-        "failed" | "error" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        "gating" => Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-        "implementing" | "running" | "active" => Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-        "queued" | "pending" => Style::default().fg(Color::Gray),
-        _ => Style::default().fg(Color::White),
+        "done" | "complete" | "completed" => theme.success(),
+        "failed" | "error" => theme.danger(),
+        "gating" => theme.warning(),
+        "implementing" | "running" | "active" => theme.info(),
+        "queued" | "pending" => theme.muted(),
+        _ => theme.text(),
     }
 }
 
 fn gauge_style(status: &str, completed: bool) -> Style {
+    let theme = Theme::from_env();
     if completed {
-        return Style::default().fg(Color::Green).bg(Color::Black);
+        return Style::default().fg(theme.success).bg(theme.background);
     }
 
     match status.to_ascii_lowercase().as_str() {
-        "failed" | "error" => Style::default().fg(Color::Red).bg(Color::Black),
-        "gating" => Style::default().fg(Color::Yellow).bg(Color::Black),
-        "implementing" | "running" | "active" => Style::default().fg(Color::Cyan).bg(Color::Black),
-        "queued" | "pending" => Style::default().fg(Color::Gray).bg(Color::Black),
-        _ => Style::default().fg(Color::White).bg(Color::Black),
+        "failed" | "error" => Style::default().fg(theme.danger).bg(theme.background),
+        "gating" => Style::default().fg(theme.warning).bg(theme.background),
+        "implementing" | "running" | "active" => Style::default().fg(theme.info).bg(theme.background),
+        "queued" | "pending" => Style::default().fg(theme.muted).bg(theme.background),
+        _ => Style::default().fg(theme.foreground).bg(theme.background),
     }
 }
 
 fn phase_style(phase: &str) -> Style {
+    let theme = Theme::from_env();
     match phase.to_ascii_lowercase().as_str() {
-        "implementing" => Style::default()
-            .fg(Color::Blue)
-            .add_modifier(Modifier::BOLD),
-        "gating" => Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-        "done" => Style::default()
-            .fg(Color::Green)
-            .add_modifier(Modifier::BOLD),
-        "failed" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        _ => Style::default().fg(Color::Gray),
+        "implementing" => theme.info(),
+        "gating" => theme.warning(),
+        "done" => theme.success(),
+        "failed" => theme.danger(),
+        _ => theme.muted(),
     }
 }
 
 fn severity_style(severity: &str) -> Style {
+    let theme = Theme::from_env();
     match severity.to_ascii_lowercase().as_str() {
-        "critical" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        "warning" => Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-        _ => Style::default().fg(Color::Gray),
+        "critical" => theme.danger(),
+        "warning" => theme.warning(),
+        _ => theme.muted(),
     }
 }
 
 fn gate_pass_rate_style(pass_rate: f64) -> Style {
+    let theme = Theme::from_env();
     if pass_rate > 0.9 {
-        Style::default()
-            .fg(Color::Green)
-            .add_modifier(Modifier::BOLD)
+        theme.success()
     } else if pass_rate >= 0.7 {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
+        theme.warning()
     } else {
-        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        theme.danger()
     }
 }
 
@@ -2534,35 +2511,37 @@ struct PlanRow {
 
 /// Render the footer with keyboard shortcuts.
 pub fn render_footer(frame: &mut Frame<'_>, area: Rect, pages: &PageRegistry, active_page: PageId) {
+    render_footer_themed(frame, area, pages, active_page, &Theme::from_env());
+}
+
+fn render_footer_themed(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    pages: &PageRegistry,
+    active_page: PageId,
+    theme: &Theme,
+) {
     let page_count = pages.len();
     let footer = Paragraph::new(vec![
         Line::from(vec![
             Span::styled(
                 "q",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
+                theme.warning(),
             ),
             Span::raw(" quit  "),
             Span::styled(
                 "r",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
+                theme.warning(),
             ),
             Span::raw(" refresh  "),
             Span::styled(
                 "←/→",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
+                theme.warning(),
             ),
             Span::raw(" page  "),
             Span::styled(
                 "↑/↓",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
+                theme.warning(),
             ),
             Span::raw(" scroll"),
         ]),
