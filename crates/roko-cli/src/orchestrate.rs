@@ -50,6 +50,7 @@ use roko_learn::runtime_feedback::{
 };
 use roko_learn::skill_library::Skill;
 use roko_learn::skill_library::{SkillExtractionRequest, SkillGateResult, SkillLibrary};
+use roko_neuro::{KnowledgeEntry, KnowledgeStore};
 use roko_orchestrator::worktree::{WorktreeConfig, WorktreeManager};
 use roko_orchestrator::{
     EventKind, EventLog, EventLogSnapshot, ExecutorAction, ExecutorEvent, ExecutorSnapshot,
@@ -73,6 +74,13 @@ const WATCHER_INTERVAL_SECS: u64 = 30;
 const WATCHER_SIGNAL_TAIL: usize = 200;
 const EFFICIENCY_SIGNAL_TAIL: usize = 256;
 const GHOST_TURN_SIGNAL_KIND: &str = "conductor.ghost_turn";
+
+fn install_episode_distillation_hook(learning: &mut LearningRuntime, workdir: &Path) {
+    let distillation_workdir = workdir.to_path_buf();
+    learning.set_episode_completion_hook(move |episode| {
+        roko_neuro::spawn_episode_distillation(distillation_workdir.clone(), episode);
+    });
+}
 
 // ─── ContextAttributionTracker ────────────────────────────────────────────
 
@@ -1699,9 +1707,10 @@ impl PlanRunner {
         }
 
         let cancel = CancelToken::new();
-        let learning = LearningRuntime::open_under(workdir.join(".roko").join("learn"))
+        let mut learning = LearningRuntime::open_under(workdir.join(".roko").join("learn"))
             .await
             .map_err(|e| anyhow!("init learning runtime: {e}"))?;
+        install_episode_distillation_hook(&mut learning, workdir);
         let skill_library =
             load_or_create_skill_library(&workdir.join(".roko").join("learn").join("skills.json"))
                 .await
@@ -1804,9 +1813,10 @@ impl PlanRunner {
         let legacy_completed = Self::legacy_completed_tasks_from_snapshot(snapshot_json);
         let task_trackers = Self::restore_task_trackers(workdir, &legacy_completed);
         let cancel = CancelToken::new();
-        let learning = LearningRuntime::open_under(workdir.join(".roko").join("learn"))
+        let mut learning = LearningRuntime::open_under(workdir.join(".roko").join("learn"))
             .await
             .map_err(|e| anyhow!("init learning runtime: {e}"))?;
+        install_episode_distillation_hook(&mut learning, workdir);
         let skill_library =
             load_or_create_skill_library(&workdir.join(".roko").join("learn").join("skills.json"))
                 .await
@@ -1907,9 +1917,10 @@ impl PlanRunner {
         let legacy_completed = Self::legacy_completed_tasks_from_snapshot(executor_json);
         let task_trackers = Self::restore_task_trackers(workdir, &legacy_completed);
         let cancel = CancelToken::new();
-        let learning = LearningRuntime::open_under(workdir.join(".roko").join("learn"))
+        let mut learning = LearningRuntime::open_under(workdir.join(".roko").join("learn"))
             .await
             .map_err(|e| anyhow!("init learning runtime: {e}"))?;
+        install_episode_distillation_hook(&mut learning, workdir);
         let skill_library =
             load_or_create_skill_library(&workdir.join(".roko").join("learn").join("skills.json"))
                 .await
@@ -6561,7 +6572,21 @@ impl PlanRunner {
         );
 
         let role_instruction = system_prompt_override
-            .unwrap_or_else(|| build_system_prompt(role, plan_id, task, &task_allowed_tools_csv));
+            .unwrap_or_else(|| {
+                let relevant_knowledge = build_relevant_knowledge_section(
+                    &self.workdir,
+                    task_def
+                        .as_ref()
+                        .and_then(|task| task.description.as_deref()),
+                );
+                build_system_prompt_with_notes(
+                    role,
+                    plan_id,
+                    task,
+                    &task_allowed_tools_csv,
+                    relevant_knowledge.as_deref(),
+                )
+            });
         let role_section = PromptSection::new("role", &role_instruction)
             .with_priority(SectionPriority::Critical)
             .with_placement(Placement::Start)
@@ -8067,14 +8092,86 @@ fn now_unix_ms_i64() -> i64 {
 }
 
 fn build_system_prompt(role: AgentRole, plan_id: &str, task: &str, tools_csv: &str) -> String {
+    build_system_prompt_with_notes(role, plan_id, task, tools_csv, None)
+}
+
+fn build_system_prompt_with_notes(
+    role: AgentRole,
+    plan_id: &str,
+    task: &str,
+    tools_csv: &str,
+    domain_notes: Option<&str>,
+) -> String {
+    let mut task_context = TaskContext::new(task)
+        .with_plan_id(plan_id)
+        .with_workspace("roko-cli orchestration");
+    if let Some(notes) = domain_notes.filter(|notes| !notes.trim().is_empty()) {
+        task_context = task_context.with_domain_notes(notes);
+    }
     RoleSystemPromptSpec::new(
         role,
-        TaskContext::new(task)
-            .with_plan_id(plan_id)
-            .with_workspace("roko-cli orchestration"),
+        task_context,
         tools_csv,
     )
     .build()
+}
+
+fn build_relevant_knowledge_section(
+    workdir: &Path,
+    task_description: Option<&str>,
+) -> Option<String> {
+    let task_description = task_description?.trim();
+    if task_description.is_empty() {
+        return None;
+    }
+
+    let knowledge_store = KnowledgeStore::for_workdir(workdir);
+    let entries = match knowledge_store.query(task_description, 5) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(
+                workdir = %workdir.display(),
+                task_description = %task_description,
+                error = %error,
+                "failed to query relevant knowledge"
+            );
+            return None;
+        }
+    };
+
+    if entries.is_empty() {
+        return None;
+    }
+
+    Some(format_relevant_knowledge_section(&entries))
+}
+
+fn format_relevant_knowledge_section(entries: &[KnowledgeEntry]) -> String {
+    let mut out = String::from("## Relevant Knowledge\n\n");
+    for entry in entries {
+        let kind = format!("{:?}", entry.kind).to_lowercase();
+        let content = entry.content.trim();
+        if content.is_empty() {
+            continue;
+        }
+
+        out.push_str(&format!(
+            "- [{kind}] (confidence: {:.2}) {content}\n",
+            entry.confidence.clamp(0.0, 1.0)
+        ));
+
+        if !entry.tags.is_empty() {
+            out.push_str(&format!("  Tags: {}\n", entry.tags.join(", ")));
+        }
+        if !entry.source_episodes.is_empty() {
+            out.push_str(&format!(
+                "  Source episodes: {}\n",
+                entry.source_episodes.join(", ")
+            ));
+        }
+    }
+
+    out.trim_end().to_string()
 }
 
 impl PlanRunner {

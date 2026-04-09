@@ -10,10 +10,15 @@ description = "HTTP server crate for the roko API."
 [lints]
 workspace = true
 
+[features]
+default = []
+hdc = ["dep:bardo-primitives"]
+
 [dependencies]
 roko-core = { path = "../roko-core" }
 roko-agent = { path = "../roko-agent" }
 roko-learn = { path = "../roko-learn" }
+roko-neuro = { path = "../roko-neuro" }
 roko-gate = { path = "../roko-gate" }
 roko-fs = { path = "../roko-fs" }
 roko-compose = { path = "../roko-compose" }
@@ -22,6 +27,7 @@ roko-orchestrator = { path = "../roko-orchestrator" }
 roko-conductor = { path = "../roko-conductor" }
 roko-plugin = { path = "../roko-plugin" }
 bardo-runtime = { path = "../bardo-runtime" }
+bardo-primitives = { path = "../bardo-primitives", optional = true }
 
 anyhow = { workspace = true }
 async-trait = { workspace = true }

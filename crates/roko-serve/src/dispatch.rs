@@ -33,8 +33,11 @@ use roko_core::{Body, Context as RokoContext, Kind, Provenance, Signal};
 use roko_core::{ContentHash, Verdict};
 use roko_learn::cascade_router::CascadeRouter;
 use roko_learn::efficiency::AgentEfficiencyEvent;
-use roko_learn::episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage as EpisodeUsage};
+use roko_learn::episode_logger::{
+    Episode, EpisodeLogger, GateVerdict, Usage as EpisodeUsage,
+};
 use roko_learn::prompt_experiment::ExperimentStore;
+use roko_neuro::spawn_episode_distillation;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
@@ -1092,6 +1095,36 @@ pub async fn dispatch_loop(state: Arc<AppState>, dispatcher: Arc<dyn AgentDispat
         }
 
         let matched = subscriptions.find_matching(&signal);
+        if matched.is_empty() {
+            let episodes_path = state.layout.episodes_path();
+            match EpisodeLogger::suggest_template_from_recent_episodes(&episodes_path, &signal)
+                .await
+            {
+                Ok(Some(template_name)) => {
+                    info!(
+                        signal = %signal.kind.as_str(),
+                        template = %template_name,
+                        "using similarity-based template suggestion"
+                    );
+                    let signal = signal.clone();
+                    let dispatcher = Arc::clone(&dispatcher);
+                    let state = Arc::clone(&state);
+                    let suggested_subscription = Subscription::new(
+                        template_name.clone(),
+                        signal.kind.as_str(),
+                    );
+                    tokio::spawn(async move {
+                        dispatch_agent(state, suggested_subscription, signal, dispatcher).await;
+                    });
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    warn!(error = %err, "failed to suggest template from recent episodes");
+                }
+            }
+            continue;
+        }
+
         for sub in matched {
             if !subscriptions.check_concurrency_limit(&sub) {
                 continue;
@@ -1588,12 +1621,14 @@ async fn append_dispatch_episode(
         cost_usd_without_cache: f64::from(outcome.result.usage.cost_usd),
         wall_ms: outcome.result.usage.wall_ms,
     };
+    episode.attach_text_fingerprint();
 
     let logger = EpisodeLogger::new(state.layout.episodes_path());
     if let Err(err) = logger.append(&episode).await {
         warn!(error = %err, template = %template.name, "failed to append episode");
         return;
     }
+    spawn_episode_distillation(state.workdir.clone(), episode.clone());
 
     if let Err(err) = record_cascade_router_outcome(state, template, outcome.result.success).await {
         warn!(error = %err, template = %template.name, "failed to record cascade router outcome");

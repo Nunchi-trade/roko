@@ -31,6 +31,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use bardo_primitives::hdc::{HdcVector, text_fingerprint};
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex as SyncMutex;
 use serde::{Deserialize, Serialize};
@@ -38,11 +39,16 @@ use thiserror::Error;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex as AsyncMutex;
+use roko_core::Signal;
 
 /// Maximum serialized size (in bytes) of a single episode's `extra`
 /// field. Enforced in [`EpisodeLogger::append`] so that a runaway
 /// optimizer cannot blow up the log.
 const MAX_EXTRA_BYTES: usize = 16 * 1024;
+const TEXT_FINGERPRINT_KEY: &str = "text_fingerprint";
+const TEMPLATE_SUGGESTION_MIN_SIMILARITY: f64 = 0.7;
+const TEMPLATE_SUGGESTION_MAX_AGE_DAYS: i64 = 30;
+const TEMPLATE_SUGGESTION_MAX_CANDIDATES: usize = 256;
 
 /// Errors that can occur while appending to or reading from an episode
 /// log.
@@ -290,6 +296,37 @@ impl Episode {
         self.failure_reason = Some(reason.into());
         self
     }
+
+    /// Attach a deterministic fingerprint of the completed episode text.
+    pub fn attach_text_fingerprint(&mut self) {
+        let text = self.completion_fingerprint_text();
+        let fingerprint = text_fingerprint(&text);
+        self.extra.insert(
+            TEXT_FINGERPRINT_KEY.to_string(),
+            serde_json::to_value(fingerprint)
+                .expect("HDC text fingerprint serialization should not fail"),
+        );
+    }
+
+    fn completion_fingerprint_text(&self) -> String {
+        let actions =
+            serde_json::to_string(&self.external_actions).unwrap_or_else(|_| "[]".to_string());
+        let outcome = if self.success {
+            "success".to_string()
+        } else {
+            self.failure_reason
+                .as_deref()
+                .filter(|reason| !reason.trim().is_empty())
+                .unwrap_or("failure")
+                .to_string()
+        };
+
+        format!(
+            "trigger_kind={}\nagent_template={}\nactions={}\noutcome={}",
+            self.trigger_kind, self.agent_template, actions, outcome
+        )
+    }
+
 }
 
 /// Derive a stable id by hashing `(agent_id, task_id, timestamp)` with
@@ -305,6 +342,67 @@ fn derive_id(agent_id: &str, task_id: &str, timestamp: DateTime<Utc>) -> String 
         .unwrap_or(0)
         .hash(&mut hasher);
     format!("ep_{:016x}", hasher.finish())
+}
+
+fn suggest_template_from_episodes(episodes: &[Episode], signal: &Signal) -> Option<String> {
+    let cutoff = Utc::now() - chrono::Duration::days(TEMPLATE_SUGGESTION_MAX_AGE_DAYS);
+    let signal_fingerprint = text_fingerprint(&signal_fingerprint_text(signal));
+
+    let mut best: Option<(f64, String)> = None;
+    for episode in episodes
+        .iter()
+        .rev()
+        .filter(|episode| episode.completed_at >= cutoff || episode.timestamp >= cutoff)
+        .take(TEMPLATE_SUGGESTION_MAX_CANDIDATES)
+    {
+        let Some(template) = normalized_template(&episode.agent_template) else {
+            continue;
+        };
+        let Some(episode_fingerprint) = episode_fingerprint(episode) else {
+            continue;
+        };
+        let similarity = signal_fingerprint.similarity(&episode_fingerprint) as f64;
+        if similarity <= TEMPLATE_SUGGESTION_MIN_SIMILARITY {
+            continue;
+        }
+
+        let should_replace = best
+            .as_ref()
+            .is_none_or(|(best_similarity, _)| similarity > *best_similarity);
+        if should_replace {
+            best = Some((similarity, template));
+        }
+    }
+
+    best.map(|(_, template)| template)
+}
+
+fn episode_fingerprint(episode: &Episode) -> Option<HdcVector> {
+    let fingerprint_value = episode.extra.get(TEXT_FINGERPRINT_KEY)?.clone();
+    serde_json::from_value(fingerprint_value).ok()
+}
+
+fn normalized_template(template: &str) -> Option<String> {
+    let trimmed = template.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn signal_fingerprint_text(signal: &Signal) -> String {
+    let body_bytes = signal.body.canonical_bytes();
+    let body = String::from_utf8_lossy(&body_bytes);
+    let agent_template = signal
+        .tag("agent_template")
+        .or_else(|| signal.tag("template"))
+        .unwrap_or(signal.kind.as_str());
+    let outcome = signal.tag("outcome").unwrap_or("unknown");
+
+    format!(
+        "trigger_kind={}\nagent_template={}\nactions={}\noutcome={}",
+        signal.kind.as_str(),
+        agent_template,
+        body,
+        outcome
+    )
 }
 
 /// Append-only JSONL episode logger.
@@ -461,6 +559,24 @@ impl EpisodeLogger {
         Ok(out)
     }
 
+    /// Suggest a template by comparing a signal against recent episode fingerprints.
+    ///
+    /// Exact subscription resolution happens upstream. This helper is a
+    /// fallback: it reads recent episodes from `path`, fingerprints the
+    /// incoming `signal`, and returns the most similar episode template when
+    /// the HDC similarity exceeds `0.7`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a logger error if the episode log cannot be read.
+    pub async fn suggest_template_from_recent_episodes(
+        path: impl AsRef<Path>,
+        signal: &Signal,
+    ) -> Result<Option<String>, LoggerError> {
+        let episodes = Self::read_all_lossy(path).await?;
+        Ok(suggest_template_from_episodes(&episodes, signal))
+    }
+
     /// Run age-based and size-based retention, pruning oldest episodes
     /// first while preserving those marked as [`Episode::headline`].
     ///
@@ -591,6 +707,7 @@ pub struct CompactStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roko_core::{Body, Kind, Signal};
     use tempfile::TempDir;
 
     fn tmp_log() -> (TempDir, PathBuf) {
@@ -605,6 +722,24 @@ mod tests {
         ep.usage = Usage::tokens(100, 50);
         ep.gate_verdicts.push(GateVerdict::new("compile", success));
         ep
+    }
+
+    fn suggestion_signal(kind: Kind, body: &str) -> Signal {
+        Signal::builder(kind).body(Body::text(body)).build()
+    }
+
+    fn episode_for_signal(template: &str, signal: &Signal, completed_at: DateTime<Utc>) -> Episode {
+        let mut episode = Episode::new("agent-a", "task-a");
+        episode.agent_template = template.to_string();
+        episode.timestamp = completed_at;
+        episode.started_at = completed_at;
+        episode.completed_at = completed_at;
+        episode.extra.insert(
+            TEXT_FINGERPRINT_KEY.to_string(),
+            serde_json::to_value(text_fingerprint(&signal_fingerprint_text(signal)))
+                .expect("serialize fingerprint"),
+        );
+        episode
     }
 
     #[tokio::test]
@@ -627,6 +762,104 @@ mod tests {
         assert!(all[0].success);
         assert_eq!(all[0].gate_verdicts.len(), 1);
         assert_eq!(all[0].gate_verdicts[0].gate, "compile");
+    }
+
+    #[tokio::test]
+    async fn suggest_template_from_recent_episodes_returns_best_match() {
+        let (_dir, path) = tmp_log();
+        let signal = suggestion_signal(Kind::Task, "implement similarity fallback");
+        let matched = episode_for_signal("code-implementer", &signal, Utc::now());
+        tokio::fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&matched).expect("serialize episode")),
+        )
+        .await
+        .expect("write episodes");
+
+        let suggestion = EpisodeLogger::suggest_template_from_recent_episodes(&path, &signal)
+            .await
+            .expect("suggest template");
+        assert_eq!(suggestion.as_deref(), Some("code-implementer"));
+    }
+
+    #[tokio::test]
+    async fn suggest_template_from_recent_episodes_accepts_similar_unmatched_events() {
+        let (_dir, path) = tmp_log();
+        let signal = suggestion_signal(Kind::Task, "implement similarity fallback");
+        let signal_fingerprint = text_fingerprint(&signal_fingerprint_text(&signal));
+        let similar_fingerprint = HdcVector::bundle(&[
+            &signal_fingerprint,
+            &signal_fingerprint,
+            &HdcVector::from_seed(b"template-similarity-noise"),
+        ]);
+        let similarity = signal_fingerprint.similarity(&similar_fingerprint);
+        assert!(
+            similarity > 0.7,
+            "expected similar fingerprints to cluster above the 0.7 cutoff, got {similarity}"
+        );
+
+        let mut episode = Episode::new("agent-a", "task-a");
+        episode.agent_template = "code-implementer".to_string();
+        episode.timestamp = Utc::now();
+        episode.started_at = episode.timestamp;
+        episode.completed_at = episode.timestamp;
+        episode.extra.insert(
+            TEXT_FINGERPRINT_KEY.to_string(),
+            serde_json::to_value(similar_fingerprint).expect("serialize fingerprint"),
+        );
+
+        tokio::fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&episode).expect("serialize episode")),
+        )
+        .await
+        .expect("write episodes");
+
+        let suggestion = EpisodeLogger::suggest_template_from_recent_episodes(&path, &signal)
+            .await
+            .expect("suggest template");
+        assert_eq!(suggestion.as_deref(), Some("code-implementer"));
+    }
+
+    #[tokio::test]
+    async fn suggest_template_from_recent_episodes_ignores_low_similarity() {
+        let (_dir, path) = tmp_log();
+        let signal = suggestion_signal(Kind::Task, "implement similarity fallback");
+        let other_signal = suggestion_signal(Kind::Task, "completely different request");
+        let episode = episode_for_signal("code-implementer", &other_signal, Utc::now());
+        tokio::fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&episode).expect("serialize episode")),
+        )
+        .await
+        .expect("write episodes");
+
+        let suggestion = EpisodeLogger::suggest_template_from_recent_episodes(&path, &signal)
+            .await
+            .expect("suggest template");
+        assert!(suggestion.is_none());
+    }
+
+    #[tokio::test]
+    async fn suggest_template_from_recent_episodes_ignores_old_matches() {
+        let (_dir, path) = tmp_log();
+        let signal = suggestion_signal(Kind::Task, "implement similarity fallback");
+        let old_match = episode_for_signal(
+            "code-implementer",
+            &signal,
+            Utc::now() - chrono::Duration::days(60),
+        );
+        tokio::fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&old_match).expect("serialize episode")),
+        )
+        .await
+        .expect("write episodes");
+
+        let suggestion = EpisodeLogger::suggest_template_from_recent_episodes(&path, &signal)
+            .await
+            .expect("suggest template");
+        assert!(suggestion.is_none());
     }
 
     #[tokio::test]
@@ -762,6 +995,33 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert!(!all[0].success);
         assert_eq!(all[0].failure_reason.as_deref(), Some("E0277:Send+Sync"));
+    }
+
+    #[test]
+    fn episode_text_fingerprint_is_written_to_metadata() {
+        let mut ep = Episode::new("agent-a", "task-a");
+        ep.trigger_kind = "webhook_dispatch".to_string();
+        ep.agent_template = "template-a".to_string();
+        ep.external_actions = vec![serde_json::json!({
+            "kind": "comment",
+            "target": "issue-1"
+        })];
+        ep.success = false;
+        ep.failure_reason = Some("gated".to_string());
+
+        ep.attach_text_fingerprint();
+
+        let stored = ep
+            .extra
+            .get(TEXT_FINGERPRINT_KEY)
+            .cloned()
+            .expect("fingerprint metadata");
+        let decoded: bardo_primitives::hdc::HdcVector =
+            serde_json::from_value(stored).expect("decode fingerprint");
+        let expected = text_fingerprint(
+            "trigger_kind=webhook_dispatch\nagent_template=template-a\nactions=[{\"kind\":\"comment\",\"target\":\"issue-1\"}]\noutcome=gated",
+        );
+        assert_eq!(decoded, expected);
     }
 
     #[tokio::test]

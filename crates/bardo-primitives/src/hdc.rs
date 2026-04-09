@@ -234,9 +234,29 @@ impl HdcVector {
     }
 }
 
+/// Compute a deterministic HDC fingerprint for any serializable value.
+///
+/// The value is first encoded with `serde_json`, then mapped into a
+/// 10,240-bit vector using the crate's deterministic seed expansion.
+#[must_use]
+pub fn fingerprint(value: &impl serde::Serialize) -> HdcVector {
+    let seed = serde_json::to_vec(value).unwrap_or_default();
+    HdcVector::from_seed(&seed)
+}
+
+/// Compute a deterministic HDC fingerprint for raw text.
+///
+/// This is a convenience wrapper for callers that already have a
+/// canonical text blob and do not need to serialize a structured value
+/// through `serde_json` first.
+#[must_use]
+pub fn text_fingerprint(text: &str) -> HdcVector {
+    HdcVector::from_seed(text.as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::HdcVector;
+    use super::{fingerprint, text_fingerprint, HdcVector};
 
     #[test]
     fn hdc_bind_involution() {
@@ -307,5 +327,19 @@ mod tests {
         let decoded: Wrapper = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded.label, "t");
         assert_eq!(decoded.vector, w.vector);
+    }
+
+    #[test]
+    fn hdc_fingerprint_is_deterministic() {
+        let left = fingerprint(&serde_json::json!({"a": 1, "b": [2, 3]}));
+        let right = fingerprint(&serde_json::json!({"a": 1, "b": [2, 3]}));
+        assert_eq!(left, right);
+    }
+
+    #[test]
+    fn hdc_text_fingerprint_is_deterministic() {
+        let left = text_fingerprint("trigger_kind=webhook_dispatch\nagent_template=a");
+        let right = text_fingerprint("trigger_kind=webhook_dispatch\nagent_template=a");
+        assert_eq!(left, right);
     }
 }

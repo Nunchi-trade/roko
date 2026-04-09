@@ -524,9 +524,13 @@ async fn append_episode_log(
             .insert("session_id".to_string(), serde_json::json!(session_id));
     }
 
-    let runtime = LearningRuntime::open_under(workdir.join(".roko").join("memory"))
+    let mut runtime = LearningRuntime::open_under(workdir.join(".roko").join("memory"))
         .await
         .map_err(|e| anyhow!("open learning runtime: {e}"))?;
+    let distillation_workdir = workdir.to_path_buf();
+    runtime.set_episode_completion_hook(move |episode| {
+        roko_neuro::spawn_episode_distillation(distillation_workdir.clone(), episode);
+    });
     let mut completed = CompletedRunInput::from_episode(episode);
     completed.provider = Some(infer_provider(config));
     completed.task_metric = Some(build_task_metric(config, prompt, verdicts, agent_result));

@@ -5092,6 +5092,7 @@ dependencies = [
  "roko-fs",
  "roko-gate",
  "roko-learn",
+ "roko-neuro",
  "roko-orchestrator",
  "roko-plugin",
  "roko-serve",
@@ -5312,6 +5313,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "roko-neuro"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bardo-primitives",
+ "chrono",
+ "parking_lot",
+ "roko-agent",
+ "roko-core",
+ "roko-fs",
+ "roko-learn",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "roko-orchestrator"
 version = "0.1.0"
 dependencies = [
@@ -5351,6 +5372,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "bardo-primitives",
  "bardo-runtime",
  "base64",
  "chrono",
@@ -5367,6 +5389,7 @@ dependencies = [
  "roko-fs",
  "roko-gate",
  "roko-learn",
+ "roko-neuro",
  "roko-orchestrator",
  "roko-plugin",
  "roko-std",

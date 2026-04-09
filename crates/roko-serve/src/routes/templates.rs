@@ -51,16 +51,13 @@ async fn create_template(
 ) -> Result<impl IntoResponse, ApiError> {
     let name = template.name.clone();
 
-    {
-        let registry = state.templates.read().await;
-        if registry.get(&name).is_some() {
-            return Err(ApiError::conflict(format!(
-                "template '{name}' already exists"
-            )));
-        }
-    }
-
+    // Single write lock to check-and-insert atomically (no TOCTOU race).
     let mut registry = state.templates.write().await;
+    if registry.get(&name).is_some() {
+        return Err(ApiError::conflict(format!(
+            "template '{name}' already exists"
+        )));
+    }
     registry
         .insert(template)
         .map_err(|e| ApiError::internal(format!("insert template: {e}")))?;

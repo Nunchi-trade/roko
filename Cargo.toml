@@ -53,6 +53,9 @@ members = [
     # Learning subsystems — episodes, playbooks, skills, caches, pattern discovery.
     "crates/roko-learn",
 
+    # Neuro subsystem — knowledge + memory.
+    "crates/roko-neuro",
+
     # Golem scaffold — phase-2 subsystem placeholders (feature-gated).
     "crates/roko-golem",
 

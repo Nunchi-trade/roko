@@ -71,10 +71,10 @@ async fn github_webhook(
     let kind = github_signal_kind(event_type, &payload)
         .ok_or_else(|| ApiError::bad_request(format!("unsupported github event: {event_type}")))?;
 
-    let signal = Signal::builder(kind)
+    let signal = attach_hdc_fingerprint(Signal::builder(kind)
         .body(Body::Json(payload))
         .provenance(Provenance::external("github:webhook"))
-        .build();
+        .build());
 
     persist_webhook_signal(&state, signal).await?;
 
@@ -138,10 +138,10 @@ async fn slack_webhook(
     let kind = slack_signal_kind(event_type)
         .ok_or_else(|| ApiError::bad_request(format!("unsupported slack event: {event_type}")))?;
 
-    let signal = Signal::builder(kind)
+    let signal = attach_hdc_fingerprint(Signal::builder(kind)
         .body(Body::Json(payload))
         .provenance(Provenance::external("slack:webhook"))
-        .build();
+        .build());
 
     persist_webhook_signal(&state, signal).await?;
 
@@ -158,7 +158,7 @@ async fn generic_webhook(
     let payload: Value = serde_json::from_slice(&body)
         .map_err(|e| ApiError::bad_request(format!("invalid generic webhook json: {e}")))?;
 
-    let signal = generic_webhook_signal(payload);
+    let signal = attach_hdc_fingerprint(generic_webhook_signal(payload));
     persist_webhook_signal(&state, signal).await?;
 
     Ok(StatusCode::OK)
@@ -169,6 +169,24 @@ fn generic_webhook_signal(payload: Value) -> Signal {
         .body(Body::Json(payload))
         .provenance(Provenance::external("webhook:generic"))
         .build()
+}
+
+#[cfg(feature = "hdc")]
+fn attach_hdc_fingerprint(mut signal: Signal) -> Signal {
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use base64::Engine as _;
+
+    let fingerprint = bardo_primitives::hdc::fingerprint(&signal.body);
+    signal
+        .tags
+        .insert("hdc_fingerprint".into(), BASE64.encode(fingerprint.to_bytes()));
+    signal.id = signal.content_hash();
+    signal
+}
+
+#[cfg(not(feature = "hdc"))]
+fn attach_hdc_fingerprint(signal: Signal) -> Signal {
+    signal
 }
 
 async fn persist_webhook_signal(state: &AppState, signal: Signal) -> Result<(), ApiError> {
@@ -318,6 +336,10 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "hdc")]
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    #[cfg(feature = "hdc")]
+    use base64::Engine as _;
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
 
@@ -420,6 +442,35 @@ mod tests {
         assert_eq!(signal.kind.as_str(), "webhook:generic");
         assert_eq!(signal.body, Body::Json(payload));
         assert_eq!(signal.provenance.author, "webhook:generic");
+    }
+
+    #[cfg(feature = "hdc")]
+    #[test]
+    fn attach_hdc_fingerprint_populates_signal_metadata() {
+        use bardo_primitives::hdc::{fingerprint, HdcVector};
+
+        let body = Body::Json(serde_json::json!({
+            "event": "push",
+            "repository": "roko",
+            "changes": ["a.rs", "b.rs"],
+        }));
+        let signal = Signal::builder(Kind::Custom("github:push".into()))
+            .body(body.clone())
+            .provenance(Provenance::external("github:webhook"))
+            .build();
+
+        let signal = attach_hdc_fingerprint(signal);
+        let encoded = signal
+            .tag("hdc_fingerprint")
+            .expect("expected hdc_fingerprint metadata");
+        let decoded = BASE64.decode(encoded).expect("decode hdc fingerprint");
+        let raw: [u8; 1280] = decoded
+            .as_slice()
+            .try_into()
+            .expect("expected 1280-byte hdc fingerprint");
+        let recovered = HdcVector::from_bytes(&raw);
+
+        assert_eq!(recovered, fingerprint(&body));
     }
 
     fn hex_encode(bytes: &[u8]) -> String {

@@ -417,6 +417,33 @@ mod tests {
     }
 
     #[test]
+    fn similar_vectors_exceed_threshold_and_cluster_together() {
+        let base = HdcVector::from_seed(b"similar-base");
+        let similar = HdcVector::bundle(&[
+            &base,
+            &base,
+            &HdcVector::from_seed(b"similar-base-noise"),
+        ]);
+
+        let similarity = base.similarity(&similar);
+        assert!(
+            similarity > 0.7,
+            "expected similar vectors to exceed the 0.7 threshold, got {similarity}"
+        );
+
+        let result = k_medoids(
+            &[base, similar],
+            &KMedoidsConfig {
+                k: 1,
+                max_iterations: 10,
+            },
+        );
+
+        assert_eq!(result.clusters.len(), 1);
+        assert_eq!(result.clusters[0].members, vec![0, 1]);
+    }
+
+    #[test]
     fn convergence_flag_set_when_stable() {
         // With identical vectors, should converge in 1 iteration.
         let v = HdcVector::from_seed(b"converge");
