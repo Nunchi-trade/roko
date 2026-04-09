@@ -412,6 +412,45 @@ pub async fn daemon_status() -> Result<()> {
     Ok(())
 }
 
+/// Reload daemon templates and subscriptions without restarting active agents.
+pub async fn daemon_reload() -> Result<()> {
+    let workdir = std::env::current_dir().context("resolve current working directory")?;
+    let socket_path = daemon_socket_path(&workdir);
+    let mut stream = UnixStream::connect(&socket_path)
+        .await
+        .with_context(|| format!("connect {}", socket_path.display()))?;
+    stream
+        .write_all(b"reload")
+        .await
+        .context("send daemon reload request")?;
+    stream
+        .shutdown()
+        .await
+        .context("close daemon reload request")?;
+
+    let mut buf = Vec::new();
+    stream
+        .read_to_end(&mut buf)
+        .await
+        .context("read daemon reload response")?;
+    let response: DaemonReloadResponse = serde_json::from_slice(&buf)
+        .with_context(|| format!("parse daemon reload response from {}", socket_path.display()))?;
+
+    println!(
+        "daemon {}: subscriptions={}, templates={}, loaded={}",
+        response.command,
+        response.subscriptions,
+        response.templates,
+        response.loaded
+    );
+
+    if response.ok {
+        Ok(())
+    } else {
+        Err(anyhow!("daemon reload failed"))
+    }
+}
+
 /// Print daemon logs for the current working directory.
 pub async fn daemon_logs(follow: bool, lines: usize) -> Result<()> {
     let workdir = std::env::current_dir().context("resolve current working directory")?;
@@ -621,6 +660,15 @@ struct DaemonStatusResponse {
     active_agents: usize,
     subscriptions: usize,
     uptime_secs: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct DaemonReloadResponse {
+    ok: bool,
+    command: String,
+    subscriptions: usize,
+    templates: usize,
+    loaded: usize,
 }
 
 fn print_daemon_status_table(
