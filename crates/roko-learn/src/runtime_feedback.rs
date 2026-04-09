@@ -31,6 +31,7 @@ use crate::regression::{RegressionReport, RegressionThresholds, detect_regressio
 use crate::skill_library::{SkillLibrary, SkillLibraryError, TemplatePatternGenerator};
 use roko_core::agent::AgentRole;
 use roko_core::task::{TaskCategory, TaskComplexityBand};
+use roko_golem::AffectEngine;
 
 type EpisodeCompletionHook = Arc<dyn Fn(Episode) + Send + Sync>;
 
@@ -234,6 +235,7 @@ pub enum LearningRuntimeError {
 pub struct LearningRuntime {
     paths: LearningPaths,
     episode_logger: EpisodeLogger,
+    affect_engine: parking_lot::Mutex<AffectEngine>,
     costs_log: CostsLog,
     costs_db: CostsDb,
     provider_health: ProviderHealthTracker,
@@ -287,6 +289,7 @@ impl LearningRuntime {
         Ok(Self {
             paths,
             episode_logger,
+            affect_engine: parking_lot::Mutex::new(AffectEngine::new()),
             costs_log,
             costs_db,
             provider_health: ProviderHealthTracker::new(),
@@ -335,6 +338,7 @@ impl LearningRuntime {
         Ok(Self {
             paths,
             episode_logger,
+            affect_engine: parking_lot::Mutex::new(AffectEngine::new()),
             costs_log,
             costs_db,
             provider_health: ProviderHealthTracker::new(),
@@ -468,7 +472,9 @@ impl LearningRuntime {
 
     /// Append one raw episode record without triggering any learning updates.
     pub async fn append_episode(&self, episode: &Episode) -> Result<(), LearningRuntimeError> {
-        self.episode_logger.append(episode).await?;
+        let mut episode = episode.clone();
+        self.apply_affect_signature(&mut episode);
+        self.episode_logger.append(&episode).await?;
         Ok(())
     }
 
@@ -487,6 +493,7 @@ impl LearningRuntime {
         let mut update = LearningUpdate::default();
 
         input.episode.attach_text_fingerprint();
+        self.apply_affect_signature(&mut input.episode);
         self.episode_logger.append(&input.episode).await?;
         update.episode_logged = ApplyStatus::Applied;
         if let Some(hook) = &self.episode_completion_hook {
@@ -598,6 +605,39 @@ impl LearningRuntime {
         }
 
         Ok(update)
+    }
+
+    /// Attach the current PAD snapshot to an episode before it is persisted.
+    fn apply_affect_signature(&self, episode: &mut Episode) {
+        let task_key = if episode.task_id.trim().is_empty() {
+            episode.agent_id.clone()
+        } else {
+            episode.task_id.clone()
+        };
+
+        let mut engine = self.affect_engine.lock();
+        for verdict in &episode.gate_verdicts {
+            if verdict.passed {
+                let _ = engine.on_gate_pass(task_key.clone());
+            } else {
+                let _ = engine.on_gate_fail(task_key.clone());
+            }
+        }
+        if episode.success {
+            let _ = engine.on_task_success(task_key.clone());
+        } else {
+            let _ = engine.on_task_failure(task_key.clone());
+        }
+
+        let state = engine.get_state(task_key);
+        episode.extra.insert(
+            "pad".to_string(),
+            serde_json::json!({
+                "pleasure": state.pleasure,
+                "arousal": state.arousal,
+                "dominance": state.dominance,
+            }),
+        );
     }
 
     /// Update the cascade router from episode metadata if role + model are available.
@@ -876,6 +916,18 @@ mod tests {
         assert_eq!(update.provider_updated, ApplyStatus::Applied);
         assert!(update.extracted_skill_id.is_some());
         assert_eq!(runtime.costs_db().len(), 1);
+
+        let episodes_jsonl = std::fs::read_to_string(&runtime.paths().episodes_jsonl).unwrap();
+        let persisted: Episode = serde_json::from_str(episodes_jsonl.lines().next().unwrap())
+            .expect("persisted episode");
+        let pad = persisted
+            .extra
+            .get("pad")
+            .and_then(serde_json::Value::as_object)
+            .expect("pad signature");
+        assert!(pad.contains_key("pleasure"));
+        assert!(pad.contains_key("arousal"));
+        assert!(pad.contains_key("dominance"));
     }
 
     #[tokio::test]

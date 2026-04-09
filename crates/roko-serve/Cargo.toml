@@ -26,6 +26,7 @@ roko-std = { path = "../roko-std" }
 roko-orchestrator = { path = "../roko-orchestrator" }
 roko-conductor = { path = "../roko-conductor" }
 roko-plugin = { path = "../roko-plugin" }
+roko-golem = { path = "../roko-golem" }
 bardo-runtime = { path = "../bardo-runtime" }
 bardo-primitives = { path = "../bardo-primitives", optional = true }
 

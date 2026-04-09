@@ -1632,6 +1632,7 @@ async fn append_dispatch_episode(
         wall_ms: outcome.result.usage.wall_ms,
     };
     episode.attach_text_fingerprint();
+    apply_affect_signature(state, &mut episode);
 
     let logger = EpisodeLogger::new(state.layout.episodes_path());
     if let Err(err) = logger.append(&episode).await {
@@ -1651,6 +1652,38 @@ async fn append_dispatch_episode(
     {
         warn!(error = %err, template = %template.name, "failed to record efficiency event");
     }
+}
+
+fn apply_affect_signature(state: &AppState, episode: &mut Episode) {
+    let task_key = if episode.task_id.trim().is_empty() {
+        episode.agent_id.clone()
+    } else {
+        episode.task_id.clone()
+    };
+
+    let mut engine = state.affect_engine.lock();
+    for verdict in &episode.gate_verdicts {
+        if verdict.passed {
+            let _ = engine.on_gate_pass(task_key.clone());
+        } else {
+            let _ = engine.on_gate_fail(task_key.clone());
+        }
+    }
+    if episode.success {
+        let _ = engine.on_task_success(task_key.clone());
+    } else {
+        let _ = engine.on_task_failure(task_key.clone());
+    }
+
+    let state = engine.get_state(task_key);
+    episode.extra.insert(
+        "pad".into(),
+        serde_json::json!({
+            "pleasure": state.pleasure,
+            "arousal": state.arousal,
+            "dominance": state.dominance,
+        }),
+    );
 }
 
 async fn record_cascade_router_outcome(

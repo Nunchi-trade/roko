@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{OnceCell, RwLock};
 use tokio::task::JoinHandle;
@@ -18,6 +19,7 @@ use bardo_runtime::cancel::CancelToken;
 use bardo_runtime::process::ProcessSupervisor;
 use roko_core::config::schema::RokoConfig;
 use roko_core::{Signal, Substrate};
+use roko_golem::AffectEngine;
 
 use crate::deploy::{DeployBackend, Deployment};
 use crate::dispatch::SubscriptionRegistry;
@@ -120,6 +122,8 @@ pub struct AppState {
     pub metrics: Arc<MetricRegistry>,
     /// Process lifecycle manager.
     pub supervisor: Arc<ProcessSupervisor>,
+    /// Affect engine used to stamp PAD vectors onto persisted episodes.
+    pub affect_engine: Mutex<AffectEngine>,
     /// Event bus for streaming server events to clients.
     pub event_bus: EventBus<ServerEvent>,
     /// Event subscriptions loaded at startup.
@@ -169,6 +173,7 @@ impl AppState {
             started_at: Instant::now(),
             metrics: Arc::new(MetricRegistry::new()),
             supervisor,
+            affect_engine: Mutex::new(AffectEngine::new()),
             event_bus: EventBus::new(1024),
             subscriptions,
             runtime,
