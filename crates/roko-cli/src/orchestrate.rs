@@ -21,6 +21,7 @@ use roko_compose::{
     SectionPriority, TaskContext,
 };
 use roko_conductor::{Conductor, ConductorDecision};
+use roko_conductor::diagnosis::DiagnosisEngine;
 use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::obs::health::{AlwaysUpProbe, ProbeRegistry};
 use roko_core::obs::{LabelSet, MetricRegistry};
@@ -1044,14 +1045,37 @@ impl PlanRunner {
         if self.conductor.circuit_breaker().is_broken(plan_id) {
             eprintln!("[conductor] pausing {plan_id}: circuit breaker tripped");
             let _ = self.executor.pause_plan(plan_id);
+            let error_output = self
+                .conductor
+                .circuit_breaker()
+                .get_record(plan_id)
+                .map(|record| {
+                    if record.reasons.is_empty() {
+                        "failure budget exhausted".to_owned()
+                    } else {
+                        record.reasons.join("\n")
+                    }
+                })
+                .unwrap_or_else(|| "failure budget exhausted".to_owned());
+            let diagnosis_engine = DiagnosisEngine::default();
+            let diagnosis_results = diagnosis_engine.diagnose(&error_output);
+            let primary_diagnosis = diagnosis_results.first().cloned();
+            let payload = serde_json::json!({
+                "plan_id": plan_id,
+                "action": "pause",
+                "watcher": "circuit-breaker",
+                "reason": "failure budget exhausted",
+                "error_output": error_output,
+                "primary_diagnosis": primary_diagnosis,
+                "diagnosis_results": diagnosis_results,
+            });
             self.event_log.append(
                 EventKind::InterventionFired,
-                serde_json::json!({
-                    "plan_id": plan_id,
-                    "action": "pause",
-                    "watcher": "circuit-breaker",
-                    "reason": "failure budget exhausted",
-                }),
+                payload.clone(),
+            );
+            self.emit_conductor_signal(
+                Kind::Custom("conductor.circuit_breaker".into()),
+                payload,
             );
             return ConductorDecision::Continue;
         }
