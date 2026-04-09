@@ -1674,7 +1674,7 @@ impl PlanRunner {
                 );
                 // Conductor signal: agent spawned (§7).
                 self.emit_conductor_signal(
-                    Kind::AgentOutput,
+                    Kind::Custom("conductor.agent_spawn".into()),
                     serde_json::json!({
                         "plan_id": &plan_id,
                         "role": format!("{role:?}"),
@@ -3945,6 +3945,10 @@ impl PlanRunner {
             .await
             .map_err(|e| anyhow!("persist agent output: {e}"))?;
 
+        // Feed the raw agent turn into the conductor stream so the stuck-pattern
+        // watcher can compare consecutive outputs across turns.
+        self.emit_agent_turn_signal(&result.output);
+
         if !result.success {
             return Err(anyhow!(
                 "agent returned failure for plan={plan_id} task={task}"
@@ -4129,7 +4133,7 @@ impl PlanRunner {
 
         // ── Conductor signal: agent output (§7) ──────────────────────
         self.emit_conductor_signal(
-            Kind::AgentOutput,
+            Kind::Custom("conductor.agent_output".into()),
             serde_json::json!({
                 "plan_id": plan_id,
                 "task": task,
@@ -4690,6 +4694,34 @@ impl PlanRunner {
                 LabelSet::from_pairs(&[("gate", &rung_str), ("verdict", verdict)]),
             )
             .inc();
+    }
+
+    /// Feed the raw agent turn output into the conductor stream.
+    ///
+    /// The stuck-pattern watcher only counts consecutive action bodies, so we
+    /// emit one action signal per completed turn and keep the metadata signals
+    /// on non-action kinds.
+    fn emit_agent_turn_signal(&mut self, output: &Signal) {
+        let body = match &output.body {
+            Body::Text(text) => {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    return;
+                }
+                Body::text(trimmed)
+            }
+            Body::Json(value) => Body::Json(value.clone()),
+            Body::Bytes(bytes) => {
+                if bytes.is_empty() {
+                    return;
+                }
+                Body::Bytes(bytes.clone())
+            }
+            Body::Empty => return,
+        };
+
+        self.conductor_signals
+            .push(Signal::builder(output.kind.clone()).body(body).build());
     }
 
     /// Construct and persist an [`AgentEfficiencyEvent`] for one agent turn.
