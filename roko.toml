@@ -76,6 +76,17 @@ name = "weekly-digest"
 expression = "0 9 * * MON"
 signal_kind = "scheduler:cron:weekly-digest"
 
+[watcher]
+
+[[watcher.paths]]
+name = "call-notes"
+directory = "call-notes/"
+include = ["*.md", "*.txt"]
+exclude = ["*.tmp", ".DS_Store"]
+signal_kind = "fswatcher:created"  # only emit on creation, not modification
+recursive = true
+debounce_ms = 500
+
 [webhooks.github]
 secret = "${GITHUB_WEBHOOK_SECRET}"
 enabled = true
