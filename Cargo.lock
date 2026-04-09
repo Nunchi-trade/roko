@@ -4873,6 +4873,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "roko-plugin"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "roko-core",
+ "serde",
+ "tokio",
+]
+
+[[package]]
 name = "roko-serve"
 version = "0.1.0"
 dependencies = [
