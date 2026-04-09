@@ -5,7 +5,8 @@
 //! mode is used by IDE integrations and CI pipelines that want to keep a
 //! long-lived agent session warm.
 
-use std::fs::{self, File};
+use std::fs::{self, File as StdFile};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -16,7 +17,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sysinfo::{Pid, ProcessesToUpdate, System};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::fs::File;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, SeekFrom};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
@@ -410,6 +412,18 @@ pub async fn daemon_status() -> Result<()> {
     Ok(())
 }
 
+/// Print daemon logs for the current working directory.
+pub async fn daemon_logs(follow: bool, lines: usize) -> Result<()> {
+    let workdir = std::env::current_dir().context("resolve current working directory")?;
+    let path = log_path(&workdir, "daemon.log");
+
+    if follow {
+        follow_daemon_log(&path).await
+    } else {
+        print_recent_daemon_logs(&path, lines).await
+    }
+}
+
 fn ensure_runtime_dirs(workdir: &Path) -> Result<()> {
     fs::create_dir_all(daemon_root_dir(workdir))
         .with_context(|| format!("create {}", daemon_root_dir(workdir).display()))?;
@@ -446,9 +460,9 @@ fn spawn_detached_child(workdir: &Path, port: u16) -> Result<()> {
     ensure_runtime_dirs(workdir)?;
     let exe = std::env::current_exe().context("resolve current executable")?;
     let port = port.to_string();
-    let stdout = File::create(log_path(workdir, "daemon.log"))
+    let stdout = StdFile::create(log_path(workdir, "daemon.log"))
         .with_context(|| format!("open {}", log_path(workdir, "daemon.log").display()))?;
-    let stderr = File::create(log_path(workdir, "daemon.err"))
+    let stderr = StdFile::create(log_path(workdir, "daemon.err"))
         .with_context(|| format!("open {}", log_path(workdir, "daemon.err").display()))?;
 
     let child = Command::new(exe)
@@ -509,6 +523,97 @@ fn pid_is_alive(pid: u32) -> Result<bool> {
     let mut system = System::new_all();
     system.refresh_processes(ProcessesToUpdate::All, true);
     Ok(system.process(Pid::from_u32(pid)).is_some())
+}
+
+async fn follow_daemon_log(path: &Path) -> Result<()> {
+    let poll_interval = Duration::from_millis(200);
+
+    loop {
+        let file = match File::open(path).await {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                sleep(poll_interval).await;
+                continue;
+            }
+            Err(err) => return Err(err).with_context(|| format!("open {}", path.display())),
+        };
+
+        let mut reader = BufReader::new(file);
+        reader
+            .seek(SeekFrom::End(0))
+            .await
+            .with_context(|| format!("seek {}", path.display()))?;
+
+        loop {
+            let mut line = String::new();
+            let bytes = reader
+                .read_line(&mut line)
+                .await
+                .with_context(|| format!("read {}", path.display()))?;
+            if bytes == 0 {
+                sleep(poll_interval).await;
+                continue;
+            }
+
+            print!("{line}");
+            std::io::stdout()
+                .flush()
+                .context("flush daemon log output")?;
+        }
+    }
+}
+
+async fn print_recent_daemon_logs(path: &Path, lines: usize) -> Result<()> {
+    if lines == 0 {
+        return Ok(());
+    }
+
+    let mut file = match File::open(path).await {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err).with_context(|| format!("open {}", path.display())),
+    };
+
+    let mut contents = Vec::new();
+    file
+        .read_to_end(&mut contents)
+        .await
+        .with_context(|| format!("read {}", path.display()))?;
+    if contents.is_empty() {
+        return Ok(());
+    }
+
+    let mut end = contents.len();
+    let mut out = Vec::new();
+
+    while end > 0 && contents[end - 1] == b'\n' {
+        end -= 1;
+    }
+
+    while out.len() < lines {
+        let start = contents[..end]
+            .iter()
+            .rposition(|&byte| byte == b'\n')
+            .map(|idx| idx + 1)
+            .unwrap_or(0);
+
+        let mut line = contents[start..end].to_vec();
+        if matches!(line.last(), Some(b'\r')) {
+            line.pop();
+        }
+        out.push(String::from_utf8_lossy(&line).into_owned());
+
+        if start == 0 {
+            break;
+        }
+        end = start - 1;
+    }
+
+    out.reverse();
+    for line in out {
+        println!("{line}");
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
