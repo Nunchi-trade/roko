@@ -1040,7 +1040,22 @@ impl PlanRunner {
 
     /// Run conductor watchers against accumulated signals.
     /// Returns the decision and logs non-continue outcomes.
-    fn run_conductor_check(&self, plan_id: &str) -> ConductorDecision {
+    fn run_conductor_check(&mut self, plan_id: &str) -> ConductorDecision {
+        if self.conductor.circuit_breaker().is_broken(plan_id) {
+            eprintln!("[conductor] pausing {plan_id}: circuit breaker tripped");
+            let _ = self.executor.pause_plan(plan_id);
+            self.event_log.append(
+                EventKind::InterventionFired,
+                serde_json::json!({
+                    "plan_id": plan_id,
+                    "action": "pause",
+                    "watcher": "circuit-breaker",
+                    "reason": "failure budget exhausted",
+                }),
+            );
+            return ConductorDecision::Continue;
+        }
+
         let ctx = Context::now();
         let decision = self.conductor.evaluate(&self.conductor_signals, &ctx);
         match &decision {
