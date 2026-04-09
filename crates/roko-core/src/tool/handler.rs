@@ -17,12 +17,36 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::call::{ToolCall, ToolResult};
 use super::def::ToolPermission;
 use super::metrics::{MetricsSink, NoopMetricsSink};
 use super::trace::{NoopTraceSink, TraceSink};
 use crate::Signal;
+
+/// A mutating side effect performed by a tool during agent execution.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExternalAction {
+    /// External service that received the action.
+    #[serde(default)]
+    pub service: String,
+    /// Service-specific action name, such as `review_pr` or `post_message`.
+    #[serde(default)]
+    pub action_type: String,
+    /// Resource identifier the action targeted.
+    #[serde(default)]
+    pub resource_id: String,
+    /// Additional structured metadata for the action.
+    #[serde(default)]
+    pub metadata: Value,
+    /// Time when the action was performed.
+    #[serde(default = "Utc::now")]
+    pub performed_at: DateTime<Utc>,
+}
 
 // ─── AuditSink ────────────────────────────────────────────────────────────
 
@@ -136,6 +160,8 @@ pub struct ToolContext {
     pub metrics_sink: Arc<dyn MetricsSink>,
     /// Cancellation signal from the conductor.
     pub cancel_token: Arc<dyn CancelToken>,
+    /// Shared log of external side effects produced during execution.
+    pub external_actions: Arc<RwLock<Vec<ExternalAction>>>,
 }
 
 impl ToolContext {
@@ -160,6 +186,7 @@ impl ToolContext {
             trace_sink,
             metrics_sink,
             cancel_token,
+            external_actions: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -183,6 +210,7 @@ impl ToolContext {
             trace_sink: Arc::new(NoopTraceSink),
             metrics_sink: Arc::new(NoopMetricsSink),
             cancel_token: Arc::new(NeverCancel),
+            external_actions: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -214,6 +242,16 @@ impl ToolContext {
         self
     }
 
+    /// Replace the external-action buffer (builder-style for shared ownership).
+    #[must_use]
+    pub fn with_external_actions(
+        mut self,
+        external_actions: Arc<RwLock<Vec<ExternalAction>>>,
+    ) -> Self {
+        self.external_actions = external_actions;
+        self
+    }
+
     /// Replace the task-level tool allowlist.
     #[must_use]
     pub fn with_allowed_tools(mut self, allowed_tools: Option<Vec<String>>) -> Self {
@@ -239,6 +277,11 @@ impl ToolContext {
     pub fn worktree(&self) -> &Path {
         &self.worktree_path
     }
+
+    /// Record a mutating external side-effect for later inspection.
+    pub fn record_external_action(&self, action: ExternalAction) {
+        self.external_actions.write().push(action);
+    }
 }
 
 impl std::fmt::Debug for ToolContext {
@@ -253,6 +296,7 @@ impl std::fmt::Debug for ToolContext {
             .field("trace_sink", &"Arc<dyn TraceSink>")
             .field("metrics_sink", &"Arc<dyn MetricsSink>")
             .field("cancel_token", &"Arc<dyn CancelToken>")
+            .field("external_actions", &"Arc<RwLock<Vec<ExternalAction>>>")
             .finish()
     }
 }
@@ -352,6 +396,23 @@ mod tests {
         let s = format!("{ctx:?}");
         assert!(s.contains("ToolContext"));
         assert!(s.contains("/tmp/debug"));
+    }
+
+    #[test]
+    fn record_external_action_appends_to_shared_buffer() {
+        let ctx = ToolContext::testing("/tmp/actions");
+        let action = ExternalAction {
+            service: "github".into(),
+            action_type: "review_pr".into(),
+            resource_id: "pr-123".into(),
+            metadata: serde_json::json!({"state": "approved"}),
+            performed_at: DateTime::<Utc>::UNIX_EPOCH,
+        };
+
+        ctx.record_external_action(action.clone());
+
+        let actions = ctx.external_actions.read();
+        assert_eq!(actions.as_slice(), &[action]);
     }
 
     // Compile-time check that a ToolHandler impl is accepted by

@@ -12,6 +12,7 @@ use anyhow::{Context as _, Result, anyhow};
 use chrono::Utc;
 use roko_agent::translate::{ClaudeTranslator, OllamaTranslator, RenderedTools, Translator};
 use roko_agent::{Agent, AgentResult, ClaudeCliAgent, ExecAgent, OllamaLlmBackend};
+use roko_core::tool::ExternalAction;
 use roko_compose::{
     Placement, PromptComposer, PromptSection, RoleSystemPromptSpec, SectionPriority, TaskContext,
 };
@@ -118,7 +119,8 @@ pub async fn run_once(workdir: &Path, config: &Config, prompt_text: &str) -> Res
     // Run the agent.
     // ClaudeCliAgent owns `--append-system-prompt`, `--tools`, and `--settings`
     // internally; ExecAgent stays available for non-Claude backends.
-    let agent_result = dispatch_agent(workdir, config, &prompt, prompt_text, &ctx).await;
+    let (agent_result, external_actions) =
+        dispatch_agent(workdir, config, &prompt, prompt_text, &ctx).await;
 
     // Optionally post-process the agent output to strip ANSI escapes and
     // reasoning-model thinking traces. The raw body is preserved as an
@@ -192,6 +194,7 @@ pub async fn run_once(workdir: &Path, config: &Config, prompt_text: &str) -> Res
         &final_output_sig,
         &verdict_summary,
         &agent_result,
+        &external_actions,
     )
     .await
     {
@@ -292,7 +295,7 @@ async fn dispatch_agent(
     prompt: &Signal,
     prompt_text: &str,
     ctx: &Context,
-) -> AgentResult {
+) -> (AgentResult, Vec<ExternalAction>) {
     // ClaudeCliAgent owns `--append-system-prompt`, `--tools`, and `--settings`
     // internally; ExecAgent stays available for non-Claude backends.
     if config.agent.command == "claude" {
@@ -323,7 +326,7 @@ async fn dispatch_agent(
         for (k, v) in &config.agent.env {
             agent = agent.with_env_var(k, v);
         }
-        agent.run(prompt, ctx).await
+        (agent.run(prompt, ctx).await, Vec::new())
     } else if config.agent.command == "ollama" {
         run_ollama_agentic_single(workdir, config, prompt_text).await
     } else {
@@ -332,7 +335,7 @@ async fn dispatch_agent(
         for (k, v) in &config.agent.env {
             agent = agent.with_env_var(k, v);
         }
-        agent.run(prompt, ctx).await
+        (agent.run(prompt, ctx).await, Vec::new())
     }
 }
 
@@ -341,9 +344,10 @@ async fn run_ollama_agentic_single(
     workdir: &Path,
     config: &Config,
     prompt_text: &str,
-) -> AgentResult {
+) -> (AgentResult, Vec<ExternalAction>) {
     use roko_agent::dispatcher::ToolDispatcher;
     use roko_agent::tool_loop::{StopReason, ToolLoop};
+    use parking_lot::RwLock;
     use roko_core::tool::{ToolContext, ToolHandler};
     use std::sync::Arc;
     use std::time::Instant;
@@ -382,11 +386,13 @@ async fn run_ollama_agentic_single(
     let tool_loop = ToolLoop::new(translator, dispatcher, backend);
 
     let system_prompt = build_system_prompt(&config.prompt.role, prompt_text, "");
-    let tool_ctx = ToolContext::testing(workdir);
+    let external_actions = Arc::new(RwLock::new(Vec::new()));
+    let tool_ctx = ToolContext::testing(workdir).with_external_actions(Arc::clone(&external_actions));
 
     let output = tool_loop
         .run(&system_prompt, prompt_text, &tools, &tool_ctx)
         .await;
+    let external_actions = external_actions.read().clone();
 
     let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let agent_name = format!("ollama:{model}");
@@ -415,9 +421,9 @@ async fn run_ollama_agentic_single(
     };
 
     if success {
-        AgentResult::ok(sig).with_usage(usage)
+        (AgentResult::ok(sig).with_usage(usage), external_actions)
     } else {
-        AgentResult::fail(sig).with_usage(usage)
+        (AgentResult::fail(sig).with_usage(usage), external_actions)
     }
 }
 
@@ -428,6 +434,7 @@ async fn append_episode_log(
     final_output: &Signal,
     verdicts: &[(String, bool)],
     agent_result: &AgentResult,
+    external_actions: &[ExternalAction],
 ) -> Result<()> {
     let agent_id = agent_result
         .output
@@ -457,6 +464,11 @@ async fn append_episode_log(
         cost_usd_without_cache: f64::from(agent_result.usage.cost_usd),
         wall_ms: agent_result.usage.wall_ms,
     };
+    episode.external_actions = external_actions
+        .iter()
+        .map(|action| serde_json::to_value(action))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| anyhow!("encode external actions: {e}"))?;
     episode.extra.insert(
         "role".to_string(),
         serde_json::json!(normalized_role_label(&config.prompt.role)),

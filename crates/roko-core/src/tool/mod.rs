@@ -80,7 +80,8 @@ pub use call::{Artifact, ToolCall, ToolError, ToolResult};
 pub use def::{ToolCategory, ToolConcurrency, ToolDef, ToolPermission, ToolSchema};
 pub use format::{ToolFormat, ToolFormatProfile, profile_for_model};
 pub use handler::{
-    AtomicCancel, AuditSink, CancelToken, NeverCancel, NoopAuditSink, ToolContext, ToolHandler,
+    AtomicCancel, AuditSink, CancelToken, ExternalAction, NeverCancel, NoopAuditSink, ToolContext,
+    ToolHandler,
 };
 pub use metrics::{
     MetricsKey, MetricsSink, NoopMetricsSink, RewardConfig, ToolMetrics, compute_reward,
