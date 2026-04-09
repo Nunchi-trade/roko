@@ -40,6 +40,7 @@ use roko_gate::{
     payload::GatePayload, test_gate::TestGate,
 };
 use roko_learn::skill_library::Skill;
+use roko_learn::playbook::PlaybookStore;
 use roko_learn::costs_db::CostRecord;
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::episode_logger::{Episode, GateVerdict, Usage};
@@ -421,6 +422,11 @@ async fn load_or_create_skill_library(path: &Path) -> Result<SkillLibrary> {
     Ok(SkillLibrary::new(path).await?)
 }
 
+async fn load_or_create_playbook_store(path: &Path) -> Result<PlaybookStore> {
+    tokio::fs::create_dir_all(path).await?;
+    Ok(PlaybookStore::new(path))
+}
+
 /// Convert the latest efficiency entries into the signals expected by the conductor.
 fn build_efficiency_signals(text: &str, budget_usd: Option<f64>) -> Vec<Signal> {
     let mut signals = Vec::new();
@@ -574,6 +580,9 @@ pub struct PlanRunner {
     learning: LearningRuntime,
     /// Skill library for reusable prompt patterns and successful task recipes.
     skill_library: SkillLibrary,
+    /// Playbook store for reusable successful task sequences.
+    #[allow(dead_code)]
+    playbook: PlaybookStore,
     /// Process supervisor for tracking and cleaning up agent subprocesses.
     supervisor: ProcessSupervisor,
     /// Root cancellation token for coordinated shutdown.
@@ -986,6 +995,10 @@ impl PlanRunner {
             load_or_create_skill_library(&workdir.join(".roko").join("learn").join("skills.json"))
                 .await
                 .context("init skill library")?;
+        let playbook =
+            load_or_create_playbook_store(&workdir.join(".roko").join("learn").join("playbooks.json"))
+                .await
+                .context("init playbook store")?;
         let selected_mcp_servers = if any_task_without_mcp_list || requested_mcp_servers.is_empty()
         {
             None
@@ -1039,6 +1052,7 @@ impl PlanRunner {
             ),
             efficiency_events: Vec::new(),
             server_event_bus: None,
+            playbook,
         })
     }
 
@@ -1066,6 +1080,10 @@ impl PlanRunner {
             load_or_create_skill_library(&workdir.join(".roko").join("learn").join("skills.json"))
                 .await
                 .context("init skill library")?;
+        let playbook =
+            load_or_create_playbook_store(&workdir.join(".roko").join("learn").join("playbooks.json"))
+                .await
+                .context("init playbook store")?;
         let (mcp_clients, tool_registry) = Self::setup_mcp(&config, workdir, None).await;
         let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
         obs_sinks
@@ -1112,6 +1130,7 @@ impl PlanRunner {
             ),
             efficiency_events: Vec::new(),
             server_event_bus: None,
+            playbook,
         })
     }
 
@@ -1143,6 +1162,10 @@ impl PlanRunner {
             load_or_create_skill_library(&workdir.join(".roko").join("learn").join("skills.json"))
                 .await
                 .context("init skill library")?;
+        let playbook =
+            load_or_create_playbook_store(&workdir.join(".roko").join("learn").join("playbooks.json"))
+                .await
+                .context("init playbook store")?;
         let (mcp_clients, tool_registry) = Self::setup_mcp(&config, workdir, None).await;
         let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
         obs_sinks
@@ -1189,6 +1212,7 @@ impl PlanRunner {
             ),
             efficiency_events: Vec::new(),
             server_event_bus: None,
+            playbook,
         })
     }
 
