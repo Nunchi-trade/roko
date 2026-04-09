@@ -58,6 +58,7 @@ members = [
 
     # Golem scaffold — phase-2 subsystem placeholders (feature-gated).
     "crates/roko-golem",
+    "crates/roko-dreams",
     # Daimon subsystem — affect and motivation modeling.
     "crates/roko-daimon",
 
