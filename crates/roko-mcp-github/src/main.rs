@@ -1104,11 +1104,19 @@ fn github_client() -> Result<Client, JsonRpcError> {
         .map_err(|err| JsonRpcError::internal_error(format!("build GitHub client: {err}")))
 }
 
-fn github_token() -> Option<String> {
-    env::var("GITHUB_TOKEN")
-        .ok()
-        .filter(|token| !token.is_empty())
-        .or_else(|| env::var("GH_TOKEN").ok().filter(|token| !token.is_empty()))
+fn github_token() -> Result<String, JsonRpcError> {
+    match env::var("GITHUB_TOKEN") {
+        Ok(token) if !token.trim().is_empty() => Ok(token),
+        Ok(_) => Err(JsonRpcError::internal_error(
+            "GITHUB_TOKEN is set but empty",
+        )),
+        Err(env::VarError::NotPresent) => Err(JsonRpcError::internal_error(
+            "GITHUB_TOKEN is not set",
+        )),
+        Err(err) => Err(JsonRpcError::internal_error(format!(
+            "read GITHUB_TOKEN from environment: {err}"
+        ))),
+    }
 }
 
 const RATE_LIMIT_REMAINING_THRESHOLD: u32 = 10;
@@ -1223,13 +1231,12 @@ fn list_pull_requests(
         "per_page",
         args.per_page.unwrap_or(30).clamp(1, 100).to_string(),
     ));
+    let token = github_token()?;
 
     let response = send_github_request(
         || {
             let mut request = client.get(&url);
-            if let Some(token) = github_token() {
-                request = request.bearer_auth(token);
-            }
+            request = request.bearer_auth(&token);
             request.query(&query)
         },
         "list pull requests",
@@ -1275,13 +1282,12 @@ fn list_issues(
         "per_page",
         args.per_page.unwrap_or(30).clamp(1, 100).to_string(),
     ));
+    let token = github_token()?;
 
     let response = send_github_request(
         || {
             let mut request = client.get(&url);
-            if let Some(token) = github_token() {
-                request = request.bearer_auth(token);
-            }
+            request = request.bearer_auth(&token);
             request.query(&query)
         },
         "list issues",
@@ -1313,12 +1319,11 @@ fn get_pull_request(
     number: u64,
 ) -> Result<GithubPullRequestDetails, JsonRpcError> {
     let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls/{number}");
+    let token = github_token()?;
     let response = send_github_request(
         || {
             let mut request = client.get(&url);
-            if let Some(token) = github_token() {
-                request = request.bearer_auth(token);
-            }
+            request = request.bearer_auth(&token);
             request
         },
         "get pull request",
@@ -1346,12 +1351,11 @@ fn list_pull_request_reviews(
     number: u64,
 ) -> Result<Vec<GithubPullRequestReview>, JsonRpcError> {
     let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls/{number}/reviews");
+    let token = github_token()?;
     let response = send_github_request(
         || {
             let mut request = client.get(&url);
-            if let Some(token) = github_token() {
-                request = request.bearer_auth(token);
-            }
+            request = request.bearer_auth(&token);
             request.query(&[("per_page", "100")])
         },
         "list pull request reviews",
@@ -1388,13 +1392,12 @@ fn create_pull_request(
     if let Some(draft) = args.draft {
         payload["draft"] = Value::Bool(draft);
     }
+    let token = github_token()?;
 
     let response = send_github_request(
         || {
             let mut request = client.post(&url);
-            if let Some(token) = github_token() {
-                request = request.bearer_auth(token);
-            }
+            request = request.bearer_auth(&token);
             request.json(&payload)
         },
         "create pull request",
@@ -1438,13 +1441,12 @@ fn create_issue(
     {
         payload["assignees"] = Value::Array(assignees.iter().cloned().map(Value::String).collect());
     }
+    let token = github_token()?;
 
     let response = send_github_request(
         || {
             let mut request = client.post(&url);
-            if let Some(token) = github_token() {
-                request = request.bearer_auth(token);
-            }
+            request = request.bearer_auth(&token);
             request.json(&payload)
         },
         "create issue",
@@ -1474,12 +1476,11 @@ fn get_repository_file(
         "https://api.github.com/repos/{}/{}/contents/{}",
         args.owner, args.repo, args.path
     );
+    let token = github_token()?;
     let response = send_github_request(
         || {
             let mut request = client.get(&url);
-            if let Some(token) = github_token() {
-                request = request.bearer_auth(token);
-            }
+            request = request.bearer_auth(&token);
             if let Some(ref_name) = &args.ref_name {
                 request = request.query(&[("ref", ref_name)]);
             }
@@ -1568,13 +1569,12 @@ fn search_code(
     if let Some(per_page) = args.per_page {
         params.push(("per_page", per_page.clamp(1, 100).to_string()));
     }
+    let token = github_token()?;
 
     let response = send_github_request(
         || {
             let mut request = client.get(&url);
-            if let Some(token) = github_token() {
-                request = request.bearer_auth(token);
-            }
+            request = request.bearer_auth(&token);
             request.query(&params)
         },
         "search code",
@@ -1615,13 +1615,12 @@ fn create_pull_request_comment(
     let payload = serde_json::json!({
         "body": args.body,
     });
+    let token = github_token()?;
 
     let response = send_github_request(
         || {
             let mut request = client.post(&url);
-            if let Some(token) = github_token() {
-                request = request.bearer_auth(token);
-            }
+            request = request.bearer_auth(&token);
             request.json(&payload)
         },
         "create pull request comment",
@@ -1656,13 +1655,12 @@ fn submit_pull_request_review(
         "body": args.body,
         "event": args.event.as_str(),
     });
+    let token = github_token()?;
 
     let response = send_github_request(
         || {
             let mut request = client.post(&url);
-            if let Some(token) = github_token() {
-                request = request.bearer_auth(token);
-            }
+            request = request.bearer_auth(&token);
             request.json(&payload)
         },
         "submit pull request review",
@@ -1699,13 +1697,12 @@ fn merge_pull_request(
     if let Some(commit_title) = &args.commit_title {
         payload["commit_title"] = Value::String(commit_title.clone());
     }
+    let token = github_token()?;
 
     let response = send_github_request(
         || {
             let mut request = client.put(&url);
-            if let Some(token) = github_token() {
-                request = request.bearer_auth(token);
-            }
+            request = request.bearer_auth(&token);
             request.json(&payload)
         },
         "merge pull request",
