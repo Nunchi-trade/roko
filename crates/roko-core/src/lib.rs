@@ -80,7 +80,10 @@ pub use kind::Kind;
 pub use language::{Import, ImportKind, LanguageProvider, Symbol, SymbolKind, Visibility};
 pub use loop_tick::{TickOutcome, loop_tick};
 pub use metric::{ConfigHash, Headlines, TaskMetric, compute_headlines};
-pub use operating_frequency::{OperatingFrequency, OperatingFrequencyAffect};
+pub use operating_frequency::{
+    OperatingFrequency, OperatingFrequencyAffect, OperatingFrequencyScheduleContext,
+    OperatingFrequencyScheduler,
+};
 pub use phase::{FailureKind, PhaseKind, PlanPhase, is_monotonic_progression, valid_transitions};
 pub use polyglot::{PolyglotProject, detect_polyglot};
 pub use project::{
