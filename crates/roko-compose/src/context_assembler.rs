@@ -1,4 +1,5 @@
-//! Stage 1 gathering and Stage 2 ranking for the 5-stage assembly pipeline.
+//! Stage 1 gathering, Stage 2 ranking, and Stage 3 compression for the
+//! 5-stage assembly pipeline.
 //!
 //! This module collects candidate context chunks from durable memory,
 //! recent episodes, task-local file context, and recent plan signals.
@@ -116,7 +117,7 @@ impl ContextAssembler {
         chunks.extend(self.gather_recent_signals(plan_id, signals_path.as_ref()));
 
         self.rank(&task_text, &mut chunks);
-        chunks
+        self.compress(chunks)
     }
 
     /// Rank gathered chunks by descending score.
@@ -144,6 +145,40 @@ impl ContextAssembler {
         for chunk in chunks.iter_mut() {
             chunk.relevance = score_chunk(task_text, chunk, self.affect_state.as_ref());
         }
+    }
+
+    /// Stage 3: compress ranked chunks and enforce the token budget.
+    ///
+    /// Chunks in the lower half of the ranking are summarized to a short head
+    /// plus ellipsis. The top half stays verbatim. If the compressed set still
+    /// exceeds the budget, the lowest-ranked chunks are dropped until it fits.
+    #[must_use]
+    pub fn compress(&self, mut chunks: Vec<ContextChunk>) -> Vec<ContextChunk> {
+        if chunks.is_empty() {
+            return chunks;
+        }
+
+        let split_at = chunks.len() / 2;
+        for (idx, chunk) in chunks.iter_mut().enumerate() {
+            if idx >= split_at {
+                continue;
+            }
+            chunk.content = summarize_content(&chunk.content);
+        }
+
+        let mut total_tokens: usize = chunks
+            .iter()
+            .map(|chunk| estimate_chunk_tokens(&chunk.content))
+            .sum();
+
+        while total_tokens > self.max_context_tokens {
+            let Some(chunk) = chunks.pop() else {
+                break;
+            };
+            total_tokens = total_tokens.saturating_sub(estimate_chunk_tokens(&chunk.content));
+        }
+
+        chunks
     }
 
     fn gather_knowledge(&self, task_text: &str) -> Vec<ContextChunk> {
@@ -690,6 +725,15 @@ fn extract_line_range(content: &str, range: &str) -> String {
     lines[start_idx..end_idx].join("\n")
 }
 
+fn summarize_content(content: &str) -> String {
+    let head: String = content.chars().take(100).collect();
+    format!("{head}...")
+}
+
+fn estimate_chunk_tokens(content: &str) -> usize {
+    content.len() / 4
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -785,6 +829,21 @@ mod tests {
             track_record: None,
             confidence: Some(0.3),
             recency: Some(0.2),
+        }
+    }
+
+    fn ranked_chunk(content: &str, relevance: f64) -> ContextChunk {
+        ContextChunk {
+            content: content.into(),
+            source: ContextSource::RecentSignal {
+                signal_id: content.into(),
+                plan_id: "plan-1".into(),
+                kind: "task:update".into(),
+            },
+            relevance,
+            track_record: None,
+            confidence: Some(0.5),
+            recency: Some(0.5),
         }
     }
 
@@ -1039,5 +1098,54 @@ mod tests {
 
         assert_eq!(high_first, "Procedure");
         assert_eq!(low_first, "AntiKnowledge");
+    }
+
+    #[test]
+    fn compress_summarizes_lower_half_and_keeps_upper_half_verbatim() {
+        let dir = TempDir::new().expect("tempdir");
+        let assembler = ContextAssembler::new(
+            Arc::new(KnowledgeStore::new(dir.path().join("knowledge.jsonl"))),
+            Arc::new(EpisodeStore::new(dir.path().join("episodes.jsonl"))),
+        );
+        let chunks = vec![
+            ranked_chunk("top chunk", 0.9),
+            ranked_chunk("second chunk", 0.8),
+            ranked_chunk("third chunk", 0.7),
+            ranked_chunk("bottom chunk", 0.6),
+        ];
+
+        let compressed = assembler.compress(chunks);
+
+        assert_eq!(compressed.len(), 4);
+        assert_eq!(compressed[0].content, "top chunk");
+        assert_eq!(compressed[1].content, "second chunk");
+        assert_eq!(compressed[2].content, "third chunk...");
+        assert_eq!(compressed[3].content, "bottom chunk...");
+    }
+
+    #[test]
+    fn compress_drops_lowest_ranked_chunks_until_within_budget() {
+        let dir = TempDir::new().expect("tempdir");
+        let assembler = ContextAssembler::new(
+            Arc::new(KnowledgeStore::new(dir.path().join("knowledge.jsonl"))),
+            Arc::new(EpisodeStore::new(dir.path().join("episodes.jsonl"))),
+        )
+        .with_max_context_tokens(12);
+        let chunks = vec![
+            ranked_chunk("top chunk top chunk top chunk top chunk", 0.9),
+            ranked_chunk("second chunk second chunk second chunk second chunk", 0.8),
+            ranked_chunk("third chunk third chunk third chunk third chunk", 0.7),
+            ranked_chunk("bottom chunk bottom chunk bottom chunk bottom chunk", 0.6),
+        ];
+
+        let compressed = assembler.compress(chunks);
+
+        assert_eq!(compressed.len(), 1);
+        assert_eq!(compressed[0].content, "top chunk top chunk top chunk top chunk");
+        assert!(compressed
+            .iter()
+            .map(|chunk| estimate_chunk_tokens(&chunk.content))
+            .sum::<usize>()
+            <= 12);
     }
 }
