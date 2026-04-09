@@ -1104,6 +1104,10 @@ fn register_state_mutation_methods(
             with_state_write(&ctx.state, |state| {
                 for _ in 0..count {
                     state.fork.local_block_number = state.fork.local_block_number.saturating_add(1);
+                    state.fork.timestamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
                     let block_hash = keccak256(state.fork.local_block_number.to_le_bytes());
                     let block = LocalBlock {
                         hash: block_hash,
