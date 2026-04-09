@@ -1217,7 +1217,7 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 "Read the source below and generate implementation plan directories under plans/. \
                  Search the codebase first to understand what exists. \
                  Create plan.md and tasks.toml files with tier, model_hint, context (read_files with line ranges), \
-                 and verify steps (executable shell commands). \
+                 mcp_servers (per-task MCP server names), and verify steps (executable shell commands). \
                  Use the cheapest model tier for each task.\n\n{source_text}"
             );
 
@@ -1274,10 +1274,11 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             let system = roko_cli::plan_generate::build_regeneration_prompt(&workdir, &existing);
             let task_prompt = format!(
                 "Regenerate the tasks.toml at {} with full metadata. \
-                 Read the codebase to fill in tier, model_hint, max_loc, \
-                 context (read_files with line ranges, symbols, anti_patterns), \
-                 and verify steps for each task. \
-                 Write the updated tasks.toml back to the same file.",
+                Read the codebase to fill in tier, model_hint, max_loc, \
+                context (read_files with line ranges, symbols, anti_patterns), \
+                and mcp_servers (per-task MCP server names) \
+                and verify steps for each task. \
+                Write the updated tasks.toml back to the same file.",
                 tasks_path.display()
             );
 
@@ -1627,7 +1628,8 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                  under plans/. Each REQ-XXX requirement becomes one or more tasks. \
                  Each acceptance criterion becomes a task verification command. \
                  Search the codebase first to understand what already exists. \
-                 Create plan.md and tasks.toml files directly.\n\n\
+                 Create plan.md and tasks.toml files directly, including per-task mcp_servers \
+                 when a task needs a specific MCP server.\n\n\
                  PRD content:\n{content}",
                 path = prd_path.display()
             );

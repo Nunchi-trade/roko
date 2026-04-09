@@ -537,6 +537,7 @@ model_hint = "claude-sonnet-4-6"
 max_loc = 50
 write_files = ["src/main.rs"]
 allowed_tools = ["read_file", "grep"]
+mcp_servers = ["filesystem", "git"]
 depends_on = []
 
 [task.context]
@@ -565,7 +566,10 @@ command = "cargo check -p roko-cli"
             task.allowed_tools,
             Some(vec!["read_file".into(), "grep".into()])
         );
-        assert!(task.mcp_servers.is_none());
+        assert_eq!(
+            task.mcp_servers,
+            Some(vec!["filesystem".into(), "git".into()])
+        );
         assert_eq!(
             task.denied_tools,
             Some(

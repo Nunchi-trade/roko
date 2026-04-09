@@ -104,6 +104,9 @@ tier = "mechanical"       # mechanical | focused | integrative | architectural
 model_hint = "haiku"      # cheapest model for this tier
 max_loc = 20              # maximum lines of change
 files = ["<path>"]        # files this task modifies
+allowed_tools = ["read_file", "grep"]
+denied_tools = []
+mcp_servers = ["filesystem"] # MCP servers this task needs
 depends_on = []
 
 # SURGICAL CONTEXT: exactly what the agent needs to read
@@ -192,11 +195,12 @@ pub fn build_regeneration_prompt(workdir: &Path, existing_tasks_toml: &str) -> S
     let _ = writeln!(
         prompt,
         "The following tasks.toml exists but is missing full metadata (tier, model_hint, \
-         read_files, verify, context, max_loc). Your job is to read the codebase and fill in \
+         read_files, verify, context, max_loc, mcp_servers). Your job is to read the codebase and fill in \
          every field for each task. Keep the existing id, title, and depends_on. Add:\n\
          - `tier` (mechanical/focused/integrative/architectural)\n\
          - `model_hint` (the cheapest model for that tier)\n\
          - `max_loc` (estimated lines of change)\n\
+         - `allowed_tools`, `denied_tools`, and `mcp_servers` (per-task tool/MCP constraints)\n\
          - `[task.context]` with read_files, symbols, anti_patterns\n\
          - `[[task.verify]]` with at least compile + test checks\n\n\
          ## Existing tasks.toml:\n\n```toml\n{existing_tasks_toml}\n```"
