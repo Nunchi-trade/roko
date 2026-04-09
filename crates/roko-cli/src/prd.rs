@@ -17,11 +17,13 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::agent_exec::{AgentExecOpts, run_agent};
 use crate::task_parser::TasksFile;
 use anyhow::{Context as _, Result, anyhow};
 use roko_core::config::schema::RokoConfig;
+use roko_core::obs::MetricRegistry;
 
 // ─── Directory layout ──────────────────────────────���───────────────
 
@@ -382,7 +384,7 @@ pub fn cmd_status(workdir: &Path, plans_dir: Option<&Path>) -> Result<()> {
 }
 
 /// `roko prd draft promote <slug>` — move draft to published.
-pub async fn cmd_promote(workdir: &Path, slug: &str) -> Result<()> {
+pub async fn cmd_promote(workdir: &Path, slug: &str, auto_execute: bool) -> Result<()> {
     ensure_dirs(workdir)?;
     let src = drafts_dir(workdir).join(format!("{slug}.md"));
     if !src.exists() {
@@ -405,8 +407,28 @@ pub async fn cmd_promote(workdir: &Path, slug: &str) -> Result<()> {
     std::fs::remove_file(&src)?;
     println!("✅ Promoted: {}", dst.display());
     if auto_plan_enabled(workdir)? {
-        let _ = generate_plan_from_prd(slug, &dst).await?;
+        let plans_root = generate_plan_from_prd(slug, &dst).await?;
+        if auto_execute {
+            run_generated_plans(workdir, &plans_root).await?;
+        }
     }
+    Ok(())
+}
+
+async fn run_generated_plans(workdir: &Path, plans_root: &Path) -> Result<()> {
+    let resolved = crate::load_layered(workdir)?;
+    let metrics = Arc::new(MetricRegistry::new());
+    roko_core::obs::register_standard_metrics(&metrics);
+
+    let mut runner = crate::PlanRunner::from_plans_dir(
+        plans_root,
+        workdir,
+        resolved.config,
+        metrics,
+        false,
+    )
+    .await?;
+    let _report = runner.run_task_plans(plans_root).await?;
     Ok(())
 }
 
@@ -633,7 +655,7 @@ mod tests {
             "---\nstatus: draft\nupdated: 2020-01-01\n---\n# Test\n",
         )
         .unwrap();
-        cmd_promote(tmp.path(), "test").await.unwrap();
+        cmd_promote(tmp.path(), "test", false).await.unwrap();
         assert!(!draft.exists());
         let published = published_dir(tmp.path()).join("test.md");
         assert!(published.exists());

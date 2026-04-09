@@ -343,6 +343,9 @@ enum PrdDraftCmd {
     Promote {
         /// Draft slug (filename without .md).
         slug: String,
+        /// Execute the generated plan immediately after promotion.
+        #[arg(long)]
+        auto_execute: bool,
     },
     /// List all drafts.
     List,
@@ -1772,8 +1775,8 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                 })
                 .await
             }
-            PrdDraftCmd::Promote { slug } => {
-                roko_cli::prd::cmd_promote(&workdir, &slug).await?;
+            PrdDraftCmd::Promote { slug, auto_execute } => {
+                roko_cli::prd::cmd_promote(&workdir, &slug, auto_execute).await?;
                 Ok(0)
             }
             PrdDraftCmd::List => {
