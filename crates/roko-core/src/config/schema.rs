@@ -39,6 +39,10 @@ pub struct RokoConfig {
     #[serde(default)]
     pub project: ProjectConfig,
 
+    /// PRD lifecycle settings.
+    #[serde(default)]
+    pub prd: PrdConfig,
+
     /// Agent / model settings (including per-role overrides).
     #[serde(default)]
     pub agent: AgentConfig,
@@ -89,6 +93,7 @@ impl Default for RokoConfig {
         Self {
             schema_version: CURRENT_SCHEMA_VERSION,
             project: ProjectConfig::default(),
+            prd: PrdConfig::default(),
             agent: AgentConfig::default(),
             gates: GatesConfig::default(),
             routing: RoutingConfig::default(),
@@ -126,6 +131,12 @@ impl RokoConfig {
             "fresh_base_branch = \"{}\"\n",
             cfg.project.fresh_base_branch
         );
+    }
+
+    fn write_example_prd(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "# -- PRD lifecycle settings --");
+        let _ = writeln!(out, "[prd]");
+        let _ = writeln!(out, "auto_plan = {}\n", cfg.prd.auto_plan);
     }
 
     fn write_example_agent(out: &mut String, cfg: &Self) {
@@ -346,6 +357,7 @@ impl RokoConfig {
 
         Self::write_example_prelude(&mut out);
         Self::write_example_project(&mut out, &cfg);
+        Self::write_example_prd(&mut out, &cfg);
         Self::write_example_agent(&mut out, &cfg);
         Self::write_example_gates(&mut out, &cfg);
         Self::write_example_routing(&mut out, &cfg);
@@ -367,6 +379,20 @@ fn parse_bool_env(s: &str) -> bool {
 }
 
 // ---- [project] -----------------------------------------------------------
+
+/// PRD lifecycle settings.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrdConfig {
+    /// Automatically generate a plan when a PRD is promoted.
+    #[serde(default)]
+    pub auto_plan: bool,
+}
+
+impl Default for PrdConfig {
+    fn default() -> Self {
+        Self { auto_plan: false }
+    }
+}
 
 /// Project-level metadata.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -993,6 +1019,16 @@ fresh_base_branch = "develop"
     }
 
     #[test]
+    fn prd_section_parses() {
+        let toml = r#"
+[prd]
+auto_plan = true
+"#;
+        let cfg = RokoConfig::from_toml(toml).expect("parse");
+        assert!(cfg.prd.auto_plan);
+    }
+
+    #[test]
     fn agent_section_with_role_overrides() {
         let toml = r#"
 [agent]
@@ -1235,6 +1271,7 @@ port = 3000
     fn example_toml_contains_all_sections() {
         let example = RokoConfig::example_toml();
         assert!(example.contains("[project]"));
+        assert!(example.contains("[prd]"));
         assert!(example.contains("[agent]"));
         assert!(example.contains("[gates]"));
         assert!(example.contains("[routing]"));

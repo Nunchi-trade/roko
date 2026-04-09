@@ -84,7 +84,10 @@ impl Config {
              # SLACK_SIGNING_SECRET — Slack webhook signing secret\n\
              # ANTHROPIC_API_KEY  — Claude API key (for direct API agents, not needed for CLI agents)\n\
              \n\
-             {rendered}"
+             {rendered}\n\
+             # PRD settings (parsed by `RokoConfig`)\n\
+             [prd]\n\
+             auto_plan = false\n"
         ))
     }
 }
@@ -1651,5 +1654,7 @@ program = "echo"
         assert!(rendered.contains("SLACK_BOT_TOKEN"));
         assert!(rendered.contains("SLACK_SIGNING_SECRET"));
         assert!(rendered.contains("ANTHROPIC_API_KEY"));
+        assert!(rendered.contains("[prd]"));
+        assert!(rendered.contains("auto_plan = false"));
     }
 }

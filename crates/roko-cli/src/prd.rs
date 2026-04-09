@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, anyhow};
 use crate::agent_exec::{AgentExecOpts, run_agent};
+use roko_core::config::schema::RokoConfig;
 
 // ─── Directory layout ──────────────────────────────���───────────────
 
@@ -328,10 +329,31 @@ pub async fn cmd_promote(workdir: &Path, slug: &str) -> Result<()> {
     std::fs::write(&dst, &content)?;
     std::fs::remove_file(&src)?;
     println!("✅ Promoted: {}", dst.display());
-    if crate::load_layered(workdir)?.config.auto_plan {
+    if auto_plan_enabled(workdir)? {
         let _ = generate_plan_from_prd(slug, &dst).await?;
     }
     Ok(())
+}
+
+fn auto_plan_enabled(workdir: &Path) -> Result<bool> {
+    let roko_toml = workdir.join("roko.toml");
+    if roko_toml.is_file() {
+        let text = std::fs::read_to_string(&roko_toml)
+            .with_context(|| format!("read {}", roko_toml.display()))?;
+        let raw: toml::Value =
+            toml::from_str(&text).with_context(|| format!("parse {}", roko_toml.display()))?;
+        if raw
+            .get("prd")
+            .and_then(|prd| prd.get("auto_plan"))
+            .is_some()
+        {
+            let cfg: RokoConfig = toml::from_str(&text)
+                .with_context(|| format!("parse {}", roko_toml.display()))?;
+            return Ok(cfg.prd.auto_plan);
+        }
+    }
+
+    Ok(crate::load_layered(workdir)?.config.auto_plan)
 }
 
 /// Generate implementation plans from a published PRD file.
