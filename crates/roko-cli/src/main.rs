@@ -16,6 +16,7 @@ use roko_cli::{
     PageId, PipeMode, Plan, PlanSummary, ReplMode, SessionStatus, Source, WizardInputs, config_cmd,
     load_layered, run_init_wizard, run_once,
 };
+use roko_cli::tui::App;
 use roko_core::{ContentHash, Context, Kind, Query, Substrate};
 use roko_core::{Headlines, TaskMetric, compute_headlines};
 use roko_fs::{FileSubstrate, FsObservabilitySinks, RokoLayout};
@@ -26,6 +27,7 @@ use roko_learn::runtime_feedback::read_efficiency_events;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::env;
+use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
 use tracing_subscriber::registry::LookupSpan;
@@ -201,7 +203,7 @@ enum Command {
         #[command(subcommand)]
         cmd: ResearchCmd,
     },
-    /// Render the dashboard scaffold in plain text.
+    /// Launch the dashboard TUI, with text fallback for non-interactive use.
     Dashboard {
         /// Specific dashboard page slug to render.
         #[arg(long)]
@@ -696,12 +698,21 @@ async fn cmd_dashboard(
     page: Option<String>,
     list_pages: bool,
 ) -> Result<i32> {
-    let output = dashboard_output(cli, workdir, page, list_pages).await?;
+    let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
+    prepare_runtime_hooks(&workdir, cli.quiet);
+
+    if page.is_none() && !list_pages && std::io::stdout().is_terminal() {
+        if App::new(&workdir).run().is_ok() {
+            return Ok(EXIT_SUCCESS);
+        }
+    }
+
+    let output = render_dashboard_text(cli, Some(workdir), page, list_pages).await?;
     print!("{output}");
     Ok(EXIT_SUCCESS)
 }
 
-async fn dashboard_output(
+async fn render_dashboard_text(
     cli: &Cli,
     workdir: Option<PathBuf>,
     page: Option<String>,
@@ -741,6 +752,16 @@ async fn dashboard_output(
     } else {
         Ok(dashboard.render_overview_text())
     }
+}
+
+#[cfg(test)]
+async fn dashboard_output(
+    cli: &Cli,
+    workdir: Option<PathBuf>,
+    page: Option<String>,
+    list_pages: bool,
+) -> Result<String> {
+    render_dashboard_text(cli, workdir, page, list_pages).await
 }
 
 #[derive(Debug, Clone, PartialEq)]
