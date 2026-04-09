@@ -805,8 +805,8 @@ mod tests {
     use axum::extract::State;
     use tempfile::tempdir;
 
-    use roko_cli::Config;
     use crate::deploy::create_backend;
+    use crate::runtime::NoOpRuntime;
     use crate::state::AppState;
 
     fn make_experiment() -> PromptExperiment {
@@ -997,7 +997,7 @@ mod tests {
             Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
         let state = Arc::new(AppState::new(
             workdir,
-            Config::default(),
+            Arc::new(NoOpRuntime),
             roko_core::config::schema::RokoConfig::default(),
             deploy_backend,
         ));

@@ -148,7 +148,7 @@ impl AppState {
     /// Construct a new `AppState` from the working directory and loaded configs.
     pub fn new(
         workdir: PathBuf,
-        config: roko_cli::Config,
+        runtime: Arc<dyn CliRuntime>,
         roko_config: RokoConfig,
         deploy_backend: Arc<dyn DeployBackend>,
     ) -> Self {
@@ -174,7 +174,7 @@ impl AppState {
             supervisor,
             event_bus: EventBus::new(1024),
             subscriptions,
-            config: RwLock::new(config),
+            runtime,
             roko_config: RwLock::new(roko_config),
             active_runs: RwLock::new(HashMap::new()),
             active_plans: RwLock::new(HashMap::new()),

@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use crate::error::ApiError;
 use crate::events::ServerEvent;
 use crate::state::{AppState, OperationHandle, OperationStatus, PlanHandle};
-use roko_cli::{Plan, PlanTask};
+use crate::plan_types::{Plan, PlanTask};
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -350,8 +350,8 @@ mod tests {
     use axum::Json;
     use tempfile::tempdir;
 
-    use roko_cli::Config;
     use crate::deploy::create_backend;
+    use crate::runtime::NoOpRuntime;
 
     fn test_state() -> (tempfile::TempDir, Arc<AppState>) {
         let dir = tempdir().expect("tempdir");
@@ -360,7 +360,7 @@ mod tests {
             Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
         let state = Arc::new(AppState::new(
             workdir,
-            Config::default(),
+            Arc::new(NoOpRuntime),
             roko_core::config::schema::RokoConfig::default(),
             deploy_backend,
         ));

@@ -33,6 +33,39 @@ pub struct DashboardInfo {
     pub rendered: String,
 }
 
+/// No-op runtime used in tests.
+#[cfg(test)]
+pub struct NoOpRuntime;
+
+#[cfg(test)]
+#[async_trait]
+impl CliRuntime for NoOpRuntime {
+    async fn run_once(
+        &self,
+        _workdir: &std::path::Path,
+        _prompt: &str,
+    ) -> anyhow::Result<RunResult> {
+        Ok(RunResult { success: true })
+    }
+
+    fn session_status(&self, workdir: PathBuf) -> SessionStatusInfo {
+        SessionStatusInfo {
+            session_id: None,
+            workdir,
+            daemon_running: false,
+            signal_count: None,
+            episode_count: None,
+            last_episode_passed: None,
+        }
+    }
+
+    fn dashboard_scaffold(&self, _workdir: &std::path::Path) -> DashboardInfo {
+        DashboardInfo {
+            rendered: String::new(),
+        }
+    }
+}
+
 /// Trait that roko-serve calls for operations that live in roko-cli.
 ///
 /// The HTTP server holds an `Arc<dyn CliRuntime>` and delegates to it

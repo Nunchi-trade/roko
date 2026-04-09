@@ -138,16 +138,16 @@ async fn deploy_template(
 
     let op_id = uuid::Uuid::new_v4().to_string();
     let workdir = state.workdir.clone();
-    let config = state.config.read().await.clone();
     let bus = state.event_bus.clone();
+    let runtime = state.runtime.clone();
 
     let handle = tokio::spawn({
         let op_id = op_id.clone();
         let template_name = name.clone();
         let state = Arc::clone(&state);
         async move {
-            match roko_cli::run_once(&workdir, &config, &prompt).await {
-                Ok(report) => {
+            match runtime.run_once(&workdir, &prompt).await {
+                Ok(result) => {
                     state
                         .template_runs
                         .write()
@@ -157,12 +157,12 @@ async fn deploy_template(
                         .push(crate::state::TemplateRunRecord {
                             timestamp: chrono::Utc::now(),
                             trigger_kind: "template_deploy".into(),
-                            success: report.overall_success(),
+                            success: result.success,
                         });
                     bus.publish(ServerEvent::OperationCompleted {
                         op_id,
                         kind: "template_deploy".into(),
-                        success: report.overall_success(),
+                        success: result.success,
                     });
                 }
                 Err(e) => {

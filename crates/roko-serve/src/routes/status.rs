@@ -58,7 +58,7 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<Value> {
 
 /// `GET /api/status` — session status overview.
 async fn session_status(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    let ss = roko_cli::SessionStatus::offline(state.workdir.clone());
+    let ss = state.runtime.session_status(state.workdir.clone());
     Ok(Json(json!({
         "session_id": ss.session_id,
         "workdir": ss.workdir,
@@ -154,9 +154,8 @@ async fn coverage(State(state): State<Arc<AppState>>) -> Json<Value> {
 
 /// `GET /api/dashboard` — dashboard scaffold as JSON.
 async fn dashboard(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let scaffold = roko_cli::DashboardScaffold::new_in(&state.workdir);
-    let text = format!("{scaffold:?}");
-    Json(json!({ "rendered": text }))
+    let info = state.runtime.dashboard_scaffold(&state.workdir);
+    Json(json!({ "rendered": info.rendered }))
 }
 
 /// `GET /api/episodes` — read episodes JSONL as a JSON array.
@@ -1364,8 +1363,8 @@ mod tests {
     use axum::extract::{Path, Query, State};
     use tempfile::tempdir;
 
-    use roko_cli::Config;
     use crate::deploy::create_backend;
+    use crate::runtime::NoOpRuntime;
     use crate::state::{AppState, OperationStatus, PlanHandle};
     use roko_core::{Body, Kind, Provenance, Signal, Verdict};
 
@@ -1463,7 +1462,7 @@ mod tests {
             Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
         let state = Arc::new(AppState::new(
             workdir,
-            Config::default(),
+            Arc::new(NoOpRuntime),
             roko_core::config::schema::RokoConfig::default(),
             deploy_backend,
         ));

@@ -11,7 +11,6 @@ description = "HTTP server crate for the roko API."
 workspace = true
 
 [dependencies]
-roko-cli = { path = "../roko-cli" }
 roko-core = { path = "../roko-core" }
 roko-agent = { path = "../roko-agent" }
 roko-learn = { path = "../roko-learn" }

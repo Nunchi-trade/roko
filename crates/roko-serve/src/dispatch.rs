@@ -36,10 +36,6 @@ use tracing::{info, warn};
 use crate::events::ServerEvent;
 use crate::state::{AppState, TemplateRunRecord};
 use crate::templates::{AgentTemplate, TemplateRegistry};
-use roko_cli::dispatch::{
-    Subscription as SharedSubscription,
-    SubscriptionRegistry as SharedSubscriptionRegistry,
-};
 
 /// Async agent-dispatch interface used by the routing loop.
 #[async_trait]
@@ -674,7 +670,7 @@ pub async fn dispatch_loop(
     state: Arc<AppState>,
     dispatcher: Arc<dyn AgentDispatcher>,
 ) {
-    let subscriptions: SharedSubscriptionRegistry = state.subscriptions.clone();
+    let subscriptions: SubscriptionRegistry = state.subscriptions.clone();
     let mut rx = state.event_bus.subscribe();
 
     loop {
@@ -719,7 +715,7 @@ pub async fn dispatch_loop(
 
 async fn dispatch_agent(
     state: Arc<AppState>,
-    subscription: SharedSubscription,
+    subscription: Subscription,
     signal: Signal,
     dispatcher: Arc<dyn AgentDispatcher>,
 ) {

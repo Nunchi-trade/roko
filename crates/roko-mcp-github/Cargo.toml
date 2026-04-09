@@ -1,8 +1,14 @@
 [package]
 name = "roko-mcp-github"
 version = "0.1.0"
-edition = "2024"
-rust-version = "1.85"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "MCP server exposing GitHub API as tools for roko agents"
+
+[lints]
+workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
