@@ -5,7 +5,7 @@
 //! while enforcing per-subscription concurrency, cooldown, and dedup
 //! constraints.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -24,6 +24,7 @@ use roko_core::config::schema::{RokoConfig, SubscriptionConfig, SubscriptionFilt
 use roko_core::{ContentHash, Verdict};
 use roko_core::tool::ExternalAction;
 use roko_gate::{ClippyGate, CompileGate, DiffGate, DiffPayload, GatePayload, TestGate};
+use roko_learn::cascade_router::CascadeRouter;
 use roko_learn::episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage as EpisodeUsage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -981,7 +982,54 @@ async fn append_dispatch_episode(
     let logger = EpisodeLogger::new(state.layout.episodes_path());
     if let Err(err) = logger.append(&episode).await {
         warn!(error = %err, template = %template.name, "failed to append episode");
+        return;
     }
+
+    if let Err(err) = record_cascade_router_outcome(state, template, outcome.result.success).await
+    {
+        warn!(error = %err, template = %template.name, "failed to record cascade router outcome");
+    }
+}
+
+async fn record_cascade_router_outcome(
+    state: &Arc<AppState>,
+    template: &AgentTemplate,
+    success: bool,
+) -> Result<()> {
+    let path = state
+        .workdir
+        .join(".roko")
+        .join("learn")
+        .join("cascade-router.json");
+
+    let model_slugs = {
+        let templates = state.templates.read().await;
+        let mut slugs = Vec::new();
+        let mut seen = HashSet::new();
+
+        for loaded in templates.list() {
+            let model = loaded.agent.model.clone();
+            if seen.insert(model.clone()) {
+                slugs.push(model);
+            }
+        }
+
+        let model = template.agent.model.clone();
+        if seen.insert(model.clone()) {
+            slugs.push(model);
+        }
+
+        slugs
+    };
+
+    let cascade_router = CascadeRouter::load_or_new(&path, model_slugs);
+    if cascade_router.record_outcome(&template.agent.model, success) {
+        cascade_router
+            .save(&path)
+            .with_context(|| format!("save {}", path.display()))?;
+    }
+
+    Ok(())
 }
 
 fn glob_match(pattern: &str, text: &str) -> bool {

@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::model_router::{COLD_START_THRESHOLD, LinUCBRouter, RoutingContext};
+use crate::model_router::{COLD_START_THRESHOLD, CONTEXT_DIM, LinUCBRouter, RoutingContext};
 
 // ─── CascadeStage ───────────────────────────────────────────────────────────
 
@@ -284,6 +284,21 @@ impl CascadeRouter {
             return;
         };
         self.observe_internal(&ctx.to_features(), model_idx, reward, success);
+    }
+
+    /// Record a binary outcome for `model_slug` without a full routing context.
+    ///
+    /// This is used by event-driven feedback paths that only know which model
+    /// produced the episode, not the original routing features.
+    pub fn record_outcome(&self, model_slug: &str, success: bool) -> bool {
+        let Some(model_idx) = self.model_index_for_slug(model_slug) else {
+            return false;
+        };
+
+        let reward = if success { 1.0 } else { 0.0 };
+        let context = [0.0; CONTEXT_DIM];
+        self.observe_internal(&context, model_idx, reward, success);
+        true
     }
 
     /// Record a successful observation from a raw 17-dim context vector.
@@ -806,5 +821,16 @@ mod tests {
         let result = cascade.route(&ctx);
         // LinUCB should prefer the highly-rewarded arm
         assert_eq!(result.primary.slug, "claude-haiku-3-5");
+    }
+
+    #[test]
+    fn record_outcome_updates_model_statistics() {
+        let cascade = CascadeRouter::new(test_slugs());
+
+        assert!(cascade.record_outcome("claude-sonnet-4-5", true));
+        assert_eq!(cascade.total_observations(), 1);
+
+        let stats = cascade.confidence_snapshot();
+        assert_eq!(stats.get("claude-sonnet-4-5"), Some(&(1, 1)));
     }
 }
