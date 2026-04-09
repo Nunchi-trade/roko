@@ -36,6 +36,7 @@ pub trait AgentDispatcher: Send + Sync {
 /// A subscription from signal trigger to agent template.
 #[derive(Debug)]
 pub struct Subscription {
+    subscription_id: usize,
     config: SubscriptionConfig,
     dedup_ttl: Duration,
     state: Arc<SubscriptionState>,
@@ -43,7 +44,6 @@ pub struct Subscription {
 
 #[derive(Debug)]
 struct SubscriptionState {
-    active: AtomicUsize,
     last_triggered: Mutex<Option<Instant>>,
     recent_signals: Mutex<HashMap<ContentHash, Instant>>,
 }
@@ -51,7 +51,6 @@ struct SubscriptionState {
 impl SubscriptionState {
     fn new() -> Self {
         Self {
-            active: AtomicUsize::new(0),
             last_triggered: Mutex::new(None),
             recent_signals: Mutex::new(HashMap::new()),
         }
@@ -61,6 +60,7 @@ impl SubscriptionState {
 impl Clone for Subscription {
     fn clone(&self) -> Self {
         Self {
+            subscription_id: self.subscription_id,
             config: self.config.clone(),
             dedup_ttl: self.dedup_ttl,
             state: Arc::clone(&self.state),
@@ -84,6 +84,7 @@ impl Subscription {
     #[must_use]
     pub fn from_config(config: SubscriptionConfig) -> Self {
         Self {
+            subscription_id: usize::MAX,
             config,
             dedup_ttl: Duration::from_secs(60),
             state: Arc::new(SubscriptionState::new()),
@@ -125,6 +126,17 @@ impl Subscription {
         self
     }
 
+    fn with_subscription_id(mut self, subscription_id: usize) -> Self {
+        self.subscription_id = subscription_id;
+        self
+    }
+
+    /// Stable registry identifier for this subscription.
+    #[must_use]
+    pub const fn subscription_id(&self) -> usize {
+        self.subscription_id
+    }
+
     /// Agent template name associated with this subscription.
     #[must_use]
     pub fn template(&self) -> &str {
@@ -159,35 +171,13 @@ impl Subscription {
 
     /// Reserve a concurrency slot if the current active count is below the limit.
     #[must_use]
-    pub fn check_concurrency_limit(&self) -> bool {
-        if self.config.concurrency_limit == 0 {
-            return false;
-        }
-
-        let mut current = self.state.active.load(Ordering::Acquire);
-        loop {
-            if current >= self.config.concurrency_limit {
-                return false;
-            }
-
-            match self.state.active.compare_exchange(
-                current,
-                current + 1,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return true,
-                Err(next) => current = next,
-            }
-        }
+    pub fn check_concurrency_limit(&self, registry: &SubscriptionRegistry) -> bool {
+        registry.check_concurrency_limit(self)
     }
 
     /// Release one reserved concurrency slot.
-    pub fn release_concurrency(&self) {
-        let _ = self
-            .state
-            .active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
+    pub fn release_concurrency(&self, registry: &SubscriptionRegistry) {
+        registry.release_concurrency(self);
     }
 
     /// Check and update the cooldown gate.
@@ -237,6 +227,8 @@ impl Subscription {
 #[derive(Clone, Debug, Default)]
 pub struct SubscriptionRegistry {
     subscriptions: Arc<RwLock<Vec<Subscription>>>,
+    active_counts: Arc<Mutex<HashMap<usize, AtomicUsize>>>,
+    next_subscription_id: Arc<AtomicUsize>,
 }
 
 impl SubscriptionRegistry {
@@ -285,14 +277,36 @@ impl SubscriptionRegistry {
     /// Create a registry seeded with subscriptions.
     #[must_use]
     pub fn with_subscriptions(subscriptions: Vec<Subscription>) -> Self {
+        let active_counts = Arc::new(Mutex::new(HashMap::new()));
+        let next_subscription_id = Arc::new(AtomicUsize::new(0));
+        let subscriptions = subscriptions
+            .into_iter()
+            .enumerate()
+            .map(|(subscription_id, subscription)| {
+                active_counts
+                    .lock()
+                    .insert(subscription_id, AtomicUsize::new(0));
+                next_subscription_id.store(subscription_id + 1, Ordering::Release);
+                subscription.with_subscription_id(subscription_id)
+            })
+            .collect();
+
         Self {
             subscriptions: Arc::new(RwLock::new(subscriptions)),
+            active_counts,
+            next_subscription_id,
         }
     }
 
     /// Add a subscription to the registry.
     pub fn insert(&self, subscription: Subscription) {
-        self.subscriptions.write().push(subscription);
+        let subscription_id = self.next_subscription_id.fetch_add(1, Ordering::AcqRel);
+        self.active_counts
+            .lock()
+            .insert(subscription_id, AtomicUsize::new(0));
+        self.subscriptions
+            .write()
+            .push(subscription.with_subscription_id(subscription_id));
     }
 
     /// Return subscriptions whose trigger and filters match `signal`.
@@ -304,6 +318,44 @@ impl SubscriptionRegistry {
             .filter(|subscription| subscription.matches(signal))
             .cloned()
             .collect()
+    }
+
+    /// Reserve a concurrency slot for `subscription` if it is below its limit.
+    #[must_use]
+    pub fn check_concurrency_limit(&self, subscription: &Subscription) -> bool {
+        if subscription.config.concurrency_limit == 0 {
+            return false;
+        }
+
+        let mut active_counts = self.active_counts.lock();
+        let active = active_counts
+            .entry(subscription.subscription_id())
+            .or_insert_with(|| AtomicUsize::new(0));
+
+        let mut current = active.load(Ordering::Acquire);
+        loop {
+            if current >= subscription.config.concurrency_limit {
+                return false;
+            }
+
+            match active.compare_exchange(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(next) => current = next,
+            }
+        }
+    }
+
+    /// Release one reserved concurrency slot for `subscription`.
+    pub fn release_concurrency(&self, subscription: &Subscription) {
+        let active_counts = self.active_counts.lock();
+        if let Some(active) = active_counts.get(&subscription.subscription_id()) {
+            let _ = active.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
+        }
     }
 }
 
@@ -496,20 +548,21 @@ pub async fn dispatch_loop(
 
         let matched = subscriptions.find_matching(&signal);
         for sub in matched {
-            if !sub.check_concurrency_limit() {
+            if !subscriptions.check_concurrency_limit(&sub) {
                 continue;
             }
 
             if sub.check_cooldown() && sub.check_dedup(&signal) {
                 let signal = signal.clone();
                 let dispatcher = Arc::clone(&dispatcher);
+                let subscriptions = subscriptions.clone();
                 let sub_for_task = sub.clone();
                 tokio::spawn(async move {
                     dispatch_agent(sub_for_task.clone(), signal, dispatcher).await;
-                    sub_for_task.release_concurrency();
+                    sub_for_task.release_concurrency(&subscriptions);
                 });
             } else {
-                sub.release_concurrency();
+                subscriptions.release_concurrency(&sub);
             }
         }
     }
@@ -596,6 +649,32 @@ mod tests {
 
         assert!(sub.check_dedup(&signal));
         assert!(!sub.check_dedup(&signal));
+    }
+
+    #[test]
+    fn concurrency_limit_is_tracked_per_subscription() {
+        let registry = SubscriptionRegistry::with_subscriptions(vec![
+            Subscription::new("reviewer", "github:*").with_concurrency_limit(1),
+            Subscription::new("ops", "slack:*").with_concurrency_limit(2),
+        ]);
+
+        let signal = Signal::builder(Kind::Custom("github:push".into()))
+            .body(Body::Json(serde_json::json!({"repo": "roko"})))
+            .provenance(Provenance::external("github:webhook"))
+            .build();
+
+        let matched = registry.find_matching(&signal);
+        let reviewer = matched
+            .iter()
+            .find(|sub| sub.template() == "reviewer")
+            .cloned()
+            .expect("reviewer subscription");
+
+        assert!(registry.check_concurrency_limit(&reviewer));
+        assert!(!registry.check_concurrency_limit(&reviewer));
+
+        registry.release_concurrency(&reviewer);
+        assert!(registry.check_concurrency_limit(&reviewer));
     }
 
     #[test]
