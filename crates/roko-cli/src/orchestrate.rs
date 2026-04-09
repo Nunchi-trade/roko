@@ -2905,6 +2905,29 @@ impl PlanRunner {
         }
     }
 
+    /// Extract the most relevant compile failure summary from a gate run.
+    ///
+    /// The `compile_fail_repeat` watcher keys off `Kind::CompileDiagnostic`
+    /// signals, so we emit a normalized message whenever the compile gate
+    /// fails. The watcher then compares the message across consecutive
+    /// agent turns.
+    fn compile_failure_message(verdicts: &[Verdict]) -> Option<String> {
+        verdicts.iter().find_map(|verdict| {
+            if verdict.passed || !verdict.gate.starts_with("compile") {
+                return None;
+            }
+
+            let message = verdict
+                .error_digest
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| verdict.reason.trim());
+
+            (!message.is_empty()).then_some(message.to_owned())
+        })
+    }
+
     /// Record a failed task: episode log + mark failed in tracker.
     async fn record_task_failure(
         &mut self,
@@ -4340,6 +4363,16 @@ impl PlanRunner {
         if !all_passed {
             if let Some(state) = self.executor.plan_state_mut(plan_id) {
                 state.last_error = Some(Self::format_gate_failure_context(&verdicts));
+            }
+
+            if let Some(message) = Self::compile_failure_message(&verdicts) {
+                self.emit_conductor_signal(
+                    Kind::CompileDiagnostic,
+                    serde_json::json!({
+                        "plan_id": plan_id,
+                        "message": message,
+                    }),
+                );
             }
         }
         Ok(all_passed)
