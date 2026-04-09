@@ -1040,23 +1040,56 @@ fn json_login_candidates<'a>(value: &'a Value) -> Vec<&'a str> {
 pub async fn dispatch_loop(state: Arc<AppState>, dispatcher: Arc<dyn AgentDispatcher>) {
     let subscriptions: SubscriptionRegistry = state.subscriptions.clone();
     let mut rx = state.event_bus.subscribe();
+    let mut draining = false;
 
     loop {
-        let envelope = match rx.recv().await {
-            Ok(envelope) => envelope,
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                warn!(n, "dispatch loop lagged, skipped events");
-                continue;
+        let envelope = if draining {
+            match rx.try_recv() {
+                Ok(envelope) => Some(envelope),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => None,
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
+                    warn!(n, "dispatch loop lagged, skipped events");
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
+                    warn!("dispatch event bus closed, stopping loop");
+                    break;
+                }
             }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                warn!("dispatch event bus closed, stopping loop");
+        } else {
+            tokio::select! {
+                _ = state.cancel.cancelled() => {
+                    draining = true;
+                    continue;
+                }
+                result = rx.recv() => match result {
+                    Ok(envelope) => Some(envelope),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(n, "dispatch loop lagged, skipped events");
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        warn!("dispatch event bus closed, stopping loop");
+                        break;
+                    }
+                },
+            }
+        };
+        let Some(envelope) = envelope else {
+            if draining {
                 break;
             }
+            continue;
         };
 
         let ServerEvent::WebhookReceived { signal } = envelope.payload else {
             continue;
         };
+
+        if state.cancel.is_cancelled() {
+            draining = true;
+            continue;
+        }
 
         let matched = subscriptions.find_matching(&signal);
         for sub in matched {

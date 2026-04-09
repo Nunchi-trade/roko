@@ -25,6 +25,7 @@ use std::{
 use tokio::{
     process::{Child, Command},
     sync::Mutex,
+    task::JoinSet,
     time::timeout,
 };
 use tracing::{debug, info, warn};
@@ -192,6 +193,11 @@ impl ProcessHandle {
     }
 }
 
+enum WaitResult {
+    Completed(ProcessOutcome),
+    TimedOut(ProcessHandle),
+}
+
 impl fmt::Debug for ProcessHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ProcessHandle")
@@ -282,6 +288,72 @@ impl ProcessSupervisor {
         let mut outcomes = Vec::with_capacity(handles.len());
         for mut handle in handles {
             outcomes.push(handle.shutdown().await);
+        }
+        outcomes
+    }
+
+    /// Wait for all managed processes to exit within `timeout` per process.
+    ///
+    /// Any process that does not exit in time is reinserted into the
+    /// supervisor so a subsequent [`ProcessSupervisor::kill_all`] call can
+    /// forcefully terminate it.
+    pub async fn wait_all(&self, wait_timeout: Duration) -> Vec<ProcessOutcome> {
+        let handles: Vec<_> = {
+            let mut map = self.handles.lock().await;
+            map.drain().map(|(_, handle)| handle).collect()
+        };
+
+        let mut waiters = JoinSet::new();
+        for mut handle in handles {
+            waiters.spawn(async move {
+                let id = handle.id;
+                match timeout(wait_timeout, handle.wait()).await {
+                    Ok(Ok(status)) => WaitResult::Completed(handle.outcome(Some(status), false)),
+                    Ok(Err(err)) => {
+                        warn!(id = %id, label = %handle.label, error = %err, "error waiting for process during shutdown");
+                        WaitResult::TimedOut(handle)
+                    }
+                    Err(_) => {
+                        debug!(id = %id, label = %handle.label, "process wait timed out during shutdown");
+                        WaitResult::TimedOut(handle)
+                    }
+                }
+            });
+        }
+
+        let mut completed = Vec::new();
+        let mut timed_out = Vec::new();
+        while let Some(result) = waiters.join_next().await {
+            match result {
+                Ok(WaitResult::Completed(outcome)) => completed.push(outcome),
+                Ok(WaitResult::TimedOut(handle)) => timed_out.push(handle),
+                Err(err) => {
+                    warn!(error = %err, "process shutdown wait task failed");
+                }
+            }
+        }
+
+        if !timed_out.is_empty() {
+            let mut map = self.handles.lock().await;
+            for handle in timed_out {
+                map.insert(handle.id, handle);
+            }
+        }
+
+        completed
+    }
+
+    /// Force-kill all managed processes and return their outcomes.
+    pub async fn kill_all(&self) -> Vec<ProcessOutcome> {
+        self.cancel.cancel();
+        let handles: Vec<_> = {
+            let mut map = self.handles.lock().await;
+            map.drain().map(|(_, handle)| handle).collect()
+        };
+
+        let mut outcomes = Vec::with_capacity(handles.len());
+        for mut handle in handles {
+            outcomes.push(handle.force_kill().await);
         }
         outcomes
     }

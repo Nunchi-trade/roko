@@ -13,18 +13,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
+use axum::serve;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, SeekFrom};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::task::JoinHandle;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
+use tokio_util::sync::CancellationToken;
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::load_layered;
 use crate::serve_runtime::RokoCliRuntime;
@@ -238,54 +240,57 @@ pub async fn daemon_start(foreground: bool, port: u16) -> Result<()> {
     let _watchers = fswatcher::start_watchers(Arc::clone(&state));
     let _dispatch = dispatch::start_dispatch_loop(Arc::clone(&state));
     let _feedback = feedback::start_feedback_loop(Arc::clone(&state));
-    let ipc_server = match start_ipc_server(Arc::clone(&state)).await {
+    let shutdown_request = CancellationToken::new();
+    let http_shutdown = CancellationToken::new();
+    let ipc_server = match start_ipc_server(Arc::clone(&state), shutdown_request.clone()).await {
         Ok(handle) => handle,
         Err(err) => {
+            shutdown_request.cancel();
             state.shutdown().await;
             return Err(err);
         }
     };
 
-    let server = tokio::spawn(roko_serve::run_server_with_state(
-        Arc::clone(&state),
-        "0.0.0.0",
-        port,
-    ));
-
-    let run_result: Result<()> = tokio::select! {
-        result = server => {
-            match result {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(err)) => {
-                    state.shutdown().await;
-                    Err(err)
-                }
-                Err(join_err) => {
-                    state.shutdown().await;
-                    Err(join_err.into())
-                }
-            }
-        }
-        result = ipc_server => match result {
+    let server_shutdown = shutdown_request.clone();
+    let server_state = Arc::clone(&state);
+    let server_http_shutdown = http_shutdown.clone();
+    let server = tokio::spawn(async move {
+        match run_daemon_http_server(server_state, port, server_http_shutdown).await {
             Ok(()) => Ok(()),
-            Err(join_err) => {
-                state.shutdown().await;
-                Err(join_err.into())
+            Err(err) => {
+                if !server_shutdown.is_cancelled() {
+                    server_shutdown.cancel();
+                }
+                Err(err)
             }
-        },
-        _ = wait_for_shutdown_signal() => {
-            state.shutdown().await;
-            Ok(())
         }
-    };
+    });
+    let signal_task = tokio::spawn(wait_for_shutdown_signal());
 
-    let mut stopped = info.clone();
-    stopped.state = DaemonState::Stopped;
-    let _ = write_daemon_info(&workdir, &stopped);
-    let _ = fs::remove_file(daemon_socket_path(&workdir));
-    let _ = fs::remove_file(daemon_pid_path(&workdir));
+    tokio::select! {
+        _ = shutdown_request.cancelled() => {}
+        result = signal_task => {
+            match result {
+                Ok(()) => shutdown_request.cancel(),
+                Err(join_err) => {
+                    shutdown_request.cancel();
+                    state.shutdown().await;
+                    return Err(join_err.into());
+                }
+            }
+        }
+    }
 
-    run_result
+    graceful_shutdown_daemon(
+        &workdir,
+        Arc::clone(&state),
+        &info,
+        shutdown_request,
+        http_shutdown,
+        server,
+        ipc_server,
+    )
+    .await
 }
 
 /// Stop the active daemon for the current working directory.
@@ -317,12 +322,12 @@ pub async fn daemon_stop() -> Result<()> {
         }
     }
 
-    let graceful_timeout = Duration::from_secs(30);
+    let graceful_timeout = Duration::from_secs(90);
     let poll_interval = Duration::from_millis(250);
     let started = std::time::Instant::now();
     while started.elapsed() < graceful_timeout {
         if !pid_is_alive(info.pid)? {
-            cleanup_daemon_files(&workdir);
+            cleanup_shutdown_runtime_files(&workdir);
             return Ok(());
         }
         sleep(poll_interval).await;
@@ -337,7 +342,7 @@ pub async fn daemon_stop() -> Result<()> {
         }
     }
 
-    cleanup_daemon_files(&workdir);
+    cleanup_shutdown_runtime_files(&workdir);
     Ok(())
 }
 
@@ -535,14 +540,19 @@ fn read_daemon_info(workdir: &Path) -> Result<Option<DaemonInfo>> {
 }
 
 fn write_daemon_info(workdir: &Path, info: &DaemonInfo) -> Result<()> {
-    let json_path = daemon_json_path(workdir);
+    write_daemon_json(workdir, info)?;
     let pid_path = daemon_pid_path(workdir);
+    fs::write(&pid_path, info.pid.to_string()).with_context(|| format!("write {}", pid_path.display()))?;
+    Ok(())
+}
+
+fn write_daemon_json(workdir: &Path, info: &DaemonInfo) -> Result<()> {
+    let json_path = daemon_json_path(workdir);
     if let Some(parent) = json_path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let text = serde_json::to_string_pretty(info).context("serialize daemon metadata")?;
     fs::write(&json_path, text).with_context(|| format!("write {}", json_path.display()))?;
-    fs::write(&pid_path, info.pid.to_string()).with_context(|| format!("write {}", pid_path.display()))?;
     Ok(())
 }
 
@@ -560,6 +570,13 @@ fn cleanup_daemon_files(workdir: &Path) {
     let pid_path = daemon_pid_path(workdir);
     let socket_path = daemon_socket_path(workdir);
     let _ = fs::remove_file(json_path);
+    let _ = fs::remove_file(pid_path);
+    let _ = fs::remove_file(socket_path);
+}
+
+fn cleanup_shutdown_runtime_files(workdir: &Path) {
+    let pid_path = daemon_pid_path(workdir);
+    let socket_path = daemon_socket_path(workdir);
     let _ = fs::remove_file(pid_path);
     let _ = fs::remove_file(socket_path);
 }
@@ -762,7 +779,10 @@ fn send_signal(pid: u32, signal: &str) -> Result<()> {
     }
 }
 
-async fn start_ipc_server(state: Arc<AppState>) -> Result<JoinHandle<()>> {
+async fn start_ipc_server(
+    state: Arc<AppState>,
+    shutdown_request: CancellationToken,
+) -> Result<JoinHandle<()>> {
     let socket_path = daemon_socket_path(&state.workdir);
     if let Some(parent) = socket_path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
@@ -776,23 +796,29 @@ async fn start_ipc_server(state: Arc<AppState>) -> Result<JoinHandle<()>> {
 
     Ok(tokio::spawn(async move {
         loop {
-            let (stream, _) = match listener.accept().await {
-                Ok(pair) => pair,
-                Err(err) => {
-                    if state.cancel.is_cancelled() {
-                        break;
-                    }
-                    warn!(error = %err, path = %socket_path.display(), "daemon IPC accept failed");
+            tokio::select! {
+                _ = shutdown_request.cancelled() => {
                     break;
                 }
-            };
+                result = listener.accept() => {
+                    let (stream, _) = match result {
+                        Ok(pair) => pair,
+                        Err(err) => {
+                            warn!(error = %err, path = %socket_path.display(), "daemon IPC accept failed");
+                            shutdown_request.cancel();
+                            break;
+                        }
+                    };
 
-            let state = Arc::clone(&state);
-            tokio::spawn(async move {
-                if let Err(err) = handle_ipc_command(stream, state).await {
-                    warn!(error = %err, "daemon IPC command failed");
+                    let state = Arc::clone(&state);
+                    let shutdown_request = shutdown_request.clone();
+                    tokio::spawn(async move {
+                        if let Err(err) = handle_ipc_command(stream, state, shutdown_request).await {
+                            warn!(error = %err, "daemon IPC command failed");
+                        }
+                    });
                 }
-            });
+            }
         }
 
         let _ = tokio::fs::remove_file(&socket_path).await;
@@ -802,6 +828,7 @@ async fn start_ipc_server(state: Arc<AppState>) -> Result<JoinHandle<()>> {
 async fn handle_ipc_command(
     mut stream: UnixStream,
     state: Arc<AppState>,
+    shutdown_request: CancellationToken,
 ) -> Result<()> {
     let mut buf = vec![0u8; 1024];
     let n = stream
@@ -853,22 +880,16 @@ async fn handle_ipc_command(
     }
 
     if request == "stop" {
-        let state_for_shutdown = Arc::clone(&state);
-        tokio::spawn(async move {
-            state_for_shutdown.shutdown().await;
-        });
         stream
             .write_all(b"{\"ok\":true,\"command\":\"stop\"}\n")
             .await?;
+        shutdown_request.cancel();
         return Ok(());
     }
 
     if request == "shutdown" {
-        let state_for_shutdown = Arc::clone(&state);
-        tokio::spawn(async move {
-            state_for_shutdown.shutdown().await;
-        });
         stream.write_all(b"{\"ok\":true,\"command\":\"shutdown\"}\n").await?;
+        shutdown_request.cancel();
         return Ok(());
     }
 
@@ -894,7 +915,127 @@ async fn wait_for_shutdown_signal() {
 
     #[cfg(not(unix))]
     {
-    let _ = tokio::signal::ctrl_c().await;
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+async fn run_daemon_http_server(
+    state: Arc<AppState>,
+    port: u16,
+    shutdown: CancellationToken,
+) -> Result<()> {
+    let roko_config = state.roko_config.read().await.clone();
+    let router = roko_serve::routes::build_router(
+        Arc::clone(&state),
+        &roko_config.server.cors_origins,
+        roko_config.serve.auth.clone(),
+    );
+    let addr = format!("0.0.0.0:{port}");
+    let listener = TcpListener::bind(&addr)
+        .await
+        .with_context(|| format!("bind to {addr}"))?;
+
+    info!("roko server listening on http://{addr}");
+    info!("workdir: {}", state.workdir.display());
+
+    let shutdown = shutdown.clone();
+    serve(listener, router)
+        .with_graceful_shutdown(async move {
+            shutdown.cancelled().await;
+        })
+        .await
+        .context("axum server error")?;
+
+    info!("server stopped");
+    Ok(())
+}
+
+async fn graceful_shutdown_daemon(
+    workdir: &Path,
+    state: Arc<AppState>,
+    info: &DaemonInfo,
+    shutdown_request: CancellationToken,
+    http_shutdown: CancellationToken,
+    server: JoinHandle<Result<()>>,
+    ipc_server: JoinHandle<()>,
+) -> Result<()> {
+    let mut stopping = info.clone();
+    stopping.state = DaemonState::Stopping;
+    write_daemon_info(workdir, &stopping)?;
+
+    http_shutdown.cancel();
+
+    match timeout(Duration::from_secs(10), server).await {
+        Ok(join_result) => match join_result {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                warn!(error = %err, "daemon HTTP server stopped with error");
+            }
+            Err(join_err) => {
+                warn!(error = %join_err, "daemon HTTP server join failed");
+            }
+        },
+        Err(_) => {
+            warn!("daemon HTTP server did not stop within timeout");
+        }
+    }
+
+    shutdown_request.cancel();
+    state.cancel.cancel();
+
+    let active_agents = state.supervisor.count().await;
+    if active_agents > 0 {
+        info!(active_agents, "waiting for active agents to complete");
+    }
+
+    let completed = state.supervisor.wait_all(Duration::from_secs(60)).await;
+    if !completed.is_empty() {
+        info!(
+            completed = completed.len(),
+            "active agents exited during graceful shutdown"
+        );
+    }
+
+    let remaining = state.supervisor.count().await;
+    if remaining > 0 {
+        info!(remaining, "killing remaining agents");
+        let killed = state.supervisor.kill_all().await;
+        if !killed.is_empty() {
+            info!(killed = killed.len(), "killed remaining agents");
+        }
+    }
+
+    flush_daemon_artifacts(workdir).await?;
+
+    cleanup_shutdown_runtime_files(workdir);
+
+    let _ = ipc_server.await;
+
+    let mut stopped = info.clone();
+    stopped.state = DaemonState::Stopped;
+    write_daemon_json(workdir, &stopped)?;
+
+    Ok(())
+}
+
+async fn flush_daemon_artifacts(workdir: &Path) -> Result<()> {
+    flush_file(workdir.join(".roko").join("signals.jsonl")).await?;
+    flush_file(workdir.join(".roko").join("episodes.jsonl")).await?;
+    flush_file(workdir.join(".roko").join("logs").join("daemon.log")).await?;
+    flush_file(workdir.join(".roko").join("logs").join("daemon.err")).await?;
+    std::io::stdout().flush().context("flush stdout")?;
+    std::io::stderr().flush().context("flush stderr")?;
+    Ok(())
+}
+
+async fn flush_file(path: PathBuf) -> Result<()> {
+    match File::open(&path).await {
+        Ok(file) => file
+            .sync_all()
+            .await
+            .with_context(|| format!("sync {}", path.display())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("open {}", path.display())),
     }
 }
 
