@@ -68,6 +68,21 @@ impl Config {
     pub fn to_toml(&self) -> Result<String> {
         toml::to_string_pretty(self).context("serialize roko.toml")
     }
+
+    /// Render the default `roko.toml` template used by `roko init`.
+    pub fn default_toml_template() -> Result<String> {
+        let rendered = Self::default().to_toml()?;
+        Ok(format!(
+            "# REQUIRED_ENV\n\
+             # Required environment variables (set in .env or shell):\n\
+             # GITHUB_TOKEN       — GitHub personal access token (for MCP GitHub server)\n\
+             # SLACK_BOT_TOKEN    — Slack bot token (for MCP Slack server)\n\
+             # SLACK_SIGNING_SECRET — Slack webhook signing secret\n\
+             # ANTHROPIC_API_KEY  — Claude API key (for direct API agents, not needed for CLI agents)\n\
+             \n\
+             {rendered}"
+        ))
+    }
 }
 
 /// Agent backend — the external CLI invoked via `ExecAgent`.
@@ -1593,5 +1608,15 @@ program = "echo"
     #[test]
     fn detect_clis_does_not_panic() {
         let _ = detect_clis();
+    }
+
+    #[test]
+    fn default_toml_template_includes_required_env_section() {
+        let rendered = Config::default_toml_template().unwrap();
+        assert!(rendered.contains("# REQUIRED_ENV"));
+        assert!(rendered.contains("GITHUB_TOKEN"));
+        assert!(rendered.contains("SLACK_BOT_TOKEN"));
+        assert!(rendered.contains("SLACK_SIGNING_SECRET"));
+        assert!(rendered.contains("ANTHROPIC_API_KEY"));
     }
 }

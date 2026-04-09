@@ -1840,7 +1840,7 @@ async fn cmd_init(path: Option<PathBuf>) -> Result<()> {
             config_path.display()
         );
     } else {
-        let default = Config::default().to_toml()?;
+        let default = Config::default_toml_template()?;
         tokio::fs::write(&config_path, default)
             .await
             .with_context(|| format!("write {}", config_path.display()))?;
