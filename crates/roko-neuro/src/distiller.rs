@@ -373,8 +373,10 @@ fn derive_knowledge_id(
 fn knowledge_kind_tag(kind: KnowledgeKind) -> &'static str {
     match kind {
         KnowledgeKind::Fact => "fact",
+        KnowledgeKind::Insight => "insight",
         KnowledgeKind::Procedure => "procedure",
         KnowledgeKind::Heuristic => "heuristic",
+        KnowledgeKind::Playbook => "playbook",
         KnowledgeKind::Constraint => "constraint",
         KnowledgeKind::AntiKnowledge => "anti_knowledge",
     }

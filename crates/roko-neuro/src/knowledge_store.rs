@@ -518,8 +518,10 @@ fn compare_scores(
 fn knowledge_kind_label(kind: KnowledgeKind) -> &'static str {
     match kind {
         KnowledgeKind::Fact => "fact",
+        KnowledgeKind::Insight => "insight",
         KnowledgeKind::Procedure => "procedure",
         KnowledgeKind::Heuristic => "heuristic",
+        KnowledgeKind::Playbook => "playbook",
         KnowledgeKind::Constraint => "constraint",
         KnowledgeKind::AntiKnowledge => "anti_knowledge",
     }

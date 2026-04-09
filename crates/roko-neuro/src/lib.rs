@@ -19,10 +19,14 @@ fn default_half_life_days() -> f64 {
 pub enum KnowledgeKind {
     /// A declarative statement that is treated as true until contradicted.
     Fact,
+    /// A compact causal observation distilled from multiple raw episodes.
+    Insight,
     /// A step-by-step action pattern or recipe.
     Procedure,
     /// A lightweight rule of thumb or learned tendency.
     Heuristic,
+    /// A compiled human-readable playbook of validated heuristics.
+    Playbook,
     /// A hard restriction that should not be violated.
     Constraint,
     /// Negative knowledge describing what to avoid or what has failed.
@@ -70,6 +74,8 @@ pub struct KnowledgeEntry {
 pub mod knowledge_store;
 /// Episode distillation into durable knowledge candidates.
 pub mod distiller;
+/// Tier progression from raw episodes to playbooks.
+pub mod tier_progression;
 /// Helpers for asynchronously processing completed episodes.
 pub mod episode_completion;
 
