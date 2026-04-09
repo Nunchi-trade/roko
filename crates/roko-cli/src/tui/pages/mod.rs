@@ -17,6 +17,8 @@ pub enum PageId {
     Trends,
     /// Efficiency correlations.
     Correlations,
+    /// Gate results and adaptive thresholds.
+    GateResults,
     /// Efficiency parameters.
     Parameters,
     /// Efficiency experiments.
@@ -41,6 +43,7 @@ impl PageId {
             Self::Health => "Health",
             Self::Trends => "Trends",
             Self::Correlations => "Correlations",
+            Self::GateResults => "Gate Results",
             Self::Parameters => "Parameters",
             Self::Experiments => "Experiments",
             Self::Optimizer => "Optimizer",
@@ -58,6 +61,7 @@ impl PageId {
             Self::Health => "health",
             Self::Trends => "trends",
             Self::Correlations => "correlations",
+            Self::GateResults => "gate-results",
             Self::Parameters => "parameters",
             Self::Experiments => "experiments",
             Self::Optimizer => "optimizer",
@@ -75,6 +79,7 @@ impl PageId {
             Self::Health
             | Self::Trends
             | Self::Correlations
+            | Self::GateResults
             | Self::Parameters
             | Self::Experiments
             | Self::Optimizer => "efficiency",

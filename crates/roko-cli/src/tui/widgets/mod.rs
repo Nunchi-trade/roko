@@ -16,8 +16,9 @@ use serde_json::Value;
 use roko_learn::efficiency::AgentEfficiencyEvent;
 
 use super::dashboard::{
-    AgentActivitySnapshot, CFactor, DashboardData, DashboardScaffold, PlanExecutionSnapshot,
-    build_agent_activity_snapshot, read_json_value, read_jsonl_values,
+    AgentActivitySnapshot, CFactor, DashboardData, DashboardScaffold, GateFailureRow,
+    GateSummaryRow, GateThresholdRow, GateTrend, PlanExecutionSnapshot, build_agent_activity_snapshot,
+    read_json_value, read_jsonl_values,
 };
 use super::pages::{PageId, PageRegistry};
 
@@ -168,6 +169,11 @@ pub fn render_page(
         return;
     }
 
+    if active_page == PageId::GateResults {
+        render_gate_results_page(frame, area, data);
+        return;
+    }
+
     let rendered = page.render(dashboard);
     let content = Paragraph::new(rendered)
         .block(
@@ -203,6 +209,209 @@ fn render_agent_activity_page(frame: &mut Frame<'_>, area: Rect, data: &Dashboar
     render_active_agents_table(frame, sections[0], &snapshot.active_agents);
     render_model_distribution_chart(frame, sections[1], &snapshot);
     render_model_cost_breakdown(frame, sections[2], &snapshot);
+}
+
+fn render_gate_results_page(frame: &mut Frame<'_>, area: Rect, data: &DashboardData) {
+    let block = Block::default().borders(Borders::ALL).title("Gate Results");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let sections = Layout::vertical([
+        Constraint::Percentage(42),
+        Constraint::Percentage(24),
+        Constraint::Percentage(34),
+    ])
+    .split(inner);
+
+    render_gate_summary_table(frame, sections[0], &data.gate_results_page.gate_rows);
+    render_gate_thresholds_table(frame, sections[1], &data.gate_results_page.threshold_rows);
+    render_gate_failures_list(frame, sections[2], &data.gate_results_page.failure_rows);
+}
+
+fn render_gate_summary_table(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    rows: &[GateSummaryRow],
+) {
+    let block = Block::default().borders(Borders::ALL).title("gate summary");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    if rows.is_empty() {
+        let empty = Paragraph::new("no gate results")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    let table_rows: Vec<Row<'_>> = rows
+        .iter()
+        .map(|row| {
+            Row::new(vec![
+                Cell::from(truncate_text(&row.gate_name, 18)),
+                Cell::from(row.total_runs.to_string()),
+                Cell::from(Span::styled(
+                    format_pct(row.pass_rate),
+                    gate_pass_rate_style(row.pass_rate),
+                )),
+                Cell::from(format!("{:.0} ms", row.avg_duration_ms.round())),
+                Cell::from(truncate_text(&row.last_run, 16)),
+            ])
+        })
+        .collect();
+
+    let table = Table::new(
+        table_rows,
+        [
+            Constraint::Min(12),
+            Constraint::Length(8),
+            Constraint::Length(10),
+            Constraint::Length(12),
+            Constraint::Min(12),
+        ],
+    )
+    .header(
+        Row::new(vec![
+            Cell::from("gate name"),
+            Cell::from("runs"),
+            Cell::from("pass rate"),
+            Cell::from("avg duration"),
+            Cell::from("last run"),
+        ])
+        .style(
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::BOLD),
+        ),
+    )
+    .column_spacing(1);
+
+    frame.render_widget(table, inner);
+}
+
+fn render_gate_thresholds_table(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    rows: &[GateThresholdRow],
+) {
+    let block = Block::default().borders(Borders::ALL).title("adaptive thresholds");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    if rows.is_empty() {
+        let empty = Paragraph::new("no threshold data")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    let table_rows: Vec<Row<'_>> = rows
+        .iter()
+        .map(|row| {
+            let (arrow, color) = match row.trend {
+                GateTrend::Up => ("↑", Color::Green),
+                GateTrend::Flat => ("→", Color::Yellow),
+                GateTrend::Down => ("↓", Color::Red),
+            };
+            Row::new(vec![
+                Cell::from(row.rung.to_string()),
+                Cell::from(row.current_threshold.to_string()),
+                Cell::from(Span::styled(
+                    format_pct(row.ema_pass_rate),
+                    Style::default().fg(Color::Cyan),
+                )),
+                Cell::from(Span::styled(
+                    arrow,
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                )),
+            ])
+        })
+        .collect();
+
+    let table = Table::new(
+        table_rows,
+        [
+            Constraint::Length(6),
+            Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Length(6),
+        ],
+    )
+    .header(
+        Row::new(vec![
+            Cell::from("rung"),
+            Cell::from("threshold"),
+            Cell::from("EMA"),
+            Cell::from("trend"),
+        ])
+        .style(
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::BOLD),
+        ),
+    )
+    .column_spacing(1);
+
+    frame.render_widget(table, inner);
+}
+
+fn render_gate_failures_list(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    rows: &[GateFailureRow],
+) {
+    let block = Block::default().borders(Borders::ALL).title("recent failures");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    if rows.is_empty() {
+        let empty = Paragraph::new("no gate failures")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    let max_excerpt = inner.width.saturating_sub(28) as usize;
+    let items: Vec<ListItem<'_>> = rows
+        .iter()
+        .map(|row| {
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    truncate_text(&row.task_id, 10),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    truncate_text(&row.gate_name, 12),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::raw(" "),
+                Span::raw(truncate_text(&row.error_excerpt, max_excerpt)),
+            ]))
+        })
+        .collect();
+
+    let list = List::new(items);
+    frame.render_widget(list, inner);
 }
 
 fn render_active_agents_table(
@@ -1144,6 +1353,20 @@ fn severity_style(severity: &str) -> Style {
         "warning" => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
         _ => Style::default().fg(Color::Gray),
     }
+}
+
+fn gate_pass_rate_style(pass_rate: f64) -> Style {
+    if pass_rate > 0.9 {
+        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+    } else if pass_rate >= 0.7 {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+    }
+}
+
+fn format_pct(value: f64) -> String {
+    format!("{:.1}%", value * 100.0)
 }
 
 fn truncate_alert_message(message: &str, max: usize) -> String {

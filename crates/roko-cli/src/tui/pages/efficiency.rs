@@ -55,6 +55,28 @@ pub fn scaffold_pages() -> Vec<PageScaffold> {
             ],
         ),
         PageScaffold::new(
+            PageId::GateResults,
+            "Gate Results",
+            "Gate pass rates, adaptive thresholds, and recent failures.",
+            vec![
+                WidgetScaffold::new(
+                    "gate_summary",
+                    "Gate Summary",
+                    "Gate name, runs, pass rate, average duration, and last run.",
+                ),
+                WidgetScaffold::new(
+                    "adaptive_thresholds",
+                    "Adaptive Thresholds",
+                    "Current rung thresholds, EMA values, and trend arrows.",
+                ),
+                WidgetScaffold::new(
+                    "recent_failures",
+                    "Recent Failures",
+                    "Last ten gate failures with task ID, gate name, and excerpt.",
+                ),
+            ],
+        ),
+        PageScaffold::new(
             PageId::Parameters,
             "Parameters",
             "Runtime tunables and predicted impact metadata.",

@@ -144,6 +144,7 @@ impl DashboardScaffold {
             PageId::Health => self.snapshot.render_health_page(scaffold),
             PageId::Trends => self.snapshot.render_trends_page(scaffold),
             PageId::Correlations => self.snapshot.render_correlations_page(scaffold),
+            PageId::GateResults => self.snapshot.render_gate_results_page(scaffold),
             PageId::Parameters => self.snapshot.render_parameters_page(scaffold),
             PageId::Experiments => self.snapshot.render_experiments_page(scaffold),
             PageId::Optimizer => self.snapshot.render_optimizer_page(scaffold),
@@ -221,6 +222,8 @@ pub struct DashboardData {
     pub cascade_router: CascadeRouterState,
     /// Experiments from `.roko/learn/experiments.json`.
     pub experiments: Vec<ExperimentSummary>,
+    /// Gate-results page data derived from signals and adaptive thresholds.
+    pub gate_results_page: GateResultsPageData,
     /// Most recent signals from `.roko/signals.jsonl`.
     pub recent_signals: Vec<SignalSummary>,
     /// Snapshot of the currently executing plan for the Plan Execution page.
@@ -251,6 +254,11 @@ impl DashboardData {
         let cascade_router = load_json_opt::<CascadeRouterState>(&learn_dir.join(CASCADE_ROUTER_FILE))
             .unwrap_or_default();
         let experiments = load_experiment_summaries(&learn_dir.join(EXPERIMENTS_FILE));
+        let gate_signals = load_gate_signal_summaries(&signals_path);
+        let adaptive_thresholds =
+            load_json_opt::<AdaptiveThresholds>(&learn_dir.join(GATE_THRESHOLDS_FILE));
+        let gate_results_page =
+            build_gate_results_page_data(&gate_signals, adaptive_thresholds.as_ref());
         let recent_signals = load_recent_signals(&signals_path, 100);
         let conductor_alerts = recent_signals
             .iter()
@@ -274,6 +282,7 @@ impl DashboardData {
             efficiency_events,
             cascade_router,
             experiments,
+            gate_results_page,
             recent_signals,
             current_plan_execution,
             conductor_alerts,
@@ -367,6 +376,63 @@ pub struct GateResultSummary {
     pub rung: u32,
     pub duration_ms: u64,
     pub summary: String,
+}
+
+/// Gate signal summary used to derive the gate-results page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateSignalSummary {
+    pub id: String,
+    pub created_at_ms: i64,
+    pub plan_id: Option<String>,
+    pub task_id: Option<String>,
+    pub gate_name: String,
+    pub passed: bool,
+    pub duration_ms: u64,
+    pub excerpt: String,
+}
+
+/// Shared gate-results dashboard data.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GateResultsPageData {
+    pub gate_rows: Vec<GateSummaryRow>,
+    pub threshold_rows: Vec<GateThresholdRow>,
+    pub failure_rows: Vec<GateFailureRow>,
+}
+
+/// Aggregate row for the gate summary table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GateSummaryRow {
+    pub gate_name: String,
+    pub total_runs: u64,
+    pub pass_rate: f64,
+    pub avg_duration_ms: f64,
+    pub last_run: String,
+}
+
+/// Row for the adaptive threshold table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GateThresholdRow {
+    pub rung: u32,
+    pub current_threshold: u32,
+    pub ema_pass_rate: f64,
+    pub trend: GateTrend,
+}
+
+/// Recent failing gate row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GateFailureRow {
+    pub created_at_ms: i64,
+    pub task_id: String,
+    pub gate_name: String,
+    pub error_excerpt: String,
+}
+
+/// Derived EMA trend direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateTrend {
+    Up,
+    Flat,
+    Down,
 }
 
 /// Snapshot of the currently executing plan.
@@ -798,6 +864,59 @@ impl GateResultSummary {
             rung,
             duration_ms,
             summary,
+        })
+    }
+}
+
+impl GateSignalSummary {
+    fn from_value(value: &Value) -> Option<Self> {
+        if !value
+            .get("kind")
+            .and_then(Value::as_str)
+            .is_some_and(is_gate_result_kind)
+        {
+            return None;
+        }
+
+        Some(Self {
+            id: value.get("id")?.as_str()?.to_string(),
+            created_at_ms: entry_timestamp_ms(value)?,
+            plan_id: value
+                .pointer("/tags/plan_id")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+                .or_else(|| {
+                    value
+                        .pointer("/body/data/plan_id")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned)
+                })
+                .or_else(|| {
+                    value
+                        .pointer("/body/plan_id")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned)
+                }),
+            task_id: value
+                .pointer("/tags/task_id")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+                .or_else(|| {
+                    value
+                        .pointer("/body/data/task_id")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned)
+                })
+                .or_else(|| {
+                    value
+                        .pointer("/body/task_id")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned)
+                }),
+            gate_name: extract_gate_name(value)?,
+            passed: extract_gate_passed(value)?,
+            duration_ms: extract_gate_duration_ms(value).unwrap_or_default(),
+            excerpt: gate_excerpt_from_value(value),
         })
     }
 }
@@ -1388,6 +1507,29 @@ fn format_duration_ms(duration_ms: u64) -> String {
     format!("{mins}m {}s", secs % 60)
 }
 
+fn now_ms() -> u64 {
+    u64::try_from(Utc::now().timestamp_millis()).unwrap_or(u64::MAX)
+}
+
+fn format_elapsed_ms(ms: u64) -> String {
+    let secs = ms / 1000;
+    if secs == 0 {
+        return String::from("<1s");
+    }
+    if secs < 60 {
+        return format!("{secs}s");
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return format!("{mins}m");
+    }
+    let hours = mins / 60;
+    if hours < 24 {
+        return format!("{hours}h {}m", mins % 60);
+    }
+    format!("{hours}h {}m", mins % 60)
+}
+
 fn load_efficiency_summary(path: &Path) -> EfficiencySummary {
     let events = read_efficiency_events_sync(path);
     if events.is_empty() {
@@ -1430,6 +1572,102 @@ fn load_recent_signals(path: &Path, limit: usize) -> Vec<SignalSummary> {
     signals
 }
 
+fn load_gate_signal_summaries(path: &Path) -> Vec<GateSignalSummary> {
+    let mut signals = read_jsonl_values(path)
+        .into_iter()
+        .filter_map(|entry| GateSignalSummary::from_value(&entry))
+        .collect::<Vec<_>>();
+    signals.sort_by(|a, b| {
+        a.created_at_ms
+            .cmp(&b.created_at_ms)
+            .then_with(|| a.gate_name.cmp(&b.gate_name))
+            .then_with(|| a.task_id.cmp(&b.task_id))
+    });
+    signals
+}
+
+fn build_gate_results_page_data(
+    signals: &[GateSignalSummary],
+    adaptive_thresholds: Option<&AdaptiveThresholds>,
+) -> GateResultsPageData {
+    let mut by_gate: BTreeMap<String, GateAggregate> = BTreeMap::new();
+    for signal in signals {
+        let aggregate = by_gate.entry(signal.gate_name.clone()).or_default();
+        aggregate.total_runs += 1;
+        if signal.passed {
+            aggregate.passed_runs += 1;
+        }
+        aggregate.total_duration_ms += signal.duration_ms as f64;
+        aggregate.last_run = Some(signal.clone());
+    }
+
+    let mut gate_rows = by_gate
+        .into_iter()
+        .filter_map(|(gate_name, aggregate)| {
+            let last_run = aggregate.last_run?;
+            let total_runs = aggregate.total_runs;
+            let pass_rate = if total_runs == 0 {
+                0.0
+            } else {
+                aggregate.passed_runs as f64 / total_runs as f64
+            };
+            let avg_duration_ms = if total_runs == 0 {
+                0.0
+            } else {
+                aggregate.total_duration_ms / total_runs as f64
+            };
+            Some(GateSummaryRow {
+                gate_name,
+                total_runs,
+                pass_rate,
+                avg_duration_ms,
+                last_run: format_last_run(&last_run),
+            })
+        })
+        .collect::<Vec<_>>();
+    gate_rows.sort_by(|a, b| {
+        b.total_runs
+            .cmp(&a.total_runs)
+            .then_with(|| a.gate_name.cmp(&b.gate_name))
+    });
+
+    let mut threshold_rows = Vec::new();
+    if let Some(thresholds) = adaptive_thresholds {
+        threshold_rows = thresholds
+            .all_rungs()
+            .map(|(rung, stats)| GateThresholdRow {
+                rung: *rung,
+                current_threshold: thresholds.suggested_max_retries(*rung),
+                ema_pass_rate: stats.ema_pass_rate,
+                trend: gate_trend_from_ema(stats.ema_pass_rate),
+            })
+            .collect::<Vec<_>>();
+        threshold_rows.sort_by_key(|row| row.rung);
+    }
+
+    let mut failure_rows = signals
+        .iter()
+        .filter(|signal| !signal.passed)
+        .map(|signal| GateFailureRow {
+            created_at_ms: signal.created_at_ms,
+            task_id: signal
+                .task_id
+                .clone()
+                .unwrap_or_else(|| String::from("unknown")),
+            gate_name: signal.gate_name.clone(),
+            error_excerpt: signal.excerpt.clone(),
+        })
+        .collect::<Vec<_>>();
+    failure_rows.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
+    failure_rows.truncate(10);
+
+    GateResultsPageData {
+        gate_rows,
+        threshold_rows,
+        failure_rows,
+    }
+}
+
 fn load_latest_jsonl_value<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     let text = std::fs::read_to_string(path).ok()?;
     text.lines()
@@ -1463,6 +1701,57 @@ fn read_efficiency_events_sync(path: &Path) -> Vec<AgentEfficiencyEvent> {
         .filter(|line| !line.trim().is_empty())
         .filter_map(|line| serde_json::from_str(line).ok())
         .collect()
+}
+
+#[derive(Debug, Default)]
+struct GateAggregate {
+    total_runs: u64,
+    passed_runs: u64,
+    total_duration_ms: f64,
+    last_run: Option<GateSignalSummary>,
+}
+
+fn gate_trend_from_ema(ema_pass_rate: f64) -> GateTrend {
+    if ema_pass_rate >= 0.55 {
+        GateTrend::Up
+    } else if ema_pass_rate <= 0.45 {
+        GateTrend::Down
+    } else {
+        GateTrend::Flat
+    }
+}
+
+fn format_last_run(signal: &GateSignalSummary) -> String {
+    let age_ms = if signal.created_at_ms <= 0 {
+        0
+    } else {
+        let created_at_ms = u64::try_from(signal.created_at_ms).unwrap_or_default();
+        now_ms().saturating_sub(created_at_ms)
+    };
+    let state = if signal.passed { "pass" } else { "fail" };
+    format!("{} {state}", format_elapsed_ms(age_ms))
+}
+
+fn gate_excerpt_from_value(value: &Value) -> String {
+    for pointer in [
+        "/tags/error",
+        "/tags/message",
+        "/body/data/error",
+        "/body/data/message",
+        "/body/data/reason",
+        "/body/error",
+        "/body/message",
+        "/body/reason",
+    ] {
+        if let Some(text) = value.pointer(pointer).and_then(Value::as_str) {
+            let first_line = text.lines().next().unwrap_or("").trim();
+            if !first_line.is_empty() {
+                return first_line.to_string();
+            }
+        }
+    }
+
+    String::new()
 }
 
 fn extract_gate_name(entry: &Value) -> Option<String> {
@@ -1582,6 +1871,8 @@ pub struct DashboardSnapshot {
     experiments: Option<ExperimentStore>,
     /// Adaptive gate thresholds from `.roko/learn/gate-thresholds.json`.
     adaptive_thresholds: Option<AdaptiveThresholds>,
+    /// Gate-results page data derived from signals and thresholds.
+    gate_results_page: GateResultsPageData,
     /// Cascade router snapshot from `.roko/learn/cascade-router.json` (raw JSON).
     cascade_snapshot: Option<CascadeSnapshotData>,
     /// Raw episodes kept for per-agent analysis.
@@ -1612,6 +1903,7 @@ impl DashboardSnapshot {
         let learn_dir = root.join(LEARN_DIR);
         let episodes_path = memory_dir.join(EPISODES_FILE);
         let task_metrics_path = memory_dir.join(TASK_METRICS_FILE);
+        let signals_path = root.join(".roko").join("signals.jsonl");
 
         let episodes_logger = EpisodeLogger::new(&episodes_path);
         let episodes = EpisodeLogger::read_all_lossy(episodes_logger.path())
@@ -1624,6 +1916,9 @@ impl DashboardSnapshot {
         let experiments = load_json_opt::<ExperimentStore>(&learn_dir.join(EXPERIMENTS_FILE));
         let adaptive_thresholds =
             load_json_opt::<AdaptiveThresholds>(&learn_dir.join(GATE_THRESHOLDS_FILE));
+        let gate_signals = load_gate_signal_summaries(&signals_path);
+        let gate_results_page =
+            build_gate_results_page_data(&gate_signals, adaptive_thresholds.as_ref());
         let cascade_snapshot =
             load_json_opt::<CascadeSnapshotData>(&learn_dir.join(CASCADE_ROUTER_FILE));
 
@@ -1634,12 +1929,22 @@ impl DashboardSnapshot {
             efficiency_events,
             experiments,
             adaptive_thresholds,
+            gate_results_page,
             cascade_snapshot,
         ))
     }
 
     fn empty(root: PathBuf) -> Self {
-        Self::from_records(root, &[], &[], Vec::new(), None, None, None)
+        Self::from_records(
+            root,
+            &[],
+            &[],
+            Vec::new(),
+            None,
+            None,
+            GateResultsPageData::default(),
+            None,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1650,6 +1955,7 @@ impl DashboardSnapshot {
         efficiency_events: Vec<AgentEfficiencyEvent>,
         experiments: Option<ExperimentStore>,
         adaptive_thresholds: Option<AdaptiveThresholds>,
+        gate_results_page: GateResultsPageData,
         cascade_snapshot: Option<CascadeSnapshotData>,
     ) -> Self {
         let episode_count = episodes.len();
@@ -1718,6 +2024,7 @@ impl DashboardSnapshot {
             efficiency_events,
             experiments,
             adaptive_thresholds,
+            gate_results_page,
             cascade_snapshot,
             episodes: episodes.to_vec(),
         }
@@ -1991,6 +2298,83 @@ impl DashboardSnapshot {
                     stats.total_observations,
                     stats.consecutive_passes,
                     skip
+                );
+            }
+        }
+
+        Some(out)
+    }
+
+    fn render_gate_results_page(&self, page: &PageScaffold) -> Option<String> {
+        if self.gate_results_page.gate_rows.is_empty()
+            && self.gate_results_page.threshold_rows.is_empty()
+            && self.gate_results_page.failure_rows.is_empty()
+        {
+            return None;
+        }
+
+        let mut out = page_header(page);
+        let _ = writeln!(out, "source: {}/signals.jsonl", self.root.join(".roko").display());
+        let _ = writeln!(
+            out,
+            "source: {}/gate-thresholds.json",
+            self.root.join(LEARN_DIR).display()
+        );
+
+        let _ = writeln!(out);
+        let _ = writeln!(out, "gate summary:");
+        let _ = writeln!(
+            out,
+            "  {:>18}  {:>10}  {:>9}  {:>12}  {:>12}",
+            "gate", "runs", "pass rate", "avg duration", "last run"
+        );
+        for row in &self.gate_results_page.gate_rows {
+            let _ = writeln!(
+                out,
+                "  {:>18}  {:>10}  {:>9}  {:>12}  {:>12}",
+                truncate_str(&row.gate_name, 18),
+                row.total_runs,
+                format_pct(row.pass_rate),
+                format_ms(row.avg_duration_ms),
+                truncate_str(&row.last_run, 12)
+            );
+        }
+
+        let _ = writeln!(out);
+        let _ = writeln!(out, "adaptive thresholds:");
+        let _ = writeln!(
+            out,
+            "  {:>6}  {:>10}  {:>9}  {:>8}",
+            "rung", "threshold", "ema", "trend"
+        );
+        for row in &self.gate_results_page.threshold_rows {
+            let trend = match row.trend {
+                GateTrend::Up => "↑",
+                GateTrend::Flat => "→",
+                GateTrend::Down => "↓",
+            };
+            let _ = writeln!(
+                out,
+                "  {:>6}  {:>10}  {:>9}  {:>8}",
+                row.rung,
+                row.current_threshold,
+                format_pct(row.ema_pass_rate),
+                trend
+            );
+        }
+
+        let _ = writeln!(out);
+        let _ = writeln!(out, "recent gate failures:");
+        if self.gate_results_page.failure_rows.is_empty() {
+            let _ = writeln!(out, "  (none)");
+        } else {
+            for row in &self.gate_results_page.failure_rows {
+                let _ = writeln!(
+                    out,
+                    "  {} | {} | {}",
+                    row.task_id,
+                    row.gate_name,
+                    truncate_str(&row.error_excerpt, 120)
                 );
             }
         }
@@ -2497,7 +2881,7 @@ mod tests {
     fn scaffold_has_expected_page_count() {
         let dashboard = DashboardScaffold::new();
         let summary = dashboard.summary();
-        assert_eq!(summary.page_count, 10);
+        assert_eq!(summary.page_count, 11);
         assert!(summary.widget_count >= 20);
         assert_eq!(summary.active_page, PageId::Health);
     }
@@ -2513,7 +2897,7 @@ mod tests {
     fn overview_render_contains_active_page_and_counts() {
         let dashboard = DashboardScaffold::new();
         let rendered = dashboard.render_overview_text();
-        assert!(rendered.contains("dashboard scaffold: 10 pages"));
+        assert!(rendered.contains("dashboard scaffold: 11 pages"));
         assert!(rendered.contains("active=health"));
         assert!(rendered.contains("active page:"));
         assert!(rendered.contains("* Health [health] efficiency"));
@@ -2701,6 +3085,75 @@ mod tests {
         assert!(rendered.contains("Parameters"));
         assert!(rendered.contains("cascade router:"));
         assert!(rendered.contains("registered models: 2"));
+    }
+
+    #[test]
+    fn gate_results_page_renders_summary_thresholds_and_failures() {
+        let tmpdir = tempdir().expect("tempdir");
+        let roko_dir = tmpdir.path().join(".roko");
+        let learn_dir = roko_dir.join("learn");
+        fs::create_dir_all(&learn_dir).expect("learn dir");
+
+        let mut thresholds = AdaptiveThresholds::new();
+        thresholds.update(0, true);
+        thresholds.update(0, false);
+        thresholds.update(1, true);
+        write_json(&learn_dir.join(GATE_THRESHOLDS_FILE), &thresholds);
+
+        let signals = vec![
+            serde_json::json!({
+                "id": "sig-1",
+                "kind": "gate:compile",
+                "created_at_ms": 1_700_000_000_000i64,
+                "tags": {
+                    "gate": "compile",
+                    "plan_id": "plan-a",
+                    "task_id": "task-a",
+                    "passed": "true",
+                    "duration_ms": 120
+                }
+            }),
+            serde_json::json!({
+                "id": "sig-2",
+                "kind": "gate:test",
+                "created_at_ms": 1_700_000_000_500i64,
+                "tags": {
+                    "gate": "test",
+                    "plan_id": "plan-a",
+                    "task_id": "task-b",
+                    "passed": "false",
+                    "duration_ms": 340
+                },
+                "body": {
+                    "data": {
+                        "reason": "assertion failed on line 42\nmore detail"
+                    }
+                }
+            }),
+        ];
+        write_jsonl(
+            &roko_dir.join("signals.jsonl"),
+            &signals
+                .into_iter()
+                .map(|signal| serde_json::to_string(&signal).expect("signal json"))
+                .collect::<Vec<_>>(),
+        );
+
+        let memory_dir = tmpdir.path().join(MEMORY_DIR);
+        fs::create_dir_all(&memory_dir).expect("memory dir");
+        fs::write(memory_dir.join(EPISODES_FILE), "").expect("empty episodes");
+
+        let dashboard = DashboardScaffold::new_in(tmpdir.path());
+        let rendered = dashboard
+            .render_page_text(PageId::GateResults)
+            .expect("gate results page should render");
+        assert!(rendered.contains("Gate Results"));
+        assert!(rendered.contains("gate summary:"));
+        assert!(rendered.contains("adaptive thresholds:"));
+        assert!(rendered.contains("recent gate failures:"));
+        assert!(rendered.contains("compile"));
+        assert!(rendered.contains("task-b"));
+        assert!(rendered.contains("assertion failed on line 42"));
     }
 
     #[test]
