@@ -694,6 +694,59 @@ fn role_hash_features(role: &str) -> [f64; 4] {
     ]
 }
 
+fn implementer_cascade_context_vec(
+    runner: &PlanRunner,
+    plan_id: &str,
+    task_def: Option<&crate::task_parser::TaskDef>,
+) -> Vec<f64> {
+    use roko_core::TaskComplexityBand;
+    use roko_learn::model_router::CONTEXT_DIM;
+
+    let mut context_vec = vec![0.0; CONTEXT_DIM];
+    let task_tier = task_def.map(|td| td.tier.as_str()).unwrap_or("focused");
+    let tier_idx = match task_tier {
+        "mechanical" => 0,
+        "focused" => 1,
+        "integrative" => 2,
+        "architectural" => 3,
+        _ => 1,
+    };
+    context_vec[tier_idx] = 1.0;
+
+    let complexity = match task_tier {
+        "mechanical" => TaskComplexityBand::Fast,
+        "architectural" => TaskComplexityBand::Complex,
+        _ => TaskComplexityBand::Standard,
+    };
+    context_vec[4] = match complexity {
+        TaskComplexityBand::Fast => 0.0,
+        TaskComplexityBand::Complex => 1.0,
+        TaskComplexityBand::Standard => 0.5,
+        _ => 0.5,
+    };
+
+    let iteration = runner
+        .task_trackers
+        .get(plan_id)
+        .map(|tracker| f64::from(tracker.impl_round.saturating_add(1)))
+        .unwrap_or(1.0);
+    context_vec[5] = (iteration / 10.0).min(1.0);
+    context_vec[6..10].copy_from_slice(&role_hash_features("Implementer"));
+    context_vec[10] = 0.5;
+    context_vec[11] = if runner
+        .task_trackers
+        .get(plan_id)
+        .is_some_and(|tracker| tracker.gate_failure_count > 0)
+    {
+        1.0
+    } else {
+        0.0
+    };
+    context_vec[16] = 1.0;
+
+    context_vec
+}
+
 impl TaskTracker {
     fn new(tasks_file: TasksFile, plan_dir: PathBuf) -> Self {
         Self {
@@ -2902,7 +2955,7 @@ impl PlanRunner {
             ));
         }
 
-        let mut results: Vec<(String, AgentResult)> = Vec::with_capacity(task_ids.len());
+        let mut results: Vec<(String, String, AgentResult)> = Vec::with_capacity(task_ids.len());
         let plan_id_owned = plan_id.to_owned();
         let mut pending = configs.into_iter();
         loop {
@@ -2925,8 +2978,9 @@ impl PlanRunner {
                         task_role = %role,
                         phase = %task_phase
                     );
+                    let model = cfg.model.clone();
                     let result = run_prepared_agent(cfg).instrument(span).await;
-                    (tid, result)
+                    (tid, model, result)
                 });
             }
 
@@ -2946,7 +3000,7 @@ impl PlanRunner {
 
         // ── Process results sequentially ─────────────────────────────
         let mut any_fatal = false;
-        for (tid, agent_result) in &results {
+        for (tid, model, agent_result) in &results {
             self.add_task_spend(plan_id, tid, f64::from(agent_result.usage.cost_usd));
             if agent_result.success {
                 if let Err(e) = self
@@ -2970,7 +3024,7 @@ impl PlanRunner {
                     plan_id,
                     tid,
                     None,
-                    None,
+                    Some(model.as_str()),
                     &err,
                     &started,
                     Some(agent_result),
@@ -3082,6 +3136,28 @@ impl PlanRunner {
             .model
             .clone()
             .unwrap_or_else(|| "claude-sonnet-4-6".into())
+    }
+
+    /// Record a LinUCB observation for the implementer task route.
+    fn observe_cascade_router(
+        &self,
+        plan_id: &str,
+        task_def: Option<&crate::task_parser::TaskDef>,
+        model_slug: &str,
+        reward: f64,
+    ) {
+        if let Some(model_idx) = self.learning.cascade_router().model_index_for_slug(model_slug) {
+            let context_vec = implementer_cascade_context_vec(self, plan_id, task_def);
+            self.learning
+                .cascade_router()
+                .observe(context_vec, model_idx, reward);
+        } else {
+            tracing::debug!(
+                plan_id = %plan_id,
+                model = %model_slug,
+                "skipping cascade observation: model not found in router arms"
+            );
+        }
     }
 
     /// Build a learned-context string from skills, playbook rules, and patterns.
@@ -3538,6 +3614,14 @@ impl PlanRunner {
         let wall_ms = result
             .map(|r| r.usage.wall_ms)
             .unwrap_or_else(|| u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
+        let task_def = self
+            .task_trackers
+            .get(plan_id)
+            .and_then(|t| t.tasks_file.tasks.iter().find(|td| td.id == task_id))
+            .cloned();
+        if let Some(model) = selected_model {
+            self.observe_cascade_router(plan_id, task_def.as_ref(), model, 0.0);
+        }
         let mut ep = Episode::new("Implementer", task_id).failed(error.to_string());
         ep.usage = match result {
             Some(result) => Usage {
@@ -4901,6 +4985,12 @@ impl PlanRunner {
         self.emit_agent_turn_signal(&result.output);
 
         if !result.success {
+            self.observe_cascade_router(
+                plan_id,
+                task_def.as_ref(),
+                &selected_model,
+                0.0,
+            );
             let task_phase = task_def
                 .as_ref()
                 .map(|task| task.status.as_str())
@@ -5138,6 +5228,7 @@ impl PlanRunner {
                     .as_text()
                     .ok()
                     .map(|text| tail_output_lines(text, TASK_FAILURE_OUTPUT_TAIL_LINES));
+                self.observe_cascade_router(plan_id, task_def.as_ref(), &selected_model, 0.0);
                 let error = anyhow!(
                     "verify failed for {task_id}: {command} — {msg}; stderr/stdout:\n{error_output}"
                 );
