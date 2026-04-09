@@ -16,11 +16,13 @@
 //! complexity, because they can't reliably use tools and have smaller context
 //! windows.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
 use crate::symbol_resolver::SymbolResolver;
 use crate::task_brief::TaskBriefGenerator;
+use serde::{Deserialize, Serialize};
 
 // ─── Context tier ──────────────────────────────────────────────────────────
 
@@ -128,6 +130,57 @@ pub enum ContextSource {
     Decomposition,
     /// Sibling task titles (from tasks.toml, just IDs + titles of tasks in same plan).
     SiblingTasks,
+}
+
+// ─── Rolling average context utility ───────────────────────────────────────
+
+/// Minimum average reference rate required to keep `Normal` priority.
+const CONTEXT_AVERAGE_DEMOTE_THRESHOLD: f64 = 0.10;
+
+/// Rolling average statistics for one `(task_tier, context_source_type)` pair.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct ContextAverageStats {
+    /// Exponential moving average of reference rate.
+    ema_reference_rate: f64,
+    /// Total observations seen for this pair.
+    total_observations: u64,
+}
+
+/// Loaded rolling averages for task-context demotion.
+#[derive(Clone, Debug, Default)]
+struct ContextAverageTracker {
+    averages: HashMap<String, HashMap<String, ContextAverageStats>>,
+}
+
+impl ContextAverageTracker {
+    /// Load rolling averages from disk.
+    fn load(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        let averages = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| {
+                serde_json::from_str::<HashMap<String, HashMap<String, ContextAverageStats>>>(&s)
+                    .ok()
+            })
+            .unwrap_or_default();
+        Self { averages }
+    }
+
+    /// Return the rolling reference rate for a `(task_tier, source_type)` pair.
+    #[must_use]
+    fn ref_rate(&self, task_tier: &str, source_type: &str) -> f64 {
+        self.averages
+            .get(task_tier)
+            .and_then(|sources| sources.get(source_type))
+            .map(|stats| {
+                if stats.total_observations == 0 {
+                    1.0
+                } else {
+                    stats.ema_reference_rate
+                }
+            })
+            .unwrap_or(1.0)
+    }
 }
 
 // ─── Resolved context ──────────────────────────────────────────────────────
@@ -391,6 +444,8 @@ pub struct ContextProvider {
     symbol_resolver: SymbolResolver,
     /// Task brief generator instance.
     brief_generator: TaskBriefGenerator,
+    /// Rolling averages of context reference rates, loaded from `.roko/learn/`.
+    context_average_tracker: ContextAverageTracker,
 }
 
 impl ContextProvider {
@@ -399,11 +454,15 @@ impl ContextProvider {
     pub fn new(workdir: PathBuf) -> Self {
         let symbol_resolver = SymbolResolver::new(workdir.clone());
         let brief_generator = TaskBriefGenerator::new();
+        let context_average_tracker = ContextAverageTracker::load(
+            workdir.join(".roko").join("learn").join("context-averages.json"),
+        );
         Self {
             workdir,
             budgets: ContextBudgets::default(),
             symbol_resolver,
             brief_generator,
+            context_average_tracker,
         }
     }
 
@@ -451,6 +510,9 @@ impl ContextProvider {
             add_full_context(&mut sections, plan_artifacts, budget);
         }
 
+        // ── Rolling-average demotion ────────────────────────────────
+        self.apply_average_based_demotions(&mut sections, &task.tier);
+
         // ── Budget enforcement: drop lowest-priority sections ──────
         let sections = self.enforce_budget(sections, budget);
 
@@ -461,6 +523,20 @@ impl ContextProvider {
             tier,
             total_tokens_estimate,
             budget_tokens: budget,
+        }
+    }
+
+    /// Demote `Normal` sections to `Low` when their rolling reference rate is too small.
+    fn apply_average_based_demotions(&self, sections: &mut [ContextSection], task_tier: &str) {
+        for section in sections {
+            if section.section.priority != SectionPriority::Normal {
+                continue;
+            }
+            let source_type = context_source_type(&section.source);
+            let ref_rate = self.context_average_tracker.ref_rate(task_tier, source_type);
+            if ref_rate < CONTEXT_AVERAGE_DEMOTE_THRESHOLD {
+                section.section.priority = SectionPriority::Low;
+            }
         }
     }
 
@@ -880,6 +956,25 @@ fn add_full_context(
     }
 }
 
+/// Convert a context source into the stable source-type key used by learning data.
+const fn context_source_type(source: &ContextSource) -> &'static str {
+    match source {
+        ContextSource::InlineFile { .. } => "file",
+        ContextSource::SymbolSignature { .. } => "symbol",
+        ContextSource::AntiPattern => "anti_pattern",
+        ContextSource::Verification => "verification",
+        ContextSource::TaskBrief => "task_brief",
+        ContextSource::PriorTaskOutput { .. } => "prior_output",
+        ContextSource::PlanBrief => "plan_brief",
+        ContextSource::ResearchMemo => "research_memo",
+        ContextSource::Invariants => "invariants",
+        ContextSource::CrossPlanContext => "cross_plan",
+        ContextSource::PrdExtract => "prd_extract",
+        ContextSource::Decomposition => "decomposition",
+        ContextSource::SiblingTasks => "sibling_tasks",
+    }
+}
+
 /// Check if this sibling depends on the given task.
 ///
 /// We don't have the sibling's `depends_on` here, so this is best-effort.
@@ -1025,6 +1120,40 @@ mod tests {
         assert_eq!(budgets.surgical, 4_000);
         assert_eq!(budgets.focused, 12_000);
         assert_eq!(budgets.full, 24_000);
+    }
+
+    #[test]
+    fn rolling_average_demotes_low_value_normal_sections() {
+        let workdir = PathBuf::from("/tmp/test");
+        let mut provider = ContextProvider::new(workdir);
+        provider.context_average_tracker.averages.insert(
+            "integrative".to_string(),
+            HashMap::from([(
+                "task_brief".to_string(),
+                ContextAverageStats {
+                    ema_reference_rate: 0.05,
+                    total_observations: 12,
+                },
+            )]),
+        );
+
+        let mut sections = vec![
+            ContextSection {
+                section: PromptSection::new("task_brief", "brief content")
+                    .with_priority(SectionPriority::Normal),
+                source: ContextSource::TaskBrief,
+            },
+            ContextSection {
+                section: PromptSection::new("verification", "verify content")
+                    .with_priority(SectionPriority::High),
+                source: ContextSource::Verification,
+            },
+        ];
+
+        provider.apply_average_based_demotions(&mut sections, "integrative");
+
+        assert_eq!(sections[0].section.priority, SectionPriority::Low);
+        assert_eq!(sections[1].section.priority, SectionPriority::High);
     }
 
     #[test]

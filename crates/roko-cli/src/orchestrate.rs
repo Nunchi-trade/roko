@@ -114,17 +114,6 @@ impl ContextAttributionTracker {
         Self { rates }
     }
 
-    fn ref_rate(&self, tier: &str, source_type: &str) -> f64 {
-        match self.rates.get(&(tier.to_string(), source_type.to_string())) {
-            Some(&(referenced, total)) if total > 0 => referenced as f64 / total as f64,
-            _ => 1.0,
-        }
-    }
-
-    fn should_demote(&self, tier: &str, source_type: &str) -> bool {
-        self.ref_rate(tier, source_type) < 0.10
-    }
-
     fn record(&mut self, tier: &str, source_type: &str, referenced: bool) {
         let entry = self
             .rates
@@ -4863,7 +4852,7 @@ impl PlanRunner {
             // Prior task outputs: read from .roko/task-outputs/ if available
             let prior_outputs = load_prior_task_outputs(&self.workdir, &td.depends_on);
 
-            let mut resolved = context_provider.resolve(
+            let resolved = context_provider.resolve(
                 &task_input,
                 &selected_model,
                 &plan_artifacts,
@@ -4878,37 +4867,6 @@ impl PlanRunner {
                 resolved.total_tokens_estimate,
                 resolved.budget_tokens,
             );
-
-            // ── Attribution-based demotion ───────────────────────────────
-            let tier_str = format!("{:?}", resolved.tier);
-            resolved.sections.retain(|cs| {
-                use roko_compose::ContextSource;
-                let source_type = match &cs.source {
-                    ContextSource::InlineFile { .. } => "file",
-                    ContextSource::SymbolSignature { .. } => "symbol",
-                    ContextSource::AntiPattern => "anti_pattern",
-                    ContextSource::Verification => "verification",
-                    ContextSource::TaskBrief => "task_brief",
-                    ContextSource::PriorTaskOutput { .. } => "prior_output",
-                    ContextSource::PlanBrief => "plan_brief",
-                    ContextSource::ResearchMemo => "research_memo",
-                    ContextSource::Invariants => "invariants",
-                    ContextSource::CrossPlanContext => "cross_plan",
-                    ContextSource::PrdExtract => "prd_extract",
-                    ContextSource::Decomposition => "decomposition",
-                    ContextSource::SiblingTasks => "sibling_tasks",
-                };
-                let rate = self.attribution_tracker.ref_rate(&tier_str, source_type);
-                let demoted = self
-                    .attribution_tracker
-                    .should_demote(&tier_str, source_type);
-                if demoted {
-                    tracing::info!("[context] {source_type}: demoted (ref_rate={rate:.2})");
-                } else {
-                    tracing::info!("[context] {source_type}: included (ref_rate={rate:.2})");
-                }
-                !demoted
-            });
 
             // Extract attribution keys before consuming into prompt sections.
             // Each key is a searchable token (file path, symbol name) that we'll
