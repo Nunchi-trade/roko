@@ -6,6 +6,7 @@
 //! suitable for both single-shot and orchestrated execution paths.
 
 use crate::prompt::{PromptComposer, PromptSection};
+use crate::prompt::estimate_tokens;
 use crate::scorer::SectionScorer;
 use crate::system_prompt_builder::SystemPromptBuilder;
 use crate::templates::RolePromptTemplate;
@@ -17,8 +18,9 @@ use crate::templates::reviewer::{Reviewer, ReviewerTemplate};
 use crate::templates::scribe::{ScribeTemplate, ScribeVariant};
 use crate::templates::strategist::StrategistTemplate;
 use crate::templates::task_impl::TaskImplTemplate;
-use roko_core::error::Result;
+use roko_core::error::{Result, RokoError};
 use roko_core::{AgentRole, Budget, Composer, Context};
+use tracing::warn;
 
 /// Default conventions appended to every constructed system prompt.
 pub const DEFAULT_CONVENTIONS_SUFFIX: &str = "\
@@ -259,6 +261,53 @@ impl RoleSystemPromptSpec {
             &Context::now(),
         )?;
         composed.body.as_text().map(str::to_string)
+    }
+
+    /// Build the prompt and validate it against a model context window.
+    ///
+    /// If the composed prompt exceeds 30% of the available window, the
+    /// builder re-runs composition with a tighter budget to drop lower-value
+    /// sections. If it exceeds 50% of the window, the prompt is rejected.
+    pub fn build_with_context_window(&self, context_window_tokens: usize) -> Result<String> {
+        let prompt = self.build();
+        let prompt_tokens = estimate_tokens(&prompt);
+        let soft_limit = context_window_tokens.saturating_mul(3) / 10;
+        let hard_limit = context_window_tokens / 2;
+        let soft_limit = soft_limit.max(1);
+        let hard_limit = hard_limit.max(1);
+
+        if prompt_tokens > hard_limit {
+            return Err(RokoError::BudgetExceeded {
+                dimension: "system_prompt_tokens",
+                used: prompt_tokens,
+                limit: hard_limit,
+            });
+        }
+
+        if prompt_tokens > soft_limit {
+            warn!(
+                role = %self.role.label(),
+                prompt_tokens,
+                soft_limit,
+                hard_limit,
+                "system prompt exceeds the soft context-window budget; recomposing with tighter budget"
+            );
+
+            let prompt = self.compose_with_budget(soft_limit)?;
+            let prompt_tokens = estimate_tokens(&prompt);
+
+            if prompt_tokens > hard_limit {
+                return Err(RokoError::BudgetExceeded {
+                    dimension: "system_prompt_tokens",
+                    used: prompt_tokens,
+                    limit: hard_limit,
+                });
+            }
+
+            return Ok(prompt);
+        }
+
+        Ok(prompt)
     }
 }
 

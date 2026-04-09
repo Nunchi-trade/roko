@@ -6650,20 +6650,21 @@ impl PlanRunner {
             "[orchestrate] format_bandit: model={selected_model} role={role:?} tools={tool_count} → {selected_format:?}",
         );
 
-        let role_instruction = system_prompt_override.unwrap_or_else(|| {
-            let relevant_context = build_relevant_context_layer(
-                &self.workdir,
-                plan_id,
-                task_def.as_ref(),
-            );
-            build_system_prompt_with_context(
+        let role_instruction = if let Some(system_prompt) = system_prompt_override {
+            system_prompt
+        } else {
+            let relevant_context =
+                build_relevant_context_layer(&self.workdir, plan_id, task_def.as_ref());
+            let context_window_tokens = effective_context_window_tokens(&self.config);
+            build_system_prompt_with_context_validated(
                 role,
                 plan_id,
                 task,
                 &task_allowed_tools_csv,
                 relevant_context.as_deref(),
-            )
-        });
+                context_window_tokens,
+            )?
+        };
         let role_section = PromptSection::new("role", &role_instruction)
             .with_priority(SectionPriority::Critical)
             .with_placement(Placement::Start)
@@ -8192,6 +8193,30 @@ fn build_system_prompt_with_context(
         task_context = task_context.with_context(context);
     }
     RoleSystemPromptSpec::new(role, task_context, tools_csv).build()
+}
+
+fn build_system_prompt_with_context_validated(
+    role: AgentRole,
+    plan_id: &str,
+    task: &str,
+    tools_csv: &str,
+    context_layer: Option<&str>,
+    context_window_tokens: usize,
+) -> Result<String> {
+    let mut task_context = TaskContext::new(task)
+        .with_plan_id(plan_id)
+        .with_workspace("roko-cli orchestration");
+    if let Some(context) = context_layer.filter(|context| !context.trim().is_empty()) {
+        task_context = task_context.with_context(context);
+    }
+    Ok(
+        RoleSystemPromptSpec::new(role, task_context, tools_csv)
+            .build_with_context_window(context_window_tokens)?,
+    )
+}
+
+fn effective_context_window_tokens(config: &Config) -> usize {
+    config.prompt.token_budget
 }
 
 fn build_relevant_context_layer(
