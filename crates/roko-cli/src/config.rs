@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+use roko_core::config::ServeConfig;
 use roko_orchestrator::ExecutorConfig;
 
 /// The top-level `roko.toml` document.
@@ -30,6 +31,9 @@ pub struct Config {
     /// Cost budget configuration.
     #[serde(default)]
     pub budget: BudgetConfig,
+    /// API serving options.
+    #[serde(default)]
+    pub serve: ServeConfig,
 }
 
 impl Default for Config {
@@ -41,6 +45,7 @@ impl Default for Config {
             gates: vec![GateConfig::default_shell_true()],
             executor: ExecutorConfig::default(),
             budget: BudgetConfig::default(),
+            serve: ServeConfig::default(),
         }
     }
 }
@@ -508,6 +513,9 @@ pub struct ConfigLayer {
     /// Executor settings overrides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executor: Option<ExecutorLayer>,
+    /// API serving options overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serve: Option<ServeLayer>,
 }
 
 impl ConfigLayer {
@@ -554,6 +562,12 @@ impl ConfigLayer {
                 None => e,
             });
         }
+        if let Some(s) = overlay.serve {
+            self.serve = Some(match self.serve {
+                Some(base) => base.merge(s),
+                None => s,
+            });
+        }
         self
     }
 
@@ -565,6 +579,7 @@ impl ConfigLayer {
             && self.prompt.is_none()
             && self.gates.is_none()
             && self.executor.is_none()
+            && self.serve.is_none()
     }
 
     /// Resolve into a concrete [`Config`], filling missing fields with defaults.
@@ -636,6 +651,18 @@ impl ConfigLayer {
             }
             None => ExecutorConfig::default(),
         };
+        let serve = match self.serve {
+            Some(s) => {
+                let defaults = ServeConfig::default();
+                ServeConfig {
+                    auth: match s.auth {
+                        Some(auth) => auth.resolve(defaults.auth),
+                        None => defaults.auth,
+                    },
+                }
+            }
+            None => ServeConfig::default(),
+        };
         Config {
             agent,
             tools,
@@ -643,6 +670,7 @@ impl ConfigLayer {
             gates,
             executor,
             budget: BudgetConfig::default(),
+            serve,
         }
     }
 }
@@ -765,6 +793,59 @@ pub struct ExecutorLayer {
     /// Whether to auto-replan after repeated gate failures.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_replan: Option<bool>,
+}
+
+/// Partial `ServeConfig` — every field optional.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ServeLayer {
+    /// API auth settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<ServeAuthLayer>,
+}
+
+impl ServeLayer {
+    /// Merge another layer on top — `overlay` wins.
+    #[must_use]
+    pub fn merge(self, overlay: Self) -> Self {
+        Self {
+            auth: match (self.auth, overlay.auth) {
+                (Some(base), Some(overlay)) => Some(base.merge(overlay)),
+                (_, Some(overlay)) => Some(overlay),
+                (base, None) => base,
+            },
+        }
+    }
+}
+
+/// Partial API auth settings — every field optional.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ServeAuthLayer {
+    /// Whether `/api/*` requires an `X-Api-Key` header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Shared API key expected in `X-Api-Key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+}
+
+impl ServeAuthLayer {
+    /// Merge another layer on top — `overlay` wins.
+    #[must_use]
+    pub fn merge(self, overlay: Self) -> Self {
+        Self {
+            enabled: overlay.enabled.or(self.enabled),
+            api_key: overlay.api_key.or(self.api_key),
+        }
+    }
+
+    /// Resolve into a concrete [`ServeConfig::auth`] value.
+    #[must_use]
+    pub fn resolve(self, defaults: roko_core::config::ServeAuthConfig) -> roko_core::config::ServeAuthConfig {
+        roko_core::config::ServeAuthConfig {
+            enabled: self.enabled.unwrap_or(defaults.enabled),
+            api_key: self.api_key.unwrap_or(defaults.api_key),
+        }
+    }
 }
 
 impl ExecutorLayer {
@@ -1220,6 +1301,21 @@ auto_replan = false
     }
 
     #[test]
+    fn parses_serve_auth_section_from_toml() {
+        let toml = r#"
+[agent]
+command = "cat"
+
+[serve.auth]
+enabled = true
+api_key = "secret"
+"#;
+        let cfg = Config::parse_toml(toml).unwrap();
+        assert!(cfg.serve.auth.enabled);
+        assert_eq!(cfg.serve.auth.api_key, "secret");
+    }
+
+    #[test]
     fn budget_warn_threshold_defaults_to_eighty_percent() {
         let budget = BudgetConfig::default();
         assert_eq!(budget.warn_at_percent, 80);
@@ -1246,6 +1342,8 @@ auto_replan = false
         );
         assert_eq!(cfg.executor.task_timeout_secs, 900);
         assert!(!cfg.executor.auto_replan);
+        assert!(!cfg.serve.auth.enabled);
+        assert!(cfg.serve.auth.api_key.is_empty());
     }
 
     #[test]
@@ -1258,6 +1356,8 @@ auto_replan = false
         assert_eq!(parsed.tools.global_denied, cfg.tools.global_denied);
         assert_eq!(parsed.tools.mcp_timeout_secs, cfg.tools.mcp_timeout_secs);
         assert_eq!(parsed.gates.len(), cfg.gates.len());
+        assert_eq!(parsed.serve.auth.enabled, cfg.serve.auth.enabled);
+        assert_eq!(parsed.serve.auth.api_key, cfg.serve.auth.api_key);
     }
 
     #[test]
@@ -1315,6 +1415,8 @@ token_budget = 8000
         assert_eq!(cfg.tools.mcp_timeout_secs, 30);
         assert_eq!(cfg.prompt.token_budget, 10_000);
         assert!(cfg.gates.is_empty());
+        assert!(!cfg.serve.auth.enabled);
+        assert!(cfg.serve.auth.api_key.is_empty());
     }
 
     #[test]

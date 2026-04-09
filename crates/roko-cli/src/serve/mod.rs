@@ -102,13 +102,15 @@ pub async fn run_server(workdir: PathBuf, bind: Option<String>, port: Option<u16
         }
     };
 
+    let api_auth = roko_config.serve.auth.clone();
+
     let state = Arc::new(AppState::new(
         workdir.clone(),
         config,
         roko_config,
         deploy_backend,
     ));
-    let router = routes::build_router(Arc::clone(&state), &cors_origins);
+    let router = routes::build_router(Arc::clone(&state), &cors_origins, api_auth);
 
     // -- Bind and serve -----------------------------------------------------
 

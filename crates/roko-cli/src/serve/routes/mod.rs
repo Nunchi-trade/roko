@@ -5,6 +5,7 @@
 //! with CORS and tracing middleware.
 
 mod agents;
+mod auth;
 mod config;
 mod deployments;
 mod learning;
@@ -23,9 +24,14 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use super::state::AppState;
+use roko_core::config::ServeAuthConfig;
 
 /// Build the complete API router with all route groups and middleware.
-pub fn build_router(state: Arc<AppState>, cors_origins: &[String]) -> Router {
+pub fn build_router(
+    state: Arc<AppState>,
+    cors_origins: &[String],
+    api_auth: ServeAuthConfig,
+) -> Router {
     let cors = if cors_origins.is_empty() {
         CorsLayer::permissive()
     } else {
@@ -48,6 +54,15 @@ pub fn build_router(state: Arc<AppState>, cors_origins: &[String]) -> Router {
         .merge(learning::routes())
         .merge(config::routes())
         .merge(deployments::routes());
+
+    let api = if api_auth.enabled {
+        api.layer(axum::middleware::from_fn_with_state(
+            api_auth,
+            auth::require_api_key,
+        ))
+    } else {
+        api
+    };
 
     Router::new()
         .nest("/api", api)

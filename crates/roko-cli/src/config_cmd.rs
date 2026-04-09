@@ -7,7 +7,8 @@
 
 use crate::config::{
     AgentLayer, ConfigLayer, DetectedCli, ExecutorLayer, GateConfig, PromptLayer, ResolvedConfig,
-    Source, ToolsLayer, detect_clis, global_config_path, load_layered,
+    ServeAuthLayer, ServeLayer, Source, ToolsLayer, detect_clis, global_config_path,
+    load_layered,
 };
 use anyhow::{Context as _, Result, anyhow};
 use roko_orchestrator::ExecutorConfig;
@@ -113,6 +114,12 @@ pub fn run_init_wizard(target: Option<PathBuf>, inputs: &WizardInputs) -> Result
         }),
         gates,
         executor: Some(default_executor_layer()),
+        serve: Some(ServeLayer {
+            auth: Some(ServeAuthLayer {
+                enabled: Some(false),
+                api_key: Some(String::new()),
+            }),
+        }),
     };
     let rendered = toml::to_string_pretty(&layer).context("serialize config")?;
 
@@ -413,6 +420,17 @@ fn apply_key_value(layer: &mut ConfigLayer, key: &str, value: &str) -> Result<()
             let tools = layer.tools.get_or_insert_with(ToolsLayer::default);
             tools.mcp_timeout_secs = Some(secs);
         }
+        "serve.auth.enabled" => {
+            let enabled = value.parse::<bool>().context("parse enabled as bool")?;
+            let serve = layer.serve.get_or_insert_with(ServeLayer::default);
+            let auth = serve.auth.get_or_insert_with(ServeAuthLayer::default);
+            auth.enabled = Some(enabled);
+        }
+        "serve.auth.api_key" => {
+            let serve = layer.serve.get_or_insert_with(ServeLayer::default);
+            let auth = serve.auth.get_or_insert_with(ServeAuthLayer::default);
+            auth.api_key = Some(value.into());
+        }
         other => return Err(anyhow!("unknown key: {other}")),
     }
     Ok(())
@@ -619,8 +637,26 @@ mod tests {
         assert_eq!(layer.tools.as_ref().unwrap().global_denied, Some(vec![]));
         assert_eq!(layer.tools.as_ref().unwrap().mcp_timeout_secs, Some(30));
         assert_eq!(
+            layer.serve.as_ref().unwrap().auth.as_ref().unwrap().enabled,
+            Some(false)
+        );
+        assert_eq!(
+            layer.serve.as_ref().unwrap().auth.as_ref().unwrap().api_key,
+            Some(String::new())
+        );
+        assert_eq!(
             layer.executor.as_ref().unwrap().max_concurrent_plans,
             Some(4)
         );
+    }
+
+    #[test]
+    fn apply_key_value_sets_serve_auth() {
+        let mut layer = ConfigLayer::default();
+        apply_key_value(&mut layer, "serve.auth.enabled", "true").unwrap();
+        apply_key_value(&mut layer, "serve.auth.api_key", "secret").unwrap();
+        let auth = layer.serve.unwrap().auth.unwrap();
+        assert_eq!(auth.enabled, Some(true));
+        assert_eq!(auth.api_key, Some("secret".to_string()));
     }
 }

@@ -67,6 +67,10 @@ pub struct RokoConfig {
     #[serde(default)]
     pub tui: TuiConfig,
 
+    /// HTTP API serving options.
+    #[serde(default)]
+    pub serve: ServeConfig,
+
     /// HTTP server / gateway settings.
     #[serde(default)]
     pub server: ServerConfig,
@@ -92,6 +96,7 @@ impl Default for RokoConfig {
             conductor: ConductorConfig::default(),
             learning: LearningConfig::default(),
             tui: TuiConfig::default(),
+            serve: ServeConfig::default(),
             server: ServerConfig::default(),
             deploy: DeployConfig::default(),
         }
@@ -229,6 +234,11 @@ impl RokoConfig {
         let _ = writeln!(out, "# -- TUI preferences --");
         let _ = writeln!(out, "[tui]");
         let _ = writeln!(out, "refresh_rate_ms = {}\n", cfg.tui.refresh_rate_ms);
+
+        let _ = writeln!(out, "# -- API auth --");
+        let _ = writeln!(out, "[serve.auth]");
+        let _ = writeln!(out, "enabled = {}", cfg.serve.auth.enabled);
+        let _ = writeln!(out, "api_key = \"{}\"\n", cfg.serve.auth.api_key);
 
         let _ = writeln!(out, "# -- HTTP server / gateway --");
         let _ = writeln!(out, "[server]");
@@ -796,6 +806,44 @@ impl Default for TuiConfig {
     }
 }
 
+// ---- [serve] -------------------------------------------------------------
+
+/// API serving options.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServeConfig {
+    /// Authentication settings for `/api/*`.
+    #[serde(default)]
+    pub auth: ServeAuthConfig,
+}
+
+impl Default for ServeConfig {
+    fn default() -> Self {
+        Self {
+            auth: ServeAuthConfig::default(),
+        }
+    }
+}
+
+/// Authentication settings for the HTTP API.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServeAuthConfig {
+    /// Whether `/api/*` routes require an `X-Api-Key` header.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Shared API key expected in `X-Api-Key`.
+    #[serde(default)]
+    pub api_key: String,
+}
+
+impl Default for ServeAuthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            api_key: String::new(),
+        }
+    }
+}
+
 // ---- [server] ------------------------------------------------------------
 
 /// HTTP server / gateway settings.
@@ -1077,6 +1125,18 @@ port = 8080
     }
 
     #[test]
+    fn serve_auth_section_parses() {
+        let toml = r#"
+[serve.auth]
+enabled = true
+api_key = "secret"
+"#;
+        let cfg = RokoConfig::from_toml(toml).expect("parse");
+        assert!(cfg.serve.auth.enabled);
+        assert_eq!(cfg.serve.auth.api_key, "secret");
+    }
+
+    #[test]
     fn env_overrides_apply() {
         let mut cfg = RokoConfig::default();
         let env = |key: &str| -> Option<String> {
@@ -1158,6 +1218,10 @@ auto_playbook_refresh = false
 [tui]
 refresh_rate_ms = 100
 
+[serve.auth]
+enabled = true
+api_key = "secret"
+
 [server]
 port = 3000
 "#;
@@ -1178,6 +1242,7 @@ port = 3000
         assert!(example.contains("[conductor]"));
         assert!(example.contains("[learning]"));
         assert!(example.contains("[tui]"));
+        assert!(example.contains("[serve.auth]"));
         assert!(example.contains("[server]"));
     }
 

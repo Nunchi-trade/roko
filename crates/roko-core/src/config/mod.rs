@@ -16,5 +16,5 @@ pub use presets::Preset;
 pub use schema::{
     AgentConfig, AgentRoleToggles, BudgetConfig, CURRENT_SCHEMA_VERSION, ConductorConfig,
     GatesConfig, LearningConfig, ProjectConfig, RokoConfig, RoleOverride, RoutingConfig,
-    ServerConfig, TuiConfig,
+    ServerConfig, ServeAuthConfig, ServeConfig, TuiConfig,
 };

@@ -73,4 +73,13 @@ impl ApiError {
             message: msg.into(),
         }
     }
+
+    /// 401 Unauthorized.
+    pub fn unauthorized(msg: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "unauthorized".into(),
+            message: msg.into(),
+        }
+    }
 }
