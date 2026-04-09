@@ -3,10 +3,12 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use cron::Schedule;
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use notify::{EventKind, RecursiveMode, Watcher, recommended_watcher};
 use roko_core::{
     Body, Kind, Result, RokoError, Signal, FS_CREATED, FS_DELETED, FS_MODIFIED,
 };
+use roko_core::config::{WatcherConfig, WatcherPathConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -66,7 +68,7 @@ pub enum EventSourceKind {
 /// A filesystem event source backed by `notify`.
 #[derive(Debug, Clone)]
 pub struct FileWatchEventSource {
-    directories: Vec<PathBuf>,
+    paths: Vec<WatcherPathConfig>,
 }
 
 impl FileWatchEventSource {
@@ -78,14 +80,37 @@ impl FileWatchEventSource {
         P: Into<PathBuf>,
     {
         Self {
-            directories: directories.into_iter().map(Into::into).collect(),
+            paths: directories
+                .into_iter()
+                .map(|directory| WatcherPathConfig {
+                    directory: directory.into(),
+                    ..WatcherPathConfig::default()
+                })
+                .collect(),
         }
     }
 
-    /// Get the configured directories.
+    /// Create a watcher from fully-specified path configs.
     #[must_use]
-    pub fn directories(&self) -> &[PathBuf] {
-        &self.directories
+    pub fn from_paths<I>(paths: I) -> Self
+    where
+        I: IntoIterator<Item = WatcherPathConfig>,
+    {
+        Self {
+            paths: paths.into_iter().collect(),
+        }
+    }
+
+    /// Create a watcher from config.
+    #[must_use]
+    pub fn from_config(config: WatcherConfig) -> Self {
+        Self::from_paths(config.paths)
+    }
+
+    /// Get the configured path entries.
+    #[must_use]
+    pub fn paths(&self) -> &[WatcherPathConfig] {
+        &self.paths
     }
 }
 
@@ -137,6 +162,13 @@ struct ActiveCronSchedule {
 struct PendingFileWatchSignal {
     signal_kind: &'static str,
     event_kind: &'static str,
+}
+
+#[derive(Debug, Clone)]
+struct CompiledFileWatchPath {
+    directory: PathBuf,
+    include: Option<GlobSet>,
+    exclude: GlobSet,
 }
 
 const FILE_WATCH_DEBOUNCE_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
@@ -244,7 +276,8 @@ impl EventSource for FileWatchEventSource {
     }
 
     async fn start(&self, sender: SignalSender, cancel: CancellationToken) -> Result<()> {
-        if self.directories.is_empty() {
+        let watched_paths = compile_file_watch_paths(&self.paths)?;
+        if watched_paths.is_empty() {
             cancel.cancelled().await;
             return Ok(());
         }
@@ -257,16 +290,18 @@ impl EventSource for FileWatchEventSource {
             RokoError::transport(format!("failed to create filesystem watcher: {err}"))
         })?;
 
-        for directory in &self.directories {
-            watcher.watch(directory, RecursiveMode::Recursive).map_err(|err| {
+        for watched_path in &watched_paths {
+            watcher
+                .watch(&watched_path.directory, RecursiveMode::Recursive)
+                .map_err(|err| {
                 RokoError::config(format!(
                     "failed to watch directory '{}': {err}",
-                    directory.display()
+                    watched_path.directory.display()
                 ))
             })?;
         }
 
-        drain_file_watch_events(event_rx, sender, cancel).await
+        drain_file_watch_events(event_rx, sender, cancel, watched_paths).await
     }
 }
 
@@ -278,6 +313,131 @@ fn cron_signal(schedule: &CronSchedule, fired_at: DateTime<Utc>) -> Signal {
             "fired_at": fired_at.to_rfc3339(),
         })))
         .build()
+}
+
+fn compile_file_watch_paths(
+    paths: &[WatcherPathConfig],
+) -> Result<Vec<CompiledFileWatchPath>> {
+    paths
+        .iter()
+        .map(|path| {
+            let include = compile_globset(&path.include, &path.directory, "include")?;
+            let exclude = compile_globset_with_defaults(
+                &path.exclude,
+                &path.directory,
+                "exclude",
+                default_file_watch_excludes(),
+            )?;
+            Ok(CompiledFileWatchPath {
+                directory: path.directory.clone(),
+                include,
+                exclude,
+            })
+        })
+        .collect()
+}
+
+fn compile_globset(
+    patterns: &[String],
+    directory: &Path,
+    kind: &str,
+) -> Result<Option<GlobSet>> {
+    if patterns.is_empty() {
+        return Ok(None);
+    }
+
+    let mut builder = GlobSetBuilder::new();
+    for pattern in patterns {
+        builder.add(Glob::new(pattern).map_err(|err| {
+            RokoError::config(format!(
+                "invalid {kind} glob for watcher '{}': {err}",
+                directory.display()
+            ))
+        })?);
+    }
+
+    builder.build().map(Some).map_err(|err| {
+        RokoError::config(format!(
+            "failed to build {kind} globset for watcher '{}': {err}",
+            directory.display()
+        ))
+    })
+}
+
+fn compile_globset_with_defaults(
+    patterns: &[String],
+    directory: &Path,
+    kind: &str,
+    defaults: &[&str],
+) -> Result<GlobSet> {
+    let mut builder = GlobSetBuilder::new();
+    for pattern in defaults {
+        builder.add(Glob::new(pattern).map_err(|err| {
+            RokoError::config(format!(
+                "invalid default {kind} glob for watcher '{}': {err}",
+                directory.display()
+            ))
+        })?);
+    }
+    for pattern in patterns {
+        builder.add(Glob::new(pattern).map_err(|err| {
+            RokoError::config(format!(
+                "invalid {kind} glob for watcher '{}': {err}",
+                directory.display()
+            ))
+        })?);
+    }
+
+    builder.build().map_err(|err| {
+        RokoError::config(format!(
+            "failed to build {kind} globset for watcher '{}': {err}",
+            directory.display()
+        ))
+    })
+}
+
+fn default_file_watch_excludes() -> &'static [&'static str] {
+    &[
+        ".git",
+        ".git/**",
+        "**/.git",
+        "**/.git/**",
+        "**/*.swp",
+        "**/*.swx",
+        "**/*~",
+        "**/.#*",
+        "**/#*#",
+        "**/.DS_Store",
+        "**/Thumbs.db",
+    ]
+}
+
+fn normalize_glob_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn watch_path_is_enabled(path: &Path, watch_root: &Path, filters: &CompiledFileWatchPath) -> bool {
+    let mut candidates = Vec::with_capacity(2);
+    candidates.push(normalize_glob_path(path));
+
+    if let Ok(relative) = path.strip_prefix(watch_root) {
+        let relative = normalize_glob_path(relative);
+        if !relative.is_empty() {
+            candidates.push(relative);
+        }
+    }
+
+    let included = match &filters.include {
+        Some(include) => candidates.iter().any(|candidate| include.is_match(candidate)),
+        None => true,
+    };
+    if !included {
+        return false;
+    }
+
+    !candidates
+        .iter()
+        .any(|candidate| filters.exclude.is_match(candidate))
 }
 
 fn file_watch_signal(path: &Path, signal_kind: &str, event_kind: &str) -> Signal {
@@ -304,6 +464,7 @@ async fn drain_file_watch_events(
     >,
     sender: SignalSender,
     cancel: CancellationToken,
+    watched_paths: Vec<CompiledFileWatchPath>,
 ) -> Result<()> {
     let mut pending: HashMap<PathBuf, PendingFileWatchSignal> = HashMap::new();
     let debounce_sleep = tokio::time::sleep(FILE_WATCH_DEBOUNCE_WINDOW);
@@ -326,7 +487,13 @@ async fn drain_file_watch_events(
                     continue;
                 };
 
-                for path in event.paths {
+                for path in event.paths.into_iter() {
+                    if !watched_paths
+                        .iter()
+                        .any(|watched| watch_path_is_enabled(&path, &watched.directory, watched))
+                    {
+                        continue;
+                    }
                     pending.insert(path, PendingFileWatchSignal { signal_kind, event_kind });
                 }
 
@@ -629,9 +796,15 @@ mod tests {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
         let cancel = CancellationToken::new();
+        let watched_paths = compile_file_watch_paths(&[WatcherPathConfig {
+            directory: PathBuf::from("/tmp"),
+            include: Vec::new(),
+            exclude: Vec::new(),
+        }])
+        .expect("watch path should compile");
         let runner = tokio::spawn({
             let cancel = cancel.clone();
-            async move { drain_file_watch_events(event_rx, sender, cancel).await }
+            async move { drain_file_watch_events(event_rx, sender, cancel, watched_paths).await }
         });
 
         let path = PathBuf::from("/tmp/roko-plugin-debounce.txt");
@@ -676,6 +849,78 @@ mod tests {
             .await
             .expect("task should complete")
             .expect("debounce loop should exit cleanly");
+    }
+
+    #[tokio::test]
+    async fn file_watch_event_source_applies_include_and_exclude_filters() {
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        let watch_root = PathBuf::from("/tmp/roko-plugin-filtered");
+        let watched_paths = compile_file_watch_paths(&[WatcherPathConfig {
+            directory: watch_root.clone(),
+            include: vec!["**/*".to_string()],
+            exclude: vec![
+                ".git".to_string(),
+                ".git/**".to_string(),
+                "**/*.swp".to_string(),
+                "**/*~".to_string(),
+            ],
+        }])
+        .expect("watch path should compile");
+        let runner = tokio::spawn({
+            let cancel = cancel.clone();
+            async move { drain_file_watch_events(event_rx, sender, cancel, watched_paths).await }
+        });
+
+        let allowed = watch_root.join("notes.md");
+        let excluded_git = watch_root.join(".git").join("HEAD");
+        let excluded_swap = watch_root.join("draft.swp");
+
+        event_tx
+            .send(Ok(
+                notify::Event::new(notify::EventKind::Create(CreateKind::Any))
+                    .add_path(excluded_git.clone()),
+            ))
+            .expect("git event should be accepted");
+        event_tx
+            .send(Ok(
+                notify::Event::new(notify::EventKind::Create(CreateKind::Any))
+                    .add_path(excluded_swap.clone()),
+            ))
+            .expect("swap event should be accepted");
+        event_tx
+            .send(Ok(
+                notify::Event::new(notify::EventKind::Create(CreateKind::Any))
+                    .add_path(allowed.clone()),
+            ))
+            .expect("allowed event should be accepted");
+        drop(event_tx);
+
+        let signal = timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .expect("signal should be emitted")
+            .expect("sender should remain open");
+        assert_eq!(signal.kind, Kind::Custom(FS_CREATED.to_string()));
+        let body: serde_json::Value = signal.body.as_json().expect("signal body should be json");
+        let allowed_string = allowed.to_string_lossy().into_owned();
+        assert_eq!(
+            body.get("path").and_then(|value| value.as_str()),
+            Some(allowed_string.as_str())
+        );
+
+        assert!(
+            timeout(Duration::from_millis(700), receiver.recv())
+                .await
+                .expect("receiver should close after flush")
+                .is_none(),
+            "excluded paths should not emit signals"
+        );
+
+        runner
+            .await
+            .expect("task should complete")
+            .expect("filtering loop should exit cleanly");
     }
 
     #[tokio::test]

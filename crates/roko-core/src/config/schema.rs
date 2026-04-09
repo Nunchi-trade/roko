@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -63,6 +64,10 @@ pub struct RokoConfig {
     #[serde(default)]
     pub conductor: ConductorConfig,
 
+    /// File-system watcher settings.
+    #[serde(default, skip_serializing_if = "WatcherConfig::is_empty")]
+    pub watcher: WatcherConfig,
+
     /// Learning subsystem toggles.
     #[serde(default)]
     pub learning: LearningConfig,
@@ -107,6 +112,7 @@ impl Default for RokoConfig {
             routing: RoutingConfig::default(),
             budget: BudgetConfig::default(),
             conductor: ConductorConfig::default(),
+            watcher: WatcherConfig::default(),
             learning: LearningConfig::default(),
             tui: TuiConfig::default(),
             serve: ServeConfig::default(),
@@ -1039,6 +1045,64 @@ impl SubscriptionFilterConfig {
     }
 }
 
+/// File-system watcher configuration.
+///
+/// Each watch path can narrow the observed file set with include/exclude
+/// glob patterns.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WatcherConfig {
+    /// Watch roots configured by the user.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<WatcherPathConfig>,
+}
+
+impl WatcherConfig {
+    /// Returns `true` when no watch paths are configured.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
+}
+
+/// One watched directory and its path filters.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WatcherPathConfig {
+    /// Directory to watch recursively.
+    pub directory: PathBuf,
+    /// Glob patterns that opt paths into emission.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_glob_list",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub include: Vec<String>,
+    /// Glob patterns that suppress paths even if they match `include`.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_glob_list",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub exclude: Vec<String>,
+}
+
+impl Default for WatcherPathConfig {
+    fn default() -> Self {
+        Self {
+            directory: PathBuf::from("."),
+            include: Vec::new(),
+            exclude: Vec::new(),
+        }
+    }
+}
+
+impl WatcherPathConfig {
+    /// Returns `true` when no include/exclude filters are configured.
+    #[must_use]
+    pub fn filters_are_empty(&self) -> bool {
+        self.include.is_empty() && self.exclude.is_empty()
+    }
+}
+
 /// Authentication settings for the HTTP API.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServeAuthConfig {
@@ -1205,6 +1269,26 @@ fresh_base_branch = "develop"
         assert_eq!(cfg.project.name, "my-dapp");
         assert_eq!(cfg.project.root, "/home/user/code");
         assert_eq!(cfg.project.fresh_base_branch, "develop");
+    }
+
+    #[test]
+    fn watcher_section_parses_include_and_exclude_globs() {
+        let toml = r#"
+[watcher]
+[[watcher.paths]]
+directory = "call-notes"
+include = ["*.md", "*.txt"]
+exclude = [".git/**", "**/*.swp"]
+"#;
+        let cfg = RokoConfig::from_toml(toml).expect("parse");
+        assert_eq!(cfg.watcher.paths.len(), 1);
+        let path = &cfg.watcher.paths[0];
+        assert_eq!(path.directory, std::path::PathBuf::from("call-notes"));
+        assert_eq!(path.include, vec!["*.md".to_string(), "*.txt".to_string()]);
+        assert_eq!(
+            path.exclude,
+            vec![".git/**".to_string(), "**/*.swp".to_string()]
+        );
     }
 
     #[test]

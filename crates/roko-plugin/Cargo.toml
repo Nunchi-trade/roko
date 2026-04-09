@@ -14,6 +14,7 @@ workspace = true
 roko-core = { path = "../roko-core" }
 async-trait = { workspace = true }
 chrono = { workspace = true }
+globset = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 cron = "0.12"
