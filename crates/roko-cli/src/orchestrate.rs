@@ -7,6 +7,7 @@
 //! real agents, gates, and git, then feeds results back as events.
 
 use std::collections::{HashMap, HashSet};
+use std::cmp::Ordering;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1212,6 +1213,32 @@ impl TaskTracker {
             .cloned()
             .collect()
     }
+}
+
+fn prioritize_ready_tasks<F>(ready: Vec<String>, mut arousal_for_task: F) -> Vec<String>
+where
+    F: FnMut(&str) -> f64,
+{
+    let ready_count = ready.len();
+    let mut scored: Vec<(usize, f64, String)> = ready
+        .into_iter()
+        .enumerate()
+        .map(|(idx, task_id)| {
+            let base_priority = (ready_count.saturating_sub(idx)) as f64;
+            let arousal = arousal_for_task(&task_id).clamp(-1.0, 1.0);
+            let effective_priority = base_priority * (1.0 + arousal * 0.5);
+            (idx, effective_priority, task_id)
+        })
+        .collect();
+
+    scored.sort_by(|(idx_a, score_a, _), (idx_b, score_b, _)| {
+        score_b
+            .partial_cmp(score_a)
+            .unwrap_or(Ordering::Equal)
+            .then(idx_a.cmp(idx_b))
+    });
+
+    scored.into_iter().map(|(_, _, task_id)| task_id).collect()
 }
 
 fn merge_completed_tasks(tracker: &mut TaskTracker, completed_tasks: &[String]) {
@@ -3335,6 +3362,7 @@ impl PlanRunner {
                 })
                 .unwrap_or_default()
         };
+        let ready = prioritize_ready_tasks(ready, |task_id| self.learning.task_arousal(task_id));
 
         if ready.is_empty() {
             // No ready tasks — check if all done or blocked
@@ -9277,6 +9305,26 @@ files = ["crates/roko-cli/src/orchestrate.rs"]
 
         let reloaded = CrateFamiliarityTracker::load(&path);
         assert!((reloaded.score_for_task(Some(&task)) - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn prioritize_ready_tasks_prefers_high_arousal() {
+        let ready = vec!["calm".to_string(), "urgent".to_string()];
+        let result = prioritize_ready_tasks(ready, |task_id| match task_id {
+            "calm" => -1.0,
+            "urgent" => 1.0,
+            _ => 0.0,
+        });
+
+        assert_eq!(result, vec!["urgent", "calm"]);
+    }
+
+    #[test]
+    fn prioritize_ready_tasks_keeps_original_order_for_ties() {
+        let ready = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let result = prioritize_ready_tasks(ready, |_| 0.0);
+
+        assert_eq!(result, vec!["a", "b", "c"]);
     }
 
     #[test]

@@ -683,6 +683,11 @@ impl LearningRuntime {
             .record_observation(&ctx, &slug, reward, episode.success);
         true
     }
+
+    /// Return the current arousal value tracked for a task key.
+    pub fn task_arousal(&self, task_id: impl AsRef<str>) -> f64 {
+        self.affect_engine.lock().get_state(task_id).arousal
+    }
 }
 
 /// Read optional string value from `episode.extra`.
