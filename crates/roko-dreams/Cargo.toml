@@ -18,6 +18,7 @@ roko-core = { path = "../roko-core" }
 roko-neuro = { path = "../roko-neuro" }
 roko-learn = { path = "../roko-learn" }
 roko-agent = { path = "../roko-agent" }
+async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 chrono = { workspace = true }

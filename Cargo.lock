@@ -5202,6 +5202,7 @@ name = "roko-dreams"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "roko-agent",
  "roko-core",
