@@ -105,6 +105,20 @@ struct ListPrsArguments {
 }
 
 #[derive(Debug, Deserialize)]
+struct ListIssuesArguments {
+    owner: String,
+    repo: String,
+    #[serde(default)]
+    state: Option<IssueState>,
+    #[serde(default)]
+    labels: Option<Vec<String>>,
+    #[serde(default)]
+    assignee: Option<String>,
+    #[serde(default)]
+    per_page: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
 struct GetPrArguments {
     owner: String,
     repo: String,
@@ -159,6 +173,14 @@ enum PullRequestState {
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum IssueState {
+    Open,
+    Closed,
+    All,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 enum GithubReviewEvent {
     Approve,
@@ -185,6 +207,16 @@ impl GithubReviewEvent {
 }
 
 impl PullRequestState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Closed => "closed",
+            Self::All => "all",
+        }
+    }
+}
+
+impl IssueState {
     fn as_str(self) -> &'static str {
         match self {
             Self::Open => "open",
@@ -222,6 +254,20 @@ struct GithubUser {
 #[derive(Debug, Deserialize)]
 struct GithubLabel {
     name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubIssue {
+    number: u64,
+    title: String,
+    state: String,
+    #[serde(default)]
+    labels: Vec<GithubLabel>,
+    #[serde(default)]
+    assignee: Option<GithubUser>,
+    created_at: Option<String>,
+    #[serde(default)]
+    pull_request: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -859,8 +905,18 @@ fn handle_merge_pr(arguments: Value) -> Result<Value, JsonRpcError> {
 }
 
 fn handle_list_issues(arguments: Value) -> Result<Value, JsonRpcError> {
-    let _ = arguments;
-    unsupported_tool("github.list_issues")
+    let args: ListIssuesArguments = serde_json::from_value(arguments).map_err(|err| {
+        JsonRpcError::invalid_params(format!("invalid github.list_issues args: {err}"))
+    })?;
+    let client = github_client()?;
+    let issues = list_issues(&client, &args, "https://api.github.com")?;
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": summarize_issues(&issues).to_string()
+        }],
+        "isError": false
+    }))
 }
 
 fn handle_create_issue(arguments: Value) -> Result<Value, JsonRpcError> {
@@ -1002,6 +1058,61 @@ fn list_pull_requests(
 
     serde_json::from_str(&body)
         .map_err(|err| JsonRpcError::internal_error(format!("parse GitHub pull requests: {err}")))
+}
+
+fn list_issues(
+    client: &Client,
+    args: &ListIssuesArguments,
+    api_base_url: &str,
+) -> Result<Vec<GithubIssue>, JsonRpcError> {
+    let url = format!("{api_base_url}/repos/{}/{}/issues", args.owner, args.repo);
+    let mut request = client.get(url);
+    if let Some(token) = github_token() {
+        request = request.bearer_auth(token);
+    }
+
+    let mut query: Vec<(&str, String)> = Vec::with_capacity(5);
+    query.push((
+        "state",
+        args.state.unwrap_or(IssueState::Open).as_str().to_string(),
+    ));
+    if let Some(labels) = &args.labels
+        && !labels.is_empty()
+    {
+        query.push(("labels", labels.join(",")));
+    }
+    if let Some(assignee) = &args.assignee
+        && !assignee.is_empty()
+    {
+        query.push(("assignee", assignee.clone()));
+    }
+    query.push((
+        "per_page",
+        args.per_page.unwrap_or(30).clamp(1, 100).to_string(),
+    ));
+
+    let response = request
+        .query(&query)
+        .send()
+        .map_err(|err| JsonRpcError::internal_error(format!("call GitHub API: {err}")))?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|err| JsonRpcError::internal_error(format!("read GitHub response: {err}")))?;
+    if !status.is_success() {
+        return Err(JsonRpcError::internal_error(format!(
+            "GitHub API returned {status}: {}",
+            body.trim()
+        )));
+    }
+
+    let issues: Vec<GithubIssue> = serde_json::from_str(&body)
+        .map_err(|err| JsonRpcError::internal_error(format!("parse GitHub issues: {err}")))?;
+    Ok(issues
+        .into_iter()
+        .filter(|issue| issue.pull_request.is_none())
+        .collect())
 }
 
 fn get_pull_request(
@@ -1341,6 +1452,21 @@ fn summarize_pull_requests(prs: &[GithubPullRequest]) -> Value {
                 "number": pr.number,
                 "author": pr.user.as_ref().map(|user| user.login.clone()),
                 "labels": pr.labels.iter().map(|label| label.name.clone()).collect::<Vec<_>>()
+            })
+        }).collect::<Vec<_>>()
+    })
+}
+
+fn summarize_issues(issues: &[GithubIssue]) -> Value {
+    serde_json::json!({
+        "issues": issues.iter().map(|issue| {
+            serde_json::json!({
+                "number": issue.number,
+                "title": issue.title.clone(),
+                "state": issue.state.clone(),
+                "labels": issue.labels.iter().map(|label| label.name.clone()).collect::<Vec<_>>(),
+                "assignee": issue.assignee.as_ref().map(|user| user.login.clone()),
+                "created_at": issue.created_at.clone()
             })
         }).collect::<Vec<_>>()
     })
@@ -1715,6 +1841,142 @@ mod tests {
                 ]
             })
         );
+    }
+
+    #[test]
+    fn summarize_issues_extracts_expected_fields() {
+        let issues = vec![
+            GithubIssue {
+                number: 101,
+                title: "Bug: login redirect".to_string(),
+                state: "open".to_string(),
+                labels: vec![
+                    GithubLabel {
+                        name: "bug".to_string(),
+                    },
+                    GithubLabel {
+                        name: "urgent".to_string(),
+                    },
+                ],
+                assignee: Some(GithubUser {
+                    login: "octocat".to_string(),
+                }),
+                created_at: Some("2026-04-08T09:00:00Z".to_string()),
+                pull_request: None,
+            },
+            GithubIssue {
+                number: 102,
+                title: "Add docs".to_string(),
+                state: "closed".to_string(),
+                labels: vec![],
+                assignee: None,
+                created_at: None,
+                pull_request: None,
+            },
+        ];
+
+        let summary = summarize_issues(&issues);
+
+        assert_eq!(
+            summary,
+            json!({
+                "issues": [
+                    {
+                        "number": 101,
+                        "title": "Bug: login redirect",
+                        "state": "open",
+                        "labels": ["bug", "urgent"],
+                        "assignee": "octocat",
+                        "created_at": "2026-04-08T09:00:00Z"
+                    },
+                    {
+                        "number": 102,
+                        "title": "Add docs",
+                        "state": "closed",
+                        "labels": [],
+                        "assignee": null,
+                        "created_at": null
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn list_issues_queries_expected_params_and_filters_pull_requests() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept request");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+            let mut request_line = String::new();
+            reader
+                .read_line(&mut request_line)
+                .expect("read request line");
+            assert!(request_line.starts_with("GET /repos/octo/hello-world/issues?"));
+
+            let mut saw_headers = false;
+            loop {
+                let mut header_line = String::new();
+                reader.read_line(&mut header_line).expect("read header");
+                let header = header_line.trim_end();
+                if header.is_empty() {
+                    saw_headers = true;
+                    break;
+                }
+            }
+            assert!(saw_headers);
+
+            let mut writer = stream;
+            let response_body = json!([
+                {
+                    "number": 101,
+                    "title": "Bug: login redirect",
+                    "state": "open",
+                    "labels": [
+                        {"name": "bug"},
+                        {"name": "urgent"}
+                    ],
+                    "assignee": {"login": "octocat"},
+                    "created_at": "2026-04-08T09:00:00Z"
+                },
+                {
+                    "number": 202,
+                    "title": "Actually a pull request",
+                    "state": "open",
+                    "labels": [],
+                    "created_at": "2026-04-08T10:00:00Z",
+                    "pull_request": {}
+                }
+            ])
+            .to_string();
+            write!(
+                writer,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            )
+            .expect("write response");
+        });
+
+        let client = github_client().expect("client");
+        let args = ListIssuesArguments {
+            owner: "octo".to_string(),
+            repo: "hello-world".to_string(),
+            state: Some(IssueState::Open),
+            labels: Some(vec!["bug".to_string(), "urgent".to_string()]),
+            assignee: Some("octocat".to_string()),
+            per_page: Some(50),
+        };
+
+        let issues = list_issues(&client, &args, &format!("http://{}", addr)).expect("list issues");
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].number, 101);
+        assert_eq!(issues[0].title, "Bug: login redirect");
+        assert_eq!(issues[0].assignee.as_ref().map(|user| user.login.as_str()), Some("octocat"));
+
+        server.join().expect("server thread");
     }
 
     #[test]
