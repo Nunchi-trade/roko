@@ -11,10 +11,10 @@ use std::path::Path;
 
 use anyhow::{Context as _, Result};
 use roko_std::RESEARCHER_TOOL_PROFILE;
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Parsed `[meta]` section of tasks.toml.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskMeta {
     pub plan: String,
     #[serde(default)]
@@ -36,7 +36,7 @@ fn default_max_parallel() -> u32 {
 }
 
 /// A single task definition.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TaskDef {
     pub id: String,
     pub title: String,
@@ -60,6 +60,9 @@ pub struct TaskDef {
     pub depends_on: Vec<String>,
     /// Plan IDs this task depends on before dispatching.
     pub depends_on_plan: Vec<String>,
+    /// Subtasks created when this task is decomposed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split_into: Option<Vec<String>>,
     /// Surgical context specification.
     pub context: Option<TaskContext>,
     /// Verification pipeline.
@@ -70,7 +73,7 @@ pub struct TaskDef {
     pub acceptance: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct TaskDefSerde {
     pub id: String,
     pub title: String,
@@ -96,6 +99,8 @@ struct TaskDefSerde {
     pub depends_on: Vec<String>,
     #[serde(default)]
     pub depends_on_plan: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split_into: Option<Vec<String>>,
     #[serde(default)]
     pub context: Option<TaskContext>,
     #[serde(default)]
@@ -122,6 +127,7 @@ impl From<TaskDefSerde> for TaskDef {
             mcp_servers: raw.mcp_servers,
             depends_on: raw.depends_on,
             depends_on_plan: raw.depends_on_plan,
+            split_into: raw.split_into,
             context: raw.context,
             verify: raw.verify,
             timeout_secs: raw.timeout_secs,
@@ -323,7 +329,7 @@ impl TaskDef {
 }
 
 /// Surgical context for a task.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TaskContext {
     /// Files to read (with optional line ranges).
     #[serde(default)]
@@ -340,7 +346,7 @@ pub struct TaskContext {
 }
 
 /// A file to read as context, with optional line range.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadFile {
     pub path: String,
     #[serde(default)]
@@ -354,7 +360,7 @@ fn default_why() -> String {
 }
 
 /// One step in the per-task verification pipeline.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifyStep {
     /// Phase: structural, compile, test, integration.
     #[serde(default)]
@@ -374,7 +380,7 @@ fn default_verify_timeout() -> u64 {
 }
 
 /// The full parsed tasks.toml.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TasksFile {
     pub meta: TaskMeta,
     #[serde(rename = "task")]
@@ -387,6 +393,12 @@ impl TasksFile {
         let content =
             std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
         toml::from_str(&content).with_context(|| format!("parse tasks.toml at {}", path.display()))
+    }
+
+    /// Parse a `tasks.toml` payload returned inline by an agent.
+    pub fn parse_agent_output(content: &str) -> Result<Self> {
+        let payload = extract_toml_payload(content);
+        toml::from_str(&payload).context("parse tasks.toml from agent output")
     }
 
     /// Get all tasks that are ready to execute (deps satisfied).
@@ -490,6 +502,23 @@ fn extract_line_range(content: &str, range: &str) -> String {
     lines[start..end].join("\n")
 }
 
+fn extract_toml_payload(content: &str) -> String {
+    let trimmed = content.trim();
+    let Some(open_start) = trimmed.find("```") else {
+        return trimmed.to_string();
+    };
+    let after_open = &trimmed[open_start + 3..];
+    let Some(open_end) = after_open.find('\n') else {
+        return trimmed.to_string();
+    };
+    let body = &after_open[open_end + 1..];
+    if let Some(close_start) = body.rfind("```") {
+        body[..close_start].trim().to_string()
+    } else {
+        body.trim().to_string()
+    }
+}
+
 // ─── Tests ─────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -519,6 +548,28 @@ depends_on = ["T1"]
         assert_eq!(parsed.meta.plan, "test");
         assert_eq!(parsed.tasks.len(), 2);
         assert_eq!(parsed.tasks[1].depends_on, vec!["T1"]);
+    }
+
+    #[test]
+    fn parse_agent_output_strips_fences() {
+        let output = r#"
+Here is the plan:
+```toml
+[meta]
+plan = "test"
+total = 1
+
+[[task]]
+id = "T1"
+title = "Split work"
+status = "ready"
+depends_on = []
+```
+"#;
+        let parsed = TasksFile::parse_agent_output(output).unwrap();
+        assert_eq!(parsed.meta.plan, "test");
+        assert_eq!(parsed.tasks.len(), 1);
+        assert_eq!(parsed.tasks[0].id, "T1");
     }
 
     #[test]
@@ -605,6 +656,7 @@ command = "cargo check -p roko-cli"
             mcp_servers: None,
             depends_on: vec![],
             depends_on_plan: vec![],
+            split_into: None,
             context: None,
             verify: vec![],
             timeout_secs: 600,
@@ -741,6 +793,7 @@ depends_on = ["other-plan:T3"]
             mcp_servers: None,
             depends_on: vec![],
             depends_on_plan: vec![],
+            split_into: None,
             context: None,
             verify: vec![],
             timeout_secs: 600,
@@ -771,6 +824,7 @@ depends_on = ["other-plan:T3"]
             mcp_servers: None,
             depends_on: vec![],
             depends_on_plan: vec![],
+            split_into: None,
             context: None,
             verify: vec![],
             timeout_secs: 600,

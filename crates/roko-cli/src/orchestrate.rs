@@ -912,11 +912,17 @@ fn cascade_context_vec(
 
 impl TaskTracker {
     fn new(tasks_file: TasksFile, plan_dir: PathBuf) -> Self {
-        Self {
+        let skipped = tasks_file
+            .tasks
+            .iter()
+            .filter(|task| task.status.eq_ignore_ascii_case("skipped"))
+            .map(|task| task.id.clone())
+            .collect();
+        let mut tracker = Self {
             tasks_file,
             completed: Vec::new(),
             failed: Vec::new(),
-            skipped: Vec::new(),
+            skipped,
             current_group_index: 0,
             _plan_dir: plan_dir,
             last_gate_failure: None,
@@ -929,7 +935,9 @@ impl TaskTracker {
             last_experiment_variant_id: None,
             last_skill_request: None,
             gate_failure_count: 0,
-        }
+        };
+        tracker.advance_group_index();
+        tracker
     }
 
     /// Find the next unfinished task that has all deps satisfied.
@@ -1004,7 +1012,13 @@ impl TaskTracker {
         let task_ids: std::collections::HashSet<String> =
             self.tasks_file.tasks.iter().map(|task| task.id.clone()).collect();
         self.failed.clear();
-        self.skipped.clear();
+        self.skipped = self
+            .tasks_file
+            .tasks
+            .iter()
+            .filter(|task| task.status.eq_ignore_ascii_case("skipped"))
+            .map(|task| task.id.clone())
+            .collect();
         self.completed.retain(|task_id| task_ids.contains(task_id));
         self.current_group_index = 0;
         self.impl_round += 1;
@@ -3771,6 +3785,60 @@ impl PlanRunner {
         }
     }
 
+    /// Summarize all known gate failures for a plan.
+    fn gate_failure_report(&self, plan_id: &str) -> String {
+        let Some(state) = self.executor.plan_state(plan_id) else {
+            return String::new();
+        };
+
+        let mut sections = Vec::new();
+        for verdict in state.gate_results.iter().filter(|verdict| !verdict.passed) {
+            let mut section = format!("{}: {}", verdict.gate_name, verdict.summary.trim());
+            if !verdict.summary.trim().is_empty() && verdict.summary.trim() != verdict.gate_name {
+                section.push_str("\nsummary:\n");
+                section.push_str(verdict.summary.trim());
+            }
+            sections.push(section);
+        }
+
+        if let Some(last_error) = state.last_error.as_deref().map(str::trim).filter(|s| !s.is_empty())
+        {
+            sections.push(format!("executor.last_error:\n{last_error}"));
+        }
+
+        sections.join("\n\n---\n\n")
+    }
+
+    /// Build the prompt used for decomposition re-planning.
+    fn build_decompose_prompt(
+        &self,
+        plan_id: &str,
+        tasks_file: &TasksFile,
+        original_task: &crate::task_parser::TaskDef,
+        failure_summary: &str,
+        gate_report: &str,
+    ) -> String {
+        let mut prompt = String::new();
+        prompt.push_str(failure_summary);
+        prompt.push_str("\n\n## Original task spec\n");
+        prompt.push_str(&task_spec_summary(tasks_file));
+        prompt.push_str("\n\n## Original task prompt\n");
+        prompt.push_str(&original_task.build_prompt(plan_id, &self.workdir));
+
+        if !gate_report.trim().is_empty() {
+            prompt.push_str("\n\n## Gate failure outputs\n");
+            prompt.push_str(gate_report);
+        }
+
+        prompt.push_str(
+            "\n\n## Output requirements\n\
+             Return ONLY a valid tasks.toml file.\n\
+             Produce 2-3 subtasks that replace the failed task.\n\
+             Keep task ids unique, preserve the plan's executable order, and do not add prose or markdown fences.",
+        );
+        prompt
+    }
+
     /// Attempt to re-plan after gate failures (§9).
     async fn attempt_replan(&mut self, plan_id: &str) {
         let Some(tracker) = self.task_trackers.get(plan_id) else {
@@ -3892,14 +3960,33 @@ impl PlanRunner {
             }
             ReplanStrategy::Decompose => {
                 let tasks_path = plan_dir.join("tasks.toml");
-                let existing_tasks = std::fs::read_to_string(&tasks_path).unwrap_or_default();
+                let Some(tasks_snapshot) = self
+                    .task_trackers
+                    .get(plan_id)
+                    .map(|tracker| tracker.tasks_file.clone())
+                else {
+                    tracing::warn!("[orchestrate] decomposition requested for unknown plan {plan_id}");
+                    return;
+                };
+                let Some(original_task) = tasks_snapshot
+                    .tasks
+                    .iter()
+                    .find(|task| task.id == task_id)
+                    .cloned()
+                else {
+                    tracing::warn!(
+                        "[orchestrate] decomposition requested for missing task {task_id} in {plan_id}"
+                    );
+                    return;
+                };
+                let gate_report = self.gate_failure_report(plan_id);
                 let system_prompt = crate::plan_generate::PLAN_GENERATOR_SYSTEM_PROMPT.to_string();
-                let prompt = format!(
-                    "{failure_summary}\n\n\
-                     Split the failed task '{task_id}' into 2-3 smaller subtasks.\n\
-                     Preserve already-completed work, keep the plan executable, and update \
-                     plans/{plan_id}/tasks.toml in place.\n\n\
-                     ## Existing tasks.toml\n\n```toml\n{existing_tasks}\n```"
+                let prompt = self.build_decompose_prompt(
+                    plan_id,
+                    &tasks_snapshot,
+                    &original_task,
+                    &failure_summary,
+                    &gate_report,
                 );
                 match self
                     .dispatch_agent_with(
@@ -3913,8 +4000,167 @@ impl PlanRunner {
                     )
                     .await
                 {
-                    Ok(_) => {
-                        tracing::info!("[orchestrate] decomposition replan completed for {plan_id}");
+                    Ok(result) => {
+                        let response_text = match result.output.body.as_text() {
+                            Ok(text) => text,
+                            Err(e) => {
+                                tracing::error!(
+                                    "[orchestrate] decomposition agent returned non-text output for {plan_id}: {e}"
+                                );
+                                return;
+                            }
+                        };
+
+                        let parsed = match crate::task_parser::TasksFile::parse_agent_output(
+                            response_text,
+                        ) {
+                            Ok(tf) => tf,
+                            Err(e) => {
+                                tracing::error!(
+                                    "[orchestrate] failed to parse decomposition output for {plan_id}: {e}"
+                                );
+                                return;
+                            }
+                        };
+
+                        if !(2..=3).contains(&parsed.tasks.len()) {
+                            tracing::error!(
+                                "[orchestrate] decomposition output for {plan_id} produced {} tasks, expected 2-3",
+                                parsed.tasks.len()
+                            );
+                            return;
+                        }
+
+                        let existing_ids: HashSet<String> = tasks_snapshot
+                            .tasks
+                            .iter()
+                            .map(|task| task.id.clone())
+                            .collect();
+                        let mut new_tasks = parsed.tasks;
+                        let mut new_ids = HashSet::new();
+                        for task in &mut new_tasks {
+                            if task.id == task_id || existing_ids.contains(&task.id) {
+                                tracing::error!(
+                                    "[orchestrate] decomposition output reused existing task id {} for {plan_id}",
+                                    task.id
+                                );
+                                return;
+                            }
+                            if !new_ids.insert(task.id.clone()) {
+                                tracing::error!(
+                                    "[orchestrate] decomposition output duplicated task id {} for {plan_id}",
+                                    task.id
+                                );
+                                return;
+                            }
+                            if task.depends_on.iter().any(|dep| dep == &task_id) {
+                                tracing::error!(
+                                    "[orchestrate] decomposition task {} still depends on failed task {task_id}",
+                                    task.id
+                                );
+                                return;
+                            }
+                            task.status = "ready".to_string();
+                            task.split_into = None;
+                        }
+
+                        let terminal_ids: Vec<String> = new_tasks
+                            .iter()
+                            .filter(|task| {
+                                !new_tasks
+                                    .iter()
+                                    .any(|other| other.depends_on.iter().any(|dep| dep == &task.id))
+                            })
+                            .map(|task| task.id.clone())
+                            .collect();
+                        if terminal_ids.is_empty() {
+                            tracing::error!(
+                                "[orchestrate] decomposition output for {plan_id} produced no terminal subtasks"
+                            );
+                            return;
+                        }
+
+                        let mut rewritten_tasks = tasks_snapshot.clone();
+                        let Some(original_index) = rewritten_tasks
+                            .tasks
+                            .iter()
+                            .position(|task| task.id == task_id)
+                        else {
+                            tracing::error!(
+                                "[orchestrate] original task {task_id} disappeared before decomposition rewrite"
+                            );
+                            return;
+                        };
+
+                        let mut original = original_task.clone();
+                        original.status = "skipped".to_string();
+                        original.split_into = Some(new_tasks.iter().map(|task| task.id.clone()).collect());
+
+                        rewritten_tasks.tasks.remove(original_index);
+                        rewritten_tasks.tasks.insert(original_index, original);
+                        for (offset, task) in new_tasks.into_iter().enumerate() {
+                            rewritten_tasks.tasks.insert(original_index + 1 + offset, task);
+                        }
+
+                        for task in &mut rewritten_tasks.tasks {
+                            if task.id == task_id || new_ids.contains(&task.id) {
+                                continue;
+                            }
+                            let mut rewritten_deps = Vec::with_capacity(task.depends_on.len());
+                            for dep in &task.depends_on {
+                                if dep == &task_id {
+                                    for terminal_id in &terminal_ids {
+                                        if !rewritten_deps.contains(terminal_id) {
+                                            rewritten_deps.push(terminal_id.clone());
+                                        }
+                                    }
+                                } else if !rewritten_deps.contains(dep) {
+                                    rewritten_deps.push(dep.clone());
+                                }
+                            }
+                            task.depends_on = rewritten_deps;
+                        }
+
+                        rewritten_tasks.meta.plan = plan_id.to_string();
+                        rewritten_tasks.meta.total = rewritten_tasks.tasks.len() as u32;
+                        rewritten_tasks.meta.done =
+                            (rewritten_tasks
+                                .tasks
+                                .iter()
+                                .filter(|task| {
+                                    task.status.eq_ignore_ascii_case("skipped")
+                                        || task.status.eq_ignore_ascii_case("done")
+                                })
+                                .count()) as u32;
+                        rewritten_tasks.meta.status = "ready".to_string();
+
+                        let rendered = match toml::to_string_pretty(&rewritten_tasks) {
+                            Ok(text) => text,
+                            Err(e) => {
+                                tracing::error!(
+                                    "[orchestrate] failed to serialize decomposed tasks for {plan_id}: {e}"
+                                );
+                                return;
+                            }
+                        };
+
+                        if let Err(e) = std::fs::write(&tasks_path, rendered) {
+                            tracing::error!(
+                                "[orchestrate] failed to write decomposed tasks for {plan_id}: {e}"
+                            );
+                            return;
+                        }
+
+                        tracing::info!(
+                            "[orchestrate] decomposition replan completed for {plan_id} with subtasks {:?}",
+                            rewritten_tasks
+                                .tasks
+                                .iter()
+                                .filter(|task| new_ids.contains(&task.id))
+                                .map(|task| task.id.clone())
+                                .collect::<Vec<_>>()
+                        );
+
                         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
                             if let Err(e) = tracker.reload_tasks_file() {
                                 tracing::error!(
