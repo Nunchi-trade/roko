@@ -20,6 +20,8 @@ use crate::{KnowledgeEntry, KnowledgeKind};
 
 /// Default garbage-collection threshold for knowledge entries.
 pub const DEFAULT_GC_MIN_CONFIDENCE: f64 = 0.05;
+/// Multiplier applied when a knowledge entry has multiple independent sources.
+const CONFIRMATION_BOOST: f64 = 1.5;
 
 #[cfg(feature = "hdc")]
 const HDC_VECTOR_BYTES: usize = 1280;
@@ -132,8 +134,9 @@ impl KnowledgeStore {
     /// Query the store for entries relevant to `topic`.
     ///
     /// Relevance is scored by keyword overlap in tags/content, multiplied
-    /// by confidence and recency. When the `hdc` feature is enabled, HDC
-    /// similarity is added as an extra signal.
+    /// by confidence, recency, and a 1.5× confirmation boost for entries
+    /// backed by multiple independent episodes. When the `hdc` feature is
+    /// enabled, HDC similarity is added as an extra signal.
     ///
     /// # Errors
     ///
@@ -153,7 +156,7 @@ impl KnowledgeStore {
             .filter_map(|entry| {
                 let keyword_score = keyword_score(&entry, &topic_terms, &topic_norm);
                 let recency = recency_factor(&entry, now);
-                let confidence = entry.confidence.clamp(0.0, 1.0);
+                let confidence = effective_confidence(&entry);
                 let score = keyword_score * confidence * recency;
 
                 #[cfg(feature = "hdc")]
@@ -252,7 +255,7 @@ impl KnowledgeStore {
         let entries = self
             .read_all()?
             .into_iter()
-            .filter(|entry| entry.confidence >= threshold)
+            .filter(|entry| effective_confidence(entry) >= threshold)
             .collect::<Vec<_>>();
         self.rewrite_all(&entries)
     }
@@ -440,10 +443,8 @@ fn compare_hits(left: &MemoryHit, right: &MemoryHit) -> std::cmp::Ordering {
         .partial_cmp(&left.similarity)
         .unwrap_or(std::cmp::Ordering::Equal)
         .then_with(|| {
-            right
-                .entry
-                .confidence
-                .partial_cmp(&left.entry.confidence)
+            effective_confidence(&right.entry)
+                .partial_cmp(&effective_confidence(&left.entry))
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
         .then_with(|| right.entry.created_at.cmp(&left.entry.created_at))
@@ -505,6 +506,18 @@ fn effective_half_life_days(entry: &KnowledgeEntry) -> f64 {
     }
 }
 
+fn effective_confidence(entry: &KnowledgeEntry) -> f64 {
+    entry.confidence.clamp(0.0, 1.0) * confirmation_boost(entry)
+}
+
+fn confirmation_boost(entry: &KnowledgeEntry) -> f64 {
+    if entry.source_episodes.len() >= 2 {
+        CONFIRMATION_BOOST
+    } else {
+        1.0
+    }
+}
+
 fn compare_scores(
     left: &(f64, KnowledgeEntry),
     right: &(f64, KnowledgeEntry),
@@ -514,10 +527,8 @@ fn compare_scores(
         .partial_cmp(&left.0)
         .unwrap_or(std::cmp::Ordering::Equal)
         .then_with(|| {
-            right
-                .1
-                .confidence
-                .partial_cmp(&left.1.confidence)
+            effective_confidence(&right.1)
+                .partial_cmp(&effective_confidence(&left.1))
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
         .then_with(|| right.1.created_at.cmp(&left.1.created_at))
@@ -561,6 +572,7 @@ mod tests {
         content: &str,
         tags: &[&str],
         confidence: f64,
+        source_episodes: &[&str],
         created_at: DateTime<Utc>,
     ) -> KnowledgeEntry {
         KnowledgeEntry {
@@ -568,7 +580,10 @@ mod tests {
             kind,
             content: content.to_owned(),
             confidence,
-            source_episodes: Vec::new(),
+            source_episodes: source_episodes
+                .iter()
+                .map(|source| (*source).to_owned())
+                .collect(),
             tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
             created_at,
             half_life_days: kind.default_half_life_days(),
@@ -589,6 +604,7 @@ mod tests {
                 "Rust async actors and memory stores",
                 &["rust", "async"],
                 1.0,
+                &["ep-a"],
                 now,
             ))
             .expect("add first");
@@ -599,6 +615,7 @@ mod tests {
                 "Rust data pipelines",
                 &["rust"],
                 0.8,
+                &["ep-b"],
                 now - Duration::days(10),
             ))
             .expect("add second");
@@ -609,6 +626,7 @@ mod tests {
                 "Completely unrelated note",
                 &["misc"],
                 0.01,
+                &[],
                 now,
             ))
             .expect("add third");
@@ -637,6 +655,7 @@ mod tests {
                 "A durable heuristic",
                 &["heuristic"],
                 1.0,
+                &["ep-a", "ep-b"],
                 created_at,
             ))
             .expect("add");
@@ -660,6 +679,7 @@ mod tests {
                 "Long-lived factual memory",
                 &["fact"],
                 1.0,
+                &[],
                 created_at,
             ))
             .expect("add fact");
@@ -670,6 +690,7 @@ mod tests {
                 "Short-lived insight",
                 &["insight"],
                 1.0,
+                &["ep-a", "ep-b"],
                 created_at,
             ))
             .expect("add insight");
@@ -680,6 +701,7 @@ mod tests {
                 "Mid-lived heuristic",
                 &["heuristic"],
                 1.0,
+                &[],
                 created_at,
             ))
             .expect("add heuristic");
@@ -701,6 +723,41 @@ mod tests {
         assert!((insight.confidence - 0.5).abs() < 0.05);
         assert!(fact.confidence > 0.9);
         assert!((heuristic.confidence - 0.79).abs() < 0.05);
+    }
+
+    #[test]
+    fn confirmation_boost_retains_validated_entries_through_gc() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let created_at = Utc::now() - Duration::days(30);
+
+        store
+            .add(entry(
+                KnowledgeKind::Insight,
+                "single",
+                "Single-source insight",
+                &["insight"],
+                0.4,
+                &["ep-a"],
+                created_at,
+            ))
+            .expect("add single");
+        store
+            .add(entry(
+                KnowledgeKind::Insight,
+                "validated",
+                "Validated insight",
+                &["insight"],
+                0.4,
+                &["ep-a", "ep-b"],
+                created_at,
+            ))
+            .expect("add validated");
+
+        store.gc(0.5).expect("gc");
+        let all = store.read_all().expect("read");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, "validated");
     }
 
     #[test]
@@ -769,6 +826,7 @@ mod tests {
                 "rust async memory retrieval",
                 &["rust", "memory"],
                 1.0,
+                &["ep-a"],
                 now,
             ),
             entry(
@@ -777,6 +835,7 @@ mod tests {
                 "postgres maintenance routine",
                 &["db"],
                 0.9,
+                &[],
                 now,
             ),
         ]);
@@ -804,6 +863,7 @@ mod tests {
                 "semantic retrieval over durable knowledge",
                 &["memory"],
                 1.0,
+                &["ep-a"],
                 now,
             ))
             .expect("add first");
@@ -814,6 +874,7 @@ mod tests {
                 "completely unrelated topic",
                 &["misc"],
                 0.8,
+                &[],
                 now,
             ))
             .expect("add second");
