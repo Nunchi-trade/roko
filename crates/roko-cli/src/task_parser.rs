@@ -120,6 +120,19 @@ impl TaskDef {
         self.status == "ready" && self.depends_on.iter().all(|dep| completed.contains(dep))
     }
 
+    /// Whether this task is ready to execute, including cross-plan dependencies.
+    pub fn is_ready_with_plan_deps(
+        &self,
+        completed_tasks: &[String],
+        completed_plans: &[String],
+    ) -> bool {
+        self.is_ready(completed_tasks)
+            && self
+                .depends_on_plan
+                .iter()
+                .all(|dep| completed_plans.contains(dep))
+    }
+
     /// Build the agent prompt from task title + surgical context.
     pub fn build_prompt(&self, plan_id: &str, workdir: &Path) -> String {
         let mut prompt = String::new();

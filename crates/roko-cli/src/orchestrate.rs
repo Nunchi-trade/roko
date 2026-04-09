@@ -377,25 +377,37 @@ impl TaskTracker {
     /// Find the next unfinished task that has all deps satisfied.
     #[cfg(test)]
     #[allow(dead_code)]
-    fn next_ready_task(&self) -> Option<&crate::task_parser::TaskDef> {
-        self.tasks_file.tasks.iter().find(|t| {
-            !self.completed.contains(&t.id)
-                && !self.failed.contains(&t.id)
-                && t.is_ready(&self.completed)
-        })
+    fn next_ready_task(
+        &self,
+        completed_plans: &[String],
+    ) -> Option<&crate::task_parser::TaskDef> {
+        self.ready_tasks(completed_plans).into_iter().next()
     }
 
     /// Return ALL ready tasks (deps satisfied, not completed, not failed).
-    fn ready_tasks(&self) -> Vec<&crate::task_parser::TaskDef> {
+    fn ready_tasks(&self, completed_plans: &[String]) -> Vec<&crate::task_parser::TaskDef> {
         self.tasks_file
             .tasks
             .iter()
             .filter(|t| {
                 !self.completed.contains(&t.id)
                     && !self.failed.contains(&t.id)
-                    && t.is_ready(&self.completed)
+                    && t.is_ready_with_plan_deps(&self.completed, completed_plans)
             })
             .collect()
+    }
+
+    /// Whether any unfinished task is currently blocked only by cross-plan deps.
+    fn has_tasks_blocked_by_plans(&self, completed_plans: &[String]) -> bool {
+        self.tasks_file.tasks.iter().any(|task| {
+            !self.completed.contains(&task.id)
+                && !self.failed.contains(&task.id)
+                && task.is_ready(&self.completed)
+                && !task
+                    .depends_on_plan
+                    .iter()
+                    .all(|dep| completed_plans.contains(dep))
+        })
     }
 
     /// Whether all tasks in the plan are completed.
@@ -624,15 +636,6 @@ impl PlanRunner {
                         tf.meta.max_parallel,
                         model_tiers.join(", ")
                     );
-
-                    for task in &tf.tasks {
-                        if !task.depends_on_plan.is_empty() {
-                            plan_deps
-                                .entry(plan_id.clone())
-                                .or_default()
-                                .extend(task.depends_on_plan.iter().cloned());
-                        }
-                    }
                 }
             }
 
@@ -1250,6 +1253,22 @@ impl PlanRunner {
                 break;
             }
 
+            let completed_plans = self.executor.completed_plans();
+            for plan_id in &plan_ids {
+                let Some(state) = self.executor.plan_state(plan_id) else {
+                    continue;
+                };
+                if state.paused && state.current_phase.kind() == PhaseKind::Implementing {
+                    if self
+                        .task_trackers
+                        .get(plan_id)
+                        .is_some_and(|tracker| !tracker.ready_tasks(&completed_plans).is_empty())
+                    {
+                        self.executor.resume_plan(plan_id);
+                    }
+                }
+            }
+
             let actions = self.executor.tick();
 
             if actions.is_empty() {
@@ -1382,19 +1401,6 @@ impl PlanRunner {
                 }
             }
         }
-
-        let mut plan_deps: HashMap<String, Vec<String>> = HashMap::new();
-        for (plan_id, tracker) in &self.task_trackers {
-            for task in &tracker.tasks_file.tasks {
-                if !task.depends_on_plan.is_empty() {
-                    plan_deps
-                        .entry(plan_id.clone())
-                        .or_default()
-                        .extend(task.depends_on_plan.iter().cloned());
-                }
-            }
-        }
-        self.executor.set_plan_dependencies(plan_deps);
 
         self.run_all().await
     }
@@ -1841,6 +1847,8 @@ impl PlanRunner {
             return;
         }
 
+        let completed_plans = self.executor.completed_plans();
+
         // Collect ALL ready tasks (deps satisfied, not completed/failed).
         let ready: Vec<String> = {
             let Some(tracker) = self.task_trackers.get(plan_id) else {
@@ -1855,7 +1863,7 @@ impl PlanRunner {
                         .filter(|t| {
                             !tracker.completed.contains(&t.id)
                                 && !tracker.failed.contains(&t.id)
-                                && t.is_ready(&tracker.completed)
+                                && t.is_ready_with_plan_deps(&tracker.completed, &completed_plans)
                         })
                         .map(|t| t.id.clone())
                         .collect()
@@ -1873,6 +1881,15 @@ impl PlanRunner {
                 let event = ExecutorEvent::ImplementationDone;
                 self.log_transition(plan_id, &event);
                 let _ = self.executor.apply_event(plan_id, &event);
+            } else if self
+                .task_trackers
+                .get(plan_id)
+                .is_some_and(|tracker| tracker.has_tasks_blocked_by_plans(&completed_plans))
+            {
+                eprintln!(
+                    "[orchestrate] {plan_id}: implementation blocked by dependent plan(s), pausing"
+                );
+                self.executor.pause_plan(plan_id);
             } else {
                 eprintln!(
                     "[orchestrate] {plan_id}: no ready tasks but not all done — blocked or failed"
@@ -2142,11 +2159,12 @@ impl PlanRunner {
             }
         }
 
+        let completed_plans = self.executor.completed_plans();
         if any_fatal
             && self
                 .task_trackers
                 .get(plan_id)
-                .is_some_and(|t| t.ready_tasks().is_empty())
+                .is_some_and(|t| t.ready_tasks(&completed_plans).is_empty())
         {
             // All remaining tasks are blocked by failures.
             let _ = self.executor.apply_event(
@@ -5065,19 +5083,51 @@ depends_on = []
         assert!(!tracker.all_tasks_done());
 
         // T1 and T3 should be ready (no deps)
-        let ready = tracker.next_ready_task().unwrap();
+        let ready = tracker.next_ready_task(&[]).unwrap();
         assert!(ready.id == "T1" || ready.id == "T3");
 
         tracker.mark_completed("T1");
         tracker.mark_completed("T3");
 
         // Now T2 should be ready
-        let ready = tracker.next_ready_task().unwrap();
+        let ready = tracker.next_ready_task(&[]).unwrap();
         assert_eq!(ready.id, "T2");
 
         tracker.mark_completed("T2");
         assert!(tracker.all_tasks_done());
-        assert!(tracker.next_ready_task().is_none());
+        assert!(tracker.next_ready_task(&[]).is_none());
+    }
+
+    #[test]
+    fn task_tracker_blocks_on_completed_plan_deps() {
+        let toml_str = r#"
+[meta]
+plan = "test"
+total = 2
+
+[[task]]
+id = "T1"
+title = "first"
+depends_on = []
+
+[[task]]
+id = "T2"
+title = "waits for external plan"
+depends_on = []
+depends_on_plan = ["other-plan"]
+"#;
+        let tf: TasksFile = toml::from_str(toml_str).unwrap();
+        let tracker = TaskTracker::new(tf, PathBuf::from("/tmp"));
+
+        let ready = tracker.ready_tasks(&[]);
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id, "T1");
+        assert!(tracker.has_tasks_blocked_by_plans(&[]));
+
+        let completed_plans = vec!["other-plan".to_string()];
+        let ready_with_dep = tracker.ready_tasks(&completed_plans);
+        assert_eq!(ready_with_dep.len(), 2);
+        assert!(!tracker.has_tasks_blocked_by_plans(&completed_plans));
     }
 
     #[test]
