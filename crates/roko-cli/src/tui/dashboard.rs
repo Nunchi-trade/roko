@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Write as _};
 use std::path::{Path, PathBuf};
 
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -202,6 +203,8 @@ pub struct DashboardSummary {
 /// Shared dashboard data loaded from `.roko/`.
 #[derive(Debug, Clone, Default)]
 pub struct DashboardData {
+    /// Workspace root used for refreshes.
+    root: PathBuf,
     /// Plans from executor state.
     pub plans: Vec<PlanSummary>,
     /// Currently executing tasks.
@@ -252,6 +255,7 @@ impl DashboardData {
         let cfactor = load_latest_jsonl_value::<CFactor>(&learn_dir.join("c-factor.jsonl"));
 
         Self {
+            root,
             plans,
             active_tasks,
             agents,
@@ -263,6 +267,14 @@ impl DashboardData {
             conductor_alerts,
             cfactor,
         }
+    }
+
+    /// Refresh the snapshot from the stored workspace root.
+    pub async fn refresh(&mut self) -> Result<()> {
+        let root = self.root.clone();
+        let refreshed = tokio::task::spawn_blocking(move || Self::load_best_effort(root)).await?;
+        *self = refreshed;
+        Ok(())
     }
 }
 

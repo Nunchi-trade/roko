@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::io::Stdout;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -36,7 +37,33 @@ pub struct App {
     pub scroll_offset: HashMap<PageId, u16>,
 }
 
-type TuiTerminal = Terminal<CrosstermBackend<io::Stdout>>;
+type TuiTerminal = Terminal<CrosstermBackend<Stdout>>;
+
+/// Run the interactive dashboard event loop.
+pub async fn run(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut App,
+) -> Result<()> {
+    loop {
+        terminal.draw(|f| render_page(f, app))?;
+        if crossterm::event::poll(Duration::from_millis(250))? {
+            match crossterm::event::read()? {
+                crossterm::event::Event::Key(key) => handle_key(app, key),
+                crossterm::event::Event::Resize(_, _) => {} // ratatui handles this
+                _ => {}
+            }
+        }
+        if app.last_refresh.elapsed() > Duration::from_secs(1) {
+            app.data.refresh().await?;
+            app.last_refresh = Instant::now();
+        }
+        if !app.running {
+            break;
+        }
+    }
+
+    Ok(())
+}
 
 impl App {
     /// Build a new app from a workspace root.
@@ -193,4 +220,19 @@ impl App {
         .context("leave alternate screen")?;
         Ok(())
     }
+}
+
+fn render_page(frame: &mut Frame<'_>, app: &App) {
+    let pages = app.pages();
+    widgets::render_dashboard(
+        frame,
+        &app.scaffold,
+        &pages,
+        app.current_page,
+        app.scroll_for(app.current_page),
+    );
+}
+
+fn handle_key(app: &mut App, key: KeyEvent) {
+    app.handle_key(key);
 }
