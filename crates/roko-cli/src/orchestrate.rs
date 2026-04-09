@@ -6520,6 +6520,9 @@ impl PlanRunner {
         let task_def = tasks_file
             .as_ref()
             .and_then(|tf| tf.tasks.iter().find(|t| t.id == task).cloned());
+        let frequency = task_def
+            .as_ref()
+            .map_or(OperatingFrequency::Theta, |td| td.operating_frequency());
 
         let mcp_lease = self.acquire_task_mcp_servers(task_def.as_ref()).await;
 
@@ -6569,7 +6572,6 @@ impl PlanRunner {
 
         // ── Adaptive model selection via CascadeRouter ───────────────
         if let Some(td) = task_def.as_ref() {
-            let frequency = td.operating_frequency();
             let cascade_router = self.learning.cascade_router();
             let routing_ctx = cascade_routing_context(self, plan_id, task, role, Some(td));
 
@@ -6904,12 +6906,13 @@ impl PlanRunner {
                 .unwrap_or_default();
             let mut agent =
                 ClaudeCliAgent::new(&self.config.agent.command, &exec_dir, &selected_model)
-                    .with_timeout_ms(self.effective_task_timeout_ms(task_def.as_ref()))
-                    .with_bare_mode(self.config.agent.bare_mode)
-                    .with_effort(self.config.agent.effort.clone())
-                    .with_system_prompt(role_instruction.clone())
-                    .with_extra_args(task_read_args)
-                    .with_tools(task_allowed_tools_csv)
+                .with_timeout_ms(self.effective_task_timeout_ms(task_def.as_ref()))
+                .with_bare_mode(self.config.agent.bare_mode)
+                .with_effort(self.config.agent.effort.clone())
+                .with_max_turns(frequency.turn_limit())
+                .with_system_prompt(role_instruction.clone())
+                .with_extra_args(task_read_args)
+                .with_tools(task_allowed_tools_csv)
                     .with_settings_json(roko_agent::claude_cli_agent::build_settings_json())
                     .with_dangerously_skip_permissions(claude_skip_permissions_for_role(role))
                     .with_optional_resume(self.claude_resume_session.clone())

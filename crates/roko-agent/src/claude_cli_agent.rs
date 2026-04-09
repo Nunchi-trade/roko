@@ -13,7 +13,7 @@ use crate::process::{
 };
 use crate::usage::Usage;
 use async_trait::async_trait;
-use roko_core::{Body, Context, Kind, Provenance, Signal};
+use roko_core::{Body, Context, Kind, OperatingFrequency, Provenance, Signal};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -116,7 +116,7 @@ impl ClaudeCliAgent {
             bare_mode: true,
             system_prompt: None,
             allowed_tools: None,
-            max_turns: None,
+            max_turns: Some(OperatingFrequency::Theta.turn_limit()),
             settings_json: build_settings_json(),
             extra_args: Vec::new(),
             env: Vec::new(),
@@ -605,6 +605,8 @@ printf '%s\n' '{{"type":"content_block_delta","delta":{{"text":"hello"}}}}'
         assert!(args_text.contains("claude-test-model"));
         assert!(args_text.contains("--effort"));
         assert!(args_text.contains("medium"));
+        assert!(args_text.contains("--max-turns"));
+        assert!(args_text.contains("20"));
         assert!(args_text.contains("--append-system-prompt"));
         assert!(args_text.contains("system guidance"));
         assert!(args_text.contains("--settings"));
