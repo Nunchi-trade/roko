@@ -88,9 +88,8 @@ async fn agent_episodes(
         if line.trim().is_empty() {
             continue;
         }
-        let value = serde_json::from_str::<Value>(line).map_err(|e| {
-            ApiError::internal(format!("parse episodes line {}: {e}", line_no + 1))
-        })?;
+        let value = serde_json::from_str::<Value>(line)
+            .map_err(|e| ApiError::internal(format!("parse episodes line {}: {e}", line_no + 1)))?;
         if value
             .get("agent_id")
             .is_some_and(|a| a.as_str() == Some(&agent_id_str) || a.as_u64() == Some(id))

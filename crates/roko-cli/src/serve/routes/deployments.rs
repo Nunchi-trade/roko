@@ -371,10 +371,7 @@ async fn proxy_task(
 }
 
 /// Infer the backing template name for a deployment, if it follows the worker naming convention.
-async fn template_name_for_deployment(
-    deployment_id: &str,
-    state: &AppState,
-) -> Option<String> {
+async fn template_name_for_deployment(deployment_id: &str, state: &AppState) -> Option<String> {
     let deps = state.deployments.read().await;
     let deployment = deps.get(deployment_id)?;
     deployment

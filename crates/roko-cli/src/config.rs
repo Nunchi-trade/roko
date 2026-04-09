@@ -840,7 +840,10 @@ impl ServeAuthLayer {
 
     /// Resolve into a concrete [`ServeConfig::auth`] value.
     #[must_use]
-    pub fn resolve(self, defaults: roko_core::config::ServeAuthConfig) -> roko_core::config::ServeAuthConfig {
+    pub fn resolve(
+        self,
+        defaults: roko_core::config::ServeAuthConfig,
+    ) -> roko_core::config::ServeAuthConfig {
         roko_core::config::ServeAuthConfig {
             enabled: self.enabled.unwrap_or(defaults.enabled),
             api_key: self.api_key.unwrap_or(defaults.api_key),

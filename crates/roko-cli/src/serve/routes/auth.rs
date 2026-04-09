@@ -22,7 +22,9 @@ pub async fn require_api_key(
         .unwrap_or("");
 
     if supplied != auth.api_key {
-        return Err(ApiError::unauthorized("invalid or missing X-Api-Key header"));
+        return Err(ApiError::unauthorized(
+            "invalid or missing X-Api-Key header",
+        ));
     }
 
     Ok(next.run(req).await)

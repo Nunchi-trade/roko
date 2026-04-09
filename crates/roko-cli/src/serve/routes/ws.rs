@@ -131,7 +131,9 @@ fn matches_filter(event: &crate::serve::events::ServerEvent, filter: &[String]) 
         }
     }
 
-    filter
-        .iter()
-        .any(|f| event_types.iter().any(|event_type| event_type.contains(f.as_str())))
+    filter.iter().any(|f| {
+        event_types
+            .iter()
+            .any(|event_type| event_type.contains(f.as_str()))
+    })
 }

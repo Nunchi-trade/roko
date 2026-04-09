@@ -343,8 +343,7 @@ impl DashboardData {
             .collect();
         let cfactor = load_latest_jsonl_value::<CFactor>(&cfactor_path);
         let cfactor_stamp = file_stamp(&cfactor_path);
-        let current_plan_execution =
-            load_current_plan_execution(&root, &state, &episodes);
+        let current_plan_execution = load_current_plan_execution(&root, &state, &episodes);
         let efficiency_stamp = file_stamp(&efficiency_path);
 
         Self {
@@ -444,8 +443,7 @@ impl DashboardData {
         let stamp = file_stamp(&gate_thresholds_path);
         if stamp != self.gate_thresholds_stamp {
             self.gate_thresholds_stamp = stamp;
-            self.adaptive_thresholds =
-                load_json_opt::<AdaptiveThresholds>(&gate_thresholds_path);
+            self.adaptive_thresholds = load_json_opt::<AdaptiveThresholds>(&gate_thresholds_path);
             self.rebuild_gate_results_page();
         }
 
@@ -886,14 +884,15 @@ pub(crate) fn build_agent_activity_snapshot(
     for event in efficiency_events {
         let (tier, input_rate, output_rate) = model_pricing(&event.model);
         *model_usage.entry(tier).or_default() += 1;
-        let aggregate = cost_groups
-            .entry(event.model.clone())
-            .or_insert_with(|| ModelCostAggregate {
-                model: event.model.clone(),
-                input_rate,
-                output_rate,
-                ..ModelCostAggregate::default()
-            });
+        let aggregate =
+            cost_groups
+                .entry(event.model.clone())
+                .or_insert_with(|| ModelCostAggregate {
+                    model: event.model.clone(),
+                    input_rate,
+                    output_rate,
+                    ..ModelCostAggregate::default()
+                });
         aggregate.input_tokens += event.input_tokens;
         aggregate.output_tokens += event.output_tokens;
     }
@@ -930,12 +929,14 @@ pub(crate) fn build_agent_activity_snapshot(
 fn synthesize_agents_from_events(efficiency_events: &[AgentEfficiencyEvent]) -> Vec<AgentSummary> {
     let mut agents = BTreeMap::<String, AgentSummary>::new();
     for event in efficiency_events {
-        agents.entry(event.agent_id.clone()).or_insert_with(|| AgentSummary {
-            id: event.agent_id.clone(),
-            label: event.agent_id.clone(),
-            plan_id: Some(event.plan_id.clone()),
-            status: String::from("active"),
-        });
+        agents
+            .entry(event.agent_id.clone())
+            .or_insert_with(|| AgentSummary {
+                id: event.agent_id.clone(),
+                label: event.agent_id.clone(),
+                plan_id: Some(event.plan_id.clone()),
+                status: String::from("active"),
+            });
     }
     agents.into_values().collect()
 }
@@ -971,7 +972,10 @@ impl AgentActivityAggregate {
         if self.first_seen_at.map_or(true, |first| timestamp < first) {
             self.first_seen_at = Some(timestamp);
         }
-        if self.latest_event_at.map_or(true, |latest| timestamp > latest) {
+        if self
+            .latest_event_at
+            .map_or(true, |latest| timestamp > latest)
+        {
             self.latest_event_at = Some(timestamp);
             self.model = event.model.clone();
             self.task = event.task_id.clone();
@@ -982,7 +986,12 @@ impl AgentActivityAggregate {
     fn render_row(&self, agent: &AgentSummary, now: DateTime<Utc>) -> AgentActivityRow {
         let uptime_ms = self
             .first_seen_at
-            .and_then(|first| now.signed_duration_since(first).num_milliseconds().try_into().ok())
+            .and_then(|first| {
+                now.signed_duration_since(first)
+                    .num_milliseconds()
+                    .try_into()
+                    .ok()
+            })
             .unwrap_or_default();
         AgentActivityRow {
             agent_id: agent.id.clone(),
@@ -1197,7 +1206,11 @@ impl GateSignalSummary {
 impl ExperimentSummary {
     fn from_experiment(experiment: &roko_learn::prompt_experiment::PromptExperiment) -> Self {
         let total_trials: u64 = experiment.stats.values().map(|stats| stats.trials).sum();
-        let active_variants = experiment.variants.iter().filter(|variant| variant.active).count();
+        let active_variants = experiment
+            .variants
+            .iter()
+            .filter(|variant| variant.active)
+            .count();
         Self {
             experiment_id: experiment.experiment_id.clone(),
             section_name: experiment.section_name.clone(),
@@ -1307,7 +1320,11 @@ fn load_active_tasks(state: &Value) -> Vec<TaskSummary> {
         });
     }
 
-    tasks.sort_by(|a, b| a.plan_id.cmp(&b.plan_id).then_with(|| a.task_id.cmp(&b.task_id)));
+    tasks.sort_by(|a, b| {
+        a.plan_id
+            .cmp(&b.plan_id)
+            .then_with(|| a.task_id.cmp(&b.task_id))
+    });
     tasks
 }
 
@@ -1344,7 +1361,10 @@ fn load_agents(state: &Value) -> Vec<AgentSummary> {
     agents
 }
 
-fn load_gate_results(state: &Value, signal_gate_results: &[GateResultSummary]) -> Vec<GateResultSummary> {
+fn load_gate_results(
+    state: &Value,
+    signal_gate_results: &[GateResultSummary],
+) -> Vec<GateResultSummary> {
     let mut gate_results = Vec::new();
 
     if let Some(plan_states) = state.get("plan_states").and_then(Value::as_object) {
@@ -1360,8 +1380,14 @@ fn load_gate_results(state: &Value, signal_gate_results: &[GateResultSummary]) -
                         .and_then(Value::as_str)
                         .unwrap_or("unknown")
                         .to_string(),
-                    passed: result.get("passed").and_then(Value::as_bool).unwrap_or(false),
-                    rung: result.get("rung").and_then(Value::as_u64).unwrap_or_default() as u32,
+                    passed: result
+                        .get("passed")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    rung: result
+                        .get("rung")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default() as u32,
                     duration_ms: result
                         .get("duration_ms")
                         .and_then(Value::as_u64)
@@ -1447,7 +1473,11 @@ fn load_current_plan_execution(
             Some((priority, started_at_ms, plan_id.clone()))
         })
         .collect::<Vec<_>>();
-    candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)).then_with(|| a.2.cmp(&b.2)));
+    candidates.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| b.1.cmp(&a.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
 
     let plan_id = candidates
         .first()
@@ -1538,7 +1568,11 @@ fn current_task_id(
     let groups = tasks_file.parallel_groups();
     if let Some(tracker) = tracker {
         if let Some(group) = groups
-            .get(tracker.current_group_index.min(groups.len().saturating_sub(1)))
+            .get(
+                tracker
+                    .current_group_index
+                    .min(groups.len().saturating_sub(1)),
+            )
             .or_else(|| groups.last())
         {
             if let Some(task) = group
@@ -1795,7 +1829,10 @@ fn load_efficiency_summary(path: &Path) -> EfficiencySummary {
     let total_input_tokens = events.iter().map(|event| event.input_tokens).sum();
     let total_output_tokens = events.iter().map(|event| event.output_tokens).sum();
     let passed_count = events.iter().filter(|event| event.gate_passed).count();
-    let average_wall_time_ms = events.iter().map(|event| event.wall_time_ms as f64).sum::<f64>()
+    let average_wall_time_ms = events
+        .iter()
+        .map(|event| event.wall_time_ms as f64)
+        .sum::<f64>()
         / count_to_f64(event_count);
 
     EfficiencySummary {
@@ -1929,7 +1966,12 @@ fn file_stamp(path: &Path) -> FileStamp {
 
 fn load_signal_state(
     path: &Path,
-) -> (Vec<SignalSummary>, Vec<GateSignalSummary>, Vec<GateResultSummary>, JsonlState) {
+) -> (
+    Vec<SignalSummary>,
+    Vec<GateSignalSummary>,
+    Vec<GateResultSummary>,
+    JsonlState,
+) {
     let values = read_jsonl_values(path);
     let (recent_signals, gate_signal_summaries, signal_gate_results) =
         collect_signal_records(values);
@@ -1966,7 +2008,11 @@ fn load_episodes_from_offset(path: &Path, offset: u64) -> Vec<Episode> {
 
 fn collect_signal_records(
     values: Vec<Value>,
-) -> (Vec<SignalSummary>, Vec<GateSignalSummary>, Vec<GateResultSummary>) {
+) -> (
+    Vec<SignalSummary>,
+    Vec<GateSignalSummary>,
+    Vec<GateResultSummary>,
+) {
     let mut recent_signals = Vec::new();
     let mut gate_signal_summaries = Vec::new();
     let mut signal_gate_results = Vec::new();
@@ -2151,11 +2197,7 @@ fn extract_gate_passed(entry: &Value) -> Option<bool> {
             "false" => Some(false),
             _ => None,
         })
-        .or_else(|| {
-            entry
-                .pointer("/body/data/passed")
-                .and_then(Value::as_bool)
-        })
+        .or_else(|| entry.pointer("/body/data/passed").and_then(Value::as_bool))
         .or_else(|| entry.pointer("/body/passed").and_then(Value::as_bool))
 }
 
@@ -2171,7 +2213,12 @@ fn entry_timestamp_ms(entry: &Value) -> Option<i64> {
     entry
         .get("created_at_ms")
         .and_then(Value::as_i64)
-        .or_else(|| entry.get("created_at_ms").and_then(Value::as_u64).map(|ts| ts as i64))
+        .or_else(|| {
+            entry
+                .get("created_at_ms")
+                .and_then(Value::as_u64)
+                .map(|ts| ts as i64)
+        })
 }
 
 fn signal_parent_hash(value: &Value) -> Option<String> {
@@ -2754,7 +2801,11 @@ impl DashboardSnapshot {
         }
 
         let mut out = page_header(page);
-        let _ = writeln!(out, "source: {}/signals.jsonl", self.root.join(".roko").display());
+        let _ = writeln!(
+            out,
+            "source: {}/signals.jsonl",
+            self.root.join(".roko").display()
+        );
         let _ = writeln!(
             out,
             "source: {}/gate-thresholds.json",
@@ -2862,10 +2913,9 @@ impl DashboardSnapshot {
     }
 
     fn render_learning_page(&self, page: &PageScaffold) -> Option<String> {
-        let has_router = self
-            .cascade_snapshot
-            .as_ref()
-            .is_some_and(|snapshot| !snapshot.model_slugs.is_empty() || !snapshot.confidence_stats.is_empty());
+        let has_router = self.cascade_snapshot.as_ref().is_some_and(|snapshot| {
+            !snapshot.model_slugs.is_empty() || !snapshot.confidence_stats.is_empty()
+        });
         let has_experiments = self
             .experiments
             .as_ref()
@@ -2877,7 +2927,12 @@ impl DashboardSnapshot {
         }
 
         let mut out = page_header(page);
-        let _ = writeln!(out, "source: {}/{}", self.root.join(LEARN_DIR).display(), CASCADE_ROUTER_FILE);
+        let _ = writeln!(
+            out,
+            "source: {}/{}",
+            self.root.join(LEARN_DIR).display(),
+            CASCADE_ROUTER_FILE
+        );
 
         let router_rows = self
             .cascade_snapshot
@@ -2895,7 +2950,10 @@ impl DashboardSnapshot {
                 "model", "weight", "recs", "ucb"
             );
             for row in &router_rows {
-                let recs = recommendation_counts.get(&row.model).copied().unwrap_or_default();
+                let recs = recommendation_counts
+                    .get(&row.model)
+                    .copied()
+                    .unwrap_or_default();
                 let _ = writeln!(
                     out,
                     "  {:>20}  {:>10}  {:>6}  {:>10}",
@@ -3028,10 +3086,7 @@ impl DashboardSnapshot {
                 });
             }
         }
-        let snapshot = build_agent_activity_snapshot(
-            &active_agents,
-            &self.efficiency_events,
-        )?;
+        let snapshot = build_agent_activity_snapshot(&active_agents, &self.efficiency_events)?;
 
         let mut out = page_header(page);
         let _ = writeln!(out, "active agents:");
@@ -3079,7 +3134,11 @@ impl DashboardSnapshot {
                 format_usd(row.cost_usd)
             );
         }
-        let _ = writeln!(out, "  total session cost: {}", format_usd(snapshot.total_session_cost));
+        let _ = writeln!(
+            out,
+            "  total session cost: {}",
+            format_usd(snapshot.total_session_cost)
+        );
 
         Some(out)
     }
@@ -3200,7 +3259,11 @@ impl DashboardSnapshot {
         });
 
         let mut out = page_header(page);
-        let _ = writeln!(out, "source: {}/signals.jsonl", self.root.join(".roko").display());
+        let _ = writeln!(
+            out,
+            "source: {}/signals.jsonl",
+            self.root.join(".roko").display()
+        );
         let _ = writeln!(out, "window: last {} signals", signals.len());
 
         let _ = writeln!(out);
@@ -3247,7 +3310,10 @@ impl DashboardSnapshot {
                 truncate_str(&selected.kind, 24),
                 truncate_str(&selected.id, 16)
             );
-            for (depth, node) in signal_parent_chain(&signals, selected).into_iter().enumerate() {
+            for (depth, node) in signal_parent_chain(&signals, selected)
+                .into_iter()
+                .enumerate()
+            {
                 let indent = "  ".repeat(depth + 1);
                 let label = match node.signal {
                     Some(signal) => format!(
@@ -3258,10 +3324,7 @@ impl DashboardSnapshot {
                     ),
                     None => truncate_str(&node.hash, 48),
                 };
-                let _ = writeln!(
-                    out,
-                    "{indent}- {label}"
-                );
+                let _ = writeln!(out, "{indent}- {label}");
             }
         }
 
@@ -3334,7 +3397,9 @@ struct LearningDayAggregateSnapshot {
     first_try_successes: u64,
 }
 
-fn learning_cascade_rows_snapshot(snapshot: &CascadeSnapshotData) -> Vec<LearningCascadeRowSnapshot> {
+fn learning_cascade_rows_snapshot(
+    snapshot: &CascadeSnapshotData,
+) -> Vec<LearningCascadeRowSnapshot> {
     let mut rows = snapshot
         .model_slugs
         .iter()
@@ -3378,7 +3443,9 @@ fn learning_cascade_rows_snapshot(snapshot: &CascadeSnapshotData) -> Vec<Learnin
     rows
 }
 
-fn learning_recommendation_counts_snapshot(rows: &[LearningCascadeRowSnapshot]) -> HashMap<String, u64> {
+fn learning_recommendation_counts_snapshot(
+    rows: &[LearningCascadeRowSnapshot],
+) -> HashMap<String, u64> {
     let mut counts = HashMap::new();
     if rows.is_empty() {
         return counts;
@@ -3427,7 +3494,11 @@ fn learning_experiment_row_snapshot(
         .iter()
         .filter(|variant| variant.active)
         .map(|variant| {
-            let stats = experiment.stats.get(&variant.id).cloned().unwrap_or_default();
+            let stats = experiment
+                .stats
+                .get(&variant.id)
+                .cloned()
+                .unwrap_or_default();
             (variant, stats)
         })
         .collect::<Vec<_>>();
@@ -3555,7 +3626,9 @@ fn learning_trend_series_snapshot(events: &[AgentEfficiencyEvent]) -> LearningTr
                 if bucket.tasks == 0 {
                     0
                 } else {
-                    ((bucket.cost_usd / bucket.tasks as f64) * 100.0).round().max(0.0) as u64
+                    ((bucket.cost_usd / bucket.tasks as f64) * 100.0)
+                        .round()
+                        .max(0.0) as u64
                 }
             })
             .collect(),
@@ -3611,14 +3684,18 @@ impl LearningTaskAggregateSnapshot {
             self.first_passed = event.gate_passed;
         }
 
-        if self.latest_timestamp.map_or(true, |latest| timestamp > latest) {
+        if self
+            .latest_timestamp
+            .map_or(true, |latest| timestamp > latest)
+        {
             self.latest_timestamp = Some(timestamp);
             self.latest_passed = event.gate_passed;
         }
     }
 
     fn latest_day(&self) -> Option<chrono::NaiveDate> {
-        self.latest_timestamp.map(|timestamp| timestamp.date_naive())
+        self.latest_timestamp
+            .map(|timestamp| timestamp.date_naive())
     }
 
     fn first_try_passed(&self) -> bool {
@@ -3726,8 +3803,7 @@ fn standard_normal_cdf_snapshot(x: f64) -> f64 {
     let d = 0.398_942_3 * (-0.5 * x * x).exp();
     let prob = d
         * t
-        * (0.319_381_5
-            + t * (-0.356_563_8 + t * (1.781_478 + t * (-1.821_256 + t * 1.330_274))));
+        * (0.319_381_5 + t * (-0.356_563_8 + t * (1.781_478 + t * (-1.821_256 + t * 1.330_274))));
     if x >= 0.0 { 1.0 - prob } else { prob }
 }
 
@@ -4539,8 +4615,12 @@ files = ["src/dashboard.rs"]
 
         let mut episode = Episode::new("agent-a", "task-2");
         episode.input_signal_hash = "plan-a".to_string();
-        episode.extra.insert("plan_id".to_string(), serde_json::json!("plan-a"));
-        episode.extra.insert("task_id".to_string(), serde_json::json!("task-2"));
+        episode
+            .extra
+            .insert("plan_id".to_string(), serde_json::json!("plan-a"));
+        episode
+            .extra
+            .insert("task_id".to_string(), serde_json::json!("task-2"));
         episode.extra.insert(
             "stderr".to_string(),
             serde_json::json!(
@@ -4574,8 +4654,14 @@ files = ["src/dashboard.rs"]
             "task-2"
         );
         assert_eq!(execution.agent_output_tail.len(), 20);
-        assert_eq!(execution.agent_output_tail.first().expect("tail head"), "stderr line 6");
-        assert_eq!(execution.agent_output_tail.last().expect("tail last"), "stderr line 25");
+        assert_eq!(
+            execution.agent_output_tail.first().expect("tail head"),
+            "stderr line 6"
+        );
+        assert_eq!(
+            execution.agent_output_tail.last().expect("tail last"),
+            "stderr line 25"
+        );
     }
 
     #[test]

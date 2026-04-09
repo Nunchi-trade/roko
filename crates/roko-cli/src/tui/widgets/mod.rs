@@ -4,18 +4,18 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    BarChart, Block, Borders, Cell, Gauge, List, ListItem, Paragraph, Row, Sparkline, Table,
-    Tabs, Wrap,
+    BarChart, Block, Borders, Cell, Gauge, List, ListItem, Paragraph, Row, Sparkline, Table, Tabs,
+    Wrap,
 };
-use ratatui::Frame;
-use serde_json::Value;
+use roko_core::task::{TaskCategory, TaskComplexityBand};
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::prompt_experiment::{ExperimentStatus, ExperimentStore};
-use roko_core::task::{TaskCategory, TaskComplexityBand};
+use serde_json::Value;
 
 use super::dashboard::{
     AgentActivitySnapshot, CFactor, CascadeRouterState, DashboardData, DashboardScaffold,
@@ -82,7 +82,12 @@ pub fn render_header(
     let summary = dashboard.summary();
     let title = Paragraph::new(vec![
         Line::from(vec![
-            Span::styled("roko ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "roko ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw("dashboard"),
         ]),
         Line::from(summary.to_string()),
@@ -136,11 +141,7 @@ pub fn render_sidebar(
         .collect();
 
     let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("navigation"),
-        )
+        .block(Block::default().borders(Borders::ALL).title("navigation"))
         .highlight_style(
             Style::default()
                 .fg(Color::Black)
@@ -202,22 +203,21 @@ pub fn render_page(
 
     let rendered = page.render(dashboard);
     let content = Paragraph::new(rendered)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(page.title()),
-        )
+        .block(Block::default().borders(Borders::ALL).title(page.title()))
         .wrap(Wrap { trim: false })
         .scroll((scroll, 0));
     frame.render_widget(content, area);
 }
 
 fn render_agent_activity_page(frame: &mut Frame<'_>, area: Rect, data: &DashboardData) {
-    let block = Block::default().borders(Borders::ALL).title("Agent Activity");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Agent Activity");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let Some(snapshot) = build_agent_activity_snapshot(&data.agents, &data.efficiency_events) else {
+    let Some(snapshot) = build_agent_activity_snapshot(&data.agents, &data.efficiency_events)
+    else {
         let empty = Paragraph::new("no active agents or efficiency history")
             .style(Style::default().fg(Color::DarkGray))
             .alignment(Alignment::Center);
@@ -277,8 +277,8 @@ fn render_learning_page(frame: &mut Frame<'_>, area: Rect, data: &DashboardData)
         return;
     }
 
-    let sections = Layout::vertical([Constraint::Percentage(56), Constraint::Percentage(44)])
-    .split(inner);
+    let sections =
+        Layout::vertical([Constraint::Percentage(56), Constraint::Percentage(44)]).split(inner);
     let top = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(sections[0]);
 
@@ -323,12 +323,10 @@ fn render_signals_page(
     render_signal_tree(frame, sections[2], &signals, selected);
 }
 
-fn render_cascade_router_table(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    router: &CascadeRouterState,
-) {
-    let block = Block::default().borders(Borders::ALL).title("cascade router");
+fn render_cascade_router_table(frame: &mut Frame<'_>, area: Rect, router: &CascadeRouterState) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("cascade router");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -390,11 +388,7 @@ fn render_cascade_router_table(
     frame.render_widget(table, inner);
 }
 
-fn render_active_experiments_table(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    store: &ExperimentStore,
-) {
+fn render_active_experiments_table(frame: &mut Frame<'_>, area: Rect, store: &ExperimentStore) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title("active experiments");
@@ -459,13 +453,9 @@ fn render_active_experiments_table(
     frame.render_widget(table, inner);
 }
 
-fn render_learning_trends(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    events: &[AgentEfficiencyEvent],
-) {
-    let blocks = Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
+fn render_learning_trends(frame: &mut Frame<'_>, area: Rect, events: &[AgentEfficiencyEvent]) {
+    let blocks =
+        Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).split(area);
     let top = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(blocks[0]);
     let bottom = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -611,7 +601,9 @@ fn render_signals_table(
     signals: &[SignalSummary],
     selected: usize,
 ) {
-    let block = Block::default().borders(Borders::ALL).title("recent signals");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("recent signals");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -862,7 +854,11 @@ fn build_active_experiment_rows(store: &ExperimentStore) -> Vec<LearningExperime
                 .iter()
                 .filter(|variant| variant.active)
                 .map(|variant| {
-                    let stats = experiment.stats.get(&variant.id).cloned().unwrap_or_default();
+                    let stats = experiment
+                        .stats
+                        .get(&variant.id)
+                        .cloned()
+                        .unwrap_or_default();
                     (variant, stats)
                 })
                 .collect::<Vec<_>>();
@@ -920,7 +916,10 @@ fn build_active_experiment_rows(store: &ExperimentStore) -> Vec<LearningExperime
 
 fn experiment_significance_label(
     experiment: &roko_learn::prompt_experiment::PromptExperiment,
-    variants: &[(&roko_learn::prompt_experiment::PromptVariant, roko_learn::prompt_experiment::VariantStats)],
+    variants: &[(
+        &roko_learn::prompt_experiment::PromptVariant,
+        roko_learn::prompt_experiment::VariantStats,
+    )],
 ) -> String {
     let active = variants
         .iter()
@@ -1030,7 +1029,9 @@ fn build_learning_trend_series(events: &[AgentEfficiencyEvent]) -> LearningTrend
                 if bucket.tasks == 0 {
                     0
                 } else {
-                    ((bucket.cost_usd / bucket.tasks as f64) * 100.0).round().max(0.0) as u64
+                    ((bucket.cost_usd / bucket.tasks as f64) * 100.0)
+                        .round()
+                        .max(0.0) as u64
                 }
             })
             .collect(),
@@ -1107,7 +1108,9 @@ fn tier_for_model(model: &str) -> &'static str {
 
 fn significance_style(significance: &str) -> Style {
     if significance.starts_with("sig") {
-        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
     } else if significance.starts_with('p') {
         Style::default().fg(Color::Yellow)
     } else {
@@ -1162,8 +1165,7 @@ fn standard_normal_cdf(x: f64) -> f64 {
     let d = 0.398_942_3 * (-0.5 * x * x).exp();
     let prob = d
         * t
-        * (0.319_381_5
-            + t * (-0.356_563_8 + t * (1.781_478 + t * (-1.821_256 + t * 1.330_274))));
+        * (0.319_381_5 + t * (-0.356_563_8 + t * (1.781_478 + t * (-1.821_256 + t * 1.330_274))));
     if x >= 0.0 { 1.0 - prob } else { prob }
 }
 
@@ -1218,14 +1220,18 @@ impl LearningTaskAggregate {
             self.first_passed = event.gate_passed;
         }
 
-        if self.latest_timestamp.map_or(true, |latest| timestamp > latest) {
+        if self
+            .latest_timestamp
+            .map_or(true, |latest| timestamp > latest)
+        {
             self.latest_timestamp = Some(timestamp);
             self.latest_passed = event.gate_passed;
         }
     }
 
     fn latest_day(&self) -> Option<chrono::NaiveDate> {
-        self.latest_timestamp.map(|timestamp| timestamp.date_naive())
+        self.latest_timestamp
+            .map(|timestamp| timestamp.date_naive())
     }
 
     fn first_try_passed(&self) -> bool {
@@ -1242,11 +1248,7 @@ struct LearningDayAggregate {
     first_try_successes: u64,
 }
 
-fn render_gate_summary_table(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    rows: &[GateSummaryRow],
-) {
+fn render_gate_summary_table(frame: &mut Frame<'_>, area: Rect, rows: &[GateSummaryRow]) {
     let block = Block::default().borders(Borders::ALL).title("gate summary");
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1308,12 +1310,10 @@ fn render_gate_summary_table(
     frame.render_widget(table, inner);
 }
 
-fn render_gate_thresholds_table(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    rows: &[GateThresholdRow],
-) {
-    let block = Block::default().borders(Borders::ALL).title("adaptive thresholds");
+fn render_gate_thresholds_table(frame: &mut Frame<'_>, area: Rect, rows: &[GateThresholdRow]) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("adaptive thresholds");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -1385,7 +1385,9 @@ fn render_gate_failures_list(
     rows: &[GateFailureRow],
     selected: usize,
 ) {
-    let block = Block::default().borders(Borders::ALL).title("recent failures");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("recent failures");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -1417,7 +1419,10 @@ fn render_gate_failures_list(
                 Style::default()
             };
             ListItem::new(Line::from(vec![
-                Span::styled(truncate_text(&row.task_id, 10), Style::default().fg(Color::Cyan)),
+                Span::styled(
+                    truncate_text(&row.task_id, 10),
+                    Style::default().fg(Color::Cyan),
+                ),
                 Span::raw(" "),
                 Span::styled(
                     truncate_text(&row.gate_name, 12),
@@ -1439,7 +1444,9 @@ fn render_active_agents_table(
     area: Rect,
     rows: &[super::dashboard::AgentActivityRow],
 ) {
-    let block = Block::default().borders(Borders::ALL).title("active agents");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("active agents");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -1531,7 +1538,14 @@ fn render_model_distribution_chart(
         .direction(Direction::Horizontal)
         .bar_width(1)
         .bar_gap(1)
-        .max(snapshot.model_usage.iter().map(|row| row.count).max().unwrap_or(1))
+        .max(
+            snapshot
+                .model_usage
+                .iter()
+                .map(|row| row.count)
+                .max()
+                .unwrap_or(1),
+        )
         .bar_style(Style::default().fg(Color::Cyan))
         .value_style(Style::default().fg(Color::White))
         .label_style(Style::default().fg(Color::Gray))
@@ -1545,7 +1559,9 @@ fn render_model_cost_breakdown(
     area: Rect,
     snapshot: &AgentActivitySnapshot,
 ) {
-    let outer = Block::default().borders(Borders::ALL).title("cost breakdown");
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .title("cost breakdown");
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
@@ -1635,7 +1651,9 @@ fn render_plan_execution_page(
     data: &DashboardData,
     scroll: u16,
 ) {
-    let outer = Block::default().borders(Borders::ALL).title("Plan Execution");
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .title("Plan Execution");
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
@@ -1676,12 +1694,15 @@ fn render_plan_execution_page(
         .ratio(progress)
         .label(Span::styled(
             format!("{}/{}", execution.tasks_done, execution.tasks_total),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ))
         .gauge_style(Style::default().fg(Color::Cyan).bg(Color::Black));
     frame.render_widget(gauge, top);
 
-    let split = Layout::horizontal([Constraint::Percentage(72), Constraint::Percentage(28)]).split(body);
+    let split =
+        Layout::horizontal([Constraint::Percentage(72), Constraint::Percentage(28)]).split(body);
     let left = split[0];
     let right = split[1];
 
@@ -1806,14 +1827,21 @@ fn render_plan_execution_sidebar(
 
     let mut lines = Vec::new();
     lines.push(Line::from(vec![
-        Span::styled("task", Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "task",
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(": "),
         Span::raw(&task.task_id),
     ]));
     lines.push(Line::from(vec![
         Span::styled(
             "description",
-            Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw(": "),
         Span::raw(truncate_text(&task.description, 200)),
@@ -1821,7 +1849,9 @@ fn render_plan_execution_sidebar(
     lines.push(Line::from(" "));
     lines.push(Line::from(Span::styled(
         "read_files",
-        Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Gray)
+            .add_modifier(Modifier::BOLD),
     )));
     if task.read_files.is_empty() {
         lines.push(Line::from("  <none>"));
@@ -1840,7 +1870,9 @@ fn render_plan_execution_sidebar(
     lines.push(Line::from(" "));
     lines.push(Line::from(Span::styled(
         "write_files",
-        Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Gray)
+            .add_modifier(Modifier::BOLD),
     )));
     if task.write_files.is_empty() {
         lines.push(Line::from("  <none>"));
@@ -1852,7 +1884,9 @@ fn render_plan_execution_sidebar(
     lines.push(Line::from(" "));
     lines.push(Line::from(Span::styled(
         "gate_results",
-        Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Gray)
+            .add_modifier(Modifier::BOLD),
     )));
     if gate_rows.is_empty() {
         lines.push(Line::from("  <none>"));
@@ -1890,7 +1924,11 @@ fn render_plan_overview(frame: &mut Frame<'_>, area: Rect, data: &DashboardData)
         return;
     }
 
-    let gauge_width = inner.width.saturating_div(3).clamp(12, 18).min(inner.width.saturating_sub(1));
+    let gauge_width = inner
+        .width
+        .saturating_div(3)
+        .clamp(12, 18)
+        .min(inner.width.saturating_sub(1));
     let table_width = inner.width.saturating_sub(gauge_width).max(1);
     let columns = Layout::horizontal([
         Constraint::Length(table_width),
@@ -1980,7 +2018,11 @@ fn render_health_indicators(frame: &mut Frame<'_>, area: Rect, data: &DashboardD
     let c_factor_series = cfactor_series(data);
 
     let gate = Sparkline::default()
-        .block(Block::default().borders(Borders::ALL).title("gate pass rate (7d)"))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("gate pass rate (7d)"),
+        )
         .data(&gate_series)
         .style(Style::default().fg(Color::Green));
     frame.render_widget(gate, panels[0]);
@@ -1992,14 +2034,20 @@ fn render_health_indicators(frame: &mut Frame<'_>, area: Rect, data: &DashboardD
     frame.render_widget(cost, panels[1]);
 
     let cfactor = Sparkline::default()
-        .block(Block::default().borders(Borders::ALL).title("C-Factor score"))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("C-Factor score"),
+        )
         .data(&c_factor_series)
         .style(Style::default().fg(Color::Cyan));
     frame.render_widget(cfactor, panels[2]);
 }
 
 fn render_alerts(frame: &mut Frame<'_>, area: Rect, data: &DashboardData) {
-    let block = Block::default().borders(Borders::ALL).title("Conductor Alerts");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Conductor Alerts");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -2094,7 +2142,11 @@ fn collect_plan_rows(data: &DashboardData) -> Vec<PlanRow> {
         })
         .collect::<Vec<_>>();
 
-    rows.sort_by(|a, b| b.completed.cmp(&a.completed).then_with(|| a.name.cmp(&b.name)));
+    rows.sort_by(|a, b| {
+        b.completed
+            .cmp(&a.completed)
+            .then_with(|| a.name.cmp(&b.name))
+    });
     rows
 }
 
@@ -2126,7 +2178,10 @@ fn load_task_tracker_completion_counts(root: &Path) -> HashMap<String, usize> {
 
     let mut counts = HashMap::new();
     for entry in entries {
-        let plan_id = entry.get("plan_id").and_then(Value::as_str).unwrap_or_default();
+        let plan_id = entry
+            .get("plan_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         if plan_id.is_empty() {
             continue;
         }
@@ -2245,7 +2300,11 @@ fn load_efficiency_events(root: &Path) -> Vec<AgentEfficiencyEvent> {
 }
 
 fn cfactor_series(data: &DashboardData) -> Vec<u64> {
-    let path = data.root().join(".roko").join("learn").join("c-factor.jsonl");
+    let path = data
+        .root()
+        .join(".roko")
+        .join("learn")
+        .join("c-factor.jsonl");
     let history = read_jsonl_values(&path)
         .into_iter()
         .filter_map(|entry| serde_json::from_value::<CFactor>(entry).ok())
@@ -2270,7 +2329,11 @@ fn cfactor_series(data: &DashboardData) -> Vec<u64> {
 }
 
 fn cfactor_trend(data: &DashboardData) -> &'static str {
-    let path = data.root().join(".roko").join("learn").join("c-factor.jsonl");
+    let path = data
+        .root()
+        .join(".roko")
+        .join("learn")
+        .join("c-factor.jsonl");
     let history = read_jsonl_values(&path)
         .into_iter()
         .filter_map(|entry| serde_json::from_value::<CFactor>(entry).ok())
@@ -2359,9 +2422,15 @@ fn gauge_style(status: &str, completed: bool) -> Style {
 
 fn phase_style(phase: &str) -> Style {
     match phase.to_ascii_lowercase().as_str() {
-        "implementing" => Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
-        "gating" => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        "done" => Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+        "implementing" => Style::default()
+            .fg(Color::Blue)
+            .add_modifier(Modifier::BOLD),
+        "gating" => Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+        "done" => Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
         "failed" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         _ => Style::default().fg(Color::Gray),
     }
@@ -2370,16 +2439,22 @@ fn phase_style(phase: &str) -> Style {
 fn severity_style(severity: &str) -> Style {
     match severity.to_ascii_lowercase().as_str() {
         "critical" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        "warning" => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        "warning" => Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
         _ => Style::default().fg(Color::Gray),
     }
 }
 
 fn gate_pass_rate_style(pass_rate: f64) -> Style {
     if pass_rate > 0.9 {
-        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
     } else if pass_rate >= 0.7 {
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
     }
@@ -2458,22 +2533,37 @@ struct PlanRow {
 }
 
 /// Render the footer with keyboard shortcuts.
-pub fn render_footer(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    pages: &PageRegistry,
-    active_page: PageId,
-) {
+pub fn render_footer(frame: &mut Frame<'_>, area: Rect, pages: &PageRegistry, active_page: PageId) {
     let page_count = pages.len();
     let footer = Paragraph::new(vec![
         Line::from(vec![
-            Span::styled("q", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "q",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" quit  "),
-            Span::styled("r", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "r",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" refresh  "),
-            Span::styled("←/→", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "←/→",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" page  "),
-            Span::styled("↑/↓", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "↑/↓",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" scroll"),
         ]),
         Line::from(format!(

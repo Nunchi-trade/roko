@@ -1159,11 +1159,7 @@ impl PlanRunner {
         }
     }
 
-    fn emit_execution_event(
-        &self,
-        plan_id: &str,
-        event: crate::serve::events::ExecutionEvent,
-    ) {
+    fn emit_execution_event(&self, plan_id: &str, event: crate::serve::events::ExecutionEvent) {
         self.emit_server_event(crate::serve::events::ServerEvent::Execution {
             plan_id: plan_id.to_string(),
             event,
@@ -1796,9 +1792,14 @@ impl PlanRunner {
                 self.efficiency_events.clone()
             }
         };
-        let total_input_tokens: u64 = efficiency_events.iter().map(|event| event.input_tokens).sum();
-        let total_output_tokens: u64 =
-            efficiency_events.iter().map(|event| event.output_tokens).sum();
+        let total_input_tokens: u64 = efficiency_events
+            .iter()
+            .map(|event| event.input_tokens)
+            .sum();
+        let total_output_tokens: u64 = efficiency_events
+            .iter()
+            .map(|event| event.output_tokens)
+            .sum();
         let total_cost_usd: f64 = efficiency_events.iter().map(|event| event.cost_usd).sum();
         let duration_secs: f64 = efficiency_events
             .iter()
@@ -2259,7 +2260,12 @@ impl PlanRunner {
                     EventKind::ErrorOccurred,
                     serde_json::json!({"plan_id": &plan_id, "error": reason.clone()}),
                 );
-                self.apply_event_and_emit(&plan_id, "plan", &ExecutorEvent::Fatal(reason), "failed");
+                self.apply_event_and_emit(
+                    &plan_id,
+                    "plan",
+                    &ExecutorEvent::Fatal(reason),
+                    "failed",
+                );
             }
             ExecutorAction::CompletePlan { plan_id } => {
                 tracing::info!("[orchestrate] CompletePlan {plan_id}");
@@ -2514,9 +2520,8 @@ impl PlanRunner {
             })
             .map(|task| task.status.as_str())
             .unwrap_or("unknown");
-        let _span =
-            info_span!("task", plan_id = %plan_id, task_id = %task_id, phase = %task_phase)
-                .entered();
+        let _span = info_span!("task", plan_id = %plan_id, task_id = %task_id, phase = %task_phase)
+            .entered();
 
         // Track which task is being worked on (used by autofix if gates fail).
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
@@ -2550,7 +2555,9 @@ impl PlanRunner {
 
         for attempt in 0..=max_retries {
             if attempt > 0 {
-                tracing::info!("[orchestrate] Retry {attempt}/{max_retries} for {plan_id}/{task_id}");
+                tracing::info!(
+                    "[orchestrate] Retry {attempt}/{max_retries} for {plan_id}/{task_id}"
+                );
             }
 
             match self
@@ -2574,7 +2581,9 @@ impl PlanRunner {
                             succeeded = true;
                         }
                         Err(e) => {
-                            tracing::error!("[orchestrate] task {task_id} aborted by plan budget: {e}");
+                            tracing::error!(
+                                "[orchestrate] task {task_id} aborted by plan budget: {e}"
+                            );
                             self.apply_event_and_emit(
                                 plan_id,
                                 task_id,
@@ -2653,7 +2662,8 @@ impl PlanRunner {
         }
 
         // ── Build agent configs sequentially (needs &mut self) ───────
-        let mut configs: Vec<(String, String, AgentRunConfig)> = Vec::with_capacity(task_dirs.len());
+        let mut configs: Vec<(String, String, AgentRunConfig)> =
+            Vec::with_capacity(task_dirs.len());
 
         let plan_dir = self.workdir.join("plans").join(plan_id);
         let tasks_toml = plan_dir.join("tasks.toml");
@@ -2838,7 +2848,9 @@ impl PlanRunner {
             self.apply_event_and_emit(
                 plan_id,
                 "implementation",
-                &ExecutorEvent::Fatal("parallel batch had failures; remaining tasks blocked".into()),
+                &ExecutorEvent::Fatal(
+                    "parallel batch had failures; remaining tasks blocked".into(),
+                ),
                 "failed",
             );
         }
@@ -3184,7 +3196,9 @@ impl PlanRunner {
              and provide updated implementation steps."
         );
 
-        tracing::info!("[orchestrate] Attempting re-plan for {plan_id} after repeated gate failures");
+        tracing::info!(
+            "[orchestrate] Attempting re-plan for {plan_id} after repeated gate failures"
+        );
         match self
             .dispatch_agent_with(
                 plan_id,
@@ -3203,7 +3217,12 @@ impl PlanRunner {
                     tracker.gate_failure_count = 0;
                 }
                 // Reset to implementing phase so the updated plan gets executed.
-                self.apply_event_and_emit(plan_id, "replan", &ExecutorEvent::EnrichmentDone, "transitioned");
+                self.apply_event_and_emit(
+                    plan_id,
+                    "replan",
+                    &ExecutorEvent::EnrichmentDone,
+                    "transitioned",
+                );
             }
             Err(e) => {
                 tracing::error!("[orchestrate] Re-plan failed for {plan_id}: {e}");
@@ -3548,9 +3567,7 @@ impl PlanRunner {
                     .ok()
                     .map(|text| tail_output_lines(&text, TASK_FAILURE_OUTPUT_TAIL_LINES));
                 let error = with_task_failure_context(
-                    anyhow!(
-                        "{msg}; stderr/stdout:\n{error_output}"
-                    ),
+                    anyhow!("{msg}; stderr/stdout:\n{error_output}"),
                     &task_id,
                     &phase,
                     &command,
@@ -4085,7 +4102,8 @@ impl PlanRunner {
             if td.model_hint.is_some() {
                 tracing::info!(
                     "[orchestrate] Task {} model_hint={} (skipping CascadeRouter)",
-                    td.id, selected_model
+                    td.id,
+                    selected_model
                 );
             } else {
                 use roko_core::TaskComplexityBand;
@@ -4115,7 +4133,8 @@ impl PlanRunner {
                 if cascade.stage != roko_learn::cascade_router::CascadeStage::Static {
                     tracing::info!(
                         "[orchestrate] CascadeRouter recommends model={} (stage={:?})",
-                        cascade.primary.slug, cascade.stage
+                        cascade.primary.slug,
+                        cascade.stage
                     );
                     selected_model = cascade.primary.slug;
                 }
@@ -4140,7 +4159,8 @@ impl PlanRunner {
             if cascade.stage != roko_learn::cascade_router::CascadeStage::Static {
                 tracing::info!(
                     "[orchestrate] CascadeRouter recommends model={} (stage={:?})",
-                    cascade.primary.slug, cascade.stage
+                    cascade.primary.slug,
+                    cascade.stage
                 );
                 selected_model = cascade.primary.slug;
             }
@@ -6159,8 +6179,7 @@ fn with_task_failure_context(
     match output_tail {
         Some(tail) if !tail.trim().is_empty() => error.context(format!(
             "agent_output_tail_last_{}_lines:\n{}",
-            TASK_FAILURE_OUTPUT_TAIL_LINES,
-            tail
+            TASK_FAILURE_OUTPUT_TAIL_LINES, tail
         )),
         _ => error.context(format!(
             "agent_output_tail_last_{}_lines: <unavailable>",

@@ -2,18 +2,18 @@
 
 use std::sync::Arc;
 
-use chrono::{DateTime, Duration, Utc};
 use axum::extract::{Path, Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
-use std::collections::{BTreeMap, HashMap};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::{BTreeMap, HashMap};
 
 use crate::serve::error::ApiError;
 use crate::serve::state::AppState;
-use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::cascade_router::CascadeStage;
+use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
 use roko_learn::model_router::COLD_START_THRESHOLD;
 use roko_learn::prompt_experiment::{ExperimentStatus, ExperimentStore};
@@ -86,10 +86,9 @@ async fn metrics_summary(
     Query(query): Query<MetricsSummaryQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let summary = build_metrics_summary(&state, query.period.as_deref()).await?;
-    Ok(Json(
-        serde_json::to_value(summary)
-            .map_err(|e| ApiError::internal(format!("serialize metrics summary: {e}")))?,
-    ))
+    Ok(Json(serde_json::to_value(summary).map_err(|e| {
+        ApiError::internal(format!("serialize metrics summary: {e}"))
+    })?))
 }
 
 /// `GET /api/metrics/success_rate` — per template success rate, split by trigger kind.
@@ -111,9 +110,7 @@ async fn model_efficiency(State(state): State<Arc<AppState>>) -> Result<Json<Val
     let efficiency_path = state.workdir.join(".roko/learn/efficiency.jsonl");
     let events = read_efficiency_events(&efficiency_path).await?;
     Ok(Json(build_model_efficiency_response(
-        &path,
-        snapshot,
-        &events,
+        &path, snapshot, &events,
     )))
 }
 
@@ -284,7 +281,11 @@ async fn read_jsonl_entries(path: &std::path::Path) -> Result<Vec<Value>, ApiErr
             continue;
         }
         let entry = serde_json::from_str::<Value>(line).map_err(|e| {
-            ApiError::internal(format!("parse {} line {}: {e}", path.display(), line_no + 1))
+            ApiError::internal(format!(
+                "parse {} line {}: {e}",
+                path.display(),
+                line_no + 1
+            ))
         })?;
         entries.push(entry);
     }
@@ -396,13 +397,18 @@ async fn build_metrics_summary(
     let experiments = read_experiment_store(&experiment_path).await?;
 
     let agents_run = efficiency_events.len() as u64;
-    let success_count = efficiency_events.iter().filter(|event| event.gate_passed).count() as u64;
+    let success_count = efficiency_events
+        .iter()
+        .filter(|event| event.gate_passed)
+        .count() as u64;
     let success_rate = ratio(success_count, agents_run);
     let avg_cost_per_episode_cents = if agents_run == 0 {
         0
     } else {
         let total_cost_usd: f64 = efficiency_events.iter().map(|event| event.cost_usd).sum();
-        ((total_cost_usd / agents_run as f64) * 100.0).round().max(0.0) as u64
+        ((total_cost_usd / agents_run as f64) * 100.0)
+            .round()
+            .max(0.0) as u64
     };
 
     let feedback_engagement_rate = feedback_engagement_rate(&episodes);
@@ -426,7 +432,9 @@ async fn build_metrics_summary(
     })
 }
 
-fn build_template_success_rate(runs: &HashMap<String, Vec<crate::serve::state::TemplateRunRecord>>) -> Value {
+fn build_template_success_rate(
+    runs: &HashMap<String, Vec<crate::serve::state::TemplateRunRecord>>,
+) -> Value {
     let mut templates = Vec::new();
 
     for (template_name, records) in runs {
@@ -472,7 +480,9 @@ fn build_template_success_rate(runs: &HashMap<String, Vec<crate::serve::state::T
     json!({ "templates": templates })
 }
 
-fn build_template_engagement(runs: &HashMap<String, Vec<crate::serve::state::TemplateRunRecord>>) -> Value {
+fn build_template_engagement(
+    runs: &HashMap<String, Vec<crate::serve::state::TemplateRunRecord>>,
+) -> Value {
     let mut templates = Vec::new();
 
     for (template_name, records) in runs {
@@ -503,7 +513,12 @@ fn build_model_efficiency_response(
 ) -> Value {
     let total_observations = snapshot
         .as_ref()
-        .map(|snap| snap.confidence_stats.values().map(|stats| stats.trials).sum::<u64>())
+        .map(|snap| {
+            snap.confidence_stats
+                .values()
+                .map(|stats| stats.trials)
+                .sum::<u64>()
+        })
         .unwrap_or(0);
     let current_stage = cascade_stage_for_observations(total_observations).label();
 
@@ -615,10 +630,7 @@ fn build_gate_rate_response(entries: &[Value]) -> Value {
     json!({ "gates": gates })
 }
 
-fn build_experiment_metrics_response(
-    path: &std::path::Path,
-    store: &ExperimentStore,
-) -> Value {
+fn build_experiment_metrics_response(path: &std::path::Path, store: &ExperimentStore) -> Value {
     let mut experiments = Vec::new();
 
     for experiment in store.iter() {
@@ -634,7 +646,11 @@ fn build_experiment_metrics_response(
         let mut ranked: Vec<Value> = variants
             .iter()
             .map(|variant| {
-                let stats = experiment.stats.get(&variant.id).cloned().unwrap_or_default();
+                let stats = experiment
+                    .stats
+                    .get(&variant.id)
+                    .cloned()
+                    .unwrap_or_default();
                 json!({
                     "id": variant.id,
                     "name": variant.name,
@@ -670,10 +686,17 @@ fn build_experiment_metrics_response(
         let best = ranked.first().cloned();
         let worst = ranked.last().cloned();
         let difference = match (
-            best.as_ref().and_then(|v| v.get("success_rate")).and_then(Value::as_f64),
-            worst.as_ref().and_then(|v| v.get("success_rate")).and_then(Value::as_f64),
+            best.as_ref()
+                .and_then(|v| v.get("success_rate"))
+                .and_then(Value::as_f64),
+            worst
+                .as_ref()
+                .and_then(|v| v.get("success_rate"))
+                .and_then(Value::as_f64),
         ) {
-            (Some(best_rate), Some(worst_rate)) if ranked.len() >= 2 => Some(best_rate - worst_rate),
+            (Some(best_rate), Some(worst_rate)) if ranked.len() >= 2 => {
+                Some(best_rate - worst_rate)
+            }
             _ => None,
         };
 
@@ -714,7 +737,9 @@ fn build_feedback_latency_response(entries: &[Value]) -> Value {
         let Some(signal_id) = signal_id(entry) else {
             continue;
         };
-        let Some(action_ts) = ancestor_timestamp(&index, &signal_id, &["agent_output", "agent_message"]) else {
+        let Some(action_ts) =
+            ancestor_timestamp(&index, &signal_id, &["agent_output", "agent_message"])
+        else {
             continue;
         };
         if gate_ts < action_ts {
@@ -877,7 +902,12 @@ fn entry_timestamp_ms(entry: &Value) -> Option<i64> {
     entry
         .get("created_at_ms")
         .and_then(Value::as_i64)
-        .or_else(|| entry.get("created_at_ms").and_then(Value::as_u64).map(|ts| ts as i64))
+        .or_else(|| {
+            entry
+                .get("created_at_ms")
+                .and_then(Value::as_u64)
+                .map(|ts| ts as i64)
+        })
 }
 
 fn gate_trend(samples: &[(i64, bool)]) -> (f64, String, f64, f64) {
@@ -952,7 +982,11 @@ async fn read_efficiency_events(
             continue;
         }
         let event = serde_json::from_str::<AgentEfficiencyEvent>(line).map_err(|e| {
-            ApiError::internal(format!("parse {} line {}: {e}", path.display(), line_no + 1))
+            ApiError::internal(format!(
+                "parse {} line {}: {e}",
+                path.display(),
+                line_no + 1
+            ))
         })?;
         events.push(event);
     }
@@ -971,7 +1005,9 @@ async fn read_experiment_store(path: &std::path::Path) -> Result<ExperimentStore
 }
 
 /// Read the persisted cascade router snapshot if it exists.
-async fn read_cascade_snapshot(path: &std::path::Path) -> Result<Option<CascadeSnapshotData>, ApiError> {
+async fn read_cascade_snapshot(
+    path: &std::path::Path,
+) -> Result<Option<CascadeSnapshotData>, ApiError> {
     let content = match tokio::fs::read_to_string(path).await {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -1097,18 +1133,21 @@ fn self_improvement_velocity(events: &[AgentEfficiencyEvent]) -> f64 {
 fn best_experiment_lift(store: &ExperimentStore) -> Option<ExperimentLiftSummary> {
     let mut best: Option<ExperimentLiftSummary> = None;
 
-    for experiment in store.iter().filter(|experiment| experiment.status == ExperimentStatus::Running) {
+    for experiment in store
+        .iter()
+        .filter(|experiment| experiment.status == ExperimentStatus::Running)
+    {
         let mut active_variants: Vec<_> = experiment
             .variants
             .iter()
             .filter(|variant| variant.active)
             .map(|variant| {
-                let stats = experiment.stats.get(&variant.id).cloned().unwrap_or_default();
-                (
-                    variant.name.clone(),
-                    stats.trials,
-                    stats.success_rate(),
-                )
+                let stats = experiment
+                    .stats
+                    .get(&variant.id)
+                    .cloned()
+                    .unwrap_or_default();
+                (variant.name.clone(), stats.trials, stats.success_rate())
             })
             .collect();
 
@@ -1155,7 +1194,10 @@ async fn top_templates(state: &AppState, window_start: DateTime<Utc>) -> Vec<Tem
 
     for (template_name, records) in runs.iter() {
         let aggregate = summary.entry(template_name.clone()).or_default();
-        for record in records.iter().filter(|record| record.timestamp >= window_start) {
+        for record in records
+            .iter()
+            .filter(|record| record.timestamp >= window_start)
+        {
             aggregate.runs += 1;
             if record.success {
                 aggregate.successes += 1;
@@ -1176,7 +1218,11 @@ async fn top_templates(state: &AppState, window_start: DateTime<Utc>) -> Vec<Tem
     templates.sort_by(|a, b| {
         b.runs
             .cmp(&a.runs)
-            .then_with(|| b.success_rate.partial_cmp(&a.success_rate).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| {
+                b.success_rate
+                    .partial_cmp(&a.success_rate)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .then_with(|| a.name.cmp(&b.name))
     });
 
@@ -1297,11 +1343,7 @@ fn extract_gate_passed(entry: &Value) -> Option<bool> {
             "false" => Some(false),
             _ => None,
         })
-        .or_else(|| {
-            entry
-                .pointer("/body/data/passed")
-                .and_then(Value::as_bool)
-        })
+        .or_else(|| entry.pointer("/body/data/passed").and_then(Value::as_bool))
         .or_else(|| entry.pointer("/body/passed").and_then(Value::as_bool))
 }
 
@@ -1408,9 +1450,8 @@ mod tests {
     fn test_state() -> (tempfile::TempDir, Arc<AppState>) {
         let dir = tempdir().expect("tempdir");
         let workdir = dir.path().to_path_buf();
-        let deploy_backend = Arc::from(
-            create_backend("manual", None, None, None).expect("manual backend"),
-        );
+        let deploy_backend =
+            Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
         let state = Arc::new(AppState::new(
             workdir,
             Config::default(),

@@ -7,8 +7,7 @@
 
 use crate::config::{
     AgentLayer, ConfigLayer, DetectedCli, ExecutorLayer, GateConfig, PromptLayer, ResolvedConfig,
-    ServeAuthLayer, ServeLayer, Source, ToolsLayer, detect_clis, global_config_path,
-    load_layered,
+    ServeAuthLayer, ServeLayer, Source, ToolsLayer, detect_clis, global_config_path, load_layered,
 };
 use anyhow::{Context as _, Result, anyhow};
 use roko_orchestrator::ExecutorConfig;

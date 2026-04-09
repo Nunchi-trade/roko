@@ -11,12 +11,12 @@
 use anyhow::{Context as _, Result, anyhow};
 use clap::{Parser, Subcommand, ValueEnum};
 use roko_agent::process::{cleanup_orphaned_agents, reap_orphaned_children};
+use roko_cli::tui::App;
 use roko_cli::{
     Config, DaemonMode, DashboardScaffold, EditTarget, InjectKind, InjectRequest, OneshotMode,
     PageId, PipeMode, Plan, PlanSummary, ReplMode, SessionStatus, Source, WizardInputs, config_cmd,
     load_layered, run_init_wizard, run_once,
 };
-use roko_cli::tui::App;
 use roko_core::{ContentHash, Context, Kind, Query, Substrate};
 use roko_core::{Headlines, TaskMetric, compute_headlines};
 use roko_fs::{FileSubstrate, FsObservabilitySinks, RokoLayout};
@@ -25,8 +25,8 @@ use roko_learn::episode_logger::{Episode, EpisodeLogger};
 use roko_learn::prompt_experiment::ExperimentStore;
 use roko_learn::runtime_feedback::read_efficiency_events;
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
 use std::env;
+use std::fmt::Write as _;
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
@@ -211,6 +211,9 @@ enum Command {
         /// List all available page slugs.
         #[arg(long)]
         list_pages: bool,
+        /// Force text-mode output instead of the interactive terminal UI.
+        #[arg(long)]
+        text: bool,
         /// Override the working directory (default: cwd / --repo).
         #[arg(long)]
         workdir: Option<PathBuf>,
@@ -448,7 +451,9 @@ fn main() {
     match cli.log_format {
         LogFormat::Json => {
             tracing_subscriber::fmt()
-                .event_format(RedactingFormat::new(tracing_subscriber::fmt::format().json()))
+                .event_format(RedactingFormat::new(
+                    tracing_subscriber::fmt::format().json(),
+                ))
                 .with_env_filter(filter)
                 .init();
         }
@@ -575,8 +580,9 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
         Command::Dashboard {
             page,
             list_pages,
+            text,
             workdir,
-        } => cmd_dashboard(cli, workdir, page, list_pages).await,
+        } => cmd_dashboard(cli, workdir, page, list_pages, text).await,
         Command::Serve {
             bind,
             port,
@@ -697,11 +703,12 @@ async fn cmd_dashboard(
     workdir: Option<PathBuf>,
     page: Option<String>,
     list_pages: bool,
+    text: bool,
 ) -> Result<i32> {
     let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
     prepare_runtime_hooks(&workdir, cli.quiet);
 
-    if page.is_none() && !list_pages && std::io::stdout().is_terminal() {
+    if !text && page.is_none() && !list_pages && std::io::stdout().is_terminal() {
         if App::new(&workdir).run().is_ok() {
             return Ok(EXIT_SUCCESS);
         }
@@ -2458,8 +2465,18 @@ mod tests {
             Some(Command::Dashboard {
                 page: Some(_),
                 list_pages: true,
+                text: false,
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn cli_parses_dashboard_text_flag() {
+        let cli = Cli::try_parse_from(["roko", "dashboard", "--text"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Dashboard { text: true, .. })
         ));
     }
 

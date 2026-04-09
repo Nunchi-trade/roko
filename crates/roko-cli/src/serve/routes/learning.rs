@@ -11,10 +11,10 @@ use serde_json::Value;
 
 use crate::serve::error::ApiError;
 use crate::serve::state::AppState;
-use roko_gate::adaptive_threshold::AdaptiveThresholds;
-use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_core::task::{TaskCategory, TaskComplexityBand};
+use roko_gate::adaptive_threshold::AdaptiveThresholds;
 use roko_learn::cascade_router::CascadeStage;
+use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::model_router::COLD_START_THRESHOLD;
 use roko_learn::prompt_experiment::{ExperimentStatus, ExperimentStore, PromptExperiment};
 use roko_learn::runtime_feedback::read_efficiency_events;
@@ -33,7 +33,9 @@ pub fn routes() -> Router<Arc<AppState>> {
 }
 
 /// `GET /api/learn/efficiency` — aggregate `.roko/learn/efficiency.jsonl`.
-async fn efficiency(State(state): State<Arc<AppState>>) -> Result<Json<EfficiencyResponse>, ApiError> {
+async fn efficiency(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<EfficiencyResponse>, ApiError> {
     let path = state.workdir.join(".roko/learn/efficiency.jsonl");
     let events = read_efficiency_events(&path)
         .await
@@ -55,7 +57,9 @@ async fn cascade(State(state): State<Arc<AppState>>) -> Result<Json<CascadeRespo
 }
 
 /// `GET /api/learn/experiments` — summarize `.roko/learn/experiments.json`.
-async fn experiments(State(state): State<Arc<AppState>>) -> Result<Json<ExperimentsResponse>, ApiError> {
+async fn experiments(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ExperimentsResponse>, ApiError> {
     let path = state.workdir.join(".roko/learn/experiments.json");
     let store = read_experiment_store(&path).await?;
     Ok(Json(build_experiments_response(&path, &store)))
@@ -99,10 +103,7 @@ async fn read_experiment_store(path: &std::path::Path) -> Result<ExperimentStore
     let content = match tokio::fs::read_to_string(path).await {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(ApiError::not_found(format!(
-                "{} not found",
-                path.display()
-            )));
+            return Err(ApiError::not_found(format!("{} not found", path.display())));
         }
         Err(e) => {
             return Err(ApiError::internal(format!("read {}: {e}", path.display())));
@@ -141,7 +142,9 @@ fn build_efficiency_response(events: &[AgentEfficiencyEvent]) -> EfficiencyRespo
             plan_id: event.plan_id.clone(),
             task_id: event.task_id.clone(),
         };
-        let aggregate = tasks.entry(key).or_insert_with(TaskEfficiencyAggregate::default);
+        let aggregate = tasks
+            .entry(key)
+            .or_insert_with(TaskEfficiencyAggregate::default);
         aggregate.record(event, index);
     }
 
@@ -237,7 +240,11 @@ fn summarize_experiment(experiment: &PromptExperiment) -> ActiveExperimentSummar
         .variants
         .iter()
         .map(|variant| {
-            let stats = experiment.stats.get(&variant.id).cloned().unwrap_or_default();
+            let stats = experiment
+                .stats
+                .get(&variant.id)
+                .cloned()
+                .unwrap_or_default();
             VariantPerformance {
                 id: variant.id.clone(),
                 name: variant.name.clone(),
@@ -279,7 +286,8 @@ fn experiment_significance(
     experiment: &PromptExperiment,
     variants: &[VariantPerformance],
 ) -> ExperimentSignificance {
-    let active: Vec<&VariantPerformance> = variants.iter().filter(|variant| variant.active).collect();
+    let active: Vec<&VariantPerformance> =
+        variants.iter().filter(|variant| variant.active).collect();
     if active.len() < 2 {
         return ExperimentSignificance {
             best_variant_id: active.first().map(|variant| variant.id.clone()),
@@ -299,8 +307,18 @@ fn experiment_significance(
     let best = active[0];
     let runner_up = active[1];
     let gap = best.success_rate - runner_up.success_rate;
-    let p_value = two_proportion_p_value(best.successes, best.trials, runner_up.successes, runner_up.trials);
-    let z_score = two_proportion_z_score(best.successes, best.trials, runner_up.successes, runner_up.trials);
+    let p_value = two_proportion_p_value(
+        best.successes,
+        best.trials,
+        runner_up.successes,
+        runner_up.trials,
+    );
+    let z_score = two_proportion_z_score(
+        best.successes,
+        best.trials,
+        runner_up.successes,
+        runner_up.trials,
+    );
     let meets_effect_size_threshold = gap >= experiment.min_effect_size;
     let statistically_significant = p_value
         .map(|p| p < 0.05 && meets_effect_size_threshold)
@@ -362,13 +380,14 @@ fn standard_normal_cdf(x: f64) -> f64 {
     let d = 0.398_942_3 * (-0.5 * x * x).exp();
     let prob = d
         * t
-        * (0.319_381_5
-            + t * (-0.356_563_8 + t * (1.781_478 + t * (-1.821_256 + t * 1.330_274))));
+        * (0.319_381_5 + t * (-0.356_563_8 + t * (1.781_478 + t * (-1.821_256 + t * 1.330_274))));
     if x >= 0.0 { 1.0 - prob } else { prob }
 }
 
 /// Read and parse a cascade snapshot, or return `None` if the file is missing.
-async fn read_cascade_snapshot(path: &std::path::Path) -> Result<Option<CascadeSnapshotData>, ApiError> {
+async fn read_cascade_snapshot(
+    path: &std::path::Path,
+) -> Result<Option<CascadeSnapshotData>, ApiError> {
     let content = match tokio::fs::read_to_string(path).await {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -501,7 +520,9 @@ fn task_recommendations(weights: &[CascadeModelWeight]) -> Vec<TaskRecommendatio
                 recommended_model: selected
                     .map(|weight| weight.model.clone())
                     .unwrap_or_else(|| "unknown".to_string()),
-                weight: selected.map(|weight| weight.normalized_weight).unwrap_or(0.0),
+                weight: selected
+                    .map(|weight| weight.normalized_weight)
+                    .unwrap_or(0.0),
             }
         })
         .collect()
@@ -860,13 +881,25 @@ mod tests {
 
     #[test]
     fn cascade_response_summarizes_weights_and_recommendations() {
-        let response = build_cascade_response(std::path::Path::new("/tmp/.roko/learn/cascade-router.json"), Some(snapshot()));
+        let response = build_cascade_response(
+            std::path::Path::new("/tmp/.roko/learn/cascade-router.json"),
+            Some(snapshot()),
+        );
 
         assert_eq!(response.current_stage, "confidence");
         assert_eq!(response.routing_stats.total_observations, 80);
         assert_eq!(response.routing_stats.registered_models, 3);
         assert_eq!(response.model_weights.len(), 3);
-        assert!((response.model_weights.iter().map(|w| w.normalized_weight).sum::<f64>() - 1.0).abs() < 1e-9);
+        assert!(
+            (response
+                .model_weights
+                .iter()
+                .map(|w| w.normalized_weight)
+                .sum::<f64>()
+                - 1.0)
+                .abs()
+                < 1e-9
+        );
 
         let docs = response
             .recommended_models
@@ -898,8 +931,10 @@ mod tests {
         let mut store = ExperimentStore::new();
         store.register(make_experiment());
 
-        let response =
-            build_experiments_response(std::path::Path::new("/tmp/.roko/learn/experiments.json"), &store);
+        let response = build_experiments_response(
+            std::path::Path::new("/tmp/.roko/learn/experiments.json"),
+            &store,
+        );
 
         assert_eq!(response.running_experiments, 1);
         assert_eq!(response.concluded_experiments, 0);
@@ -954,9 +989,8 @@ mod tests {
     fn test_state() -> (tempfile::TempDir, Arc<AppState>) {
         let dir = tempdir().expect("tempdir");
         let workdir = dir.path().to_path_buf();
-        let deploy_backend = Arc::from(
-            create_backend("manual", None, None, None).expect("manual backend"),
-        );
+        let deploy_backend =
+            Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
         let state = Arc::new(AppState::new(
             workdir,
             Config::default(),
@@ -998,8 +1032,24 @@ mod tests {
     #[test]
     fn efficiency_response_aggregates_task_level_metrics() {
         let events = vec![
-            efficiency_event("plan-a", "task-1", "2026-04-08T10:00:00Z", 1.0, 100, 50, 1_000),
-            efficiency_event("plan-a", "task-1", "2026-04-08T10:05:00Z", 2.0, 120, 30, 2_000),
+            efficiency_event(
+                "plan-a",
+                "task-1",
+                "2026-04-08T10:00:00Z",
+                1.0,
+                100,
+                50,
+                1_000,
+            ),
+            efficiency_event(
+                "plan-a",
+                "task-1",
+                "2026-04-08T10:05:00Z",
+                2.0,
+                120,
+                30,
+                2_000,
+            ),
             efficiency_event("plan-b", "task-2", "2026-04-08T11:00:00Z", 3.0, 80, 20, 500),
         ];
 

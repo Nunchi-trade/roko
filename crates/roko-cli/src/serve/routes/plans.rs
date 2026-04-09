@@ -356,9 +356,8 @@ mod tests {
     fn test_state() -> (tempfile::TempDir, Arc<AppState>) {
         let dir = tempdir().expect("tempdir");
         let workdir = dir.path().to_path_buf();
-        let deploy_backend = Arc::from(
-            create_backend("manual", None, None, None).expect("manual backend"),
-        );
+        let deploy_backend =
+            Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
         let state = Arc::new(AppState::new(
             workdir,
             Config::default(),
@@ -427,9 +426,7 @@ mod tests {
         let (_dir, state) = test_state();
         let err = generate_plan(
             State(Arc::clone(&state)),
-            Json(GenerateRequest {
-                slug: "  ".into(),
-            }),
+            Json(GenerateRequest { slug: "  ".into() }),
         )
         .await
         .expect_err("invalid request should fail");

@@ -5,12 +5,12 @@
 //! `pages`, and `widgets`.
 
 pub mod app;
+pub mod dashboard;
 pub mod event;
 pub mod pages;
 pub mod widgets;
-pub mod dashboard;
 
 pub use app::App;
-pub use event::{Event, EventHandler};
 pub use dashboard::{DashboardData, DashboardScaffold, DashboardSummary};
+pub use event::{Event, EventHandler};
 pub use pages::{Page, PageId, PageRegistry, PageScaffold, WidgetScaffold};

@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEvent};
 use crossterm::execute;
-use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -56,9 +58,7 @@ enum OverlayState {
     Detail(DetailState),
 }
 
-struct PanicHookRestoreGuard(
-    Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync + 'static>,
-);
+struct PanicHookRestoreGuard(Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync + 'static>);
 
 impl Drop for PanicHookRestoreGuard {
     fn drop(&mut self) {
@@ -68,10 +68,7 @@ impl Drop for PanicHookRestoreGuard {
 }
 
 /// Run the interactive dashboard event loop.
-pub async fn run(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    app: &mut App,
-) -> Result<()> {
+pub async fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Result<()> {
     loop {
         terminal.draw(|f| render_page(f, app))?;
         if crossterm::event::poll(Duration::from_millis(250))? {
@@ -457,7 +454,11 @@ impl App {
     }
 
     fn gate_failure_detail_overlay(&self) -> Option<DetailState> {
-        let row = self.data.gate_results_page.failure_rows.get(self.gate_failure_selection)?;
+        let row = self
+            .data
+            .gate_results_page
+            .failure_rows
+            .get(self.gate_failure_selection)?;
         let raw = load_gate_failure_entry(&self.workdir, row)?;
         let mut body = String::new();
         let _ = std::fmt::Write::write_fmt(
@@ -471,7 +472,10 @@ impl App {
                 pretty_json(&raw)
             ),
         );
-        Some(DetailState::new(format!("gate failure {}", row.gate_name), body))
+        Some(DetailState::new(
+            format!("gate failure {}", row.gate_name),
+            body,
+        ))
     }
 
     fn render_overlay(&self, frame: &mut Frame<'_>, overlay: &OverlayState) {
@@ -602,7 +606,9 @@ fn help_lines() -> Vec<Line<'static>> {
     vec![
         Line::from(Span::styled(
             "dashboard keybindings",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from("1-6      jump to dashboard pages 1 through 6"),
@@ -629,13 +635,19 @@ fn load_signal_entry(workdir: &Path, signal_id: &str) -> Option<Value> {
         .find(|entry| entry.get("id").and_then(Value::as_str) == Some(signal_id))
 }
 
-fn load_gate_failure_entry(workdir: &Path, row: &super::dashboard::GateFailureRow) -> Option<Value> {
+fn load_gate_failure_entry(
+    workdir: &Path,
+    row: &super::dashboard::GateFailureRow,
+) -> Option<Value> {
     let path = workdir.join(".roko").join("signals.jsonl");
     super::dashboard::read_jsonl_values(&path)
         .into_iter()
         .rev()
         .find(|entry| {
-            let kind = entry.get("kind").and_then(Value::as_str).unwrap_or_default();
+            let kind = entry
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             is_gate_result_kind(kind)
                 && entry
                     .pointer("/tags/gate")
@@ -657,7 +669,12 @@ fn entry_timestamp_ms(entry: &Value) -> Option<i64> {
     entry
         .get("created_at_ms")
         .and_then(Value::as_i64)
-        .or_else(|| entry.get("created_at_ms").and_then(Value::as_u64).map(|ts| ts as i64))
+        .or_else(|| {
+            entry
+                .get("created_at_ms")
+                .and_then(Value::as_u64)
+                .map(|ts| ts as i64)
+        })
 }
 
 fn is_gate_result_kind(kind: &str) -> bool {
