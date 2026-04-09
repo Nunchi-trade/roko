@@ -8,7 +8,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use roko_core::{Body, Kind, Provenance, Signal};
+use roko_core::{Body, Kind, OperatingFrequencyAffect, Provenance, Signal};
 use serde::{Deserialize, Serialize};
 
 use crate::{GolemSubsystemId, GolemSubsystemSummary, ScaffoldEngine};
@@ -105,6 +105,20 @@ impl AffectState {
     #[must_use]
     pub const fn behavior_modulation(&self) -> AffectBehaviorModulation {
         self.octant().behavior_modulation()
+    }
+}
+
+impl OperatingFrequencyAffect for AffectState {
+    fn confidence(&self) -> f64 {
+        self.confidence
+    }
+
+    fn arousal(&self) -> f64 {
+        self.arousal
+    }
+
+    fn dominance(&self) -> f64 {
+        self.dominance
     }
 }
 
