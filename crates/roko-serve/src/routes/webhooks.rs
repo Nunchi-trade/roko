@@ -336,6 +336,10 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "hdc")]
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    #[cfg(feature = "hdc")]
+    use base64::Engine as _;
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
 
@@ -438,6 +442,35 @@ mod tests {
         assert_eq!(signal.kind.as_str(), "webhook:generic");
         assert_eq!(signal.body, Body::Json(payload));
         assert_eq!(signal.provenance.author, "webhook:generic");
+    }
+
+    #[cfg(feature = "hdc")]
+    #[test]
+    fn attach_hdc_fingerprint_populates_signal_metadata() {
+        use bardo_primitives::hdc::{fingerprint, HdcVector};
+
+        let body = Body::Json(serde_json::json!({
+            "event": "push",
+            "repository": "roko",
+            "changes": ["a.rs", "b.rs"],
+        }));
+        let signal = Signal::builder(Kind::Custom("github:push".into()))
+            .body(body.clone())
+            .provenance(Provenance::external("github:webhook"))
+            .build();
+
+        let signal = attach_hdc_fingerprint(signal);
+        let encoded = signal
+            .tag("hdc_fingerprint")
+            .expect("expected hdc_fingerprint metadata");
+        let decoded = BASE64.decode(encoded).expect("decode hdc fingerprint");
+        let raw: [u8; 1280] = decoded
+            .as_slice()
+            .try_into()
+            .expect("expected 1280-byte hdc fingerprint");
+        let recovered = HdcVector::from_bytes(&raw);
+
+        assert_eq!(recovered, fingerprint(&body));
     }
 
     fn hex_encode(bytes: &[u8]) -> String {

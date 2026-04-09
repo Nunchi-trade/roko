@@ -783,6 +783,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn suggest_template_from_recent_episodes_accepts_similar_unmatched_events() {
+        let (_dir, path) = tmp_log();
+        let signal = suggestion_signal(Kind::Task, "implement similarity fallback");
+        let signal_fingerprint = text_fingerprint(&signal_fingerprint_text(&signal));
+        let similar_fingerprint = HdcVector::bundle(&[
+            &signal_fingerprint,
+            &signal_fingerprint,
+            &HdcVector::from_seed(b"template-similarity-noise"),
+        ]);
+        let similarity = signal_fingerprint.similarity(&similar_fingerprint);
+        assert!(
+            similarity > 0.7,
+            "expected similar fingerprints to cluster above the 0.7 cutoff, got {similarity}"
+        );
+
+        let mut episode = Episode::new("agent-a", "task-a");
+        episode.agent_template = "code-implementer".to_string();
+        episode.timestamp = Utc::now();
+        episode.started_at = episode.timestamp;
+        episode.completed_at = episode.timestamp;
+        episode.extra.insert(
+            TEXT_FINGERPRINT_KEY.to_string(),
+            serde_json::to_value(similar_fingerprint).expect("serialize fingerprint"),
+        );
+
+        tokio::fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&episode).expect("serialize episode")),
+        )
+        .await
+        .expect("write episodes");
+
+        let suggestion = EpisodeLogger::suggest_template_from_recent_episodes(&path, &signal)
+            .await
+            .expect("suggest template");
+        assert_eq!(suggestion.as_deref(), Some("code-implementer"));
+    }
+
+    #[tokio::test]
     async fn suggest_template_from_recent_episodes_ignores_low_similarity() {
         let (_dir, path) = tmp_log();
         let signal = suggestion_signal(Kind::Task, "implement similarity fallback");
