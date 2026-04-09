@@ -8,7 +8,7 @@ use notify::{EventKind, RecursiveMode, Watcher, recommended_watcher};
 use roko_core::{
     Body, Kind, Result, RokoError, Signal, FS_CREATED, FS_DELETED, FS_MODIFIED,
 };
-use roko_core::config::{WatcherConfig, WatcherPathConfig};
+use roko_core::config::{SchedulerConfig, SchedulerCronConfig, WatcherConfig, WatcherPathConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -171,9 +171,28 @@ struct CompiledFileWatchPath {
     exclude: GlobSet,
 }
 
+impl From<SchedulerCronConfig> for CronSchedule {
+    fn from(value: SchedulerCronConfig) -> Self {
+        Self {
+            name: value.name,
+            expression: value.expression,
+            signal_kind: value.signal_kind,
+            metadata: value.metadata,
+        }
+    }
+}
+
 const FILE_WATCH_DEBOUNCE_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
 
 impl CronEventSource {
+    /// Create a cron event source from config.
+    #[must_use]
+    pub fn from_config(config: SchedulerConfig) -> Self {
+        Self {
+            schedules: config.cron.into_iter().map(CronSchedule::from).collect(),
+        }
+    }
+
     fn compile_schedules(&self) -> Result<Vec<ActiveCronSchedule>> {
         self.schedules
             .iter()

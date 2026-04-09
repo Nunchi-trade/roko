@@ -82,19 +82,19 @@ struct Cli {
     #[arg(long)]
     block_interval_ms: Option<u64>,
     /// Enable the HDC index subsystem (required for chain_searchInsights / chain_postInsight).
-    /// Only effective with --features chain.
+    /// Only effective with --features chain. Enabled by default.
     #[cfg(feature = "chain")]
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = true)]
     enable_hdc: bool,
     /// Enable the knowledge layer (InsightEntry state machine, confirmations, challenges, decay).
-    /// Only effective with --features chain.
+    /// Only effective with --features chain. Enabled by default.
     #[cfg(feature = "chain")]
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = true)]
     enable_knowledge: bool,
     /// Enable stigmergy (THREAT/OPPORTUNITY/WISDOM pheromones with time decay).
-    /// Only effective with --features chain.
+    /// Only effective with --features chain. Enabled by default.
     #[cfg(feature = "chain")]
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = true)]
     enable_stigmergy: bool,
     /// Switchover threshold — above this entry count, the HDC index auto-upgrades to HNSW.
     /// Only effective with --features chain.

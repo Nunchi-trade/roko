@@ -20,11 +20,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use tokio::sync::mpsc;
 use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use roko_core::config::schema::RokoConfig;
+use roko_core::Signal;
+use roko_plugin::{CronEventSource, EventSource, FileWatchEventSource};
 
+use crate::events::ServerEvent;
 use runtime::CliRuntime;
 use state::AppState;
 
@@ -126,6 +131,7 @@ impl ServerBuilder {
             None,
         ));
         tokio::spawn(dispatch::dispatch_loop(Arc::clone(&state), dispatcher));
+        start_builtin_event_sources(Arc::clone(&state), self.config.roko_config.clone());
         let _feedback_loop = feedback::start_feedback_loop(Arc::clone(&state));
         let router = routes::build_router(
             Arc::clone(&state),
@@ -182,6 +188,84 @@ fn build_app_state(
 ) -> AppState {
     let deploy_backend = create_deploy_backend(&roko_config);
     AppState::new(workdir, runtime, roko_config, deploy_backend)
+}
+
+fn start_builtin_event_sources(state: Arc<AppState>, roko_config: RokoConfig) {
+    let mut sources: Vec<Box<dyn EventSource>> = Vec::new();
+
+    if !roko_config.scheduler.is_empty() {
+        sources.push(Box::new(CronEventSource::from_config(roko_config.scheduler.clone())));
+    }
+
+    if !roko_config.watcher.is_empty() {
+        sources.push(Box::new(FileWatchEventSource::from_config(roko_config.watcher.clone())));
+    }
+
+    if sources.is_empty() {
+        return;
+    }
+
+    let cancel = CancellationToken::new();
+    let cancel_for_shutdown = cancel.clone();
+    let state_for_shutdown = Arc::clone(&state);
+    tokio::spawn(async move {
+        state_for_shutdown.cancel.cancelled().await;
+        cancel_for_shutdown.cancel();
+    });
+
+    let (signal_tx, signal_rx) = mpsc::channel::<Signal>(256);
+    tokio::spawn(signal_ingest_loop(
+        Arc::clone(&state),
+        signal_rx,
+        cancel.clone(),
+    ));
+
+    for source in sources {
+        let source_name = source.name().to_string();
+        let source_kind = source.kind();
+        let sender = signal_tx.clone();
+        let cancel = cancel.clone();
+
+        tokio::spawn(async move {
+            if let Err(err) = source.start(sender, cancel).await {
+                warn!(
+                    source = %source_name,
+                    kind = ?source_kind,
+                    error = %err,
+                    "event source stopped"
+                );
+            }
+        });
+    }
+}
+
+async fn signal_ingest_loop(
+    state: Arc<AppState>,
+    mut receiver: mpsc::Receiver<Signal>,
+    cancel: CancellationToken,
+) {
+    loop {
+        let maybe_signal = tokio::select! {
+            _ = cancel.cancelled() => None,
+            signal = receiver.recv() => signal,
+        };
+        let Some(signal) = maybe_signal else {
+            break;
+        };
+
+        if let Err(err) = state.signal_store.put(signal.clone()).await {
+            warn!(
+                kind = %signal.kind,
+                error = %err,
+                "failed to persist event-source signal"
+            );
+            continue;
+        }
+
+        state
+            .event_bus
+            .publish(ServerEvent::WebhookReceived { signal });
+    }
 }
 
 fn create_deploy_backend(roko_config: &RokoConfig) -> Arc<dyn deploy::DeployBackend> {

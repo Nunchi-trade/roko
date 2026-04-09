@@ -80,6 +80,10 @@ pub struct RokoConfig {
     #[serde(default)]
     pub serve: ServeConfig,
 
+    /// Cron scheduler settings.
+    #[serde(default)]
+    pub scheduler: SchedulerConfig,
+
     /// Webhook ingress configuration.
     #[serde(default)]
     pub webhooks: WebhooksConfig,
@@ -116,6 +120,7 @@ impl Default for RokoConfig {
             learning: LearningConfig::default(),
             tui: TuiConfig::default(),
             serve: ServeConfig::default(),
+            scheduler: SchedulerConfig::default(),
             webhooks: WebhooksConfig::default(),
             subscriptions: Vec::new(),
             server: ServerConfig::default(),
@@ -273,6 +278,15 @@ impl RokoConfig {
         let _ = writeln!(out, "port = {}", cfg.server.port);
     }
 
+    fn write_example_scheduler(out: &mut String, _cfg: &Self) {
+        let _ = writeln!(out, "\n# -- Cron scheduler --");
+        let _ = writeln!(out, "[scheduler]");
+        let _ = writeln!(out, "[[scheduler.cron]]");
+        let _ = writeln!(out, "name = \"weekly-digest\"");
+        let _ = writeln!(out, "expression = \"0 9 * * MON\"");
+        let _ = writeln!(out, "signal_kind = \"scheduler:cron:weekly-digest\"");
+    }
+
     fn write_example_webhooks(out: &mut String, _cfg: &Self) {
         let _ = writeln!(out, "\n# -- Webhooks --");
         let _ = writeln!(out, "[webhooks.github]");
@@ -387,6 +401,7 @@ impl RokoConfig {
         Self::write_example_conductor(&mut out, &cfg);
         Self::write_example_learning(&mut out, &cfg);
         Self::write_example_tui_and_server(&mut out, &cfg);
+        Self::write_example_scheduler(&mut out, &cfg);
         Self::write_example_webhooks(&mut out, &cfg);
         Self::write_example_deploy(&mut out, &cfg);
 
@@ -918,6 +933,53 @@ impl Default for ServeConfig {
     }
 }
 
+/// Cron scheduler configuration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchedulerConfig {
+    /// Cron jobs configured at startup.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cron: Vec<SchedulerCronConfig>,
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self { cron: Vec::new() }
+    }
+}
+
+impl SchedulerConfig {
+    /// Returns `true` when no cron jobs are configured.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.cron.is_empty()
+    }
+}
+
+/// One cron job configuration entry.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchedulerCronConfig {
+    /// Human-readable schedule name.
+    pub name: String,
+    /// Standard cron expression.
+    pub expression: String,
+    /// Signal kind emitted when the schedule fires.
+    pub signal_kind: String,
+    /// Extra structured metadata included in the emitted signal body.
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+}
+
+impl Default for SchedulerCronConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            expression: String::new(),
+            signal_kind: String::new(),
+            metadata: serde_json::Value::Null,
+        }
+    }
+}
+
 /// Webhook ingress configuration.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebhooksConfig {
@@ -1289,6 +1351,23 @@ exclude = [".git/**", "**/*.swp"]
             path.exclude,
             vec![".git/**".to_string(), "**/*.swp".to_string()]
         );
+    }
+
+    #[test]
+    fn scheduler_section_parses_cron_jobs() {
+        let toml = r#"
+[scheduler]
+[[scheduler.cron]]
+name = "weekly-digest"
+expression = "0 9 * * MON"
+signal_kind = "scheduler:cron:weekly-digest"
+"#;
+        let cfg = RokoConfig::from_toml(toml).expect("parse");
+        assert_eq!(cfg.scheduler.cron.len(), 1);
+        let cron = &cfg.scheduler.cron[0];
+        assert_eq!(cron.name, "weekly-digest");
+        assert_eq!(cron.expression, "0 9 * * MON");
+        assert_eq!(cron.signal_kind, "scheduler:cron:weekly-digest");
     }
 
     #[test]
