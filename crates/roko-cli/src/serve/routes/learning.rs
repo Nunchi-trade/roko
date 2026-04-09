@@ -11,6 +11,7 @@ use serde_json::Value;
 
 use crate::serve::error::ApiError;
 use crate::serve::state::AppState;
+use roko_gate::adaptive_threshold::AdaptiveThresholds;
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_core::task::{TaskCategory, TaskComplexityBand};
 use roko_learn::cascade_router::CascadeStage;
@@ -26,6 +27,8 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/learn/cascade", get(cascade))
         .route("/learn/experiments", get(experiments))
         .route("/learning/experiments", get(experiments))
+        .route("/learn/adaptive-thresholds", get(adaptive_thresholds))
+        .route("/learning/adaptive-thresholds", get(adaptive_thresholds))
         .route("/learning/gate-thresholds", get(gate_thresholds))
 }
 
@@ -62,6 +65,15 @@ async fn experiments(State(state): State<Arc<AppState>>) -> Result<Json<Experime
 async fn gate_thresholds(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let path = state.workdir.join(".roko/learn/gate-thresholds.json");
     read_json_file(&path).await
+}
+
+/// `GET /api/learn/adaptive-thresholds` — summarize `.roko/learn/gate-thresholds.json`.
+async fn adaptive_thresholds(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<AdaptiveThresholdsResponse>, ApiError> {
+    let path = state.workdir.join(".roko/learn/gate-thresholds.json");
+    let thresholds = AdaptiveThresholds::load_or_new(&path);
+    Ok(Json(build_adaptive_thresholds_response(&path, &thresholds)))
 }
 
 // ── helpers ──────────────────────────────────────────────────────────
@@ -187,6 +199,32 @@ fn build_efficiency_response(events: &[AgentEfficiencyEvent]) -> EfficiencyRespo
             total_duration_ms as f64 / task_count
         },
         cost_trend,
+    }
+}
+
+/// Build a structured response from the adaptive gate threshold store.
+fn build_adaptive_thresholds_response(
+    path: &std::path::Path,
+    thresholds: &AdaptiveThresholds,
+) -> AdaptiveThresholdsResponse {
+    let mut rungs: Vec<RungThresholdSummary> = thresholds
+        .all_rungs()
+        .map(|(rung, stats)| RungThresholdSummary {
+            rung: *rung,
+            ema_pass_rate: stats.ema_pass_rate,
+            total_observations: stats.total_observations,
+            consecutive_passes: stats.consecutive_passes,
+            suggested_max_retries: thresholds.suggested_max_retries(*rung),
+            should_skip_rung: thresholds.should_skip_rung(*rung),
+        })
+        .collect();
+
+    rungs.sort_by_key(|summary| summary.rung);
+
+    AdaptiveThresholdsResponse {
+        source: path.display().to_string(),
+        tracked_rungs: rungs.len(),
+        rungs,
     }
 }
 
@@ -714,6 +752,27 @@ struct EfficiencyResponse {
     cost_trend: Vec<CostTrendPoint>,
 }
 
+/// Structured API response for `GET /api/learn/adaptive-thresholds`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct AdaptiveThresholdsResponse {
+    source: String,
+    tracked_rungs: usize,
+    rungs: Vec<RungThresholdSummary>,
+}
+
+/// One rung entry from the adaptive threshold store.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct RungThresholdSummary {
+    rung: u32,
+    ema_pass_rate: f64,
+    total_observations: u64,
+    consecutive_passes: u32,
+    suggested_max_retries: u32,
+    should_skip_rung: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -898,5 +957,36 @@ mod tests {
         assert_eq!(response.cost_trend.len(), 2);
         assert!((response.cost_trend[0].cumulative_cost_usd - 3.0).abs() < 1e-9);
         assert!((response.cost_trend[1].cumulative_cost_usd - 6.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn adaptive_thresholds_response_exposes_per_rung_ema_values() {
+        let mut thresholds = AdaptiveThresholds::new();
+        for _ in 0..5 {
+            thresholds.update(2, true);
+        }
+        for _ in 0..3 {
+            thresholds.update(1, false);
+        }
+
+        let response = build_adaptive_thresholds_response(
+            std::path::Path::new("/tmp/.roko/learn/gate-thresholds.json"),
+            &thresholds,
+        );
+
+        assert_eq!(response.source, "/tmp/.roko/learn/gate-thresholds.json");
+        assert_eq!(response.tracked_rungs, 2);
+        assert_eq!(response.rungs.len(), 2);
+        assert_eq!(response.rungs[0].rung, 1);
+        assert_eq!(response.rungs[0].total_observations, 3);
+        assert_eq!(response.rungs[0].consecutive_passes, 0);
+        assert_eq!(response.rungs[0].suggested_max_retries, 5);
+        assert!((response.rungs[0].ema_pass_rate - 0.0).abs() < 1e-9);
+        assert_eq!(response.rungs[1].rung, 2);
+        assert_eq!(response.rungs[1].total_observations, 5);
+        assert_eq!(response.rungs[1].consecutive_passes, 5);
+        assert_eq!(response.rungs[1].suggested_max_retries, 1);
+        assert!((response.rungs[1].ema_pass_rate - 1.0).abs() < 1e-9);
+        assert!(response.rungs[1].should_skip_rung);
     }
 }
