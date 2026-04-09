@@ -1433,15 +1433,15 @@ impl PlanRunner {
             match StdioTransport::spawn(&server.command, &server.args) {
                 Ok(transport) => {
                     let client = McpClient::new(transport);
-                    match tokio::time::timeout(Duration::from_secs(10), client.initialize()).await {
+                    match tokio::time::timeout(Duration::from_secs(5), client.initialize()).await {
                         Ok(Ok(_)) => {}
                         Ok(Err(e)) => {
                             tracing::warn!("MCP server '{}' initialize failed: {e}", server.name);
                             continue;
                         }
                         Err(_) => {
-                            tracing::warn!(
-                                "MCP server '{}' initialize timed out after 10s",
+                            tracing::error!(
+                                "MCP server '{}' initialize timed out after 5s",
                                 server.name
                             );
                             continue;
