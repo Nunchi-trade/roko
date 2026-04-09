@@ -306,12 +306,36 @@ impl WatcherRunner {
                                 signals.extend(cost_signals);
                             }
                             let findings = self.conductor.check_all(&signals);
-                            if !findings.is_empty() {
-                                eprintln!(
-                                    "[conductor] watcher runner observed {} intervention signal(s) from last {} signal(s)",
-                                    findings.len(),
-                                    signals.len()
-                                );
+                            let alert_signals: Vec<Signal> = findings
+                                .into_iter()
+                                .filter(|signal| {
+                                    matches!(
+                                        &signal.kind,
+                                        Kind::Custom(kind) if kind.starts_with("conductor:alert:")
+                                    )
+                                })
+                                .collect();
+                            if !alert_signals.is_empty() {
+                                if let Some(root) = self.signals_path.parent() {
+                                    match FileSubstrate::open(root).await {
+                                        Ok(substrate) => {
+                                            for signal in alert_signals {
+                                                if let Err(e) = substrate.put(signal).await {
+                                                    eprintln!(
+                                                        "[conductor] watcher runner failed to persist alert to {}: {e}",
+                                                        self.signals_path.display()
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            eprintln!(
+                                                "[conductor] watcher runner failed to open {}: {e}",
+                                                root.display()
+                                            );
+                                        }
+                                    }
+                                }
                             }
                         }
                         Err(e) => {
