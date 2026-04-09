@@ -3251,6 +3251,35 @@ impl PlanRunner {
             .or_insert(0.0) += cost;
     }
 
+    /// Emit a warning once a plan crosses the configured budget threshold.
+    fn warn_plan_budget_pressure(&mut self, plan_id: &str, plan_spent: f64) {
+        let budget = &self.config.budget;
+        let warn_threshold = budget.warn_threshold_usd();
+        if budget.max_plan_usd > 0.0 && plan_spent >= warn_threshold {
+            let max_plan_usd = budget.max_plan_usd;
+            let warn_at_percent = budget.warn_at_percent;
+            let percent_used = (plan_spent / budget.max_plan_usd) * 100.0;
+            tracing::warn!(
+                plan_id,
+                plan_spent,
+                max_plan_usd,
+                warn_at_percent,
+                "[budget] plan {plan_id} has consumed {:.0}% of budget (${plan_spent:.2}/${max_plan_usd:.2})",
+                percent_used,
+            );
+            self.emit_conductor_signal(
+                Kind::Custom("cost-pressure".into()),
+                serde_json::json!({
+                    "plan_id": plan_id,
+                    "plan_spent": plan_spent,
+                    "max_plan_usd": max_plan_usd,
+                    "warn_at_percent": warn_at_percent,
+                    "percent_used": percent_used,
+                }),
+            );
+        }
+    }
+
     /// Abort before dispatch if the cumulative task budget is already exhausted.
     fn ensure_task_budget_available(&self, plan_id: &str, task: &str) -> Result<()> {
         let task_spent = self.task_spent(plan_id, task);
@@ -3290,14 +3319,7 @@ impl PlanRunner {
                 budget.max_plan_usd
             ));
         }
-        let warn_threshold = budget.max_plan_usd * f64::from(budget.warn_at_percent) / 100.0;
-        if plan_spent >= warn_threshold {
-            eprintln!(
-                "[budget] WARNING: plan {plan_id} at ${plan_spent:.2} / ${:.2} ({:.0}%)",
-                budget.max_plan_usd,
-                plan_spent / budget.max_plan_usd * 100.0
-            );
-        }
+        self.warn_plan_budget_pressure(plan_id, plan_spent);
 
         // ── Try to load structured task definition ──────────────────
         let plan_dir = self.workdir.join("plans").join(plan_id);
@@ -3688,6 +3710,7 @@ impl PlanRunner {
         let task_cost = f64::from(result.usage.cost_usd);
         self.add_task_spend(plan_id, task, task_cost);
         let plan_spent = self.plan_costs.get(plan_id).copied().unwrap_or(0.0);
+        self.warn_plan_budget_pressure(plan_id, plan_spent);
         if plan_spent >= self.config.budget.max_plan_usd {
             return Err(anyhow!(
                 "plan {plan_id} budget exhausted: ${plan_spent:.2} >= ${:.2} max",
@@ -3807,31 +3830,10 @@ impl PlanRunner {
         }
         *self.plan_costs.entry(plan_id.to_string()).or_insert(0.0) += task_cost;
         let plan_spent = self.plan_costs.get(plan_id).copied().unwrap_or(0.0);
-
-        // ── Warn-at-percent budget check (§8) ───────────────────────
-        let max_plan_usd = self.config.budget.max_plan_usd;
-        let max_session_usd = self.config.budget.max_session_usd;
-        let warn_threshold = self.config.budget.warn_at_percent as f64 / 100.0;
-        if max_plan_usd > 0.0 && plan_spent / max_plan_usd >= warn_threshold {
-            tracing::warn!(
-                plan_id,
-                plan_spent,
-                max_plan_usd,
-                "[budget] plan {plan_id} has consumed {:.0}% of budget (${plan_spent:.2}/${max_plan_usd:.2})",
-                (plan_spent / max_plan_usd) * 100.0,
-            );
-            self.emit_conductor_signal(
-                Kind::Custom("cost-pressure".into()),
-                serde_json::json!({
-                    "plan_id": plan_id,
-                    "plan_spent": plan_spent,
-                    "max_plan_usd": max_plan_usd,
-                    "percent_used": (plan_spent / max_plan_usd) * 100.0,
-                }),
-            );
-        }
+        self.warn_plan_budget_pressure(plan_id, plan_spent);
 
         // ── Session budget check (§8) ───────────────────────────────
+        let max_session_usd = self.config.budget.max_session_usd;
         let session_total: f64 = self.plan_costs.values().sum();
         if max_session_usd > 0.0 && session_total > max_session_usd {
             return Err(anyhow!(

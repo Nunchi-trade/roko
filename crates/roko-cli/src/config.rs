@@ -202,6 +202,16 @@ impl BudgetConfig {
     const fn default_warn_pct() -> u32 {
         80
     }
+
+    /// Return the USD spend at which the plan should start warning.
+    #[must_use]
+    pub fn warn_threshold_usd(&self) -> f64 {
+        if self.max_plan_usd <= 0.0 {
+            0.0
+        } else {
+            self.max_plan_usd * f64::from(self.warn_at_percent) / 100.0
+        }
+    }
 }
 
 impl Default for BudgetConfig {
@@ -1028,6 +1038,9 @@ command = "ollama"
 args = ["run", "llama3"]
 timeout_ms = 30000
 
+[budget]
+warn_at_percent = 90
+
 [prompt]
 token_budget = 20000
 role = "You are a senior Rust engineer."
@@ -1048,6 +1061,7 @@ build_system = "cargo"
             vec!["run".to_string(), "llama3".to_string()]
         );
         assert_eq!(cfg.agent.timeout_ms, 30_000);
+        assert_eq!(cfg.budget.warn_at_percent, 90);
         assert_eq!(cfg.prompt.token_budget, 20_000);
         assert_eq!(cfg.gates.len(), 2);
     }
@@ -1075,6 +1089,13 @@ auto_replan = false
         assert_eq!(cfg.executor.task_timeout_secs, 42);
         assert_eq!(cfg.executor.budget_usd, Some(1.5));
         assert!(!cfg.executor.auto_replan);
+    }
+
+    #[test]
+    fn budget_warn_threshold_defaults_to_eighty_percent() {
+        let budget = BudgetConfig::default();
+        assert_eq!(budget.warn_at_percent, 80);
+        assert!((budget.warn_threshold_usd() - 8.0).abs() < f64::EPSILON);
     }
 
     #[test]
