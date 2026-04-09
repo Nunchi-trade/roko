@@ -214,8 +214,24 @@ fn github_signal_kind(event_type: &str, payload: &Value) -> Option<Kind> {
         "pull_request" => payload
             .get("action")
             .and_then(Value::as_str)
-            .filter(|action| *action == "opened")
-            .map(|_| Kind::Custom(signal_kinds::GITHUB_PR_OPENED.into())),
+            .and_then(|action| match action {
+                "opened" => Some(Kind::Custom(signal_kinds::GITHUB_PR_OPENED.into())),
+                "closed" if payload
+                    .get("pull_request")
+                    .and_then(|pr| pr.get("merged"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                    && payload
+                        .get("pull_request")
+                        .and_then(|pr| pr.get("head"))
+                        .and_then(|head| head.get("ref"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|branch| branch.starts_with("plan/")) =>
+                {
+                    Some(Kind::Custom(signal_kinds::PRD_PLAN_APPROVED.into()))
+                }
+                _ => None,
+            }),
         "pull_request_review" => Some(Kind::Custom(signal_kinds::GITHUB_PR_REVIEW.into())),
         "issues" => payload
             .get("action")
@@ -371,6 +387,20 @@ mod tests {
         let issue_opened = github_signal_kind("issues", &serde_json::json!({ "action": "opened" }));
         assert!(
             matches!(issue_opened.as_ref().map(Kind::as_str), Some(kind) if kind == signal_kinds::GITHUB_ISSUE_OPENED)
+        );
+
+        let plan_approved = github_signal_kind(
+            "pull_request",
+            &serde_json::json!({
+                "action": "closed",
+                "pull_request": {
+                    "merged": true,
+                    "head": { "ref": "plan/test-feature" }
+                }
+            }),
+        );
+        assert!(
+            matches!(plan_approved.as_ref().map(Kind::as_str), Some(kind) if kind == signal_kinds::PRD_PLAN_APPROVED)
         );
     }
 

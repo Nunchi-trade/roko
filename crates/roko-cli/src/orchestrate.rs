@@ -66,6 +66,7 @@ use tracing::{Instrument, info_span, instrument};
 
 use crate::config::Config;
 use crate::task_parser::{TaskValidationIssue, TasksFile};
+use crate::worker::cloud::CloudExecution;
 
 /// Default number of actions between auto-saves.
 const AUTOSAVE_INTERVAL: usize = 5;
@@ -914,6 +915,8 @@ pub struct PlanRunner {
     /// Optional event bus sender for HTTP API event streaming.
     server_event_bus:
         Option<bardo_runtime::event_bus::BusSender<crate::serve::events::ServerEvent>>,
+    /// Optional cloud execution state for code-implementer runs.
+    cloud_execution: Option<CloudExecution>,
 }
 
 /// Tracks per-task completion within a plan. Lives in PlanRunner (CLI crate),
@@ -1797,6 +1800,7 @@ impl PlanRunner {
             ),
             efficiency_events: Vec::new(),
             server_event_bus: None,
+            cloud_execution: None,
             playbook,
         })
     }
@@ -1897,6 +1901,7 @@ impl PlanRunner {
             ),
             efficiency_events: Vec::new(),
             server_event_bus: None,
+            cloud_execution: None,
             playbook,
         })
     }
@@ -2001,6 +2006,7 @@ impl PlanRunner {
             ),
             efficiency_events: Vec::new(),
             server_event_bus: None,
+            cloud_execution: None,
             playbook,
         })
     }
@@ -2017,6 +2023,11 @@ impl PlanRunner {
         bus: bardo_runtime::event_bus::BusSender<crate::serve::events::ServerEvent>,
     ) {
         self.server_event_bus = Some(bus);
+    }
+
+    /// Enable cloud execution behavior for the current plan run.
+    pub fn enable_cloud_execution(&mut self, cloud_execution: CloudExecution) {
+        self.cloud_execution = Some(cloud_execution);
     }
 
     /// Emit a server event if a bus is attached.
@@ -2778,6 +2789,7 @@ impl PlanRunner {
             self.run_all(&watcher_cancel).await
         }
         .await;
+
         watcher_cancel.cancel();
         let _ = watcher_task.await;
         result
@@ -3363,7 +3375,11 @@ impl PlanRunner {
             return;
         }
 
-        if ready.len() == 1 {
+        if self.cloud_execution.is_some() && ready.len() > 1 {
+            for task_id in &ready {
+                self.handle_implementing_single(plan_id, task_id).await;
+            }
+        } else if ready.len() == 1 {
             // ── Single task: sequential dispatch with retry ──────────
             self.handle_implementing_single(plan_id, &ready[0]).await;
         } else {
@@ -3489,6 +3505,61 @@ impl PlanRunner {
                     {
                         Ok(()) => {
                             succeeded = true;
+                            if let Some(cloud) = self.cloud_execution.clone() {
+                                let task_title = self
+                                    .task_trackers
+                                    .get(plan_id)
+                                    .and_then(|tracker| {
+                                        tracker
+                                            .tasks_file
+                                            .tasks
+                                            .iter()
+                                            .find(|task| task.id == task_id)
+                                            .map(|task| task.title.clone())
+                                    })
+                                    .unwrap_or_else(|| task_id.to_string());
+                                let commit_message = format!("task: {task_title}");
+                                if let Err(e) = crate::worker::cloud::git_commit(
+                                    &exec_dir,
+                                    &commit_message,
+                                )
+                                .await
+                                {
+                                    tracing::error!(
+                                        "[orchestrate] cloud commit failed for {plan_id}/{task_id}: {e}"
+                                    );
+                                    self.apply_event_and_emit(
+                                        plan_id,
+                                        task_id,
+                                        &ExecutorEvent::Fatal(format!(
+                                            "cloud commit failed: {e}"
+                                        )),
+                                        "failed",
+                                    );
+                                    return;
+                                }
+
+                                if let Err(e) = crate::worker::cloud::git_push(
+                                    &exec_dir,
+                                    &cloud.branch_name(),
+                                    &cloud,
+                                )
+                                .await
+                                {
+                                    tracing::error!(
+                                        "[orchestrate] cloud push failed for {plan_id}/{task_id}: {e}"
+                                    );
+                                    self.apply_event_and_emit(
+                                        plan_id,
+                                        task_id,
+                                        &ExecutorEvent::Fatal(format!(
+                                            "cloud push failed: {e}"
+                                        )),
+                                        "failed",
+                                    );
+                                    return;
+                                }
+                            }
                         }
                         Err(e) => {
                             tracing::error!(
@@ -3518,8 +3589,10 @@ impl PlanRunner {
             }
         }
 
-        if let Err(e) = self.worktrees.remove(&wt_id).await {
-            tracing::error!("[orchestrate] worktree cleanup failed for {task_id}: {e}");
+        if self.cloud_execution.is_none() {
+            if let Err(e) = self.worktrees.remove(&wt_id).await {
+                tracing::error!("[orchestrate] worktree cleanup failed for {task_id}: {e}");
+            }
         }
 
         if !succeeded && !budget_aborted {
@@ -7373,6 +7446,9 @@ impl PlanRunner {
     }
 
     async fn plan_exec_dir(&self, plan_id: &str) -> PathBuf {
+        if self.cloud_execution.is_some() {
+            return self.workdir.clone();
+        }
         self.clear_stale_worktree_locks().await;
         match self.worktrees.ensure_for_plan(plan_id).await {
             Ok(handle) => handle.path,
@@ -7388,6 +7464,9 @@ impl PlanRunner {
     /// Create (or fall back to plan-level) worktree for an individual task
     /// within a plan, so parallel tasks get isolated working directories.
     async fn task_exec_dir(&self, plan_id: &str, task_id: &str) -> Result<PathBuf> {
+        if self.cloud_execution.is_some() {
+            return Ok(self.workdir.clone());
+        }
         self.clear_stale_worktree_locks().await;
         let wt_id = format!("{plan_id}-{task_id}");
         let branch = format!("roko/task/{plan_id}/{task_id}");

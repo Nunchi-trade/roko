@@ -8,6 +8,7 @@
 //! - `PORT`: Listen port (Railway injects this)
 
 pub mod handler;
+pub mod cloud;
 
 use std::sync::Arc;
 
