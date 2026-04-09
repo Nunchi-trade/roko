@@ -53,7 +53,7 @@ use roko_learn::skill_library::{SkillExtractionRequest, SkillGateResult, SkillLi
 use roko_orchestrator::worktree::{WorktreeConfig, WorktreeManager};
 use roko_orchestrator::{
     EventKind, EventLog, EventLogSnapshot, ExecutorAction, ExecutorEvent, ExecutorSnapshot,
-    GateResult, ParallelExecutor, PlanState, PostMergeRunner, discover_plans,
+    GateResult, ParallelExecutor, PlanState, PostMergeRunner, ReplanStrategy, discover_plans,
 };
 use roko_std::NoOpScorer;
 use roko_std::StaticToolRegistry;
@@ -834,6 +834,7 @@ struct TaskTracker {
     tasks_file: TasksFile,
     completed: Vec<String>,
     failed: Vec<String>,
+    skipped: Vec<String>,
     current_group_index: usize,
     _plan_dir: PathBuf,
     last_gate_failure: Option<String>,
@@ -915,6 +916,7 @@ impl TaskTracker {
             tasks_file,
             completed: Vec::new(),
             failed: Vec::new(),
+            skipped: Vec::new(),
             current_group_index: 0,
             _plan_dir: plan_dir,
             last_gate_failure: None,
@@ -945,6 +947,7 @@ impl TaskTracker {
             .filter(|t| {
                 !self.completed.contains(&t.id)
                     && !self.failed.contains(&t.id)
+                    && !self.skipped.contains(&t.id)
                     && t.is_ready_with_plan_deps(&self.completed, completed_plans)
             })
             .collect()
@@ -955,6 +958,7 @@ impl TaskTracker {
         self.tasks_file.tasks.iter().any(|task| {
             !self.completed.contains(&task.id)
                 && !self.failed.contains(&task.id)
+                && !self.skipped.contains(&task.id)
                 && task.is_ready(&self.completed)
                 && !task
                     .depends_on_plan
@@ -968,7 +972,7 @@ impl TaskTracker {
         self.tasks_file
             .tasks
             .iter()
-            .all(|t| self.completed.contains(&t.id))
+            .all(|t| self.completed.contains(&t.id) || self.skipped.contains(&t.id))
     }
 
     /// Mark a task as completed and advance group index if current group is fully done.
@@ -976,14 +980,69 @@ impl TaskTracker {
         if !self.completed.contains(&task_id.to_string()) {
             self.completed.push(task_id.to_string());
         }
+        self.failed.retain(|id| id != task_id);
+        self.skipped.retain(|id| id != task_id);
+        self.advance_group_index();
+    }
+
+    /// Mark a task as skipped and advance group index if current group is fully done.
+    fn mark_skipped(&mut self, task_id: &str) {
+        if !self.skipped.contains(&task_id.to_string()) {
+            self.skipped.push(task_id.to_string());
+        }
+        self.failed.retain(|id| id != task_id);
+        self.advance_group_index();
+    }
+
+    /// Re-load `tasks.toml` after the agent rewrites the plan in place.
+    ///
+    /// Completed tasks are preserved if they still exist. Failed/skipped
+    /// state is cleared because the plan structure has changed.
+    fn reload_tasks_file(&mut self) -> Result<()> {
+        let tasks_path = self._plan_dir.join("tasks.toml");
+        self.tasks_file = TasksFile::parse(&tasks_path)?;
+        let task_ids: std::collections::HashSet<String> =
+            self.tasks_file.tasks.iter().map(|task| task.id.clone()).collect();
+        self.failed.clear();
+        self.skipped.clear();
+        self.completed.retain(|task_id| task_ids.contains(task_id));
+        self.current_group_index = 0;
+        self.impl_round += 1;
+        self.advance_group_index();
+        Ok(())
+    }
+
+    /// Count distinct tasks that are terminal due to failure or skip.
+    fn terminal_task_count(&self) -> usize {
+        use std::collections::HashSet;
+
+        self.failed
+            .iter()
+            .chain(self.skipped.iter())
+            .collect::<HashSet<_>>()
+            .len()
+    }
+
+    /// Whether failed/skipped tasks exceed half of the current plan.
+    fn terminal_task_ratio_exceeds_half(&self) -> bool {
+        let total = self.tasks_file.tasks.len();
+        total > 0 && self.terminal_task_count() * 2 > total
+    }
+
+    /// Advance the current parallel group index while the active group is terminal.
+    fn advance_group_index(&mut self) {
         // Advance group index if all tasks in current group are done
+        let completed = self.completed.clone();
+        let skipped = self.skipped.clone();
         let groups = self.tasks_file.parallel_groups();
-        if self.current_group_index < groups.len() {
+        while self.current_group_index < groups.len() {
             let current_group_done = groups[self.current_group_index]
                 .iter()
-                .all(|t| self.completed.contains(&t.id));
+                .all(|t| completed.contains(&t.id) || skipped.contains(&t.id));
             if current_group_done {
                 self.current_group_index += 1;
+            } else {
+                break;
             }
         }
     }
@@ -992,6 +1051,7 @@ impl TaskTracker {
     fn reset_for_reimpl(&mut self) {
         self.completed.clear();
         self.failed.clear();
+        self.skipped.clear();
         self.current_group_index = 0;
         self.impl_round += 1;
     }
@@ -1851,6 +1911,7 @@ impl PlanRunner {
                     "plan_id": plan_id,
                     "completed": tracker.completed,
                     "failed": tracker.failed,
+                    "skipped": tracker.skipped,
                     "current_group_index": tracker.current_group_index,
                     "impl_round": tracker.impl_round,
                 })
@@ -1901,12 +1962,21 @@ impl PlanRunner {
                         .collect()
                 })
                 .unwrap_or_default();
+            let skipped: Vec<String> = entry["skipped"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
             let current_group_index = entry["current_group_index"].as_u64().unwrap_or(0) as usize;
             let impl_round = entry["impl_round"].as_u64().unwrap_or(0) as u32;
 
             let mut tracker = TaskTracker::new(tf, plan_dir);
             tracker.completed = completed;
             tracker.failed = failed;
+            tracker.skipped = skipped;
             tracker.current_group_index = current_group_index;
             tracker.impl_round = impl_round;
             if let Some(extra_completed) = completed_from_snapshot.get(&plan_id) {
@@ -2482,20 +2552,21 @@ impl PlanRunner {
                             "transitioned",
                         );
 
-                        // Failure-driven re-planning (§9): after 3 consecutive
-                        // gate failures, attempt to re-plan.
+                        // Failure-driven re-planning (§9): retry after every
+                        // consecutive gate failure, escalating the strategy as
+                        // the failure count grows.
                         if !passed {
                             let failure_count = self
                                 .task_trackers
                                 .get(&plan_id)
                                 .map(|t| t.gate_failure_count)
                                 .unwrap_or(0);
-                            if failure_count >= 3 && self.executor.config().auto_replan {
+                            if failure_count >= 1 && self.executor.config().auto_replan {
                                 self.emit_execution_event(
                                     &plan_id,
                                     crate::serve::events::ExecutionEvent::ReplanTriggered {
                                         task_id: format!("rung-{rung}"),
-                                        strategy: "failure_threshold_strategist".to_string(),
+                                        strategy: format!("gate_fail_count_{failure_count}"),
                                     },
                                 );
                                 self.attempt_replan(&plan_id).await;
@@ -3700,61 +3771,319 @@ impl PlanRunner {
         }
     }
 
-    /// Attempt to re-plan after repeated gate failures (§9).
-    ///
-    /// Spawns a Strategist agent with the failure context and asks it to
-    /// update the remaining tasks. Resets the gate failure counter on success.
+    /// Attempt to re-plan after gate failures (§9).
     async fn attempt_replan(&mut self, plan_id: &str) {
-        let failure_context = self
-            .task_trackers
-            .get(plan_id)
-            .and_then(|t| t.last_gate_failure.clone())
-            .unwrap_or_default();
-        let failure_phase = self
-            .task_trackers
-            .get(plan_id)
-            .and_then(|t| t.last_gate_failure_phase.clone())
-            .unwrap_or_default();
+        let Some(tracker) = self.task_trackers.get(plan_id) else {
+            tracing::warn!("[orchestrate] replan requested for unknown plan {plan_id}");
+            return;
+        };
 
-        let prompt = format!(
-            "The plan '{plan_id}' has failed gates 3+ times consecutively.\n\n\
-             Last failing phase: {failure_phase}\n\
-             Failure details:\n```\n{failure_context}\n```\n\n\
-             Analyze the failures and suggest concrete fixes. Focus on the root cause \
-             and provide updated implementation steps."
-        );
+        let failure_context = tracker.last_gate_failure.clone().unwrap_or_default();
+        let failure_phase = tracker.last_gate_failure_phase.clone().unwrap_or_default();
+        let failure_count = tracker.gate_failure_count;
+        let task_id = tracker
+            .last_impl_task_id
+            .clone()
+            .or_else(|| tracker.tasks_file.tasks.first().map(|task| task.id.clone()))
+            .unwrap_or_else(|| "replan".to_string());
+        let terminal_count = tracker.terminal_task_count();
+        let total_tasks = tracker.tasks_file.tasks.len();
+        let plan_dir = tracker._plan_dir.clone();
+        let current_model = self.effective_model();
+        let escalate_model = self.next_tier_model_slug(&current_model);
+        let architectural_model = self
+            .config
+            .agent
+            .tier_models
+            .get("architectural")
+            .cloned()
+            .unwrap_or_else(|| "claude-opus-4-6".into());
+
+        let strategy = if total_tasks > 0 && terminal_count * 2 > total_tasks {
+            ReplanStrategy::RegeneratePlan
+        } else {
+            match failure_count {
+                0 | 1 => ReplanStrategy::RetrySame,
+                2 => ReplanStrategy::RetryWithEscalation,
+                3 => ReplanStrategy::Decompose,
+                _ => ReplanStrategy::Skip,
+            }
+        };
 
         tracing::info!(
-            "[orchestrate] Attempting re-plan for {plan_id} after repeated gate failures"
+            plan_id = %plan_id,
+            task_id = %task_id,
+            failure_count,
+            terminal_count,
+            total_tasks,
+            strategy = %strategy,
+            "attempting replan"
         );
+
+        let failure_summary = format!(
+            "Plan '{plan_id}' failed gate checks.\n\n\
+             Failure count: {failure_count}\n\
+             Last failing phase: {failure_phase}\n\
+             Failure details:\n```\n{failure_context}\n```"
+        );
+
+        match strategy {
+            ReplanStrategy::RetrySame => {
+                let prompt = format!(
+                    "{failure_summary}\n\n\
+                     Retry the same task with the error context above. \
+                     Focus on the smallest fix that makes the gate pass."
+                );
+                match self
+                    .dispatch_agent_with(
+                        plan_id,
+                        AgentRole::Strategist,
+                        "replan",
+                        Some(prompt),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        tracing::info!("[orchestrate] replan retry-same completed for {plan_id}");
+                        if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+                            tracker.gate_failure_count = 0;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("[orchestrate] retry-same replan failed for {plan_id}: {e}");
+                    }
+                }
+            }
+            ReplanStrategy::RetryWithEscalation => {
+                let prompt = format!(
+                    "{failure_summary}\n\n\
+                     Retry the same task with the error context above using a stronger model. \
+                     Preserve the task boundary and fix the root cause."
+                );
+                match self
+                    .dispatch_agent_with(
+                        plan_id,
+                        AgentRole::Strategist,
+                        "replan",
+                        Some(prompt),
+                        Some(escalate_model),
+                        None,
+                        None,
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        tracing::info!(
+                            "[orchestrate] replan with escalation completed for {plan_id}"
+                        );
+                        if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+                            tracker.gate_failure_count = 0;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "[orchestrate] escalated replan failed for {plan_id}: {e}"
+                        );
+                    }
+                }
+            }
+            ReplanStrategy::Decompose => {
+                let tasks_path = plan_dir.join("tasks.toml");
+                let existing_tasks = std::fs::read_to_string(&tasks_path).unwrap_or_default();
+                let system_prompt = crate::plan_generate::PLAN_GENERATOR_SYSTEM_PROMPT.to_string();
+                let prompt = format!(
+                    "{failure_summary}\n\n\
+                     Split the failed task '{task_id}' into 2-3 smaller subtasks.\n\
+                     Preserve already-completed work, keep the plan executable, and update \
+                     plans/{plan_id}/tasks.toml in place.\n\n\
+                     ## Existing tasks.toml\n\n```toml\n{existing_tasks}\n```"
+                );
+                match self
+                    .dispatch_agent_with(
+                        plan_id,
+                        AgentRole::Strategist,
+                        &task_id,
+                        Some(prompt),
+                        Some(architectural_model),
+                        None,
+                        Some(system_prompt),
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        tracing::info!("[orchestrate] decomposition replan completed for {plan_id}");
+                        if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+                            if let Err(e) = tracker.reload_tasks_file() {
+                                tracing::error!(
+                                    "[orchestrate] failed to reload decomposed tasks for {plan_id}: {e}"
+                                );
+                            }
+                            tracker.gate_failure_count = 0;
+                            tracker.last_gate_failure = None;
+                            tracker.last_gate_failure_phase = None;
+                            tracker.last_impl_task_id = None;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("[orchestrate] decomposition replan failed for {plan_id}: {e}");
+                    }
+                }
+            }
+            ReplanStrategy::Skip => {
+                let skip_reason = format!("skipped after {failure_count} consecutive gate failures");
+                tracing::warn!(
+                    plan_id = %plan_id,
+                    task_id = %task_id,
+                    skip_reason = %skip_reason,
+                    "marking task skipped"
+                );
+                if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+                    tracker.mark_skipped(&task_id);
+                    tracker.gate_failure_count = 0;
+                    tracker.last_gate_failure = None;
+                    tracker.last_gate_failure_phase = None;
+                }
+                self.emit_execution_event(
+                    plan_id,
+                    crate::serve::events::ExecutionEvent::TaskCompleted {
+                        task_id: task_id.clone(),
+                        outcome: "skipped".to_string(),
+                    },
+                );
+
+                let mut ep = Episode::new("Strategist", &task_id).failed(skip_reason);
+                ep.input_signal_hash = plan_id.to_string();
+                ep.output_signal_hash = format!("{plan_id}:{task_id}:skipped");
+                ep.extra.insert(
+                    "replan_strategy".to_string(),
+                    serde_json::json!(ReplanStrategy::Skip),
+                );
+                ep.extra
+                    .insert("failure_count".to_string(), serde_json::json!(failure_count));
+                ep.extra.insert(
+                    "failure_phase".to_string(),
+                    serde_json::json!(failure_phase),
+                );
+                ep.extra.insert(
+                    "failure_context".to_string(),
+                    serde_json::json!(failure_context),
+                );
+                let input = self.enrich_completed_run(
+                    ep,
+                    plan_id,
+                    &task_id,
+                    "Strategist",
+                    &current_model,
+                    None,
+                    failure_count,
+                );
+                self.record_and_check_learning(input, plan_id).await;
+
+                if self
+                    .task_trackers
+                    .get(plan_id)
+                    .is_some_and(TaskTracker::terminal_task_ratio_exceeds_half)
+                {
+                    tracing::warn!(
+                        "[orchestrate] {plan_id}: skipped/failed tasks exceeded 50%, regenerating plan"
+                    );
+                    self.replan_plan(plan_id, &task_id, &failure_summary, &architectural_model)
+                        .await;
+                }
+            }
+            ReplanStrategy::RegeneratePlan => {
+                self.replan_plan(plan_id, &task_id, &failure_summary, &architectural_model)
+                    .await;
+            }
+        }
+    }
+
+    async fn replan_plan(
+        &mut self,
+        plan_id: &str,
+        task_id: &str,
+        failure_summary: &str,
+        model: &str,
+    ) {
+        let Some(plan_dir) = self
+            .task_trackers
+            .get(plan_id)
+            .map(|tracker| tracker._plan_dir.clone())
+        else {
+            tracing::warn!("[orchestrate] regenerate requested for unknown plan {plan_id}");
+            return;
+        };
+
+        let tasks_path = plan_dir.join("tasks.toml");
+        let system_prompt = crate::plan_generate::build_regeneration_prompt(
+            &self.workdir,
+            &std::fs::read_to_string(&tasks_path).unwrap_or_default(),
+        );
+        let prompt = format!(
+            "{failure_summary}\n\n\
+             Regenerate the plan at plans/{plan_id}/tasks.toml so it can continue \
+             from the failed task '{task_id}'. Preserve completed tasks where possible, \
+             keep the task count focused, and rewrite the file in place."
+        );
+
         match self
             .dispatch_agent_with(
                 plan_id,
                 AgentRole::Strategist,
-                "replan",
+                task_id,
                 Some(prompt),
+                Some(model.to_string()),
                 None,
-                None,
-                None,
+                Some(system_prompt),
             )
             .await
         {
-            Ok(_result) => {
-                tracing::info!("[orchestrate] Re-plan completed for {plan_id}");
+            Ok(_) => {
+                tracing::info!("[orchestrate] plan regeneration completed for {plan_id}");
                 if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+                    if let Err(e) = tracker.reload_tasks_file() {
+                        tracing::error!(
+                            "[orchestrate] failed to reload regenerated tasks for {plan_id}: {e}"
+                        );
+                    }
                     tracker.gate_failure_count = 0;
+                    tracker.last_gate_failure = None;
+                    tracker.last_gate_failure_phase = None;
+                    tracker.last_impl_task_id = None;
                 }
-                // Reset to implementing phase so the updated plan gets executed.
-                self.apply_event_and_emit(
-                    plan_id,
-                    "replan",
-                    &ExecutorEvent::EnrichmentDone,
-                    "transitioned",
-                );
             }
             Err(e) => {
-                tracing::error!("[orchestrate] Re-plan failed for {plan_id}: {e}");
+                tracing::error!("[orchestrate] plan regeneration failed for {plan_id}: {e}");
             }
+        }
+    }
+
+    /// Select the next tier up in the haiku → sonnet → opus chain.
+    fn next_tier_model_slug(&self, current_model: &str) -> String {
+        if current_model.contains("haiku") {
+            self.config
+                .agent
+                .tier_models
+                .get("focused")
+                .cloned()
+                .unwrap_or_else(|| "claude-sonnet-4-6".into())
+        } else if current_model.contains("sonnet") {
+            self.config
+                .agent
+                .tier_models
+                .get("architectural")
+                .cloned()
+                .unwrap_or_else(|| "claude-opus-4-6".into())
+        } else {
+            self.config
+                .agent
+                .tier_models
+                .get("architectural")
+                .cloned()
+                .unwrap_or_else(|| current_model.to_string())
         }
     }
 
