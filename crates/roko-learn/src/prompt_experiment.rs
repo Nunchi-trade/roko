@@ -60,6 +60,26 @@ impl VariantStats {
     }
 }
 
+/// Per-variant metric tracker.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct VariantMetricStats {
+    /// Number of metric observations.
+    samples: u64,
+    /// Sum of all recorded metric values.
+    sum: f64,
+    /// Most recent metric observation.
+    last: Option<f64>,
+}
+
+impl VariantMetricStats {
+    /// Record one metric observation.
+    fn record(&mut self, value: f64) {
+        self.samples += 1;
+        self.sum += value;
+        self.last = Some(value);
+    }
+}
+
 /// Status of a prompt experiment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExperimentStatus {
@@ -80,6 +100,9 @@ pub struct PromptExperiment {
     pub variants: Vec<PromptVariant>,
     /// Per-variant statistics, keyed by variant id.
     pub stats: HashMap<String, VariantStats>,
+    /// Per-variant metric observations, keyed by variant id.
+    #[serde(default)]
+    metric_stats: HashMap<String, VariantMetricStats>,
     /// Current experiment status.
     pub status: ExperimentStatus,
     /// Variant id of the winner, if concluded.
@@ -106,6 +129,7 @@ impl PromptExperiment {
             section_name: section_name.into(),
             variants,
             stats,
+            metric_stats: HashMap::new(),
             status: ExperimentStatus::Running,
             winner_id: None,
             min_trials_per_variant: 10,
@@ -162,6 +186,20 @@ impl PromptExperiment {
             }
         }
         false
+    }
+
+    /// Record a numeric metric for a variant.
+    pub fn record_metric(&mut self, variant_id: &str, metric: f64) {
+        if !metric.is_finite() {
+            return;
+        }
+
+        if self.stats.contains_key(variant_id) {
+            self.metric_stats
+                .entry(variant_id.to_string())
+                .or_default()
+                .record(metric);
+        }
     }
 
     /// Check if we have enough data to declare a winner.
@@ -281,6 +319,13 @@ impl ExperimentStore {
         }
     }
 
+    /// Record a numeric metric for a variant within a specific experiment.
+    pub fn record_metric(&mut self, experiment_id: &str, variant_id: &str, metric: f64) {
+        if let Some(experiment) = self.experiments.get_mut(experiment_id) {
+            experiment.record_metric(variant_id, metric);
+        }
+    }
+
     /// All experiments (for reporting).
     #[must_use]
     pub const fn experiments(&self) -> &HashMap<String, PromptExperiment> {
@@ -390,5 +435,22 @@ mod tests {
 
         // No experiment for unknown section.
         assert!(store.assign_variant_for_section("unknown").is_none());
+    }
+
+    #[test]
+    fn record_metric_updates_existing_variant_only() {
+        let mut store = ExperimentStore::new();
+        let exp = PromptExperiment::new("exp-1", "constraints", make_variants("constraints"));
+        store.register(exp);
+
+        store.record_metric("exp-1", "a", 0.75);
+        store.record_metric("exp-1", "missing", 0.2);
+
+        let experiment = store.get("exp-1").expect("experiment exists");
+        let stats = experiment.metric_stats.get("a").expect("variant metrics");
+        assert_eq!(stats.samples, 1);
+        assert_eq!(stats.last, Some(0.75));
+        assert_eq!(stats.sum, 0.75);
+        assert!(!experiment.metric_stats.contains_key("missing"));
     }
 }

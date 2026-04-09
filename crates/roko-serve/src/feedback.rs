@@ -15,6 +15,7 @@ use reqwest::Client;
 use roko_core::tool::ExternalAction;
 use roko_core::{Body, Kind, Provenance, Signal};
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
+use roko_learn::prompt_experiment::ExperimentStore;
 use serde_json::{Value, json};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant as TokioInstant, interval_at};
@@ -217,6 +218,7 @@ fn issue_labels_changed(current_labels: &[String], initial_labels: &[String]) ->
 #[derive(Debug, Clone)]
 struct FeedbackObservation {
     success: bool,
+    sentiment: f64,
     payload: Value,
 }
 
@@ -254,6 +256,55 @@ async fn persist_feedback_result(
         success: observation.success,
     });
 
+    if let Some(variant_id) = episode_experiment_variant(episode)
+        && let Err(err) = record_experiment_metric(state, &variant_id, observation.sentiment)
+    {
+        warn!(
+            error = %err,
+            episode_id = %episode.episode_id,
+            variant_id = %variant_id,
+            "failed to record experiment metric"
+        );
+    }
+
+    Ok(())
+}
+
+fn episode_experiment_variant(episode: &Episode) -> Option<String> {
+    episode
+        .extra
+        .get("experiment_variant")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            episode
+                .extra
+                .get("experiment_variant_id")
+                .and_then(Value::as_str)
+        })
+        .map(str::to_string)
+        .filter(|variant| !variant.is_empty())
+}
+
+fn sentiment_to_metric_value(sentiment: f64) -> f64 {
+    ((sentiment.clamp(-1.0, 1.0) + 1.0) / 2.0).clamp(0.0, 1.0)
+}
+
+fn record_experiment_metric(state: &AppState, variant_id: &str, sentiment: f64) -> Result<()> {
+    let path = state.workdir.join(".roko/learn/experiments.json");
+    let mut store = ExperimentStore::load_or_new(&path);
+    let Some(experiment_id) = store
+        .iter()
+        .find(|experiment| experiment.stats.contains_key(variant_id))
+        .map(|experiment| experiment.experiment_id.clone())
+    else {
+        return Ok(());
+    };
+
+    let metric_value = sentiment_to_metric_value(sentiment);
+    store.record_metric(&experiment_id, variant_id, metric_value);
+    store
+        .save(&path)
+        .with_context(|| format!("save {}", path.display()))?;
     Ok(())
 }
 
@@ -360,6 +411,7 @@ async fn collect_github_feedback(
 
             Ok(Some(FeedbackObservation {
                 success: merged || state == "closed",
+                sentiment,
                 payload: json!({
                     "resource": {
                         "owner": resource.owner,
@@ -431,6 +483,7 @@ async fn collect_github_feedback(
 
             Ok(Some(FeedbackObservation {
                 success: sentiment > 0.0 || reply_count > 0,
+                sentiment,
                 payload: json!({
                     "resource": {
                         "owner": resource.owner,
@@ -474,6 +527,7 @@ async fn collect_github_feedback(
 
             Ok(Some(FeedbackObservation {
                 success: closed || labels_changed || assigned,
+                sentiment,
                 payload: json!({
                     "resource": {
                         "owner": resource.owner,
@@ -663,6 +717,7 @@ async fn collect_slack_feedback(
 
             Ok(Some(FeedbackObservation {
                 success: unique_repliers > 0 || positive_reactions > negative_reactions,
+                sentiment,
                 payload: json!({
                     "resource": {
                         "channel": channel,
