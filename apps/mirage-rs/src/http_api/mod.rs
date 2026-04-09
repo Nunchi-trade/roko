@@ -162,14 +162,19 @@ pub mod topology;
 #[cfg(feature = "roko")]
 pub mod ws;
 
+/// Callback that returns the current block number from the fork state.
+///
+/// In production this reads `MirageState.fork.local_block_number` behind
+/// the server's `Arc<RwLock>`. In tests, callers can supply a simple closure.
+pub type BlockNumberFn = Arc<dyn Fn() -> u64 + Send + Sync>;
+
 /// Shared state for HTTP API handlers.
 #[derive(Clone)]
 pub struct ApiState {
     /// Chain context holding the knowledge store and pheromone field.
     pub chain: Arc<RwLock<ChainContext>>,
-    /// Current block number, updated by the auto-miner. Used by heartbeat
-    /// and liveness endpoints to compute `blocks_since` accurately.
-    pub current_block: Arc<AtomicU64>,
+    /// Returns the current block number. Used by heartbeat/liveness endpoints.
+    pub current_block: BlockNumberFn,
     /// HDC projection cache for query endpoints.
     pub projection_cache: ProjectionCache,
     /// Server start time for uptime computation.
@@ -180,11 +185,11 @@ pub struct ApiState {
 }
 
 impl ApiState {
-    /// Creates an `ApiState` suitable for testing with block number starting at 0.
+    /// Creates an `ApiState` with block number fixed at 0 (useful for tests).
     pub fn new(chain: Arc<RwLock<ChainContext>>) -> Self {
         Self {
             chain,
-            current_block: Arc::new(AtomicU64::new(0)),
+            current_block: Arc::new(|| 0),
             projection_cache: ProjectionCache::new(128),
             started_at: Instant::now(),
             #[cfg(feature = "roko")]

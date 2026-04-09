@@ -20,7 +20,7 @@ use tower::ServiceExt;
 use mirage_rs::{
     chain::{KnowledgeKind, PheromoneKind, projection::project_tokens},
     chain_rpc::{ChainContext, ChainToggles},
-    http_api::{self, ApiState, ProjectionCache},
+    http_api::{self, ApiState},
 };
 
 // ---------------------------------------------------------------------------
@@ -42,13 +42,7 @@ fn empty_router() -> axum::Router {
         stigmergy: true,
     };
     let chain = ChainContext::new(toggles);
-    let state = ApiState {
-        chain: Arc::new(RwLock::new(chain)),
-        projection_cache: ProjectionCache::new(128),
-        started_at: std::time::Instant::now(),
-        #[cfg(feature = "roko")]
-        subs: None,
-    };
+    let state = ApiState::new(Arc::new(RwLock::new(chain)));
     http_api::build_router(state)
 }
 
@@ -72,13 +66,7 @@ fn router_with_pheromones(n: usize) -> axum::Router {
             .pheromones
             .deposit(kinds[i % 3], v, 1.0 + i as f32, now);
     }
-    let state = ApiState {
-        chain: Arc::new(RwLock::new(chain)),
-        projection_cache: ProjectionCache::new(128),
-        started_at: std::time::Instant::now(),
-        #[cfg(feature = "roko")]
-        subs: None,
-    };
+    let state = ApiState::new(Arc::new(RwLock::new(chain)));
     http_api::build_router(state)
 }
 
@@ -112,13 +100,7 @@ fn router_with_knowledge(n: usize) -> axum::Router {
             0,
         );
     }
-    let state = ApiState {
-        chain: Arc::new(RwLock::new(chain)),
-        projection_cache: ProjectionCache::new(128),
-        started_at: std::time::Instant::now(),
-        #[cfg(feature = "roko")]
-        subs: None,
-    };
+    let state = ApiState::new(Arc::new(RwLock::new(chain)));
     http_api::build_router(state)
 }
 
@@ -139,13 +121,7 @@ fn router_with_agents(n: usize) -> axum::Router {
             now,
         );
     }
-    let state = ApiState {
-        chain: Arc::new(RwLock::new(chain)),
-        projection_cache: ProjectionCache::new(128),
-        started_at: std::time::Instant::now(),
-        #[cfg(feature = "roko")]
-        subs: None,
-    };
+    let state = ApiState::new(Arc::new(RwLock::new(chain)));
     http_api::build_router(state)
 }
 
@@ -900,13 +876,7 @@ async fn test_topology_with_agents_and_knowledge() {
         0,
     );
 
-    let state = ApiState {
-        chain: Arc::new(RwLock::new(chain)),
-        projection_cache: ProjectionCache::new(128),
-        started_at: std::time::Instant::now(),
-        #[cfg(feature = "roko")]
-        subs: None,
-    };
+    let state = ApiState::new(Arc::new(RwLock::new(chain)));
     let router = http_api::build_router(state);
 
     let (status, json) = get_json(&router, "/agents/topology").await;

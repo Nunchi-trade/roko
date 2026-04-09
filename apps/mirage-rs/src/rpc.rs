@@ -137,13 +137,10 @@ pub async fn start_rpc_server_with_chain(
         }
     };
     let api_router = {
-        let current_block = {
-            let block_num = local_state.read().fork.local_block_number;
-            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(block_num))
-        };
+        let block_state = Arc::clone(&local_state);
         let api_state = crate::http_api::ApiState {
             chain: chain.clone(),
-            current_block,
+            current_block: Arc::new(move || block_state.read().fork.local_block_number),
             projection_cache: crate::http_api::ProjectionCache::new(4096),
             started_at: std::time::Instant::now(),
             #[cfg(feature = "roko")]

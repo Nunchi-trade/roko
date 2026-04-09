@@ -79,7 +79,7 @@ pub async fn get_agent_heartbeat(
     State(state): State<ApiState>,
     Path(id): Path<String>,
 ) -> Json<serde_json::Value> {
-    let current_block = state.mirage_state.read().fork.local_block_number;
+    let current_block = (state.current_block)();
     let chain = state.chain.read();
     let timeout_blocks: u64 = 200;
     match chain.agent_registry.get_agent(&id) {
@@ -207,7 +207,7 @@ pub async fn agent_heartbeat(
     Json(req): Json<HeartbeatRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let now = now_secs();
-    let current_block = state.mirage_state.read().fork.local_block_number;
+    let current_block = (state.current_block)();
     let mut chain = state.chain.write();
 
     let ok = chain.agent_registry.heartbeat(&id, current_block, now);
