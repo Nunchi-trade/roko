@@ -3,8 +3,8 @@
 //! See [`roko_cli`] for the lib-side description. The binary exposes
 //! subcommands (`init`, `run`, `status`, `replay`, `config`, `inject`,
 //! `plan`) plus top-level flags for mode selection (`--headless`,
-//! `--role`, `--model`, `--effort`, `--json`, `--quiet`, `--resume`,
-//! `--repo`, and a positional `[prompt]` for one-shot mode).
+//! `--role`, `--model`, `--effort`, `--json`, `--log-format`, `--quiet`,
+//! `--resume`, `--repo`, and a positional `[prompt]` for one-shot mode).
 
 #![allow(clippy::too_many_lines)]
 
@@ -54,6 +54,15 @@ pub enum Effort {
     High,
     /// Maximum reasoning — slowest, most expensive.
     Max,
+}
+
+/// Log output format for tracing subscriber initialization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum LogFormat {
+    /// Human-readable text logs.
+    Text,
+    /// Structured JSON logs.
+    Json,
 }
 
 impl std::fmt::Display for Effort {
@@ -106,6 +115,10 @@ struct Cli {
     /// Emit JSON output instead of human-readable text.
     #[arg(long, global = true)]
     json: bool,
+
+    /// Set the tracing log format.
+    #[arg(long, global = true, value_enum, default_value_t = LogFormat::Text)]
+    log_format: LogFormat,
 
     /// Suppress non-essential output.
     #[arg(long, global = true)]
@@ -423,7 +436,7 @@ enum ConfigCmd {
 
 fn main() {
     let cli = Cli::parse();
-    if cli.json {
+    if cli.log_format == LogFormat::Json {
         tracing_subscriber::fmt()
             .json()
             .with_env_filter("roko=info")
