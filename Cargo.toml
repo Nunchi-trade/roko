@@ -37,6 +37,8 @@ members = [
     # (prompt → compose → agent → gate → persist → policy) against a working
     # directory. Reads its agent/gate config from ./roko.toml.
     "crates/roko-cli",
+    # HTTP server crate extracted from roko-cli's serve module.
+    "crates/roko-serve",
 
     # Conductor — reactive intelligence layer: watchers, circuit breaker, interventions.
     "crates/roko-conductor",
