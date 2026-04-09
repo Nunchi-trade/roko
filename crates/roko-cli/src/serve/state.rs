@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
@@ -95,6 +96,8 @@ pub struct AppState {
     pub layout: RokoLayout,
     /// Cancellation token for graceful shutdown.
     pub cancel: CancelToken,
+    /// Monotonic timestamp when the server state was created.
+    pub started_at: Instant,
     /// Prometheus-style metric registry.
     pub metrics: Arc<MetricRegistry>,
     /// Process lifecycle manager.
@@ -141,6 +144,7 @@ impl AppState {
             workdir,
             layout,
             cancel,
+            started_at: Instant::now(),
             metrics: Arc::new(MetricRegistry::new()),
             supervisor,
             event_bus: EventBus::new(1024),
