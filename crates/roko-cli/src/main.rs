@@ -11,6 +11,9 @@
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::{Parser, Subcommand, ValueEnum};
+use octocrab::models::hooks::{Config as HookConfig, ContentType, Hook};
+use octocrab::models::webhook_events::WebhookEventType;
+use octocrab::Octocrab;
 use roko_agent::process::{cleanup_orphaned_agents, reap_orphaned_children};
 use roko_cli::serve_runtime::RokoCliRuntime;
 use roko_cli::tui::App;
@@ -33,6 +36,7 @@ use std::env;
 use std::fmt::Write as _;
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
+use tracing::{info, warn};
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
 use tracing_subscriber::registry::LookupSpan;
 
@@ -2742,6 +2746,16 @@ async fn cmd_deploy_railway(cli: &Cli, workdir: Option<PathBuf>) -> Result<i32> 
     run_release_build(&workdir).await?;
 
     let config = load_roko_config(&workdir)?;
+    let repo_registry = match load_layered(&workdir) {
+        Ok(resolved) => resolved.repo_registry,
+        Err(err) => {
+            warn!(
+                error = %err,
+                "failed to load configured repos; skipping GitHub webhook registration"
+            );
+            RepoRegistry::default()
+        }
+    };
     let deploy_config = &config.deploy;
     let token = deploy_config
         .railway_api_token
@@ -2778,6 +2792,10 @@ async fn cmd_deploy_railway(cli: &Cli, workdir: Option<PathBuf>) -> Result<i32> 
         .url
         .as_deref()
         .ok_or_else(|| anyhow!("Railway deployment finished without a public URL"))?;
+
+    register_deployment_github_webhooks(&repo_registry, url, &config.webhooks.github.secret)
+        .await?;
+
     println!("{url}");
     Ok(EXIT_SUCCESS)
 }
@@ -2848,6 +2866,114 @@ async fn run_release_build(workdir: &Path) -> Result<()> {
             stderr.trim()
         );
     }
+
+    Ok(())
+}
+
+async fn register_deployment_github_webhooks(
+    repo_registry: &RepoRegistry,
+    webhook_url: &str,
+    secret: &str,
+) -> Result<()> {
+    if repo_registry.is_empty() {
+        return Ok(());
+    }
+
+    if secret.trim().is_empty() {
+        warn!("github webhook secret is not configured; skipping webhook registration");
+        return Ok(());
+    }
+
+    let token = match env::var("GITHUB_TOKEN").or_else(|_| env::var("GH_TOKEN")) {
+        Ok(token) if !token.trim().is_empty() => token,
+        _ => {
+            warn!("github token is not configured; skipping webhook registration");
+            return Ok(());
+        }
+    };
+
+    let github = Octocrab::builder()
+        .personal_token(token)
+        .build()
+        .context("build GitHub client")?;
+
+    let mut registered = 0usize;
+    for repo in repo_registry.repos() {
+        let slug = match git_remote_slug(&repo.root) {
+            Ok(slug) => slug,
+            Err(err) => {
+                warn!(
+                    repo = %repo.config.name,
+                    path = %repo.root.display(),
+                    error = %err,
+                    "skipping GitHub webhook registration for repo with non-GitHub origin"
+                );
+                continue;
+            }
+        };
+
+        let Some((owner, repo_name)) = slug.split_once('/') else {
+            warn!(
+                repo = %repo.config.name,
+                slug = %slug,
+                "skipping GitHub webhook registration for malformed repo slug"
+            );
+            continue;
+        };
+
+        match register_github_webhook(&github, owner, repo_name, webhook_url, secret).await {
+            Ok(()) => {
+                registered += 1;
+            }
+            Err(err) => {
+                warn!(
+                    repo = %slug,
+                    error = %err,
+                    "failed to register GitHub webhook"
+                );
+            }
+        }
+    }
+
+    if registered > 0 {
+        info!(count = registered, "registered GitHub webhooks");
+    }
+
+    Ok(())
+}
+
+async fn register_github_webhook(
+    github: &octocrab::Octocrab,
+    owner: &str,
+    repo: &str,
+    webhook_url: &str,
+    secret: &str,
+) -> Result<()> {
+    let hook = Hook {
+        name: "web".to_string(),
+        active: true,
+        events: vec![
+            WebhookEventType::Push,
+            WebhookEventType::PullRequest,
+            WebhookEventType::Issues,
+            WebhookEventType::IssueComment,
+            WebhookEventType::PullRequestReview,
+            WebhookEventType::CheckRun,
+        ],
+        config: HookConfig {
+            url: format!("{webhook_url}/webhooks/github"),
+            content_type: Some(ContentType::Json),
+            insecure_ssl: None,
+            secret: Some(secret.to_string()),
+        },
+        ..Hook::default()
+    };
+
+    github
+        .repos(owner, repo)
+        .create_hook(hook)
+        .await
+        .with_context(|| format!("create GitHub webhook for {owner}/{repo}"))?;
 
     Ok(())
 }
