@@ -7,6 +7,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
+use std::fs::OpenOptions;
+use std::io::{BufWriter, Write};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,6 +16,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use bardo_primitives::hdc::{HdcVector, text_fingerprint};
 use roko_agent::{Agent, AgentResult, nl_to_format::NlToFormatConverter};
 use roko_core::{Body, Context as RokoContext, Kind, Signal};
 use roko_learn::{
@@ -64,6 +67,153 @@ pub struct DreamCycleReport {
     pub playbooks_created: usize,
     /// Failure-oriented knowledge entries created during the pass.
     pub regressions_detected: Vec<KnowledgeEntry>,
+}
+
+/// One logged counterfactual generated during offline dreaming.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct DreamCounterfactualRecord {
+    /// When the counterfactual was generated.
+    generated_at: DateTime<Utc>,
+    /// Cluster the counterfactual came from.
+    cluster_key: DreamClusterKey,
+    /// Which semantic axis was perturbed.
+    focus_axis: String,
+    /// Original field value before the perturbation.
+    original_value: String,
+    /// Replacement field value used in the counterfactual.
+    replacement_value: String,
+    /// How the replacement was sourced.
+    replacement_source: String,
+    /// Human-readable hypothesis describing the counterfactual.
+    hypothesis: String,
+    /// Deterministic positional permutation applied to the candidate vector.
+    permutation: usize,
+    /// Stable hash of the base HDC context vector.
+    base_signature: u64,
+    /// Stable hash of the counterfactual HDC context vector.
+    counterfactual_signature: u64,
+    /// Hamming similarity between the base and counterfactual vectors.
+    similarity: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CounterfactualAxis {
+    Plan,
+    TaskType,
+    Model,
+    Outcome,
+    FailureReason,
+}
+
+impl CounterfactualAxis {
+    const ALL: [Self; 5] = [
+        Self::Plan,
+        Self::TaskType,
+        Self::Model,
+        Self::Outcome,
+        Self::FailureReason,
+    ];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Plan => "plan_id",
+            Self::TaskType => "task_type",
+            Self::Model => "model",
+            Self::Outcome => "outcome",
+            Self::FailureReason => "failure_reason",
+        }
+    }
+
+    const fn permutation(self) -> usize {
+        match self {
+            Self::Plan => 17,
+            Self::TaskType => 113,
+            Self::Model => 257,
+            Self::Outcome => 509,
+            Self::FailureReason => 863,
+        }
+    }
+
+    const fn max_neighborhood_size(self) -> usize {
+        match self {
+            Self::Outcome => 1,
+            _ => 2,
+        }
+    }
+
+    fn original_value(self, cluster: &DreamCluster) -> String {
+        match self {
+            Self::Plan => cluster.key.plan_id.clone(),
+            Self::TaskType => cluster.key.task_type.clone(),
+            Self::Model => cluster.key.model.clone(),
+            Self::Outcome => cluster.key.outcome.to_string(),
+            Self::FailureReason => summarize_failure_reason(cluster),
+        }
+    }
+
+    fn replacement_pool(self, clusters: &[DreamCluster]) -> Vec<String> {
+        let mut pool = BTreeSet::new();
+        for cluster in clusters {
+            match self {
+                Self::Plan => {
+                    pool.insert(cluster.key.plan_id.clone());
+                }
+                Self::TaskType => {
+                    pool.insert(cluster.key.task_type.clone());
+                }
+                Self::Model => {
+                    pool.insert(cluster.key.model.clone());
+                }
+                Self::Outcome => {
+                    pool.insert(cluster.key.outcome.to_string());
+                }
+                Self::FailureReason => {
+                    pool.insert(summarize_failure_reason(cluster));
+                }
+            }
+        }
+        pool.into_iter().collect()
+    }
+
+    fn fallback_replacement(self, original_value: &str) -> String {
+        match self {
+            Self::Outcome => {
+                if original_value.eq_ignore_ascii_case("success") {
+                    "failure".to_string()
+                } else {
+                    "success".to_string()
+                }
+            }
+            Self::FailureReason => {
+                if original_value.trim().is_empty() {
+                    "a different failure mode".to_string()
+                } else {
+                    format!("{original_value} (alternate failure mode)")
+                }
+            }
+            _ => format!("{original_value} (counterfactual)"),
+        }
+    }
+
+    fn hypothesis(self, original_value: &str, replacement_value: &str) -> String {
+        match self {
+            Self::Plan => format!(
+                "What if plan_id had been {replacement_value} instead of {original_value}?"
+            ),
+            Self::TaskType => format!(
+                "What if task_type had been {replacement_value} instead of {original_value}?"
+            ),
+            Self::Model => format!(
+                "What if model had been {replacement_value} instead of {original_value}?"
+            ),
+            Self::Outcome => format!(
+                "What if outcome had been {replacement_value} instead of {original_value}?"
+            ),
+            Self::FailureReason => format!(
+                "What if the failure reason had been {replacement_value} instead of {original_value}?"
+            ),
+        }
+    }
 }
 
 /// One cluster of episodes grouped by plan, task type, outcome, and model.
@@ -268,6 +418,8 @@ impl DreamCycle {
             regressions_detected,
         };
 
+        let counterfactuals = build_counterfactuals(&clusters, started_at);
+        self.write_counterfactuals(&counterfactuals)?;
         self.write_report(&report).await?;
 
         self.last_dream_at = Some(processed_through.unwrap_or(started_at));
@@ -284,6 +436,38 @@ impl DreamCycle {
         let bytes = serde_json::to_vec_pretty(report).context("serialize dream report")?;
         std::fs::write(&path, bytes)
             .with_context(|| format!("write dream report to {}", path.display()))?;
+        Ok(())
+    }
+
+    fn write_counterfactuals(&self, counterfactuals: &[DreamCounterfactualRecord]) -> Result<()> {
+        if counterfactuals.is_empty() {
+            return Ok(());
+        }
+
+        let path = dream_counterfactual_path(self.episode_store.path());
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "create dream counterfactual directory {}",
+                    parent.display()
+                )
+            })?;
+        }
+
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("open dream counterfactual log {}", path.display()))?;
+        let mut writer = BufWriter::new(file);
+        for counterfactual in counterfactuals {
+            serde_json::to_writer(&mut writer, counterfactual)
+                .context("serialize dream counterfactual")?;
+            writer
+                .write_all(b"\n")
+                .context("write dream counterfactual newline")?;
+        }
+        writer.flush().context("flush dream counterfactual log")?;
         Ok(())
     }
 }
@@ -422,6 +606,173 @@ impl From<&DreamCluster> for DreamClusterReport {
             warnings: cluster.warnings.clone(),
         }
     }
+}
+
+fn build_counterfactuals(
+    clusters: &[DreamCluster],
+    generated_at: DateTime<Utc>,
+) -> Vec<DreamCounterfactualRecord> {
+    let mut records = Vec::new();
+    if clusters.is_empty() {
+        return records;
+    }
+
+    for cluster in clusters {
+        let outcome = cluster.key.outcome.to_string();
+        let failure_reason = summarize_failure_reason(cluster);
+        let base_vector = encode_cluster_vector(
+            &cluster.key.plan_id,
+            &cluster.key.task_type,
+            &outcome,
+            &cluster.key.model,
+            &failure_reason,
+        );
+        let base_signature = vector_signature(&base_vector);
+
+        for axis in CounterfactualAxis::ALL {
+            let original_value = axis.original_value(cluster);
+            let pool = axis.replacement_pool(clusters);
+            let mut candidates = select_counterfactual_candidates(
+                axis,
+                &original_value,
+                &pool,
+                axis.max_neighborhood_size(),
+            );
+
+            if candidates.is_empty() {
+                candidates.push((axis.fallback_replacement(&original_value), "synthetic".to_string()));
+            }
+
+            for (rank, (replacement_value, source)) in candidates.into_iter().enumerate() {
+                let counterfactual_vector = encode_counterfactual_vector(
+                    cluster,
+                    axis,
+                    &replacement_value,
+                    rank + 1,
+                );
+                let similarity = base_vector.similarity(&counterfactual_vector);
+                let hypothesis = axis.hypothesis(&original_value, &replacement_value);
+                records.push(DreamCounterfactualRecord {
+                    generated_at,
+                    cluster_key: cluster.key.clone(),
+                    focus_axis: axis.label().to_string(),
+                    original_value: original_value.clone(),
+                    replacement_value,
+                    replacement_source: source,
+                    hypothesis,
+                    permutation: axis.permutation() + (rank + 1) * 17,
+                    base_signature,
+                    counterfactual_signature: vector_signature(&counterfactual_vector),
+                    similarity,
+                });
+            }
+        }
+    }
+
+    records
+}
+
+fn select_counterfactual_candidates(
+    axis: CounterfactualAxis,
+    original_value: &str,
+    pool: &[String],
+    limit: usize,
+) -> Vec<(String, String)> {
+    let original_vector = text_fingerprint(original_value);
+    let mut scored: Vec<(String, String, f32)> = pool
+        .iter()
+        .filter(|candidate| candidate.as_str() != original_value)
+        .map(|candidate| {
+            let similarity = original_vector.similarity(&text_fingerprint(candidate));
+            (candidate.clone(), "observed".to_string(), similarity)
+        })
+        .collect();
+
+    scored.sort_by(|left, right| {
+        right
+            .2
+            .partial_cmp(&left.2)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+
+    let mut selected: Vec<(String, String)> = scored
+        .into_iter()
+        .take(limit)
+        .map(|(value, source, _)| (value, source))
+        .collect();
+
+    if selected.is_empty() && !original_value.trim().is_empty() {
+        selected.push((axis.fallback_replacement(original_value), "synthetic".to_string()));
+    }
+
+    selected
+}
+
+fn encode_cluster_vector(
+    plan_id: &str,
+    task_type: &str,
+    outcome: &str,
+    model: &str,
+    failure_reason: &str,
+) -> HdcVector {
+    let parts = [
+        text_fingerprint(&format!("plan_id={plan_id}")).permute(11),
+        text_fingerprint(&format!("task_type={task_type}")).permute(37),
+        text_fingerprint(&format!("outcome={outcome}")).permute(73),
+        text_fingerprint(&format!("model={model}")).permute(131),
+        text_fingerprint(&format!("failure_reason={failure_reason}")).permute(197),
+    ];
+    let refs = parts.iter().collect::<Vec<_>>();
+    HdcVector::bundle(&refs)
+}
+
+fn encode_counterfactual_vector(
+    cluster: &DreamCluster,
+    axis: CounterfactualAxis,
+    replacement_value: &str,
+    rank: usize,
+) -> HdcVector {
+    let failure_reason = summarize_failure_reason(cluster);
+    let plan_id = match axis {
+        CounterfactualAxis::Plan => replacement_value.to_string(),
+        _ => cluster.key.plan_id.clone(),
+    };
+    let task_type = match axis {
+        CounterfactualAxis::TaskType => replacement_value.to_string(),
+        _ => cluster.key.task_type.clone(),
+    };
+    let outcome = match axis {
+        CounterfactualAxis::Outcome => replacement_value.to_string(),
+        _ => cluster.key.outcome.to_string(),
+    };
+    let model = match axis {
+        CounterfactualAxis::Model => replacement_value.to_string(),
+        _ => cluster.key.model.clone(),
+    };
+    let failure_reason = match axis {
+        CounterfactualAxis::FailureReason => replacement_value.to_string(),
+        _ => failure_reason,
+    };
+    encode_cluster_vector(
+        &plan_id,
+        &task_type,
+        &outcome,
+        &model,
+        &failure_reason,
+    )
+    .permute(axis.permutation() + rank * 17)
+}
+
+fn vector_signature(vector: &HdcVector) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    for byte in vector.to_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
 }
 
 fn cluster_episodes(episodes: Vec<Episode>) -> Vec<DreamCluster> {
@@ -1027,6 +1378,12 @@ fn dream_report_path(episode_path: &Path, started_at: DateTime<Utc>) -> PathBuf 
         .join(format!("dream-{}.json", started_at.timestamp_millis()))
 }
 
+fn dream_counterfactual_path(episode_path: &Path) -> PathBuf {
+    dream_root_path(episode_path)
+        .join("dreams")
+        .join("counterfactuals.jsonl")
+}
+
 fn dream_root_path(path: &Path) -> PathBuf {
     let mut ancestor = path;
     while let Some(parent) = ancestor.parent() {
@@ -1232,6 +1589,19 @@ mod tests {
         let report_dir = tmp.path().join(".roko").join("dreams");
         let mut entries = tokio::fs::read_dir(&report_dir).await.expect("dream dir");
         assert!(entries.next_entry().await.expect("next").is_some());
+
+        let counterfactual_path = report_dir.join("counterfactuals.jsonl");
+        let counterfactual_text = tokio::fs::read_to_string(&counterfactual_path)
+            .await
+            .expect("counterfactual log");
+        let first_line = counterfactual_text.lines().next().expect("counterfactual line");
+        let counterfactual: Value =
+            serde_json::from_str(first_line).expect("parse counterfactual json");
+        assert_eq!(
+            counterfactual["focus_axis"].as_str(),
+            Some("plan_id")
+        );
+        assert!(counterfactual["similarity"].as_f64().unwrap_or_default() > 0.0);
 
         let saved_playbooks = playbook_store.list().await.expect("list playbooks");
         assert_eq!(saved_playbooks.len(), 1);
