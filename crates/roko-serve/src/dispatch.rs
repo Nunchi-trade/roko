@@ -35,6 +35,7 @@ use roko_learn::cascade_router::CascadeRouter;
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage as EpisodeUsage};
 use roko_learn::prompt_experiment::ExperimentStore;
+use roko_neuro::spawn_episode_distillation;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
@@ -1594,6 +1595,7 @@ async fn append_dispatch_episode(
         warn!(error = %err, template = %template.name, "failed to append episode");
         return;
     }
+    spawn_episode_distillation(state.workdir.clone(), episode.clone());
 
     if let Err(err) = record_cascade_router_outcome(state, template, outcome.result.success).await {
         warn!(error = %err, template = %template.name, "failed to record cascade router outcome");

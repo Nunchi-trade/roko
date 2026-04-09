@@ -6,6 +6,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use thiserror::Error;
 use tokio::fs::OpenOptions;
@@ -30,6 +31,8 @@ use crate::regression::{RegressionReport, RegressionThresholds, detect_regressio
 use crate::skill_library::{SkillLibrary, SkillLibraryError, TemplatePatternGenerator};
 use roko_core::agent::AgentRole;
 use roko_core::task::{TaskCategory, TaskComplexityBand};
+
+type EpisodeCompletionHook = Arc<dyn Fn(Episode) + Send + Sync>;
 
 /// Filesystem locations used by [`LearningRuntime`].
 /// Thin wrapper that materializes the action slice required by [`EpisodeView`]
@@ -243,6 +246,7 @@ pub struct LearningRuntime {
     cascade_router: CascadeRouter,
     context_pack_cache: ContextPackCache,
     experiment_store: parking_lot::Mutex<ExperimentStore>,
+    episode_completion_hook: Option<EpisodeCompletionHook>,
 }
 
 impl LearningRuntime {
@@ -295,6 +299,7 @@ impl LearningRuntime {
             cascade_router,
             context_pack_cache,
             experiment_store: parking_lot::Mutex::new(experiment_store),
+            episode_completion_hook: None,
         })
     }
 
@@ -342,6 +347,7 @@ impl LearningRuntime {
             cascade_router,
             context_pack_cache,
             experiment_store: parking_lot::Mutex::new(experiment_store),
+            episode_completion_hook: None,
         })
     }
 
@@ -413,6 +419,18 @@ impl LearningRuntime {
         &self.experiment_store
     }
 
+    /// Install a callback that runs after a completed episode is
+    /// persisted.
+    ///
+    /// The callback is synchronous so it can enqueue background work
+    /// without holding up the learning runtime.
+    pub fn set_episode_completion_hook<F>(&mut self, hook: F)
+    where
+        F: Fn(Episode) + Send + Sync + 'static,
+    {
+        self.episode_completion_hook = Some(Arc::new(hook));
+    }
+
     /// Append an efficiency event to the JSONL log.
     ///
     /// # Errors
@@ -470,6 +488,9 @@ impl LearningRuntime {
 
         self.episode_logger.append(&input.episode).await?;
         update.episode_logged = ApplyStatus::Applied;
+        if let Some(hook) = &self.episode_completion_hook {
+            hook(input.episode.clone());
+        }
 
         if input.playbook_id.is_none() {
             input.playbook_id = extra_string(&input.episode, "playbook_id");

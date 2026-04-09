@@ -5329,6 +5329,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -5387,6 +5388,7 @@ dependencies = [
  "roko-fs",
  "roko-gate",
  "roko-learn",
+ "roko-neuro",
  "roko-orchestrator",
  "roko-plugin",
  "roko-std",

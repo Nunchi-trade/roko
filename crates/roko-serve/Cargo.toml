@@ -14,6 +14,7 @@ workspace = true
 roko-core = { path = "../roko-core" }
 roko-agent = { path = "../roko-agent" }
 roko-learn = { path = "../roko-learn" }
+roko-neuro = { path = "../roko-neuro" }
 roko-gate = { path = "../roko-gate" }
 roko-fs = { path = "../roko-fs" }
 roko-compose = { path = "../roko-compose" }

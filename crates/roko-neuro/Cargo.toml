@@ -27,6 +27,8 @@ chrono = { workspace = true }
 anyhow = { workspace = true }
 parking_lot = { workspace = true }
 async-trait = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
+tracing = { workspace = true }
 bardo-primitives = { path = "../bardo-primitives", optional = true }
 
 [dev-dependencies]

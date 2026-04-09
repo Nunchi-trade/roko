@@ -75,6 +75,13 @@ const WATCHER_SIGNAL_TAIL: usize = 200;
 const EFFICIENCY_SIGNAL_TAIL: usize = 256;
 const GHOST_TURN_SIGNAL_KIND: &str = "conductor.ghost_turn";
 
+fn install_episode_distillation_hook(learning: &mut LearningRuntime, workdir: &Path) {
+    let distillation_workdir = workdir.to_path_buf();
+    learning.set_episode_completion_hook(move |episode| {
+        roko_neuro::spawn_episode_distillation(distillation_workdir.clone(), episode);
+    });
+}
+
 // ─── ContextAttributionTracker ────────────────────────────────────────────
 
 /// Tracks per-(tier, source_type) context attribution rates.
@@ -1700,9 +1707,10 @@ impl PlanRunner {
         }
 
         let cancel = CancelToken::new();
-        let learning = LearningRuntime::open_under(workdir.join(".roko").join("learn"))
+        let mut learning = LearningRuntime::open_under(workdir.join(".roko").join("learn"))
             .await
             .map_err(|e| anyhow!("init learning runtime: {e}"))?;
+        install_episode_distillation_hook(&mut learning, workdir);
         let skill_library =
             load_or_create_skill_library(&workdir.join(".roko").join("learn").join("skills.json"))
                 .await
@@ -1805,9 +1813,10 @@ impl PlanRunner {
         let legacy_completed = Self::legacy_completed_tasks_from_snapshot(snapshot_json);
         let task_trackers = Self::restore_task_trackers(workdir, &legacy_completed);
         let cancel = CancelToken::new();
-        let learning = LearningRuntime::open_under(workdir.join(".roko").join("learn"))
+        let mut learning = LearningRuntime::open_under(workdir.join(".roko").join("learn"))
             .await
             .map_err(|e| anyhow!("init learning runtime: {e}"))?;
+        install_episode_distillation_hook(&mut learning, workdir);
         let skill_library =
             load_or_create_skill_library(&workdir.join(".roko").join("learn").join("skills.json"))
                 .await
@@ -1908,9 +1917,10 @@ impl PlanRunner {
         let legacy_completed = Self::legacy_completed_tasks_from_snapshot(executor_json);
         let task_trackers = Self::restore_task_trackers(workdir, &legacy_completed);
         let cancel = CancelToken::new();
-        let learning = LearningRuntime::open_under(workdir.join(".roko").join("learn"))
+        let mut learning = LearningRuntime::open_under(workdir.join(".roko").join("learn"))
             .await
             .map_err(|e| anyhow!("init learning runtime: {e}"))?;
+        install_episode_distillation_hook(&mut learning, workdir);
         let skill_library =
             load_or_create_skill_library(&workdir.join(".roko").join("learn").join("skills.json"))
                 .await

@@ -70,8 +70,11 @@ pub struct KnowledgeEntry {
 pub mod knowledge_store;
 /// Episode distillation into durable knowledge candidates.
 pub mod distiller;
+/// Helpers for asynchronously processing completed episodes.
+pub mod episode_completion;
 
 pub use distiller::{DistillationBackend, Distiller};
+pub use episode_completion::spawn_episode_distillation;
 pub use knowledge_store::KnowledgeStore;
 #[cfg(feature = "hdc")]
 pub use knowledge_store::{MemoryHit, MemoryIndex};
