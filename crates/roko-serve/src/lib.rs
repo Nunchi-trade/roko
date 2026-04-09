@@ -10,7 +10,9 @@ pub mod feedback;
 pub mod event_bus;
 pub mod error;
 pub mod events;
+pub mod plan_types;
 pub mod routes;
+pub mod runtime;
 pub mod state;
 pub mod templates;
 
@@ -23,16 +25,15 @@ use tracing::{info, warn};
 
 use roko_core::config::schema::RokoConfig;
 
-use roko_cli::Config;
+use runtime::CliRuntime;
 use state::AppState;
 
 /// Inputs required to start the HTTP server.
-#[derive(Clone)]
 pub struct ServerBuildConfig {
     /// Project working directory.
     pub workdir: PathBuf,
-    /// CLI-level configuration (`.roko/config.toml`).
-    pub cli_config: Config,
+    /// Runtime bridge to CLI operations (run_once, status, dashboard).
+    pub runtime: Arc<dyn CliRuntime>,
     /// Full `roko.toml` schema configuration.
     pub roko_config: RokoConfig,
     /// Optional bind address override.
@@ -43,17 +44,16 @@ pub struct ServerBuildConfig {
 
 impl ServerBuildConfig {
     /// Create a new server build configuration.
-    #[must_use]
     pub fn new(
         workdir: PathBuf,
-        cli_config: Config,
+        runtime: Arc<dyn CliRuntime>,
         roko_config: RokoConfig,
         bind: Option<String>,
         port: Option<u16>,
     ) -> Self {
         Self {
             workdir,
-            cli_config,
+            runtime,
             roko_config,
             bind,
             port,
@@ -115,10 +115,10 @@ impl ServerBuilder {
         };
 
         let workdir = self.config.workdir.clone();
-        let cli_config = self.config.cli_config.clone();
+        let runtime = Arc::clone(&self.config.runtime);
         let roko_config = self.config.roko_config.clone();
         let state = Arc::clone(self.state.get_or_insert_with(|| {
-            Arc::new(build_app_state(workdir, cli_config, roko_config))
+            Arc::new(build_app_state(workdir, runtime, roko_config))
         }));
         let dispatcher = Arc::new(dispatch::TemplateAgentDispatcher::new(
             state.workdir.clone(),
@@ -149,25 +149,12 @@ impl ServerBuilder {
 }
 
 /// Start the HTTP server.
-///
-/// # Arguments
-///
-/// * `workdir`  – Project working directory (must contain `roko.toml` or
-///   defaults will be used).
-/// * `bind`     – Optional bind address override (takes precedence over
-///   `roko.toml` `[server].bind`).
-/// * `port`     – Optional port override (takes precedence over
-///   `roko.toml` `[server].port`).
-pub async fn run_server(workdir: PathBuf, bind: Option<String>, port: Option<u16>) -> Result<()> {
-    let config = load_server_build_config(workdir, bind, port)?;
-    ServerBuilder::new(config).run().await
-}
-
-fn load_server_build_config(
+pub async fn run_server(
     workdir: PathBuf,
+    runtime: Arc<dyn CliRuntime>,
     bind: Option<String>,
     port: Option<u16>,
-) -> Result<ServerBuildConfig> {
+) -> Result<()> {
     let roko_toml_path = workdir.join("roko.toml");
 
     let roko_config: RokoConfig = if roko_toml_path.exists() {
@@ -182,30 +169,17 @@ fn load_server_build_config(
         RokoConfig::default()
     };
 
-    let cli_config_path = workdir.join(".roko").join("config.toml");
-    let cli_config: Config = if cli_config_path.exists() {
-        Config::from_file(&cli_config_path)
-            .with_context(|| format!("load CLI config {}", cli_config_path.display()))?
-    } else {
-        Config::default()
-    };
-
-    Ok(ServerBuildConfig::new(
-        workdir,
-        cli_config,
-        roko_config,
-        bind,
-        port,
-    ))
+    let config = ServerBuildConfig::new(workdir, runtime, roko_config, bind, port);
+    ServerBuilder::new(config).run().await
 }
 
 fn build_app_state(
     workdir: PathBuf,
-    cli_config: Config,
+    runtime: Arc<dyn CliRuntime>,
     roko_config: RokoConfig,
 ) -> AppState {
     let deploy_backend = create_deploy_backend(&roko_config);
-    AppState::new(workdir, cli_config, roko_config, deploy_backend)
+    AppState::new(workdir, runtime, roko_config, deploy_backend)
 }
 
 fn create_deploy_backend(roko_config: &RokoConfig) -> Arc<dyn deploy::DeployBackend> {

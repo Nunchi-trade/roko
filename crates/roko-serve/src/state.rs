@@ -20,11 +20,12 @@ use roko_core::config::schema::RokoConfig;
 use roko_core::{Signal, Substrate};
 
 use crate::deploy::{DeployBackend, Deployment};
+use crate::dispatch::SubscriptionRegistry;
 use crate::event_bus::EventBus;
+use crate::runtime::CliRuntime;
 use roko_core::obs::metrics::MetricRegistry;
 use roko_fs::FileSubstrate;
 use roko_fs::layout::RokoLayout;
-use roko_cli::dispatch::SubscriptionRegistry;
 
 use crate::events::ServerEvent;
 use crate::templates::TemplateRegistry;
@@ -123,8 +124,8 @@ pub struct AppState {
     pub event_bus: EventBus<ServerEvent>,
     /// Event subscriptions loaded at startup.
     pub subscriptions: SubscriptionRegistry,
-    /// CLI-level configuration (`roko.toml`).
-    pub config: RwLock<roko_cli::Config>,
+    /// Runtime bridge to CLI operations (run_once, status, dashboard).
+    pub runtime: Arc<dyn CliRuntime>,
     /// Full `roko.toml` schema configuration.
     pub roko_config: RwLock<RokoConfig>,
     /// Active one-shot runs.
