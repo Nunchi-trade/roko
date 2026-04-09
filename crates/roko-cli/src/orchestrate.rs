@@ -62,6 +62,7 @@ const DEFAULT_WORKTREE_IDLE_TTL_SECS: u64 = 30 * 60;
 const WATCHER_INTERVAL_SECS: u64 = 30;
 const WATCHER_SIGNAL_TAIL: usize = 200;
 const EFFICIENCY_SIGNAL_TAIL: usize = 256;
+const GHOST_TURN_SIGNAL_KIND: &str = "conductor.ghost_turn";
 
 // ─── ContextAttributionTracker ────────────────────────────────────────────
 
@@ -3597,6 +3598,7 @@ impl PlanRunner {
             Some(dir) => dir,
             None => self.plan_exec_dir(plan_id).await,
         };
+        let preexisting_changed_files = self.git_changed_files(&exec_dir).await.ok();
 
         // ── Budget check before dispatch ─────────────────────────────
         self.ensure_task_budget_available(plan_id, task)?;
@@ -4012,6 +4014,32 @@ impl PlanRunner {
             .put(result.output.clone())
             .await
             .map_err(|e| anyhow!("persist agent output: {e}"))?;
+
+        if !is_meaningful_output(&result.output) {
+            if let (Some(before_changed_files), Some(after_changed_files)) = (
+                preexisting_changed_files.as_ref(),
+                self.git_changed_files(&exec_dir).await.ok(),
+            ) {
+                if before_changed_files == &after_changed_files {
+                    self.emit_conductor_signal(
+                        Kind::Custom(GHOST_TURN_SIGNAL_KIND.into()),
+                        serde_json::json!({
+                            "plan_id": plan_id,
+                            "task": task,
+                            "role": format!("{role:?}"),
+                            "model": &selected_model,
+                            "cost_usd": task_cost,
+                            "duration_ms": result.usage.wall_ms,
+                            "changed_files_before": before_changed_files,
+                            "changed_files_after": after_changed_files,
+                            "net_new_changes": 0usize,
+                            "output_meaningful": false,
+                            "wasted_cost": true,
+                        }),
+                    );
+                }
+            }
+        }
 
         // Feed the raw agent turn into the conductor stream so the stuck-pattern
         // watcher can compare consecutive outputs across turns.
@@ -4903,6 +4931,26 @@ impl PlanRunner {
         secs.saturating_mul(1000)
     }
 
+    /// Load the current worktree diff as a list of changed paths.
+    async fn git_changed_files(&self, exec_dir: &Path) -> Result<Vec<String>> {
+        let output = tokio::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(exec_dir)
+            .output()
+            .await
+            .with_context(|| format!("git status for {}", exec_dir.display()))?;
+
+        if !output.status.success() {
+            return Err(anyhow!(
+                "git status failed for {}: {}",
+                exec_dir.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+
+        Ok(parse_git_status_changed_files(&String::from_utf8_lossy(&output.stdout)))
+    }
+
     /// Enforce the task's declared write-file scope after successful execution.
     async fn verify_declared_write_files(
         &self,
@@ -4914,37 +4962,8 @@ impl PlanRunner {
             return Ok(());
         }
 
-        let output = tokio::process::Command::new("git")
-            .args(["status", "--porcelain"])
-            .current_dir(exec_dir)
-            .output()
-            .await
-            .with_context(|| format!("git status for {task_id}"))?;
-
-        if !output.status.success() {
-            return Err(anyhow!(
-                "git status failed for {task_id}: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
-
         let allowed: Vec<&str> = allowed_files.iter().map(String::as_str).collect();
-        let changed: Vec<String> = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter_map(|line| {
-                if line.len() < 4 {
-                    return None;
-                }
-                let path = line[3..].trim();
-                if path.is_empty() {
-                    None
-                } else if let Some((_, new_path)) = path.rsplit_once(" -> ") {
-                    Some(new_path.trim().to_string())
-                } else {
-                    Some(path.to_string())
-                }
-            })
-            .collect();
+        let changed = self.git_changed_files(exec_dir).await?;
 
         let mut unexpected = Vec::new();
         for path in changed {
@@ -4966,6 +4985,37 @@ impl PlanRunner {
         }
 
         Ok(())
+    }
+}
+
+fn parse_git_status_changed_files(status: &str) -> Vec<String> {
+    let mut changed: Vec<String> = status
+        .lines()
+        .filter_map(|line| {
+            if line.len() < 4 {
+                return None;
+            }
+            let path = line[3..].trim();
+            if path.is_empty() {
+                None
+            } else if let Some((_, new_path)) = path.rsplit_once(" -> ") {
+                Some(new_path.trim().to_string())
+            } else {
+                Some(path.to_string())
+            }
+        })
+        .collect();
+    changed.sort();
+    changed.dedup();
+    changed
+}
+
+fn is_meaningful_output(output: &Signal) -> bool {
+    match &output.body {
+        Body::Empty => false,
+        Body::Text(text) => !text.trim().is_empty(),
+        Body::Json(value) => value.as_str().is_none_or(|s| !s.trim().is_empty()),
+        Body::Bytes(bytes) => !bytes.is_empty(),
     }
 }
 
