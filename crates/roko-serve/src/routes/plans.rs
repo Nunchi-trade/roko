@@ -382,9 +382,10 @@ mod tests {
     async fn execute_plan_returns_404_for_missing_plan() {
         let (_dir, state) = test_state();
 
-        let err = execute_plan(State(state), Path("missing-plan".into()))
-            .await
-            .expect_err("missing plan should error");
+        let err = match execute_plan(State(state), Path("missing-plan".into())).await {
+            Ok(_) => panic!("missing plan should error"),
+            Err(err) => err,
+        };
 
         assert_eq!(err.status, axum::http::StatusCode::NOT_FOUND);
     }
@@ -414,9 +415,10 @@ mod tests {
             }],
         };
 
-        let err = create_plan(State(Arc::clone(&state)), Json(request))
-            .await
-            .expect_err("invalid request should fail");
+        let err = match create_plan(State(Arc::clone(&state)), Json(request)).await {
+            Ok(_) => panic!("invalid request should fail"),
+            Err(err) => err,
+        };
 
         assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST);
     }
@@ -424,12 +426,15 @@ mod tests {
     #[tokio::test]
     async fn generate_plan_rejects_empty_slug() {
         let (_dir, state) = test_state();
-        let err = generate_plan(
+        let err = match generate_plan(
             State(Arc::clone(&state)),
             Json(GenerateRequest { slug: "  ".into() }),
         )
         .await
-        .expect_err("invalid request should fail");
+        {
+            Ok(_) => panic!("invalid request should fail"),
+            Err(err) => err,
+        };
 
         assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST);
     }

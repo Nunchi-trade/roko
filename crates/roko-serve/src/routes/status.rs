@@ -1408,11 +1408,19 @@ mod tests {
     #[test]
     fn gate_history_filters_and_orders_by_timestamp() {
         let mut compile_late = gate_signal("compile", false, 300);
-        compile_late.created_at_ms = 20;
+        compile_late
+            .as_object_mut()
+            .expect("gate signal should be an object")
+            .insert("created_at_ms".into(), Value::from(20));
         let mut compile_early = gate_signal("compile", true, 100);
-        compile_early.created_at_ms = 10;
+        compile_early
+            .as_object_mut()
+            .expect("gate signal should be an object")
+            .insert("created_at_ms".into(), Value::from(10));
         let mut test = gate_signal("test", true, 200);
-        test.created_at_ms = 15;
+        test.as_object_mut()
+            .expect("gate signal should be an object")
+            .insert("created_at_ms".into(), Value::from(15));
 
         let entries = vec![compile_late, compile_early, test];
         let mut history: Vec<Value> = entries
@@ -1533,11 +1541,11 @@ mod tests {
     #[tokio::test]
     async fn signals_returns_500_for_invalid_jsonl() {
         let (dir, state) = test_state();
-        let signals = dir.path().join(".roko").join("signals.jsonl");
-        tokio::fs::create_dir_all(signals.parent().expect("signals parent"))
+        let signals_path = dir.path().join(".roko").join("signals.jsonl");
+        tokio::fs::create_dir_all(signals_path.parent().expect("signals parent"))
             .await
             .expect("create signals dir");
-        tokio::fs::write(&signals, "{not-json}\n")
+        tokio::fs::write(&signals_path, "{not-json}\n")
             .await
             .expect("write corrupt signals");
 

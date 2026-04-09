@@ -1140,7 +1140,6 @@ mod tests {
         cmd_list(tmp.path()).unwrap();
     }
 
-    #[test]
     #[tokio::test]
     async fn promote_moves_file() {
         let tmp = tempfile::tempdir().unwrap();
