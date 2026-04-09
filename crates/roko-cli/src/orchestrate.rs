@@ -789,7 +789,10 @@ impl PlanRunner {
         // Dedup across servers and build the dynamic registry.
         let deduped = roko_agent::mcp::dedup_tools(all_server_tools);
         let base = StaticToolRegistry::new();
-        let mut registry = roko_agent::mcp::DynamicToolRegistry::new(&base);
+        let mut registry = roko_agent::mcp::DynamicToolRegistry::with_preference(
+            &base,
+            config.tools.prefer_mcp,
+        );
         // Group deduped tools by their server prefix (everything before `__`).
         let mut by_server: HashMap<String, Vec<roko_core::tool::ToolDef>> = HashMap::new();
         for tool in deduped {

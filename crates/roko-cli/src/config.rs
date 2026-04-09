@@ -15,6 +15,9 @@ use roko_orchestrator::ExecutorConfig;
 pub struct Config {
     /// Agent backend (the CLI that will be invoked via `ExecAgent`).
     pub agent: AgentConfig,
+    /// Tool registry preferences.
+    #[serde(default)]
+    pub tools: ToolsConfig,
     /// Prompt assembly settings.
     #[serde(default)]
     pub prompt: PromptConfig,
@@ -33,6 +36,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             agent: AgentConfig::default(),
+            tools: ToolsConfig::default(),
             prompt: PromptConfig::default(),
             gates: vec![GateConfig::default_shell_true()],
             executor: ExecutorConfig::default(),
@@ -104,6 +108,22 @@ pub struct AgentConfig {
     /// Retry escalation configuration.
     #[serde(default)]
     pub escalation: EscalationConfig,
+}
+
+/// Tool registry preferences.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ToolsConfig {
+    /// When true, MCP tools win over built-ins on name collisions.
+    #[serde(default)]
+    pub prefer_mcp: bool,
+}
+
+impl Default for ToolsConfig {
+    fn default() -> Self {
+        Self {
+            prefer_mcp: false,
+        }
+    }
 }
 
 impl AgentConfig {
@@ -462,6 +482,9 @@ pub struct ConfigLayer {
     /// Agent backend overrides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentLayer>,
+    /// Tool registry preference overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<ToolsLayer>,
     /// Prompt settings overrides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<PromptLayer>,
@@ -496,6 +519,12 @@ impl ConfigLayer {
                 None => a,
             });
         }
+        if let Some(t) = overlay.tools {
+            self.tools = Some(match self.tools {
+                Some(base) => base.merge(t),
+                None => t,
+            });
+        }
         if let Some(p) = overlay.prompt {
             self.prompt = Some(match self.prompt {
                 Some(base) => base.merge(p),
@@ -518,6 +547,7 @@ impl ConfigLayer {
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.agent.is_none()
+            && self.tools.is_none()
             && self.prompt.is_none()
             && self.gates.is_none()
             && self.executor.is_none()
@@ -545,6 +575,15 @@ impl ConfigLayer {
                 }
             }
             None => AgentConfig::default(),
+        };
+        let tools = match self.tools {
+            Some(t) => {
+                let defaults = ToolsConfig::default();
+                ToolsConfig {
+                    prefer_mcp: t.prefer_mcp.unwrap_or(defaults.prefer_mcp),
+                }
+            }
+            None => ToolsConfig::default(),
         };
         let prompt = match self.prompt {
             Some(p) => {
@@ -583,6 +622,7 @@ impl ConfigLayer {
         };
         Config {
             agent,
+            tools,
             prompt,
             gates,
             executor,
@@ -641,6 +681,24 @@ impl AgentLayer {
             env: overlay.env.or(self.env),
             clean_output: overlay.clean_output.or(self.clean_output),
             mcp_config: overlay.mcp_config.or(self.mcp_config),
+        }
+    }
+}
+
+/// Partial `ToolsConfig` — every field optional.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ToolsLayer {
+    /// When true, MCP tools win over built-ins on name collisions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefer_mcp: Option<bool>,
+}
+
+impl ToolsLayer {
+    /// Merge another layer on top — `overlay` wins.
+    #[must_use]
+    pub fn merge(self, overlay: Self) -> Self {
+        Self {
+            prefer_mcp: overlay.prefer_mcp.or(self.prefer_mcp),
         }
     }
 }
@@ -801,6 +859,8 @@ pub struct ConfigSources {
     pub agent_fallback_model: Source,
     /// Where `agent.timeout_ms` came from.
     pub agent_timeout_ms: Source,
+    /// Where `tools.prefer_mcp` came from.
+    pub tools_prefer_mcp: Source,
     /// Where `prompt.token_budget` came from.
     pub prompt_token_budget: Source,
     /// Where `prompt.role` came from.
@@ -851,7 +911,9 @@ pub fn load_layered(workdir: &Path) -> Result<ResolvedConfig> {
 /// Compute per-field provenance from global + project layers.
 fn compute_sources(global: &ConfigLayer, project: &ConfigLayer) -> ConfigSources {
     let g_agent = global.agent.as_ref();
+    let g_tools = global.tools.as_ref();
     let p_agent = project.agent.as_ref();
+    let p_tools = project.tools.as_ref();
     let g_prompt = global.prompt.as_ref();
     let p_prompt = project.prompt.as_ref();
 
@@ -894,6 +956,10 @@ fn compute_sources(global: &ConfigLayer, project: &ConfigLayer) -> ConfigSources
             p_agent.and_then(|a| a.timeout_ms).is_some(),
             g_agent.and_then(|a| a.timeout_ms).is_some(),
         ),
+        tools_prefer_mcp: pick(
+            p_tools.and_then(|t| t.prefer_mcp).is_some(),
+            g_tools.and_then(|t| t.prefer_mcp).is_some(),
+        ),
         prompt_token_budget: pick(
             p_prompt.and_then(|p| p.token_budget).is_some(),
             g_prompt.and_then(|p| p.token_budget).is_some(),
@@ -909,6 +975,7 @@ fn compute_sources(global: &ConfigLayer, project: &ConfigLayer) -> ConfigSources
 /// Tag every field in a single-layer config as `present` or `fallback`.
 fn sources_from_layer(layer: &ConfigLayer, present: Source, fallback: Source) -> ConfigSources {
     let agent = layer.agent.as_ref();
+    let tools = layer.tools.as_ref();
     let prompt = layer.prompt.as_ref();
     let pick = |is_set: bool| -> Source { if is_set { present } else { fallback } };
     ConfigSources {
@@ -919,6 +986,7 @@ fn sources_from_layer(layer: &ConfigLayer, present: Source, fallback: Source) ->
         agent_bare_mode: pick(agent.and_then(|a| a.bare_mode).is_some()),
         agent_fallback_model: pick(agent.and_then(|a| a.fallback_model.as_ref()).is_some()),
         agent_timeout_ms: pick(agent.and_then(|a| a.timeout_ms).is_some()),
+        tools_prefer_mcp: pick(tools.and_then(|t| t.prefer_mcp).is_some()),
         prompt_token_budget: pick(prompt.and_then(|p| p.token_budget).is_some()),
         prompt_role: pick(prompt.and_then(|p| p.role.as_ref()).is_some()),
         gates: pick(layer.gates.is_some()),
@@ -1027,6 +1095,7 @@ command = "cat"
         let cfg = Config::parse_toml(toml).unwrap();
         assert_eq!(cfg.agent.command, "cat");
         assert_eq!(cfg.agent.timeout_ms, 120_000);
+        assert!(!cfg.tools.prefer_mcp);
         assert_eq!(cfg.prompt.token_budget, 10_000);
     }
 
@@ -1040,6 +1109,9 @@ timeout_ms = 30000
 
 [budget]
 warn_at_percent = 90
+
+[tools]
+prefer_mcp = true
 
 [prompt]
 token_budget = 20000
@@ -1062,6 +1134,7 @@ build_system = "cargo"
         );
         assert_eq!(cfg.agent.timeout_ms, 30_000);
         assert_eq!(cfg.budget.warn_at_percent, 90);
+        assert!(cfg.tools.prefer_mcp);
         assert_eq!(cfg.prompt.token_budget, 20_000);
         assert_eq!(cfg.gates.len(), 2);
     }
@@ -1071,6 +1144,9 @@ build_system = "cargo"
         let toml = r#"
 [agent]
 command = "cat"
+
+[tools]
+prefer_mcp = false
 
 [executor]
 max_concurrent_plans = 8
@@ -1089,6 +1165,7 @@ auto_replan = false
         assert_eq!(cfg.executor.task_timeout_secs, 42);
         assert_eq!(cfg.executor.budget_usd, Some(1.5));
         assert!(!cfg.executor.auto_replan);
+        assert!(!cfg.tools.prefer_mcp);
     }
 
     #[test]
@@ -1123,6 +1200,7 @@ auto_replan = false
         let text = cfg.to_toml().unwrap();
         let parsed = Config::parse_toml(&text).unwrap();
         assert_eq!(parsed.agent.command, cfg.agent.command);
+        assert_eq!(parsed.tools.prefer_mcp, cfg.tools.prefer_mcp);
         assert_eq!(parsed.gates.len(), cfg.gates.len());
     }
 
@@ -1134,6 +1212,9 @@ auto_replan = false
 command = "ollama"
 args = ["run", "llama3"]
 timeout_ms = 60000
+
+[tools]
+prefer_mcp = true
 
 [prompt]
 token_budget = 4000
@@ -1159,6 +1240,7 @@ token_budget = 8000
             vec!["run".to_string(), "llama3".to_string()]
         );
         assert_eq!(merged.agent.timeout_ms, 60_000);
+        assert!(!merged.tools.prefer_mcp);
         assert_eq!(merged.prompt.token_budget, 8000);
         assert_eq!(merged.prompt.role, "global role");
     }
@@ -1168,6 +1250,7 @@ token_budget = 8000
         let layer = ConfigLayer::default();
         let cfg = layer.resolve();
         assert_eq!(cfg.agent.command, "cat");
+        assert!(!cfg.tools.prefer_mcp);
         assert_eq!(cfg.prompt.token_budget, 10_000);
         assert!(cfg.gates.is_empty());
     }
@@ -1196,6 +1279,7 @@ token_budget = 8000
         let sources = compute_sources(&global, &project);
         assert_eq!(sources.agent_command, Source::Project);
         assert_eq!(sources.agent_timeout_ms, Source::Global);
+        assert_eq!(sources.tools_prefer_mcp, Source::Default);
         assert_eq!(sources.prompt_token_budget, Source::Project);
         assert_eq!(sources.prompt_role, Source::Default);
         assert_eq!(sources.agent_args, Source::Default);

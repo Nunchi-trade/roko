@@ -7,7 +7,7 @@
 
 use crate::config::{
     AgentLayer, ConfigLayer, DetectedCli, ExecutorLayer, GateConfig, PromptLayer, ResolvedConfig,
-    Source, detect_clis, global_config_path, load_layered,
+    Source, ToolsLayer, detect_clis, global_config_path, load_layered,
 };
 use anyhow::{Context as _, Result, anyhow};
 use std::io::{self, BufRead, Write};
@@ -101,6 +101,7 @@ pub fn run_init_wizard(target: Option<PathBuf>, inputs: &WizardInputs) -> Result
             clean_output: None,
             mcp_config: None,
         }),
+        tools: None,
         prompt: Some(PromptLayer {
             token_budget: Some(token_budget),
             role: Some(role),
@@ -292,6 +293,11 @@ fn print_resolved(r: &ResolvedConfig) {
         r.sources.agent_timeout_ms.tag()
     );
     println!(
+        "  tools.prefer_mcp   = {} {}",
+        r.config.tools.prefer_mcp,
+        r.sources.tools_prefer_mcp.tag()
+    );
+    println!(
         "  prompt.token_budget= {} {}",
         r.config.prompt.token_budget,
         r.sources.prompt_token_budget.tag()
@@ -318,7 +324,8 @@ fn print_resolved(r: &ResolvedConfig) {
     }
     let fully_default = r.sources.agent_command == Source::Default
         && r.sources.prompt_token_budget == Source::Default
-        && r.sources.prompt_role == Source::Default;
+        && r.sources.prompt_role == Source::Default
+        && r.sources.tools_prefer_mcp == Source::Default;
     if fully_default {
         println!("\nhint: no config files found — run `roko config init` to set one up.");
     }
@@ -370,6 +377,11 @@ fn apply_key_value(layer: &mut ConfigLayer, key: &str, value: &str) -> Result<()
         "prompt.role" => {
             let prompt = layer.prompt.get_or_insert_with(PromptLayer::default);
             prompt.role = Some(value.into());
+        }
+        "tools.prefer_mcp" => {
+            let prefer_mcp = value.parse::<bool>().context("parse prefer_mcp as bool")?;
+            let tools = layer.tools.get_or_insert_with(ToolsLayer::default);
+            tools.prefer_mcp = Some(prefer_mcp);
         }
         other => return Err(anyhow!("unknown key: {other}")),
     }
@@ -500,6 +512,13 @@ mod tests {
         let mut layer = ConfigLayer::default();
         apply_key_value(&mut layer, "prompt.token_budget", "12345").unwrap();
         assert_eq!(layer.prompt.unwrap().token_budget.unwrap(), 12_345);
+    }
+
+    #[test]
+    fn apply_key_value_sets_tools_prefer_mcp() {
+        let mut layer = ConfigLayer::default();
+        apply_key_value(&mut layer, "tools.prefer_mcp", "true").unwrap();
+        assert!(layer.tools.unwrap().prefer_mcp.unwrap());
     }
 
     #[test]

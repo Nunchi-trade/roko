@@ -37,7 +37,7 @@ pub mod worker;
 
 pub use config::{
     AgentConfig, Config, ConfigLayer, ConfigPaths, ConfigSources, GateConfig, PromptConfig,
-    PromptFile, ResolvedConfig, Source, load_layered,
+    PromptFile, ResolvedConfig, Source, ToolsConfig, load_layered,
 };
 pub use config_cmd::{EditTarget, WizardInputs, run_init_wizard};
 pub use daemon::{DaemonConfig, DaemonMode, DaemonState, DaemonStatus};
