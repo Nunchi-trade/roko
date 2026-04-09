@@ -98,6 +98,10 @@ async fn gate_history(
         })
         .collect();
 
+    if history.is_empty() {
+        return Err(ApiError::not_found(format!("gate '{gate_name}' not found")));
+    }
+
     history.sort_by(|a, b| {
         let a_ts = a
             .get("created_at_ms")
@@ -173,11 +177,16 @@ async fn read_jsonl_entries(path: &std::path::Path) -> Result<Vec<Value>, ApiErr
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(ApiError::internal(format!("read {}: {e}", path.display()))),
     };
-    let entries: Vec<Value> = content
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect();
+    let mut entries = Vec::new();
+    for (line_no, line) in content.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let entry = serde_json::from_str::<Value>(line).map_err(|e| {
+            ApiError::internal(format!("parse {} line {}: {e}", path.display(), line_no + 1))
+        })?;
+        entries.push(entry);
+    }
     Ok(entries)
 }
 
@@ -319,6 +328,14 @@ fn extract_gate_duration_ms(entry: &Value) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use axum::extract::{Path, Query, State};
+    use tempfile::tempdir;
+
+    use crate::config::Config;
+    use crate::serve::deploy::create_backend;
+    use crate::serve::state::AppState;
     use roko_core::{Body, Kind, Provenance, Signal, Verdict};
 
     fn gate_signal(gate: &str, passed: bool, duration_ms: u64) -> Value {
@@ -398,5 +415,67 @@ mod tests {
         assert_eq!(history[0]["created_at_ms"], 10);
         assert_eq!(history[1]["passed"], false);
         assert_eq!(history[1]["created_at_ms"], 20);
+    }
+
+    fn test_state() -> (tempfile::TempDir, Arc<AppState>) {
+        let dir = tempdir().expect("tempdir");
+        let workdir = dir.path().to_path_buf();
+        let deploy_backend = Arc::from(
+            create_backend("manual", None, None, None).expect("manual backend"),
+        );
+        let state = Arc::new(AppState::new(
+            workdir,
+            Config::default(),
+            roko_core::config::schema::RokoConfig::default(),
+            deploy_backend,
+        ));
+        (dir, state)
+    }
+
+    #[tokio::test]
+    async fn gate_history_returns_404_for_missing_gate() {
+        let (_dir, state) = test_state();
+
+        let err = gate_history(State(state), Path("compile".into()))
+            .await
+            .expect_err("missing gate should fail");
+
+        assert_eq!(err.status, axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn gate_history_returns_500_for_invalid_jsonl() {
+        let (dir, state) = test_state();
+        let signals = dir.path().join(".roko").join("signals.jsonl");
+        tokio::fs::create_dir_all(signals.parent().expect("signals parent"))
+            .await
+            .expect("create signals dir");
+        tokio::fs::write(&signals, "{not-json}\n")
+            .await
+            .expect("write corrupt signals");
+
+        let err = gate_history(State(state), Path("compile".into()))
+            .await
+            .expect_err("corrupt signals should fail");
+
+        assert_eq!(err.status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn signals_returns_500_for_invalid_jsonl() {
+        let (dir, state) = test_state();
+        let signals = dir.path().join(".roko").join("signals.jsonl");
+        tokio::fs::create_dir_all(signals.parent().expect("signals parent"))
+            .await
+            .expect("create signals dir");
+        tokio::fs::write(&signals, "{not-json}\n")
+            .await
+            .expect("write corrupt signals");
+
+        let err = signals(State(state), Query(SignalQuery { limit: Some(1) }))
+            .await
+            .expect_err("corrupt signals should fail");
+
+        assert_eq!(err.status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

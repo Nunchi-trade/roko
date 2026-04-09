@@ -94,12 +94,15 @@ async fn read_json_file(path: &std::path::Path) -> Result<Json<Value>, ApiError>
     Ok(Json(value))
 }
 
-/// Read and parse the persisted experiment store, or return an empty store if missing.
+/// Read and parse the persisted experiment store.
 async fn read_experiment_store(path: &std::path::Path) -> Result<ExperimentStore, ApiError> {
     let content = match tokio::fs::read_to_string(path).await {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(ExperimentStore::default());
+            return Err(ApiError::not_found(format!(
+                "{} not found",
+                path.display()
+            )));
         }
         Err(e) => {
             return Err(ApiError::internal(format!("read {}: {e}", path.display())));
@@ -776,6 +779,14 @@ struct RungThresholdSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use axum::extract::State;
+    use tempfile::tempdir;
+
+    use crate::config::Config;
+    use crate::serve::deploy::create_backend;
+    use crate::serve::state::AppState;
 
     fn make_experiment() -> PromptExperiment {
         PromptExperiment {
@@ -938,6 +949,50 @@ mod tests {
             gate_passed: true,
             timestamp: timestamp.into(),
         }
+    }
+
+    fn test_state() -> (tempfile::TempDir, Arc<AppState>) {
+        let dir = tempdir().expect("tempdir");
+        let workdir = dir.path().to_path_buf();
+        let deploy_backend = Arc::from(
+            create_backend("manual", None, None, None).expect("manual backend"),
+        );
+        let state = Arc::new(AppState::new(
+            workdir,
+            Config::default(),
+            roko_core::config::schema::RokoConfig::default(),
+            deploy_backend,
+        ));
+        (dir, state)
+    }
+
+    #[tokio::test]
+    async fn experiments_returns_404_when_missing() {
+        let (_dir, state) = test_state();
+
+        let err = experiments(State(state))
+            .await
+            .expect_err("missing experiments should fail");
+
+        assert_eq!(err.status, axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn experiments_returns_500_for_invalid_json() {
+        let (dir, state) = test_state();
+        let path = dir.path().join(".roko/learn/experiments.json");
+        tokio::fs::create_dir_all(path.parent().expect("experiments parent"))
+            .await
+            .expect("create learn dir");
+        tokio::fs::write(&path, "{not-json}")
+            .await
+            .expect("write corrupt experiments");
+
+        let err = experiments(State(state))
+            .await
+            .expect_err("corrupt experiments should fail");
+
+        assert_eq!(err.status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[test]

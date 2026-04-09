@@ -45,27 +45,13 @@ async fn list_plans(State(state): State<Arc<AppState>>) -> Result<Json<Value>, A
         if ext != "toml" && ext != "json" {
             continue;
         }
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown")
-            .to_string();
-
-        // Try to load plan; if it fails, still include a minimal summary.
-        match load_plan_file(&path).await {
-            Ok(plan) => summaries.push(json!({
-                "id": plan.id,
-                "title": plan.title,
-                "task_count": plan.tasks.len(),
-                "completed": plan.tasks.iter().all(|t| t.completed),
-            })),
-            Err(_) => summaries.push(json!({
-                "id": stem,
-                "title": stem,
-                "task_count": 0,
-                "completed": false,
-            })),
-        }
+        let plan = load_plan_file(&path).await?;
+        summaries.push(json!({
+            "id": plan.id,
+            "title": plan.title,
+            "task_count": plan.tasks.len(),
+            "completed": plan.tasks.iter().all(|t| t.completed),
+        }));
     }
 
     Ok(Json(Value::Array(summaries)))
@@ -104,6 +90,19 @@ async fn create_plan(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreatePlanRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    if body.title.trim().is_empty() {
+        return Err(ApiError::bad_request("plan title must not be empty"));
+    }
+    if body.description.trim().is_empty() {
+        return Err(ApiError::bad_request("plan description must not be empty"));
+    }
+    if let Some(task) = body.tasks.iter().find(|task| task.id.trim().is_empty()) {
+        return Err(ApiError::bad_request(format!(
+            "task id must not be empty (description: {})",
+            task.description
+        )));
+    }
+
     let plan_id = uuid::Uuid::new_v4().to_string();
     let mut plan = Plan::new(plan_id.clone(), body.title, body.description);
 
@@ -223,6 +222,10 @@ async fn generate_plan(
     State(state): State<Arc<AppState>>,
     Json(body): Json<GenerateRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    if body.slug.trim().is_empty() {
+        return Err(ApiError::bad_request("slug must not be empty"));
+    }
+
     let op_id = uuid::Uuid::new_v4().to_string();
     let bus = state.event_bus.sender();
     let slug = body.slug.clone();
@@ -336,4 +339,120 @@ fn plan_to_json(plan: &Plan) -> Value {
             "completed": t.completed,
         })).collect::<Vec<_>>(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::Arc;
+
+    use axum::Json;
+    use tempfile::tempdir;
+
+    use crate::config::Config;
+    use crate::serve::deploy::create_backend;
+
+    fn test_state() -> (tempfile::TempDir, Arc<AppState>) {
+        let dir = tempdir().expect("tempdir");
+        let workdir = dir.path().to_path_buf();
+        let deploy_backend = Arc::from(
+            create_backend("manual", None, None, None).expect("manual backend"),
+        );
+        let state = Arc::new(AppState::new(
+            workdir,
+            Config::default(),
+            roko_core::config::schema::RokoConfig::default(),
+            deploy_backend,
+        ));
+        (dir, state)
+    }
+
+    #[tokio::test]
+    async fn get_plan_returns_404_for_missing_plan() {
+        let (_dir, state) = test_state();
+
+        let err = get_plan(State(state), Path("missing-plan".into()))
+            .await
+            .expect_err("missing plan should error");
+
+        assert_eq!(err.status, axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn execute_plan_returns_404_for_missing_plan() {
+        let (_dir, state) = test_state();
+
+        let err = execute_plan(State(state), Path("missing-plan".into()))
+            .await
+            .expect_err("missing plan should error");
+
+        assert_eq!(err.status, axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn plan_status_returns_404_when_plan_is_not_active() {
+        let (_dir, state) = test_state();
+
+        let err = plan_status(State(state), Path("missing-plan".into()))
+            .await
+            .expect_err("missing active plan should error");
+
+        assert_eq!(err.status, axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn create_plan_rejects_empty_fields() {
+        let (_dir, state) = test_state();
+        let request = CreatePlanRequest {
+            title: "   ".into(),
+            description: "desc".into(),
+            tasks: vec![CreateTaskEntry {
+                id: " ".into(),
+                description: "task".into(),
+                depends_on: vec![],
+                files: vec![],
+            }],
+        };
+
+        let err = create_plan(State(Arc::clone(&state)), Json(request))
+            .await
+            .expect_err("invalid request should fail");
+
+        assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn generate_plan_rejects_empty_slug() {
+        let (_dir, state) = test_state();
+        let err = generate_plan(
+            State(Arc::clone(&state)),
+            Json(GenerateRequest {
+                slug: "  ".into(),
+            }),
+        )
+        .await
+        .expect_err("invalid request should fail");
+
+        assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn list_plans_returns_internal_error_for_corrupt_plan_file() {
+        let (dir, state) = test_state();
+        let plans_dir = state.workdir.join(".roko").join("plans");
+        tokio::fs::create_dir_all(&plans_dir)
+            .await
+            .expect("create plans dir");
+        tokio::fs::write(plans_dir.join("broken.json"), "{not-json}")
+            .await
+            .expect("write corrupt plan");
+
+        let err = list_plans(State(state))
+            .await
+            .expect_err("corrupt plan should fail");
+
+        assert_eq!(err.status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        drop(dir);
+    }
 }

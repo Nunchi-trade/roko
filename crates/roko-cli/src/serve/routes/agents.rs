@@ -83,16 +83,21 @@ async fn agent_episodes(
     };
 
     let agent_id_str = id.to_string();
-    let filtered: Vec<Value> = content
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .filter(|v| {
-            // Match on agent_id field (could be numeric or string).
-            v.get("agent_id")
-                .is_some_and(|a| a.as_str() == Some(&agent_id_str) || a.as_u64() == Some(id))
-        })
-        .collect();
+    let mut filtered: Vec<Value> = Vec::new();
+    for (line_no, line) in content.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value = serde_json::from_str::<Value>(line).map_err(|e| {
+            ApiError::internal(format!("parse episodes line {}: {e}", line_no + 1))
+        })?;
+        if value
+            .get("agent_id")
+            .is_some_and(|a| a.as_str() == Some(&agent_id_str) || a.as_u64() == Some(id))
+        {
+            filtered.push(value);
+        }
+    }
 
     Ok(Json(Value::Array(filtered)))
 }
