@@ -10,9 +10,9 @@ use crate::config::{
     Source, ToolsLayer, detect_clis, global_config_path, load_layered,
 };
 use anyhow::{Context as _, Result, anyhow};
+use roko_orchestrator::ExecutorConfig;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
-use roko_orchestrator::ExecutorConfig;
 
 /// Non-interactive inputs for `config init` (used by CI / tests).
 #[derive(Clone, Debug, Default)]
@@ -101,7 +101,11 @@ pub fn run_init_wizard(target: Option<PathBuf>, inputs: &WizardInputs) -> Result
             clean_output: None,
             mcp_config: None,
         }),
-        tools: None,
+        tools: Some(ToolsLayer {
+            prefer_mcp: Some(false),
+            global_denied: Some(Vec::new()),
+            mcp_timeout_secs: Some(30),
+        }),
         prompt: Some(PromptLayer {
             token_budget: Some(token_budget),
             role: Some(role),
@@ -298,6 +302,16 @@ fn print_resolved(r: &ResolvedConfig) {
         r.sources.tools_prefer_mcp.tag()
     );
     println!(
+        "  tools.global_denied = {:?} {}",
+        r.config.tools.global_denied,
+        r.sources.tools_global_denied.tag()
+    );
+    println!(
+        "  tools.mcp_timeout_secs = {} {}",
+        r.config.tools.mcp_timeout_secs,
+        r.sources.tools_mcp_timeout_secs.tag()
+    );
+    println!(
         "  prompt.token_budget= {} {}",
         r.config.prompt.token_budget,
         r.sources.prompt_token_budget.tag()
@@ -382,6 +396,22 @@ fn apply_key_value(layer: &mut ConfigLayer, key: &str, value: &str) -> Result<()
             let prefer_mcp = value.parse::<bool>().context("parse prefer_mcp as bool")?;
             let tools = layer.tools.get_or_insert_with(ToolsLayer::default);
             tools.prefer_mcp = Some(prefer_mcp);
+        }
+        "tools.global_denied" => {
+            let denied: Vec<String> = if value.trim_start().starts_with('[') {
+                serde_json::from_str(value).context("parse JSON array for tools.global_denied")?
+            } else {
+                value.split_whitespace().map(String::from).collect()
+            };
+            let tools = layer.tools.get_or_insert_with(ToolsLayer::default);
+            tools.global_denied = Some(denied);
+        }
+        "tools.mcp_timeout_secs" => {
+            let secs = value
+                .parse::<u64>()
+                .context("parse mcp_timeout_secs as u64")?;
+            let tools = layer.tools.get_or_insert_with(ToolsLayer::default);
+            tools.mcp_timeout_secs = Some(secs);
         }
         other => return Err(anyhow!("unknown key: {other}")),
     }
@@ -522,6 +552,28 @@ mod tests {
     }
 
     #[test]
+    fn apply_key_value_sets_tools_global_denied() {
+        let mut layer = ConfigLayer::default();
+        apply_key_value(
+            &mut layer,
+            "tools.global_denied",
+            r#"["write_file","bash"]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            layer.tools.unwrap().global_denied.unwrap(),
+            vec!["write_file".to_string(), "bash".to_string()]
+        );
+    }
+
+    #[test]
+    fn apply_key_value_sets_tools_timeout() {
+        let mut layer = ConfigLayer::default();
+        apply_key_value(&mut layer, "tools.mcp_timeout_secs", "75").unwrap();
+        assert_eq!(layer.tools.unwrap().mcp_timeout_secs.unwrap(), 75);
+    }
+
+    #[test]
     fn apply_key_value_rejects_unknown() {
         let mut layer = ConfigLayer::default();
         assert!(apply_key_value(&mut layer, "bogus.key", "x").is_err());
@@ -563,6 +615,9 @@ mod tests {
             Some("cat")
         );
         assert_eq!(layer.prompt.as_ref().unwrap().token_budget, Some(4000));
+        assert_eq!(layer.tools.as_ref().unwrap().prefer_mcp, Some(false));
+        assert_eq!(layer.tools.as_ref().unwrap().global_denied, Some(vec![]));
+        assert_eq!(layer.tools.as_ref().unwrap().mcp_timeout_secs, Some(30));
         assert_eq!(
             layer.executor.as_ref().unwrap().max_concurrent_plans,
             Some(4)

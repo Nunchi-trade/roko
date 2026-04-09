@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context as _, Result};
-use serde::{Deserialize, Deserializer};
 use roko_std::RESEARCHER_TOOL_PROFILE;
+use serde::{Deserialize, Deserializer};
 
 /// Parsed `[meta]` section of tasks.toml.
 #[derive(Debug, Clone, Deserialize)]

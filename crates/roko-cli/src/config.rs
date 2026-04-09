@@ -116,13 +116,27 @@ pub struct ToolsConfig {
     /// When true, MCP tools win over built-ins on name collisions.
     #[serde(default)]
     pub prefer_mcp: bool,
+    /// Tool names that are blocked everywhere, regardless of role.
+    #[serde(default)]
+    pub global_denied: Vec<String>,
+    /// MCP server startup timeout in seconds.
+    #[serde(default = "ToolsConfig::default_mcp_timeout_secs")]
+    pub mcp_timeout_secs: u64,
 }
 
 impl Default for ToolsConfig {
     fn default() -> Self {
         Self {
             prefer_mcp: false,
+            global_denied: Vec::new(),
+            mcp_timeout_secs: Self::default_mcp_timeout_secs(),
         }
+    }
+}
+
+impl ToolsConfig {
+    const fn default_mcp_timeout_secs() -> u64 {
+        30
     }
 }
 
@@ -581,6 +595,8 @@ impl ConfigLayer {
                 let defaults = ToolsConfig::default();
                 ToolsConfig {
                     prefer_mcp: t.prefer_mcp.unwrap_or(defaults.prefer_mcp),
+                    global_denied: t.global_denied.unwrap_or(defaults.global_denied),
+                    mcp_timeout_secs: t.mcp_timeout_secs.unwrap_or(defaults.mcp_timeout_secs),
                 }
             }
             None => ToolsConfig::default(),
@@ -691,6 +707,12 @@ pub struct ToolsLayer {
     /// When true, MCP tools win over built-ins on name collisions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefer_mcp: Option<bool>,
+    /// Tool names blocked everywhere, regardless of role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub global_denied: Option<Vec<String>>,
+    /// MCP server startup timeout in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_timeout_secs: Option<u64>,
 }
 
 impl ToolsLayer {
@@ -699,6 +721,8 @@ impl ToolsLayer {
     pub fn merge(self, overlay: Self) -> Self {
         Self {
             prefer_mcp: overlay.prefer_mcp.or(self.prefer_mcp),
+            global_denied: overlay.global_denied.or(self.global_denied),
+            mcp_timeout_secs: overlay.mcp_timeout_secs.or(self.mcp_timeout_secs),
         }
     }
 }
@@ -861,6 +885,10 @@ pub struct ConfigSources {
     pub agent_timeout_ms: Source,
     /// Where `tools.prefer_mcp` came from.
     pub tools_prefer_mcp: Source,
+    /// Where `tools.global_denied` came from.
+    pub tools_global_denied: Source,
+    /// Where `tools.mcp_timeout_secs` came from.
+    pub tools_mcp_timeout_secs: Source,
     /// Where `prompt.token_budget` came from.
     pub prompt_token_budget: Source,
     /// Where `prompt.role` came from.
@@ -960,6 +988,14 @@ fn compute_sources(global: &ConfigLayer, project: &ConfigLayer) -> ConfigSources
             p_tools.and_then(|t| t.prefer_mcp).is_some(),
             g_tools.and_then(|t| t.prefer_mcp).is_some(),
         ),
+        tools_global_denied: pick(
+            p_tools.and_then(|t| t.global_denied.as_ref()).is_some(),
+            g_tools.and_then(|t| t.global_denied.as_ref()).is_some(),
+        ),
+        tools_mcp_timeout_secs: pick(
+            p_tools.and_then(|t| t.mcp_timeout_secs).is_some(),
+            g_tools.and_then(|t| t.mcp_timeout_secs).is_some(),
+        ),
         prompt_token_budget: pick(
             p_prompt.and_then(|p| p.token_budget).is_some(),
             g_prompt.and_then(|p| p.token_budget).is_some(),
@@ -987,6 +1023,8 @@ fn sources_from_layer(layer: &ConfigLayer, present: Source, fallback: Source) ->
         agent_fallback_model: pick(agent.and_then(|a| a.fallback_model.as_ref()).is_some()),
         agent_timeout_ms: pick(agent.and_then(|a| a.timeout_ms).is_some()),
         tools_prefer_mcp: pick(tools.and_then(|t| t.prefer_mcp).is_some()),
+        tools_global_denied: pick(tools.and_then(|t| t.global_denied.as_ref()).is_some()),
+        tools_mcp_timeout_secs: pick(tools.and_then(|t| t.mcp_timeout_secs).is_some()),
         prompt_token_budget: pick(prompt.and_then(|p| p.token_budget).is_some()),
         prompt_role: pick(prompt.and_then(|p| p.role.as_ref()).is_some()),
         gates: pick(layer.gates.is_some()),
@@ -1096,6 +1134,8 @@ command = "cat"
         assert_eq!(cfg.agent.command, "cat");
         assert_eq!(cfg.agent.timeout_ms, 120_000);
         assert!(!cfg.tools.prefer_mcp);
+        assert!(cfg.tools.global_denied.is_empty());
+        assert_eq!(cfg.tools.mcp_timeout_secs, 30);
         assert_eq!(cfg.prompt.token_budget, 10_000);
     }
 
@@ -1112,6 +1152,8 @@ warn_at_percent = 90
 
 [tools]
 prefer_mcp = true
+global_denied = ["write_file", "edit_file"]
+mcp_timeout_secs = 45
 
 [prompt]
 token_budget = 20000
@@ -1135,6 +1177,11 @@ build_system = "cargo"
         assert_eq!(cfg.agent.timeout_ms, 30_000);
         assert_eq!(cfg.budget.warn_at_percent, 90);
         assert!(cfg.tools.prefer_mcp);
+        assert_eq!(
+            cfg.tools.global_denied,
+            vec!["write_file".to_string(), "edit_file".to_string()]
+        );
+        assert_eq!(cfg.tools.mcp_timeout_secs, 45);
         assert_eq!(cfg.prompt.token_budget, 20_000);
         assert_eq!(cfg.gates.len(), 2);
     }
@@ -1147,6 +1194,8 @@ command = "cat"
 
 [tools]
 prefer_mcp = false
+global_denied = ["bash"]
+mcp_timeout_secs = 15
 
 [executor]
 max_concurrent_plans = 8
@@ -1166,6 +1215,8 @@ auto_replan = false
         assert_eq!(cfg.executor.budget_usd, Some(1.5));
         assert!(!cfg.executor.auto_replan);
         assert!(!cfg.tools.prefer_mcp);
+        assert_eq!(cfg.tools.global_denied, vec!["bash".to_string()]);
+        assert_eq!(cfg.tools.mcp_timeout_secs, 15);
     }
 
     #[test]
@@ -1189,7 +1240,10 @@ auto_replan = false
 
         let cfg = layer.resolve();
         assert_eq!(cfg.executor.max_concurrent_plans, 6);
-        assert_eq!(cfg.executor.max_concurrent_tasks, ExecutorConfig::default().max_concurrent_tasks);
+        assert_eq!(
+            cfg.executor.max_concurrent_tasks,
+            ExecutorConfig::default().max_concurrent_tasks
+        );
         assert_eq!(cfg.executor.task_timeout_secs, 900);
         assert!(!cfg.executor.auto_replan);
     }
@@ -1201,6 +1255,8 @@ auto_replan = false
         let parsed = Config::parse_toml(&text).unwrap();
         assert_eq!(parsed.agent.command, cfg.agent.command);
         assert_eq!(parsed.tools.prefer_mcp, cfg.tools.prefer_mcp);
+        assert_eq!(parsed.tools.global_denied, cfg.tools.global_denied);
+        assert_eq!(parsed.tools.mcp_timeout_secs, cfg.tools.mcp_timeout_secs);
         assert_eq!(parsed.gates.len(), cfg.gates.len());
     }
 
@@ -1215,6 +1271,8 @@ timeout_ms = 60000
 
 [tools]
 prefer_mcp = true
+global_denied = ["web_fetch"]
+mcp_timeout_secs = 99
 
 [prompt]
 token_budget = 4000
@@ -1241,6 +1299,8 @@ token_budget = 8000
         );
         assert_eq!(merged.agent.timeout_ms, 60_000);
         assert!(!merged.tools.prefer_mcp);
+        assert_eq!(merged.tools.global_denied, vec!["web_fetch".to_string()]);
+        assert_eq!(merged.tools.mcp_timeout_secs, 99);
         assert_eq!(merged.prompt.token_budget, 8000);
         assert_eq!(merged.prompt.role, "global role");
     }
@@ -1251,6 +1311,8 @@ token_budget = 8000
         let cfg = layer.resolve();
         assert_eq!(cfg.agent.command, "cat");
         assert!(!cfg.tools.prefer_mcp);
+        assert!(cfg.tools.global_denied.is_empty());
+        assert_eq!(cfg.tools.mcp_timeout_secs, 30);
         assert_eq!(cfg.prompt.token_budget, 10_000);
         assert!(cfg.gates.is_empty());
     }
@@ -1280,6 +1342,8 @@ token_budget = 8000
         assert_eq!(sources.agent_command, Source::Project);
         assert_eq!(sources.agent_timeout_ms, Source::Global);
         assert_eq!(sources.tools_prefer_mcp, Source::Default);
+        assert_eq!(sources.tools_global_denied, Source::Default);
+        assert_eq!(sources.tools_mcp_timeout_secs, Source::Default);
         assert_eq!(sources.prompt_token_budget, Source::Project);
         assert_eq!(sources.prompt_role, Source::Default);
         assert_eq!(sources.agent_args, Source::Default);

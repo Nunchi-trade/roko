@@ -2275,7 +2275,10 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Command::Plan {
-                cmd: PlanCmd::Run { resume: Some(_), .. }
+                cmd: PlanCmd::Run {
+                    resume: Some(_),
+                    ..
+                }
             })
         ));
     }

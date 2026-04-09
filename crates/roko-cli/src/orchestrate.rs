@@ -20,8 +20,8 @@ use roko_compose::{
     ContextProvider, Placement, PlanArtifacts, PromptComposer, PromptSection, RoleSystemPromptSpec,
     SectionPriority, TaskContext,
 };
-use roko_conductor::{Conductor, ConductorDecision};
 use roko_conductor::diagnosis::DiagnosisEngine;
+use roko_conductor::{Conductor, ConductorDecision};
 use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::obs::health::{AlwaysUpProbe, ProbeRegistry};
 use roko_core::obs::{LabelSet, MetricRegistry};
@@ -33,8 +33,8 @@ use roko_core::{
     Substrate, Verdict,
 };
 use roko_fs::FileSubstrate;
-use roko_fs::observability::FsObservabilitySinks;
 use roko_fs::RokoLayout;
+use roko_fs::observability::FsObservabilitySinks;
 use roko_gate::{
     adaptive_threshold::AdaptiveThresholds, clippy_gate::ClippyGate, compile::CompileGate,
     payload::GatePayload, test_gate::TestGate,
@@ -357,7 +357,10 @@ async fn load_recent_signals(path: &Path, tail_len: usize) -> std::io::Result<Ve
     }
 
     let text = tokio::fs::read_to_string(path).await?;
-    let lines: Vec<&str> = text.lines().filter(|line| !line.trim().is_empty()).collect();
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
     let start = lines.len().saturating_sub(tail_len);
     let mut signals = Vec::with_capacity(lines.len().saturating_sub(start));
     for line in &lines[start..] {
@@ -535,7 +538,8 @@ pub struct PlanRunner {
     /// MCP server clients spawned at plan-run startup.
     /// MCP server clients (kept alive for lifecycle management).
     #[allow(dead_code)]
-    mcp_clients: tokio::sync::Mutex<Vec<roko_agent::mcp::McpClient<roko_agent::mcp::StdioTransport>>>,
+    mcp_clients:
+        tokio::sync::Mutex<Vec<roko_agent::mcp::McpClient<roko_agent::mcp::StdioTransport>>>,
     /// Dynamic tool registry combining static tools with MCP-discovered tools.
     tool_registry: Option<Arc<roko_agent::mcp::DynamicToolRegistry>>,
     /// Filesystem-backed observability sinks (traces + metrics).
@@ -599,10 +603,7 @@ impl TaskTracker {
     /// Find the next unfinished task that has all deps satisfied.
     #[cfg(test)]
     #[allow(dead_code)]
-    fn next_ready_task(
-        &self,
-        completed_plans: &[String],
-    ) -> Option<&crate::task_parser::TaskDef> {
+    fn next_ready_task(&self, completed_plans: &[String]) -> Option<&crate::task_parser::TaskDef> {
         self.ready_tasks(completed_plans).into_iter().next()
     }
 
@@ -682,9 +683,12 @@ fn merge_completed_tasks(tracker: &mut TaskTracker, completed_tasks: &[String]) 
     let groups = tracker.tasks_file.parallel_groups();
     tracker.current_group_index = tracker.current_group_index.min(groups.len());
     while tracker.current_group_index < groups.len()
-        && groups[tracker.current_group_index]
-            .iter()
-            .all(|task| tracker.completed.iter().any(|completed| completed == &task.id))
+        && groups[tracker.current_group_index].iter().all(|task| {
+            tracker
+                .completed
+                .iter()
+                .any(|completed| completed == &task.id)
+        })
     {
         tracker.current_group_index += 1;
     }
@@ -741,8 +745,7 @@ impl PlanRunner {
             match StdioTransport::spawn(&server.command, &server.args) {
                 Ok(transport) => {
                     let client = McpClient::new(transport);
-                    match tokio::time::timeout(Duration::from_secs(10), client.initialize()).await
-                    {
+                    match tokio::time::timeout(Duration::from_secs(10), client.initialize()).await {
                         Ok(Ok(_)) => {}
                         Ok(Err(e)) => {
                             tracing::warn!("MCP server '{}' initialize failed: {e}", server.name);
@@ -789,10 +792,8 @@ impl PlanRunner {
         // Dedup across servers and build the dynamic registry.
         let deduped = roko_agent::mcp::dedup_tools(all_server_tools);
         let base = StaticToolRegistry::new();
-        let mut registry = roko_agent::mcp::DynamicToolRegistry::with_preference(
-            &base,
-            config.tools.prefer_mcp,
-        );
+        let mut registry =
+            roko_agent::mcp::DynamicToolRegistry::with_preference(&base, config.tools.prefer_mcp);
         // Group deduped tools by their server prefix (everything before `__`).
         let mut by_server: HashMap<String, Vec<roko_core::tool::ToolDef>> = HashMap::new();
         for tool in deduped {
@@ -1258,14 +1259,9 @@ impl PlanRunner {
                 "primary_diagnosis": primary_diagnosis,
                 "diagnosis_results": diagnosis_results,
             });
-            self.event_log.append(
-                EventKind::InterventionFired,
-                payload.clone(),
-            );
-            self.emit_conductor_signal(
-                Kind::Custom("conductor.circuit_breaker".into()),
-                payload,
-            );
+            self.event_log
+                .append(EventKind::InterventionFired, payload.clone());
+            self.emit_conductor_signal(Kind::Custom("conductor.circuit_breaker".into()), payload);
             return ConductorDecision::Continue;
         }
 
@@ -1462,9 +1458,7 @@ impl PlanRunner {
     /// Older `executor.json` files stored per-task records under `tasks`
     /// with a `status` field. Resume should preserve those completions so
     /// we do not rerun work that was already marked done/complete.
-    fn legacy_completed_tasks_from_snapshot(
-        snapshot_json: &str,
-    ) -> HashMap<String, Vec<String>> {
+    fn legacy_completed_tasks_from_snapshot(snapshot_json: &str) -> HashMap<String, Vec<String>> {
         let mut completed: HashMap<String, Vec<String>> = HashMap::new();
         let Ok(value) = serde_json::from_str::<serde_json::Value>(snapshot_json) else {
             return completed;
@@ -2131,7 +2125,8 @@ impl PlanRunner {
                 ep.input_signal_hash = plan_id.to_string();
                 ep.output_signal_hash = result.output.id.to_string();
                 let model = self.effective_model();
-                let input = self.enrich_completed_run(ep, plan_id, "enrich", "Strategist", &model, None, 1);
+                let input =
+                    self.enrich_completed_run(ep, plan_id, "enrich", "Strategist", &model, None, 1);
                 self.record_and_check_learning(input, plan_id).await;
 
                 if let Some(tracker) = self.task_trackers.get(plan_id) {
@@ -2379,7 +2374,8 @@ impl PlanRunner {
                 eprintln!(
                     "[orchestrate] task budget exhausted before dispatch for {plan_id}/{tid}: {e}"
                 );
-                self.record_task_failure(plan_id, tid, &e, &started, None).await;
+                self.record_task_failure(plan_id, tid, &e, &started, None)
+                    .await;
                 continue;
             }
             match self.task_exec_dir(plan_id, tid).await {
@@ -2454,8 +2450,7 @@ impl PlanRunner {
             } else {
                 claude_tools_csv.clone()
             };
-            let system_prompt =
-                build_system_prompt(role, plan_id, tid, &task_allowed_tools_csv);
+            let system_prompt = build_system_prompt(role, plan_id, tid, &task_allowed_tools_csv);
             let env_vars: Vec<(String, String)> = self
                 .config
                 .agent
@@ -2933,9 +2928,7 @@ impl PlanRunner {
     ) -> Option<&'a str> {
         verdicts
             .iter()
-            .find(|v| {
-                !v.passed && matches!(v.gate_name.as_str(), "compile" | "test" | "clippy")
-            })
+            .find(|v| !v.passed && matches!(v.gate_name.as_str(), "compile" | "test" | "clippy"))
             .map(|v| v.gate_name.as_str())
             .or_else(|| {
                 verdicts
@@ -2949,12 +2942,20 @@ impl PlanRunner {
         let mut sections = Vec::new();
         for verdict in verdicts.iter().filter(|v| !v.passed) {
             let mut section = format!("{}: {}", verdict.gate, verdict.reason.trim());
-            if let Some(digest) = verdict.error_digest.as_deref().map(str::trim).filter(|s| !s.is_empty())
+            if let Some(digest) = verdict
+                .error_digest
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
             {
                 section.push_str("\n\nerror_digest:\n");
                 section.push_str(digest);
             }
-            if let Some(detail) = verdict.detail.as_deref().map(str::trim).filter(|s| !s.is_empty())
+            if let Some(detail) = verdict
+                .detail
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
             {
                 section.push_str("\n\nstderr/stdout:\n");
                 section.push_str(&detail.chars().take(4000).collect::<String>());
@@ -3220,12 +3221,13 @@ impl PlanRunner {
                 if let Some(state) = self.executor.plan_state_mut(plan_id) {
                     state.last_error = None;
                 }
-                let _ = self.executor.apply_event(plan_id, &ExecutorEvent::VerifyPassed);
+                let _ = self
+                    .executor
+                    .apply_event(plan_id, &ExecutorEvent::VerifyPassed);
             }
             Err((task_id, phase, command, error_output)) => {
-                let msg = format!(
-                    "verify failed for {plan_id}/{task_id} in phase {phase}: {command}"
-                );
+                let msg =
+                    format!("verify failed for {plan_id}/{task_id} in phase {phase}: {command}");
                 eprintln!("[orchestrate] {msg}: {}", error_output.trim());
                 self.event_log.append(
                     EventKind::ErrorOccurred,
@@ -3240,7 +3242,9 @@ impl PlanRunner {
                 if let Some(state) = self.executor.plan_state_mut(plan_id) {
                     state.last_error = Some(msg);
                 }
-                let _ = self.executor.apply_event(plan_id, &ExecutorEvent::VerifyFailed);
+                let _ = self
+                    .executor
+                    .apply_event(plan_id, &ExecutorEvent::VerifyFailed);
             }
         }
     }
@@ -3272,10 +3276,10 @@ impl PlanRunner {
                 let output_text = result.output.body.as_text().unwrap_or_default().to_string();
 
                 let mut approved = parse_review_verdict(&output_text);
-                let drift_report =
-                    self.task_trackers.get(plan_id).and_then(|tracker| {
-                        review_drift_report(&tracker.tasks_file, &output_text)
-                    });
+                let drift_report = self
+                    .task_trackers
+                    .get(plan_id)
+                    .and_then(|tracker| review_drift_report(&tracker.tasks_file, &output_text));
                 if let Some(ref report) = drift_report {
                     if report.drifted() {
                         approved = false;
@@ -3287,7 +3291,12 @@ impl PlanRunner {
                     drift_report
                         .as_ref()
                         .map(|r: &ReviewDriftReport| {
-                            format!("{:.1}% ({}/{})", r.coverage() * 100.0, r.matched, r.expected)
+                            format!(
+                                "{:.1}% ({}/{})",
+                                r.coverage() * 100.0,
+                                r.matched,
+                                r.expected
+                            )
                         })
                         .unwrap_or_else(|| "n/a".into())
                 );
@@ -4004,7 +4013,9 @@ impl PlanRunner {
         if is_exec_agent {
             let tool_manifest = self.build_tool_manifest(
                 role,
-                task_def.as_ref().and_then(|task| task.denied_tools.as_deref()),
+                task_def
+                    .as_ref()
+                    .and_then(|task| task.denied_tools.as_deref()),
             );
             if !tool_manifest.is_empty() {
                 let tool_section = PromptSection::new("available-tools", &tool_manifest)
@@ -4644,7 +4655,10 @@ impl PlanRunner {
         );
 
         for (task_id, verify_steps) in steps_to_run {
-            if let Err(err) = self.run_verify_steps(&task_id, &verify_steps, &exec_dir).await {
+            if let Err(err) = self
+                .run_verify_steps(&task_id, &verify_steps, &exec_dir)
+                .await
+            {
                 return Err(err);
             }
         }
@@ -4816,7 +4830,10 @@ impl PlanRunner {
     async fn collect_public_api_snippets(
         &self,
         task: &crate::task_parser::TaskDef,
-    ) -> (Vec<String>, Vec<roko_compose::templates::scribe::FileSnippet>) {
+    ) -> (
+        Vec<String>,
+        Vec<roko_compose::templates::scribe::FileSnippet>,
+    ) {
         let mut public_api_files = Vec::new();
         let mut snippets = Vec::new();
 
@@ -5006,7 +5023,11 @@ impl PlanRunner {
             registry
                 .for_role(role)
                 .into_iter()
-                .filter(|tool| denied.as_ref().is_none_or(|set| !set.contains(tool.name.as_str())))
+                .filter(|tool| {
+                    denied
+                        .as_ref()
+                        .is_none_or(|set| !set.contains(tool.name.as_str()))
+                })
                 .cloned()
                 .collect()
         } else {
@@ -5014,7 +5035,11 @@ impl PlanRunner {
             static_reg
                 .for_role(role)
                 .into_iter()
-                .filter(|tool| denied.as_ref().is_none_or(|set| !set.contains(tool.name.as_str())))
+                .filter(|tool| {
+                    denied
+                        .as_ref()
+                        .is_none_or(|set| !set.contains(tool.name.as_str()))
+                })
                 .cloned()
                 .collect()
         };
@@ -5060,7 +5085,9 @@ impl PlanRunner {
             ));
         }
 
-        Ok(parse_git_status_changed_files(&String::from_utf8_lossy(&output.stdout)))
+        Ok(parse_git_status_changed_files(&String::from_utf8_lossy(
+            &output.stdout,
+        )))
     }
 
     /// Enforce the task's declared write-file scope after successful execution.
@@ -5239,7 +5266,8 @@ impl PlanRunner {
             ));
         }
 
-        let tools_csv = claude_tool_allowlist_with(AgentRole::Strategist, self.tool_registry.as_deref());
+        let tools_csv =
+            claude_tool_allowlist_with(AgentRole::Strategist, self.tool_registry.as_deref());
         RoleSystemPromptSpec::new(
             AgentRole::Strategist,
             TaskContext::new(format!("Enrich plan {plan_id} before agent dispatch"))
@@ -5298,8 +5326,16 @@ fn claude_task_tool_allowlist_with(
         registry
             .for_role(role)
             .into_iter()
-            .filter(|tool| allowed.as_ref().is_none_or(|set| set.contains(tool.name.as_str())))
-            .filter(|tool| denied.as_ref().is_none_or(|set| !set.contains(tool.name.as_str())))
+            .filter(|tool| {
+                allowed
+                    .as_ref()
+                    .is_none_or(|set| set.contains(tool.name.as_str()))
+            })
+            .filter(|tool| {
+                denied
+                    .as_ref()
+                    .is_none_or(|set| !set.contains(tool.name.as_str()))
+            })
             .cloned()
             .collect()
     } else {
@@ -5307,8 +5343,16 @@ fn claude_task_tool_allowlist_with(
         registry
             .for_role(role)
             .into_iter()
-            .filter(|tool| allowed.as_ref().is_none_or(|set| set.contains(tool.name.as_str())))
-            .filter(|tool| denied.as_ref().is_none_or(|set| !set.contains(tool.name.as_str())))
+            .filter(|tool| {
+                allowed
+                    .as_ref()
+                    .is_none_or(|set| set.contains(tool.name.as_str()))
+            })
+            .filter(|tool| {
+                denied
+                    .as_ref()
+                    .is_none_or(|set| !set.contains(tool.name.as_str()))
+            })
             .cloned()
             .collect()
     };
@@ -5382,11 +5426,7 @@ fn task_spec_summary(tasks_file: &TasksFile) -> String {
         if !task.verify.is_empty() {
             out.push_str("verify:\n");
             for step in &task.verify {
-                out.push_str(&format!(
-                    "- [{}] {}\n",
-                    step.phase,
-                    step.command
-                ));
+                out.push_str(&format!("- [{}] {}\n", step.phase, step.command));
             }
         }
     }
@@ -5396,9 +5436,37 @@ fn task_spec_summary(tasks_file: &TasksFile) -> String {
 
 fn significant_terms(text: &str) -> Vec<String> {
     const STOP_WORDS: &[&str] = &[
-        "the", "and", "for", "with", "from", "into", "that", "this", "task", "plan", "should",
-        "must", "have", "has", "are", "was", "were", "will", "would", "could", "can", "done",
-        "make", "build", "update", "implement", "review", "please", "then", "than", "when",
+        "the",
+        "and",
+        "for",
+        "with",
+        "from",
+        "into",
+        "that",
+        "this",
+        "task",
+        "plan",
+        "should",
+        "must",
+        "have",
+        "has",
+        "are",
+        "was",
+        "were",
+        "will",
+        "would",
+        "could",
+        "can",
+        "done",
+        "make",
+        "build",
+        "update",
+        "implement",
+        "review",
+        "please",
+        "then",
+        "than",
+        "when",
     ];
 
     let mut seen = HashSet::new();
@@ -5440,7 +5508,10 @@ fn review_drift_report(tasks_file: &TasksFile, output: &str) -> Option<ReviewDri
 
         for file in &task.files {
             push_expected(file.clone());
-            if let Some(name) = std::path::Path::new(file).file_name().and_then(|n| n.to_str()) {
+            if let Some(name) = std::path::Path::new(file)
+                .file_name()
+                .and_then(|n| n.to_str())
+            {
                 push_expected(name.to_string());
             }
         }

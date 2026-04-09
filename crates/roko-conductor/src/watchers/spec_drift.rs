@@ -5,8 +5,8 @@
 //! it actually changed. Fires when the drift exceeds
 //! [`MAX_SPEC_DRIFT_RATIO`].
 
-use serde::Deserialize;
 use roko_core::{Body, Context, Kind, Policy, Signal};
+use serde::Deserialize;
 
 /// Maximum acceptable spec drift ratio (0.0 to 1.0).
 pub const MAX_SPEC_DRIFT_RATIO: f64 = 0.25;
@@ -128,8 +128,12 @@ impl Policy for SpecDriftWatcher {
                 .as_ref()
                 .and_then(|event| event.task_id.as_deref())
                 .unwrap_or("unknown");
-            let unexpected_count = details.as_ref().map_or(0, |event| event.unexpected_files().len());
-            let changed_count = details.as_ref().map_or(0, |event| event.changed_files.len());
+            let unexpected_count = details
+                .as_ref()
+                .map_or(0, |event| event.unexpected_files().len());
+            let changed_count = details
+                .as_ref()
+                .map_or(0, |event| event.changed_files.len());
             let write_count = details.as_ref().map_or(0, |event| event.write_files.len());
             vec![
                 Signal::builder(Kind::Custom("conductor.intervention".into()))

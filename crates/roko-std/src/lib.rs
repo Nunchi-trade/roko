@@ -24,8 +24,8 @@ pub mod trace_sink;
 pub use memory::MemorySubstrate;
 pub use noop::{NoOpComposer, NoOpGate, NoOpPolicy, NoOpRouter, NoOpScorer};
 pub use roles::{
-    IMPLEMENTER_TOOL_PROFILE, RESEARCHER_TOOL_PROFILE, REVIEWER_TOOL_PROFILE,
-    STRATEGIST_TOOL_PROFILE, RoleToolProfile, RoleToolProfileKind,
+    IMPLEMENTER_TOOL_PROFILE, RESEARCHER_TOOL_PROFILE, REVIEWER_TOOL_PROFILE, RoleToolProfile,
+    RoleToolProfileKind, STRATEGIST_TOOL_PROFILE,
 };
 pub use router::{FirstRouter, HighestScoreRouter, RoundRobinRouter};
 pub use scorer::{ConstScorer, MulScorer, SumScorer};

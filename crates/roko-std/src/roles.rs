@@ -6,8 +6,8 @@
 //! `roko-std`'s built-in registry.
 
 use crate::tool::builtin::{
-    apply_patch, bash, edit_file, exit_plan_mode, glob, grep, multi_edit, notebook_edit,
-    read_file, run_tests, task_agent, todo_write, web_fetch, web_search, write_file,
+    apply_patch, bash, edit_file, exit_plan_mode, glob, grep, multi_edit, notebook_edit, read_file,
+    run_tests, task_agent, todo_write, web_fetch, web_search, write_file,
 };
 
 /// Named tool-profile archetypes.
@@ -148,10 +148,7 @@ mod tests {
 
     #[test]
     fn researcher_profile_is_read_only_plus_blocked_tools() {
-        assert_eq!(
-            RESEARCHER_TOOL_PROFILE.allowed_tools,
-            Some(&READ_TOOLS[..])
-        );
+        assert_eq!(RESEARCHER_TOOL_PROFILE.allowed_tools, Some(&READ_TOOLS[..]));
         assert_eq!(
             RESEARCHER_TOOL_PROFILE.denied_tools,
             &[write_file::NAME, edit_file::NAME, bash::NAME]
@@ -176,10 +173,7 @@ mod tests {
             STRATEGIST_TOOL_PROFILE.allowed_tools,
             Some(&STRATEGIST_TOOLS[..])
         );
-        assert_eq!(
-            STRATEGIST_TOOL_PROFILE.denied_tools,
-            &DESTRUCTIVE_TOOLS
-        );
+        assert_eq!(STRATEGIST_TOOL_PROFILE.denied_tools, &DESTRUCTIVE_TOOLS);
     }
 
     #[test]

@@ -981,7 +981,10 @@ mod tests {
 
         let handle = mgr.create("14-november", "feature/november").await.unwrap();
         assert_eq!(handle.id, "14-november");
-        assert!(!lock_path.exists(), "stale main repo lock should be removed");
+        assert!(
+            !lock_path.exists(),
+            "stale main repo lock should be removed"
+        );
     }
 
     #[tokio::test]

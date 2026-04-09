@@ -232,24 +232,26 @@ mod tests {
     use super::*;
 
     fn ghost_turn_signal(cost_usd: f64) -> Signal {
-        Signal::builder(Kind::Custom(crate::watchers::ghost_turn::TURN_SIGNAL_KIND.into()))
-            .body(
-                Body::from_json(&serde_json::json!({
-                    "plan_id": "plan-1",
-                    "task": "task-1",
-                    "role": "Implementer",
-                    "model": "claude-sonnet-4-6",
-                    "cost_usd": cost_usd,
-                    "duration_ms": 1234,
-                    "changed_files_before": [],
-                    "changed_files_after": [],
-                    "net_new_changes": 0,
-                    "output_meaningful": false,
-                    "wasted_cost": true,
-                }))
-                .expect("serialize ghost turn event"),
-            )
-            .build()
+        Signal::builder(Kind::Custom(
+            crate::watchers::ghost_turn::TURN_SIGNAL_KIND.into(),
+        ))
+        .body(
+            Body::from_json(&serde_json::json!({
+                "plan_id": "plan-1",
+                "task": "task-1",
+                "role": "Implementer",
+                "model": "claude-sonnet-4-6",
+                "cost_usd": cost_usd,
+                "duration_ms": 1234,
+                "changed_files_before": [],
+                "changed_files_after": [],
+                "net_new_changes": 0,
+                "output_meaningful": false,
+                "wasted_cost": true,
+            }))
+            .expect("serialize ghost turn event"),
+        )
+        .build()
     }
 
     fn ghost_stream(count: usize) -> Vec<Signal> {

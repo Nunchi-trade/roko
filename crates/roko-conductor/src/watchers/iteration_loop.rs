@@ -37,24 +37,21 @@ impl IterationLoopWatcher {
 }
 
 fn signal_plan_id(signal: &Signal) -> Option<String> {
-    signal
-        .tag(PLAN_ID_TAG)
-        .map(str::to_owned)
-        .or_else(|| {
-            if signal.kind != Kind::PlanPhase {
-                return None;
-            }
+    signal.tag(PLAN_ID_TAG).map(str::to_owned).or_else(|| {
+        if signal.kind != Kind::PlanPhase {
+            return None;
+        }
 
-            signal
-                .body
-                .as_json::<serde_json::Value>()
-                .ok()
-                .and_then(|body| {
-                    body.get(PLAN_ID_TAG)
-                        .and_then(|plan_id| plan_id.as_str())
-                        .map(str::to_owned)
-                })
-        })
+        signal
+            .body
+            .as_json::<serde_json::Value>()
+            .ok()
+            .and_then(|body| {
+                body.get(PLAN_ID_TAG)
+                    .and_then(|plan_id| plan_id.as_str())
+                    .map(str::to_owned)
+            })
+    })
 }
 
 fn latest_plan_id(stream: &[Signal]) -> Option<String> {
@@ -154,7 +151,10 @@ mod tests {
     #[test]
     fn below_threshold_no_fire() {
         let w = IterationLoopWatcher::default();
-        let stream = vec![plan_phase_signal("GateFailed"), plan_phase_signal("GateFailed")];
+        let stream = vec![
+            plan_phase_signal("GateFailed"),
+            plan_phase_signal("GateFailed"),
+        ];
         assert!(w.decide(&stream, &Context::at(0)).is_empty());
     }
 
@@ -175,7 +175,10 @@ mod tests {
     #[test]
     fn non_restart_signals_ignored() {
         let w = IterationLoopWatcher::default();
-        let stream = vec![plan_phase_signal("ImplementationDone"), plan_phase_signal("GatePassed")];
+        let stream = vec![
+            plan_phase_signal("ImplementationDone"),
+            plan_phase_signal("GatePassed"),
+        ];
         assert!(w.decide(&stream, &Context::at(0)).is_empty());
     }
 

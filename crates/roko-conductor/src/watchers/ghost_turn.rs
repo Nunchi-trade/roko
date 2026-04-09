@@ -4,8 +4,8 @@
 //! burning tokens without progress. After [`MAX_GHOST_TURNS`] consecutive
 //! ghost turns, this watcher fires a restart signal.
 
-use serde::Deserialize;
 use roko_core::{Body, Context, Kind, Policy, Signal};
+use serde::Deserialize;
 
 /// Maximum consecutive wasted turns before firing.
 pub const MAX_GHOST_TURNS: usize = 3;
@@ -67,13 +67,17 @@ fn extract_ghost_turn_event(signal: &Signal) -> Option<GhostTurnEvent> {
         return None;
     }
 
-    signal.body.as_json::<GhostTurnEvent>().ok().and_then(|event| {
-        if event.output_meaningful || event.net_new_changes != 0 {
-            None
-        } else {
-            Some(event)
-        }
-    })
+    signal
+        .body
+        .as_json::<GhostTurnEvent>()
+        .ok()
+        .and_then(|event| {
+            if event.output_meaningful || event.net_new_changes != 0 {
+                None
+            } else {
+                Some(event)
+            }
+        })
 }
 
 impl Policy for GhostTurnWatcher {
@@ -228,7 +232,10 @@ mod tests {
     #[test]
     fn empty_changed_files_counts_as_ghost() {
         let w = GhostTurnWatcher::new(2);
-        let stream = vec![ghost_turn_signal(0.5, vec![]), ghost_turn_signal(0.4, vec![])];
+        let stream = vec![
+            ghost_turn_signal(0.5, vec![]),
+            ghost_turn_signal(0.4, vec![]),
+        ];
         let out = w.decide(&stream, &Context::at(0));
         assert_eq!(out.len(), 1);
     }
@@ -267,24 +274,26 @@ mod tests {
     #[test]
     fn changed_files_prevent_fire() {
         let w = GhostTurnWatcher::new(1);
-        let stream = vec![Signal::builder(Kind::Custom(TURN_SIGNAL_KIND.into()))
-            .body(
-                Body::from_json(&serde_json::json!({
-                    "plan_id": "plan-1",
-                    "task": "task-1",
-                    "role": "Implementer",
-                    "model": "claude-sonnet-4-6",
-                    "cost_usd": 0.75,
-                    "duration_ms": 1234,
-                    "changed_files_before": ["src/lib.rs"],
-                    "changed_files_after": ["src/lib.rs", "src/main.rs"],
-                    "net_new_changes": 1,
-                    "output_meaningful": false,
-                    "wasted_cost": true,
-                }))
-                .expect("serialize changed-files event"),
-            )
-            .build()];
+        let stream = vec![
+            Signal::builder(Kind::Custom(TURN_SIGNAL_KIND.into()))
+                .body(
+                    Body::from_json(&serde_json::json!({
+                        "plan_id": "plan-1",
+                        "task": "task-1",
+                        "role": "Implementer",
+                        "model": "claude-sonnet-4-6",
+                        "cost_usd": 0.75,
+                        "duration_ms": 1234,
+                        "changed_files_before": ["src/lib.rs"],
+                        "changed_files_after": ["src/lib.rs", "src/main.rs"],
+                        "net_new_changes": 1,
+                        "output_meaningful": false,
+                        "wasted_cost": true,
+                    }))
+                    .expect("serialize changed-files event"),
+                )
+                .build(),
+        ];
         let out = w.decide(&stream, &Context::at(0));
         assert!(out.is_empty());
     }

@@ -38,24 +38,21 @@ impl ReviewLoopWatcher {
 }
 
 fn signal_plan_id(signal: &Signal) -> Option<String> {
-    signal
-        .tag(PLAN_ID_TAG)
-        .map(str::to_owned)
-        .or_else(|| {
-            if signal.kind != Kind::PlanPhase {
-                return None;
-            }
+    signal.tag(PLAN_ID_TAG).map(str::to_owned).or_else(|| {
+        if signal.kind != Kind::PlanPhase {
+            return None;
+        }
 
-            signal
-                .body
-                .as_json::<serde_json::Value>()
-                .ok()
-                .and_then(|body| {
-                    body.get(PLAN_ID_TAG)
-                        .and_then(|plan_id| plan_id.as_str())
-                        .map(str::to_owned)
-                })
-        })
+        signal
+            .body
+            .as_json::<serde_json::Value>()
+            .ok()
+            .and_then(|body| {
+                body.get(PLAN_ID_TAG)
+                    .and_then(|plan_id| plan_id.as_str())
+                    .map(str::to_owned)
+            })
+    })
 }
 
 fn latest_plan_id(stream: &[Signal]) -> Option<String> {
@@ -196,7 +193,10 @@ mod tests {
     #[test]
     fn below_threshold_no_fire() {
         let w = ReviewLoopWatcher::new(3);
-        let stream = vec![review_phase("ReviewRejected"), review_phase("ReviewRejected")];
+        let stream = vec![
+            review_phase("ReviewRejected"),
+            review_phase("ReviewRejected"),
+        ];
         assert!(w.decide(&stream, &Context::at(0)).is_empty());
     }
 
