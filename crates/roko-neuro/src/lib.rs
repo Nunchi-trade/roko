@@ -95,12 +95,14 @@ pub struct KnowledgeEntry {
 
 /// Episode distillation into durable knowledge candidates.
 pub mod distiller;
+pub mod context;
 /// Helpers for asynchronously processing completed episodes.
 pub mod episode_completion;
 pub mod knowledge_store;
 /// Tier progression from raw episodes to playbooks.
 pub mod tier_progression;
 
+pub use context::{ContextAssembler, EpisodeStore};
 pub use distiller::{DistillationBackend, Distiller};
 pub use episode_completion::spawn_episode_distillation;
 pub use knowledge_store::{DEFAULT_GC_MIN_CONFIDENCE, KnowledgeStats, KnowledgeStore};
