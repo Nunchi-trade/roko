@@ -748,8 +748,11 @@ async fn cmd_daemon(_cli: &Cli, cmd: DaemonCmd) -> Result<i32> {
             roko_cli::daemon::daemon_start(foreground, port).await?;
             Ok(EXIT_SUCCESS)
         }
-        DaemonCmd::Stop
-        | DaemonCmd::Status
+        DaemonCmd::Stop => {
+            roko_cli::daemon::daemon_stop().await?;
+            Ok(EXIT_SUCCESS)
+        }
+        DaemonCmd::Status
         | DaemonCmd::Logs { .. }
         | DaemonCmd::Reload
         | DaemonCmd::Restart { .. }

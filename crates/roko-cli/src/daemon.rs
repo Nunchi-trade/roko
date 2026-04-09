@@ -9,6 +9,7 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
@@ -18,8 +19,9 @@ use sysinfo::{Pid, ProcessesToUpdate, System};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::task::JoinHandle;
+use tokio::time::sleep;
 #[cfg(unix)]
-use tokio::signal::unix::{SignalKind, signal};
+use tokio::signal::unix::{signal, SignalKind};
 use tracing::warn;
 
 use crate::load_layered;
@@ -284,6 +286,59 @@ pub async fn daemon_start(foreground: bool, port: u16) -> Result<()> {
     run_result
 }
 
+/// Stop the active daemon for the current working directory.
+pub async fn daemon_stop() -> Result<()> {
+    let workdir = std::env::current_dir().context("resolve current working directory")?;
+    let info = match read_daemon_info(&workdir)? {
+        Some(info) => info,
+        None => {
+            cleanup_daemon_files(&workdir);
+            return Ok(());
+        }
+    };
+
+    let socket_path = daemon_socket_path(&workdir);
+    let mut ipc_stopped = false;
+    if let Ok(mut stream) = UnixStream::connect(&socket_path).await {
+        if stream.write_all(b"stop").await.is_ok() {
+            let _ = stream.shutdown().await;
+            ipc_stopped = true;
+        }
+    }
+
+    if !ipc_stopped {
+        #[cfg(unix)]
+        {
+            if let Err(err) = send_signal(info.pid, "TERM") {
+                warn!(error = %err, pid = info.pid, "failed to send SIGTERM to daemon");
+            }
+        }
+    }
+
+    let graceful_timeout = Duration::from_secs(30);
+    let poll_interval = Duration::from_millis(250);
+    let started = std::time::Instant::now();
+    while started.elapsed() < graceful_timeout {
+        if !pid_is_alive(info.pid)? {
+            cleanup_daemon_files(&workdir);
+            return Ok(());
+        }
+        sleep(poll_interval).await;
+    }
+
+    if pid_is_alive(info.pid)? {
+        #[cfg(unix)]
+        {
+            if let Err(err) = send_signal(info.pid, "KILL") {
+                warn!(error = %err, pid = info.pid, "failed to send SIGKILL to daemon");
+            }
+        }
+    }
+
+    cleanup_daemon_files(&workdir);
+    Ok(())
+}
+
 fn ensure_runtime_dirs(workdir: &Path) -> Result<()> {
     fs::create_dir_all(daemon_root_dir(workdir))
         .with_context(|| format!("create {}", daemon_root_dir(workdir).display()))?;
@@ -370,16 +425,34 @@ fn cleanup_stale_runtime_files(workdir: &Path) {
     let _ = fs::remove_file(socket_path);
 }
 
-#[cfg(unix)]
+fn cleanup_daemon_files(workdir: &Path) {
+    let json_path = daemon_json_path(workdir);
+    let pid_path = daemon_pid_path(workdir);
+    let socket_path = daemon_socket_path(workdir);
+    let _ = fs::remove_file(json_path);
+    let _ = fs::remove_file(pid_path);
+    let _ = fs::remove_file(socket_path);
+}
+
 fn pid_is_alive(pid: u32) -> Result<bool> {
     let mut system = System::new_all();
     system.refresh_processes(ProcessesToUpdate::All, true);
     Ok(system.process(Pid::from_u32(pid)).is_some())
 }
 
-#[cfg(not(unix))]
-fn pid_is_alive(_pid: u32) -> Result<bool> {
-    Ok(false)
+#[cfg(unix)]
+fn send_signal(pid: u32, signal: &str) -> Result<()> {
+    let pid = pid.to_string();
+    let status = Command::new("kill")
+        .arg(format!("-{signal}"))
+        .arg(&pid)
+        .status()
+        .with_context(|| format!("run kill -{signal} {pid}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(anyhow!("kill -{signal} {pid} exited with {status}"))
+    }
 }
 
 async fn start_ipc_server(state: Arc<AppState>) -> Result<JoinHandle<()>> {
