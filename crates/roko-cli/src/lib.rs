@@ -31,6 +31,7 @@ pub mod repl;
 pub mod research;
 pub mod run;
 pub mod secrets;
+pub mod subscriptions;
 pub mod status;
 pub mod task_parser;
 pub mod tui;

@@ -2,7 +2,7 @@
 //!
 //! See [`roko_cli`] for the lib-side description. The binary exposes
 //! subcommands (`init`, `run`, `status`, `replay`, `config`, `inject`,
-//! `plan`) plus top-level flags for mode selection (`--headless`,
+//! `plan`, `subscription`) plus top-level flags for mode selection (`--headless`,
 //! `--role`, `--model`, `--effort`, `--json`, `--log-format`, `--quiet`,
 //! `--resume`, `--repo`, `--no-replan`, and a positional `[prompt]` for
 //! one-shot mode).
@@ -209,6 +209,11 @@ enum Command {
         #[command(subcommand)]
         cmd: ResearchCmd,
     },
+    /// Manage event subscriptions.
+    Subscription {
+        #[command(subcommand)]
+        cmd: SubscriptionCmd,
+    },
     /// Launch the dashboard TUI, with text fallback for non-interactive use.
     Dashboard {
         /// Specific dashboard page slug to render.
@@ -386,6 +391,36 @@ enum ResearchCmd {
     Analyze,
     /// List all research artifacts.
     List,
+}
+
+#[derive(Debug, Subcommand)]
+enum SubscriptionCmd {
+    /// List all subscriptions.
+    List,
+    /// Create a new subscription.
+    Add {
+        /// Agent template name to invoke.
+        #[arg(long)]
+        template: String,
+        /// Signal trigger glob to match.
+        #[arg(long)]
+        trigger: String,
+    },
+    /// Delete a subscription.
+    Remove {
+        /// Subscription ID.
+        id: String,
+    },
+    /// Enable a subscription.
+    Enable {
+        /// Subscription ID.
+        id: String,
+    },
+    /// Disable a subscription.
+    Disable {
+        /// Subscription ID.
+        id: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -622,6 +657,11 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
         }
         Command::Research { cmd } => {
             let result = cmd_research(cli, cmd).await;
+            let _ = roko_cli::index::rebuild_all(&std::env::current_dir().unwrap_or_default());
+            result
+        }
+        Command::Subscription { cmd } => {
+            let result = cmd_subscription(cli, cmd).await;
             let _ = roko_cli::index::rebuild_all(&std::env::current_dir().unwrap_or_default());
             result
         }
@@ -1759,6 +1799,32 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 }
             }
             Ok(0)
+        }
+    }
+}
+
+async fn cmd_subscription(cli: &Cli, cmd: SubscriptionCmd) -> Result<i32> {
+    let workdir = resolve_workdir(cli);
+    match cmd {
+        SubscriptionCmd::List => {
+            roko_cli::subscriptions::cmd_list(&workdir, cli.json)?;
+            Ok(EXIT_SUCCESS)
+        }
+        SubscriptionCmd::Add { template, trigger } => {
+            roko_cli::subscriptions::cmd_add(&workdir, &template, &trigger)?;
+            Ok(EXIT_SUCCESS)
+        }
+        SubscriptionCmd::Remove { id } => {
+            roko_cli::subscriptions::cmd_remove(&workdir, &id)?;
+            Ok(EXIT_SUCCESS)
+        }
+        SubscriptionCmd::Enable { id } => {
+            roko_cli::subscriptions::cmd_set_enabled(&workdir, &id, true)?;
+            Ok(EXIT_SUCCESS)
+        }
+        SubscriptionCmd::Disable { id } => {
+            roko_cli::subscriptions::cmd_set_enabled(&workdir, &id, false)?;
+            Ok(EXIT_SUCCESS)
         }
     }
 }
