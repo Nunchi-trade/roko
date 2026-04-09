@@ -310,6 +310,15 @@ impl PlaybookStore {
         Ok(true)
     }
 
+    /// Record an outcome for the playbook identified by `id`.
+    ///
+    /// This is a convenience wrapper around [`PlaybookStore::record_outcome`]
+    /// for call sites that already have the originating task definition and
+    /// only need to persist the success/failure result.
+    pub async fn record(&self, id: &str, success: bool) -> io::Result<bool> {
+        self.record_outcome(id, success).await
+    }
+
     /// Delete the playbook stored under `id`. Returns `Ok(true)` if a file
     /// was removed, `Ok(false)` if no file existed.
     ///

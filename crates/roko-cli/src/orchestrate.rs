@@ -3152,16 +3152,19 @@ impl PlanRunner {
             save_task_output(&self.workdir, task_id, text);
         }
 
+        let task_def = self
+            .task_trackers
+            .get(plan_id)
+            .and_then(|t| t.tasks_file.tasks.iter().find(|td| td.id == task_id))
+            .cloned();
+
         // ── Observe cascade router for bandit learning (§9) ─────────
         {
             use roko_core::TaskComplexityBand;
             use roko_learn::model_router::RoutingContext;
 
-            let task_def = self
-                .task_trackers
-                .get(plan_id)
-                .and_then(|t| t.tasks_file.tasks.iter().find(|td| td.id == task_id));
             let complexity = task_def
+                .as_ref()
                 .map(|td| match td.tier.as_str() {
                     "mechanical" | "fast" => TaskComplexityBand::Fast,
                     "architectural" | "complex" | "premium" => TaskComplexityBand::Complex,
@@ -3183,6 +3186,17 @@ impl PlanRunner {
                 &model,
                 reward,
                 result.success,
+            );
+        }
+
+        if let Some(task_def) = task_def.as_ref()
+            && let Err(err) = self.playbook.record(&task_def.id, result.success).await
+        {
+            tracing::warn!(
+                plan_id = %plan_id,
+                task_id = %task_id,
+                error = %err,
+                "failed to record playbook outcome"
             );
         }
 
