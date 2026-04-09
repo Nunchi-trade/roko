@@ -443,28 +443,36 @@ enum ConfigCmd {
 }
 
 fn main() {
-    if let Err(e) = load_startup_env_files() {
-        eprintln!("error: {e:#}");
-        std::process::exit(EXIT_SYSTEM_ERROR);
-    }
+    let startup_env_redactions = match load_startup_env_files() {
+        Ok(values) => values,
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            std::process::exit(EXIT_SYSTEM_ERROR);
+        }
+    };
 
     let cli = Cli::parse();
     let filter = tracing_subscriber::EnvFilter::try_new(
         env::var("ROKO_LOG").unwrap_or_else(|_| "info".to_string()),
     )
     .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let scrubber = build_log_scrubber(&startup_env_redactions);
     match cli.log_format {
         LogFormat::Json => {
             tracing_subscriber::fmt()
                 .event_format(RedactingFormat::new(
                     tracing_subscriber::fmt::format().json(),
+                    scrubber,
                 ))
                 .with_env_filter(filter)
                 .init();
         }
         LogFormat::Text => {
             tracing_subscriber::fmt()
-                .event_format(RedactingFormat::new(tracing_subscriber::fmt::format()))
+                .event_format(RedactingFormat::new(
+                    tracing_subscriber::fmt::format(),
+                    scrubber,
+                ))
                 .with_env_filter(filter)
                 .init();
         }
@@ -492,12 +500,20 @@ struct RedactingFormat<E> {
 }
 
 impl<E> RedactingFormat<E> {
-    fn new(inner: E) -> Self {
+    fn new(inner: E, scrubber: roko_core::obs::LogScrubber) -> Self {
         Self {
             inner,
-            scrubber: roko_core::obs::LogScrubber::new(),
+            scrubber,
         }
     }
+}
+
+fn build_log_scrubber(env_redactions: &[(String, String)]) -> roko_core::obs::LogScrubber {
+    let scrubber = roko_core::obs::LogScrubber::new();
+    for (name, value) in env_redactions {
+        let _ = scrubber.add_literal_value(value, name);
+    }
+    scrubber
 }
 
 impl<S, N, E> FormatEvent<S, N> for RedactingFormat<E>
@@ -2253,10 +2269,12 @@ fn dashboard_page_slugs() -> Vec<&'static str> {
     .collect()
 }
 
-fn load_startup_env_files() -> Result<()> {
+fn load_startup_env_files() -> Result<Vec<(String, String)>> {
+    let mut redactions = Vec::new();
     if let Some(home) = env::var_os("HOME") {
         let global_env = PathBuf::from(home).join(".roko").join(".env");
         if global_env.is_file() {
+            redactions.extend(load_env_file(&global_env)?);
             dotenvy::from_path_override(&global_env)
                 .with_context(|| format!("load {}", global_env.display()))?;
         }
@@ -2264,11 +2282,20 @@ fn load_startup_env_files() -> Result<()> {
 
     let local_env = PathBuf::from(".env");
     if local_env.is_file() {
+        redactions.extend(load_env_file(&local_env)?);
         dotenvy::from_path_override(&local_env)
             .with_context(|| format!("load {}", local_env.display()))?;
     }
 
-    Ok(())
+    Ok(redactions)
+}
+
+fn load_env_file(path: &Path) -> Result<Vec<(String, String)>> {
+    let entries = dotenvy::from_path_iter(path)
+        .with_context(|| format!("inspect {}", path.display()))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .with_context(|| format!("parse {}", path.display()))?;
+    Ok(entries)
 }
 
 // -----------------------------------------------------------------------

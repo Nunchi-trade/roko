@@ -6,7 +6,7 @@
 //! bodies.
 //!
 //! Built-in patterns cover the most common leak vectors:
-//! - `sk-...` (Anthropic / `OpenAI` API keys)
+//! - `sk-...` (`API_KEY`)
 //! - `ghp_...` / `gho_...` / `ghs_...` / `ghu_...` / `ghr_...` (`GitHub` tokens)
 //! - `xoxb-...` (`Slack` bot tokens)
 //! - `Bearer ...` (Authorization headers)
@@ -22,17 +22,26 @@ pub const REDACTED: &str = "[REDACTED]";
 /// A compiled regex pattern used by the scrubber.
 struct ScrubPattern {
     regex: regex::Regex,
+    replacement: String,
 }
 
 impl ScrubPattern {
     fn new(pattern: &str) -> Result<Self, regex::Error> {
+        Self::with_replacement(pattern, REDACTED)
+    }
+
+    fn with_replacement(
+        pattern: &str,
+        replacement: impl Into<String>,
+    ) -> Result<Self, regex::Error> {
         Ok(Self {
             regex: regex::Regex::new(pattern)?,
+            replacement: replacement.into(),
         })
     }
 
     fn scrub<'a>(&self, text: &'a str) -> std::borrow::Cow<'a, str> {
-        self.regex.replace_all(text, REDACTED)
+        self.regex.replace_all(text, self.replacement.as_str())
     }
 }
 
@@ -57,23 +66,28 @@ impl std::fmt::Debug for LogScrubber {
 fn builtin_patterns() -> Vec<ScrubPattern> {
     // Each pattern captures the secret portion and replaces the whole match.
     let raw = [
-        // Anthropic / OpenAI API keys: sk-ant-..., sk-proj-..., sk-... (20+ chars)
-        r"sk-[A-Za-z0-9_-]{20,}",
+        // GitHub personal access tokens.
+        (r"ghp_[A-Za-z0-9]{36}", "[REDACTED:GITHUB_PAT]"),
+        // API keys.
+        (r"sk-[A-Za-z0-9-]+", "[REDACTED:API_KEY]"),
         // Slack bot tokens.
-        r"xoxb-[A-Za-z0-9-]{10,}",
-        // GitHub personal access tokens (classic & fine-grained)
-        r"gh[pousr]_[A-Za-z0-9_]{16,}",
+        (r"xoxb-[0-9]+-[A-Za-z0-9]+", "[REDACTED:SLACK_BOT_TOKEN]"),
+        // Anthropic / OpenAI API keys: sk-ant-..., sk-proj-..., sk-... (20+ chars)
+        (r"sk-[A-Za-z0-9_-]{20,}", REDACTED),
+        // GitHub tokens beyond the PAT shape above.
+        (r"gh[pousr]_[A-Za-z0-9_]{16,}", REDACTED),
         // Bearer tokens in authorization headers (value after "Bearer ")
-        r"(?i)Bearer\s+[A-Za-z0-9_.+/=-]{10,}",
+        (r"(?i)Bearer\s+[A-Za-z0-9_.+/=-]{10,}", REDACTED),
         // Env-var leak: ANTHROPIC_API_KEY=<value>
-        r"ANTHROPIC_API_KEY=[^\s]+",
+        (r"ANTHROPIC_API_KEY=[^\s]+", REDACTED),
         // Env-var leak: OPENAI_API_KEY=<value>
-        r"OPENAI_API_KEY=[^\s]+",
+        (r"OPENAI_API_KEY=[^\s]+", REDACTED),
     ];
     raw.iter()
         .map(|p| {
-            ScrubPattern::new(p)
-                .unwrap_or_else(|e| panic!("built-in scrub pattern {p:?} failed to compile: {e}"))
+            ScrubPattern::with_replacement(p.0, p.1).unwrap_or_else(|e| {
+                panic!("built-in scrub pattern {:?} failed to compile: {e}", p.0)
+            })
         })
         .collect()
 }
@@ -105,6 +119,30 @@ impl LogScrubber {
         let compiled = ScrubPattern::new(pattern)?;
         self.patterns.write().push(compiled);
         Ok(())
+    }
+
+    /// Add a custom regex pattern with a specific replacement string.
+    ///
+    /// This is used for `.env` values, where the replacement must identify the
+    /// loaded variable name.
+    pub fn add_pattern_with_replacement(
+        &self,
+        pattern: &str,
+        replacement: impl Into<String>,
+    ) -> Result<(), regex::Error> {
+        let compiled = ScrubPattern::with_replacement(pattern, replacement)?;
+        self.patterns.write().push(compiled);
+        Ok(())
+    }
+
+    /// Add a literal value to the scrubber, redacting it as `name`.
+    pub fn add_literal_value(&self, value: &str, name: &str) -> Result<(), regex::Error> {
+        if value.is_empty() {
+            return Ok(());
+        }
+        let pattern = regex::escape(value);
+        let replacement = format!("[REDACTED:{name}]");
+        self.add_pattern_with_replacement(&pattern, replacement)
     }
 
     /// Scrub all known patterns from the input text, replacing matches with
@@ -146,7 +184,7 @@ mod tests {
         let input = "Using key sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234567890 for request";
         let output = scrubber.scrub(input);
         assert!(!output.contains("sk-ant-api03"));
-        assert!(output.contains(REDACTED));
+        assert!(output.contains("[REDACTED:API_KEY]"));
         assert!(output.contains("Using key"));
         assert!(output.contains("for request"));
     }
@@ -157,7 +195,7 @@ mod tests {
         let input = "key=sk-proj-abcdefghijklmnopqrstuvwxyz";
         let output = scrubber.scrub(input);
         assert!(!output.contains("sk-proj-"));
-        assert!(output.contains(REDACTED));
+        assert!(output.contains("[REDACTED:API_KEY]"));
     }
 
     #[test]
@@ -166,16 +204,16 @@ mod tests {
         let input = "Authorization: token ghp_ABCDEFGHIJKLMNOPqrstuvwxyz1234567890";
         let output = scrubber.scrub(input);
         assert!(!output.contains("ghp_"));
-        assert!(output.contains(REDACTED));
+        assert!(output.contains("[REDACTED:GITHUB_PAT]"));
     }
 
     #[test]
     fn scrubs_slack_bot_token() {
         let scrubber = LogScrubber::new();
-        let input = "Authorization: Bearer xoxb-1234567890-abcdefghijklmnopqrstuv";
+        let input = "Authorization: xoxb-1234567890-abcdefghijklmnopqrstuv";
         let output = scrubber.scrub(input);
         assert!(!output.contains("xoxb-"));
-        assert!(output.contains(REDACTED));
+        assert!(output.contains("[REDACTED:SLACK_BOT_TOKEN]"));
     }
 
     #[test]
@@ -193,7 +231,7 @@ mod tests {
         let input = "export ANTHROPIC_API_KEY=sk-ant-secret-key-12345";
         let output = scrubber.scrub(input);
         assert!(!output.contains("sk-ant-secret-key"));
-        assert!(output.contains(REDACTED));
+        assert!(output.contains("[REDACTED:API_KEY]"));
     }
 
     #[test]
@@ -202,7 +240,7 @@ mod tests {
         let input = "OPENAI_API_KEY=sk-proj-myverysecretkey12345678";
         let output = scrubber.scrub(input);
         assert!(!output.contains("sk-proj-"));
-        assert!(output.contains(REDACTED));
+        assert!(output.contains("[REDACTED:API_KEY]"));
     }
 
     #[test]
@@ -217,12 +255,15 @@ mod tests {
     fn scrubs_multiple_secrets_in_one_line() {
         let scrubber = LogScrubber::new();
         let input =
-            "keys: sk-ant-abcdefghijklmnopqrstuvwxyz and ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234";
+            "keys: sk-ant-abcdefghijklmnopqrstuvwxyz and ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
         let output = scrubber.scrub(input);
         assert!(!output.contains("sk-ant-"));
         assert!(!output.contains("ghp_"));
-        // Should have two REDACTED markers
-        assert_eq!(output.matches(REDACTED).count(), 2);
+        assert_eq!(
+            output.matches("[REDACTED:API_KEY]").count()
+                + output.matches("[REDACTED:GITHUB_PAT]").count(),
+            2
+        );
     }
 
     #[test]
@@ -256,8 +297,8 @@ mod tests {
     fn default_has_builtin_patterns() {
         let scrubber = LogScrubber::default();
         assert!(
-            scrubber.pattern_count() >= 5,
-            "should have at least 5 built-in patterns"
+            scrubber.pattern_count() >= 8,
+            "should have at least 8 built-in patterns"
         );
     }
 
@@ -285,11 +326,22 @@ mod tests {
     }
 
     #[test]
-    fn short_sk_prefix_not_scrubbed() {
-        // "sk-short" has less than 20 chars after "sk-", should NOT be scrubbed
+    fn short_sk_prefix_is_scrubbed() {
         let scrubber = LogScrubber::new();
         let input = "key sk-short should stay";
         let output = scrubber.scrub(input);
-        assert_eq!(output, input);
+        assert!(!output.contains("sk-short"));
+        assert!(output.contains("[REDACTED:API_KEY]"));
+    }
+
+    #[test]
+    fn literal_value_uses_named_redaction() {
+        let scrubber = LogScrubber::empty();
+        scrubber
+            .add_literal_value("super-secret-value", "TEST_ENV")
+            .unwrap();
+        let output = scrubber.scrub("value super-secret-value leaked");
+        assert!(output.contains("[REDACTED:TEST_ENV]"));
+        assert!(!output.contains("super-secret-value"));
     }
 }
