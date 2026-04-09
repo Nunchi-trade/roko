@@ -136,6 +136,7 @@ impl App {
         widgets::render_dashboard(
             frame,
             &self.scaffold,
+            &self.data,
             &pages,
             self.current_page,
             self.scroll_for(self.current_page),
@@ -227,6 +228,7 @@ fn render_page(frame: &mut Frame<'_>, app: &App) {
     widgets::render_dashboard(
         frame,
         &app.scaffold,
+        &app.data,
         &pages,
         app.current_page,
         app.scroll_for(app.current_page),

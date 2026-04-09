@@ -276,6 +276,12 @@ impl DashboardData {
         *self = refreshed;
         Ok(())
     }
+
+    /// Workspace root used to load dashboard artifacts.
+    #[must_use]
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
 }
 
 /// Summary of a task that is currently active.
@@ -766,12 +772,12 @@ fn load_latest_jsonl_value<T: serde::de::DeserializeOwned>(path: &Path) -> Optio
         .and_then(|line| serde_json::from_str(line).ok())
 }
 
-fn read_json_value(path: &Path) -> Option<Value> {
+pub(crate) fn read_json_value(path: &Path) -> Option<Value> {
     let text = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&text).ok()
 }
 
-fn read_jsonl_values(path: &Path) -> Vec<Value> {
+pub(crate) fn read_jsonl_values(path: &Path) -> Vec<Value> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
