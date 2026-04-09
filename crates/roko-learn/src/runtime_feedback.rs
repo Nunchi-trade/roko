@@ -243,8 +243,6 @@ pub struct LearningRuntime {
     cascade_router: CascadeRouter,
     context_pack_cache: ContextPackCache,
     experiment_store: parking_lot::Mutex<ExperimentStore>,
-    /// Count of cascade router observations since last save.
-    cascade_obs_since_save: std::sync::atomic::AtomicU32,
 }
 
 impl LearningRuntime {
@@ -297,7 +295,6 @@ impl LearningRuntime {
             cascade_router,
             context_pack_cache,
             experiment_store: parking_lot::Mutex::new(experiment_store),
-            cascade_obs_since_save: std::sync::atomic::AtomicU32::new(0),
         })
     }
 
@@ -345,7 +342,6 @@ impl LearningRuntime {
             cascade_router,
             context_pack_cache,
             experiment_store: parking_lot::Mutex::new(experiment_store),
-            cascade_obs_since_save: std::sync::atomic::AtomicU32::new(0),
         })
     }
 
@@ -556,15 +552,11 @@ impl LearningRuntime {
         // ── Cascade router observation ─────────────────────────────────
         update.router_updated = self.update_cascade_router(&input.episode);
 
-        // Periodically save cascade router to disk (every 10 observations).
+        // Persist immediately so the router state file always reflects the
+        // latest observation count and confidence stats.
         if update.router_updated {
-            let prev = self
-                .cascade_obs_since_save
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if (prev + 1) % 10 == 0 {
-                if let Err(e) = self.cascade_router.save(&self.paths.cascade_router_json) {
-                    eprintln!("[learn] cascade router save failed: {e}");
-                }
+            if let Err(e) = self.save_cascade_router() {
+                eprintln!("[learn] cascade router save failed: {e}");
             }
         }
 
@@ -587,8 +579,7 @@ impl LearningRuntime {
         let (Some(role_raw), Some(slug)) = (role_str, model_slug) else {
             return false;
         };
-        let role_json = format!("\"{role_raw}\"");
-        let Ok(role) = serde_json::from_str::<AgentRole>(&role_json) else {
+        let Some(role) = parse_agent_role(&role_raw) else {
             return false;
         };
         let category_str =
@@ -640,6 +631,18 @@ fn extra_string(episode: &Episode, key: &str) -> Option<String> {
 /// Read optional floating-point value from `episode.extra`.
 fn extra_f64(episode: &Episode, key: &str) -> Option<f64> {
     episode.extra.get(key).and_then(serde_json::Value::as_f64)
+}
+
+/// Parse an [`AgentRole`] from either the persisted kebab-case label or the
+/// debug-style variant name used by `format!("{role:?}")` in orchestration.
+fn parse_agent_role(raw: &str) -> Option<AgentRole> {
+    if let Ok(role) = serde_json::from_str::<AgentRole>(&format!("\"{raw}\"")) {
+        return Some(role);
+    }
+
+    std::iter::once(AgentRole::Conductor)
+        .chain(AgentRole::ALL_AGENTS.iter().copied())
+        .find(|role| raw == format!("{role:?}"))
 }
 
 /// Build a [`CostRecord`] from an [`Episode`] and optional provider override.
@@ -877,6 +880,50 @@ mod tests {
         assert_eq!(loaded_router.current_stage(), crate::cascade_router::CascadeStage::Confidence);
         let routed = loaded_router.route(&ctx);
         assert_eq!(routed.stage, crate::cascade_router::CascadeStage::Confidence);
+    }
+
+    #[tokio::test]
+    async fn record_completed_run_persists_cascade_router_immediately() {
+        let tmp = TempDir::new().unwrap();
+        let learn_root = tmp.path().join(".roko").join("learn");
+        let runtime = LearningRuntime::open_under(&learn_root).await.unwrap();
+        let router_path = learn_root.join("cascade-router.json");
+        assert!(!router_path.exists(), "router file should not exist before observation");
+
+        let mut ep = sample_episode(true);
+        ep.extra.insert(
+            "model".to_string(),
+            serde_json::json!("claude-sonnet-4-20250514"),
+        );
+
+        let update = runtime
+            .record_completed_run(CompletedRunInput::from_episode(ep))
+            .await
+            .unwrap();
+
+        assert!(update.router_updated, "completed run should update cascade router");
+        assert!(router_path.exists(), "router file should be written after observation");
+
+        let contents = std::fs::read_to_string(&router_path).unwrap();
+        let snapshot: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        let stats = snapshot
+            .get("confidence_stats")
+            .and_then(serde_json::Value::as_object)
+            .expect("confidence stats should be persisted");
+        let sonnet = stats
+            .get("claude-sonnet-4-20250514")
+            .and_then(serde_json::Value::as_object)
+            .expect("sonnet observation should be persisted");
+        assert_eq!(
+            sonnet.get("trials").and_then(serde_json::Value::as_u64),
+            Some(1),
+            "persisted router should reflect the new observation"
+        );
+        assert_eq!(
+            sonnet.get("successes").and_then(serde_json::Value::as_u64),
+            Some(1),
+            "persisted router should reflect the successful observation"
+        );
     }
 
     #[tokio::test]
