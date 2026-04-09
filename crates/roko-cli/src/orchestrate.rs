@@ -438,6 +438,24 @@ impl TaskTracker {
     }
 }
 
+fn merge_completed_tasks(tracker: &mut TaskTracker, completed_tasks: &[String]) {
+    for task_id in completed_tasks {
+        if !tracker.completed.iter().any(|existing| existing == task_id) {
+            tracker.completed.push(task_id.clone());
+        }
+    }
+
+    let groups = tracker.tasks_file.parallel_groups();
+    tracker.current_group_index = tracker.current_group_index.min(groups.len());
+    while tracker.current_group_index < groups.len()
+        && groups[tracker.current_group_index]
+            .iter()
+            .all(|task| tracker.completed.iter().any(|completed| completed == &task.id))
+    {
+        tracker.current_group_index += 1;
+    }
+}
+
 impl PlanRunner {
     /// Spawn MCP server processes and build a DynamicToolRegistry from their tools.
     ///
@@ -707,7 +725,8 @@ impl PlanRunner {
         let snapshot =
             ExecutorSnapshot::from_json(snapshot_json).map_err(|e| anyhow!("bad snapshot: {e}"))?;
         let executor = ParallelExecutor::from_snapshot(config.executor.clone(), snapshot);
-        let task_trackers = Self::restore_task_trackers(workdir);
+        let legacy_completed = Self::legacy_completed_tasks_from_snapshot(snapshot_json);
+        let task_trackers = Self::restore_task_trackers(workdir, &legacy_completed);
         let cancel = CancelToken::new();
         let learning = LearningRuntime::open_under(workdir.join(".roko").join("learn"))
             .await
@@ -777,7 +796,8 @@ impl PlanRunner {
             .map_err(|e| anyhow!("bad event log snapshot: {e}"))?;
         let executor = ParallelExecutor::from_snapshot(config.executor.clone(), exec_snap);
         let event_log = EventLog::restore(log_snap);
-        let task_trackers = Self::restore_task_trackers(workdir);
+        let legacy_completed = Self::legacy_completed_tasks_from_snapshot(executor_json);
+        let task_trackers = Self::restore_task_trackers(workdir, &legacy_completed);
         let cancel = CancelToken::new();
         let learning = LearningRuntime::open_under(workdir.join(".roko").join("learn"))
             .await
@@ -1053,7 +1073,10 @@ impl PlanRunner {
     }
 
     /// Restore task trackers from `.roko/state/task-trackers.json` + plan dirs.
-    fn restore_task_trackers(workdir: &Path) -> HashMap<String, TaskTracker> {
+    fn restore_task_trackers(
+        workdir: &Path,
+        completed_from_snapshot: &HashMap<String, Vec<String>>,
+    ) -> HashMap<String, TaskTracker> {
         let tracker_path = workdir
             .join(".roko")
             .join("state")
@@ -1099,9 +1122,78 @@ impl PlanRunner {
             tracker.failed = failed;
             tracker.current_group_index = current_group_index;
             tracker.impl_round = impl_round;
+            if let Some(extra_completed) = completed_from_snapshot.get(&plan_id) {
+                merge_completed_tasks(&mut tracker, extra_completed);
+            }
             trackers.insert(plan_id, tracker);
         }
+
+        for (plan_id, extra_completed) in completed_from_snapshot {
+            if trackers.contains_key(plan_id) {
+                continue;
+            }
+            let plan_dir = workdir.join("plans").join(plan_id);
+            let tasks_path = plan_dir.join("tasks.toml");
+            let Ok(tf) = TasksFile::parse(&tasks_path) else {
+                continue;
+            };
+            let mut tracker = TaskTracker::new(tf, plan_dir);
+            merge_completed_tasks(&mut tracker, extra_completed);
+            trackers.insert(plan_id.clone(), tracker);
+        }
+
         trackers
+    }
+
+    /// Extract completed task ids from legacy resume snapshots.
+    ///
+    /// Older `executor.json` files stored per-task records under `tasks`
+    /// with a `status` field. Resume should preserve those completions so
+    /// we do not rerun work that was already marked done/complete.
+    fn legacy_completed_tasks_from_snapshot(
+        snapshot_json: &str,
+    ) -> HashMap<String, Vec<String>> {
+        let mut completed: HashMap<String, Vec<String>> = HashMap::new();
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(snapshot_json) else {
+            return completed;
+        };
+
+        let Some(tasks) = value.get("tasks").and_then(|tasks| tasks.as_array()) else {
+            return completed;
+        };
+
+        for task in tasks {
+            let status = task
+                .get("status")
+                .and_then(|status| status.as_str())
+                .map(|status| status.to_ascii_lowercase())
+                .unwrap_or_default();
+            if !matches!(status.as_str(), "done" | "complete" | "completed") {
+                continue;
+            }
+
+            let plan_id = task
+                .get("plan")
+                .or_else(|| task.get("plan_id"))
+                .and_then(|plan| plan.as_str())
+                .unwrap_or_default();
+            let task_id = task
+                .get("id")
+                .or_else(|| task.get("task_id"))
+                .and_then(|id| id.as_str())
+                .unwrap_or_default();
+
+            if plan_id.is_empty() || task_id.is_empty() {
+                continue;
+            }
+
+            let entry = completed.entry(plan_id.to_string()).or_default();
+            if !entry.iter().any(|existing| existing == task_id) {
+                entry.push(task_id.to_string());
+            }
+        }
+
+        completed
     }
 
     /// Run all plans to completion (or failure).

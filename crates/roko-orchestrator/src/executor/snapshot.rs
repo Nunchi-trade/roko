@@ -6,9 +6,11 @@
 //! to be written atomically (write-to-temp + rename) by the persistence
 //! layer.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
+
+use roko_core::PlanPhase;
 
 use super::plan_state::PlanState;
 
@@ -54,15 +56,96 @@ impl ExecutorSnapshot {
     ///
     /// # Errors
     ///
-    /// Returns an error if the JSON is malformed or missing required fields.
+    /// Falls back to a legacy `tasks`-based schema if the current
+    /// `plan_states` layout is unavailable.
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str(json)
+        match serde_json::from_str(json) {
+            Ok(snapshot) => Ok(snapshot),
+            Err(primary) => Self::from_legacy_json(json).or(Err(primary)),
+        }
     }
 
     /// Number of plans in the snapshot.
     #[must_use]
     pub fn plan_count(&self) -> usize {
         self.plan_states.len()
+    }
+
+    fn from_legacy_json(json: &str) -> Result<Self, serde_json::Error> {
+        let value: serde_json::Value = serde_json::from_str(json)?;
+        let Some(tasks) = value.get("tasks").and_then(|tasks| tasks.as_array()) else {
+            return Err(serde_json::Error::io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "missing plan_states or tasks",
+            )));
+        };
+
+        let timestamp_ms = value
+            .get("timestamp_ms")
+            .and_then(|timestamp| timestamp.as_u64())
+            .unwrap_or(0);
+
+        let mut plan_states: HashMap<String, PlanState> = HashMap::new();
+        let mut queue_order: Vec<String> = Vec::new();
+        let mut seen = HashSet::new();
+        let mut plan_stats: HashMap<String, (usize, usize, bool)> = HashMap::new();
+
+        for task in tasks {
+            let plan_id = task
+                .get("plan")
+                .or_else(|| task.get("plan_id"))
+                .and_then(|plan| plan.as_str())
+                .unwrap_or_default();
+            if plan_id.is_empty() {
+                continue;
+            }
+
+            if seen.insert(plan_id.to_string()) {
+                queue_order.push(plan_id.to_string());
+            }
+
+            let status = task
+                .get("status")
+                .and_then(|status| status.as_str())
+                .map(|status| status.to_ascii_lowercase())
+                .unwrap_or_default();
+
+            let entry = plan_stats
+                .entry(plan_id.to_string())
+                .or_insert((0usize, 0usize, false));
+            entry.0 += 1;
+            if matches!(status.as_str(), "done" | "complete" | "completed") {
+                entry.1 += 1;
+            } else {
+                entry.2 = true;
+            }
+        }
+
+        for (plan_id, (total, done, has_active)) in plan_stats {
+            let mut plan_state = PlanState::new(plan_id.clone());
+            if total > 0 && done == total {
+                plan_state.current_phase = PlanPhase::Complete;
+            } else if done > 0 || has_active {
+                plan_state.current_phase = PlanPhase::Implementing;
+            }
+            plan_states.insert(plan_id, plan_state);
+        }
+
+        if let Some(order) = value.get("queue_order").and_then(|order| order.as_array()) {
+            let legacy_order = order
+                .iter()
+                .filter_map(|entry| entry.as_str().map(String::from))
+                .collect::<Vec<_>>();
+            if !legacy_order.is_empty() {
+                queue_order = legacy_order;
+            }
+        }
+
+        Ok(Self {
+            plan_states,
+            queue_order,
+            timestamp_ms,
+        })
     }
 }
 
@@ -131,6 +214,63 @@ mod tests {
     #[test]
     fn from_json_rejects_garbage() {
         assert!(ExecutorSnapshot::from_json("not json").is_err());
+    }
+
+    #[test]
+    fn snapshot_with_partial_plan_state_uses_defaults() {
+        let json = r#"
+        {
+            "plan_states": {
+                "plan-1": {
+                    "plan_id": "plan-1",
+                    "current_phase": "Queued"
+                }
+            },
+            "queue_order": ["plan-1"]
+        }
+        "#;
+
+        let restored = ExecutorSnapshot::from_json(json).unwrap();
+        let ps = &restored.plan_states["plan-1"];
+        assert_eq!(ps.plan_id, "plan-1");
+        assert_eq!(ps.current_phase, PlanPhase::Queued);
+        assert!(ps.assigned_agents.is_empty());
+        assert!(ps.gate_results.is_empty());
+        assert_eq!(ps.iteration, 1);
+        assert_eq!(ps.started_at_ms, 0);
+        assert!(ps.files_changed.is_empty());
+        assert_eq!(ps.merge_attempts, 0);
+        assert!(ps.last_error.is_none());
+        assert!(!ps.paused);
+        assert_eq!(ps.priority, 0);
+    }
+
+    #[test]
+    fn legacy_task_snapshot_falls_back_to_compat_loader() {
+        let json = r#"
+        {
+            "tasks": [
+                { "id": "task-1", "status": "done", "plan": "plan-a" },
+                { "id": "task-2", "status": "running", "plan": "plan-a" },
+                { "id": "task-3", "status": "complete", "plan": "plan-b" }
+            ],
+            "queue_order": ["plan-b", "plan-a"],
+            "timestamp_ms": 42
+        }
+        "#;
+
+        let restored = ExecutorSnapshot::from_json(json).unwrap();
+        assert_eq!(restored.timestamp_ms, 42);
+        assert_eq!(restored.queue_order, vec!["plan-b", "plan-a"]);
+        assert_eq!(restored.plan_states.len(), 2);
+        assert_eq!(
+            restored.plan_states["plan-a"].current_phase,
+            PlanPhase::Implementing
+        );
+        assert_eq!(
+            restored.plan_states["plan-b"].current_phase,
+            PlanPhase::Complete
+        );
     }
 
     #[test]

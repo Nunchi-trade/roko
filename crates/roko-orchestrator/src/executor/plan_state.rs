@@ -14,10 +14,12 @@ use serde::{Deserialize, Serialize};
 /// one plan: current phase, assigned agents, gate verdicts, iteration
 /// count, and error tracking.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PlanState {
     /// Stable plan identifier (matches [`PlanInfo::base`](crate::PlanInfo)).
     pub plan_id: String,
     /// Current executor phase.
+    #[serde(default = "PlanState::default_current_phase")]
     pub current_phase: PlanPhase,
     /// Agent instance keys currently assigned to this plan.
     pub assigned_agents: Vec<String>,
@@ -69,12 +71,16 @@ impl GateResult {
 }
 
 impl PlanState {
+    const fn default_current_phase() -> PlanPhase {
+        PlanPhase::Queued
+    }
+
     /// Create a new plan state starting at `Queued`.
     #[must_use]
     pub fn new(plan_id: impl Into<String>) -> Self {
         Self {
             plan_id: plan_id.into(),
-            current_phase: PlanPhase::Queued,
+            current_phase: Self::default_current_phase(),
             assigned_agents: Vec::new(),
             gate_results: Vec::new(),
             iteration: 1,
@@ -117,6 +123,12 @@ impl PlanState {
         self.gate_results.clear();
         self.iteration += 1;
         self.last_error = None;
+    }
+}
+
+impl Default for PlanState {
+    fn default() -> Self {
+        Self::new("")
     }
 }
 

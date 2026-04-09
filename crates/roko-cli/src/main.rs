@@ -256,8 +256,8 @@ enum PlanCmd {
         /// Working directory (repo root). Defaults to current directory.
         #[arg(long)]
         workdir: Option<PathBuf>,
-        /// Resume from a saved snapshot.
-        #[arg(long)]
+        /// Resume from `.roko/state/executor.json` in the working directory.
+        #[arg(long, num_args = 0..=1, default_missing_value = ".roko/state/executor.json")]
         resume: Option<PathBuf>,
     },
     /// Generate implementation plans from a prompt, file, or PRD.
@@ -1100,13 +1100,19 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             roko_core::obs::register_standard_metrics(&metrics);
 
             let mut runner = if let Some(snap_path) = resume {
+                let snap_path = if snap_path.is_relative() {
+                    wd.join(snap_path)
+                } else {
+                    snap_path
+                };
+                let state_dir = wd.join(".roko").join("state");
                 let exec_json = std::fs::read_to_string(&snap_path)
-                    .map_err(|e| anyhow!("read snapshot: {e}"))?;
+                    .map_err(|e| anyhow!("read snapshot {}: {e}", snap_path.display()))?;
                 // Try to load the event log from alongside the executor snapshot.
-                let events_path = snap_path.with_file_name("events.json");
+                let events_path = state_dir.join("events.json");
                 if events_path.exists() {
                     let log_json = std::fs::read_to_string(&events_path)
-                        .map_err(|e| anyhow!("read event log: {e}"))?;
+                        .map_err(|e| anyhow!("read event log {}: {e}", events_path.display()))?;
                     roko_cli::PlanRunner::from_snapshots(
                         &exec_json, &log_json, &wd, config, metrics,
                     )
@@ -2259,6 +2265,17 @@ mod tests {
             cli.command,
             Some(Command::Plan {
                 cmd: PlanCmd::Create { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_parses_plan_resume_flag() {
+        let cli = Cli::try_parse_from(["roko", "plan", "run", "plans", "--resume"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Plan {
+                cmd: PlanCmd::Run { resume: Some(_), .. }
             })
         ));
     }
