@@ -357,6 +357,39 @@ pub async fn daemon_restart(port: u16) -> Result<()> {
     daemon_start(false, port).await
 }
 
+/// Install the daemon as a macOS LaunchAgent.
+pub fn daemon_install() -> Result<()> {
+    let plist_path = launchd::plist_path();
+    let plist_dir = plist_path
+        .parent()
+        .context("resolve LaunchAgents directory")?;
+    fs::create_dir_all(plist_dir)
+        .with_context(|| format!("create {}", plist_dir.display()))?;
+
+    let home_dir = dirs::home_dir().context("resolve home directory")?;
+    let logs_dir = home_dir.join(".roko").join("logs");
+    fs::create_dir_all(&logs_dir).with_context(|| format!("create {}", logs_dir.display()))?;
+
+    let plist = launchd::generate_plist(9090);
+    fs::write(&plist_path, plist).with_context(|| format!("write {}", plist_path.display()))?;
+
+    let status = Command::new("launchctl")
+        .args(["load", "-w"])
+        .arg(&plist_path)
+        .status()
+        .with_context(|| format!("run launchctl load -w {}", plist_path.display()))?;
+
+    if !status.success() {
+        return Err(anyhow!(
+            "launchctl load -w {} failed with {}",
+            plist_path.display(),
+            status
+        ));
+    }
+
+    Ok(())
+}
+
 /// Print daemon status for the current working directory.
 pub async fn daemon_status() -> Result<()> {
     let workdir = std::env::current_dir().context("resolve current working directory")?;

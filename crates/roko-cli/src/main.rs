@@ -768,8 +768,11 @@ async fn cmd_daemon(_cli: &Cli, cmd: DaemonCmd) -> Result<i32> {
             roko_cli::daemon::daemon_restart(port).await?;
             Ok(EXIT_SUCCESS)
         }
-        DaemonCmd::Install
-        | DaemonCmd::Uninstall => Err(anyhow!("daemon subcommand not implemented yet")),
+        DaemonCmd::Install => {
+            roko_cli::daemon::daemon_install()?;
+            Ok(EXIT_SUCCESS)
+        }
+        DaemonCmd::Uninstall => Err(anyhow!("daemon subcommand not implemented yet")),
     }
 }
 
