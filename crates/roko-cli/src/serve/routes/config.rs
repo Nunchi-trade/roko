@@ -19,8 +19,9 @@ pub fn routes() -> Router<Arc<AppState>> {
 /// `GET /api/config` — return the current `RokoConfig` as JSON.
 async fn get_config(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let cfg = state.roko_config.read().await;
-    let value = serde_json::to_value(&*cfg)
+    let mut value = serde_json::to_value(&*cfg)
         .map_err(|e| ApiError::internal(format!("serialize config: {e}")))?;
+    mask_secret_fields(&mut value);
     drop(cfg);
     Ok(Json(value))
 }
@@ -54,6 +55,7 @@ async fn update_config(
     *cfg = updated;
     drop(cfg);
 
+    mask_secret_fields(&mut current);
     Ok(Json(current))
 }
 
@@ -70,5 +72,84 @@ fn merge_json(base: &mut Value, patch: &Value) {
         (base, patch) => {
             *base = patch.clone();
         }
+    }
+}
+
+fn mask_secret_fields(value: &mut Value) {
+    mask_secret_field(
+        value,
+        &["serve", "auth"],
+        "api_key",
+        "ROKO_SERVE_AUTH_API_KEY",
+    );
+    mask_secret_field(value, &["server"], "auth_token", "ROKO_SERVER_AUTH_TOKEN");
+    mask_secret_field(
+        value,
+        &["deploy"],
+        "railway_api_token",
+        "ROKO_DEPLOY_RAILWAY_API_TOKEN",
+    );
+}
+
+fn mask_secret_field(value: &mut Value, path: &[&str], field: &str, env_var: &str) {
+    let mut cursor = value;
+    for key in path {
+        let Some(next) = cursor.get_mut(*key) else {
+            return;
+        };
+        cursor = next;
+    }
+
+    let Some(map) = cursor.as_object_mut() else {
+        return;
+    };
+
+    if map.contains_key(field) {
+        map.insert(field.to_string(), Value::String("***".to_string()));
+        map.insert(
+            format!("{field}_note"),
+            Value::String(format!("Set `{env_var}` in the environment.")),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mask_secret_fields_redacts_config_secrets() {
+        let mut value = serde_json::json!({
+            "serve": {
+                "auth": {
+                    "enabled": true,
+                    "api_key": "secret"
+                }
+            },
+            "server": {
+                "auth_token": "server-secret"
+            },
+            "deploy": {
+                "railway_api_token": "railway-secret"
+            }
+        });
+
+        mask_secret_fields(&mut value);
+
+        assert_eq!(value["serve"]["auth"]["api_key"], "***");
+        assert_eq!(
+            value["serve"]["auth"]["api_key_note"],
+            "Set `ROKO_SERVE_AUTH_API_KEY` in the environment."
+        );
+        assert_eq!(value["server"]["auth_token"], "***");
+        assert_eq!(
+            value["server"]["auth_token_note"],
+            "Set `ROKO_SERVER_AUTH_TOKEN` in the environment."
+        );
+        assert_eq!(value["deploy"]["railway_api_token"], "***");
+        assert_eq!(
+            value["deploy"]["railway_api_token_note"],
+            "Set `ROKO_DEPLOY_RAILWAY_API_TOKEN` in the environment."
+        );
     }
 }
