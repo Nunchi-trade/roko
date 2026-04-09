@@ -37,6 +37,7 @@ members = [
     # Standalone MCP servers used by agents via --mcp-config.
     "crates/roko-mcp-stdio",
     "crates/roko-mcp-github",
+    "crates/roko-mcp-slack",
 
     # Roko CLI: minimal user-facing binary that wires the universal loop
     # (prompt → compose → agent → gate → persist → policy) against a working
