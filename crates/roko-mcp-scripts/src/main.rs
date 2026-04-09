@@ -17,12 +17,22 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::time::timeout;
+use tracing::warn;
 
 #[derive(Debug, Clone)]
 struct AppConfig {
-    working_dir: PathBuf,
+    script_roots: Vec<PathBuf>,
+    scripts: Vec<IndexedScript>,
+    scripts_by_name: std::collections::HashMap<String, usize>,
     timeout: Duration,
     env_allowlist: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone)]
+struct IndexedScript {
+    entry: ScriptEntry,
+    path: PathBuf,
+    root: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -39,7 +49,7 @@ struct RunScriptArguments {
     args: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct ScriptEntry {
     name: String,
     description: String,
@@ -160,9 +170,11 @@ fn handle_run_script(
 }
 
 fn handle_list_scripts(config: &AppConfig) -> Result<Value, JsonRpcError> {
-    let scripts = list_scripts(&config.working_dir).map_err(|err| {
-        JsonRpcError::internal_error(format!("failed to list scripts: {err}"))
-    })?;
+    let scripts = config
+        .scripts
+        .iter()
+        .map(|script| script.entry.clone())
+        .collect::<Vec<_>>();
 
     Ok(json!({
         "content": [{
@@ -174,13 +186,29 @@ fn handle_list_scripts(config: &AppConfig) -> Result<Value, JsonRpcError> {
 }
 
 async fn execute_script(config: &AppConfig, name: &str, args: &[String]) -> ScriptExecution {
-    let working_dir = config.working_dir.clone();
-    let resolved = match resolve_script_path(&working_dir, name) {
+    if let Some(&idx) = config.scripts_by_name.get(name) {
+        if let Some(script) = config.scripts.get(idx) {
+            return execute_resolved_script(
+                config,
+                script.path.clone(),
+                script.root.clone(),
+                args,
+            )
+            .await;
+        }
+    }
+
+    let resolved = match resolve_script_path(&config.script_roots, name) {
         Ok(path) => path,
         Err(err) => {
             return ScriptExecution {
                 command: "run_script".to_string(),
-                script_path: working_dir.join(name),
+                script_path: config
+                    .script_roots
+                    .first()
+                    .cloned()
+                    .unwrap_or_default()
+                    .join(name),
                 args: args.to_vec(),
                 stdout: String::new(),
                 stderr: err,
@@ -189,7 +217,17 @@ async fn execute_script(config: &AppConfig, name: &str, args: &[String]) -> Scri
         }
     };
 
-    let (command, command_args) = command_for_script(&resolved, args);
+    execute_resolved_script(config, resolved.path, resolved.root, args).await
+}
+
+async fn execute_resolved_script(
+    config: &AppConfig,
+    script_path: PathBuf,
+    root: PathBuf,
+    args: &[String],
+) -> ScriptExecution {
+    let working_dir = root;
+    let (command, command_args) = command_for_script(&script_path, args);
     let mut cmd = Command::new(&command);
     cmd.args(&command_args)
         .current_dir(&working_dir)
@@ -201,7 +239,7 @@ async fn execute_script(config: &AppConfig, name: &str, args: &[String]) -> Scri
         Ok(Err(err)) => {
             return ScriptExecution {
                 command,
-                script_path: resolved,
+                script_path,
                 args: args.to_vec(),
                 stdout: String::new(),
                 stderr: format!("failed to run script: {err}"),
@@ -211,7 +249,7 @@ async fn execute_script(config: &AppConfig, name: &str, args: &[String]) -> Scri
         Err(_) => {
             return ScriptExecution {
                 command,
-                script_path: resolved,
+                script_path,
                 args: args.to_vec(),
                 stdout: String::new(),
                 stderr: format!("script timed out after {}s", config.timeout.as_secs()),
@@ -222,7 +260,7 @@ async fn execute_script(config: &AppConfig, name: &str, args: &[String]) -> Scri
 
     ScriptExecution {
         command,
-        script_path: resolved,
+        script_path,
         args: args.to_vec(),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -291,65 +329,91 @@ fn make_tool_result(execution: ScriptExecution) -> Value {
     })
 }
 
-fn resolve_script_path(working_dir: &Path, name: &str) -> Result<PathBuf, String> {
+fn resolve_script_path(script_roots: &[PathBuf], name: &str) -> Result<ResolvedScript, String> {
     let requested = Path::new(name);
     let mut candidates = Vec::new();
 
-    if requested.components().count() > 1 || requested.extension().is_some() {
-        candidates.push(working_dir.join(requested));
-    } else {
-        candidates.push(working_dir.join(requested));
-        candidates.push(working_dir.join("scripts").join(requested));
-        for extension in ["sh", "py", "js", "rb"] {
-            candidates.push(working_dir.join(requested.with_extension(extension)));
-            candidates.push(
-                working_dir
-                    .join("scripts")
-                    .join(requested.with_extension(extension)),
-            );
+    for root in script_roots {
+        if requested.components().count() > 1 || requested.extension().is_some() {
+            candidates.push((root.clone(), root.join(requested)));
+        } else {
+            candidates.push((root.clone(), root.join(requested)));
+            for extension in ["sh", "py", "js"] {
+                candidates.push((root.clone(), root.join(requested.with_extension(extension))));
+            }
         }
     }
 
-    let canonical_working_dir = std::fs::canonicalize(working_dir)
-        .unwrap_or_else(|_| working_dir.to_path_buf());
-
-    for candidate in candidates {
+    for (root, candidate) in candidates {
         if !candidate.is_file() {
             continue;
         }
 
+        let canonical_root = std::fs::canonicalize(&root).unwrap_or(root.clone());
         let canonical_candidate = std::fs::canonicalize(&candidate)
             .map_err(|err| format!("failed to resolve script '{}': {err}", candidate.display()))?;
 
-        if !canonical_candidate.starts_with(&canonical_working_dir) {
+        if !canonical_candidate.starts_with(&canonical_root) {
             return Err(format!(
                 "script '{}' resolves outside configured directory",
                 name
             ));
         }
 
-        return Ok(canonical_candidate);
+        return Ok(ResolvedScript {
+            path: canonical_candidate,
+            root: canonical_root,
+        });
     }
 
     Err(format!(
         "script '{}' not found under {}",
         name,
-        working_dir.display()
+        script_roots
+            .first()
+            .map_or_else(|| PathBuf::from(".roko/scripts"), PathBuf::from)
+            .display()
     ))
 }
 
-fn list_scripts(root: &Path) -> io::Result<Vec<ScriptEntry>> {
-    let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+#[derive(Debug, Clone)]
+struct ResolvedScript {
+    path: PathBuf,
+    root: PathBuf,
+}
+
+fn discover_scripts(roots: &[PathBuf]) -> Vec<IndexedScript> {
     let mut scripts = Vec::new();
-    collect_scripts(&canonical_root, &canonical_root, &mut scripts)?;
-    scripts.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(scripts)
+    let mut seen = std::collections::HashSet::new();
+
+    for root in roots {
+        let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        if !canonical_root.is_dir() {
+            warn!(
+                "script root '{}' is missing or not a directory; skipping",
+                canonical_root.display()
+            );
+            continue;
+        }
+
+        if let Err(err) = collect_scripts(&canonical_root, &canonical_root, &mut scripts, &mut seen)
+        {
+            warn!(
+                "failed to scan script root '{}': {err}",
+                canonical_root.display()
+            );
+        }
+    }
+
+    scripts.sort_by(|a, b| a.entry.name.cmp(&b.entry.name));
+    scripts
 }
 
 fn collect_scripts(
     root: &Path,
     dir: &Path,
-    scripts: &mut Vec<ScriptEntry>,
+    scripts: &mut Vec<IndexedScript>,
+    seen: &mut std::collections::HashSet<String>,
 ) -> io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
@@ -357,7 +421,7 @@ fn collect_scripts(
         let file_type = entry.file_type()?;
 
         if file_type.is_dir() {
-            collect_scripts(root, &path, scripts)?;
+            collect_scripts(root, &path, scripts, seen)?;
             continue;
         }
 
@@ -384,8 +448,20 @@ fn collect_scripts(
         };
 
         let name = rel.to_string_lossy().replace('\\', "/");
+        if !seen.insert(name.clone()) {
+            warn!(
+                "duplicate script name '{}' found under '{}'; keeping first indexed copy",
+                name,
+                canonical.display()
+            );
+            continue;
+        }
         let description = read_script_description(&canonical)?.unwrap_or_default();
-        scripts.push(ScriptEntry { name, description });
+        scripts.push(IndexedScript {
+            entry: ScriptEntry { name, description },
+            path: canonical,
+            root: root.to_path_buf(),
+        });
     }
 
     Ok(())
@@ -394,7 +470,7 @@ fn collect_scripts(
 fn is_supported_script(path: &Path) -> bool {
     matches!(
         path.extension().and_then(OsStr::to_str),
-        Some("sh" | "py" | "js" | "rb")
+        Some("sh" | "py" | "js")
     )
 }
 
@@ -445,21 +521,7 @@ fn empty_json_object() -> Value {
 
 impl AppConfig {
     fn from_env() -> anyhow::Result<Self> {
-        let mut working_dir = env::var("ROKO_SCRIPTS_DIR")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .map(PathBuf::from)
-            .or_else(|| {
-                env::var("ROKO_MCP_SCRIPTS_DIR")
-                    .ok()
-                    .filter(|value| !value.trim().is_empty())
-                    .map(PathBuf::from)
-            })
-            .unwrap_or_else(|| {
-                env::current_dir()
-                    .map(|dir| dir.join(".roko/scripts"))
-                    .unwrap_or_else(|_| PathBuf::from(".roko/scripts"))
-            });
+        let mut script_roots = script_roots_from_env();
         let mut timeout = env::var("ROKO_MCP_SCRIPTS_TIMEOUT_SECS")
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -481,13 +543,13 @@ impl AppConfig {
                     let value = args.next().ok_or_else(|| {
                         anyhow::anyhow!("missing value for {arg}")
                     })?;
-                    working_dir = PathBuf::from(value);
+                    script_roots = vec![PathBuf::from(value)];
                 }
                 value if value.starts_with("--working-dir=") => {
-                    working_dir = PathBuf::from(value.trim_start_matches("--working-dir="));
+                    script_roots = vec![PathBuf::from(value.trim_start_matches("--working-dir="))];
                 }
                 value if value.starts_with("--scripts-dir=") => {
-                    working_dir = PathBuf::from(value.trim_start_matches("--scripts-dir="));
+                    script_roots = vec![PathBuf::from(value.trim_start_matches("--scripts-dir="))];
                 }
                 "--timeout-secs" => {
                     let value = args.next().ok_or_else(|| anyhow::anyhow!("missing value for {arg}"))?;
@@ -510,12 +572,46 @@ impl AppConfig {
             }
         }
 
+        let scripts = discover_scripts(&script_roots);
+        let mut scripts_by_name = std::collections::HashMap::new();
+        for (idx, script) in scripts.iter().enumerate() {
+            scripts_by_name.entry(script.entry.name.clone()).or_insert(idx);
+        }
+
         Ok(Self {
-            working_dir,
+            script_roots,
+            scripts,
+            scripts_by_name,
             timeout,
             env_allowlist,
         })
     }
+}
+
+fn script_roots_from_env() -> Vec<PathBuf> {
+    if let Some(value) = env::var_os("ROKO_SCRIPTS_DIR") {
+        let roots: Vec<PathBuf> = env::split_paths(&value)
+            .filter(|root| !root.as_os_str().is_empty())
+            .collect();
+        if !roots.is_empty() {
+            return roots;
+        }
+    }
+
+    if let Some(value) = env::var_os("ROKO_MCP_SCRIPTS_DIR") {
+        let roots: Vec<PathBuf> = env::split_paths(&value)
+            .filter(|root| !root.as_os_str().is_empty())
+            .collect();
+        if !roots.is_empty() {
+            return roots;
+        }
+    }
+
+    vec![
+        env::current_dir()
+            .map(|dir| dir.join(".roko/scripts"))
+            .unwrap_or_else(|_| PathBuf::from(".roko/scripts")),
+    ]
 }
 
 #[cfg(test)]
@@ -532,12 +628,13 @@ mod tests {
         let script = scripts_dir.join("hello.sh");
         fs::write(&script, "#!/bin/sh\necho hello\n").expect("write script");
 
-        let resolved = resolve_script_path(&dir, "hello").expect("resolved");
-        assert_eq!(resolved, fs::canonicalize(script).expect("canonical script"));
+        let resolved = resolve_script_path(&[scripts_dir.clone()], "hello").expect("resolved");
+        assert_eq!(resolved.path, fs::canonicalize(script).expect("canonical script"));
+        assert_eq!(resolved.root, fs::canonicalize(scripts_dir).expect("canonical root"));
     }
 
     #[test]
-    fn list_scripts_discovers_scripts_with_descriptions() {
+    fn discover_scripts_indexes_scripts_with_descriptions() {
         let dir = temp_dir();
         let scripts_dir = dir.join("scripts");
         fs::create_dir_all(&scripts_dir).expect("create scripts dir");
@@ -558,12 +655,14 @@ mod tests {
         )
         .expect("write nested script");
 
-        let scripts = list_scripts(&scripts_dir).expect("list scripts");
+        let scripts = discover_scripts(&[scripts_dir]);
         assert_eq!(scripts.len(), 2);
-        assert_eq!(scripts[0].name, "hello.sh");
-        assert_eq!(scripts[0].description, "say hello");
-        assert_eq!(scripts[1].name, "nested/build.py");
-        assert_eq!(scripts[1].description, "build things");
+        assert_eq!(scripts[0].entry.name, "hello.sh");
+        assert_eq!(scripts[0].entry.description, "say hello");
+        assert_eq!(scripts[1].entry.name, "nested/build.py");
+        assert_eq!(scripts[1].entry.description, "build things");
+        assert!(scripts[0].path.is_file());
+        assert!(scripts[1].path.is_file());
     }
 
     #[test]
@@ -611,8 +710,16 @@ mod tests {
         let script = dir.join("slow.sh");
         fs::write(&script, "#!/bin/bash\nsleep 1\n").expect("write script");
 
+        let scripts = discover_scripts(std::slice::from_ref(&dir));
+        let mut scripts_by_name = std::collections::HashMap::new();
+        for (idx, script) in scripts.iter().enumerate() {
+            scripts_by_name.insert(script.entry.name.clone(), idx);
+        }
+
         let config = AppConfig {
-            working_dir: dir,
+            script_roots: vec![dir],
+            scripts,
+            scripts_by_name,
             timeout: Duration::from_millis(50),
             env_allowlist: default_env_allowlist(),
         };
