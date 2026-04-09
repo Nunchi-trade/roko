@@ -2284,7 +2284,9 @@ impl PlanRunner {
             })
             .map(|task| task.status.as_str())
             .unwrap_or("unknown");
-        let _span = info_span!("task", task_id = %task_id, phase = %task_phase).entered();
+        let _span =
+            info_span!("task", plan_id = %plan_id, task_id = %task_id, phase = %task_phase)
+                .entered();
 
         // Track which task is being worked on (used by autofix if gates fail).
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
@@ -2511,6 +2513,7 @@ impl PlanRunner {
         }
 
         let mut results: Vec<(String, AgentResult)> = Vec::with_capacity(task_ids.len());
+        let plan_id_owned = plan_id.to_owned();
         let mut pending = configs.into_iter();
         loop {
             // Run one dependency-level slice at a time, capping the number of
@@ -2522,8 +2525,16 @@ impl PlanRunner {
                     break;
                 };
                 launched += 1;
+                let plan_id = plan_id_owned.clone();
                 join_set.spawn(async move {
-                    let span = info_span!("task", task_id = %tid, phase = %task_phase);
+                    let span = info_span!(
+                        "task",
+                        plan_id = %plan_id,
+                        task_id = %tid,
+                        agent_model = %cfg.model,
+                        task_role = %role,
+                        phase = %task_phase
+                    );
                     let result = run_prepared_agent(cfg).instrument(span).await;
                     (tid, result)
                 });
@@ -4075,7 +4086,14 @@ impl PlanRunner {
                 .as_ref()
                 .and_then(|task| task.role.clone())
                 .unwrap_or_else(|| format!("{role:?}"));
-            let _span = info_span!("agent", model = %selected_model, role = %task_role).entered();
+            let _span = info_span!(
+                "agent",
+                plan_id = %plan_id,
+                task_id = %task,
+                agent_model = %selected_model,
+                task_role = %task_role
+            )
+            .entered();
             let task_read_args = task_def
                 .as_ref()
                 .map(task_read_cli_args)
@@ -4107,7 +4125,14 @@ impl PlanRunner {
                 .as_ref()
                 .and_then(|task| task.role.clone())
                 .unwrap_or_else(|| format!("{role:?}"));
-            let _span = info_span!("agent", model = %selected_model, role = %task_role).entered();
+            let _span = info_span!(
+                "agent",
+                plan_id = %plan_id,
+                task_id = %task,
+                agent_model = %selected_model,
+                task_role = %task_role
+            )
+            .entered();
             let mut agent =
                 ExecAgent::new(&self.config.agent.command, self.config.agent.args.clone())
                     .with_timeout_ms(self.config.agent.timeout_ms);
