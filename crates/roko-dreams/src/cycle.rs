@@ -30,6 +30,10 @@ use roko_neuro::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+const DREAMS_SUCCESS_REGRESSION_THRESHOLD: f64 = 0.20;
+const DREAMS_REGRESSION_MIN_RECORDS: usize = 5;
+const SIGNALS_LOG_FILE: &str = "signals.jsonl";
+
 /// Agent hook used by the dream cycle to review a consolidation batch.
 #[async_trait]
 pub trait AgentDispatcher: Send + Sync {
@@ -72,6 +76,18 @@ pub struct DreamCycleReport {
     pub regressions_detected: Vec<KnowledgeEntry>,
     /// Cross-domain strategy hypotheses synthesized from structurally similar clusters.
     pub strategy_hypotheses: Vec<KnowledgeEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DreamRegressionSignalPayload {
+    started_at: DateTime<Utc>,
+    historical_records: usize,
+    recent_records: usize,
+    historical_successes: usize,
+    recent_successes: usize,
+    historical_success_rate: f64,
+    recent_success_rate: f64,
+    drop_fraction: f64,
 }
 
 /// One logged counterfactual generated during offline dreaming.
@@ -364,10 +380,12 @@ impl DreamCycle {
             })?;
         let total_episodes = all_episodes.len();
         let cutoff = self.last_dream_at;
-        let mut batch: Vec<_> = all_episodes
-            .into_iter()
-            .filter(|episode| cutoff.map(|ts| episode.timestamp > ts).unwrap_or(true))
-            .collect();
+        let (historical, mut batch) = match cutoff {
+            Some(cutoff) => all_episodes
+                .into_iter()
+                .partition(|episode| episode.timestamp <= cutoff),
+            None => (Vec::new(), all_episodes),
+        };
         batch.sort_by(|left, right| {
             left.timestamp
                 .cmp(&right.timestamp)
@@ -375,6 +393,7 @@ impl DreamCycle {
         });
 
         let processed_through = batch.iter().map(|episode| episode.timestamp).max();
+        self.emit_success_rate_regression(&historical, &batch, started_at)?;
         let progression = TierProgression::default();
         let mut analysis = progression.analyze(&batch);
         progression.replay_heuristics(&mut analysis, &batch);
@@ -445,6 +464,80 @@ impl DreamCycle {
         Ok(report)
     }
 
+    fn emit_success_rate_regression(
+        &self,
+        historical: &[Episode],
+        recent: &[Episode],
+        started_at: DateTime<Utc>,
+    ) -> Result<()> {
+        let Some((historical_successes, historical_records, historical_rate)) =
+            success_rate(historical)
+        else {
+            return Ok(());
+        };
+        let Some((recent_successes, recent_records, recent_rate)) = success_rate(recent) else {
+            return Ok(());
+        };
+
+        if historical_records < DREAMS_REGRESSION_MIN_RECORDS
+            || recent_records < DREAMS_REGRESSION_MIN_RECORDS
+            || historical_rate <= 0.0
+        {
+            return Ok(());
+        }
+
+        let drop_fraction = (historical_rate - recent_rate) / historical_rate;
+        if drop_fraction <= DREAMS_SUCCESS_REGRESSION_THRESHOLD {
+            return Ok(());
+        }
+
+        let payload = DreamRegressionSignalPayload {
+            started_at,
+            historical_records,
+            recent_records,
+            historical_successes,
+            recent_successes,
+            historical_success_rate: historical_rate,
+            recent_success_rate: recent_rate,
+            drop_fraction,
+        };
+
+        let Some(path) = self.signals_path() else {
+            return Ok(());
+        };
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create dream signal directory {}", parent.display()))?;
+        }
+
+        let signal = Signal::builder(Kind::Custom("dreams:regression".to_string()))
+            .body(Body::from_json(&payload).context("serialize dreams regression payload")?)
+            .provenance(roko_core::Provenance::trusted("dreams"))
+            .tag("historical_records", historical_records.to_string())
+            .tag("recent_records", recent_records.to_string())
+            .tag(
+                "historical_success_rate",
+                format!("{historical_rate:.4}"),
+            )
+            .tag("recent_success_rate", format!("{recent_rate:.4}"))
+            .tag("drop_fraction", format!("{drop_fraction:.4}"))
+            .build();
+
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("open dream signal log {}", path.display()))?;
+        let mut writer = BufWriter::new(file);
+        serde_json::to_writer(&mut writer, &signal).context("serialize dreams regression signal")?;
+        writer
+            .write_all(b"\n")
+            .context("write dreams regression newline")?;
+        writer.flush().context("flush dreams regression signal")?;
+        Ok(())
+    }
+
     async fn write_report(&self, report: &DreamCycleReport) -> Result<()> {
         let path = dream_report_path(self.episode_store.path(), report.started_at);
         if let Some(parent) = path.parent() {
@@ -485,6 +578,24 @@ impl DreamCycle {
         writer.flush().context("flush dream counterfactual log")?;
         Ok(())
     }
+
+    fn signals_path(&self) -> Option<PathBuf> {
+        let root = self
+            .episode_store
+            .path()
+            .parent()
+            .unwrap_or_else(|| Path::new("."));
+        Some(root.join(SIGNALS_LOG_FILE))
+    }
+}
+
+fn success_rate(episodes: &[Episode]) -> Option<(usize, usize, f64)> {
+    let records = episodes.len();
+    if records == 0 {
+        return None;
+    }
+    let successes = episodes.iter().filter(|episode| episode.success).count();
+    Some((successes, records, successes as f64 / records as f64))
 }
 
 #[derive(Debug)]
@@ -1838,6 +1949,32 @@ mod tests {
         logger.append(episode).await.expect("append episode");
     }
 
+    fn episode_at(
+        id: &str,
+        plan_id: &str,
+        task_type: &str,
+        model: &str,
+        success: bool,
+        failure_reason: Option<&str>,
+        timestamp: DateTime<Utc>,
+    ) -> Episode {
+        let mut episode = episode(id, plan_id, task_type, model, success, failure_reason);
+        episode.timestamp = timestamp;
+        episode.started_at = timestamp;
+        episode.completed_at = timestamp;
+        episode
+    }
+
+    fn read_signals(path: &Path) -> Vec<Signal> {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Vec::new();
+        };
+        text.lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).expect("parse signal"))
+            .collect()
+    }
+
     #[tokio::test]
     async fn run_clusters_and_writes_report() {
         let tmp = TempDir::new().expect("tempdir");
@@ -1948,6 +2085,134 @@ mod tests {
                 && entry.tags.iter().any(|tag| tag == "mistake")
                 && entry.content.contains("missing rollback")
         }));
+    }
+
+    #[tokio::test]
+    async fn regression_signal_emitted_when_recent_success_rate_drops() {
+        let tmp = TempDir::new().expect("tempdir");
+        let episodes_path = tmp.path().join(".roko").join("episodes.jsonl");
+        let knowledge_path = tmp
+            .path()
+            .join(".roko")
+            .join("neuro")
+            .join("knowledge.jsonl");
+        let playbooks_root = tmp.path().join(".roko").join("playbooks");
+        let logger = EpisodeLogger::new(&episodes_path);
+        let knowledge_store = Arc::new(KnowledgeStore::new(&knowledge_path));
+        let playbook_store = Arc::new(PlaybookStore::new(&playbooks_root));
+        let dispatcher = Arc::new(MockDispatcher {
+            response: r#"<|json|>{"entries":[]}<|/json|>"#.to_string(),
+        });
+
+        let historical = Utc::now() - chrono::Duration::hours(2);
+        let recent = Utc::now();
+
+        for idx in 0..5 {
+            let ep = episode_at(
+                &format!("hist-{idx}"),
+                "plan-a",
+                "implementation",
+                "claude-haiku-4-5",
+                true,
+                None,
+                historical + chrono::Duration::minutes(i64::from(idx)),
+            );
+            write_episode(&logger, &ep).await;
+        }
+        for idx in 0..5 {
+            let ep = episode_at(
+                &format!("recent-{idx}"),
+                "plan-b",
+                "docs",
+                "claude-haiku-4-5",
+                false,
+                Some("regressed"),
+                recent + chrono::Duration::minutes(i64::from(idx)),
+            );
+            write_episode(&logger, &ep).await;
+        }
+
+        let mut cycle = DreamCycle::new(
+            Arc::new(logger),
+            knowledge_store,
+            playbook_store,
+            dispatcher,
+        );
+        cycle.set_last_dream_at(Some(historical + chrono::Duration::minutes(30)));
+
+        let report = cycle.run().await.expect("run");
+        assert_eq!(report.processed_episodes, 5);
+
+        let signal_log = tmp.path().join(".roko").join("signals.jsonl");
+        let signals = read_signals(&signal_log);
+        assert_eq!(signals.len(), 1);
+        assert_eq!(signals[0].kind.as_str(), "dreams:regression");
+        let drop_fraction: f64 = signals[0]
+            .tag("drop_fraction")
+            .and_then(|value| value.parse().ok())
+            .expect("drop fraction tag");
+        assert!(drop_fraction > DREAMS_SUCCESS_REGRESSION_THRESHOLD);
+    }
+
+    #[tokio::test]
+    async fn regression_signal_not_emitted_at_exact_threshold() {
+        let tmp = TempDir::new().expect("tempdir");
+        let episodes_path = tmp.path().join(".roko").join("episodes.jsonl");
+        let knowledge_path = tmp
+            .path()
+            .join(".roko")
+            .join("neuro")
+            .join("knowledge.jsonl");
+        let playbooks_root = tmp.path().join(".roko").join("playbooks");
+        let logger = EpisodeLogger::new(&episodes_path);
+        let knowledge_store = Arc::new(KnowledgeStore::new(&knowledge_path));
+        let playbook_store = Arc::new(PlaybookStore::new(&playbooks_root));
+        let dispatcher = Arc::new(MockDispatcher {
+            response: r#"<|json|>{"entries":[]}<|/json|>"#.to_string(),
+        });
+
+        let historical = Utc::now() - chrono::Duration::hours(2);
+        let recent = Utc::now();
+
+        for idx in 0..5 {
+            let ep = episode_at(
+                &format!("hist-{idx}"),
+                "plan-a",
+                "implementation",
+                "claude-haiku-4-5",
+                true,
+                None,
+                historical + chrono::Duration::minutes(i64::from(idx)),
+            );
+            write_episode(&logger, &ep).await;
+        }
+        for idx in 0..5 {
+            let ep = episode_at(
+                &format!("recent-{idx}"),
+                "plan-b",
+                "docs",
+                "claude-haiku-4-5",
+                idx != 4,
+                if idx == 4 { Some("single failure") } else { None },
+                recent + chrono::Duration::minutes(i64::from(idx)),
+            );
+            write_episode(&logger, &ep).await;
+        }
+
+        let mut cycle = DreamCycle::new(
+            Arc::new(logger),
+            knowledge_store,
+            playbook_store,
+            dispatcher,
+        );
+        cycle.set_last_dream_at(Some(historical + chrono::Duration::minutes(30)));
+
+        let report = cycle.run().await.expect("run");
+        assert_eq!(report.processed_episodes, 5);
+
+        let signal_log = tmp.path().join(".roko").join("signals.jsonl");
+        let signals = read_signals(&signal_log);
+        assert!(signals.iter().all(|signal| signal.kind.as_str() != "dreams:regression"));
     }
 
     #[test]
