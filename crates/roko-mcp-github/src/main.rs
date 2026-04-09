@@ -72,6 +72,7 @@ fn main() -> anyhow::Result<()> {
         let _ = &request.params;
         match request.method.as_str() {
             "initialize" => Ok(handle_initialize()),
+            "tools/list" => Ok(handle_tools_list()),
             _ => Err(JsonRpcError::method_not_found(&request.method)),
         }
     })
@@ -87,6 +88,344 @@ fn handle_initialize() -> Value {
             "name": "roko-mcp-github",
             "version": env!("CARGO_PKG_VERSION")
         }
+    })
+}
+
+fn handle_tools_list() -> Value {
+    serde_json::json!({
+        "tools": [
+            github_tool(
+                "github.list_prs",
+                "List pull requests in a repository.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "owner": {"type": "string"},
+                        "repo": {"type": "string"},
+                        "state": {"type": "string", "enum": ["open", "closed", "all"]},
+                        "head": {"type": "string"},
+                        "base": {"type": "string"},
+                        "per_page": {"type": "integer", "minimum": 1}
+                    },
+                    "required": ["owner", "repo"],
+                    "additionalProperties": false
+                })
+            ),
+            github_tool(
+                "github.get_pr",
+                "Get a pull request, optionally including its diff.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "owner": {"type": "string"},
+                        "repo": {"type": "string"},
+                        "number": {"type": "integer", "minimum": 1},
+                        "include_diff": {"type": "boolean"}
+                    },
+                    "required": ["owner", "repo", "number"],
+                    "additionalProperties": false
+                })
+            ),
+            github_tool(
+                "github.create_pr",
+                "Create a pull request.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "owner": {"type": "string"},
+                        "repo": {"type": "string"},
+                        "title": {"type": "string"},
+                        "body": {"type": "string"},
+                        "head": {"type": "string"},
+                        "base": {"type": "string"},
+                        "draft": {"type": "boolean"}
+                    },
+                    "required": ["owner", "repo", "title", "body", "head", "base"],
+                    "additionalProperties": false
+                })
+            ),
+            github_tool(
+                "github.comment_pr",
+                "Comment on a pull request.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "owner": {"type": "string"},
+                        "repo": {"type": "string"},
+                        "number": {"type": "integer", "minimum": 1},
+                        "body": {"type": "string"}
+                    },
+                    "required": ["owner", "repo", "number", "body"],
+                    "additionalProperties": false
+                })
+            ),
+            github_tool(
+                "github.review_pr",
+                "Create a pull request review.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "owner": {"type": "string"},
+                        "repo": {"type": "string"},
+                        "number": {"type": "integer", "minimum": 1},
+                        "event": {"type": "string", "enum": ["APPROVE", "REQUEST_CHANGES", "COMMENT"]},
+                        "body": {"type": "string"},
+                        "comments": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "path": {"type": "string"},
+                                    "line": {"type": "integer", "minimum": 1},
+                                    "body": {"type": "string"}
+                                },
+                                "required": ["path", "line", "body"],
+                                "additionalProperties": false
+                            }
+                        }
+                    },
+                    "required": ["owner", "repo", "number", "event", "body"],
+                    "additionalProperties": false
+                })
+            ),
+            github_tool(
+                "github.merge_pr",
+                "Merge a pull request.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "owner": {"type": "string"},
+                        "repo": {"type": "string"},
+                        "number": {"type": "integer", "minimum": 1},
+                        "merge_method": {"type": "string", "enum": ["merge", "squash", "rebase"]},
+                        "commit_title": {"type": "string"}
+                    },
+                    "required": ["owner", "repo", "number"],
+                    "additionalProperties": false
+                })
+            ),
+            github_tool(
+                "github.list_issues",
+                "List issues in a repository.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "owner": {"type": "string"},
+                        "repo": {"type": "string"},
+                        "state": {"type": "string"},
+                        "labels": {
+                            "type": "array",
+                            "items": {"type": "string"}
+                        },
+                        "assignee": {"type": "string"},
+                        "per_page": {"type": "integer", "minimum": 1}
+                    },
+                    "required": ["owner", "repo"],
+                    "additionalProperties": false
+                })
+            ),
+            github_tool(
+                "github.create_issue",
+                "Create an issue.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "owner": {"type": "string"},
+                        "repo": {"type": "string"},
+                        "title": {"type": "string"},
+                        "body": {"type": "string"},
+                        "labels": {
+                            "type": "array",
+                            "items": {"type": "string"}
+                        },
+                        "assignees": {
+                            "type": "array",
+                            "items": {"type": "string"}
+                        }
+                    },
+                    "required": ["owner", "repo", "title", "body"],
+                    "additionalProperties": false
+                })
+            ),
+            github_tool(
+                "github.comment_issue",
+                "Comment on an issue.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "owner": {"type": "string"},
+                        "repo": {"type": "string"},
+                        "number": {"type": "integer", "minimum": 1},
+                        "body": {"type": "string"}
+                    },
+                    "required": ["owner", "repo", "number", "body"],
+                    "additionalProperties": false
+                })
+            ),
+            github_tool(
+                "github.close_issue",
+                "Close an issue.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "owner": {"type": "string"},
+                        "repo": {"type": "string"},
+                        "number": {"type": "integer", "minimum": 1},
+                        "reason": {"type": "string", "enum": ["completed", "not_planned"]}
+                    },
+                    "required": ["owner", "repo", "number"],
+                    "additionalProperties": false
+                })
+            ),
+            github_tool(
+                "github.add_labels",
+                "Add labels to an issue.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "owner": {"type": "string"},
+                        "repo": {"type": "string"},
+                        "number": {"type": "integer", "minimum": 1},
+                        "labels": {
+                            "type": "array",
+                            "items": {"type": "string"}
+                        }
+                    },
+                    "required": ["owner", "repo", "number", "labels"],
+                    "additionalProperties": false
+                })
+            ),
+            github_tool(
+                "github.create_label",
+                "Create a repository label.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "owner": {"type": "string"},
+                        "repo": {"type": "string"},
+                        "name": {"type": "string"},
+                        "color": {"type": "string"},
+                        "description": {"type": "string"}
+                    },
+                    "required": ["owner", "repo", "name", "color"],
+                    "additionalProperties": false
+                })
+            ),
+            github_tool(
+                "github.get_file",
+                "Fetch a file from a repository.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "owner": {"type": "string"},
+                        "repo": {"type": "string"},
+                        "path": {"type": "string"},
+                        "ref": {"type": "string"}
+                    },
+                    "required": ["owner", "repo", "path"],
+                    "additionalProperties": false
+                })
+            ),
+            github_tool(
+                "github.search_code",
+                "Search code in GitHub repositories.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "owner": {"type": "string"},
+                        "repo": {"type": "string"},
+                        "per_page": {"type": "integer", "minimum": 1}
+                    },
+                    "required": ["query"],
+                    "additionalProperties": false
+                })
+            ),
+            github_tool(
+                "github.list_commits",
+                "List commits in a repository.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "owner": {"type": "string"},
+                        "repo": {"type": "string"},
+                        "sha": {"type": "string"},
+                        "path": {"type": "string"},
+                        "since": {"type": "string"},
+                        "until": {"type": "string"},
+                        "per_page": {"type": "integer", "minimum": 1}
+                    },
+                    "required": ["owner", "repo"],
+                    "additionalProperties": false
+                })
+            ),
+            github_tool(
+                "github.create_branch",
+                "Create a branch from a commit SHA.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "owner": {"type": "string"},
+                        "repo": {"type": "string"},
+                        "branch": {"type": "string"},
+                        "from_sha": {"type": "string"}
+                    },
+                    "required": ["owner", "repo", "branch", "from_sha"],
+                    "additionalProperties": false
+                })
+            ),
+            github_tool(
+                "github.get_branch",
+                "Get branch metadata.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "owner": {"type": "string"},
+                        "repo": {"type": "string"},
+                        "branch": {"type": "string"}
+                    },
+                    "required": ["owner", "repo", "branch"],
+                    "additionalProperties": false
+                })
+            ),
+            github_tool(
+                "github.compare_branches",
+                "Compare two branches.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "owner": {"type": "string"},
+                        "repo": {"type": "string"},
+                        "base": {"type": "string"},
+                        "head": {"type": "string"}
+                    },
+                    "required": ["owner", "repo", "base", "head"],
+                    "additionalProperties": false
+                })
+            ),
+            github_tool(
+                "github.get_actions_status",
+                "Get the combined GitHub Actions status for a ref.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "owner": {"type": "string"},
+                        "repo": {"type": "string"},
+                        "ref": {"type": "string"}
+                    },
+                    "required": ["owner", "repo", "ref"],
+                    "additionalProperties": false
+                })
+            ),
+        ]
+    })
+}
+
+fn github_tool(name: &str, description: &str, input_schema: Value) -> Value {
+    serde_json::json!({
+        "name": name,
+        "description": description,
+        "inputSchema": input_schema
     })
 }
 
@@ -241,5 +580,22 @@ mod tests {
         assert_eq!(result["capabilities"]["tools"], json!({}));
         assert_eq!(result["serverInfo"]["name"], "roko-mcp-github");
         assert_eq!(result["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn tools_list_returns_all_tool_definitions() {
+        let result = handle_tools_list();
+        let tools = result["tools"].as_array().expect("tools array");
+
+        assert_eq!(tools.len(), 19);
+        assert_eq!(tools[0]["name"], "github.list_prs");
+        assert_eq!(tools[18]["name"], "github.get_actions_status");
+
+        let get_pr = tools
+            .iter()
+            .find(|tool| tool["name"] == "github.get_pr")
+            .expect("github.get_pr tool");
+        assert_eq!(get_pr["description"], "Get a pull request, optionally including its diff.");
+        assert_eq!(get_pr["inputSchema"]["required"], json!(["owner", "repo", "number"]));
     }
 }

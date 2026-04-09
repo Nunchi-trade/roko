@@ -641,7 +641,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             workdir,
         } => {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
-            let config = load_config(&wd);
+            let config = resolve_config_for_workdir(cli, &wd)?;
             let runtime = RokoCliRuntime::new(config).into_arc();
             roko_serve::run_server(wd, runtime, bind, port).await?;
             Ok(EXIT_SUCCESS)
