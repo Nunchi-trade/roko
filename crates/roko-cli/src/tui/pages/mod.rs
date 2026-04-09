@@ -1,6 +1,9 @@
 //! Placeholder page and widget models for the TUI scaffold.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
+
+use super::dashboard::DashboardScaffold;
 
 pub mod efficiency;
 pub mod operations;
@@ -201,6 +204,138 @@ impl PageScaffold {
             let _ = writeln!(out, "{}", widget.render_line());
         }
         out
+    }
+}
+
+/// Common page behavior for the interactive TUI shell.
+pub trait Page {
+    /// Stable page identifier.
+    fn id(&self) -> PageId;
+    /// Human-readable page title.
+    fn title(&self) -> &str;
+    /// Page intent used in the shell metadata.
+    fn intent(&self) -> &str;
+    /// Widgets composing this page.
+    fn widgets(&self) -> &[WidgetScaffold];
+    /// Render this page against the current dashboard snapshot.
+    fn render(&self, dashboard: &DashboardScaffold) -> String;
+}
+
+impl Page for PageScaffold {
+    fn id(&self) -> PageId {
+        self.id
+    }
+
+    fn title(&self) -> &str {
+        self.title
+    }
+
+    fn intent(&self) -> &str {
+        self.intent
+    }
+
+    fn widgets(&self) -> &[WidgetScaffold] {
+        &self.widgets
+    }
+
+    fn render(&self, dashboard: &DashboardScaffold) -> String {
+        dashboard
+            .render_page_text(self.id)
+            .unwrap_or_else(|| self.render_text())
+    }
+}
+
+/// Registry of TUI pages in stable order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PageRegistry {
+    pages: BTreeMap<PageId, PageScaffold>,
+}
+
+impl PageRegistry {
+    /// Build a registry from an iterator of page scaffolds.
+    #[must_use]
+    pub fn new(pages: impl IntoIterator<Item = PageScaffold>) -> Self {
+        Self {
+            pages: pages.into_iter().map(|page| (page.id, page)).collect(),
+        }
+    }
+
+    /// Build a registry from the dashboard scaffold.
+    #[must_use]
+    pub fn from_dashboard(dashboard: &DashboardScaffold) -> Self {
+        Self::new(dashboard.pages().into_iter().cloned())
+    }
+
+    /// Number of registered pages.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.pages.len()
+    }
+
+    /// Whether the registry is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pages.is_empty()
+    }
+
+    /// Return the first page if one exists.
+    #[must_use]
+    pub fn first(&self) -> Option<PageId> {
+        self.pages.keys().next().copied()
+    }
+
+    /// Return a page by ID as a trait object.
+    #[must_use]
+    pub fn page(&self, page: PageId) -> Option<&dyn Page> {
+        self.pages.get(&page).map(|page| page as &dyn Page)
+    }
+
+    /// Return the concrete scaffold for a page ID.
+    #[must_use]
+    pub fn scaffold(&self, page: PageId) -> Option<&PageScaffold> {
+        self.pages.get(&page)
+    }
+
+    /// Iterate over pages in stable order.
+    #[must_use]
+    pub fn iter(&self) -> impl Iterator<Item = &PageScaffold> {
+        self.pages.values()
+    }
+
+    /// Return the next page in registry order.
+    #[must_use]
+    pub fn next(&self, current: PageId) -> PageId {
+        let pages: Vec<PageId> = self.pages.keys().copied().collect();
+        if pages.is_empty() {
+            return current;
+        }
+
+        let index = pages.iter().position(|page| *page == current).unwrap_or(0);
+        pages[(index + 1) % pages.len()]
+    }
+
+    /// Return the previous page in registry order.
+    #[must_use]
+    pub fn previous(&self, current: PageId) -> PageId {
+        let pages: Vec<PageId> = self.pages.keys().copied().collect();
+        if pages.is_empty() {
+            return current;
+        }
+
+        let index = pages.iter().position(|page| *page == current).unwrap_or(0);
+        pages[(index + pages.len() - 1) % pages.len()]
+    }
+
+    /// Return the ordered page IDs.
+    #[must_use]
+    pub fn ids(&self) -> Vec<PageId> {
+        self.pages.keys().copied().collect()
+    }
+}
+
+impl FromIterator<PageScaffold> for PageRegistry {
+    fn from_iter<T: IntoIterator<Item = PageScaffold>>(iter: T) -> Self {
+        Self::new(iter)
     }
 }
 
