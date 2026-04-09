@@ -5230,8 +5230,10 @@ name = "roko-golem"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "roko-core",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

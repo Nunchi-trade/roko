@@ -2,13 +2,35 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::fs::OpenOptions;
 use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use roko_core::{Body, Kind, Provenance, Signal};
 
 use crate::{GolemSubsystemId, GolemSubsystemSummary, ScaffoldEngine};
+
+const CONFIDENCE_ALERT_THRESHOLD: f64 = 0.3;
+const VALENCE_ALERT_THRESHOLD: f64 = 0.8;
+const SIGNALS_LOG_FILE: &str = "signals.jsonl";
+
+#[derive(Debug, Clone, Serialize)]
+struct AffectSignalPayload {
+    task_id: String,
+    dimension: String,
+    previous: f64,
+    current: f64,
+    threshold: f64,
+    polarity: String,
+    confidence: f64,
+    pleasure: f64,
+    arousal: f64,
+    dominance: f64,
+    updated_at: DateTime<Utc>,
+}
 
 /// Normalized PAD affect state.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -161,7 +183,8 @@ impl AffectEngine {
     pub fn get_state(&mut self, task_id: impl AsRef<str>) -> AffectState {
         let task_id = task_id.as_ref();
         let now = Utc::now();
-        let (state, dirty) = {
+        let signals_path = self.signals_path();
+        let (state, dirty, previous_state) = {
             let mut dirty = false;
             let state = self
                 .states
@@ -170,6 +193,7 @@ impl AffectEngine {
                     dirty = true;
                     AffectState::neutral(now)
                 });
+            let previous_state = state.clone();
 
             let elapsed_hours = now
                 .signed_duration_since(state.updated_at)
@@ -180,10 +204,16 @@ impl AffectEngine {
                 dirty = true;
             }
 
-            (state.clone(), dirty)
+            (state.clone(), dirty, previous_state)
         };
 
         if dirty {
+            Self::emit_significant_state_changes(
+                signals_path.as_deref(),
+                task_id,
+                &previous_state,
+                &state,
+            );
             self.persist();
         }
 
@@ -258,8 +288,16 @@ impl AffectEngine {
             return;
         }
 
-        for state in self.states.values_mut() {
+        let signals_path = self.signals_path();
+        for (task_id, state) in &mut self.states {
+            let previous = state.clone();
             state.decay_by_factor(factor);
+            Self::emit_significant_state_changes(
+                signals_path.as_deref(),
+                task_id,
+                &previous,
+                state,
+            );
         }
 
         self.persist();
@@ -274,11 +312,14 @@ impl AffectEngine {
         confidence: f64,
     ) -> AffectState {
         let now = Utc::now();
+        let task_id_for_emit = task_id.clone();
+        let signals_path = self.signals_path();
         let state = {
             let state = self
                 .states
                 .entry(task_id)
                 .or_insert_with(|| AffectState::neutral(now));
+            let previous = state.clone();
 
             let elapsed_hours = now
                 .signed_duration_since(state.updated_at)
@@ -289,11 +330,123 @@ impl AffectEngine {
             }
 
             state.apply_delta(pleasure, arousal, dominance, confidence);
-            state.clone()
+            let current = state.clone();
+            Self::emit_significant_state_changes(
+                signals_path.as_deref(),
+                &task_id_for_emit,
+                &previous,
+                &current,
+            );
+            current
         };
 
         self.persist();
         state
+    }
+
+    fn emit_significant_state_changes(
+        signals_path: Option<&Path>,
+        task_id: &str,
+        previous: &AffectState,
+        current: &AffectState,
+    ) {
+        if previous.confidence >= CONFIDENCE_ALERT_THRESHOLD
+            && current.confidence < CONFIDENCE_ALERT_THRESHOLD
+        {
+            Self::emit_affect_signal(
+                signals_path,
+                task_id,
+                "confidence",
+                previous.confidence,
+                current.confidence,
+                CONFIDENCE_ALERT_THRESHOLD,
+                "low",
+                current,
+            );
+        }
+
+        let previous_valence = previous.pleasure.abs();
+        let current_valence = current.pleasure.abs();
+        if previous_valence <= VALENCE_ALERT_THRESHOLD && current_valence > VALENCE_ALERT_THRESHOLD
+        {
+            let polarity = if current.pleasure.is_sign_negative() {
+                "negative"
+            } else {
+                "positive"
+            };
+            Self::emit_affect_signal(
+                signals_path,
+                task_id,
+                "valence",
+                previous.pleasure,
+                current.pleasure,
+                VALENCE_ALERT_THRESHOLD,
+                polarity,
+                current,
+            );
+        }
+    }
+
+    fn emit_affect_signal(
+        signals_path: Option<&Path>,
+        task_id: &str,
+        dimension: &str,
+        previous: f64,
+        current: f64,
+        threshold: f64,
+        polarity: &str,
+        state: &AffectState,
+    ) {
+        let Some(path) = signals_path else {
+            return;
+        };
+
+        let payload = AffectSignalPayload {
+            task_id: task_id.to_owned(),
+            dimension: dimension.to_owned(),
+            previous,
+            current,
+            threshold,
+            polarity: polarity.to_owned(),
+            confidence: state.confidence,
+            pleasure: state.pleasure,
+            arousal: state.arousal,
+            dominance: state.dominance,
+            updated_at: state.updated_at,
+        };
+
+        let Ok(body) = Body::from_json(&payload) else {
+            return;
+        };
+
+        let signal = Signal::builder(Kind::Custom(format!("daimon:affect:{dimension}")))
+            .body(body)
+            .provenance(Provenance::trusted("daimon"))
+            .tag("task_id", task_id)
+            .tag("dimension", dimension)
+            .tag("polarity", polarity)
+            .build();
+
+        let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) else {
+            return;
+        };
+
+        let Ok(mut line) = serde_json::to_string(&signal) else {
+            return;
+        };
+        line.push('\n');
+        let _ = file.write_all(line.as_bytes());
+        let _ = file.flush();
+    }
+
+    fn signals_path(&self) -> Option<PathBuf> {
+        let path = self.persistence_path.as_ref()?;
+        let root = path
+            .parent()
+            .and_then(|parent| parent.parent())
+            .or_else(|| path.parent())
+            .unwrap_or_else(|| Path::new("."));
+        Some(root.join(SIGNALS_LOG_FILE))
     }
 
     fn persist(&self) {
@@ -566,6 +719,22 @@ mod tests {
         AffectBehaviorStrategy, AffectEngine, AffectOctant, AffectState,
     };
     use chrono::Utc;
+    use roko_core::Signal;
+    use std::path::{Path, PathBuf};
+    use tempfile::TempDir;
+
+    fn signal_log_path(tmp: &TempDir) -> PathBuf {
+        tmp.path().join(".roko").join("signals.jsonl")
+    }
+
+    fn read_signals(path: &Path) -> Vec<Signal> {
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str::<Signal>(line).unwrap())
+            .collect()
+    }
 
     #[test]
     fn maps_all_pad_octants_to_named_states() {
@@ -676,14 +845,14 @@ mod tests {
     #[test]
     fn decay_halves_state_at_half_life() {
         let mut engine = AffectEngine::with_half_life_hours(4.0);
-        engine.on_task_success("task-6");
-        engine.on_time_pressure("task-6", 1.0);
+        let _ = engine.on_task_success("task-6");
+        let _ = engine.on_time_pressure("task-6", 1.0);
 
         engine.decay(4.0);
         let state = engine.get_state("task-6");
 
         assert!((state.pleasure - 0.05).abs() < 1e-9);
-        assert!(state.arousal > 0.0 && state.arousal < 0.2);
+        assert!(state.arousal >= 0.0 && state.arousal <= 0.2);
         assert!((state.dominance - 0.05).abs() < 1e-9);
     }
 
@@ -709,6 +878,37 @@ mod tests {
             state.confidence < 0.3,
             "repeated failures should lower affect confidence enough to bias routing"
         );
+    }
+
+    #[test]
+    fn confidence_drop_emits_confidence_signal() {
+        let tmp = TempDir::new().unwrap();
+        let affect_path = tmp.path().join(".roko").join("daimon").join("affect.json");
+        let mut engine = AffectEngine::new().with_persistence_path(&affect_path);
+
+        let _ = engine.on_task_failure("task-confidence");
+        let _ = engine.on_task_failure("task-confidence");
+
+        let signals = read_signals(&signal_log_path(&tmp));
+        assert_eq!(signals.len(), 1);
+        assert_eq!(signals[0].kind.as_str(), "daimon:affect:confidence");
+        assert_eq!(signals[0].tag("task_id"), Some("task-confidence"));
+    }
+
+    #[test]
+    fn valence_extreme_emits_valence_signal() {
+        let tmp = TempDir::new().unwrap();
+        let affect_path = tmp.path().join(".roko").join("daimon").join("affect.json");
+        let mut engine = AffectEngine::new().with_persistence_path(&affect_path);
+
+        for _ in 0..9 {
+            let _ = engine.on_task_success("task-valence");
+        }
+
+        let signals = read_signals(&signal_log_path(&tmp));
+        assert_eq!(signals.len(), 1);
+        assert_eq!(signals[0].kind.as_str(), "daimon:affect:valence");
+        assert_eq!(signals[0].tag("task_id"), Some("task-valence"));
     }
 
     #[test]

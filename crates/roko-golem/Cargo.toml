@@ -12,8 +12,12 @@ workspace = true
 
 [dependencies]
 chrono = { workspace = true }
+roko-core = { path = "../roko-core" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [features]
 default = []
