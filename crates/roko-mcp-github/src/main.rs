@@ -6,6 +6,7 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use chrono::DateTime;
 use reqwest::StatusCode;
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::header::{ACCEPT, HeaderMap, HeaderValue, RETRY_AFTER, USER_AGENT};
@@ -1119,11 +1120,19 @@ fn reset_delay(headers: &HeaderMap) -> Option<Duration> {
 }
 
 fn retry_after_delay(headers: &HeaderMap) -> Option<Duration> {
-    headers
-        .get(RETRY_AFTER)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .map(Duration::from_secs)
+    let value = headers.get(RETRY_AFTER)?.to_str().ok()?.trim();
+
+    if let Ok(delay_secs) = value.parse::<u64>() {
+        return Some(Duration::from_secs(delay_secs));
+    }
+
+    let retry_after_at = DateTime::parse_from_rfc2822(value)
+        .ok()?
+        .with_timezone(&chrono::Utc);
+    retry_after_at
+        .signed_duration_since(chrono::Utc::now())
+        .to_std()
+        .ok()
 }
 
 fn exponential_backoff_delay(attempt: u32) -> Duration {
@@ -1817,7 +1826,7 @@ struct GithubRepositoryFile {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::io::Cursor;
+    use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
     use std::thread;
 
@@ -1887,6 +1896,25 @@ mod tests {
         assert_eq!(exponential_backoff_delay(0), Duration::from_secs(1));
         assert_eq!(exponential_backoff_delay(1), Duration::from_secs(2));
         assert_eq!(exponential_backoff_delay(6), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn retry_after_delay_parses_delta_seconds_and_http_dates() {
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("3"));
+        assert_eq!(retry_after_delay(&headers), Some(Duration::from_secs(3)));
+
+        let retry_after = chrono::Utc::now() + chrono::Duration::seconds(10);
+        headers.insert(
+            RETRY_AFTER,
+            HeaderValue::from_str(&retry_after.to_rfc2822()).expect("valid retry-after header"),
+        );
+
+        let delay = retry_after_delay(&headers).expect("date retry-after");
+        assert!(
+            delay.as_secs() <= 10 && delay.as_secs() >= 8,
+            "expected a short delay, got {delay:?}"
+        );
     }
 
     #[test]
