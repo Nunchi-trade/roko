@@ -5165,6 +5165,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "roko-daimon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "roko-core",
+ "roko-golem",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "roko-demo"
 version = "0.1.0"
 dependencies = [

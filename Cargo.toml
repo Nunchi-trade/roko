@@ -58,6 +58,8 @@ members = [
 
     # Golem scaffold — phase-2 subsystem placeholders (feature-gated).
     "crates/roko-golem",
+    # Daimon subsystem — affect and motivation modeling.
+    "crates/roko-daimon",
 
     # Demo environment orchestrator — deploys contracts from roko/contracts/,
     # seeds fixtures, spawns a clade of agents per declarative scenario manifest.
