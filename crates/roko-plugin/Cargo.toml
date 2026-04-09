@@ -17,5 +17,6 @@ chrono = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 cron = "0.12"
+notify = "8.2.0"
 tokio = { workspace = true, features = ["macros", "rt", "sync"] }
 tokio-util = { workspace = true }

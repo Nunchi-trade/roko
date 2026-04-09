@@ -3,9 +3,13 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use cron::Schedule;
-use roko_core::{Body, Kind, Result, RokoError, Signal};
+use notify::{EventKind, RecursiveMode, Watcher, recommended_watcher};
+use roko_core::{
+    Body, Kind, Result, RokoError, Signal, FS_CREATED, FS_DELETED, FS_MODIFIED,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
@@ -56,6 +60,32 @@ pub enum EventSourceKind {
     FileWatch,
     /// Custom source type provided by a plugin.
     Custom(String),
+}
+
+/// A filesystem event source backed by `notify`.
+#[derive(Debug, Clone)]
+pub struct FileWatchEventSource {
+    directories: Vec<PathBuf>,
+}
+
+impl FileWatchEventSource {
+    /// Create a watcher for the given directories.
+    #[must_use]
+    pub fn new<I, P>(directories: I) -> Self
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<PathBuf>,
+    {
+        Self {
+            directories: directories.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    /// Get the configured directories.
+    #[must_use]
+    pub fn directories(&self) -> &[PathBuf] {
+        &self.directories
+    }
 }
 
 /// An asynchronous source of signals.
@@ -194,6 +224,69 @@ impl EventSource for CronEventSource {
     }
 }
 
+#[async_trait]
+impl EventSource for FileWatchEventSource {
+    fn name(&self) -> &str {
+        "fswatcher"
+    }
+
+    fn kind(&self) -> EventSourceKind {
+        EventSourceKind::FileWatch
+    }
+
+    async fn start(&self, sender: SignalSender, cancel: CancellationToken) -> Result<()> {
+        if self.directories.is_empty() {
+            cancel.cancelled().await;
+            return Ok(());
+        }
+
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut watcher = recommended_watcher(move |result| {
+            let _ = event_tx.send(result);
+        })
+        .map_err(|err| {
+            RokoError::transport(format!("failed to create filesystem watcher: {err}"))
+        })?;
+
+        for directory in &self.directories {
+            watcher.watch(directory, RecursiveMode::Recursive).map_err(|err| {
+                RokoError::config(format!(
+                    "failed to watch directory '{}': {err}",
+                    directory.display()
+                ))
+            })?;
+        }
+
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                maybe_event = event_rx.recv() => {
+                    let Some(result) = maybe_event else {
+                        break;
+                    };
+
+                    let event = result.map_err(|err| {
+                        RokoError::transport(format!("filesystem watcher error: {err}"))
+                    })?;
+
+                    let Some((signal_kind, event_kind)) = classify_file_watch_event(&event.kind) else {
+                        continue;
+                    };
+
+                    for path in event.paths {
+                        let signal = file_watch_signal(&path, signal_kind, event_kind);
+                        sender.send(signal).await.map_err(|_| {
+                            RokoError::cancelled("filesystem watcher receiver dropped")
+                        })?;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
 fn cron_signal(schedule: &CronSchedule, fired_at: DateTime<Utc>) -> Signal {
     Signal::builder(Kind::Custom(schedule.signal_kind.clone()))
         .body(Body::Json(serde_json::json!({
@@ -202,6 +295,24 @@ fn cron_signal(schedule: &CronSchedule, fired_at: DateTime<Utc>) -> Signal {
             "fired_at": fired_at.to_rfc3339(),
         })))
         .build()
+}
+
+fn file_watch_signal(path: &Path, signal_kind: &str, event_kind: &str) -> Signal {
+    Signal::builder(Kind::Custom(signal_kind.to_string()))
+        .body(Body::Json(serde_json::json!({
+            "path": path.to_string_lossy().into_owned(),
+            "event_kind": event_kind,
+        })))
+        .build()
+}
+
+fn classify_file_watch_event(kind: &EventKind) -> Option<(&'static str, &'static str)> {
+    match kind {
+        EventKind::Create(_) => Some((FS_CREATED, "created")),
+        EventKind::Modify(_) => Some((FS_MODIFIED, "modified")),
+        EventKind::Remove(_) => Some((FS_DELETED, "deleted")),
+        _ => None,
+    }
 }
 
 /// Periodically collects outcomes for previously emitted work.
@@ -282,10 +393,12 @@ impl PluginBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use std::fs;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use roko_core::{Body, Kind, Signal};
     use serde_json::json;
+    use tokio::time::{sleep, timeout};
 
     struct DummyEventSource;
     struct DummyFeedbackCollector;
@@ -403,6 +516,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn file_watch_event_source_emits_create_modify_delete_signals() {
+        let tempdir = make_tempdir();
+        let watched_dir = tempdir.join("nested");
+        fs::create_dir(&watched_dir).expect("nested directory should be created");
+
+        let source = FileWatchEventSource::new([tempdir.as_path()]);
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        let runner = tokio::spawn({
+            let cancel = cancel.clone();
+            async move { source.start(sender, cancel).await }
+        });
+
+        sleep(Duration::from_millis(100)).await;
+
+        let file_path = watched_dir.join(format!(
+            "watch-{}.txt",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time should be valid")
+                .as_nanos()
+        ));
+        let file_path_string = file_path.to_string_lossy().into_owned();
+
+        fs::write(&file_path, b"alpha").expect("file should be created");
+        assert_eq!(
+            wait_for_watch_event(&mut receiver, &file_path_string, FS_CREATED, "created").await,
+            Some("created")
+        );
+
+        fs::write(&file_path, b"beta").expect("file should be modified");
+        assert_eq!(
+            wait_for_watch_event(&mut receiver, &file_path_string, FS_MODIFIED, "modified")
+                .await,
+            Some("modified")
+        );
+
+        fs::remove_file(&file_path).expect("file should be deleted");
+        assert_eq!(
+            wait_for_watch_event(&mut receiver, &file_path_string, FS_DELETED, "deleted").await,
+            Some("deleted")
+        );
+
+        cancel.cancel();
+        runner
+            .await
+            .expect("task should complete")
+            .expect("watcher should exit cleanly");
+
+        fs::remove_dir_all(&tempdir).expect("tempdir should be removed");
+    }
+
+    #[tokio::test]
     async fn feedback_collector_is_object_safe() {
         let collector: Box<dyn FeedbackCollector> = Box::new(DummyFeedbackCollector);
         assert_eq!(collector.name(), "dummy-feedback");
@@ -419,6 +585,45 @@ mod tests {
         assert_eq!(feedback[0].outcome, FeedbackOutcome::Approved);
         assert_eq!(feedback[0].metadata, json!({ "reviewer": "alice" }));
         assert_eq!(feedback[0].timestamp, DateTime::<Utc>::UNIX_EPOCH);
+    }
+
+    async fn wait_for_watch_event(
+        receiver: &mut tokio::sync::mpsc::Receiver<Signal>,
+        expected_path: &str,
+        expected_signal_kind: &str,
+        expected_event_kind: &str,
+    ) -> Option<&'static str> {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let signal = receiver.recv().await?;
+                if signal.kind == Kind::Custom(expected_signal_kind.to_string()) {
+                    let body: serde_json::Value = signal.body.as_json().ok()?;
+                    if body.get("path").and_then(|value| value.as_str()) == Some(expected_path)
+                        && body.get("event_kind").and_then(|value| value.as_str())
+                            == Some(expected_event_kind)
+                    {
+                        return Some(expected_event_kind);
+                    }
+                }
+            }
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    fn make_tempdir() -> std::path::PathBuf {
+        let base = std::env::temp_dir();
+        let unique = format!(
+            "roko-plugin-fswatcher-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time should be valid")
+                .as_nanos()
+        );
+        let path = base.join(unique);
+        fs::create_dir(&path).expect("tempdir should be created");
+        path
     }
 
     #[test]
