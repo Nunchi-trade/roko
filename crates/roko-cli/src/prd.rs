@@ -269,6 +269,228 @@ fn generated_plan_stats(paths: &[PathBuf]) -> Result<(usize, String)> {
     Ok((task_count, estimated_complexity))
 }
 
+fn normalize_task_title(title: &str) -> String {
+    title
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn preserve_completed_task_status(
+    old_tasks: Option<&TasksFile>,
+    mut regenerated: TasksFile,
+    plan_dir: &Path,
+) -> TasksFile {
+    if let Some(old_tasks) = old_tasks {
+        let completed: Vec<&crate::task_parser::TaskDef> = old_tasks
+            .tasks
+            .iter()
+            .filter(|task| task.status.eq_ignore_ascii_case("done"))
+            .collect();
+
+        for task in &mut regenerated.tasks {
+            let normalized = normalize_task_title(&task.title);
+            if completed.iter().any(|old| {
+                let old_title = normalize_task_title(&old.title);
+                old.id == task.id
+                    || old_title == normalized
+                    || old_title.contains(&normalized)
+                    || normalized.contains(&old_title)
+            }) {
+                task.status = "done".to_string();
+            }
+        }
+
+        regenerated.meta.iteration = old_tasks.meta.iteration.saturating_add(1);
+        if regenerated.meta.plan.trim().is_empty() {
+            regenerated.meta.plan = old_tasks.meta.plan.clone();
+        }
+    }
+
+    if regenerated.meta.plan.trim().is_empty() {
+        regenerated.meta.plan = plan_dir
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown-plan".to_string());
+    }
+
+    regenerated.meta.total = regenerated.tasks.len() as u32;
+    regenerated.meta.done = regenerated
+        .tasks
+        .iter()
+        .filter(|task| task.status.eq_ignore_ascii_case("done"))
+        .count() as u32;
+    regenerated.meta.status = if regenerated.meta.total > 0
+        && regenerated.meta.done == regenerated.meta.total
+    {
+        "complete".to_string()
+    } else {
+        "ready".to_string()
+    };
+
+    regenerated
+}
+
+fn find_plan_source_document(plan_dir: &Path) -> Result<PathBuf> {
+    for candidate in ["source-prd.md", "prd-extract.md", "plan.md"] {
+        let path = plan_dir.join(candidate);
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+
+    Err(anyhow!(
+        "no source PRD found in {} (looked for source-prd.md, prd-extract.md, and plan.md)",
+        plan_dir.display()
+    ))
+}
+
+fn old_format_plan_dirs(root: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let tasks_path = path.join("tasks.toml");
+            if !tasks_path.is_file() {
+                continue;
+            }
+            if matches!(
+                TasksFile::validate_modern_fields(&tasks_path),
+                Ok(issues) if !issues.is_empty()
+            ) {
+                dirs.push(path);
+            }
+        }
+    }
+    dirs.sort();
+    dirs
+}
+
+async fn regenerate_old_format_plan(
+    workdir: &Path,
+    model: Option<&str>,
+    effort: Option<&str>,
+    env_vars: &[(String, String)],
+    plan_dir: &Path,
+) -> Result<bool> {
+    let tasks_path = plan_dir.join("tasks.toml");
+    if !tasks_path.is_file() {
+        return Ok(false);
+    }
+
+    let modern_issues = TasksFile::validate_modern_fields(&tasks_path)
+        .with_context(|| format!("validate modern fields at {}", tasks_path.display()))?;
+    if modern_issues.is_empty() {
+        return Ok(false);
+    }
+
+    let existing = std::fs::read_to_string(&tasks_path)
+        .with_context(|| format!("read {}", tasks_path.display()))?;
+    let existing_tasks = TasksFile::parse(&tasks_path).ok();
+    let source_path = find_plan_source_document(plan_dir)?;
+    let source_content = std::fs::read_to_string(&source_path)
+        .with_context(|| format!("read {}", source_path.display()))?;
+    let system = crate::plan_generate::build_generation_prompt(workdir, &source_content, "plan");
+    let task_prompt = format!(
+        "Regenerate the plan at {path} from the source plan document above. \
+         Rewrite tasks.toml in place with full modern metadata: tier, model_hint, \
+         max_loc, files, allowed_tools, denied_tools, mcp_servers, depends_on, \
+         [task.context], and [[task.verify]]. Preserve the status of any task \
+         that is already marked done in the existing file. Do not create new plan \
+         directories.\n\n## Existing tasks.toml\n\n```toml\n{existing}\n```",
+        path = tasks_path.display(),
+        existing = existing,
+    );
+
+    let exit_code = match run_agent(AgentExecOpts {
+        prompt: &task_prompt,
+        workdir,
+        model,
+        effort,
+        system_prompt: Some(&system),
+        resume_session: None,
+        env_vars,
+    })
+    .await
+    {
+        Ok(code) => code,
+        Err(err) => {
+            std::fs::write(&tasks_path, &existing)
+                .with_context(|| format!("restore {}", tasks_path.display()))?;
+            return Err(err);
+        }
+    };
+
+    if exit_code != 0 {
+        std::fs::write(&tasks_path, &existing)
+            .with_context(|| format!("restore {}", tasks_path.display()))?;
+        anyhow::bail!("plan regeneration agent failed with exit code {exit_code}");
+    }
+
+    let regenerated = match TasksFile::parse(&tasks_path) {
+        Ok(tasks) => tasks,
+        Err(err) => {
+            std::fs::write(&tasks_path, &existing)
+                .with_context(|| format!("restore {}", tasks_path.display()))?;
+            return Err(err);
+        }
+    };
+
+    let merged = preserve_completed_task_status(existing_tasks.as_ref(), regenerated, plan_dir);
+    let rendered = toml::to_string_pretty(&merged).context("serialize regenerated tasks.toml")?;
+    if let Err(err) = std::fs::write(&tasks_path, rendered) {
+        std::fs::write(&tasks_path, &existing)
+            .with_context(|| format!("restore {}", tasks_path.display()))?;
+        return Err(err.into());
+    }
+
+    match TasksFile::validate_modern_fields(&tasks_path) {
+        Ok(issues) if !issues.is_empty() => {
+            std::fs::write(&tasks_path, &existing)
+                .with_context(|| format!("restore {}", tasks_path.display()))?;
+            anyhow::bail!(
+                "regenerated tasks.toml is missing modern fields: {}",
+                issues
+                    .into_iter()
+                    .map(|issue| format!("{}: {:?}", issue.task_id, issue.missing_fields))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            );
+        }
+        Ok(_) => {}
+        Err(err) => {
+            std::fs::write(&tasks_path, &existing)
+                .with_context(|| format!("restore {}", tasks_path.display()))?;
+            return Err(err);
+        }
+    }
+
+    Ok(true)
+}
+
+async fn regenerate_old_format_plans(
+    workdir: &Path,
+    model: Option<&str>,
+    effort: Option<&str>,
+    env_vars: &[(String, String)],
+    plans_root: &Path,
+) -> Result<usize> {
+    let mut regen_count = 0usize;
+    for plan_dir in old_format_plan_dirs(plans_root) {
+        if regenerate_old_format_plan(workdir, model, effort, env_vars, &plan_dir).await? {
+            regen_count += 1;
+        }
+    }
+    Ok(regen_count)
+}
+
 async fn emit_prd_plan_signal(
     workdir: &Path,
     kind: Kind,
@@ -692,6 +914,19 @@ pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path, dry_run: bool) 
             ));
         }
 
+        let generated_changed = changed_tasks_files(&plans_root, &tasks_before);
+
+        if !dry_run {
+            regenerate_old_format_plans(
+                workdir_ref,
+                resolved.config.agent.model.as_deref(),
+                Some(resolved.config.agent.effort.as_str()),
+                &resolved.config.agent.env,
+                &plans_root,
+            )
+            .await?;
+        }
+
         let changed = changed_tasks_files(&plans_root, &tasks_before);
         if dry_run {
             if changed.is_empty() {
@@ -707,7 +942,7 @@ pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path, dry_run: bool) 
             warn_on_new_or_updated_tasks(&plans_root, &tasks_before);
         }
 
-        let (task_count, estimated_complexity) = generated_plan_stats(&changed)?;
+        let (task_count, estimated_complexity) = generated_plan_stats(&generated_changed)?;
         if task_count > template_kind.max_task_count() {
             eprintln!(
                 "⚠️  Generated {task_count} tasks, which exceeds the `{}` template budget of {}",
