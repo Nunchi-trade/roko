@@ -29,6 +29,7 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/webhooks/github", post(github_webhook))
         .route("/webhooks/slack", post(slack_webhook))
+        .route("/webhooks/generic", post(generic_webhook))
 }
 
 /// `POST /webhooks/github` — verify the GitHub signature, convert the payload
@@ -144,6 +145,31 @@ async fn slack_webhook(
         .publish(ServerEvent::WebhookReceived { signal });
 
     Ok(StatusCode::OK.into_response())
+}
+
+/// `POST /webhooks/generic` — accept arbitrary JSON, convert it into a
+/// `Signal`, and publish it to the server event bus. This endpoint skips
+/// signature verification and is intended for internal use behind auth.
+async fn generic_webhook(
+    State(state): State<Arc<AppState>>,
+    body: Bytes,
+) -> Result<StatusCode, ApiError> {
+    let payload: Value = serde_json::from_slice(&body)
+        .map_err(|e| ApiError::bad_request(format!("invalid generic webhook json: {e}")))?;
+
+    let signal = generic_webhook_signal(payload);
+    state
+        .event_bus
+        .publish(ServerEvent::WebhookReceived { signal });
+
+    Ok(StatusCode::OK)
+}
+
+fn generic_webhook_signal(payload: Value) -> Signal {
+    Signal::builder(Kind::Custom("webhook:generic".into()))
+        .body(Body::Json(payload))
+        .provenance(Provenance::external("webhook:generic"))
+        .build()
 }
 
 fn github_signal_kind(event_type: &str, payload: &Value) -> Option<Kind> {
@@ -349,6 +375,19 @@ mod tests {
         let sig = "sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         assert!(parse_github_signature(sig).is_some());
         assert!(parse_github_signature(&sig[7..]).is_some());
+    }
+
+    #[test]
+    fn builds_generic_webhook_signal_with_raw_json_payload() {
+        let payload = serde_json::json!({
+            "nested": { "value": 1 },
+            "items": [1, 2, 3],
+        });
+        let signal = generic_webhook_signal(payload.clone());
+
+        assert_eq!(signal.kind.as_str(), "webhook:generic");
+        assert_eq!(signal.body, Body::Json(payload));
+        assert_eq!(signal.provenance.author, "webhook:generic");
     }
 
     fn hex_encode(bytes: &[u8]) -> String {
