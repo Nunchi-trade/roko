@@ -138,6 +138,18 @@ struct CreatePrArguments {
 }
 
 #[derive(Debug, Deserialize)]
+struct CreateIssueArguments {
+    owner: String,
+    repo: String,
+    title: String,
+    body: String,
+    #[serde(default)]
+    labels: Option<Vec<String>>,
+    #[serde(default)]
+    assignees: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
 struct CommentPrArguments {
     owner: String,
     repo: String,
@@ -334,6 +346,12 @@ struct GithubPullRequestDetails {
 
 #[derive(Debug, Deserialize)]
 struct GithubCreatePullRequestResponse {
+    number: u64,
+    html_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubCreateIssueResponse {
     number: u64,
     html_url: Option<String>,
 }
@@ -920,8 +938,25 @@ fn handle_list_issues(arguments: Value) -> Result<Value, JsonRpcError> {
 }
 
 fn handle_create_issue(arguments: Value) -> Result<Value, JsonRpcError> {
-    let _ = arguments;
-    unsupported_tool("github.create_issue")
+    let args: CreateIssueArguments = serde_json::from_value(arguments).map_err(|err| {
+        JsonRpcError::invalid_params(format!("invalid github.create_issue args: {err}"))
+    })?;
+    let client = github_client()?;
+    let issue = create_issue(&client, &args, "https://api.github.com")?;
+    let html_url = issue
+        .html_url
+        .ok_or_else(|| JsonRpcError::internal_error("GitHub API response missing html_url"))?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": serde_json::json!({
+                "number": issue.number,
+                "html_url": html_url
+            }).to_string()
+        }],
+        "isError": false
+    }))
 }
 
 fn handle_comment_issue(arguments: Value) -> Result<Value, JsonRpcError> {
@@ -1219,6 +1254,55 @@ fn create_pull_request(
     serde_json::from_str(&body).map_err(|err| {
         JsonRpcError::internal_error(format!(
             "parse GitHub pull request creation response: {err}"
+        ))
+    })
+}
+
+fn create_issue(
+    client: &Client,
+    args: &CreateIssueArguments,
+    api_base_url: &str,
+) -> Result<GithubCreateIssueResponse, JsonRpcError> {
+    let url = format!("{api_base_url}/repos/{}/{}/issues", args.owner, args.repo);
+    let mut request = client.post(url);
+    if let Some(token) = github_token() {
+        request = request.bearer_auth(token);
+    }
+
+    let mut payload = serde_json::json!({
+        "title": args.title,
+        "body": args.body,
+    });
+    if let Some(labels) = &args.labels
+        && !labels.is_empty()
+    {
+        payload["labels"] = Value::Array(labels.iter().cloned().map(Value::String).collect());
+    }
+    if let Some(assignees) = &args.assignees
+        && !assignees.is_empty()
+    {
+        payload["assignees"] = Value::Array(assignees.iter().cloned().map(Value::String).collect());
+    }
+
+    let response = request
+        .json(&payload)
+        .send()
+        .map_err(|err| JsonRpcError::internal_error(format!("call GitHub API: {err}")))?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|err| JsonRpcError::internal_error(format!("read GitHub response: {err}")))?;
+    if !status.is_success() {
+        return Err(JsonRpcError::internal_error(format!(
+            "GitHub API returned {status}: {}",
+            body.trim()
+        )));
+    }
+
+    serde_json::from_str(&body).map_err(|err| {
+        JsonRpcError::internal_error(format!(
+            "parse GitHub issue creation response: {err}"
         ))
     })
 }
@@ -1900,6 +1984,81 @@ mod tests {
                 ]
             })
         );
+    }
+
+    #[test]
+    fn create_issue_posts_expected_payload_and_returns_url() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept request");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+            let mut request_line = String::new();
+            reader
+                .read_line(&mut request_line)
+                .expect("read request line");
+            assert!(request_line.starts_with("POST /repos/octo/hello-world/issues HTTP/1.1"));
+
+            let mut content_length = 0usize;
+            loop {
+                let mut header_line = String::new();
+                reader.read_line(&mut header_line).expect("read header");
+                let header = header_line.trim_end();
+                if header.is_empty() {
+                    break;
+                }
+                if let Some(value) = header.to_ascii_lowercase().strip_prefix("content-length: ") {
+                    content_length = value.parse().expect("parse content length");
+                }
+            }
+
+            let mut body = vec![0u8; content_length];
+            reader.read_exact(&mut body).expect("read request body");
+            let body_json: Value = serde_json::from_slice(&body).expect("parse request body");
+            assert_eq!(
+                body_json,
+                json!({
+                    "title": "Bug: login redirect",
+                    "body": "This blocks sign-in.",
+                    "labels": ["bug", "urgent"],
+                    "assignees": ["octocat", "maintainer"]
+                })
+            );
+
+            let mut writer = stream;
+            let response_body = json!({
+                "number": 101,
+                "html_url": "https://github.com/octo/hello-world/issues/101"
+            })
+            .to_string();
+            write!(
+                writer,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            )
+            .expect("write response");
+        });
+
+        let client = github_client().expect("client");
+        let args = CreateIssueArguments {
+            owner: "octo".to_string(),
+            repo: "hello-world".to_string(),
+            title: "Bug: login redirect".to_string(),
+            body: "This blocks sign-in.".to_string(),
+            labels: Some(vec!["bug".to_string(), "urgent".to_string()]),
+            assignees: Some(vec!["octocat".to_string(), "maintainer".to_string()]),
+        };
+
+        let issue = create_issue(&client, &args, &format!("http://{}", addr)).expect("create issue");
+        assert_eq!(issue.number, 101);
+        assert_eq!(
+            issue.html_url.as_deref(),
+            Some("https://github.com/octo/hello-world/issues/101")
+        );
+
+        server.join().expect("server thread");
     }
 
     #[test]
