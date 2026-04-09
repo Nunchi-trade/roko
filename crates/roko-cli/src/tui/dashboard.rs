@@ -39,6 +39,8 @@ const EFFICIENCY_FILE: &str = "efficiency.jsonl";
 const EXPERIMENTS_FILE: &str = "experiments.json";
 const GATE_THRESHOLDS_FILE: &str = "gate-thresholds.json";
 const CASCADE_ROUTER_FILE: &str = "cascade-router.json";
+const DAIMON_DIR: &str = "daimon";
+const AFFECT_FILE: &str = "affect.json";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct FileStamp {
@@ -441,6 +443,10 @@ pub struct DashboardData {
     cfactor_stamp: FileStamp,
     /// Cascade router file metadata.
     cascade_router_stamp: FileStamp,
+    /// Cached Daimon affect state from `.roko/learn/daimon/affect.json`.
+    affect_states: HashMap<String, DashboardAffectState>,
+    /// Last observed affect file metadata.
+    affect_stamp: FileStamp,
 }
 
 impl DashboardData {
@@ -457,6 +463,7 @@ impl DashboardData {
         let experiments_path = learn_dir.join(EXPERIMENTS_FILE);
         let gate_thresholds_path = learn_dir.join(GATE_THRESHOLDS_FILE);
         let cascade_router_path = learn_dir.join(CASCADE_ROUTER_FILE);
+        let affect_path = learn_dir.join(DAIMON_DIR).join(AFFECT_FILE);
         let cfactor_path = learn_dir.join("c-factor.jsonl");
 
         let state = read_json_value(&state_path).unwrap_or(Value::Null);
@@ -475,6 +482,10 @@ impl DashboardData {
         let cascade_router =
             load_json_opt::<CascadeRouterState>(&cascade_router_path).unwrap_or_default();
         let cascade_router_stamp = file_stamp(&cascade_router_path);
+        let affect_states = load_json_opt::<DashboardAffectStore>(&affect_path)
+            .map(|store| store.states)
+            .unwrap_or_default();
+        let affect_stamp = file_stamp(&affect_path);
         let experiment_store =
             load_json_opt::<ExperimentStore>(&experiments_path).unwrap_or_default();
         let experiments_stamp = file_stamp(&experiments_path);
@@ -526,6 +537,8 @@ impl DashboardData {
             cfactor,
             cfactor_stamp,
             cascade_router_stamp,
+            affect_states,
+            affect_stamp,
         }
     }
 
@@ -550,6 +563,7 @@ impl DashboardData {
         let experiments_path = roko_dir.join("learn").join(EXPERIMENTS_FILE);
         let gate_thresholds_path = roko_dir.join("learn").join(GATE_THRESHOLDS_FILE);
         let cascade_router_path = roko_dir.join("learn").join(CASCADE_ROUTER_FILE);
+        let affect_path = roko_dir.join("learn").join(DAIMON_DIR).join(AFFECT_FILE);
         let cfactor_path = roko_dir.join("learn").join("c-factor.jsonl");
 
         let mut state_changed = false;
@@ -603,6 +617,14 @@ impl DashboardData {
             self.cascade_router_stamp = stamp;
             self.cascade_router =
                 load_json_opt::<CascadeRouterState>(&cascade_router_path).unwrap_or_default();
+        }
+
+        let stamp = file_stamp(&affect_path);
+        if stamp != self.affect_stamp {
+            self.affect_stamp = stamp;
+            self.affect_states = load_json_opt::<DashboardAffectStore>(&affect_path)
+                .map(|store| store.states)
+                .unwrap_or_default();
         }
 
         let stamp = file_stamp(&cfactor_path);
@@ -716,6 +738,15 @@ impl DashboardData {
     pub(crate) fn root(&self) -> &Path {
         &self.root
     }
+
+    /// Return the affect emoji for a plan or agent key.
+    #[must_use]
+    pub(crate) fn affect_indicator(&self, key: &str) -> &'static str {
+        self.affect_states
+            .get(key)
+            .map(DashboardAffectState::valence_indicator)
+            .unwrap_or("😐")
+    }
 }
 
 /// Summary of a task that is currently active.
@@ -744,6 +775,7 @@ pub struct AgentSummary {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AgentActivityRow {
     pub agent_id: String,
+    pub plan_id: Option<String>,
     pub model: String,
     pub task: String,
     pub role: String,
@@ -919,6 +951,29 @@ pub struct CascadeRouterState {
     pub model_slugs: Vec<String>,
     #[serde(default)]
     pub confidence_stats: HashMap<String, CascadeRouterModelStats>,
+}
+
+/// Persisted Daimon affect state snapshot.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+struct DashboardAffectStore {
+    #[serde(default)]
+    states: HashMap<String, DashboardAffectState>,
+}
+
+/// Persisted affect state for one plan or agent.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+struct DashboardAffectState {
+    pleasure: f64,
+    arousal: f64,
+    dominance: f64,
+    confidence: f64,
+    updated_at: DateTime<Utc>,
+}
+
+impl DashboardAffectState {
+    fn valence_indicator(&self) -> &'static str {
+        valence_indicator(self.pleasure)
+    }
 }
 
 /// Per-model cascade-router stats.
@@ -1146,6 +1201,7 @@ impl AgentActivityAggregate {
             .unwrap_or_default();
         AgentActivityRow {
             agent_id: agent.id.clone(),
+            plan_id: agent.plan_id.clone(),
             model: if self.model.is_empty() {
                 String::from("-")
             } else {
@@ -4106,6 +4162,16 @@ fn format_ms(value: f64) -> String {
     format!("{value:.0} ms")
 }
 
+fn valence_indicator(pleasure: f64) -> &'static str {
+    if pleasure >= 0.25 {
+        "😊"
+    } else if pleasure <= -0.25 {
+        "😟"
+    } else {
+        "😐"
+    }
+}
+
 fn count_to_f64(count: usize) -> f64 {
     f64::from(u32::try_from(count).unwrap_or(u32::MAX))
 }
@@ -4838,6 +4904,39 @@ files = ["src/dashboard.rs"]
             execution.agent_output_tail.last().expect("tail last"),
             "stderr line 25"
         );
+    }
+
+    #[test]
+    fn affect_snapshot_renders_valence_indicators() {
+        let tmpdir = tempdir().expect("tempdir");
+        let learn_dir = tmpdir.path().join(".roko/learn/daimon");
+        fs::create_dir_all(&learn_dir).expect("learn dir");
+        write_json(
+            &learn_dir.join(AFFECT_FILE),
+            &serde_json::json!({
+                "states": {
+                    "agent-happy": {
+                        "pleasure": 0.9,
+                        "arousal": 0.1,
+                        "dominance": 0.2,
+                        "confidence": 0.8,
+                        "updated_at": "2026-04-10T00:00:00Z"
+                    },
+                    "plan-sad": {
+                        "pleasure": -0.9,
+                        "arousal": 0.1,
+                        "dominance": -0.2,
+                        "confidence": 0.3,
+                        "updated_at": "2026-04-10T00:00:00Z"
+                    }
+                }
+            }),
+        );
+
+        let data = DashboardData::load_best_effort(tmpdir.path());
+        assert_eq!(data.affect_indicator("agent-happy"), "😊");
+        assert_eq!(data.affect_indicator("plan-sad"), "😟");
+        assert_eq!(data.affect_indicator("missing"), "😐");
     }
 
     #[test]

@@ -223,7 +223,7 @@ fn render_agent_activity_page(frame: &mut Frame<'_>, area: Rect, data: &Dashboar
     ])
     .split(inner);
 
-    render_active_agents_table(frame, sections[0], &snapshot.active_agents);
+    render_active_agents_table(frame, sections[0], &snapshot.active_agents, data);
     render_model_distribution_chart(frame, sections[1], &snapshot);
     render_model_cost_breakdown(frame, sections[2], &snapshot);
 }
@@ -1434,6 +1434,7 @@ fn render_active_agents_table(
     frame: &mut Frame<'_>,
     area: Rect,
     rows: &[super::dashboard::AgentActivityRow],
+    data: &DashboardData,
 ) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1456,7 +1457,13 @@ fn render_active_agents_table(
     let table_rows: Vec<Row<'_>> = rows
         .iter()
         .map(|row| {
+            let affect = row
+                .plan_id
+                .as_deref()
+                .map(|plan_id| data.affect_indicator(plan_id))
+                .unwrap_or_else(|| data.affect_indicator(&row.agent_id));
             Row::new(vec![
+                Cell::from(affect),
                 Cell::from(truncate_text(&row.agent_id, 20)),
                 Cell::from(truncate_text(&row.model, 14)),
                 Cell::from(truncate_text(&row.task, 16)),
@@ -1472,6 +1479,7 @@ fn render_active_agents_table(
     let table = Table::new(
         table_rows,
         [
+            Constraint::Length(3),
             Constraint::Length(20),
             Constraint::Length(14),
             Constraint::Length(16),
@@ -1482,13 +1490,14 @@ fn render_active_agents_table(
             Constraint::Length(10),
         ],
     )
-    .header(
-        Row::new(vec![
-            Cell::from("agent ID"),
-            Cell::from("model"),
-            Cell::from("task"),
-            Cell::from("role"),
-            Cell::from("turns"),
+        .header(
+            Row::new(vec![
+                Cell::from("aff"),
+                Cell::from("agent ID"),
+                Cell::from("model"),
+                Cell::from("task"),
+                Cell::from("role"),
+                Cell::from("turns"),
             Cell::from("tokens used"),
             Cell::from("cost"),
             Cell::from("uptime"),
@@ -1672,8 +1681,11 @@ fn render_plan_execution_page(
     };
 
     let title_label = format!(
-        "{}  [{}/{}]",
-        execution.plan_title, execution.tasks_done, execution.tasks_total
+        "{}  {}  [{}/{}]",
+        execution.plan_title,
+        data.affect_indicator(&execution.plan_id),
+        execution.tasks_done,
+        execution.tasks_total
     );
     let progress = if execution.tasks_total == 0 {
         0.0
@@ -1826,6 +1838,16 @@ fn render_plan_execution_sidebar(
         ),
         Span::raw(": "),
         Span::raw(&task.task_id),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            "plan affect",
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(": "),
+        Span::raw(data.affect_indicator(&execution.plan_id)),
     ]));
     lines.push(Line::from(vec![
         Span::styled(
