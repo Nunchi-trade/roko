@@ -89,6 +89,9 @@ pub enum OperationStatus {
 pub struct TemplateRunRecord {
     /// When the run completed.
     pub timestamp: chrono::DateTime<chrono::Utc>,
+    /// What triggered the run (e.g. `template_deploy`, `worker_callback`).
+    #[serde(default)]
+    pub trigger_kind: String,
     /// Whether the run succeeded.
     pub success: bool,
 }

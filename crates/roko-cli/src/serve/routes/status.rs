@@ -6,14 +6,16 @@ use chrono::{DateTime, Duration, Utc};
 use axum::extract::{Path, Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::serve::error::ApiError;
 use crate::serve::state::AppState;
 use roko_learn::efficiency::AgentEfficiencyEvent;
+use roko_learn::cascade_router::CascadeStage;
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
+use roko_learn::model_router::COLD_START_THRESHOLD;
 use roko_learn::prompt_experiment::{ExperimentStatus, ExperimentStore};
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -22,6 +24,14 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/status", get(session_status))
         .route("/metrics", get(metrics))
         .route("/metrics/summary", get(metrics_summary))
+        .route("/metrics/success_rate", get(success_rate))
+        .route("/metrics/engagement", get(engagement))
+        .route("/metrics/model_efficiency", get(model_efficiency))
+        .route("/metrics/gate_rate", get(gate_rate))
+        .route("/metrics/experiments", get(experiments_metric))
+        .route("/metrics/feedback_latency", get(feedback_latency))
+        .route("/metrics/velocity", get(velocity))
+        .route("/metrics/coverage", get(coverage))
         .route("/dashboard", get(dashboard))
         .route("/gates/summary", get(gate_summary))
         .route("/gates/{gate_name}/history", get(gate_history))
@@ -80,6 +90,68 @@ async fn metrics_summary(
         serde_json::to_value(summary)
             .map_err(|e| ApiError::internal(format!("serialize metrics summary: {e}")))?,
     ))
+}
+
+/// `GET /api/metrics/success_rate` — per template success rate, split by trigger kind.
+async fn success_rate(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let runs = state.template_runs.read().await;
+    Json(build_template_success_rate(&runs))
+}
+
+/// `GET /api/metrics/engagement` — feedback acknowledgement ratio per template.
+async fn engagement(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let runs = state.template_runs.read().await;
+    Json(build_template_engagement(&runs))
+}
+
+/// `GET /api/metrics/model_efficiency` — cost per successful episode for each routed model.
+async fn model_efficiency(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+    let path = state.workdir.join(".roko/learn/cascade-router.json");
+    let snapshot = read_cascade_snapshot(&path).await?;
+    let efficiency_path = state.workdir.join(".roko/learn/efficiency.jsonl");
+    let events = read_efficiency_events(&efficiency_path).await?;
+    Ok(Json(build_model_efficiency_response(
+        &path,
+        snapshot,
+        &events,
+    )))
+}
+
+/// `GET /api/metrics/gate_rate` — passed / total per gate with a trend delta.
+async fn gate_rate(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+    let path = state.workdir.join(".roko").join("signals.jsonl");
+    let entries = read_jsonl_entries(&path).await?;
+    Ok(Json(build_gate_rate_response(&entries)))
+}
+
+/// `GET /api/metrics/experiments` — best vs worst variant gap per experiment.
+async fn experiments_metric(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+    let path = state.workdir.join(".roko/learn/experiments.json");
+    let store = read_experiment_store(&path).await?;
+    Ok(Json(build_experiment_metrics_response(&path, &store)))
+}
+
+/// `GET /api/metrics/feedback_latency` — median hours from action to first feedback signal.
+async fn feedback_latency(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+    let path = state.workdir.join(".roko").join("signals.jsonl");
+    let entries = read_jsonl_entries(&path).await?;
+    Ok(Json(build_feedback_latency_response(&entries)))
+}
+
+/// `GET /api/metrics/velocity` — rate of change of success rate over time.
+async fn velocity(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+    let path = state.workdir.join(".roko/learn/efficiency.jsonl");
+    let events = read_efficiency_events(&path).await?;
+    Ok(Json(json!({
+        "velocity": self_improvement_velocity(&events),
+        "sample_count": events.len(),
+    })))
+}
+
+/// `GET /api/metrics/coverage` — percentage of events that matched a known subscription.
+async fn coverage(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let backlog = state.event_bus.replay_from(0);
+    Json(build_coverage_response(&backlog))
 }
 
 /// `GET /api/dashboard` — dashboard scaffold as JSON.
@@ -262,6 +334,41 @@ struct RunAggregate {
     successes: u64,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+struct CascadeSnapshotData {
+    #[serde(default)]
+    model_slugs: Vec<String>,
+    #[serde(default)]
+    confidence_stats: HashMap<String, PersistedModelStatsData>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct PersistedModelStatsData {
+    #[serde(default)]
+    trials: u64,
+}
+
+#[derive(Debug, Default)]
+struct ModelEfficiencyAggregate {
+    total_cost_usd: f64,
+    total_episodes: u64,
+    successful_episodes: u64,
+}
+
+#[derive(Debug, Default)]
+struct GateRateAggregate {
+    passed_gates: u64,
+    total_gates: u64,
+    samples: Vec<(i64, bool)>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SignalNode {
+    kind: String,
+    created_at_ms: i64,
+    lineage: Vec<String>,
+}
+
 async fn build_metrics_summary(
     state: &AppState,
     period: Option<&str>,
@@ -319,6 +426,517 @@ async fn build_metrics_summary(
     })
 }
 
+fn build_template_success_rate(runs: &HashMap<String, Vec<crate::serve::state::TemplateRunRecord>>) -> Value {
+    let mut templates = Vec::new();
+
+    for (template_name, records) in runs {
+        let mut by_trigger: BTreeMap<String, RunAggregate> = BTreeMap::new();
+        for record in records {
+            let trigger = if record.trigger_kind.trim().is_empty() {
+                "unknown".to_string()
+            } else {
+                record.trigger_kind.clone()
+            };
+            let aggregate = by_trigger.entry(trigger).or_default();
+            aggregate.runs += 1;
+            if record.success {
+                aggregate.successes += 1;
+            }
+        }
+
+        let triggers = by_trigger
+            .into_iter()
+            .map(|(trigger_kind, aggregate)| {
+                json!({
+                    "trigger_kind": trigger_kind,
+                    "successful_episodes": aggregate.successes,
+                    "total_episodes": aggregate.runs,
+                    "success_rate": ratio(aggregate.successes, aggregate.runs),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        templates.push(json!({
+            "template": template_name,
+            "triggers": triggers,
+        }));
+    }
+
+    templates.sort_by(|a, b| {
+        a.get("template")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .cmp(b.get("template").and_then(Value::as_str).unwrap_or(""))
+    });
+
+    json!({ "templates": templates })
+}
+
+fn build_template_engagement(runs: &HashMap<String, Vec<crate::serve::state::TemplateRunRecord>>) -> Value {
+    let mut templates = Vec::new();
+
+    for (template_name, records) in runs {
+        let total_actions = records.len() as u64;
+        let acknowledged_actions = records.iter().filter(|record| record.success).count() as u64;
+        templates.push(json!({
+            "template": template_name,
+            "acknowledged_actions": acknowledged_actions,
+            "total_actions": total_actions,
+            "engagement_rate": ratio(acknowledged_actions, total_actions),
+        }));
+    }
+
+    templates.sort_by(|a, b| {
+        a.get("template")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .cmp(b.get("template").and_then(Value::as_str).unwrap_or(""))
+    });
+
+    json!({ "templates": templates })
+}
+
+fn build_model_efficiency_response(
+    path: &std::path::Path,
+    snapshot: Option<CascadeSnapshotData>,
+    events: &[AgentEfficiencyEvent],
+) -> Value {
+    let total_observations = snapshot
+        .as_ref()
+        .map(|snap| snap.confidence_stats.values().map(|stats| stats.trials).sum::<u64>())
+        .unwrap_or(0);
+    let current_stage = cascade_stage_for_observations(total_observations).label();
+
+    let mut models: BTreeMap<String, ModelEfficiencyAggregate> = BTreeMap::new();
+    if let Some(snapshot) = &snapshot {
+        for slug in &snapshot.model_slugs {
+            models.entry(slug.clone()).or_default();
+        }
+        for slug in snapshot.confidence_stats.keys() {
+            models.entry(slug.clone()).or_default();
+        }
+    }
+
+    for event in events {
+        let aggregate = models.entry(event.model.clone()).or_default();
+        aggregate.total_cost_usd += event.cost_usd;
+        aggregate.total_episodes += 1;
+        if event.gate_passed {
+            aggregate.successful_episodes += 1;
+        }
+    }
+
+    let mut rows: Vec<Value> = models
+        .into_iter()
+        .map(|(model, aggregate)| {
+            let cost_per_success = if aggregate.successful_episodes == 0 {
+                0.0
+            } else {
+                aggregate.total_cost_usd / aggregate.successful_episodes as f64
+            };
+            json!({
+                "model": model,
+                "total_episodes": aggregate.total_episodes,
+                "successful_episodes": aggregate.successful_episodes,
+                "total_cost_usd": aggregate.total_cost_usd,
+                "cost_per_successful_episode_usd": cost_per_success,
+                "success_rate": ratio(aggregate.successful_episodes, aggregate.total_episodes),
+            })
+        })
+        .collect();
+
+    rows.sort_by(|a, b| {
+        a.get("model")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .cmp(b.get("model").and_then(Value::as_str).unwrap_or(""))
+    });
+
+    json!({
+        "source": path.display().to_string(),
+        "current_stage": current_stage,
+        "total_observations": total_observations,
+        "models": rows,
+    })
+}
+
+fn build_gate_rate_response(entries: &[Value]) -> Value {
+    let mut by_gate: BTreeMap<String, GateRateAggregate> = BTreeMap::new();
+
+    for entry in entries {
+        let Some(kind) = entry.get("kind").and_then(Value::as_str) else {
+            continue;
+        };
+        if !is_gate_result_kind(kind) {
+            continue;
+        }
+
+        let Some(gate_name) = extract_gate_name(entry) else {
+            continue;
+        };
+        let Some(passed) = extract_gate_passed(entry) else {
+            continue;
+        };
+        let timestamp = entry_timestamp_ms(entry).unwrap_or_default();
+
+        let aggregate = by_gate.entry(gate_name).or_default();
+        aggregate.total_gates += 1;
+        if passed {
+            aggregate.passed_gates += 1;
+        }
+        aggregate.samples.push((timestamp, passed));
+    }
+
+    let mut gates = Vec::new();
+    for (gate, aggregate) in by_gate {
+        let (trend_delta, trend_direction, baseline_rate, recent_rate) =
+            gate_trend(&aggregate.samples);
+        gates.push(json!({
+            "gate": gate,
+            "passed_gates": aggregate.passed_gates,
+            "total_gates": aggregate.total_gates,
+            "gate_rate": ratio(aggregate.passed_gates, aggregate.total_gates),
+            "trend": {
+                "delta": trend_delta,
+                "direction": trend_direction,
+                "baseline_rate": baseline_rate,
+                "recent_rate": recent_rate,
+            },
+        }));
+    }
+
+    gates.sort_by(|a, b| {
+        a.get("gate")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .cmp(b.get("gate").and_then(Value::as_str).unwrap_or(""))
+    });
+
+    json!({ "gates": gates })
+}
+
+fn build_experiment_metrics_response(
+    path: &std::path::Path,
+    store: &ExperimentStore,
+) -> Value {
+    let mut experiments = Vec::new();
+
+    for experiment in store.iter() {
+        let mut variants: Vec<_> = experiment
+            .variants
+            .iter()
+            .filter(|variant| variant.active)
+            .collect();
+        if variants.len() < 2 {
+            variants = experiment.variants.iter().collect();
+        }
+
+        let mut ranked: Vec<Value> = variants
+            .iter()
+            .map(|variant| {
+                let stats = experiment.stats.get(&variant.id).cloned().unwrap_or_default();
+                json!({
+                    "id": variant.id,
+                    "name": variant.name,
+                    "section_name": variant.section_name,
+                    "active": variant.active,
+                    "trials": stats.trials,
+                    "successes": stats.successes,
+                    "success_rate": stats.success_rate(),
+                })
+            })
+            .collect();
+
+        ranked.sort_by(|a, b| {
+            b.get("success_rate")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0)
+                .partial_cmp(&a.get("success_rate").and_then(Value::as_f64).unwrap_or(0.0))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    b.get("trials")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0)
+                        .cmp(&a.get("trials").and_then(Value::as_u64).unwrap_or(0))
+                })
+                .then_with(|| {
+                    a.get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .cmp(b.get("id").and_then(Value::as_str).unwrap_or(""))
+                })
+        });
+
+        let best = ranked.first().cloned();
+        let worst = ranked.last().cloned();
+        let difference = match (
+            best.as_ref().and_then(|v| v.get("success_rate")).and_then(Value::as_f64),
+            worst.as_ref().and_then(|v| v.get("success_rate")).and_then(Value::as_f64),
+        ) {
+            (Some(best_rate), Some(worst_rate)) if ranked.len() >= 2 => Some(best_rate - worst_rate),
+            _ => None,
+        };
+
+        experiments.push(json!({
+            "experiment_id": experiment.experiment_id,
+            "section_name": experiment.section_name,
+            "status": experiment.status,
+            "best_variant": best,
+            "worst_variant": worst,
+            "metric_difference": difference,
+        }));
+    }
+
+    experiments.sort_by(|a, b| {
+        a.get("experiment_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .cmp(b.get("experiment_id").and_then(Value::as_str).unwrap_or(""))
+    });
+
+    json!({
+        "source": path.display().to_string(),
+        "experiments": experiments,
+    })
+}
+
+fn build_feedback_latency_response(entries: &[Value]) -> Value {
+    let index = build_signal_index(entries);
+    let mut latencies_hours = Vec::new();
+
+    for entry in entries {
+        if signal_kind(entry).as_deref() != Some("gate_verdict") {
+            continue;
+        }
+        let Some(gate_ts) = entry_timestamp_ms(entry) else {
+            continue;
+        };
+        let Some(signal_id) = signal_id(entry) else {
+            continue;
+        };
+        let Some(action_ts) = ancestor_timestamp(&index, &signal_id, &["agent_output", "agent_message"]) else {
+            continue;
+        };
+        if gate_ts < action_ts {
+            continue;
+        }
+        latencies_hours.push((gate_ts - action_ts) as f64 / 3_600_000.0);
+    }
+
+    latencies_hours.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median_hours = median(&latencies_hours);
+
+    json!({
+        "sample_count": latencies_hours.len(),
+        "median_hours": median_hours,
+    })
+}
+
+fn build_coverage_response(
+    backlog: &[bardo_runtime::event_bus::Envelope<crate::serve::events::ServerEvent>],
+) -> Value {
+    let subscription_terms = [
+        "plan",
+        "task",
+        "gate",
+        "execution",
+        "episode",
+        "efficiency",
+        "run",
+        "operation",
+        "deployment",
+        "error",
+        "server_shutdown",
+        "agent",
+    ];
+
+    let mut matched = 0u64;
+    let mut unhandled = 0u64;
+
+    for envelope in backlog {
+        let Ok(value) = serde_json::to_value(&envelope.payload) else {
+            unhandled += 1;
+            continue;
+        };
+
+        let mut event_types = Vec::new();
+        if let Some(event_type) = value.get("type").and_then(Value::as_str) {
+            event_types.push(event_type);
+        }
+        if event_types.contains(&"execution") {
+            if let Some(exec_type) = value
+                .get("event")
+                .and_then(|event| event.get("type"))
+                .and_then(Value::as_str)
+            {
+                event_types.push(exec_type);
+            }
+        }
+
+        if event_types.iter().any(|event_type| {
+            subscription_terms
+                .iter()
+                .any(|term| event_type.contains(term))
+        }) {
+            matched += 1;
+        } else {
+            unhandled += 1;
+        }
+    }
+
+    let total = matched + unhandled;
+    json!({
+        "matched_events": matched,
+        "unhandled_events": unhandled,
+        "coverage": ratio(matched, total),
+        "subscription_terms": subscription_terms,
+    })
+}
+
+fn build_signal_index(entries: &[Value]) -> HashMap<String, SignalNode> {
+    let mut index = HashMap::new();
+
+    for entry in entries {
+        let Some(id) = signal_id(entry) else {
+            continue;
+        };
+        let kind = signal_kind(entry).unwrap_or_else(|| "unknown".to_string());
+        let created_at_ms = entry_timestamp_ms(entry).unwrap_or_default();
+        let lineage = entry
+            .get("lineage")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        index.insert(
+            id,
+            SignalNode {
+                kind,
+                created_at_ms,
+                lineage,
+            },
+        );
+    }
+
+    index
+}
+
+fn ancestor_timestamp(
+    index: &HashMap<String, SignalNode>,
+    signal_id: &str,
+    desired_kinds: &[&str],
+) -> Option<i64> {
+    let mut visited = std::collections::HashSet::new();
+    ancestor_timestamp_inner(index, signal_id, desired_kinds, &mut visited)
+}
+
+fn ancestor_timestamp_inner(
+    index: &HashMap<String, SignalNode>,
+    signal_id: &str,
+    desired_kinds: &[&str],
+    visited: &mut std::collections::HashSet<String>,
+) -> Option<i64> {
+    let node = index.get(signal_id)?;
+    if desired_kinds.iter().any(|kind| *kind == node.kind) {
+        return Some(node.created_at_ms);
+    }
+
+    for parent in &node.lineage {
+        if !visited.insert(parent.clone()) {
+            continue;
+        }
+        if let Some(ts) = ancestor_timestamp_inner(index, parent, desired_kinds, visited) {
+            return Some(ts);
+        }
+    }
+
+    None
+}
+
+fn signal_kind(entry: &Value) -> Option<String> {
+    entry
+        .get("kind")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn signal_id(entry: &Value) -> Option<String> {
+    entry
+        .get("id")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn entry_timestamp_ms(entry: &Value) -> Option<i64> {
+    entry
+        .get("created_at_ms")
+        .and_then(Value::as_i64)
+        .or_else(|| entry.get("created_at_ms").and_then(Value::as_u64).map(|ts| ts as i64))
+}
+
+fn gate_trend(samples: &[(i64, bool)]) -> (f64, String, f64, f64) {
+    if samples.len() < 2 {
+        return (0.0, "flat".to_string(), 0.0, 0.0);
+    }
+
+    let mut ordered = samples.to_vec();
+    ordered.sort_by_key(|(ts, _)| *ts);
+
+    let split = ordered.len() / 2;
+    if split == 0 || split == ordered.len() {
+        return (0.0, "flat".to_string(), 0.0, 0.0);
+    }
+
+    let baseline = &ordered[..split];
+    let recent = &ordered[split..];
+    let baseline_rate = ratio(
+        baseline.iter().filter(|(_, passed)| *passed).count() as u64,
+        baseline.len() as u64,
+    );
+    let recent_rate = ratio(
+        recent.iter().filter(|(_, passed)| *passed).count() as u64,
+        recent.len() as u64,
+    );
+    let delta = recent_rate - baseline_rate;
+    let direction = if delta > 0.01 {
+        "improving"
+    } else if delta < -0.01 {
+        "declining"
+    } else {
+        "flat"
+    };
+
+    (delta, direction.to_string(), baseline_rate, recent_rate)
+}
+
+fn cascade_stage_for_observations(observations: u64) -> CascadeStage {
+    if observations < COLD_START_THRESHOLD {
+        CascadeStage::Static
+    } else if observations < 200 {
+        CascadeStage::Confidence
+    } else {
+        CascadeStage::Ucb
+    }
+}
+
+fn median(values: &[f64]) -> Option<f64> {
+    match values.len() {
+        0 => None,
+        len if len % 2 == 1 => values.get(len / 2).copied(),
+        len => {
+            let upper = values.get(len / 2).copied()?;
+            let lower = values.get((len / 2).saturating_sub(1)).copied()?;
+            Some((lower + upper) / 2.0)
+        }
+    }
+}
+
 async fn read_efficiency_events(
     path: &std::path::Path,
 ) -> Result<Vec<AgentEfficiencyEvent>, ApiError> {
@@ -350,6 +968,19 @@ async fn read_experiment_store(path: &std::path::Path) -> Result<ExperimentStore
 
     serde_json::from_str(&content)
         .map_err(|e| ApiError::internal(format!("parse {}: {e}", path.display())))
+}
+
+/// Read the persisted cascade router snapshot if it exists.
+async fn read_cascade_snapshot(path: &std::path::Path) -> Result<Option<CascadeSnapshotData>, ApiError> {
+    let content = match tokio::fs::read_to_string(path).await {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(ApiError::internal(format!("read {}: {e}", path.display()))),
+    };
+
+    let snapshot = serde_json::from_str::<CascadeSnapshotData>(&content)
+        .map_err(|e| ApiError::internal(format!("parse {}: {e}", path.display())))?;
+    Ok(Some(snapshot))
 }
 
 fn parse_period(period: Option<&str>) -> (String, u64) {

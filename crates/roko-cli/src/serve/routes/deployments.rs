@@ -406,6 +406,7 @@ async fn receive_callback(
             .or_default()
             .push(crate::serve::state::TemplateRunRecord {
                 timestamp: chrono::Utc::now(),
+                trigger_kind: "worker_callback".into(),
                 success,
             });
     }

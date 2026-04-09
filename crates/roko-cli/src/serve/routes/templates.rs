@@ -156,6 +156,7 @@ async fn deploy_template(
                         .or_default()
                         .push(crate::serve::state::TemplateRunRecord {
                             timestamp: chrono::Utc::now(),
+                            trigger_kind: "template_deploy".into(),
                             success: report.overall_success(),
                         });
                     bus.emit(ServerEvent::OperationCompleted {
@@ -173,6 +174,7 @@ async fn deploy_template(
                         .or_default()
                         .push(crate::serve::state::TemplateRunRecord {
                             timestamp: chrono::Utc::now(),
+                            trigger_kind: "template_deploy".into(),
                             success: false,
                         });
                     bus.emit(ServerEvent::Error {
