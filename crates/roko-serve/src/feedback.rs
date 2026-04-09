@@ -5,6 +5,7 @@
 //! persists the collected feedback as normal signals.
 
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,6 +22,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant as TokioInstant, interval_at};
 use tracing::{info, warn};
 
+use super::dispatch::record_cascade_router_observation;
 use crate::events::ServerEvent;
 use crate::state::AppState;
 
@@ -267,6 +269,33 @@ async fn persist_feedback_result(
         );
     }
 
+    if observation.sentiment > 0.0
+        && !episode.model.trim().is_empty()
+        && let Err(err) = record_positive_cascade_feedback(&state.workdir, episode)
+    {
+        warn!(
+            error = %err,
+            episode_id = %episode.episode_id,
+            model = %episode.model,
+            "failed to record positive cascade router feedback"
+        );
+    }
+
+    Ok(())
+}
+
+fn record_positive_cascade_feedback(workdir: &Path, episode: &Episode) -> Result<()> {
+    let model_slug = episode.model.trim();
+    if model_slug.is_empty() {
+        return Ok(());
+    }
+
+    record_cascade_router_observation(
+        workdir,
+        vec![model_slug.to_string()],
+        model_slug,
+        true,
+    )?;
     Ok(())
 }
 
@@ -743,7 +772,9 @@ async fn collect_slack_feedback(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use serde_json::json;
+    use uuid::Uuid;
 
     #[test]
     fn action_key_is_stable() {
@@ -853,5 +884,39 @@ mod tests {
         ];
 
         assert_eq!(slack_unique_replier_count(&messages), 3);
+    }
+
+    #[test]
+    fn positive_feedback_updates_cascade_router_for_used_model() {
+        let root = std::env::temp_dir().join(format!("roko-feedback-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("create temp root");
+
+        let path = root.join(".roko/learn/cascade-router.json");
+        let router = CascadeRouter::new(vec![
+            "claude-haiku-3-5".to_string(),
+            "claude-sonnet-4-5".to_string(),
+        ]);
+        router.save(&path).expect("seed router state");
+
+        let updated = record_cascade_router_observation(
+            &root,
+            vec!["claude-sonnet-4-5".to_string()],
+            "claude-sonnet-4-5",
+            true,
+        )
+        .expect("record positive feedback");
+        assert!(updated);
+
+        let reloaded = CascadeRouter::load_or_new(
+            &path,
+            vec![
+                "claude-haiku-3-5".to_string(),
+                "claude-sonnet-4-5".to_string(),
+            ],
+        );
+        assert_eq!(
+            reloaded.confidence_snapshot().get("claude-sonnet-4-5"),
+            Some(&(1, 1))
+        );
     }
 }

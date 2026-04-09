@@ -1080,12 +1080,6 @@ async fn record_cascade_router_outcome(
     template: &AgentTemplate,
     success: bool,
 ) -> Result<()> {
-    let path = state
-        .workdir
-        .join(".roko")
-        .join("learn")
-        .join("cascade-router.json");
-
     let model_slugs = {
         let templates = state.templates.read().await;
         let mut slugs = Vec::new();
@@ -1106,14 +1100,30 @@ async fn record_cascade_router_outcome(
         slugs
     };
 
+    record_cascade_router_observation(&state.workdir, model_slugs, &template.agent.model, success)?;
+    Ok(())
+}
+
+pub(crate) fn record_cascade_router_observation(
+    workdir: &Path,
+    model_slugs: Vec<String>,
+    model_slug: &str,
+    success: bool,
+) -> Result<bool> {
+    let path = workdir
+        .join(".roko")
+        .join("learn")
+        .join("cascade-router.json");
+
     let cascade_router = CascadeRouter::load_or_new(&path, model_slugs);
-    if cascade_router.record_outcome(&template.agent.model, success) {
+    if cascade_router.record_outcome(model_slug, success) {
         cascade_router
             .save(&path)
             .with_context(|| format!("save {}", path.display()))?;
+        Ok(true)
+    } else {
+        Ok(false)
     }
-
-    Ok(())
 }
 
 fn glob_match(pattern: &str, text: &str) -> bool {
