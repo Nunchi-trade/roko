@@ -5,8 +5,11 @@
 //! JSON responses to stdout.
 
 use anyhow::Context;
+use reqwest::blocking::Client;
+use reqwest::header::{ACCEPT, HeaderMap, HeaderValue, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::env;
 use std::io::{self, BufRead, Write};
 
 #[derive(Debug, Deserialize)]
@@ -48,6 +51,7 @@ impl JsonRpcError {
     const PARSE_ERROR: i64 = -32700;
     const INVALID_REQUEST: i64 = -32600;
     const METHOD_NOT_FOUND: i64 = -32601;
+    const INTERNAL_ERROR: i64 = -32603;
 
     fn parse_error(message: impl Into<String>) -> Self {
         Self {
@@ -76,6 +80,66 @@ impl JsonRpcError {
     fn invalid_params(message: impl Into<String>) -> Self {
         Self::invalid_request(message)
     }
+
+    fn internal_error(message: impl Into<String>) -> Self {
+        Self {
+            code: Self::INTERNAL_ERROR,
+            message: message.into(),
+            data: None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ListPrsArguments {
+    owner: String,
+    repo: String,
+    #[serde(default)]
+    state: Option<PullRequestState>,
+    #[serde(default)]
+    head: Option<String>,
+    #[serde(default)]
+    base: Option<String>,
+    #[serde(default)]
+    per_page: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum PullRequestState {
+    Open,
+    Closed,
+    All,
+}
+
+impl PullRequestState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Closed => "closed",
+            Self::All => "all",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubPullRequest {
+    title: String,
+    number: u64,
+    #[serde(default)]
+    user: Option<GithubUser>,
+    #[serde(default)]
+    labels: Vec<GithubLabel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubUser {
+    login: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubLabel {
+    name: String,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -476,8 +540,17 @@ fn unsupported_tool(name: &str) -> Result<Value, JsonRpcError> {
 }
 
 fn handle_list_prs(arguments: Value) -> Result<Value, JsonRpcError> {
-    let _ = arguments;
-    unsupported_tool("github.list_prs")
+    let args: ListPrsArguments = serde_json::from_value(arguments)
+        .map_err(|err| JsonRpcError::invalid_params(format!("invalid github.list_prs args: {err}")))?;
+    let client = github_client()?;
+    let prs = list_pull_requests(&client, &args)?;
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": summarize_pull_requests(&prs).to_string()
+        }],
+        "isError": false
+    }))
 }
 
 fn handle_get_pr(arguments: Value) -> Result<Value, JsonRpcError> {
@@ -575,6 +648,86 @@ fn github_tool(name: &str, description: &str, input_schema: Value) -> Value {
         "name": name,
         "description": description,
         "inputSchema": input_schema
+    })
+}
+
+fn github_client() -> Result<Client, JsonRpcError> {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        ACCEPT,
+        HeaderValue::from_static("application/vnd.github+json"),
+    );
+    headers.insert(
+        USER_AGENT,
+        HeaderValue::from_static("roko-mcp-github/0.1"),
+    );
+
+    Client::builder()
+        .default_headers(headers)
+        .build()
+        .map_err(|err| JsonRpcError::internal_error(format!("build GitHub client: {err}")))
+}
+
+fn github_token() -> Option<String> {
+    env::var("GITHUB_TOKEN")
+        .ok()
+        .filter(|token| !token.is_empty())
+        .or_else(|| env::var("GH_TOKEN").ok().filter(|token| !token.is_empty()))
+}
+
+fn list_pull_requests(
+    client: &Client,
+    args: &ListPrsArguments,
+) -> Result<Vec<GithubPullRequest>, JsonRpcError> {
+    let url = format!(
+        "https://api.github.com/repos/{}/{}/pulls",
+        args.owner, args.repo
+    );
+    let mut request = client.get(url);
+    if let Some(token) = github_token() {
+        request = request.bearer_auth(token);
+    }
+
+    let mut query: Vec<(&str, String)> = Vec::with_capacity(4);
+    query.push(("state", args.state.unwrap_or(PullRequestState::Open).as_str().to_string()));
+    if let Some(head) = &args.head {
+        query.push(("head", head.clone()));
+    }
+    if let Some(base) = &args.base {
+        query.push(("base", base.clone()));
+    }
+    query.push(("per_page", args.per_page.unwrap_or(30).clamp(1, 100).to_string()));
+
+    let response = request
+        .query(&query)
+        .send()
+        .map_err(|err| JsonRpcError::internal_error(format!("call GitHub API: {err}")))?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|err| JsonRpcError::internal_error(format!("read GitHub response: {err}")))?;
+    if !status.is_success() {
+        return Err(JsonRpcError::internal_error(format!(
+            "GitHub API returned {status}: {}",
+            body.trim()
+        )));
+    }
+
+    serde_json::from_str(&body)
+        .map_err(|err| JsonRpcError::internal_error(format!("parse GitHub pull requests: {err}")))
+}
+
+fn summarize_pull_requests(prs: &[GithubPullRequest]) -> Value {
+    serde_json::json!({
+        "pull_requests": prs.iter().map(|pr| {
+            serde_json::json!({
+                "title": pr.title.clone(),
+                "number": pr.number,
+                "author": pr.user.as_ref().map(|user| user.login.clone()),
+                "labels": pr.labels.iter().map(|label| label.name.clone()).collect::<Vec<_>>()
+            })
+        }).collect::<Vec<_>>()
     })
 }
 
@@ -776,5 +929,54 @@ mod tests {
 
         assert_eq!(err.code, JsonRpcError::INVALID_REQUEST);
         assert!(err.message.contains("unknown tool"));
+    }
+
+    #[test]
+    fn summarize_pull_requests_extracts_expected_fields() {
+        let prs = vec![
+            GithubPullRequest {
+                title: "Fix login flow".to_string(),
+                number: 17,
+                user: Some(GithubUser {
+                    login: "octocat".to_string(),
+                }),
+                labels: vec![
+                    GithubLabel {
+                        name: "bug".to_string(),
+                    },
+                    GithubLabel {
+                        name: "priority".to_string(),
+                    },
+                ],
+            },
+            GithubPullRequest {
+                title: "Update docs".to_string(),
+                number: 18,
+                user: None,
+                labels: vec![],
+            },
+        ];
+
+        let summary = summarize_pull_requests(&prs);
+
+        assert_eq!(
+            summary,
+            json!({
+                "pull_requests": [
+                    {
+                        "title": "Fix login flow",
+                        "number": 17,
+                        "author": "octocat",
+                        "labels": ["bug", "priority"]
+                    },
+                    {
+                        "title": "Update docs",
+                        "number": 18,
+                        "author": null,
+                        "labels": []
+                    }
+                ]
+            })
+        );
     }
 }
