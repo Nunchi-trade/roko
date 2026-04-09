@@ -1053,6 +1053,50 @@ build_system = "cargo"
     }
 
     #[test]
+    fn parses_executor_section_from_toml() {
+        let toml = r#"
+[agent]
+command = "cat"
+
+[executor]
+max_concurrent_plans = 8
+max_concurrent_tasks = 12
+max_auto_fix_iterations = 9
+max_merge_attempts = 4
+task_timeout_secs = 42
+budget_usd = 1.5
+auto_replan = false
+"#;
+        let cfg = Config::parse_toml(toml).unwrap();
+        assert_eq!(cfg.executor.max_concurrent_plans, 8);
+        assert_eq!(cfg.executor.max_concurrent_tasks, 12);
+        assert_eq!(cfg.executor.max_auto_fix_iterations, 9);
+        assert_eq!(cfg.executor.max_merge_attempts, 4);
+        assert_eq!(cfg.executor.task_timeout_secs, 42);
+        assert_eq!(cfg.executor.budget_usd, Some(1.5));
+        assert!(!cfg.executor.auto_replan);
+    }
+
+    #[test]
+    fn layer_resolve_uses_executor_overrides() {
+        let layer = ConfigLayer::parse_toml(
+            r#"
+[executor]
+max_concurrent_plans = 6
+task_timeout_secs = 900
+auto_replan = false
+"#,
+        )
+        .unwrap();
+
+        let cfg = layer.resolve();
+        assert_eq!(cfg.executor.max_concurrent_plans, 6);
+        assert_eq!(cfg.executor.max_concurrent_tasks, ExecutorConfig::default().max_concurrent_tasks);
+        assert_eq!(cfg.executor.task_timeout_secs, 900);
+        assert!(!cfg.executor.auto_replan);
+    }
+
+    #[test]
     fn default_config_roundtrips_through_toml() {
         let cfg = Config::default();
         let text = cfg.to_toml().unwrap();
