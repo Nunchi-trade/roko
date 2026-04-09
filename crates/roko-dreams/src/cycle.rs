@@ -218,12 +218,20 @@ impl DreamCycle {
 
         let processed_through = batch.iter().map(|episode| episode.timestamp).max();
         let analysis = TierProgression::default().analyze(&batch);
+        let review_entries = review_insights_from_heuristics(&analysis, started_at);
         let mut clusters = cluster_episodes(batch);
         let mut written_knowledge_ids = BTreeSet::new();
 
         let mut knowledge_entries_written = 0usize;
         let mut playbooks_created = 0usize;
         let mut regressions_detected = Vec::new();
+
+        for entry in review_entries {
+            if written_knowledge_ids.insert(entry.id.clone()) {
+                self.knowledge_store.add(entry.clone())?;
+                knowledge_entries_written += 1;
+            }
+        }
 
         for cluster in &mut clusters {
             let outcome = process_cluster(
@@ -784,6 +792,68 @@ fn build_regression_entry(cluster: &DreamCluster, created_at: DateTime<Utc>) -> 
     }
 }
 
+fn review_insights_from_heuristics(
+    analysis: &TierProgressionReport,
+    created_at: DateTime<Utc>,
+) -> Vec<KnowledgeEntry> {
+    analysis
+        .heuristics
+        .iter()
+        .filter(|heuristic| heuristic_recommends_different_approach(&heuristic.then_clause))
+        .filter(|heuristic| !heuristic.source_episodes.is_empty())
+        .map(|heuristic| {
+            let content = format!(
+                "Would I do this differently now? For {}, current knowledge suggests a different approach: {}.",
+                heuristic.when_clause, heuristic.then_clause
+            );
+            let source_episodes = heuristic.source_episodes.clone();
+            let tags = vec![
+                knowledge_kind_tag(KnowledgeKind::Insight).to_string(),
+                "dream".to_string(),
+                "review".to_string(),
+                "heuristic".to_string(),
+                format!("heuristic:{}", heuristic.id),
+            ];
+            KnowledgeEntry {
+                id: derive_knowledge_id(
+                    KnowledgeKind::Insight,
+                    &content,
+                    &source_episodes,
+                    &tags,
+                ),
+                kind: KnowledgeKind::Insight,
+                source: Some("dream".to_string()),
+                content,
+                confidence: heuristic.confidence.clamp(0.0, 1.0),
+                source_episodes,
+                tags,
+                created_at,
+                half_life_days: KnowledgeKind::Insight.default_half_life_days(),
+                hdc_vector: None,
+            }
+        })
+        .collect()
+}
+
+fn heuristic_recommends_different_approach(then_clause: &str) -> bool {
+    let normalized = then_clause.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+    if normalized.contains("reuse this path as the default play") {
+        return false;
+    }
+
+    normalized.starts_with("add ")
+        || normalized.starts_with("prioritize ")
+        || normalized.starts_with("treat ")
+        || normalized.starts_with("avoid ")
+        || normalized.starts_with("escalate ")
+        || normalized.starts_with("switch ")
+        || normalized.starts_with("retry ")
+        || normalized.contains("different approach")
+}
+
 fn summarize_failure_reason(cluster: &DreamCluster) -> String {
     let mut reasons: BTreeMap<String, usize> = BTreeMap::new();
     for episode in cluster.episodes.iter().filter(|episode| !episode.success) {
@@ -1078,7 +1148,7 @@ mod tests {
             );
             write_episode(&logger, &ep).await;
         }
-        for idx in 0..3 {
+        for idx in 0..5 {
             let ep = episode(
                 &format!("fail-{idx}"),
                 "plan-b",
@@ -1098,7 +1168,7 @@ mod tests {
         );
 
         let report = cycle.run().await.expect("run");
-        assert_eq!(report.processed_episodes, 7);
+        assert_eq!(report.processed_episodes, 9);
         assert_eq!(report.clusters.len(), 2);
         assert_eq!(report.playbooks_created, 1);
         assert!(!report.regressions_detected.is_empty());
@@ -1115,5 +1185,60 @@ mod tests {
         let store = KnowledgeStore::new(&knowledge_path);
         let knowledge_entries = store.query("dream", 10).expect("query");
         assert!(!knowledge_entries.is_empty());
+        let review_entries = store
+            .query("different approach", 10)
+            .expect("query review entries");
+        assert!(
+            review_entries
+                .iter()
+                .any(|entry| entry.content.contains("Would I do this differently now?"))
+        );
+    }
+
+    #[test]
+    fn review_insights_from_heuristics_skips_confirmation_only_rules() {
+        let analysis = TierProgressionReport {
+            insights: Vec::new(),
+            heuristics: vec![
+                roko_neuro::tier_progression::HeuristicRule {
+                    id: "heuristic-1".to_string(),
+                    insight_id: "insight-1".to_string(),
+                    title: "If trigger gate failure then add verification".to_string(),
+                    when_clause: "trigger gate failure and agent implementer".to_string(),
+                    then_clause: "add a verification step before proceeding".to_string(),
+                    confidence: 0.91,
+                    confirmations: 5,
+                    first_seen_ms: 10,
+                    last_seen_ms: 20,
+                    source_episodes: vec!["ep-1".to_string(), "ep-2".to_string()],
+                },
+                roko_neuro::tier_progression::HeuristicRule {
+                    id: "heuristic-2".to_string(),
+                    insight_id: "insight-2".to_string(),
+                    title: "If successful path then reuse it".to_string(),
+                    when_clause: "trigger agent success and gate compile passed".to_string(),
+                    then_clause: "reuse this path as the default play".to_string(),
+                    confidence: 0.95,
+                    confirmations: 5,
+                    first_seen_ms: 30,
+                    last_seen_ms: 40,
+                    source_episodes: vec!["ep-3".to_string(), "ep-4".to_string()],
+                },
+            ],
+            playbook: roko_neuro::tier_progression::PlaybookCompilation {
+                markdown: String::new(),
+                rules: Vec::new(),
+            },
+        };
+
+        let entries = review_insights_from_heuristics(&analysis, Utc::now());
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.kind, KnowledgeKind::Insight);
+        assert!(entry.content.contains("Would I do this differently now?"));
+        assert!(entry.content.contains("current knowledge suggests"));
+        assert!(entry.tags.iter().any(|tag| tag == "review"));
+        assert!(entry.source_episodes.contains(&"ep-1".to_string()));
+        assert!(entry.source_episodes.contains(&"ep-2".to_string()));
     }
 }
