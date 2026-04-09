@@ -61,6 +61,7 @@ const AUTOSAVE_INTERVAL: usize = 5;
 const DEFAULT_WORKTREE_IDLE_TTL_SECS: u64 = 30 * 60;
 const WATCHER_INTERVAL_SECS: u64 = 30;
 const WATCHER_SIGNAL_TAIL: usize = 200;
+const EFFICIENCY_SIGNAL_TAIL: usize = 256;
 
 // ─── ContextAttributionTracker ────────────────────────────────────────────
 
@@ -271,6 +272,8 @@ struct LearnedContext {
 struct WatcherRunner {
     conductor: Arc<Conductor>,
     signals_path: PathBuf,
+    efficiency_path: PathBuf,
+    budget_usd: Option<f64>,
     cancel: TokioCancellationToken,
 }
 
@@ -292,12 +295,21 @@ impl WatcherRunner {
                 _ = interval.tick() => {
                     match load_recent_signals(&self.signals_path, WATCHER_SIGNAL_TAIL).await {
                         Ok(recent_signals) => {
-                            let findings = self.conductor.check_all(&recent_signals);
+                            let mut signals = recent_signals;
+                            if let Ok(cost_signals) = load_efficiency_cost_signals(
+                                &self.efficiency_path,
+                                self.budget_usd,
+                            )
+                            .await
+                            {
+                                signals.extend(cost_signals);
+                            }
+                            let findings = self.conductor.check_all(&signals);
                             if !findings.is_empty() {
                                 eprintln!(
                                     "[conductor] watcher runner observed {} intervention signal(s) from last {} signal(s)",
                                     findings.len(),
-                                    recent_signals.len()
+                                    signals.len()
                                 );
                             }
                         }
@@ -329,6 +341,74 @@ async fn load_recent_signals(path: &Path, tail_len: usize) -> std::io::Result<Ve
         }
     }
     Ok(signals)
+}
+
+/// Load the latest efficiency entries and convert them into cost metric signals.
+async fn load_efficiency_cost_signals(
+    path: &Path,
+    budget_usd: Option<f64>,
+) -> std::io::Result<Vec<Signal>> {
+    let Some(budget_usd) = budget_usd.filter(|budget| *budget > 0.0) else {
+        return Ok(Vec::new());
+    };
+
+    let text = tokio::fs::read_to_string(path).await?;
+    Ok(build_cost_overrun_signals(&text, budget_usd))
+}
+
+/// Synchronous variant used by the main conductor check path.
+fn load_efficiency_cost_signals_sync(
+    path: &Path,
+    budget_usd: Option<f64>,
+) -> std::io::Result<Vec<Signal>> {
+    let Some(budget_usd) = budget_usd.filter(|budget| *budget > 0.0) else {
+        return Ok(Vec::new());
+    };
+
+    let text = std::fs::read_to_string(path)?;
+    Ok(build_cost_overrun_signals(&text, budget_usd))
+}
+
+/// Convert the latest efficiency entries into the metric signals expected by `cost_overrun`.
+fn build_cost_overrun_signals(text: &str, budget_usd: f64) -> Vec<Signal> {
+    let Some(cost_usd) = latest_efficiency_cost(text) else {
+        return Vec::new();
+    };
+
+    vec![
+        Signal::builder(Kind::Metric)
+            .body(Body::text("plan cost"))
+            .tag("name", "plan_cost")
+            .tag("value", format!("{cost_usd:.6}"))
+            .build(),
+        Signal::builder(Kind::Metric)
+            .body(Body::text("plan budget"))
+            .tag("name", "plan_budget")
+            .tag("value", format!("{budget_usd:.6}"))
+            .build(),
+    ]
+}
+
+/// Sum the cost from the latest valid efficiency events in the JSONL log.
+fn latest_efficiency_cost(text: &str) -> Option<f64> {
+    let mut total = 0.0;
+    let mut seen = 0usize;
+
+    for line in text.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(event) = serde_json::from_str::<AgentEfficiencyEvent>(trimmed) {
+            total += event.cost_usd;
+            seen += 1;
+            if seen >= EFFICIENCY_SIGNAL_TAIL {
+                break;
+            }
+        }
+    }
+
+    (seen > 0).then_some(total)
 }
 
 // ─── PlanRunner ───────────────────────────────────────────────────────────
@@ -1081,7 +1161,14 @@ impl PlanRunner {
         }
 
         let ctx = Context::now();
-        let decision = self.conductor.evaluate(&self.conductor_signals, &ctx);
+        let mut signals = self.conductor_signals.clone();
+        if let Ok(cost_signals) = load_efficiency_cost_signals_sync(
+            &self.learning.paths().efficiency_jsonl,
+            self.executor.config().budget_usd,
+        ) {
+            signals.extend(cost_signals);
+        }
+        let decision = self.conductor.evaluate(&signals, &ctx);
         match &decision {
             ConductorDecision::Continue => {}
             ConductorDecision::Restart { watcher, reason } => {
@@ -1507,6 +1594,8 @@ impl PlanRunner {
         let watcher_task = WatcherRunner {
             conductor: Arc::clone(&self.conductor),
             signals_path: self.workdir.join(".roko").join("signals.jsonl"),
+            efficiency_path: self.learning.paths().efficiency_jsonl.clone(),
+            budget_usd: self.executor.config().budget_usd,
             cancel: watcher_cancel.clone(),
         }
         .spawn();
