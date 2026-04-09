@@ -193,7 +193,7 @@ enum Command {
         #[arg(long)]
         workdir: Option<PathBuf>,
     },
-    /// Manage plans (list, show, create).
+    /// Manage plans (list, show, create, validate).
     Plan {
         #[command(subcommand)]
         cmd: PlanCmd,
@@ -272,6 +272,11 @@ enum PlanCmd {
         /// Working directory.
         #[arg(long)]
         workdir: Option<PathBuf>,
+    },
+    /// Validate a plan directory for modern `tasks.toml` fields.
+    Validate {
+        /// Path to the plan directory containing `tasks.toml`.
+        plan_dir: PathBuf,
     },
     /// Run a plan directory through the orchestration loop.
     Run {
@@ -1244,6 +1249,29 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 println!("created plan '{}' at {}", plan_id, path.display());
             }
             Ok(EXIT_SUCCESS)
+        }
+        PlanCmd::Validate { plan_dir } => {
+            let tasks_path = plan_dir.join("tasks.toml");
+            if !tasks_path.is_file() {
+                anyhow::bail!("No tasks.toml found in {}", plan_dir.display());
+            }
+
+            let issues = roko_cli::task_parser::TasksFile::validate_modern_fields(&tasks_path)?;
+            if issues.is_empty() {
+                if !cli.quiet {
+                    println!(
+                        "modern task fields present in {}",
+                        tasks_path.display()
+                    );
+                }
+                return Ok(EXIT_SUCCESS);
+            }
+
+            eprintln!("❌ {} is missing modern fields:", tasks_path.display());
+            for issue in &issues {
+                eprintln!("  - {issue}");
+            }
+            Ok(EXIT_AGENT_FAILURE)
         }
         PlanCmd::Run {
             plans_dir,

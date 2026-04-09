@@ -208,6 +208,15 @@ pub enum TaskQualityWarning {
     },
 }
 
+/// A task that is missing one or more modern `tasks.toml` fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModernFieldIssue {
+    /// Task identifier being checked.
+    pub task_id: String,
+    /// Modern fields that are absent or empty.
+    pub missing_fields: Vec<&'static str>,
+}
+
 impl std::fmt::Display for TaskValidationIssue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -248,6 +257,17 @@ impl std::fmt::Display for TaskQualityWarning {
                 write!(f, "plan has {task_count} tasks (>20); consider splitting it")
             }
         }
+    }
+}
+
+impl std::fmt::Display for ModernFieldIssue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: missing modern fields: {}",
+            self.task_id,
+            self.missing_fields.join(", ")
+        )
     }
 }
 
@@ -641,6 +661,14 @@ impl TasksFile {
         warnings
     }
 
+    /// Validate that the raw `tasks.toml` still carries the modern task fields.
+    pub fn validate_modern_fields(path: &Path) -> Result<Vec<ModernFieldIssue>> {
+        let content =
+            std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        validate_modern_fields_content(&content)
+            .with_context(|| format!("parse modern field keys at {}", path.display()))
+    }
+
     /// Validate the task graph structure required for execution.
     pub fn validate_structure(&self) -> Vec<TaskValidationIssue> {
         let mut issues = Vec::new();
@@ -703,6 +731,85 @@ impl TasksFile {
 
         issues
     }
+}
+
+fn validate_modern_fields_content(content: &str) -> Result<Vec<ModernFieldIssue>> {
+    let raw: toml::Value = toml::from_str(content).context("parse tasks.toml")?;
+    let Some(tasks) = raw.get("task").and_then(toml::Value::as_array) else {
+        return Ok(vec![ModernFieldIssue {
+            task_id: "tasks.toml".into(),
+            missing_fields: vec!["task"],
+        }]);
+    };
+
+    let mut issues = Vec::new();
+    for (index, task) in tasks.iter().enumerate() {
+        let task_table = task.as_table();
+        let task_id = task_table
+            .and_then(|table| table.get("id"))
+            .and_then(toml::Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| format!("task #{}", index + 1));
+
+        let Some(table) = task_table else {
+            issues.push(ModernFieldIssue {
+                task_id,
+                missing_fields: vec![
+                    "tier",
+                    "model_hint",
+                    "read_files",
+                    "verify",
+                    "depends_on",
+                ],
+            });
+            continue;
+        };
+
+        let mut missing_fields = Vec::new();
+
+        let tier_missing = table
+            .get("tier")
+            .and_then(toml::Value::as_str)
+            .is_none_or(|tier| tier.trim().is_empty());
+        if tier_missing {
+            missing_fields.push("tier");
+        }
+
+        let model_hint_missing = table
+            .get("model_hint")
+            .and_then(toml::Value::as_str)
+            .is_none_or(|hint| hint.trim().is_empty());
+        if model_hint_missing {
+            missing_fields.push("model_hint");
+        }
+
+        let read_files_missing = table
+            .get("context")
+            .and_then(toml::Value::as_table)
+            .and_then(|context| context.get("read_files"))
+            .is_none();
+        if read_files_missing {
+            missing_fields.push("read_files");
+        }
+
+        if !table.contains_key("verify") {
+            missing_fields.push("verify");
+        }
+
+        if !table.contains_key("depends_on") {
+            missing_fields.push("depends_on");
+        }
+
+        if !missing_fields.is_empty() {
+            issues.push(ModernFieldIssue {
+                task_id,
+                missing_fields,
+            });
+        }
+    }
+
+    Ok(issues)
 }
 
 fn detect_cycle_nodes(deps: &HashMap<&str, Vec<&str>>) -> Vec<String> {
@@ -1349,5 +1456,55 @@ depends_on = []
         let task = &parsed.tasks[0];
         assert_eq!(task.role.as_deref(), Some("researcher"));
         assert_eq!(task.denied_tools, Some(vec!["custom_block".into()]));
+    }
+
+    #[test]
+    fn validate_modern_fields_reports_missing_keys() {
+        let content = r#"
+[meta]
+plan = "demo"
+iteration = 1
+total = 1
+done = 0
+status = "ready"
+
+[[task]]
+id = "T1"
+title = "Legacy task"
+status = "ready"
+depends_on = []
+"#;
+        let issues = validate_modern_fields_content(content).unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(
+            issues[0].missing_fields,
+            vec!["tier", "model_hint", "read_files", "verify"]
+        );
+    }
+
+    #[test]
+    fn validate_modern_fields_accepts_full_metadata() {
+        let content = r#"
+[meta]
+plan = "demo"
+iteration = 1
+total = 1
+done = 0
+status = "ready"
+
+[[task]]
+id = "T1"
+title = "Modern task"
+status = "ready"
+tier = "focused"
+model_hint = "claude-sonnet-4-6"
+depends_on = []
+verify = [{ phase = "compile", command = "cargo check" }]
+
+[task.context]
+read_files = [{ path = "src/lib.rs" }]
+"#;
+        let issues = validate_modern_fields_content(content).unwrap();
+        assert!(issues.is_empty());
     }
 }
