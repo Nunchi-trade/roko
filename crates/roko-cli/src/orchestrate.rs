@@ -50,6 +50,7 @@ use roko_orchestrator::{
 use roko_std::NoOpScorer;
 use roko_std::StaticToolRegistry;
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken as TokioCancellationToken;
 
 use crate::config::Config;
 use crate::task_parser::TasksFile;
@@ -269,7 +270,7 @@ struct LearnedContext {
 struct WatcherRunner {
     conductor: Arc<Conductor>,
     signals_path: PathBuf,
-    cancel: CancelToken,
+    cancel: TokioCancellationToken,
 }
 
 impl WatcherRunner {
@@ -1282,7 +1283,10 @@ impl PlanRunner {
     ///
     /// Returns an error if agent dispatch, gate execution, or substrate
     /// I/O fails fatally (per-plan failures are recorded in the report).
-    pub async fn run_all(&mut self) -> Result<OrchestrationReport> {
+    pub async fn run_all(
+        &mut self,
+        watcher_cancel: &TokioCancellationToken,
+    ) -> Result<OrchestrationReport> {
         self.clear_stale_worktree_locks().await;
         // Clean up stale worktrees from previous runs (§6).
         if let Err(e) = self.worktrees.prune().await {
@@ -1314,13 +1318,6 @@ impl PlanRunner {
                 });
             }
         }
-
-        let watcher_task = WatcherRunner {
-            conductor: Arc::clone(&self.conductor),
-            signals_path: self.workdir.join(".roko").join("signals.jsonl"),
-            cancel: self.cancel.clone(),
-        }
-        .spawn();
 
         // Maximum iterations to prevent infinite loops.
         let max_iterations = 1000;
@@ -1356,7 +1353,10 @@ impl PlanRunner {
                     break;
                 }
                 // No actions but not all terminal — wait and retry.
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                tokio::select! {
+                    _ = watcher_cancel.cancelled() => break,
+                    _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {}
+                }
                 continue;
             }
 
@@ -1372,9 +1372,6 @@ impl PlanRunner {
                 self.actions_since_save = 0;
             }
         }
-
-        watcher_task.abort();
-        let _ = watcher_task.await;
 
         // Clean up worktrees after completion (§6).
         if let Err(e) = self.worktrees.reclaim_idle().await {
@@ -1467,25 +1464,39 @@ impl PlanRunner {
     /// handlers (handle_enriching, handle_implementing, etc.) use the
     /// trackers for task-level granularity.
     pub async fn run_task_plans(&mut self, plans_dir: &Path) -> Result<OrchestrationReport> {
-        // Pre-load task trackers for any plans not already tracked
-        let plan_dirs = Self::find_plan_dirs(plans_dir)?;
-        for plan_dir in &plan_dirs {
-            let name = plan_dir
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            let tasks_path = plan_dir.join("tasks.toml");
-            if tasks_path.exists() {
-                if let Ok(tf) = TasksFile::parse(&tasks_path) {
-                    self.task_trackers
-                        .entry(name)
-                        .or_insert_with(|| TaskTracker::new(tf, plan_dir.clone()));
+        let watcher_cancel = TokioCancellationToken::new();
+        let watcher_task = WatcherRunner {
+            conductor: Arc::clone(&self.conductor),
+            signals_path: self.workdir.join(".roko").join("signals.jsonl"),
+            cancel: watcher_cancel.clone(),
+        }
+        .spawn();
+
+        let result = async {
+            // Pre-load task trackers for any plans not already tracked
+            let plan_dirs = Self::find_plan_dirs(plans_dir)?;
+            for plan_dir in &plan_dirs {
+                let name = plan_dir
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                let tasks_path = plan_dir.join("tasks.toml");
+                if tasks_path.exists() {
+                    if let Ok(tf) = TasksFile::parse(&tasks_path) {
+                        self.task_trackers
+                            .entry(name)
+                            .or_insert_with(|| TaskTracker::new(tf, plan_dir.clone()));
+                    }
                 }
             }
-        }
 
-        self.run_all().await
+            self.run_all(&watcher_cancel).await
+        }
+        .await;
+        watcher_cancel.cancel();
+        let _ = watcher_task.await;
+        result
     }
 
     /// Find plan directories (containing plan.md or tasks.toml).
