@@ -26,6 +26,7 @@ use roko_gate::{ClippyGate, CompileGate, DiffGate, DiffPayload, GatePayload, Tes
 use roko_learn::episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage as EpisodeUsage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uuid::Uuid;
 use tracing::{info, warn};
 
 use crate::events::ServerEvent;
@@ -90,6 +91,13 @@ pub struct WebhookEpisodeMetadata {
 #[derive(Clone, Debug)]
 pub struct TemplateAgentDispatcher {
     workdir: PathBuf,
+}
+
+#[derive(Debug)]
+struct DispatchOutcome {
+    result: AgentResult,
+    gate_verdicts: Vec<GateVerdict>,
+    success: bool,
 }
 
 impl TemplateAgentDispatcher {
@@ -658,6 +666,8 @@ async fn dispatch_agent(
     dispatcher: Arc<dyn AgentDispatcher>,
 ) {
     let template_name = subscription.template().to_owned();
+    let started_at = Utc::now();
+    let started = Instant::now();
     let template = {
         let templates = state.templates.read().await;
         templates.get(&template_name).cloned()
@@ -671,9 +681,39 @@ async fn dispatch_agent(
         return;
     };
 
-    if let Err(err) = dispatch_template(state, template, signal, dispatcher).await {
-        warn!(error = %err, template = %template_name, "agent dispatch failed");
-    }
+    let outcome = match dispatch_template(state.clone(), template.clone(), signal.clone(), dispatcher).await {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            warn!(error = %err, template = %template_name, "agent dispatch failed");
+            let fallback_output = signal
+                .derive(
+                    Kind::AgentOutput,
+                    Body::text(format!("dispatch failed: {err}")),
+                )
+                .provenance(Provenance::trusted("roko-serve"))
+                .tag("agent", &template.agent.command)
+                .tag("failed", "true")
+                .build();
+            DispatchOutcome {
+                result: AgentResult::fail(fallback_output),
+                gate_verdicts: Vec::new(),
+                success: false,
+            }
+        }
+    };
+    let completed_at = Utc::now();
+
+    append_dispatch_episode(
+        &state,
+        &template,
+        &signal,
+        &outcome,
+        started_at,
+        completed_at,
+        started.elapsed().as_secs_f64(),
+    )
+    .await;
+
 }
 
 async fn dispatch_template(
@@ -681,7 +721,7 @@ async fn dispatch_template(
     template: AgentTemplate,
     signal: Signal,
     dispatcher: Arc<dyn AgentDispatcher>,
-) -> Result<()> {
+) -> Result<DispatchOutcome> {
     let dispatch_started = Instant::now();
     let dispatch_signal = build_dispatch_signal(&template, &signal)?;
     let dispatch_result = match dispatcher.dispatch(template.clone(), dispatch_signal.clone()).await
@@ -700,21 +740,16 @@ async fn dispatch_template(
                 .build();
             let result = AgentResult::fail(failure_output);
             record_template_run(&state, &template.name, false).await;
-            append_episode(
-                &state,
-                &template,
-                &signal,
-                &result,
-                &[],
-                false,
-            )
-            .await;
             state.event_bus.publish(ServerEvent::OperationCompleted {
                 op_id: format!("{}:{}", template.name, signal.id.to_hex()),
                 kind: format!("template_dispatch:{}", template.name),
                 success: false,
             });
-            return Ok(());
+            return Ok(DispatchOutcome {
+                result,
+                gate_verdicts: Vec::new(),
+                success: false,
+            });
         }
     };
     let output = dispatch_result.output.clone();
@@ -736,15 +771,6 @@ async fn dispatch_template(
 
     let success = dispatch_result.success && gate_verdicts.iter().all(|verdict| verdict.passed);
     record_template_run(&state, &template.name, success).await;
-    append_episode(
-        &state,
-        &template,
-        &signal,
-        &dispatch_result,
-        &gate_verdicts,
-        success,
-    )
-    .await;
 
     let completion_kind = format!("template_dispatch:{}", template.name);
     state.event_bus.publish(ServerEvent::OperationCompleted {
@@ -760,7 +786,11 @@ async fn dispatch_template(
         "template dispatch completed"
     );
 
-    Ok(())
+    Ok(DispatchOutcome {
+        result: dispatch_result,
+        gate_verdicts,
+        success,
+    })
 }
 
 fn build_agent(
@@ -918,35 +948,53 @@ async fn record_template_run(state: &Arc<AppState>, template_name: &str, success
         });
 }
 
-async fn append_episode(
+async fn append_dispatch_episode(
     state: &Arc<AppState>,
     template: &AgentTemplate,
     signal: &Signal,
-    result: &AgentResult,
-    gate_verdicts: &[GateVerdict],
-    success: bool,
+    outcome: &DispatchOutcome,
+    started_at: chrono::DateTime<Utc>,
+    completed_at: chrono::DateTime<Utc>,
+    duration_secs: f64,
 ) {
-    let agent_id = result
+    let agent_id = outcome
+        .result
         .output
         .tag("agent")
         .map_or_else(|| template.agent.command.clone(), ToString::to_string);
+    let episode_id = Uuid::new_v4().to_string();
+    let turns = 1_u64;
+    let tokens_used = u64::from(outcome.result.usage.total_tokens());
     let mut episode = Episode::new(agent_id, signal.id.to_hex());
     episode.kind = "agent_turn".into();
+    episode.timestamp = completed_at;
+    episode.id = episode_id.clone();
+    episode.episode_id = episode_id;
+    episode.agent_template = template.name.clone();
+    episode.model = template.agent.model.clone();
+    episode.trigger_kind = signal.kind.as_str().to_string();
+    episode.trigger_signal_hash = signal.id.to_hex();
+    episode.started_at = started_at;
+    episode.completed_at = completed_at;
+    episode.duration_secs = duration_secs;
     episode.input_signal_hash = signal.id.to_hex();
-    episode.output_signal_hash = result.output.id.to_hex();
-    episode.gate_verdicts = gate_verdicts.to_vec();
-    episode.success = success;
-    if !success {
+    episode.output_signal_hash = outcome.result.output.id.to_hex();
+    episode.gate_verdicts = outcome.gate_verdicts.clone();
+    episode.success = outcome.success;
+    episode.turns = turns;
+    episode.tokens_used = tokens_used;
+    episode.external_actions = Vec::new();
+    if !outcome.success {
         episode.failure_reason = Some("agent dispatch or template gate failure".into());
     }
     episode.usage = EpisodeUsage {
-        input_tokens: result.usage.input_tokens.into(),
-        output_tokens: result.usage.output_tokens.into(),
-        cache_read_tokens: result.usage.cache_read_tokens.into(),
-        cache_write_tokens: result.usage.cache_create_tokens.into(),
-        cost_usd: f64::from(result.usage.cost_usd),
-        cost_usd_without_cache: f64::from(result.usage.cost_usd),
-        wall_ms: result.usage.wall_ms,
+        input_tokens: outcome.result.usage.input_tokens.into(),
+        output_tokens: outcome.result.usage.output_tokens.into(),
+        cache_read_tokens: outcome.result.usage.cache_read_tokens.into(),
+        cache_write_tokens: outcome.result.usage.cache_create_tokens.into(),
+        cost_usd: f64::from(outcome.result.usage.cost_usd),
+        cost_usd_without_cache: f64::from(outcome.result.usage.cost_usd),
+        wall_ms: outcome.result.usage.wall_ms,
     };
 
     let logger = EpisodeLogger::new(state.layout.episodes_path());

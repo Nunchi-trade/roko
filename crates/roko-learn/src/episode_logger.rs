@@ -181,6 +181,30 @@ pub struct Episode {
     /// Hash of the output signal the agent produced.
     #[serde(default)]
     pub output_signal_hash: String,
+    /// Stable identifier for the episode record.
+    #[serde(default)]
+    pub episode_id: String,
+    /// Template or role name used to dispatch the agent.
+    #[serde(default)]
+    pub agent_template: String,
+    /// Model slug used for the dispatch.
+    #[serde(default)]
+    pub model: String,
+    /// Trigger kind that caused the dispatch.
+    #[serde(default)]
+    pub trigger_kind: String,
+    /// Hash of the trigger signal.
+    #[serde(default)]
+    pub trigger_signal_hash: String,
+    /// Time when the dispatch started.
+    #[serde(default = "Utc::now")]
+    pub started_at: DateTime<Utc>,
+    /// Time when the dispatch completed.
+    #[serde(default = "Utc::now")]
+    pub completed_at: DateTime<Utc>,
+    /// Dispatch duration in seconds.
+    #[serde(default)]
+    pub duration_secs: f64,
     /// Individual gate verdicts observed for the turn.
     #[serde(default)]
     pub gate_verdicts: Vec<GateVerdict>,
@@ -190,6 +214,15 @@ pub struct Episode {
     /// Whether the turn is considered successful overall.
     #[serde(default)]
     pub success: bool,
+    /// Number of agent turns observed for this episode.
+    #[serde(default)]
+    pub turns: u64,
+    /// Total tokens consumed by the agent run.
+    #[serde(default)]
+    pub tokens_used: u64,
+    /// External actions emitted while handling the trigger.
+    #[serde(default)]
+    pub external_actions: Vec<serde_json::Value>,
     /// Optional short failure reason (hashed, never raw output).
     #[serde(default)]
     pub failure_reason: Option<String>,
@@ -212,7 +245,9 @@ impl Episode {
         let agent_id = agent_id.into();
         let task_id = task_id.into();
         let timestamp = Utc::now();
-        let id = derive_id(&agent_id, &task_id, timestamp);
+        let started_at = timestamp.clone();
+        let completed_at = timestamp;
+        let id = derive_id(&agent_id, &task_id, completed_at.clone());
         Self {
             kind: String::new(),
             id,
@@ -221,9 +256,20 @@ impl Episode {
             task_id,
             input_signal_hash: String::new(),
             output_signal_hash: String::new(),
+            episode_id: String::new(),
+            agent_template: String::new(),
+            model: String::new(),
+            trigger_kind: String::new(),
+            trigger_signal_hash: String::new(),
+            started_at,
+            completed_at,
+            duration_secs: 0.0,
             gate_verdicts: Vec::new(),
             usage: Usage::default(),
             success: false,
+            turns: 0,
+            tokens_used: 0,
+            external_actions: Vec::new(),
             failure_reason: None,
             headline: false,
             extra: HashMap::new(),
