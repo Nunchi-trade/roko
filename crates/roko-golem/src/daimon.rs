@@ -61,14 +61,20 @@ impl AffectState {
 
     /// Resolve this PAD vector to its named octant.
     #[must_use]
-    pub fn octant(&self) -> AffectOctant {
+    pub const fn octant(&self) -> AffectOctant {
         AffectOctant::from_pad(self.pleasure, self.arousal, self.dominance)
     }
 
     /// Human-readable label for logging and dashboards.
     #[must_use]
-    pub fn octant_label(&self) -> &'static str {
+    pub const fn octant_label(&self) -> &'static str {
         self.octant().label()
+    }
+
+    /// Derive the behavioral modulation table entry for the current state.
+    #[must_use]
+    pub const fn behavior_modulation(&self) -> AffectBehaviorModulation {
+        self.octant().behavior_modulation()
     }
 }
 
@@ -309,6 +315,114 @@ impl AffectOctant {
             (false, false, false) => Self::Depressed,
         }
     }
+
+    /// Translate this affect state into behavioral parameters.
+    #[must_use]
+    pub const fn behavior_modulation(self) -> AffectBehaviorModulation {
+        match self {
+            Self::Anxious => AffectBehaviorModulation::anxious(),
+            Self::Confident => AffectBehaviorModulation::confident(),
+            Self::Angry => AffectBehaviorModulation::angry(),
+            Self::Bored => AffectBehaviorModulation::bored(),
+            _ => AffectBehaviorModulation::balanced(),
+        }
+    }
+}
+
+/// High-level behavior mode selected by affect state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AffectBehaviorStrategy {
+    /// Stick to proven playbooks and limit exploration.
+    Conservative,
+    /// Default mixed mode.
+    Balanced,
+    /// Bias toward novel approaches and broader search.
+    Exploratory,
+    /// Escalate capability and persist longer before giving up.
+    Escalating,
+    /// Run maintenance and background cognitive tasks.
+    Proactive,
+}
+
+/// Behavioral parameters modulated by the current affect state.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct AffectBehaviorModulation {
+    /// Coarse strategy preference.
+    pub strategy: AffectBehaviorStrategy,
+    /// Exploration rate in `[0.0, 1.0]`.
+    pub exploration_rate: f64,
+    /// Whether to prefer proven playbooks over novel approaches.
+    pub prefer_proven_playbooks: bool,
+    /// How many model-tier steps to escalate when selecting a model.
+    pub model_tier_escalation: u8,
+    /// Additional retry attempts before giving up.
+    pub extra_retries: u32,
+    /// Whether to trigger dream cycles proactively.
+    pub trigger_dream_cycles: bool,
+    /// Whether to run maintenance tasks proactively.
+    pub run_maintenance_tasks: bool,
+}
+
+impl AffectBehaviorModulation {
+    const fn balanced() -> Self {
+        Self {
+            strategy: AffectBehaviorStrategy::Balanced,
+            exploration_rate: 0.20,
+            prefer_proven_playbooks: true,
+            model_tier_escalation: 0,
+            extra_retries: 0,
+            trigger_dream_cycles: false,
+            run_maintenance_tasks: false,
+        }
+    }
+
+    const fn anxious() -> Self {
+        Self {
+            strategy: AffectBehaviorStrategy::Conservative,
+            exploration_rate: 0.05,
+            prefer_proven_playbooks: true,
+            model_tier_escalation: 0,
+            extra_retries: 0,
+            trigger_dream_cycles: false,
+            run_maintenance_tasks: false,
+        }
+    }
+
+    const fn confident() -> Self {
+        Self {
+            strategy: AffectBehaviorStrategy::Exploratory,
+            exploration_rate: 0.35,
+            prefer_proven_playbooks: false,
+            model_tier_escalation: 0,
+            extra_retries: 0,
+            trigger_dream_cycles: false,
+            run_maintenance_tasks: false,
+        }
+    }
+
+    const fn angry() -> Self {
+        Self {
+            strategy: AffectBehaviorStrategy::Escalating,
+            exploration_rate: 0.10,
+            prefer_proven_playbooks: true,
+            model_tier_escalation: 1,
+            extra_retries: 2,
+            trigger_dream_cycles: false,
+            run_maintenance_tasks: false,
+        }
+    }
+
+    const fn bored() -> Self {
+        Self {
+            strategy: AffectBehaviorStrategy::Proactive,
+            exploration_rate: 0.25,
+            prefer_proven_playbooks: true,
+            model_tier_escalation: 0,
+            extra_retries: 0,
+            trigger_dream_cycles: true,
+            run_maintenance_tasks: true,
+        }
+    }
 }
 
 impl fmt::Display for AffectOctant {
@@ -356,7 +470,9 @@ impl ScaffoldEngine for DaimonEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::{AffectEngine, AffectOctant, AffectState};
+    use super::{
+        AffectBehaviorStrategy, AffectEngine, AffectOctant, AffectState,
+    };
     use chrono::Utc;
 
     #[test]
@@ -432,6 +548,33 @@ mod tests {
         let heavy_blocked = engine.on_blocked("task-5", 5);
         assert!(heavy_blocked.arousal > light_blocked.arousal);
         assert!(heavy_blocked.dominance < light_blocked.dominance);
+    }
+
+    #[test]
+    fn behavior_modulation_matches_named_affect_states() {
+        let anxious = AffectOctant::Anxious.behavior_modulation();
+        assert_eq!(anxious.strategy, AffectBehaviorStrategy::Conservative);
+        assert!(anxious.prefer_proven_playbooks);
+        assert!(anxious.exploration_rate < 0.1);
+        assert_eq!(anxious.model_tier_escalation, 0);
+        assert_eq!(anxious.extra_retries, 0);
+        assert!(!anxious.trigger_dream_cycles);
+        assert!(!anxious.run_maintenance_tasks);
+
+        let confident = AffectOctant::Confident.behavior_modulation();
+        assert_eq!(confident.strategy, AffectBehaviorStrategy::Exploratory);
+        assert!(!confident.prefer_proven_playbooks);
+        assert!(confident.exploration_rate > anxious.exploration_rate);
+
+        let angry = AffectOctant::Angry.behavior_modulation();
+        assert_eq!(angry.strategy, AffectBehaviorStrategy::Escalating);
+        assert_eq!(angry.model_tier_escalation, 1);
+        assert!(angry.extra_retries >= 2);
+
+        let bored = AffectOctant::Bored.behavior_modulation();
+        assert_eq!(bored.strategy, AffectBehaviorStrategy::Proactive);
+        assert!(bored.trigger_dream_cycles);
+        assert!(bored.run_maintenance_tasks);
     }
 
     #[test]
