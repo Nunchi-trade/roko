@@ -18,7 +18,8 @@
 //! - Complexity band (scalar 0.0 / 0.5 / 1.0)
 //! - Iteration (normalized: iteration / 10, capped at 1.0)
 //! - Agent role (hashed to 4-dim float vector)
-//! - Crate familiarity (0.0 - 1.0)
+//! - Crate familiarity for the crate being modified
+//!   (`success_count / total_count`, clamped to `[0.0, 1.0]`)
 //! - Has prior failure (0.0 or 1.0)
 //! - Bias term (always 1.0)
 //!
@@ -109,7 +110,7 @@ impl RoutingContext {
         x[idx..idx + 4].copy_from_slice(&role_hash);
         idx += 4;
 
-        // Crate familiarity
+        // Per-crate familiarity score for the crate being modified.
         x[idx] = self.crate_familiarity.clamp(0.0, 1.0);
         idx += 1;
 

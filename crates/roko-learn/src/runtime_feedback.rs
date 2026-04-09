@@ -601,13 +601,14 @@ impl LearningRuntime {
         let cplx_json = format!("\"{complexity_str}\"");
         let complexity = serde_json::from_str::<TaskComplexityBand>(&cplx_json)
             .unwrap_or(TaskComplexityBand::Standard);
+        let crate_familiarity = extra_f64(episode, "crate_familiarity").unwrap_or(0.5);
 
         let ctx = RoutingContext {
             task_category,
             complexity,
             iteration: 0,
             role,
-            crate_familiarity: 0.5,
+            crate_familiarity,
             has_prior_failure: !episode.success,
         };
         if episode
@@ -634,6 +635,11 @@ fn extra_string(episode: &Episode, key: &str) -> Option<String> {
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .map(ToOwned::to_owned)
+}
+
+/// Read optional floating-point value from `episode.extra`.
+fn extra_f64(episode: &Episode, key: &str) -> Option<f64> {
+    episode.extra.get(key).and_then(serde_json::Value::as_f64)
 }
 
 /// Build a [`CostRecord`] from an [`Episode`] and optional provider override.

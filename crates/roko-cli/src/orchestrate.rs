@@ -7,6 +7,7 @@
 //! real agents, gates, and git, then feeds results back as events.
 
 use std::collections::{HashMap, HashSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -132,6 +133,126 @@ impl ContextAttributionTracker {
             entry.0 += 1;
         }
         entry.1 += 1;
+    }
+}
+
+// ─── CrateFamiliarityTracker ──────────────────────────────────────────────
+
+/// Tracks per-crate task outcomes so we can derive a familiarity score.
+///
+/// The score is `success_count / total_count` for the crate touched by the
+/// task's changed files. This is persisted as JSONL under `.roko/learn/` and
+/// reloaded on startup so routing has history across runs.
+struct CrateFamiliarityTracker {
+    /// Append-only JSONL file with crate outcome observations.
+    path: PathBuf,
+    /// crate_name -> (success_count, total_count)
+    stats: HashMap<String, (u64, u64)>,
+}
+
+impl CrateFamiliarityTracker {
+    fn load(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        let mut stats: HashMap<String, (u64, u64)> = HashMap::new();
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            for line in contents.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line)
+                    && let Some(crate_name) = v.get("crate_name").and_then(|c| c.as_str())
+                {
+                    let success = v.get("success").and_then(|s| s.as_bool()).unwrap_or(false);
+                    let entry = stats.entry(crate_name.to_string()).or_insert((0, 0));
+                    if success {
+                        entry.0 += 1;
+                    }
+                    entry.1 += 1;
+                }
+            }
+        }
+        Self { path, stats }
+    }
+
+    /// Return the familiarity score for the crate touched by `task_def`.
+    #[must_use]
+    fn score_for_task(&self, task_def: Option<&crate::task_parser::TaskDef>) -> f64 {
+        task_crate_name(task_def)
+            .as_deref()
+            .map(|crate_name| self.score_for_crate(crate_name))
+            .unwrap_or(0.5)
+    }
+
+    /// Record one task outcome for every crate touched by the task files.
+    fn record_task_outcome(
+        &mut self,
+        task_def: Option<&crate::task_parser::TaskDef>,
+        success: bool,
+        plan_id: &str,
+        task_id: &str,
+    ) -> std::io::Result<()> {
+        let Some(crate_name) = task_crate_name(task_def) else {
+            return Ok(());
+        };
+
+        let entry = self.stats.entry(crate_name.clone()).or_insert((0, 0));
+        if success {
+            entry.0 += 1;
+        }
+        entry.1 += 1;
+
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        let record = serde_json::json!({
+            "plan_id": plan_id,
+            "task_id": task_id,
+            "crate_name": crate_name,
+            "success": success,
+            "ts": chrono::Utc::now().to_rfc3339(),
+        });
+        writeln!(file, "{}", record)?;
+        Ok(())
+    }
+
+    fn score_for_crate(&self, crate_name: &str) -> f64 {
+        match self.stats.get(crate_name) {
+            Some(&(success_count, total_count)) if total_count > 0 => {
+                success_count as f64 / total_count as f64
+            }
+            _ => 0.5,
+        }
+    }
+}
+
+/// Derive a crate name from the task's modified files.
+fn task_crate_name(task_def: Option<&crate::task_parser::TaskDef>) -> Option<String> {
+    let mut seen = HashSet::new();
+    task_def
+        .into_iter()
+        .flat_map(|task| task.files.iter())
+        .filter_map(|file| crate_name_for_path(file))
+        .find(|crate_name| seen.insert(crate_name.clone()))
+}
+
+/// Best-effort crate key derivation from a repository-relative file path.
+fn crate_name_for_path(path: &str) -> Option<String> {
+    let normalized = path.replace('\\', "/");
+    let parts: Vec<&str> = normalized.split('/').filter(|part| !part.is_empty()).collect();
+    match parts.as_slice() {
+        [first, second, ..] if *first == "crates" || *first == "apps" => {
+            Some((*second).to_string())
+        }
+        [first, second, ..] if matches!(*second, "src" | "tests" | "benches") => {
+            Some((*first).to_string())
+        }
+        [first, ..] if matches!(*first, "src" | "tests" | "benches") => {
+            Some("workspace".to_string())
+        }
+        [first, ..] if *first == "Cargo.toml" => Some("workspace".to_string()),
+        _ => None,
     }
 }
 
@@ -625,6 +746,8 @@ pub struct PlanRunner {
     conductor_signals: Vec<Signal>,
     /// Context attribution tracker for per-(tier, source_type) demotion decisions.
     attribution_tracker: ContextAttributionTracker,
+    /// Per-crate familiarity tracker for LinUCB context features.
+    crate_familiarity_tracker: CrateFamiliarityTracker,
     /// Cumulative USD cost per plan_id.
     plan_costs: HashMap<String, f64>,
     /// Cumulative USD cost per plan/task dispatch key.
@@ -719,12 +842,16 @@ fn cascade_context_vec(
         .get(plan_id)
         .is_some_and(|tracker| tracker.last_gate_failure.is_some());
 
+    let crate_familiarity = runner
+        .crate_familiarity_tracker
+        .score_for_task(task_def);
+
     RoutingContext {
         task_category: TaskCategory::Implementation,
         complexity,
         iteration,
         role,
-        crate_familiarity: 0.5,
+        crate_familiarity,
         has_prior_failure,
     }
     .to_features()
@@ -1116,6 +1243,12 @@ impl PlanRunner {
             attribution_tracker: ContextAttributionTracker::load(
                 &workdir.join(".roko").join("context-attribution.jsonl"),
             ),
+            crate_familiarity_tracker: CrateFamiliarityTracker::load(
+                workdir
+                    .join(".roko")
+                    .join("learn")
+                    .join("crate-familiarity.jsonl"),
+            ),
             plan_costs: HashMap::new(),
             task_costs: HashMap::new(),
             metrics,
@@ -1193,6 +1326,12 @@ impl PlanRunner {
             conductor_signals: Vec::new(),
             attribution_tracker: ContextAttributionTracker::load(
                 &workdir.join(".roko").join("context-attribution.jsonl"),
+            ),
+            crate_familiarity_tracker: CrateFamiliarityTracker::load(
+                workdir
+                    .join(".roko")
+                    .join("learn")
+                    .join("crate-familiarity.jsonl"),
             ),
             plan_costs: HashMap::new(),
             task_costs: HashMap::new(),
@@ -1275,6 +1414,12 @@ impl PlanRunner {
             conductor_signals: Vec::new(),
             attribution_tracker: ContextAttributionTracker::load(
                 &workdir.join(".roko").join("context-attribution.jsonl"),
+            ),
+            crate_familiarity_tracker: CrateFamiliarityTracker::load(
+                workdir
+                    .join(".roko")
+                    .join("learn")
+                    .join("crate-familiarity.jsonl"),
             ),
             plan_costs: HashMap::new(),
             task_costs: HashMap::new(),
@@ -3138,7 +3283,28 @@ impl PlanRunner {
             tracing::debug!(
                 plan_id = %plan_id,
                 model = %model_slug,
-                "skipping cascade observation: model not found in router arms"
+            "skipping cascade observation: model not found in router arms"
+            );
+        }
+    }
+
+    /// Persist one crate-familiarity observation for the current task.
+    fn record_crate_familiarity(
+        &mut self,
+        plan_id: &str,
+        task_id: &str,
+        task_def: Option<&crate::task_parser::TaskDef>,
+        success: bool,
+    ) {
+        if let Err(err) =
+            self.crate_familiarity_tracker
+                .record_task_outcome(task_def, success, plan_id, task_id)
+        {
+            tracing::warn!(
+                plan_id = %plan_id,
+                task_id = %task_id,
+                error = %err,
+                "failed to record crate familiarity observation"
             );
         }
     }
@@ -3358,6 +3524,14 @@ impl PlanRunner {
         }
 
         let mut ep = Episode::new("Implementer", task_id).succeeded();
+        if let Some(task_def) = task_def.as_ref() {
+            ep.extra
+                .insert("files".to_string(), serde_json::json!(task_def.files.clone()));
+        }
+        ep.extra.insert(
+            "crate_familiarity".to_string(),
+            serde_json::json!(self.crate_familiarity_tracker.score_for_task(task_def.as_ref())),
+        );
         ep.usage = Usage {
             wall_ms,
             cost_usd: f64::from(result.usage.cost_usd),
@@ -3376,6 +3550,7 @@ impl PlanRunner {
         let model = self.effective_model();
         let input = self.enrich_completed_run(ep, plan_id, task_id, "Implementer", &model, None, 1);
         self.record_and_check_learning(input, plan_id).await;
+        self.record_crate_familiarity(plan_id, task_id, task_def.as_ref(), true);
 
         // Emit efficiency event for this agent turn.
         self.emit_efficiency_event(
@@ -3606,6 +3781,14 @@ impl PlanRunner {
             self.observe_cascade_router(plan_id, task_def.as_ref(), model, 0.0);
         }
         let mut ep = Episode::new("Implementer", task_id).failed(error.to_string());
+        if let Some(task_def) = task_def.as_ref() {
+            ep.extra
+                .insert("files".to_string(), serde_json::json!(task_def.files.clone()));
+        }
+        ep.extra.insert(
+            "crate_familiarity".to_string(),
+            serde_json::json!(self.crate_familiarity_tracker.score_for_task(task_def.as_ref())),
+        );
         ep.usage = match result {
             Some(result) => Usage {
                 wall_ms,
@@ -3625,6 +3808,7 @@ impl PlanRunner {
         let model = self.effective_model();
         let input = self.enrich_completed_run(ep, plan_id, task_id, "Implementer", &model, None, 1);
         self.record_and_check_learning(input, plan_id).await;
+        self.record_crate_familiarity(plan_id, task_id, task_def.as_ref(), false);
         if let Some(request) = self
             .build_failed_skill_request(plan_id, task_id, task_text, selected_model)
             .await
@@ -6724,6 +6908,7 @@ fn save_task_output(workdir: &Path, task_id: &str, output: &str) {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use tempfile::TempDir;
 
     #[test]
     fn orchestration_report_all_succeeded() {
@@ -7097,5 +7282,51 @@ read_files = [
                 "src/mod.rs".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn crate_name_for_path_derives_member_and_workspace_crates() {
+        assert_eq!(
+            crate_name_for_path("crates/roko-cli/src/orchestrate.rs"),
+            Some("roko-cli".to_string())
+        );
+        assert_eq!(
+            crate_name_for_path("apps/demo/src/main.rs"),
+            Some("demo".to_string())
+        );
+        assert_eq!(
+            crate_name_for_path("src/lib.rs"),
+            Some("workspace".to_string())
+        );
+        assert_eq!(crate_name_for_path("README.md"), None);
+    }
+
+    #[test]
+    fn crate_familiarity_tracker_persists_ratio() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("crate-familiarity.jsonl");
+        let task: crate::task_parser::TaskDef = toml::from_str(
+            r#"
+id = "T1"
+title = "Touch orchestrator"
+files = ["crates/roko-cli/src/orchestrate.rs"]
+"#,
+        )
+        .unwrap();
+
+        let mut tracker = CrateFamiliarityTracker::load(&path);
+        assert!((tracker.score_for_task(Some(&task)) - 0.5).abs() < f64::EPSILON);
+
+        tracker
+            .record_task_outcome(Some(&task), true, "plan-a", "task-a")
+            .unwrap();
+        tracker
+            .record_task_outcome(Some(&task), false, "plan-b", "task-b")
+            .unwrap();
+
+        assert!((tracker.score_for_task(Some(&task)) - 0.5).abs() < f64::EPSILON);
+
+        let reloaded = CrateFamiliarityTracker::load(&path);
+        assert!((reloaded.score_for_task(Some(&task)) - 0.5).abs() < f64::EPSILON);
     }
 }
