@@ -7,12 +7,12 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use axum::Router;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
-use axum::Router;
 use hmac::{Hmac, Mac};
 use roko_core::signal_kinds;
 use roko_core::{Body, Kind, Provenance, Signal};
@@ -98,7 +98,11 @@ async fn slack_webhook(
             .and_then(Value::as_str)
             .ok_or_else(|| ApiError::bad_request("missing slack challenge field"))?;
 
-        return Ok((StatusCode::OK, axum::Json(json!({ "challenge": challenge }))).into_response());
+        return Ok((
+            StatusCode::OK,
+            axum::Json(json!({ "challenge": challenge })),
+        )
+            .into_response());
     }
 
     let secret = std::env::var("SLACK_SIGNING_SECRET")
@@ -189,9 +193,7 @@ fn github_signal_kind(event_type: &str, payload: &Value) -> Option<Kind> {
             .and_then(Value::as_str)
             .filter(|action| *action == "opened")
             .map(|_| Kind::Custom(signal_kinds::GITHUB_PR_OPENED.into())),
-        "pull_request_review" => {
-            Some(Kind::Custom(signal_kinds::GITHUB_PR_REVIEW.into()))
-        }
+        "pull_request_review" => Some(Kind::Custom(signal_kinds::GITHUB_PR_REVIEW.into())),
         "issues" => payload
             .get("action")
             .and_then(Value::as_str)
@@ -324,16 +326,25 @@ mod tests {
     #[test]
     fn maps_supported_github_events_to_signal_kinds() {
         let push = github_signal_kind("push", &serde_json::json!({}));
-        assert!(matches!(push.as_ref().map(Kind::as_str), Some(kind) if kind == signal_kinds::GITHUB_PUSH));
+        assert!(
+            matches!(push.as_ref().map(Kind::as_str), Some(kind) if kind == signal_kinds::GITHUB_PUSH)
+        );
 
-        let pr_opened = github_signal_kind("pull_request", &serde_json::json!({ "action": "opened" }));
-        assert!(matches!(pr_opened.as_ref().map(Kind::as_str), Some(kind) if kind == signal_kinds::GITHUB_PR_OPENED));
+        let pr_opened =
+            github_signal_kind("pull_request", &serde_json::json!({ "action": "opened" }));
+        assert!(
+            matches!(pr_opened.as_ref().map(Kind::as_str), Some(kind) if kind == signal_kinds::GITHUB_PR_OPENED)
+        );
 
         let review = github_signal_kind("pull_request_review", &serde_json::json!({}));
-        assert!(matches!(review.as_ref().map(Kind::as_str), Some(kind) if kind == signal_kinds::GITHUB_PR_REVIEW));
+        assert!(
+            matches!(review.as_ref().map(Kind::as_str), Some(kind) if kind == signal_kinds::GITHUB_PR_REVIEW)
+        );
 
         let issue_opened = github_signal_kind("issues", &serde_json::json!({ "action": "opened" }));
-        assert!(matches!(issue_opened.as_ref().map(Kind::as_str), Some(kind) if kind == signal_kinds::GITHUB_ISSUE_OPENED));
+        assert!(
+            matches!(issue_opened.as_ref().map(Kind::as_str), Some(kind) if kind == signal_kinds::GITHUB_ISSUE_OPENED)
+        );
     }
 
     #[test]
@@ -346,7 +357,10 @@ mod tests {
             Err(_) => panic!("invalid test hmac key"),
         };
         mac.update(body);
-        let signature = format!("sha256={}", hex_encode(mac.finalize().into_bytes().as_ref()));
+        let signature = format!(
+            "sha256={}",
+            hex_encode(mac.finalize().into_bytes().as_ref())
+        );
 
         assert!(verify_github_signature(secret, body, &signature));
         assert!(!verify_github_signature(secret, body, "sha256=deadbeef"));
@@ -355,10 +369,14 @@ mod tests {
     #[test]
     fn maps_supported_slack_events_to_signal_kinds() {
         let message = slack_signal_kind("message");
-        assert!(matches!(message.as_ref().map(Kind::as_str), Some(kind) if kind == signal_kinds::SLACK_MESSAGE));
+        assert!(
+            matches!(message.as_ref().map(Kind::as_str), Some(kind) if kind == signal_kinds::SLACK_MESSAGE)
+        );
 
         let reaction = slack_signal_kind("reaction_added");
-        assert!(matches!(reaction.as_ref().map(Kind::as_str), Some(kind) if kind == signal_kinds::SLACK_REACTION));
+        assert!(
+            matches!(reaction.as_ref().map(Kind::as_str), Some(kind) if kind == signal_kinds::SLACK_REACTION)
+        );
     }
 
     #[test]
@@ -376,7 +394,12 @@ mod tests {
         let signature = format!("v0={}", hex_encode(mac.finalize().into_bytes().as_ref()));
 
         assert!(verify_slack_signature(secret, timestamp, body, &signature));
-        assert!(!verify_slack_signature(secret, timestamp, body, "v0=deadbeef"));
+        assert!(!verify_slack_signature(
+            secret,
+            timestamp,
+            body,
+            "v0=deadbeef"
+        ));
     }
 
     #[test]

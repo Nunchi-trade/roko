@@ -13,17 +13,17 @@ mod plans;
 mod prds;
 mod research;
 mod run;
-mod webhooks;
 mod status;
 mod templates;
+mod webhooks;
 mod ws;
 
 use std::sync::Arc;
 
-use axum::Router;
-use tower_http::trace::TraceLayer;
 use super::state::AppState;
+use axum::Router;
 use roko_core::config::ServeAuthConfig;
+use tower_http::trace::TraceLayer;
 
 /// Build the complete API router with all route groups and middleware.
 pub fn build_router(

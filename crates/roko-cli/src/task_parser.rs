@@ -248,13 +248,22 @@ impl std::fmt::Display for TaskQualityWarning {
                 "{task_id}: description is {word_count} words (>500); likely too coarse for ≤50 LOC changes"
             ),
             Self::MissingReadFiles { task_id } => {
-                write!(f, "{task_id}: missing context.read_files; agent won't have file context")
+                write!(
+                    f,
+                    "{task_id}: missing context.read_files; agent won't have file context"
+                )
             }
             Self::MissingVerify { task_id } => {
-                write!(f, "{task_id}: missing verify steps; no way to check completion")
+                write!(
+                    f,
+                    "{task_id}: missing verify steps; no way to check completion"
+                )
             }
             Self::TooManyTasks { task_count } => {
-                write!(f, "plan has {task_count} tasks (>20); consider splitting it")
+                write!(
+                    f,
+                    "plan has {task_count} tasks (>20); consider splitting it"
+                )
             }
         }
     }
@@ -755,13 +764,7 @@ fn validate_modern_fields_content(content: &str) -> Result<Vec<ModernFieldIssue>
         let Some(table) = task_table else {
             issues.push(ModernFieldIssue {
                 task_id,
-                missing_fields: vec![
-                    "tier",
-                    "model_hint",
-                    "read_files",
-                    "verify",
-                    "depends_on",
-                ],
+                missing_fields: vec!["tier", "model_hint", "read_files", "verify", "depends_on"],
             });
             continue;
         };
@@ -855,7 +858,14 @@ fn detect_cycle_nodes(deps: &HashMap<&str, Vec<&str>>) -> Vec<String> {
 
     for node in nodes {
         if state.get(node).copied().unwrap_or(0) == 0 {
-            dfs(node, deps, &mut state, &mut stack, &mut positions, &mut cycle_nodes);
+            dfs(
+                node,
+                deps,
+                &mut state,
+                &mut stack,
+                &mut positions,
+                &mut cycle_nodes,
+            );
         }
     }
 
@@ -1203,15 +1213,21 @@ depends_on = ["missing"]
         .unwrap();
 
         let issues = tasks.validate_structure();
-        assert!(issues
-            .iter()
-            .any(|issue| matches!(issue, TaskValidationIssue::UnknownDependency { .. })));
-        assert!(issues
-            .iter()
-            .any(|issue| matches!(issue, TaskValidationIssue::CircularDependency { .. })));
-        assert!(issues
-            .iter()
-            .any(|issue| matches!(issue, TaskValidationIssue::NoStartNode)));
+        assert!(
+            issues
+                .iter()
+                .any(|issue| matches!(issue, TaskValidationIssue::UnknownDependency { .. }))
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|issue| matches!(issue, TaskValidationIssue::CircularDependency { .. }))
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|issue| matches!(issue, TaskValidationIssue::NoStartNode))
+        );
     }
 
     #[test]
@@ -1233,7 +1249,10 @@ depends_on = []
         let issues = tasks.validate_structure();
         assert!(issues.iter().any(|issue| matches!(
             issue,
-            TaskValidationIssue::MissingRequiredField { field: "description", .. }
+            TaskValidationIssue::MissingRequiredField {
+                field: "description",
+                ..
+            }
         )));
     }
 

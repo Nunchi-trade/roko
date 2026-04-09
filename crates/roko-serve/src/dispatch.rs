@@ -14,24 +14,24 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
 use anyhow::{Context as _, Result};
+use async_trait::async_trait;
 use chrono::Utc;
 use parking_lot::{Mutex, RwLock};
 use roko_agent::{Agent, AgentResult, ClaudeCliAgent, ExecAgent};
-use roko_core::{Body, Context as RokoContext, Gate, Kind, Provenance, Signal};
 use roko_core::config::schema::{RokoConfig, SubscriptionConfig, SubscriptionFilterConfig};
-use roko_core::{ContentHash, Verdict};
 use roko_core::tool::ExternalAction;
+use roko_core::{Body, Context as RokoContext, Gate, Kind, Provenance, Signal};
+use roko_core::{ContentHash, Verdict};
 use roko_gate::{ClippyGate, CompileGate, DiffGate, DiffPayload, GatePayload, TestGate};
-use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::cascade_router::CascadeRouter;
+use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage as EpisodeUsage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use uuid::Uuid;
 use tokio::io::AsyncWriteExt;
 use tracing::{info, warn};
+use uuid::Uuid;
 
 use crate::events::ServerEvent;
 use crate::state::{AppState, TemplateRunRecord};
@@ -378,7 +378,9 @@ impl SubscriptionRegistry {
             for path in files {
                 match load_subscription_file(&path) {
                     Ok(mut loaded) => subscriptions.append(&mut loaded),
-                    Err(e) => warn!(path = %path.display(), error = %e, "failed to load subscription file"),
+                    Err(e) => {
+                        warn!(path = %path.display(), error = %e, "failed to load subscription file")
+                    }
                 }
             }
         } else if subs_dir.exists() {
@@ -459,12 +461,8 @@ impl SubscriptionRegistry {
                 return false;
             }
 
-            match active.compare_exchange(
-                current,
-                current + 1,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
+            match active.compare_exchange(current, current + 1, Ordering::AcqRel, Ordering::Acquire)
+            {
                 Ok(_) => return true,
                 Err(next) => current = next,
             }
@@ -522,7 +520,11 @@ fn load_subscription_file(path: &Path) -> anyhow::Result<Vec<Subscription>> {
         toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
     let mut subscriptions = Vec::new();
     subscriptions.extend(file.subscription.into_iter().map(Subscription::from_config));
-    subscriptions.extend(file.subscriptions.into_iter().map(Subscription::from_config));
+    subscriptions.extend(
+        file.subscriptions
+            .into_iter()
+            .map(Subscription::from_config),
+    );
 
     if subscriptions.is_empty() {
         anyhow::bail!("no subscriptions found");
@@ -558,9 +560,12 @@ fn matches_any_glob<'a>(
     patterns: &[String],
 ) -> bool {
     let candidates: Vec<&'a str> = candidates.into_iter().collect();
-    patterns
-        .iter()
-        .any(|pattern| candidates.iter().copied().any(|candidate| glob_match(pattern, candidate)))
+    patterns.iter().any(|pattern| {
+        candidates
+            .iter()
+            .copied()
+            .any(|candidate| glob_match(pattern, candidate))
+    })
 }
 
 fn signal_repo_candidates(signal: &Signal) -> Vec<&str> {
@@ -666,10 +671,7 @@ fn json_string_array_at<'a>(value: &'a Value, path: &[&str]) -> Vec<&'a str> {
 }
 
 /// Central event routing loop for webhook-driven signals.
-pub async fn dispatch_loop(
-    state: Arc<AppState>,
-    dispatcher: Arc<dyn AgentDispatcher>,
-) {
+pub async fn dispatch_loop(state: Arc<AppState>, dispatcher: Arc<dyn AgentDispatcher>) {
     let subscriptions: SubscriptionRegistry = state.subscriptions.clone();
     let mut rx = state.event_bus.subscribe();
 
@@ -735,7 +737,14 @@ async fn dispatch_agent(
         return;
     };
 
-    let outcome = match dispatch_template(state.clone(), template.clone(), signal.clone(), dispatcher).await {
+    let outcome = match dispatch_template(
+        state.clone(),
+        template.clone(),
+        signal.clone(),
+        dispatcher,
+    )
+    .await
+    {
         Ok(outcome) => outcome,
         Err(err) => {
             warn!(error = %err, template = %template_name, "agent dispatch failed");
@@ -767,7 +776,6 @@ async fn dispatch_agent(
         started.elapsed().as_secs_f64(),
     )
     .await;
-
 }
 
 async fn dispatch_template(
@@ -778,7 +786,9 @@ async fn dispatch_template(
 ) -> Result<DispatchOutcome> {
     let dispatch_started = Instant::now();
     let dispatch_signal = build_dispatch_signal(&template, &signal)?;
-    let dispatch_result = match dispatcher.dispatch(template.clone(), dispatch_signal.clone()).await
+    let dispatch_result = match dispatcher
+        .dispatch(template.clone(), dispatch_signal.clone())
+        .await
     {
         Ok(result) => result,
         Err(err) => {
@@ -913,7 +923,9 @@ fn build_dispatch_signal(template: &AgentTemplate, signal: &Signal) -> Result<Si
 fn signal_body_to_text(body: &Body) -> String {
     match body {
         Body::Text(text) => text.clone(),
-        Body::Json(value) => serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
+        Body::Json(value) => {
+            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+        }
         Body::Bytes(bytes) => format!("<{} bytes>", bytes.len()),
         Body::Empty => String::new(),
     }
@@ -936,11 +948,7 @@ async fn run_template_gates(
     verdicts
 }
 
-async fn run_named_gate(
-    state: &Arc<AppState>,
-    gate_name: &str,
-    output: &Signal,
-) -> Verdict {
+async fn run_named_gate(state: &Arc<AppState>, gate_name: &str, output: &Signal) -> Verdict {
     let ctx = RokoContext::now().with_attr("gate", gate_name.to_string());
     let payload_signal = match gate_payload_signal(&state.workdir, gate_name, output) {
         Ok(signal) => signal,
@@ -1057,8 +1065,7 @@ async fn append_dispatch_episode(
         return;
     }
 
-    if let Err(err) = record_cascade_router_outcome(state, template, outcome.result.success).await
-    {
+    if let Err(err) = record_cascade_router_outcome(state, template, outcome.result.success).await {
         warn!(error = %err, template = %template.name, "failed to record cascade router outcome");
     }
 

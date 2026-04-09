@@ -58,6 +58,5 @@ pub use run::{RunReport, run_once};
 pub use secrets::SecretsCmd;
 pub use status::SessionStatus;
 pub use tui::{
-    DashboardData, DashboardScaffold, DashboardSummary, PageId, PageScaffold, Theme,
-    WidgetScaffold,
+    DashboardData, DashboardScaffold, DashboardSummary, PageId, PageScaffold, Theme, WidgetScaffold,
 };

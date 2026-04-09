@@ -309,13 +309,7 @@ impl CascadeRouter {
         self.observe_internal(&context_vec, model_idx, reward, true);
     }
 
-    fn observe_internal(
-        &self,
-        context_vec: &[f64],
-        model_idx: usize,
-        reward: f64,
-        success: bool,
-    ) {
+    fn observe_internal(&self, context_vec: &[f64], model_idx: usize, reward: f64, success: bool) {
         let Some(slug) = self.model_slugs.get(model_idx) else {
             return;
         };

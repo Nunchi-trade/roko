@@ -38,7 +38,11 @@ pub fn render_dashboard(
 ) {
     let areas = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(5), Constraint::Min(0), Constraint::Length(2)])
+        .constraints([
+            Constraint::Length(5),
+            Constraint::Min(0),
+            Constraint::Length(2),
+        ])
         .split(frame.area());
 
     render_header(frame, areas[0], dashboard, pages, active_page, theme);
@@ -81,10 +85,7 @@ pub fn render_header(
     let summary = dashboard.summary();
     let title = Paragraph::new(vec![
         Line::from(vec![
-            Span::styled(
-                "roko ",
-                theme.accent_bold(),
-            ),
+            Span::styled("roko ", theme.accent_bold()),
             Span::raw("dashboard"),
         ]),
         Line::from(summary.to_string()),
@@ -151,14 +152,12 @@ pub fn render_page(
     theme: &Theme,
 ) {
     let Some(page) = pages.page(active_page) else {
-        let placeholder = Paragraph::new("missing page")
-            .style(theme.muted())
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("content")
-                    .border_style(theme.muted()),
-            );
+        let placeholder = Paragraph::new("missing page").style(theme.muted()).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("content")
+                .border_style(theme.muted()),
+        );
         frame.render_widget(placeholder, area);
         return;
     };
@@ -2400,7 +2399,9 @@ fn gauge_style(status: &str, completed: bool) -> Style {
     match status.to_ascii_lowercase().as_str() {
         "failed" | "error" => Style::default().fg(theme.danger).bg(theme.background),
         "gating" => Style::default().fg(theme.warning).bg(theme.background),
-        "implementing" | "running" | "active" => Style::default().fg(theme.info).bg(theme.background),
+        "implementing" | "running" | "active" => {
+            Style::default().fg(theme.info).bg(theme.background)
+        }
         "queued" | "pending" => Style::default().fg(theme.muted).bg(theme.background),
         _ => Style::default().fg(theme.foreground).bg(theme.background),
     }
@@ -2524,25 +2525,13 @@ fn render_footer_themed(
     let page_count = pages.len();
     let footer = Paragraph::new(vec![
         Line::from(vec![
-            Span::styled(
-                "q",
-                theme.warning(),
-            ),
+            Span::styled("q", theme.warning()),
             Span::raw(" quit  "),
-            Span::styled(
-                "r",
-                theme.warning(),
-            ),
+            Span::styled("r", theme.warning()),
             Span::raw(" refresh  "),
-            Span::styled(
-                "←/→",
-                theme.warning(),
-            ),
+            Span::styled("←/→", theme.warning()),
             Span::raw(" page  "),
-            Span::styled(
-                "↑/↓",
-                theme.warning(),
-            ),
+            Span::styled("↑/↓", theme.warning()),
             Span::raw(" scroll"),
         ]),
         Line::from(format!(

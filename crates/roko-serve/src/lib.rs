@@ -6,10 +6,10 @@
 
 pub mod deploy;
 pub mod dispatch;
-pub mod feedback;
-pub mod event_bus;
 pub mod error;
+pub mod event_bus;
 pub mod events;
+pub mod feedback;
 pub mod plan_types;
 pub mod routes;
 pub mod runtime;
@@ -117,9 +117,10 @@ impl ServerBuilder {
         let workdir = self.config.workdir.clone();
         let runtime = Arc::clone(&self.config.runtime);
         let roko_config = self.config.roko_config.clone();
-        let state = Arc::clone(self.state.get_or_insert_with(|| {
-            Arc::new(build_app_state(workdir, runtime, roko_config))
-        }));
+        let state = Arc::clone(
+            self.state
+                .get_or_insert_with(|| Arc::new(build_app_state(workdir, runtime, roko_config))),
+        );
         let dispatcher = Arc::new(dispatch::TemplateAgentDispatcher::new(
             state.workdir.clone(),
         ));

@@ -12,11 +12,11 @@ use anyhow::{Context as _, Result, anyhow};
 use chrono::Utc;
 use roko_agent::translate::{ClaudeTranslator, OllamaTranslator, RenderedTools, Translator};
 use roko_agent::{Agent, AgentResult, ClaudeCliAgent, ExecAgent, OllamaLlmBackend};
-use roko_core::tool::ExternalAction;
 use roko_compose::{
     Placement, PromptComposer, PromptSection, RoleSystemPromptSpec, SectionPriority, TaskContext,
 };
 use roko_core::metric::{ConfigHash, TaskMetric};
+use roko_core::tool::ExternalAction;
 use roko_core::tool::ToolRegistry;
 use roko_core::{
     AgentRole, Body, Budget, Composer, Context, Gate, Kind, Provenance, Signal, Substrate, Verdict,
@@ -345,9 +345,9 @@ async fn run_ollama_agentic_single(
     config: &Config,
     prompt_text: &str,
 ) -> (AgentResult, Vec<ExternalAction>) {
+    use parking_lot::RwLock;
     use roko_agent::dispatcher::ToolDispatcher;
     use roko_agent::tool_loop::{StopReason, ToolLoop};
-    use parking_lot::RwLock;
     use roko_core::tool::{ToolContext, ToolHandler};
     use std::sync::Arc;
     use std::time::Instant;
@@ -387,7 +387,8 @@ async fn run_ollama_agentic_single(
 
     let system_prompt = build_system_prompt(&config.prompt.role, prompt_text, "");
     let external_actions = Arc::new(RwLock::new(Vec::new()));
-    let tool_ctx = ToolContext::testing(workdir).with_external_actions(Arc::clone(&external_actions));
+    let tool_ctx =
+        ToolContext::testing(workdir).with_external_actions(Arc::clone(&external_actions));
 
     let output = tool_loop
         .run(&system_prompt, prompt_text, &tools, &tool_ctx)

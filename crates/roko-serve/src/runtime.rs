@@ -74,11 +74,7 @@ impl CliRuntime for NoOpRuntime {
 #[async_trait]
 pub trait CliRuntime: Send + Sync + 'static {
     /// Run a single prompt through the universal loop.
-    async fn run_once(
-        &self,
-        workdir: &std::path::Path,
-        prompt: &str,
-    ) -> anyhow::Result<RunResult>;
+    async fn run_once(&self, workdir: &std::path::Path, prompt: &str) -> anyhow::Result<RunResult>;
 
     /// Return current session status for the given workdir.
     fn session_status(&self, workdir: PathBuf) -> SessionStatusInfo;

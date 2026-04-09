@@ -113,8 +113,9 @@ async fn load_recent_episodes(state: &AppState) -> Result<Vec<Episode>> {
     let episodes = EpisodeLogger::read_all_lossy(&path)
         .await
         .with_context(|| format!("load episodes from {}", path.display()))?;
-    let cutoff = Utc::now() - chrono::Duration::from_std(FEEDBACK_MAX_WINDOW)
-        .unwrap_or_else(|_| chrono::Duration::days(7));
+    let cutoff = Utc::now()
+        - chrono::Duration::from_std(FEEDBACK_MAX_WINDOW)
+            .unwrap_or_else(|_| chrono::Duration::days(7));
 
     Ok(episodes
         .into_iter()
@@ -127,8 +128,9 @@ fn parse_external_action(value: Value) -> Option<ExternalAction> {
 }
 
 fn within_recent_window(performed_at: &DateTime<Utc>) -> bool {
-    let cutoff = Utc::now() - chrono::Duration::from_std(FEEDBACK_MAX_WINDOW)
-        .unwrap_or_else(|_| chrono::Duration::days(7));
+    let cutoff = Utc::now()
+        - chrono::Duration::from_std(FEEDBACK_MAX_WINDOW)
+            .unwrap_or_else(|_| chrono::Duration::days(7));
     *performed_at >= cutoff
 }
 
@@ -159,7 +161,10 @@ fn action_key(episode: &Episode, action: &ExternalAction) -> String {
         action.service,
         action.action_type,
         action.resource_id,
-        action.performed_at.timestamp_nanos_opt().unwrap_or_default()
+        action
+            .performed_at
+            .timestamp_nanos_opt()
+            .unwrap_or_default()
     )
 }
 
@@ -182,9 +187,24 @@ fn stringish_value(value: &Value) -> Option<String> {
     value
         .as_str()
         .map(str::to_string)
-        .or_else(|| value.get("name").and_then(Value::as_str).map(str::to_string))
-        .or_else(|| value.get("login").and_then(Value::as_str).map(str::to_string))
-        .or_else(|| value.get("content").and_then(Value::as_str).map(str::to_string))
+        .or_else(|| {
+            value
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            value
+                .get("login")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            value
+                .get("content")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
 }
 
 fn reaction_content(value: &Value) -> Option<&str> {
@@ -294,12 +314,7 @@ fn record_positive_cascade_feedback(workdir: &Path, episode: &Episode) -> Result
         return Ok(());
     }
 
-    record_cascade_router_observation(
-        workdir,
-        vec![model_slug.to_string()],
-        model_slug,
-        true,
-    )?;
+    record_cascade_router_observation(workdir, vec![model_slug.to_string()], model_slug, true)?;
     Ok(())
 }
 
@@ -362,8 +377,12 @@ fn parse_github_resource(action: &ExternalAction) -> Result<GitHubResource> {
     }
 
     let resource = action.resource_id.trim();
-    let resource = resource.strip_prefix("https://github.com/").unwrap_or(resource);
-    let resource = resource.strip_prefix("http://github.com/").unwrap_or(resource);
+    let resource = resource
+        .strip_prefix("https://github.com/")
+        .unwrap_or(resource);
+    let resource = resource
+        .strip_prefix("http://github.com/")
+        .unwrap_or(resource);
 
     if let Some((repo_part, number_part)) = resource.split_once('#') {
         let (owner, repo) = repo_part
@@ -378,7 +397,10 @@ fn parse_github_resource(action: &ExternalAction) -> Result<GitHubResource> {
         });
     }
 
-    let parts: Vec<&str> = resource.split('/').filter(|part| !part.is_empty()).collect();
+    let parts: Vec<&str> = resource
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
     if parts.len() >= 4 {
         let owner = parts[0];
         let repo = parts[1];
@@ -426,9 +448,16 @@ async fn collect_github_feedback(
             let reviews = github_get_json_page(&github, &reviews_path).await?;
             let review_states: Vec<String> = reviews
                 .iter()
-                .filter_map(|review| review.get("state").and_then(Value::as_str).map(str::to_string))
+                .filter_map(|review| {
+                    review
+                        .get("state")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
                 .collect();
-            let dismissed = review_states.iter().any(|review_state| review_state == "DISMISSED");
+            let dismissed = review_states
+                .iter()
+                .any(|review_state| review_state == "DISMISSED");
 
             if state == "open" && !merged && !dismissed {
                 return Ok(None);
@@ -486,7 +515,8 @@ async fn collect_github_feedback(
                 resource.owner, resource.repo
             );
             let reactions = github_get_json_page(&github, &reactions_path).await?;
-            let (positive_reactions, negative_reactions, sentiment) = reaction_sentiment(&reactions);
+            let (positive_reactions, negative_reactions, sentiment) =
+                reaction_sentiment(&reactions);
 
             let replies_path = format!(
                 "/repos/{}/{}/issues/{}/comments",
@@ -503,12 +533,13 @@ async fn collect_github_feedback(
                         .map(|ts| ts.with_timezone(&Utc));
 
                     match (comment_created_at.as_ref(), reply_created_at.as_ref()) {
-                        (Some(comment_created_at), Some(reply_created_at)) => reply_created_at > comment_created_at,
+                        (Some(comment_created_at), Some(reply_created_at)) => {
+                            reply_created_at > comment_created_at
+                        }
                         _ => false,
                     }
                 })
-                .count()
-                ;
+                .count();
 
             if positive_reactions == 0 && negative_reactions == 0 && reply_count == 0 {
                 return Ok(None);
@@ -538,7 +569,10 @@ async fn collect_github_feedback(
                 resource.owner, resource.repo, resource.number
             );
             let issue = github_get_json(&github, &issue_path).await?;
-            let issue_state = issue.get("state").and_then(Value::as_str).unwrap_or("unknown");
+            let issue_state = issue
+                .get("state")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
             let assignees = value_as_strings(issue.get("assignees"));
             let labels = value_as_strings(issue.get("labels"));
             let initial_labels = value_as_strings(action.metadata.get("labels"));
@@ -594,7 +628,10 @@ async fn github_get_json_page(client: &Octocrab, route: &str) -> Result<Vec<Valu
         .get::<Page<Value>, _, _>(route, Some(&params))
         .await
         .with_context(|| format!("GET {route}"))?;
-    client.all_pages(page).await.with_context(|| format!("page through {route}"))
+    client
+        .all_pages(page)
+        .await
+        .with_context(|| format!("page through {route}"))
 }
 
 fn parse_slack_resource(action: &ExternalAction) -> Result<(String, String)> {
@@ -622,12 +659,26 @@ fn slack_reaction_name(reaction: &Value) -> Option<&str> {
 fn is_positive_slack_reaction(name: &str) -> bool {
     matches!(
         name,
-        "+1" | "thumbsup" | "white_check_mark" | "tada" | "heart" | "fire" | "rocket" | "👍" | "✅" | "🎉" | "❤️" | "🔥" | "🚀"
+        "+1" | "thumbsup"
+            | "white_check_mark"
+            | "tada"
+            | "heart"
+            | "fire"
+            | "rocket"
+            | "👍"
+            | "✅"
+            | "🎉"
+            | "❤️"
+            | "🔥"
+            | "🚀"
     )
 }
 
 fn is_negative_slack_reaction(name: &str) -> bool {
-    matches!(name, "-1" | "thumbsdown" | "x" | "no_entry" | "👎" | "❌" | "🚫")
+    matches!(
+        name,
+        "-1" | "thumbsdown" | "x" | "no_entry" | "👎" | "❌" | "🚫"
+    )
 }
 
 fn slack_reaction_sentiment(reactions: &[Value]) -> (u32, u32, f64) {
@@ -690,7 +741,11 @@ async fn collect_slack_feedback(
             let reactions_resp = client
                 .get(reactions_url)
                 .bearer_auth(&token)
-                .query(&[("channel", channel.as_str()), ("timestamp", ts.as_str()), ("full", "true")])
+                .query(&[
+                    ("channel", channel.as_str()),
+                    ("timestamp", ts.as_str()),
+                    ("full", "true"),
+                ])
                 .send()
                 .await
                 .with_context(|| format!("GET {reactions_url}"))?
@@ -724,7 +779,11 @@ async fn collect_slack_feedback(
             let replies_resp = client
                 .get(replies_url)
                 .bearer_auth(&token)
-                .query(&[("channel", channel.as_str()), ("ts", ts.as_str()), ("limit", "100")])
+                .query(&[
+                    ("channel", channel.as_str()),
+                    ("ts", ts.as_str()),
+                    ("limit", "100"),
+                ])
                 .send()
                 .await
                 .with_context(|| format!("GET {replies_url}"))?
@@ -776,8 +835,8 @@ async fn collect_slack_feedback(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use serde_json::json;
+    use std::fs;
     use uuid::Uuid;
 
     #[test]

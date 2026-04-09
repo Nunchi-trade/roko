@@ -130,8 +130,7 @@ async fn deploy_template(
         let template = registry
             .get(&name)
             .ok_or_else(|| ApiError::not_found(format!("template '{name}' not found")))?;
-        let rendered =
-            crate::templates::TemplateRegistry::render_prompt(template, &body.params);
+        let rendered = crate::templates::TemplateRegistry::render_prompt(template, &body.params);
         drop(registry);
         rendered
     };

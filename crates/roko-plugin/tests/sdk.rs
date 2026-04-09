@@ -3,9 +3,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use roko_core::{Body, Kind, Result, Signal};
-use roko_plugin::{
-    EventSource, EventSourceKind, FeedbackCollector, FeedbackSignal, SignalSender,
-};
+use roko_plugin::{EventSource, EventSourceKind, FeedbackCollector, FeedbackSignal, SignalSender};
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
 
@@ -75,7 +73,10 @@ async fn mock_event_source_emits_signal_after_100ms() {
     assert_eq!(signal.body, Body::text("mock signal"));
 
     cancel.cancel();
-    runner.await.expect("task should complete").expect("source should exit cleanly");
+    runner
+        .await
+        .expect("task should complete")
+        .expect("source should exit cleanly");
 }
 
 #[tokio::test]
@@ -95,7 +96,10 @@ async fn cancellation_token_stops_event_source() {
         .expect("task should stop after cancellation")
         .expect("source should exit cleanly");
 
-    assert!(receiver.try_recv().is_err(), "event source should not emit after cancellation");
+    assert!(
+        receiver.try_recv().is_err(),
+        "event source should not emit after cancellation"
+    );
 }
 
 #[test]

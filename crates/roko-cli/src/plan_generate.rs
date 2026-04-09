@@ -90,7 +90,11 @@ pub(crate) fn render_plan_template_guidance(template: PlanTemplateKind) -> Strin
     let mut out = String::new();
     let _ = writeln!(out, "## Plan template");
     let _ = writeln!(out, "- name: {}", template.label());
-    let _ = writeln!(out, "- default model tier: {}", template.default_model_tier());
+    let _ = writeln!(
+        out,
+        "- default model tier: {}",
+        template.default_model_tier()
+    );
     let _ = writeln!(out, "- gate strictness: {}", template.gate_strictness());
     let _ = writeln!(out, "- max task count: {}", template.max_task_count());
     let _ = writeln!(

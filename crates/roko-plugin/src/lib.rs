@@ -1,7 +1,7 @@
 //! Plugin SDK for Roko event sources and feedback collectors.
 
-use chrono::{DateTime, Utc};
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use roko_core::{Result, Signal};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -194,15 +194,13 @@ mod tests {
         }
 
         async fn collect(&self, _since: DateTime<Utc>) -> Result<Vec<FeedbackSignal>> {
-            Ok(vec![
-                FeedbackSignal {
-                    original_episode_id: "episode-123".to_string(),
-                    service: "github".to_string(),
-                    outcome: FeedbackOutcome::Approved,
-                    metadata: json!({ "reviewer": "alice" }),
-                    timestamp: DateTime::<Utc>::UNIX_EPOCH,
-                },
-            ])
+            Ok(vec![FeedbackSignal {
+                original_episode_id: "episode-123".to_string(),
+                service: "github".to_string(),
+                outcome: FeedbackOutcome::Approved,
+                metadata: json!({ "reviewer": "alice" }),
+                timestamp: DateTime::<Utc>::UNIX_EPOCH,
+            }])
         }
     }
 
@@ -221,7 +219,10 @@ mod tests {
         assert_eq!(signal.body, Body::text("hello"));
 
         cancel.cancel();
-        runner.await.expect("task should complete").expect("source should exit cleanly");
+        runner
+            .await
+            .expect("task should complete")
+            .expect("source should exit cleanly");
     }
 
     #[tokio::test]

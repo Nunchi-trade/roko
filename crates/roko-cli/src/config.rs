@@ -712,7 +712,10 @@ where
 {
     let mut value: toml::Value = toml::from_str(text).context(context)?;
     interpolate_env_values(&mut value)?;
-    value.try_into().map_err(|err| anyhow!(err)).context(context)
+    value
+        .try_into()
+        .map_err(|err| anyhow!(err))
+        .context(context)
 }
 
 fn interpolate_env_values(value: &mut toml::Value) -> Result<()> {

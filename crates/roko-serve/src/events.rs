@@ -2,8 +2,8 @@
 //! operations. These flow through the shared event bus and are streamed to
 //! connected SSE / WebSocket clients.
 
-use serde::{Deserialize, Serialize};
 use roko_core::Signal;
+use serde::{Deserialize, Serialize};
 
 /// Progress emitted by the execution loop as plans move through phases,
 /// complete tasks, and finish gate checks.

@@ -118,8 +118,7 @@ async fn create_deployment(
     };
 
     // Create per-request backend if overridden, otherwise use the server default
-    let backend: Arc<dyn crate::deploy::DeployBackend> = if let Some(ref name) = req.backend
-    {
+    let backend: Arc<dyn crate::deploy::DeployBackend> = if let Some(ref name) = req.backend {
         let rc = state.roko_config.read().await;
         let b = crate::deploy::create_backend(
             name,

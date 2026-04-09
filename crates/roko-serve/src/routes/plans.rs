@@ -11,8 +11,8 @@ use serde_json::{Value, json};
 
 use crate::error::ApiError;
 use crate::events::ServerEvent;
-use crate::state::{AppState, OperationHandle, OperationStatus, PlanHandle};
 use crate::plan_types::{Plan, PlanTask};
+use crate::state::{AppState, OperationHandle, OperationStatus, PlanHandle};
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()

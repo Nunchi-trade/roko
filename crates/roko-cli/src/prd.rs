@@ -22,9 +22,9 @@ use std::sync::Arc;
 use crate::agent_exec::{AgentExecOpts, run_agent};
 use crate::task_parser::TasksFile;
 use anyhow::{Context as _, Result, anyhow};
-use roko_core::{Body, Kind, Provenance, Signal, Substrate};
 use roko_core::config::schema::RokoConfig;
 use roko_core::obs::MetricRegistry;
+use roko_core::{Body, Kind, Provenance, Signal, Substrate};
 use roko_fs::FileSubstrate;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -195,7 +195,12 @@ fn print_tasks_preview(path: &Path, tasks_file: &TasksFile) {
     );
     for task in &tasks_file.tasks {
         let mut details = format!("  - {} [{}] {}", task.id, task.tier, task.title);
-        details.push_str(&format!(" | files={} deps={} verify={}", task.files.len(), task.depends_on.len(), task.verify.len()));
+        details.push_str(&format!(
+            " | files={} deps={} verify={}",
+            task.files.len(),
+            task.depends_on.len(),
+            task.verify.len()
+        ));
         println!("{details}");
     }
 }
@@ -208,7 +213,10 @@ fn validate_and_print_preview(path: &Path) -> Result<()> {
         for issue in &issues {
             eprintln!("  - {issue}");
         }
-        return Err(anyhow!("dry-run plan validation failed for {}", path.display()));
+        return Err(anyhow!(
+            "dry-run plan validation failed for {}",
+            path.display()
+        ));
     }
 
     let warnings = tasks_file.quality_warnings();
@@ -324,13 +332,12 @@ fn preserve_completed_task_status(
         .iter()
         .filter(|task| task.status.eq_ignore_ascii_case("done"))
         .count() as u32;
-    regenerated.meta.status = if regenerated.meta.total > 0
-        && regenerated.meta.done == regenerated.meta.total
-    {
-        "complete".to_string()
-    } else {
-        "ready".to_string()
-    };
+    regenerated.meta.status =
+        if regenerated.meta.total > 0 && regenerated.meta.done == regenerated.meta.total {
+            "complete".to_string()
+        } else {
+            "ready".to_string()
+        };
 
     regenerated
 }
@@ -491,11 +498,7 @@ async fn regenerate_old_format_plans(
     Ok(regen_count)
 }
 
-async fn emit_prd_plan_signal(
-    workdir: &Path,
-    kind: Kind,
-    body: serde_json::Value,
-) -> Result<()> {
+async fn emit_prd_plan_signal(workdir: &Path, kind: Kind, body: serde_json::Value) -> Result<()> {
     let substrate = FileSubstrate::open(workdir.join(".roko"))
         .await
         .with_context(|| format!("open {}", workdir.join(".roko").display()))?;
@@ -825,14 +828,9 @@ async fn run_generated_plans(workdir: &Path, plans_root: &Path) -> Result<()> {
     let metrics = Arc::new(MetricRegistry::new());
     roko_core::obs::register_standard_metrics(&metrics);
 
-    let mut runner = crate::PlanRunner::from_plans_dir(
-        plans_root,
-        workdir,
-        resolved.config,
-        metrics,
-        false,
-    )
-    .await?;
+    let mut runner =
+        crate::PlanRunner::from_plans_dir(plans_root, workdir, resolved.config, metrics, false)
+            .await?;
     let _report = runner.run_task_plans(plans_root).await?;
     Ok(())
 }
@@ -849,8 +847,8 @@ fn auto_plan_enabled(workdir: &Path) -> Result<bool> {
             .and_then(|prd| prd.get("auto_plan"))
             .is_some()
         {
-            let cfg: RokoConfig = toml::from_str(&text)
-                .with_context(|| format!("parse {}", roko_toml.display()))?;
+            let cfg: RokoConfig =
+                toml::from_str(&text).with_context(|| format!("parse {}", roko_toml.display()))?;
             return Ok(cfg.prd.auto_plan);
         }
     }
@@ -867,8 +865,7 @@ pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path, dry_run: bool) 
         let prd_meta = PrdMeta::parse(&content).unwrap_or_default();
         let template_kind =
             crate::plan_generate::PlanTemplateKind::resolve(prd_meta.plan_template.as_deref());
-        let template_guidance =
-            crate::plan_generate::render_plan_template_guidance(template_kind);
+        let template_guidance = crate::plan_generate::render_plan_template_guidance(template_kind);
         println!("📋 Generating plans from PRD: {slug}");
 
         let dry_run_workdir = if dry_run {
@@ -1088,7 +1085,12 @@ fn prd_workdir(prd_path: &Path) -> Result<PathBuf> {
         .ancestors()
         .nth(4)
         .map(Path::to_path_buf)
-        .ok_or_else(|| anyhow!("could not derive workdir from PRD path: {}", prd_path.display()))
+        .ok_or_else(|| {
+            anyhow!(
+                "could not derive workdir from PRD path: {}",
+                prd_path.display()
+            )
+        })
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────

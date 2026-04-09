@@ -516,11 +516,7 @@ impl App {
                 frame.render_widget(block, area);
 
                 let body = Paragraph::new(detail.body.as_str())
-                    .style(
-                        theme
-                            .text()
-                            .add_modifier(Modifier::BOLD),
-                    )
+                    .style(theme.text().add_modifier(Modifier::BOLD))
                     .wrap(Wrap { trim: false })
                     .scroll((detail.scroll, 0));
                 frame.render_widget(body, inner);
@@ -616,10 +612,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 fn help_lines() -> Vec<Line<'static>> {
     let theme = Theme::from_env();
     vec![
-        Line::from(Span::styled(
-            "dashboard keybindings",
-            theme.accent_bold(),
-        )),
+        Line::from(Span::styled("dashboard keybindings", theme.accent_bold())),
         Line::from(""),
         Line::from("1-6      jump to dashboard pages 1 through 6"),
         Line::from("Tab      next page"),

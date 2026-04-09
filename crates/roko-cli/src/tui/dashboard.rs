@@ -13,9 +13,9 @@ use std::time::SystemTime;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use ratatui::style::{Color, Modifier, Style};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use ratatui::style::{Color, Modifier, Style};
 
 use crate::plan::{PlanSummary, plans_dir};
 use crate::task_parser::{TaskDef, TasksFile};
@@ -178,19 +178,25 @@ impl Theme {
     /// A success style for completed or healthy states.
     #[must_use]
     pub fn success(self) -> Style {
-        Style::default().fg(self.success).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(self.success)
+            .add_modifier(Modifier::BOLD)
     }
 
     /// A warning style for gating or degraded states.
     #[must_use]
     pub fn warning(self) -> Style {
-        Style::default().fg(self.warning).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(self.warning)
+            .add_modifier(Modifier::BOLD)
     }
 
     /// A danger style for failed or critical states.
     #[must_use]
     pub fn danger(self) -> Style {
-        Style::default().fg(self.danger).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(self.danger)
+            .add_modifier(Modifier::BOLD)
     }
 
     /// An informational style for active or in-flight states.

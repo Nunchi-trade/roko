@@ -883,9 +883,15 @@ mod tests {
         let loaded_router = runtime.cascade_router();
 
         assert_eq!(loaded_router.total_observations(), 60);
-        assert_eq!(loaded_router.current_stage(), crate::cascade_router::CascadeStage::Confidence);
+        assert_eq!(
+            loaded_router.current_stage(),
+            crate::cascade_router::CascadeStage::Confidence
+        );
         let routed = loaded_router.route(&ctx);
-        assert_eq!(routed.stage, crate::cascade_router::CascadeStage::Confidence);
+        assert_eq!(
+            routed.stage,
+            crate::cascade_router::CascadeStage::Confidence
+        );
     }
 
     #[tokio::test]
@@ -894,7 +900,10 @@ mod tests {
         let learn_root = tmp.path().join(".roko").join("learn");
         let runtime = LearningRuntime::open_under(&learn_root).await.unwrap();
         let router_path = learn_root.join("cascade-router.json");
-        assert!(!router_path.exists(), "router file should not exist before observation");
+        assert!(
+            !router_path.exists(),
+            "router file should not exist before observation"
+        );
 
         let mut ep = sample_episode(true);
         ep.extra.insert(
@@ -907,8 +916,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(update.router_updated, "completed run should update cascade router");
-        assert!(router_path.exists(), "router file should be written after observation");
+        assert!(
+            update.router_updated,
+            "completed run should update cascade router"
+        );
+        assert!(
+            router_path.exists(),
+            "router file should be written after observation"
+        );
 
         let contents = std::fs::read_to_string(&router_path).unwrap();
         let snapshot: serde_json::Value = serde_json::from_str(&contents).unwrap();

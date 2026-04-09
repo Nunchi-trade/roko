@@ -215,9 +215,7 @@ impl SignalStore {
         let substrate = self
             .substrate
             .get_or_try_init(|| async {
-                FileSubstrate::open(self.root.clone())
-                    .await
-                    .map(Arc::new)
+                FileSubstrate::open(self.root.clone()).await.map(Arc::new)
             })
             .await?;
         Ok(Arc::clone(substrate))

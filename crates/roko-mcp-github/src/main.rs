@@ -5,8 +5,10 @@
 //! JSON responses to stdout.
 
 use anyhow::Context;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use reqwest::blocking::Client;
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, USER_AGENT};
+use reqwest::header::{ACCEPT, HeaderMap, HeaderValue, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::env;
@@ -147,6 +149,15 @@ struct CreateIssueArguments {
     labels: Option<Vec<String>>,
     #[serde(default)]
     assignees: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GetFileArguments {
+    owner: String,
+    repo: String,
+    path: String,
+    #[serde(rename = "ref")]
+    ref_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -980,8 +991,23 @@ fn handle_create_label(arguments: Value) -> Result<Value, JsonRpcError> {
 }
 
 fn handle_get_file(arguments: Value) -> Result<Value, JsonRpcError> {
-    let _ = arguments;
-    unsupported_tool("github.get_file")
+    let args: GetFileArguments = serde_json::from_value(arguments).map_err(|err| {
+        JsonRpcError::invalid_params(format!("invalid github.get_file args: {err}"))
+    })?;
+    let client = github_client()?;
+    let file = get_repository_file(&client, &args)?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": serde_json::json!({
+                "content": file.content,
+                "sha": file.sha,
+                "size": file.size
+            }).to_string()
+        }],
+        "isError": false
+    }))
 }
 
 fn handle_search_code(arguments: Value) -> Result<Value, JsonRpcError> {
@@ -1301,10 +1327,85 @@ fn create_issue(
     }
 
     serde_json::from_str(&body).map_err(|err| {
-        JsonRpcError::internal_error(format!(
-            "parse GitHub issue creation response: {err}"
-        ))
+        JsonRpcError::internal_error(format!("parse GitHub issue creation response: {err}"))
     })
+}
+
+fn get_repository_file(
+    client: &Client,
+    args: &GetFileArguments,
+) -> Result<GithubRepositoryFile, JsonRpcError> {
+    let url = format!(
+        "https://api.github.com/repos/{}/{}/contents/{}",
+        args.owner, args.repo, args.path
+    );
+    let mut request = client.get(url);
+    if let Some(token) = github_token() {
+        request = request.bearer_auth(token);
+    }
+    if let Some(ref_name) = &args.ref_name {
+        request = request.query(&[("ref", ref_name)]);
+    }
+
+    let response = request
+        .send()
+        .map_err(|err| JsonRpcError::internal_error(format!("call GitHub API: {err}")))?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|err| JsonRpcError::internal_error(format!("read GitHub response: {err}")))?;
+    if !status.is_success() {
+        return Err(JsonRpcError::internal_error(format!(
+            "GitHub API returned {status}: {}",
+            body.trim()
+        )));
+    }
+
+    let value: Value = serde_json::from_str(&body).map_err(|err| {
+        JsonRpcError::internal_error(format!("parse GitHub file response: {err}"))
+    })?;
+    let object = value.as_object().ok_or_else(|| {
+        JsonRpcError::internal_error("GitHub contents API returned a directory, not a file")
+    })?;
+    let kind = object.get("type").and_then(Value::as_str).unwrap_or("");
+    if kind != "file" {
+        return Err(JsonRpcError::internal_error(format!(
+            "GitHub contents API returned {kind:?}, expected file"
+        )));
+    }
+
+    let content = object
+        .get("content")
+        .and_then(Value::as_str)
+        .ok_or_else(|| JsonRpcError::internal_error("GitHub file response missing content"))?;
+    let sha = object
+        .get("sha")
+        .and_then(Value::as_str)
+        .ok_or_else(|| JsonRpcError::internal_error("GitHub file response missing sha"))?
+        .to_string();
+    let size = object
+        .get("size")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| JsonRpcError::internal_error("GitHub file response missing size"))?;
+
+    let decoded = decode_github_file_content(content)?;
+    let decoded = String::from_utf8(decoded).map_err(|err| {
+        JsonRpcError::internal_error(format!("GitHub file content is not valid UTF-8: {err}"))
+    })?;
+
+    Ok(GithubRepositoryFile {
+        content: decoded,
+        sha,
+        size,
+    })
+}
+
+fn decode_github_file_content(content: &str) -> Result<Vec<u8>, JsonRpcError> {
+    let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
+    BASE64
+        .decode(compact.as_bytes())
+        .map_err(|err| JsonRpcError::internal_error(format!("decode GitHub file content: {err}")))
 }
 
 fn create_pull_request_comment(
@@ -1312,7 +1413,10 @@ fn create_pull_request_comment(
     args: &CommentPrArguments,
     api_base_url: &str,
 ) -> Result<GithubIssueComment, JsonRpcError> {
-    let url = format!("{api_base_url}/repos/{}/{}/issues/{}/comments", args.owner, args.repo, args.number);
+    let url = format!(
+        "{api_base_url}/repos/{}/{}/issues/{}/comments",
+        args.owner, args.repo, args.number
+    );
     let mut request = client.post(url);
     if let Some(token) = github_token() {
         request = request.bearer_auth(token);
@@ -1556,6 +1660,13 @@ fn summarize_issues(issues: &[GithubIssue]) -> Value {
     })
 }
 
+#[derive(Debug)]
+struct GithubRepositoryFile {
+    content: String,
+    sha: String,
+    size: u64,
+}
+
 fn serve_stdio<R, W, F>(reader: R, mut writer: W, mut handler: F) -> anyhow::Result<()>
 where
     R: BufRead,
@@ -1732,9 +1843,18 @@ mod tests {
             get_pr["inputSchema"]["required"],
             json!(["owner", "repo", "number"])
         );
-        assert!(get_pr["inputSchema"]["properties"]
-            .get("include_diff")
-            .is_none());
+        assert!(
+            get_pr["inputSchema"]["properties"]
+                .get("include_diff")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn decode_github_file_content_strips_whitespace_and_decodes_base64() {
+        let decoded = decode_github_file_content("SGVs\nbG8gV29y\nbGQh").expect("decoded");
+
+        assert_eq!(decoded, b"Hello World!");
     }
 
     #[test]
@@ -2051,7 +2171,8 @@ mod tests {
             assignees: Some(vec!["octocat".to_string(), "maintainer".to_string()]),
         };
 
-        let issue = create_issue(&client, &args, &format!("http://{}", addr)).expect("create issue");
+        let issue =
+            create_issue(&client, &args, &format!("http://{}", addr)).expect("create issue");
         assert_eq!(issue.number, 101);
         assert_eq!(
             issue.html_url.as_deref(),
@@ -2133,7 +2254,10 @@ mod tests {
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].number, 101);
         assert_eq!(issues[0].title, "Bug: login redirect");
-        assert_eq!(issues[0].assignee.as_ref().map(|user| user.login.as_str()), Some("octocat"));
+        assert_eq!(
+            issues[0].assignee.as_ref().map(|user| user.login.as_str()),
+            Some("octocat")
+        );
 
         server.join().expect("server thread");
     }

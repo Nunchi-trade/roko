@@ -209,10 +209,7 @@ pub fn cmd_check_secrets(workdir: &Path) -> Result<()> {
     let tokens = collect_env_tokens(&text)?;
 
     if tokens.is_empty() {
-        println!(
-            "no `${{VAR}}` tokens found in {}",
-            config_path.display()
-        );
+        println!("no `${{VAR}}` tokens found in {}", config_path.display());
         return Ok(());
     }
 
@@ -343,11 +340,7 @@ fn write_atomic_restricted(path: &Path, text: &str) -> Result<()> {
         .duration_since(UNIX_EPOCH)
         .context("system clock is before UNIX_EPOCH")?
         .as_nanos();
-    let tmp_path = parent.join(format!(
-        ".{}.{}.tmp",
-        file_name.to_string_lossy(),
-        unique
-    ));
+    let tmp_path = parent.join(format!(".{}.{}.tmp", file_name.to_string_lossy(), unique));
 
     #[cfg(unix)]
     {
@@ -741,9 +734,7 @@ fn validate_slack_token(client: &reqwest::blocking::Client, token: &str) -> Resu
         .send()
         .context("call Slack API")?;
     let status = response.status();
-    let body: serde_json::Value = response
-        .json()
-        .context("parse Slack API response")?;
+    let body: serde_json::Value = response.json().context("parse Slack API response")?;
     if body.get("ok").and_then(|value| value.as_bool()) == Some(true) {
         return Ok(());
     }

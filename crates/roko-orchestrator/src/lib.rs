@@ -17,9 +17,9 @@ pub mod event_log;
 pub mod executor;
 pub mod merge_queue;
 pub mod plan_discovery;
-pub mod replan;
 pub mod post_merge;
 pub mod progress;
+pub mod replan;
 pub mod safety;
 pub mod worktree;
 
@@ -34,9 +34,9 @@ pub use plan_discovery::{
     DiscoveryError, PlanFrontmatter, PlanInfo, ValidationError, discover_plans, parse_frontmatter,
     rank_plans, validate_frontmatter,
 };
-pub use replan::ReplanStrategy;
 pub use post_merge::{PostMergeCheck, PostMergeResult, PostMergeRunner};
 pub use progress::{
     ErrorEvent, ProgressError, ProgressTracker, ValidationError as EnrichmentValidationError,
     publish_error, validate_enrichment,
 };
+pub use replan::ReplanStrategy;

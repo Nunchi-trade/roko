@@ -461,12 +461,7 @@ impl SkillLibrary {
     ///
     /// Returns the top matching skills so callers can pick the most suitable
     /// one for prompt injection.
-    pub fn query(
-        &self,
-        task_files: &[String],
-        task_tier: &str,
-        symbols: &[String],
-    ) -> Vec<Skill> {
+    pub fn query(&self, task_files: &[String], task_tier: &str, symbols: &[String]) -> Vec<Skill> {
         let query = SkillQuery {
             tags: symbols.to_vec(),
             category: (!task_tier.is_empty()).then(|| task_tier.to_string()),
@@ -642,7 +637,10 @@ impl SkillLibrary {
                         short_hash(&prompt_hash)
                     ),
                     format!("Successful {} task on {}", task_tier, model),
-                    format!("Extracted from a successful {} task using {}.", task_tier, model),
+                    format!(
+                        "Extracted from a successful {} task using {}.",
+                        task_tier, model
+                    ),
                     score,
                     pattern,
                 )
@@ -970,7 +968,11 @@ fn sanitize_component(value: &str) -> String {
             out.push('_');
         }
     }
-    if out.is_empty() { "unknown".to_string() } else { out }
+    if out.is_empty() {
+        "unknown".to_string()
+    } else {
+        out
+    }
 }
 
 #[cfg(test)]
@@ -1509,7 +1511,11 @@ mod tests {
 
         let reloaded = SkillLibrary::new(&path).await.unwrap();
         assert_eq!(reloaded.len(), 1);
-        assert!(reloaded.get(extracted.as_ref().unwrap().name.as_str()).is_some());
+        assert!(
+            reloaded
+                .get(extracted.as_ref().unwrap().name.as_str())
+                .is_some()
+        );
     }
 
     #[tokio::test]

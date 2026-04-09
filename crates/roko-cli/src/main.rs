@@ -9,7 +9,6 @@
 
 #![allow(clippy::too_many_lines)]
 
-
 use anyhow::{Context as _, Result, anyhow};
 use clap::{Parser, Subcommand, ValueEnum};
 use roko_agent::process::{cleanup_orphaned_agents, reap_orphaned_children};
@@ -532,10 +531,7 @@ struct RedactingFormat<E> {
 
 impl<E> RedactingFormat<E> {
     fn new(inner: E, scrubber: roko_core::obs::LogScrubber) -> Self {
-        Self {
-            inner,
-            scrubber,
-        }
+        Self { inner, scrubber }
     }
 }
 
@@ -1282,10 +1278,7 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             let issues = roko_cli::task_parser::TasksFile::validate_modern_fields(&tasks_path)?;
             if issues.is_empty() {
                 if !cli.quiet {
-                    println!(
-                        "modern task fields present in {}",
-                        tasks_path.display()
-                    );
+                    println!("modern task fields present in {}", tasks_path.display());
                 }
                 return Ok(EXIT_SUCCESS);
             }
@@ -1480,8 +1473,11 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 .with_context(|| format!("read {}", source_path.display()))?;
 
             if dry_run {
-                let system =
-                    roko_cli::plan_generate::build_generation_prompt(&workdir, &source_content, "prd");
+                let system = roko_cli::plan_generate::build_generation_prompt(
+                    &workdir,
+                    &source_content,
+                    "prd",
+                );
                 let task_prompt = format!(
                     "Regenerate the plan at {} from the source PRD above. \
                      Rewrite tasks.toml in place with full modern metadata: tier, model_hint, \
@@ -1552,9 +1548,10 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 }
             };
 
-            let merged = preserve_completed_task_status(existing_tasks.as_ref(), regenerated, &plan_dir);
-            let rendered = toml::to_string_pretty(&merged)
-                .context("serialize regenerated tasks.toml")?;
+            let merged =
+                preserve_completed_task_status(existing_tasks.as_ref(), regenerated, &plan_dir);
+            let rendered =
+                toml::to_string_pretty(&merged).context("serialize regenerated tasks.toml")?;
             if let Err(err) = std::fs::write(&tasks_path, rendered) {
                 std::fs::write(&tasks_path, &existing)
                     .with_context(|| format!("restore {}", tasks_path.display()))?;
@@ -1849,13 +1846,12 @@ fn preserve_completed_task_status(
         .iter()
         .filter(|task| task.status.eq_ignore_ascii_case("done"))
         .count() as u32;
-    regenerated.meta.status = if regenerated.meta.total > 0
-        && regenerated.meta.done == regenerated.meta.total
-    {
-        "complete".to_string()
-    } else {
-        "ready".to_string()
-    };
+    regenerated.meta.status =
+        if regenerated.meta.total > 0 && regenerated.meta.done == regenerated.meta.total {
+            "complete".to_string()
+        } else {
+            "ready".to_string()
+        };
 
     regenerated
 }

@@ -15,7 +15,6 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, anyhow};
 use bardo_runtime::cancel::CancelToken;
 use bardo_runtime::process::ProcessSupervisor;
-use serde::{Deserialize, Serialize};
 use roko_agent::translate::{ClaudeTranslator, RenderedTools, Translator};
 use roko_agent::{Agent, AgentResult, ClaudeCliAgent, ExecAgent};
 use roko_compose::{
@@ -41,14 +40,14 @@ use roko_gate::{
     adaptive_threshold::AdaptiveThresholds, clippy_gate::ClippyGate, compile::CompileGate,
     payload::GatePayload, test_gate::TestGate,
 };
-use roko_learn::skill_library::Skill;
-use roko_learn::playbook::{Playbook, PlaybookStore};
 use roko_learn::costs_db::CostRecord;
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::episode_logger::{Episode, GateVerdict, Usage};
+use roko_learn::playbook::{Playbook, PlaybookStore};
 use roko_learn::runtime_feedback::{
     CompletedRunInput, LearningRuntime, LearningUpdate, read_efficiency_events,
 };
+use roko_learn::skill_library::Skill;
 use roko_learn::skill_library::{SkillExtractionRequest, SkillGateResult, SkillLibrary};
 use roko_orchestrator::worktree::{WorktreeConfig, WorktreeManager};
 use roko_orchestrator::{
@@ -57,6 +56,7 @@ use roko_orchestrator::{
 };
 use roko_std::NoOpScorer;
 use roko_std::StaticToolRegistry;
+use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken as TokioCancellationToken;
@@ -147,10 +147,8 @@ impl ContextAverageTracker {
         let averages = std::fs::read_to_string(&path)
             .ok()
             .and_then(|s| {
-                serde_json::from_str::<
-                    HashMap<String, HashMap<String, ContextAverageStats>>,
-                >(&s)
-                .ok()
+                serde_json::from_str::<HashMap<String, HashMap<String, ContextAverageStats>>>(&s)
+                    .ok()
             })
             .unwrap_or_default();
         Self { path, averages }
@@ -165,10 +163,8 @@ impl ContextAverageTracker {
         if stats.total_observations == 0 {
             stats.ema_reference_rate = value;
         } else {
-            stats.ema_reference_rate = EMA_ALPHA.mul_add(
-                value,
-                (1.0 - EMA_ALPHA) * stats.ema_reference_rate,
-            );
+            stats.ema_reference_rate =
+                EMA_ALPHA.mul_add(value, (1.0 - EMA_ALPHA) * stats.ema_reference_rate);
         }
         stats.total_observations += 1;
     }
@@ -290,7 +286,10 @@ fn task_crate_name(task_def: Option<&crate::task_parser::TaskDef>) -> Option<Str
 /// Best-effort crate key derivation from a repository-relative file path.
 fn crate_name_for_path(path: &str) -> Option<String> {
     let normalized = path.replace('\\', "/");
-    let parts: Vec<&str> = normalized.split('/').filter(|part| !part.is_empty()).collect();
+    let parts: Vec<&str> = normalized
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
     match parts.as_slice() {
         [first, second, ..] if *first == "crates" || *first == "apps" => {
             Some((*second).to_string())
@@ -306,7 +305,12 @@ fn crate_name_for_path(path: &str) -> Option<String> {
     }
 }
 
-fn log_tasks_validation_issue(plan_id: &str, plan_base: &str, tasks_path: &Path, issue: &TaskValidationIssue) {
+fn log_tasks_validation_issue(
+    plan_id: &str,
+    plan_base: &str,
+    tasks_path: &Path,
+    issue: &TaskValidationIssue,
+) {
     match issue {
         TaskValidationIssue::MissingRequiredField { task_id, field } => {
             tracing::error!(
@@ -971,9 +975,7 @@ fn cascade_context_vec(
         .get(plan_id)
         .is_some_and(|tracker| tracker.last_gate_failure.is_some());
 
-    let crate_familiarity = runner
-        .crate_familiarity_tracker
-        .score_for_task(task_def);
+    let crate_familiarity = runner.crate_familiarity_tracker.score_for_task(task_def);
 
     RoutingContext {
         task_category: TaskCategory::Implementation,
@@ -1085,8 +1087,12 @@ impl TaskTracker {
     fn reload_tasks_file(&mut self) -> Result<()> {
         let tasks_path = self._plan_dir.join("tasks.toml");
         self.tasks_file = TasksFile::parse(&tasks_path)?;
-        let task_ids: std::collections::HashSet<String> =
-            self.tasks_file.tasks.iter().map(|task| task.id.clone()).collect();
+        let task_ids: std::collections::HashSet<String> = self
+            .tasks_file
+            .tasks
+            .iter()
+            .map(|task| task.id.clone())
+            .collect();
         self.failed.clear();
         self.skipped = self
             .tasks_file
@@ -1147,12 +1153,13 @@ impl TaskTracker {
     }
 
     /// Update a task's `model_hint` and persist the rewritten `tasks.toml`.
-    fn set_task_model_hint(
-        &mut self,
-        task_id: &str,
-        model_hint: Option<String>,
-    ) -> Result<()> {
-        let Some(task) = self.tasks_file.tasks.iter_mut().find(|task| task.id == task_id) else {
+    fn set_task_model_hint(&mut self, task_id: &str, model_hint: Option<String>) -> Result<()> {
+        let Some(task) = self
+            .tasks_file
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == task_id)
+        else {
             return Err(anyhow!(
                 "task {task_id} not found in plan {}",
                 self._plan_dir.display()
@@ -1296,7 +1303,10 @@ fn merge_regenerated_plan(
     let mut merged_tasks = Vec::new();
     let mut preserved_completed_ids = HashSet::new();
     for task in &old_tasks.tasks {
-        if completed_tasks.iter().any(|completed| completed.id == task.id) {
+        if completed_tasks
+            .iter()
+            .any(|completed| completed.id == task.id)
+        {
             let mut preserved = task.clone();
             preserved.status = "done".to_string();
             preserved_completed_ids.insert(preserved.id.clone());
@@ -1625,10 +1635,11 @@ impl PlanRunner {
             load_or_create_skill_library(&workdir.join(".roko").join("learn").join("skills.json"))
                 .await
                 .context("init skill library")?;
-        let playbook =
-            load_or_create_playbook_store(&workdir.join(".roko").join("learn").join("playbooks.json"))
-                .await
-                .context("init playbook store")?;
+        let playbook = load_or_create_playbook_store(
+            &workdir.join(".roko").join("learn").join("playbooks.json"),
+        )
+        .await
+        .context("init playbook store")?;
         let selected_mcp_servers = if any_task_without_mcp_list || requested_mcp_servers.is_empty()
         {
             None
@@ -1724,10 +1735,11 @@ impl PlanRunner {
             load_or_create_skill_library(&workdir.join(".roko").join("learn").join("skills.json"))
                 .await
                 .context("init skill library")?;
-        let playbook =
-            load_or_create_playbook_store(&workdir.join(".roko").join("learn").join("playbooks.json"))
-                .await
-                .context("init playbook store")?;
+        let playbook = load_or_create_playbook_store(
+            &workdir.join(".roko").join("learn").join("playbooks.json"),
+        )
+        .await
+        .context("init playbook store")?;
         let (mcp_clients, tool_registry) = Self::setup_mcp(&config, workdir, None).await;
         let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
         obs_sinks
@@ -1820,10 +1832,11 @@ impl PlanRunner {
             load_or_create_skill_library(&workdir.join(".roko").join("learn").join("skills.json"))
                 .await
                 .context("init skill library")?;
-        let playbook =
-            load_or_create_playbook_store(&workdir.join(".roko").join("learn").join("playbooks.json"))
-                .await
-                .context("init playbook store")?;
+        let playbook = load_or_create_playbook_store(
+            &workdir.join(".roko").join("learn").join("playbooks.json"),
+        )
+        .await
+        .context("init playbook store")?;
         let (mcp_clients, tool_registry) = Self::setup_mcp(&config, workdir, None).await;
         let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
         obs_sinks
@@ -3624,7 +3637,7 @@ impl PlanRunner {
                     &started,
                     Some(agent_result),
                 )
-                    .await;
+                .await;
                 any_fatal = true;
             }
         }
@@ -3741,7 +3754,11 @@ impl PlanRunner {
         model_slug: &str,
         reward: f64,
     ) {
-        if let Some(model_idx) = self.learning.cascade_router().model_index_for_slug(model_slug) {
+        if let Some(model_idx) = self
+            .learning
+            .cascade_router()
+            .model_index_for_slug(model_slug)
+        {
             let context_vec = cascade_context_vec(self, plan_id, AgentRole::Implementer, task_def);
             self.learning
                 .cascade_router()
@@ -3763,9 +3780,9 @@ impl PlanRunner {
         task_def: Option<&crate::task_parser::TaskDef>,
         success: bool,
     ) {
-        if let Err(err) =
-            self.crate_familiarity_tracker
-                .record_task_outcome(task_def, success, plan_id, task_id)
+        if let Err(err) = self
+            .crate_familiarity_tracker
+            .record_task_outcome(task_def, success, plan_id, task_id)
         {
             tracing::warn!(
                 plan_id = %plan_id,
@@ -3992,12 +4009,17 @@ impl PlanRunner {
 
         let mut ep = Episode::new("Implementer", task_id).succeeded();
         if let Some(task_def) = task_def.as_ref() {
-            ep.extra
-                .insert("files".to_string(), serde_json::json!(task_def.files.clone()));
+            ep.extra.insert(
+                "files".to_string(),
+                serde_json::json!(task_def.files.clone()),
+            );
         }
         ep.extra.insert(
             "crate_familiarity".to_string(),
-            serde_json::json!(self.crate_familiarity_tracker.score_for_task(task_def.as_ref())),
+            serde_json::json!(
+                self.crate_familiarity_tracker
+                    .score_for_task(task_def.as_ref())
+            ),
         );
         ep.usage = Usage {
             wall_ms,
@@ -4113,7 +4135,11 @@ impl PlanRunner {
             sections.push(section);
         }
 
-        if let Some(last_error) = state.last_error.as_deref().map(str::trim).filter(|s| !s.is_empty())
+        if let Some(last_error) = state
+            .last_error
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
         {
             sections.push(format!("executor.last_error:\n{last_error}"));
         }
@@ -4175,8 +4201,10 @@ impl PlanRunner {
             "attempt_number".to_string(),
             serde_json::json!(attempt_number),
         );
-        ep.extra
-            .insert("original_task_id".to_string(), serde_json::json!(original_task_id));
+        ep.extra.insert(
+            "original_task_id".to_string(),
+            serde_json::json!(original_task_id),
+        );
         if let Some(task) = original_task {
             ep.extra.insert(
                 "original_task".to_string(),
@@ -4245,9 +4273,7 @@ impl PlanRunner {
         let current_model = self.effective_model();
         let task_model = task_def
             .as_ref()
-            .map(|task| {
-                task.effective_model(&current_model, Some(&self.config.agent.tier_models))
-            })
+            .map(|task| task.effective_model(&current_model, Some(&self.config.agent.tier_models)))
             .unwrap_or_else(|| current_model.clone());
         let escalate_model = self.next_tier_model_slug(&task_model);
         let architectural_model = self
@@ -4328,8 +4354,8 @@ impl PlanRunner {
                         None,
                         None,
                         None,
-                )
-                .await
+                    )
+                    .await
                 {
                     Ok(_) => {
                         tracing::info!("[orchestrate] replan retry-same completed for {plan_id}");
@@ -4349,7 +4375,9 @@ impl PlanRunner {
                         }
                     }
                     Err(e) => {
-                        tracing::error!("[orchestrate] retry-same replan failed for {plan_id}: {e}");
+                        tracing::error!(
+                            "[orchestrate] retry-same replan failed for {plan_id}: {e}"
+                        );
                         self.record_replan_episode(
                             plan_id,
                             &task_id,
@@ -4388,8 +4416,8 @@ impl PlanRunner {
                         Some(escalate_model),
                         None,
                         None,
-                )
-                .await
+                    )
+                    .await
                 {
                     Ok(_) => {
                         tracing::info!(
@@ -4411,9 +4439,7 @@ impl PlanRunner {
                         }
                     }
                     Err(e) => {
-                        tracing::error!(
-                            "[orchestrate] escalated replan failed for {plan_id}: {e}"
-                        );
+                        tracing::error!("[orchestrate] escalated replan failed for {plan_id}: {e}");
                         self.record_replan_episode(
                             plan_id,
                             &task_id,
@@ -4435,7 +4461,9 @@ impl PlanRunner {
                     .get(plan_id)
                     .map(|tracker| tracker.tasks_file.clone())
                 else {
-                    tracing::warn!("[orchestrate] decomposition requested for unknown plan {plan_id}");
+                    tracing::warn!(
+                        "[orchestrate] decomposition requested for unknown plan {plan_id}"
+                    );
                     self.record_replan_episode(
                         plan_id,
                         &task_id,
@@ -4491,8 +4519,8 @@ impl PlanRunner {
                         Some(architectural_model),
                         None,
                         Some(system_prompt),
-                )
-                .await
+                    )
+                    .await
                 {
                     Ok(result) => {
                         let response_text = match result.output.body.as_text() {
@@ -4603,10 +4631,7 @@ impl PlanRunner {
                                     failure_count,
                                     &[],
                                     false,
-                                    Some(format!(
-                                        "decomposition duplicated task id {}",
-                                        task.id
-                                    )),
+                                    Some(format!("decomposition duplicated task id {}", task.id)),
                                 )
                                 .await;
                                 return;
@@ -4681,7 +4706,10 @@ impl PlanRunner {
                                 failure_count,
                                 &resulting_subtasks,
                                 false,
-                                Some("original task disappeared before decomposition rewrite".to_string()),
+                                Some(
+                                    "original task disappeared before decomposition rewrite"
+                                        .to_string(),
+                                ),
                             )
                             .await;
                             return;
@@ -4689,12 +4717,15 @@ impl PlanRunner {
 
                         let mut original = original_task.clone();
                         original.status = "skipped".to_string();
-                        original.split_into = Some(new_tasks.iter().map(|task| task.id.clone()).collect());
+                        original.split_into =
+                            Some(new_tasks.iter().map(|task| task.id.clone()).collect());
 
                         rewritten_tasks.tasks.remove(original_index);
                         rewritten_tasks.tasks.insert(original_index, original);
                         for (offset, task) in new_tasks.into_iter().enumerate() {
-                            rewritten_tasks.tasks.insert(original_index + 1 + offset, task);
+                            rewritten_tasks
+                                .tasks
+                                .insert(original_index + 1 + offset, task);
                         }
 
                         for task in &mut rewritten_tasks.tasks {
@@ -4718,15 +4749,14 @@ impl PlanRunner {
 
                         rewritten_tasks.meta.plan = plan_id.to_string();
                         rewritten_tasks.meta.total = rewritten_tasks.tasks.len() as u32;
-                        rewritten_tasks.meta.done =
-                            (rewritten_tasks
-                                .tasks
-                                .iter()
-                                .filter(|task| {
-                                    task.status.eq_ignore_ascii_case("skipped")
-                                        || task.status.eq_ignore_ascii_case("done")
-                                })
-                                .count()) as u32;
+                        rewritten_tasks.meta.done = (rewritten_tasks
+                            .tasks
+                            .iter()
+                            .filter(|task| {
+                                task.status.eq_ignore_ascii_case("skipped")
+                                    || task.status.eq_ignore_ascii_case("done")
+                            })
+                            .count()) as u32;
                         rewritten_tasks.meta.status = "ready".to_string();
 
                         let rendered = match toml::to_string_pretty(&rewritten_tasks) {
@@ -4802,7 +4832,9 @@ impl PlanRunner {
                         .await;
                     }
                     Err(e) => {
-                        tracing::error!("[orchestrate] decomposition replan failed for {plan_id}: {e}");
+                        tracing::error!(
+                            "[orchestrate] decomposition replan failed for {plan_id}: {e}"
+                        );
                         self.record_replan_episode(
                             plan_id,
                             &task_id,
@@ -4818,7 +4850,8 @@ impl PlanRunner {
                 }
             }
             ReplanStrategy::Skip => {
-                let skip_reason = format!("skipped after {failure_count} consecutive gate failures");
+                let skip_reason =
+                    format!("skipped after {failure_count} consecutive gate failures");
                 tracing::warn!(
                     plan_id = %plan_id,
                     task_id = %task_id,
@@ -4847,8 +4880,10 @@ impl PlanRunner {
                     "replan_strategy".to_string(),
                     serde_json::json!(ReplanStrategy::Skip),
                 );
-                ep.extra
-                    .insert("failure_count".to_string(), serde_json::json!(failure_count));
+                ep.extra.insert(
+                    "failure_count".to_string(),
+                    serde_json::json!(failure_count),
+                );
                 ep.extra.insert(
                     "failure_phase".to_string(),
                     serde_json::json!(failure_phase),
@@ -4991,11 +5026,8 @@ impl PlanRunner {
 
         let tasks_path = plan_dir.join("tasks.toml");
         let existing_tasks = std::fs::read_to_string(&tasks_path).unwrap_or_default();
-        let system_prompt = crate::plan_generate::build_generation_prompt(
-            &self.workdir,
-            &prd_content,
-            "prd",
-        );
+        let system_prompt =
+            crate::plan_generate::build_generation_prompt(&self.workdir, &prd_content, "prd");
         let prompt = format!(
             "{failure_summary}\n\n\
              Regenerate the implementation plan from the PRD at {}.\
@@ -5018,8 +5050,8 @@ impl PlanRunner {
                 Some(model.to_string()),
                 None,
                 Some(system_prompt),
-        )
-        .await
+            )
+            .await
         {
             Ok(_) => {
                 let regenerated_tasks = match crate::task_parser::TasksFile::parse(&tasks_path) {
@@ -5265,12 +5297,17 @@ impl PlanRunner {
         }
         let mut ep = Episode::new("Implementer", task_id).failed(error.to_string());
         if let Some(task_def) = task_def.as_ref() {
-            ep.extra
-                .insert("files".to_string(), serde_json::json!(task_def.files.clone()));
+            ep.extra.insert(
+                "files".to_string(),
+                serde_json::json!(task_def.files.clone()),
+            );
         }
         ep.extra.insert(
             "crate_familiarity".to_string(),
-            serde_json::json!(self.crate_familiarity_tracker.score_for_task(task_def.as_ref())),
+            serde_json::json!(
+                self.crate_familiarity_tracker
+                    .score_for_task(task_def.as_ref())
+            ),
         );
         ep.usage = match result {
             Some(result) => Usage {
@@ -5355,7 +5392,11 @@ impl PlanRunner {
         selected_model: Option<&str>,
     ) -> Option<SkillExtractionRequest> {
         let tracker = self.task_trackers.get(plan_id)?;
-        let task_def = tracker.tasks_file.tasks.iter().find(|task| task.id == task_id)?;
+        let task_def = tracker
+            .tasks_file
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)?;
         let role = AgentRole::Implementer;
         let task_allowed_tools_csv = claude_task_tool_allowlist_with(
             role,
@@ -5402,11 +5443,7 @@ impl PlanRunner {
             }
         }
 
-        let gate_results = vec![SkillGateResult::new(
-            "task_failure",
-            false,
-            0.0,
-        )];
+        let gate_results = vec![SkillGateResult::new("task_failure", false, 0.0)];
 
         Some(SkillExtractionRequest::new(
             task_files,
@@ -6153,7 +6190,10 @@ impl PlanRunner {
         };
 
         // ── Adaptive model selection via CascadeRouter ───────────────
-        let use_cascade = task_def.as_ref().map(|td| td.model_hint.is_none()).unwrap_or(true);
+        let use_cascade = task_def
+            .as_ref()
+            .map(|td| td.model_hint.is_none())
+            .unwrap_or(true);
         if use_cascade {
             let cascade_router = self.learning.cascade_router();
             let context_vec = cascade_context_vec(self, plan_id, role, task_def.as_ref());
@@ -6186,10 +6226,7 @@ impl PlanRunner {
             .as_ref()
             .map(|td| td.files.clone())
             .unwrap_or_default();
-        let task_tier_for_skill_query = task_def
-            .as_ref()
-            .map(|td| td.tier.as_str())
-            .unwrap_or("");
+        let task_tier_for_skill_query = task_def.as_ref().map(|td| td.tier.as_str()).unwrap_or("");
         let symbols_for_skill_query = extract_task_symbols(&task_text);
         let skill_context_section = self
             .skill_library
@@ -6226,9 +6263,7 @@ impl PlanRunner {
             }
             Ok(None) => None,
             Err(err) => {
-                tracing::warn!(
-                    "[orchestrate] failed to lookup playbook for task {task}: {err}"
-                );
+                tracing::warn!("[orchestrate] failed to lookup playbook for task {task}: {err}");
                 None
             }
         };
@@ -6681,12 +6716,7 @@ impl PlanRunner {
         }
 
         if !result.success {
-            self.observe_cascade_router(
-                plan_id,
-                task_def.as_ref(),
-                &selected_model,
-                0.0,
-            );
+            self.observe_cascade_router(plan_id, task_def.as_ref(), &selected_model, 0.0);
             let task_phase = task_def
                 .as_ref()
                 .map(|task| task.status.as_str())
@@ -8393,9 +8423,8 @@ fn extract_task_symbols(text: &str) -> Vec<String> {
         }
 
         for candidate in raw.split("::") {
-            let candidate = candidate.trim_matches(|ch: char| {
-                !ch.is_ascii_alphanumeric() && ch != '_'
-            });
+            let candidate =
+                candidate.trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_');
             if candidate.len() < 3 {
                 continue;
             }

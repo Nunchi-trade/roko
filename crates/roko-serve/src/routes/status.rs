@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
 
-use crate::event_bus::Envelope;
 use crate::error::ApiError;
+use crate::event_bus::Envelope;
 use crate::state::AppState;
 use roko_learn::cascade_router::CascadeStage;
 use roko_learn::efficiency::AgentEfficiencyEvent;
@@ -757,9 +757,7 @@ fn build_feedback_latency_response(entries: &[Value]) -> Value {
     })
 }
 
-fn build_coverage_response(
-    backlog: &[Envelope<crate::events::ServerEvent>],
-) -> Value {
+fn build_coverage_response(backlog: &[Envelope<crate::events::ServerEvent>]) -> Value {
     let subscription_terms = [
         "plan",
         "task",

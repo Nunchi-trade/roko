@@ -456,7 +456,10 @@ impl ContextProvider {
         let symbol_resolver = SymbolResolver::new(workdir.clone());
         let brief_generator = TaskBriefGenerator::new();
         let context_average_tracker = ContextAverageTracker::load(
-            workdir.join(".roko").join("learn").join("context-averages.json"),
+            workdir
+                .join(".roko")
+                .join("learn")
+                .join("context-averages.json"),
         );
         Self {
             workdir,
@@ -531,7 +534,9 @@ impl ContextProvider {
     fn apply_average_based_demotions(&self, sections: &mut [ContextSection], task_tier: &str) {
         for section in sections {
             let source_type = context_source_type(&section.source);
-            let ref_rate = self.context_average_tracker.ref_rate(task_tier, source_type);
+            let ref_rate = self
+                .context_average_tracker
+                .ref_rate(task_tier, source_type);
             let decision = if ref_rate < CONTEXT_AVERAGE_DEMOTE_THRESHOLD {
                 if section.section.priority == SectionPriority::Normal {
                     section.section.priority = SectionPriority::Low;
@@ -543,8 +548,7 @@ impl ContextProvider {
 
             info!(
                 "[context] {}: {} (ref_rate={ref_rate:.2})",
-                section.section.name,
-                decision
+                section.section.name, decision
             );
         }
     }
