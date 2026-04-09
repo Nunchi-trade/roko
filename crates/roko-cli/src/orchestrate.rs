@@ -430,6 +430,12 @@ impl TaskTracker {
         self.current_group_index = 0;
         self.impl_round += 1;
     }
+
+    /// Return the most recently implemented task, if it still exists in the task file.
+    fn last_impl_task(&self) -> Option<&crate::task_parser::TaskDef> {
+        let task_id = self.last_impl_task_id.as_deref()?;
+        self.tasks_file.tasks.iter().find(|task| task.id == task_id)
+    }
 }
 
 impl PlanRunner {
@@ -3981,6 +3987,20 @@ impl PlanRunner {
         use roko_compose::templates::{PlanSlice, RolePromptTemplate};
 
         let plan_dir = self.workdir.join("plans").join(plan_id);
+        let mut public_api_files = Vec::new();
+        let mut source_snippets = Vec::new();
+
+        let last_task = self
+            .task_trackers
+            .get(plan_id)
+            .and_then(TaskTracker::last_impl_task)
+            .cloned();
+
+        if let Some(task) = last_task {
+            let (files, snippets) = self.collect_public_api_snippets(&task).await;
+            public_api_files = files;
+            source_snippets = snippets;
+        }
 
         // Load plan.md content
         let plan_md_path = plan_dir.join("plan.md");
@@ -3994,6 +4014,20 @@ impl PlanRunner {
             .await
             .unwrap_or_default();
 
+        let brief = if public_api_files.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "This task changed public API surface. Generate or update documentation for the exported items in the touched files:\n{}\n\n\
+                 Update module docs, inline docs, and user-facing references so the public API remains accurate.",
+                public_api_files
+                    .iter()
+                    .map(|file| format!("- {file}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )
+        };
+
         let input = ScribeInput {
             agents_md,
             plan: PlanSlice {
@@ -4003,8 +4037,8 @@ impl PlanRunner {
                 content: plan_content,
             },
             prd2_extract: String::new(),
-            brief: String::new(),
-            source_snippets: Vec::new(),
+            brief,
+            source_snippets,
             variant: ScribeVariant::Initial,
             critic_feedback: None,
             prior_docs: None,
@@ -4018,6 +4052,34 @@ impl PlanRunner {
             .map(|s| s.content.as_str())
             .collect::<Vec<_>>()
             .join("\n\n---\n\n")
+    }
+
+    /// Collect source snippets for touched files that appear to expose public API.
+    async fn collect_public_api_snippets(
+        &self,
+        task: &crate::task_parser::TaskDef,
+    ) -> (Vec<String>, Vec<roko_compose::templates::scribe::FileSnippet>) {
+        let mut public_api_files = Vec::new();
+        let mut snippets = Vec::new();
+
+        for file in &task.files {
+            let path = self.workdir.join(file);
+            let Ok(content) = tokio::fs::read_to_string(&path).await else {
+                continue;
+            };
+
+            if !file_contains_public_api(file, &content) {
+                continue;
+            }
+
+            public_api_files.push(file.clone());
+            snippets.push(roko_compose::templates::scribe::FileSnippet {
+                path: file.clone(),
+                content: truncate_doc_snippet(&content, 12_000),
+            });
+        }
+
+        (public_api_files, snippets)
     }
 
     // ── Observability helpers ────────────────────────────────────────────
@@ -4627,6 +4689,34 @@ fn task_def_to_input(td: &crate::task_parser::TaskDef) -> roko_compose::TaskInpu
     }
 }
 
+fn file_contains_public_api(path: &str, content: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    if normalized.ends_with("/src/lib.rs") || normalized.ends_with("/src/mod.rs") {
+        return true;
+    }
+
+    content.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("pub fn ")
+            || trimmed.starts_with("pub struct ")
+            || trimmed.starts_with("pub enum ")
+            || trimmed.starts_with("pub trait ")
+            || trimmed.starts_with("pub type ")
+            || trimmed.starts_with("pub use ")
+            || trimmed.starts_with("pub mod ")
+    })
+}
+
+fn truncate_doc_snippet(content: &str, max_chars: usize) -> String {
+    let mut chars = content.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_none() {
+        content.to_string()
+    } else {
+        format!("{truncated}\n\n[... truncated]")
+    }
+}
+
 /// Load prior task outputs from `.roko/task-outputs/{task_id}.txt`.
 ///
 /// When a task completes successfully, we persist a summary of its output
@@ -4943,5 +5033,29 @@ command = "cargo check -p roko-cli"
         let report = report.unwrap();
         assert!(!report.drifted());
         assert!(report.coverage() >= 0.35);
+    }
+
+    #[test]
+    fn file_contains_public_api_detects_exports() {
+        assert!(file_contains_public_api(
+            "crates/demo/src/lib.rs",
+            "pub fn exported() {}\n"
+        ));
+        assert!(file_contains_public_api(
+            "crates/demo/src/foo.rs",
+            "pub struct Thing;\n"
+        ));
+        assert!(!file_contains_public_api(
+            "crates/demo/src/foo.rs",
+            "fn helper() {}\n"
+        ));
+    }
+
+    #[test]
+    fn truncate_doc_snippet_limits_length() {
+        let content = "a".repeat(20);
+        let truncated = truncate_doc_snippet(&content, 8);
+        assert!(truncated.starts_with("aaaaaaaa"));
+        assert!(truncated.contains("[... truncated]"));
     }
 }
