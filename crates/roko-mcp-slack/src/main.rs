@@ -34,6 +34,13 @@ struct SlackReplyArguments {
 }
 
 #[derive(Debug, Deserialize)]
+struct SlackReactArguments {
+    channel: String,
+    ts: String,
+    emoji: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct SlackPostMessageResponse {
     ok: bool,
     #[serde(default)]
@@ -44,6 +51,13 @@ struct SlackPostMessageResponse {
     ts: Option<String>,
     #[serde(default)]
     message: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SlackMutationResponse {
+    ok: bool,
+    #[serde(default)]
+    error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -114,6 +128,20 @@ fn handle_tools_list() -> Value {
                     "required": ["channel", "thread_ts", "text"],
                     "additionalProperties": false
                 }
+            }),
+            serde_json::json!({
+                "name": "slack_react",
+                "description": "Add a reaction to a Slack message.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "channel": {"type": "string"},
+                        "ts": {"type": "string"},
+                        "emoji": {"type": "string"}
+                    },
+                    "required": ["channel", "ts", "emoji"],
+                    "additionalProperties": false
+                }
             })
         ]
     })
@@ -129,6 +157,7 @@ fn dispatch_tool_call(name: &str, arguments: Value) -> Result<Value, JsonRpcErro
     match name {
         "slack.post_message" => handle_slack_post_message(arguments),
         "slack_reply" => handle_slack_reply(arguments),
+        "slack_react" => handle_slack_react(arguments),
         _ => Err(JsonRpcError::invalid_params(format!(
             "unknown tool: {name}"
         ))),
@@ -203,6 +232,27 @@ fn handle_slack_reply(arguments: Value) -> Result<Value, JsonRpcError> {
     }))
 }
 
+fn handle_slack_react(arguments: Value) -> Result<Value, JsonRpcError> {
+    let args: SlackReactArguments = serde_json::from_value(arguments).map_err(|err| {
+        JsonRpcError::invalid_params(format!("invalid slack_react args: {err}"))
+    })?;
+
+    let client = SlackClient::from_env()?;
+    client.add_reaction(&args.channel, &args.ts, &args.emoji)?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": serde_json::json!({
+                "channel": args.channel,
+                "ts": args.ts,
+                "emoji": args.emoji
+            }).to_string()
+        }],
+        "isError": false
+    }))
+}
+
 impl SlackClient {
     fn from_env() -> Result<Self, JsonRpcError> {
         let token = env::var("SLACK_BOT_TOKEN")
@@ -261,6 +311,44 @@ impl SlackClient {
 
         Ok(parsed)
     }
+
+    fn add_reaction(
+        &self,
+        channel: &str,
+        ts: &str,
+        emoji: &str,
+    ) -> Result<SlackMutationResponse, JsonRpcError> {
+        let mut headers = HeaderMap::new();
+        let auth_value = format!("Bearer {}", self.token);
+        let auth_value = HeaderValue::from_str(&auth_value)
+            .map_err(|err| JsonRpcError::internal_error(format!("invalid slack auth header: {err}")))?;
+        headers.insert(AUTHORIZATION, auth_value);
+
+        let response = self
+            .client
+            .post("https://slack.com/api/reactions.add")
+            .headers(headers)
+            .form(&[
+                ("channel", channel),
+                ("timestamp", ts),
+                ("name", emoji),
+            ])
+            .send()
+            .map_err(|err| JsonRpcError::internal_error(format!("slack request failed: {err}")))?;
+
+        let parsed: SlackMutationResponse = response
+            .json()
+            .map_err(|err| JsonRpcError::internal_error(format!("invalid slack response: {err}")))?;
+
+        if !parsed.ok {
+            let error = parsed.error.as_deref().unwrap_or("unknown");
+            return Err(JsonRpcError::internal_error(format!(
+                "Slack API error: {error}"
+            )));
+        }
+
+        Ok(parsed)
+    }
 }
 
 #[cfg(test)]
@@ -270,11 +358,13 @@ mod tests {
     #[test]
     fn tools_list_contains_post_message() {
         let tools = handle_tools_list()["tools"].as_array().expect("tools array");
-        assert_eq!(tools.len(), 2);
+        assert_eq!(tools.len(), 3);
         assert_eq!(tools[0]["name"], "slack.post_message");
         assert_eq!(tools[0]["inputSchema"]["required"], serde_json::json!(["channel", "text"]));
         assert_eq!(tools[1]["name"], "slack_reply");
         assert_eq!(tools[1]["inputSchema"]["required"], serde_json::json!(["channel", "thread_ts", "text"]));
+        assert_eq!(tools[2]["name"], "slack_react");
+        assert_eq!(tools[2]["inputSchema"]["required"], serde_json::json!(["channel", "ts", "emoji"]));
     }
 
     #[test]
