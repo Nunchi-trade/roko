@@ -484,11 +484,7 @@ impl RailwayApiBackend {
     }
 
     /// Trigger a deployment and return the deployment ID.
-    async fn trigger_deployment(
-        &self,
-        service_id: &str,
-        environment_id: &str,
-    ) -> Result<String> {
+    async fn trigger_deployment(&self, service_id: &str, environment_id: &str) -> Result<String> {
         let deploy_query = r"
             mutation ServiceInstanceDeployV2($serviceId: String!, $environmentId: String!) {
                 serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId)
@@ -510,7 +506,11 @@ impl RailwayApiBackend {
         let deployment_id = deployment
             .as_str()
             .map(str::to_string)
-            .or_else(|| deployment.get("id").and_then(|value| value.as_str().map(str::to_string)))
+            .or_else(|| {
+                deployment
+                    .get("id")
+                    .and_then(|value| value.as_str().map(str::to_string))
+            })
             .ok_or_else(|| anyhow!("missing deployment id in serviceInstanceDeployV2 response"))?;
 
         info!(%deployment_id, "initiated Railway deployment");
@@ -520,7 +520,11 @@ impl RailwayApiBackend {
     /// Deploy the Roko app, wait for healthcheck success, and return the live deployment.
     pub async fn deploy_roko_app(&self, spec: &RailwayDeploySpec) -> Result<Deployment> {
         let project = self
-            .ensure_project_context(spec.project_id.as_deref(), spec.environment_id.as_deref(), &spec.project_name)
+            .ensure_project_context(
+                spec.project_id.as_deref(),
+                spec.environment_id.as_deref(),
+                &spec.project_name,
+            )
             .await?;
 
         let service_id = self
@@ -573,7 +577,8 @@ impl RailwayApiBackend {
             .trigger_deployment(&service_id, &project.environment_id)
             .await?;
 
-        self.wait_for_ready(&deployment_id, &spec.service_name).await
+        self.wait_for_ready(&deployment_id, &spec.service_name)
+            .await
     }
 
     async fn wait_for_ready(&self, deployment_id: &str, service_name: &str) -> Result<Deployment> {

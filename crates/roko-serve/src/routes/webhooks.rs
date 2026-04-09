@@ -71,10 +71,12 @@ async fn github_webhook(
     let kind = github_signal_kind(event_type, &payload)
         .ok_or_else(|| ApiError::bad_request(format!("unsupported github event: {event_type}")))?;
 
-    let signal = attach_hdc_fingerprint(Signal::builder(kind)
-        .body(Body::Json(payload))
-        .provenance(Provenance::external("github:webhook"))
-        .build());
+    let signal = attach_hdc_fingerprint(
+        Signal::builder(kind)
+            .body(Body::Json(payload))
+            .provenance(Provenance::external("github:webhook"))
+            .build(),
+    );
 
     persist_webhook_signal(&state, signal).await?;
 
@@ -138,10 +140,12 @@ async fn slack_webhook(
     let kind = slack_signal_kind(event_type)
         .ok_or_else(|| ApiError::bad_request(format!("unsupported slack event: {event_type}")))?;
 
-    let signal = attach_hdc_fingerprint(Signal::builder(kind)
-        .body(Body::Json(payload))
-        .provenance(Provenance::external("slack:webhook"))
-        .build());
+    let signal = attach_hdc_fingerprint(
+        Signal::builder(kind)
+            .body(Body::Json(payload))
+            .provenance(Provenance::external("slack:webhook"))
+            .build(),
+    );
 
     persist_webhook_signal(&state, signal).await?;
 
@@ -173,13 +177,14 @@ fn generic_webhook_signal(payload: Value) -> Signal {
 
 #[cfg(feature = "hdc")]
 fn attach_hdc_fingerprint(mut signal: Signal) -> Signal {
-    use base64::engine::general_purpose::STANDARD as BASE64;
     use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64;
 
     let fingerprint = bardo_primitives::hdc::fingerprint(&signal.body);
-    signal
-        .tags
-        .insert("hdc_fingerprint".into(), BASE64.encode(fingerprint.to_bytes()));
+    signal.tags.insert(
+        "hdc_fingerprint".into(),
+        BASE64.encode(fingerprint.to_bytes()),
+    );
     signal.id = signal.content_hash();
     signal
 }
@@ -337,9 +342,9 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 mod tests {
     use super::*;
     #[cfg(feature = "hdc")]
-    use base64::engine::general_purpose::STANDARD as BASE64;
-    #[cfg(feature = "hdc")]
     use base64::Engine as _;
+    #[cfg(feature = "hdc")]
+    use base64::engine::general_purpose::STANDARD as BASE64;
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
 
@@ -447,7 +452,7 @@ mod tests {
     #[cfg(feature = "hdc")]
     #[test]
     fn attach_hdc_fingerprint_populates_signal_metadata() {
-        use bardo_primitives::hdc::{fingerprint, HdcVector};
+        use bardo_primitives::hdc::{HdcVector, fingerprint};
 
         let body = Body::Json(serde_json::json!({
             "event": "push",

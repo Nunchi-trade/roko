@@ -114,7 +114,11 @@ fn format_event_sources(snapshot: &EventSourcesSnapshot) -> String {
     let mut out = String::new();
 
     let _ = writeln!(out, "Cron schedules");
-    let _ = writeln!(out, "{}", format_cron_schedule_list(&snapshot.cron_schedules));
+    let _ = writeln!(
+        out,
+        "{}",
+        format_cron_schedule_list(&snapshot.cron_schedules)
+    );
     let _ = writeln!(out);
     let _ = writeln!(out, "File watchers");
     let _ = writeln!(out, "{}", format_file_watcher_list(&snapshot.file_watchers));

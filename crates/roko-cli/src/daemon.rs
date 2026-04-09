@@ -21,11 +21,11 @@ use sysinfo::{Pid, ProcessesToUpdate, System};
 use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, SeekFrom};
 use tokio::net::{TcpListener, UnixListener, UnixStream};
+#[cfg(unix)]
+use tokio::signal::unix::{SignalKind, signal};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
-#[cfg(unix)]
-use tokio::signal::unix::{signal, SignalKind};
 use tracing::{info, warn};
 
 /// macOS LaunchAgents plist helpers for daemon installation.
@@ -365,8 +365,7 @@ pub fn daemon_install() -> Result<()> {
     let plist_dir = plist_path
         .parent()
         .context("resolve LaunchAgents directory")?;
-    fs::create_dir_all(plist_dir)
-        .with_context(|| format!("create {}", plist_dir.display()))?;
+    fs::create_dir_all(plist_dir).with_context(|| format!("create {}", plist_dir.display()))?;
 
     let home_dir = dirs::home_dir().context("resolve home directory")?;
     let logs_dir = home_dir.join(".roko").join("logs");
@@ -411,8 +410,7 @@ pub fn daemon_uninstall() -> Result<()> {
     }
 
     if plist_path.exists() {
-        fs::remove_file(&plist_path)
-            .with_context(|| format!("remove {}", plist_path.display()))?;
+        fs::remove_file(&plist_path).with_context(|| format!("remove {}", plist_path.display()))?;
     }
 
     Ok(())
@@ -467,15 +465,22 @@ pub async fn daemon_status() -> Result<()> {
         .write_all(b"status")
         .await
         .context("send daemon status request")?;
-    stream.shutdown().await.context("close daemon status request")?;
+    stream
+        .shutdown()
+        .await
+        .context("close daemon status request")?;
 
     let mut buf = Vec::new();
     stream
         .read_to_end(&mut buf)
         .await
         .context("read daemon status response")?;
-    let response: DaemonStatusResponse = serde_json::from_slice(&buf)
-        .with_context(|| format!("parse daemon status response from {}", socket_path.display()))?;
+    let response: DaemonStatusResponse = serde_json::from_slice(&buf).with_context(|| {
+        format!(
+            "parse daemon status response from {}",
+            socket_path.display()
+        )
+    })?;
 
     print_daemon_status_table(
         state,
@@ -510,15 +515,16 @@ pub async fn daemon_reload() -> Result<()> {
         .read_to_end(&mut buf)
         .await
         .context("read daemon reload response")?;
-    let response: DaemonReloadResponse = serde_json::from_slice(&buf)
-        .with_context(|| format!("parse daemon reload response from {}", socket_path.display()))?;
+    let response: DaemonReloadResponse = serde_json::from_slice(&buf).with_context(|| {
+        format!(
+            "parse daemon reload response from {}",
+            socket_path.display()
+        )
+    })?;
 
     println!(
         "daemon {}: subscriptions={}, templates={}, loaded={}",
-        response.command,
-        response.subscriptions,
-        response.templates,
-        response.loaded
+        response.command, response.subscriptions, response.templates, response.loaded
     );
 
     if response.ok {
@@ -608,7 +614,8 @@ fn read_daemon_info(workdir: &Path) -> Result<Option<DaemonInfo>> {
 fn write_daemon_info(workdir: &Path, info: &DaemonInfo) -> Result<()> {
     write_daemon_json(workdir, info)?;
     let pid_path = daemon_pid_path(workdir);
-    fs::write(&pid_path, info.pid.to_string()).with_context(|| format!("write {}", pid_path.display()))?;
+    fs::write(&pid_path, info.pid.to_string())
+        .with_context(|| format!("write {}", pid_path.display()))?;
     Ok(())
 }
 
@@ -703,8 +710,7 @@ async fn print_recent_daemon_logs(path: &Path, lines: usize) -> Result<()> {
     };
 
     let mut contents = Vec::new();
-    file
-        .read_to_end(&mut contents)
+    file.read_to_end(&mut contents)
         .await
         .with_context(|| format!("read {}", path.display()))?;
     if contents.is_empty() {
@@ -799,8 +805,7 @@ fn print_daemon_status_table(
     );
     println!(
         "{:<26}{}",
-        "total signals processed",
-        total_signals_processed
+        "total signals processed", total_signals_processed
     );
 }
 
@@ -854,7 +859,8 @@ async fn start_ipc_server(
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     if socket_path.exists() {
-        fs::remove_file(&socket_path).with_context(|| format!("remove {}", socket_path.display()))?;
+        fs::remove_file(&socket_path)
+            .with_context(|| format!("remove {}", socket_path.display()))?;
     }
 
     let listener = UnixListener::bind(&socket_path)
@@ -901,7 +907,9 @@ async fn handle_ipc_command(
         .read(&mut buf)
         .await
         .context("read daemon IPC request")?;
-    let request = String::from_utf8_lossy(&buf[..n]).trim().to_ascii_lowercase();
+    let request = String::from_utf8_lossy(&buf[..n])
+        .trim()
+        .to_ascii_lowercase();
 
     if request == "status" {
         let active_agents = state.supervisor.count().await;
@@ -920,7 +928,8 @@ async fn handle_ipc_command(
 
     if request == "reload" {
         let response = reload_daemon_runtime(&state).await;
-        let response = serde_json::to_string(&response).context("serialize daemon reload response")?;
+        let response =
+            serde_json::to_string(&response).context("serialize daemon reload response")?;
         stream.write_all(response.as_bytes()).await?;
         stream.write_all(b"\n").await?;
         return Ok(());
@@ -935,7 +944,9 @@ async fn handle_ipc_command(
     }
 
     if request == "shutdown" {
-        stream.write_all(b"{\"ok\":true,\"command\":\"shutdown\"}\n").await?;
+        stream
+            .write_all(b"{\"ok\":true,\"command\":\"shutdown\"}\n")
+            .await?;
         shutdown_request.cancel();
         return Ok(());
     }
@@ -952,8 +963,10 @@ async fn handle_ipc_command(
 async fn reload_daemon_runtime(state: &AppState) -> DaemonReloadResponse {
     let subscriptions_report = {
         let roko_config = state.roko_config.read().await.clone();
-        let registry =
-            roko_serve::dispatch::SubscriptionRegistry::load_from_project(&state.workdir, &roko_config);
+        let registry = roko_serve::dispatch::SubscriptionRegistry::load_from_project(
+            &state.workdir,
+            &roko_config,
+        );
         state.subscriptions.replace_with(registry.all())
     };
 

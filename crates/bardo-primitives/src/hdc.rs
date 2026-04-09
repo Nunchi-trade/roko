@@ -256,7 +256,7 @@ pub fn text_fingerprint(text: &str) -> HdcVector {
 
 #[cfg(test)]
 mod tests {
-    use super::{fingerprint, text_fingerprint, HdcVector};
+    use super::{HdcVector, fingerprint, text_fingerprint};
 
     #[test]
     fn hdc_bind_involution() {

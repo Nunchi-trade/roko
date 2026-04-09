@@ -17,8 +17,10 @@ pub fn start_watchers(state: Arc<AppState>) -> JoinHandle<()> {
             if config.watcher.is_empty() {
                 Vec::new()
             } else {
-                vec![Box::new(FileWatchEventSource::from_config(config.watcher.clone()))
-                    as Box<dyn EventSource>]
+                vec![
+                    Box::new(FileWatchEventSource::from_config(config.watcher.clone()))
+                        as Box<dyn EventSource>,
+                ]
             }
         };
 

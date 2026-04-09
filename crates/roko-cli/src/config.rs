@@ -4,13 +4,13 @@
 //! sets a token budget for prompt composition, and lists the gates to run
 //! on the agent's output.
 
-use anyhow::{anyhow, Context, Result};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use anyhow::{Context, Result, anyhow};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::path::{Path, PathBuf};
 
+use roko_core::config::ServeConfig;
 use roko_core::config::schema::RokoConfig;
 use roko_core::config::schema::SubscriptionConfig;
-use roko_core::config::ServeConfig;
 use roko_orchestrator::ExecutorConfig;
 
 /// The top-level `roko.toml` document.
@@ -515,9 +515,7 @@ impl RepoRegistry {
         }
         // Match bare name (e.g. "my-repo" in "owner/my-repo").
         let bare = full_name.rsplit('/').next().unwrap_or(full_name);
-        self.repos
-            .iter()
-            .find(|entry| entry.config.name == bare)
+        self.repos.iter().find(|entry| entry.config.name == bare)
     }
 
     fn resolve_root(repo: &RepoConfig, workdir: &Path) -> Result<PathBuf> {
@@ -1362,13 +1360,7 @@ fn sources_from_layer(layer: &ConfigLayer, present: Source, fallback: Source) ->
     let agent = layer.agent.as_ref();
     let tools = layer.tools.as_ref();
     let prompt = layer.prompt.as_ref();
-    let pick = |is_set: bool| -> Source {
-        if is_set {
-            present
-        } else {
-            fallback
-        }
-    };
+    let pick = |is_set: bool| -> Source { if is_set { present } else { fallback } };
     ConfigSources {
         auto_plan: pick(layer.auto_plan.is_some()),
         agent_command: pick(agent.and_then(|a| a.command.as_ref()).is_some()),
@@ -1734,10 +1726,11 @@ auto_plan = true
         let repo = registry.get("repo-a").unwrap();
         assert!(repo.root.ends_with("repo-a"));
         assert!(repo.roko_config.is_some());
-        assert!(repo
-            .roko_config_path
-            .as_ref()
-            .is_some_and(|path| path.ends_with(".roko/roko.toml")));
+        assert!(
+            repo.roko_config_path
+                .as_ref()
+                .is_some_and(|path| path.ends_with(".roko/roko.toml"))
+        );
     }
 
     #[test]

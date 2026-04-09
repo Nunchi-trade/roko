@@ -5,11 +5,11 @@
 //! (`decay` and `gc`) rewrite the file atomically through a temporary
 //! sibling.
 
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -70,12 +70,7 @@ impl KnowledgeStore {
     /// The resulting file is `.roko/neuro/knowledge.jsonl`.
     #[must_use]
     pub fn for_roko_dir(roko_dir: impl AsRef<Path>) -> Self {
-        Self::new(
-            roko_dir
-                .as_ref()
-                .join("neuro")
-                .join("knowledge.jsonl"),
-        )
+        Self::new(roko_dir.as_ref().join("neuro").join("knowledge.jsonl"))
     }
 
     /// Construct a store from a workspace root.
@@ -264,16 +259,21 @@ impl KnowledgeStore {
         let file = match File::open(&self.path) {
             Ok(file) => file,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(err) => return Err(err).with_context(|| {
-                format!("open knowledge store at {}", self.path.display())
-            }),
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("open knowledge store at {}", self.path.display()));
+            }
         };
 
         let reader = BufReader::new(file);
         let mut entries = Vec::new();
         for (line_idx, line) in reader.lines().enumerate() {
             let line = line.with_context(|| {
-                format!("read knowledge line {} from {}", line_idx + 1, self.path.display())
+                format!(
+                    "read knowledge line {} from {}",
+                    line_idx + 1,
+                    self.path.display()
+                )
             })?;
             if line.trim().is_empty() {
                 continue;
@@ -453,7 +453,13 @@ fn compare_hits(left: &MemoryHit, right: &MemoryHit) -> std::cmp::Ordering {
 
 fn normalize(text: &str) -> String {
     text.chars()
-        .map(|ch| if ch.is_alphanumeric() { ch.to_ascii_lowercase() } else { ' ' })
+        .map(|ch| {
+            if ch.is_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
         .collect::<String>()
 }
 
@@ -474,13 +480,20 @@ fn keyword_score(entry: &KnowledgeEntry, terms: &[String], topic_norm: &str) -> 
         if content.contains(topic_norm) {
             score += 1.0;
         }
-        if tags.iter().any(|tag| tag.contains(topic_norm) || topic_norm.contains(tag)) {
+        if tags
+            .iter()
+            .any(|tag| tag.contains(topic_norm) || topic_norm.contains(tag))
+        {
             score += 1.0;
         }
     }
 
     for term in terms {
-        if content.contains(term) || tags.iter().any(|tag| tag.contains(term) || term.contains(tag)) {
+        if content.contains(term)
+            || tags
+                .iter()
+                .any(|tag| tag.contains(term) || term.contains(tag))
+        {
             score += 1.0;
         }
     }
@@ -562,8 +575,8 @@ fn hdc_similarity(entry: &KnowledgeEntry, topic: &str) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Duration;
     use crate::KnowledgeKind;
+    use chrono::Duration;
     use tempfile::TempDir;
 
     fn entry(
@@ -840,8 +853,14 @@ mod tests {
         assert_eq!(stats.kind_counts.get("fact"), Some(&2));
         assert_eq!(stats.kind_counts.get("procedure"), Some(&1));
         assert!((stats.average_confidence.expect("average") - 0.8).abs() < f64::EPSILON);
-        assert_eq!(stats.oldest_entry.as_ref().map(|entry| entry.id.as_str()), Some("oldest"));
-        assert_eq!(stats.newest_entry.as_ref().map(|entry| entry.id.as_str()), Some("newest"));
+        assert_eq!(
+            stats.oldest_entry.as_ref().map(|entry| entry.id.as_str()),
+            Some("oldest")
+        );
+        assert_eq!(
+            stats.newest_entry.as_ref().map(|entry| entry.id.as_str()),
+            Some("newest")
+        );
     }
 
     #[cfg(feature = "hdc")]

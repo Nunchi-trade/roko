@@ -5,10 +5,8 @@ use chrono::{DateTime, Utc};
 use cron::Schedule;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use notify::{EventKind, RecursiveMode, Watcher, recommended_watcher};
-use roko_core::{
-    Body, Kind, Result, RokoError, Signal, FS_CREATED, FS_DELETED, FS_MODIFIED,
-};
 use roko_core::config::{SchedulerConfig, SchedulerCronConfig, WatcherConfig, WatcherPathConfig};
+use roko_core::{Body, FS_CREATED, FS_DELETED, FS_MODIFIED, Kind, Result, RokoError, Signal};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -287,7 +285,10 @@ impl EventSource for CronEventSource {
                     break;
                 };
 
-                let wait = fire_at.signed_duration_since(now).to_std().unwrap_or_default();
+                let wait = fire_at
+                    .signed_duration_since(now)
+                    .to_std()
+                    .unwrap_or_default();
                 tokio::select! {
                     _ = cancel.cancelled() => break,
                     _ = tokio::time::sleep(wait) => {}
@@ -341,11 +342,11 @@ impl EventSource for FileWatchEventSource {
             watcher
                 .watch(&watched_path.directory, RecursiveMode::Recursive)
                 .map_err(|err| {
-                RokoError::config(format!(
-                    "failed to watch directory '{}': {err}",
-                    watched_path.directory.display()
-                ))
-            })?;
+                    RokoError::config(format!(
+                        "failed to watch directory '{}': {err}",
+                        watched_path.directory.display()
+                    ))
+                })?;
         }
 
         drain_file_watch_events(event_rx, sender, cancel, watched_paths).await
@@ -362,9 +363,7 @@ fn cron_signal(schedule: &CronSchedule, fired_at: DateTime<Utc>) -> Signal {
         .build()
 }
 
-fn compile_file_watch_paths(
-    paths: &[WatcherPathConfig],
-) -> Result<Vec<CompiledFileWatchPath>> {
+fn compile_file_watch_paths(paths: &[WatcherPathConfig]) -> Result<Vec<CompiledFileWatchPath>> {
     paths
         .iter()
         .map(|path| {
@@ -384,11 +383,7 @@ fn compile_file_watch_paths(
         .collect()
 }
 
-fn compile_globset(
-    patterns: &[String],
-    directory: &Path,
-    kind: &str,
-) -> Result<Option<GlobSet>> {
+fn compile_globset(patterns: &[String], directory: &Path, kind: &str) -> Result<Option<GlobSet>> {
     if patterns.is_empty() {
         return Ok(None);
     }
@@ -475,7 +470,9 @@ fn watch_path_is_enabled(path: &Path, watch_root: &Path, filters: &CompiledFileW
     }
 
     let included = match &filters.include {
-        Some(include) => candidates.iter().any(|candidate| include.is_match(candidate)),
+        Some(include) => candidates
+            .iter()
+            .any(|candidate| include.is_match(candidate)),
         None => true,
     };
     if !included {
@@ -572,9 +569,10 @@ async fn flush_pending_file_watch_signals(
 
     for (path, signal) in batched {
         let signal = file_watch_signal(&path, signal.signal_kind, signal.event_kind);
-        sender.send(signal).await.map_err(|_| {
-            RokoError::cancelled("filesystem watcher receiver dropped")
-        })?;
+        sender
+            .send(signal)
+            .await
+            .map_err(|_| RokoError::cancelled("filesystem watcher receiver dropped"))?;
     }
 
     Ok(())
@@ -774,7 +772,10 @@ mod tests {
         let (sender, _receiver) = tokio::sync::mpsc::channel(1);
         let cancel = CancellationToken::new();
 
-        let err = source.start(sender, cancel).await.expect_err("invalid cron should fail");
+        let err = source
+            .start(sender, cancel)
+            .await
+            .expect_err("invalid cron should fail");
         assert!(
             err.to_string().contains("broken"),
             "error should include schedule name"
@@ -816,8 +817,7 @@ mod tests {
 
         fs::write(&file_path, b"beta").expect("file should be modified");
         assert_eq!(
-            wait_for_watch_event(&mut receiver, &file_path_string, FS_MODIFIED, "modified")
-                .await,
+            wait_for_watch_event(&mut receiver, &file_path_string, FS_MODIFIED, "modified").await,
             Some("modified")
         );
 
@@ -857,21 +857,24 @@ mod tests {
         let path = PathBuf::from("/tmp/roko-plugin-debounce.txt");
 
         event_tx
-            .send(Ok(
-                notify::Event::new(notify::EventKind::Create(CreateKind::Any)).add_path(path.clone()),
+            .send(Ok(notify::Event::new(notify::EventKind::Create(
+                CreateKind::Any,
             ))
+            .add_path(path.clone())))
             .expect("create event should be accepted");
         sleep(Duration::from_millis(100)).await;
         event_tx
-            .send(Ok(
-                notify::Event::new(notify::EventKind::Modify(ModifyKind::Any)).add_path(path.clone()),
+            .send(Ok(notify::Event::new(notify::EventKind::Modify(
+                ModifyKind::Any,
             ))
+            .add_path(path.clone())))
             .expect("modify event should be accepted");
         sleep(Duration::from_millis(100)).await;
         event_tx
-            .send(Ok(
-                notify::Event::new(notify::EventKind::Remove(RemoveKind::Any)).add_path(path.clone()),
+            .send(Ok(notify::Event::new(notify::EventKind::Remove(
+                RemoveKind::Any,
             ))
+            .add_path(path.clone())))
             .expect("remove event should be accepted");
         drop(event_tx);
 
@@ -882,8 +885,14 @@ mod tests {
         assert_eq!(signal.kind, Kind::Custom(FS_DELETED.to_string()));
         let body: serde_json::Value = signal.body.as_json().expect("signal body should be json");
         let path_string = path.to_string_lossy().into_owned();
-        assert_eq!(body.get("path").and_then(|value| value.as_str()), Some(path_string.as_str()));
-        assert_eq!(body.get("event_kind").and_then(|value| value.as_str()), Some("deleted"));
+        assert_eq!(
+            body.get("path").and_then(|value| value.as_str()),
+            Some(path_string.as_str())
+        );
+        assert_eq!(
+            body.get("event_kind").and_then(|value| value.as_str()),
+            Some("deleted")
+        );
         assert!(
             timeout(Duration::from_millis(700), receiver.recv())
                 .await
@@ -925,22 +934,22 @@ mod tests {
         let excluded_swap = watch_root.join("draft.swp");
 
         event_tx
-            .send(Ok(
-                notify::Event::new(notify::EventKind::Create(CreateKind::Any))
-                    .add_path(excluded_git.clone()),
+            .send(Ok(notify::Event::new(notify::EventKind::Create(
+                CreateKind::Any,
             ))
+            .add_path(excluded_git.clone())))
             .expect("git event should be accepted");
         event_tx
-            .send(Ok(
-                notify::Event::new(notify::EventKind::Create(CreateKind::Any))
-                    .add_path(excluded_swap.clone()),
+            .send(Ok(notify::Event::new(notify::EventKind::Create(
+                CreateKind::Any,
             ))
+            .add_path(excluded_swap.clone())))
             .expect("swap event should be accepted");
         event_tx
-            .send(Ok(
-                notify::Event::new(notify::EventKind::Create(CreateKind::Any))
-                    .add_path(allowed.clone()),
+            .send(Ok(notify::Event::new(notify::EventKind::Create(
+                CreateKind::Any,
             ))
+            .add_path(allowed.clone())))
             .expect("allowed event should be accepted");
         drop(event_tx);
 

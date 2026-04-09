@@ -9,8 +9,8 @@ pub mod dispatch;
 pub mod error;
 pub mod event_bus;
 pub mod events;
-pub mod fswatcher;
 pub mod feedback;
+pub mod fswatcher;
 pub mod plan_types;
 pub mod routes;
 pub mod runtime;
@@ -22,14 +22,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tokio::sync::mpsc;
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use roko_core::config::schema::RokoConfig;
 use roko_core::Signal;
+use roko_core::config::schema::RokoConfig;
 use roko_plugin::{CronEventSource, EventSource, FileWatchEventSource};
 
 use crate::events::ServerEvent;
@@ -266,11 +266,15 @@ fn start_builtin_event_sources(state: Arc<AppState>, roko_config: RokoConfig) {
     let mut sources: Vec<Box<dyn EventSource>> = Vec::new();
 
     if !roko_config.scheduler.is_empty() {
-        sources.push(Box::new(CronEventSource::from_config(roko_config.scheduler.clone())));
+        sources.push(Box::new(CronEventSource::from_config(
+            roko_config.scheduler.clone(),
+        )));
     }
 
     if !roko_config.watcher.is_empty() {
-        sources.push(Box::new(FileWatchEventSource::from_config(roko_config.watcher.clone())));
+        sources.push(Box::new(FileWatchEventSource::from_config(
+            roko_config.watcher.clone(),
+        )));
     }
 
     if sources.is_empty() {

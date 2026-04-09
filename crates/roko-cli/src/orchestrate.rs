@@ -1567,12 +1567,18 @@ impl PlanRunner {
         };
 
         if let Err(e) = std::fs::write(&tmp_path, json) {
-            tracing::warn!("failed to write runtime MCP config {}: {e}", tmp_path.display());
+            tracing::warn!(
+                "failed to write runtime MCP config {}: {e}",
+                tmp_path.display()
+            );
             return self.config.agent.mcp_config.clone();
         }
         if let Err(e) = std::fs::rename(&tmp_path, &path) {
             let _ = std::fs::remove_file(&tmp_path);
-            tracing::warn!("failed to publish runtime MCP config {}: {e}", path.display());
+            tracing::warn!(
+                "failed to publish runtime MCP config {}: {e}",
+                path.display()
+            );
             return self.config.agent.mcp_config.clone();
         }
 
@@ -6571,22 +6577,21 @@ impl PlanRunner {
             "[orchestrate] format_bandit: model={selected_model} role={role:?} tools={tool_count} → {selected_format:?}",
         );
 
-        let role_instruction = system_prompt_override
-            .unwrap_or_else(|| {
-                let relevant_knowledge = build_relevant_knowledge_section(
-                    &self.workdir,
-                    task_def
-                        .as_ref()
-                        .and_then(|task| task.description.as_deref()),
-                );
-                build_system_prompt_with_notes(
-                    role,
-                    plan_id,
-                    task,
-                    &task_allowed_tools_csv,
-                    relevant_knowledge.as_deref(),
-                )
-            });
+        let role_instruction = system_prompt_override.unwrap_or_else(|| {
+            let relevant_knowledge = build_relevant_knowledge_section(
+                &self.workdir,
+                task_def
+                    .as_ref()
+                    .and_then(|task| task.description.as_deref()),
+            );
+            build_system_prompt_with_notes(
+                role,
+                plan_id,
+                task,
+                &task_allowed_tools_csv,
+                relevant_knowledge.as_deref(),
+            )
+        });
         let role_section = PromptSection::new("role", &role_instruction)
             .with_priority(SectionPriority::Critical)
             .with_placement(Placement::Start)
@@ -8108,12 +8113,7 @@ fn build_system_prompt_with_notes(
     if let Some(notes) = domain_notes.filter(|notes| !notes.trim().is_empty()) {
         task_context = task_context.with_domain_notes(notes);
     }
-    RoleSystemPromptSpec::new(
-        role,
-        task_context,
-        tools_csv,
-    )
-    .build()
+    RoleSystemPromptSpec::new(role, task_context, tools_csv).build()
 }
 
 fn build_relevant_knowledge_section(

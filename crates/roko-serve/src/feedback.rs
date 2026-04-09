@@ -848,9 +848,9 @@ async fn collect_slack_feedback(
 mod tests {
     use super::*;
     use roko_learn::prompt_experiment::{ExperimentStore, PromptExperiment, PromptVariant};
-    use uuid::Uuid;
     use serde_json::json;
     use std::fs;
+    use uuid::Uuid;
     use uuid::Uuid;
 
     #[test]
@@ -1022,9 +1022,10 @@ mod tests {
 
         let saved = std::fs::read_to_string(&path).expect("read experiment store");
         let json: serde_json::Value = serde_json::from_str(&saved).expect("parse experiment store");
-        let metric = json["experiments"]["template-experiment"]["metric_stats"]["variant-a"]["samples"]
-            .as_u64()
-            .expect("metric samples");
+        let metric =
+            json["experiments"]["template-experiment"]["metric_stats"]["variant-a"]["samples"]
+                .as_u64()
+                .expect("metric samples");
         assert_eq!(metric, 1);
     }
 

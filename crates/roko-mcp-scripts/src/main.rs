@@ -188,13 +188,8 @@ fn handle_list_scripts(config: &AppConfig) -> Result<Value, JsonRpcError> {
 async fn execute_script(config: &AppConfig, name: &str, args: &[String]) -> ScriptExecution {
     if let Some(&idx) = config.scripts_by_name.get(name) {
         if let Some(script) = config.scripts.get(idx) {
-            return execute_resolved_script(
-                config,
-                script.path.clone(),
-                script.root.clone(),
-                args,
-            )
-            .await;
+            return execute_resolved_script(config, script.path.clone(), script.root.clone(), args)
+                .await;
         }
     }
 
@@ -513,10 +508,7 @@ fn command_for_script(script_path: &Path, args: &[String]) -> (String, Vec<Strin
         Some("sh") => "bash",
         Some("js") => "node",
         _ => {
-            return (
-                script_path.to_string_lossy().into_owned(),
-                args.to_vec(),
-            );
+            return (script_path.to_string_lossy().into_owned(), args.to_vec());
         }
     };
 
@@ -551,9 +543,9 @@ impl AppConfig {
             let arg = arg.to_string_lossy().into_owned();
             match arg.as_str() {
                 "--working-dir" | "--scripts-dir" => {
-                    let value = args.next().ok_or_else(|| {
-                        anyhow::anyhow!("missing value for {arg}")
-                    })?;
+                    let value = args
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("missing value for {arg}"))?;
                     script_roots = vec![PathBuf::from(value)];
                 }
                 value if value.starts_with("--working-dir=") => {
@@ -563,7 +555,9 @@ impl AppConfig {
                     script_roots = vec![PathBuf::from(value.trim_start_matches("--scripts-dir="))];
                 }
                 "--timeout-secs" => {
-                    let value = args.next().ok_or_else(|| anyhow::anyhow!("missing value for {arg}"))?;
+                    let value = args
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("missing value for {arg}"))?;
                     timeout = Duration::from_secs(parse_timeout_secs(value.to_string_lossy())?);
                 }
                 value if value.starts_with("--timeout-secs=") => {
@@ -572,7 +566,9 @@ impl AppConfig {
                     )?);
                 }
                 "--env-allowlist" => {
-                    let value = args.next().ok_or_else(|| anyhow::anyhow!("missing value for {arg}"))?;
+                    let value = args
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("missing value for {arg}"))?;
                     env_allowlist = parse_env_allowlist(value.to_string_lossy());
                 }
                 value if value.starts_with("--env-allowlist=") => {
@@ -586,7 +582,9 @@ impl AppConfig {
         let scripts = discover_scripts(&script_roots);
         let mut scripts_by_name = std::collections::HashMap::new();
         for (idx, script) in scripts.iter().enumerate() {
-            scripts_by_name.entry(script.entry.name.clone()).or_insert(idx);
+            scripts_by_name
+                .entry(script.entry.name.clone())
+                .or_insert(idx);
         }
 
         Ok(Self {
@@ -640,8 +638,14 @@ mod tests {
         fs::write(&script, "#!/bin/sh\necho hello\n").expect("write script");
 
         let resolved = resolve_script_path(&[scripts_dir.clone()], "hello").expect("resolved");
-        assert_eq!(resolved.path, fs::canonicalize(script).expect("canonical script"));
-        assert_eq!(resolved.root, fs::canonicalize(scripts_dir).expect("canonical root"));
+        assert_eq!(
+            resolved.path,
+            fs::canonicalize(script).expect("canonical script")
+        );
+        assert_eq!(
+            resolved.root,
+            fs::canonicalize(scripts_dir).expect("canonical root")
+        );
     }
 
     #[test]
@@ -694,11 +698,8 @@ mod tests {
     fn read_script_description_uses_first_non_shebang_line() {
         let dir = temp_dir();
         let script = dir.join("tool.sh");
-        fs::write(
-            &script,
-            "#!/bin/bash\n# description: first line comment\n",
-        )
-        .expect("write script");
+        fs::write(&script, "#!/bin/bash\n# description: first line comment\n")
+            .expect("write script");
 
         assert_eq!(
             read_script_description(&script).expect("description"),

@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use chrono::Utc;
-use regex::Regex;
 use parking_lot::{Mutex, RwLock};
+use regex::Regex;
 use roko_agent::{
     Agent, AgentResult, ClaudeCliAgent,
     mcp::{McpConfig, McpServerConfig, find_mcp_config},
@@ -27,24 +27,22 @@ use roko_compose::SystemPromptBuilder;
 use roko_core::agent::AgentRole;
 use roko_core::config::schema::{RokoConfig, SubscriptionConfig, SubscriptionFilterConfig};
 use roko_core::tool::ExternalAction;
-use roko_core::tool::role_allowlist::role_allowlist;
 use roko_core::tool::ToolRegistry;
+use roko_core::tool::role_allowlist::role_allowlist;
 use roko_core::{Body, Context as RokoContext, Kind, Provenance, Signal};
 use roko_core::{ContentHash, Verdict};
 use roko_learn::cascade_router::CascadeRouter;
 use roko_learn::efficiency::AgentEfficiencyEvent;
-use roko_learn::episode_logger::{
-    Episode, EpisodeLogger, GateVerdict, Usage as EpisodeUsage,
-};
+use roko_learn::episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage as EpisodeUsage};
 use roko_learn::prompt_experiment::ExperimentStore;
 use roko_neuro::spawn_episode_distillation;
+use roko_std::tool::StaticToolRegistry;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 use uuid::Uuid;
-use roko_std::tool::StaticToolRegistry;
 
 use crate::events::ServerEvent;
 use crate::state::{AppState, TemplateRunRecord};
@@ -214,17 +212,19 @@ pub fn start_dispatch_loop(state: Arc<AppState>) -> JoinHandle<()> {
 #[async_trait]
 impl AgentDispatcher for TemplateAgentDispatcher {
     async fn dispatch(&self, template: AgentTemplate, signal: Signal) -> Result<AgentResult> {
-        let experiment_variant = template
-            .experiment
-            .as_ref()
-            .and_then(|experiment| load_template_experiment_variant(&self.workdir, &experiment.name));
+        let experiment_variant = template.experiment.as_ref().and_then(|experiment| {
+            load_template_experiment_variant(&self.workdir, &experiment.name)
+        });
         let system_prompt = build_template_system_prompt(
             &template,
             Some(&signal),
-            experiment_variant.as_ref().map(|(_, content)| content.as_str()),
+            experiment_variant
+                .as_ref()
+                .map(|(_, content)| content.as_str()),
         );
         let allowed_tools = build_allowed_tools_csv(&template);
-        let mcp_config = resolve_template_mcp_config(self.base_mcp_config.as_ref(), &self.workdir, &template)?;
+        let mcp_config =
+            resolve_template_mcp_config(self.base_mcp_config.as_ref(), &self.workdir, &template)?;
         let agent = build_agent(
             &template,
             &system_prompt,
@@ -235,7 +235,10 @@ impl AgentDispatcher for TemplateAgentDispatcher {
         let ctx = dispatch_context(&template, &signal);
         let mut result = agent.run(&signal, &ctx).await;
         if let Some((variant_id, _)) = experiment_variant {
-            result.output.tags.insert("experiment_variant".into(), variant_id.clone());
+            result
+                .output
+                .tags
+                .insert("experiment_variant".into(), variant_id.clone());
             result
                 .output
                 .tags
@@ -591,7 +594,9 @@ impl SubscriptionRegistry {
     #[must_use]
     pub fn update_by_id(&self, id: &str, subscription: Subscription) -> Option<Subscription> {
         let mut subscriptions = self.subscriptions.write();
-        let existing = subscriptions.iter_mut().find(|candidate| candidate.id == id)?;
+        let existing = subscriptions
+            .iter_mut()
+            .find(|candidate| candidate.id == id)?;
         let subscription_id = existing.subscription_id();
         *existing = subscription.with_subscription_id(subscription_id);
         Some(existing.clone())
@@ -600,7 +605,9 @@ impl SubscriptionRegistry {
     /// Remove a subscription by public ID.
     pub fn remove_by_id(&self, id: &str) -> Option<Subscription> {
         let mut subscriptions = self.subscriptions.write();
-        let index = subscriptions.iter().position(|subscription| subscription.id == id)?;
+        let index = subscriptions
+            .iter()
+            .position(|subscription| subscription.id == id)?;
         let removed = subscriptions.remove(index);
         self.active_counts.lock().remove(&removed.subscription_id());
         self.last_dispatches
@@ -751,7 +758,8 @@ fn subscription_filter_matches(filter: &SubscriptionFilterConfig, signal: &Signa
         return false;
     }
 
-    if !filter.label.is_empty() && !matches_any_exact(signal_label_candidates(signal), &filter.label)
+    if !filter.label.is_empty()
+        && !matches_any_exact(signal_label_candidates(signal), &filter.label)
     {
         return false;
     }
@@ -785,7 +793,10 @@ fn matches_any_regex<'a>(
     let candidates: Vec<&'a str> = candidates.into_iter().collect();
     patterns.iter().any(|pattern| {
         Regex::new(pattern).ok().is_some_and(|regex: Regex| {
-            candidates.iter().copied().any(|candidate| regex.is_match(candidate))
+            candidates
+                .iter()
+                .copied()
+                .any(|candidate| regex.is_match(candidate))
         })
     })
 }
@@ -795,9 +806,12 @@ fn matches_any_exact<'a>(
     patterns: &[String],
 ) -> bool {
     let candidates: Vec<&'a str> = candidates.into_iter().collect();
-    patterns
-        .iter()
-        .any(|pattern| candidates.iter().copied().any(|candidate| candidate == pattern))
+    patterns.iter().any(|pattern| {
+        candidates
+            .iter()
+            .copied()
+            .any(|candidate| candidate == pattern)
+    })
 }
 
 fn signal_repo_candidates(signal: &Signal) -> Vec<&str> {
@@ -1109,10 +1123,8 @@ pub async fn dispatch_loop(state: Arc<AppState>, dispatcher: Arc<dyn AgentDispat
                     let signal = signal.clone();
                     let dispatcher = Arc::clone(&dispatcher);
                     let state = Arc::clone(&state);
-                    let suggested_subscription = Subscription::new(
-                        template_name.clone(),
-                        signal.kind.as_str(),
-                    );
+                    let suggested_subscription =
+                        Subscription::new(template_name.clone(), signal.kind.as_str());
                     tokio::spawn(async move {
                         dispatch_agent(state, suggested_subscription, signal, dispatcher).await;
                     });
@@ -1313,11 +1325,9 @@ fn build_template_system_prompt(
     experiment_variant: Option<&str>,
 ) -> String {
     let role_prompt = match signal {
-        Some(signal) => TemplateRegistry::render_prompt_with_signal(
-            template,
-            &HashMap::new(),
-            Some(signal),
-        ),
+        Some(signal) => {
+            TemplateRegistry::render_prompt_with_signal(template, &HashMap::new(), Some(signal))
+        }
         None => TemplateRegistry::render_prompt(template, &HashMap::new()),
     };
     let mut prompt = role_prompt;
@@ -1475,8 +1485,7 @@ fn resolve_template_mcp_config(
     let path = dir.join(format!("{}-{}.mcp.json", template.name, Uuid::new_v4()));
     std::fs::write(
         &path,
-        serde_json::to_string_pretty(&generated)
-            .context("serialize template MCP config")?,
+        serde_json::to_string_pretty(&generated).context("serialize template MCP config")?,
     )
     .with_context(|| format!("write {}", path.display()))?;
     Ok(Some(path))
@@ -1599,9 +1608,10 @@ async fn append_dispatch_episode(
     );
 
     if let Some(variant) = webhook_metadata.experiment_variant.as_deref() {
-        episode
-            .extra
-            .insert("experiment_variant".into(), Value::String(variant.to_string()));
+        episode.extra.insert(
+            "experiment_variant".into(),
+            Value::String(variant.to_string()),
+        );
     }
     if let Some(variant_id) = outcome.result.output.tag("experiment_variant_id") {
         episode.extra.insert(
@@ -1954,7 +1964,10 @@ filter = { path = "src/**/*.rs" }
                 McpServerConfig {
                     name: "filesystem".into(),
                     command: "npx".into(),
-                    args: vec!["-y".into(), "@modelcontextprotocol/server-filesystem".into()],
+                    args: vec![
+                        "-y".into(),
+                        "@modelcontextprotocol/server-filesystem".into(),
+                    ],
                     env: Default::default(),
                 },
                 McpServerConfig {
@@ -1985,8 +1998,7 @@ filter = { path = "src/**/*.rs" }
             experiment: None,
         };
 
-        let generated =
-            resolve_template_mcp_config(None, tmp.path(), &template).expect("resolve");
+        let generated = resolve_template_mcp_config(None, tmp.path(), &template).expect("resolve");
         let generated = generated.expect("generated path");
         let rendered = std::fs::read_to_string(&generated).expect("read generated config");
         let parsed: McpConfig = serde_json::from_str(&rendered).expect("parse generated config");

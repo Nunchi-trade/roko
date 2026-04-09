@@ -124,10 +124,16 @@ impl AgentTemplate {
             ));
         }
         if self.system_prompt.trim().is_empty() {
-            errors.push(format!("template '{}' must have a system_prompt", self.name));
+            errors.push(format!(
+                "template '{}' must have a system_prompt",
+                self.name
+            ));
         }
         if self.max_turns == 0 {
-            errors.push(format!("template '{}' must allow at least one turn", self.name));
+            errors.push(format!(
+                "template '{}' must allow at least one turn",
+                self.name
+            ));
         }
         if let Some(experiment) = &self.experiment
             && experiment.name.trim().is_empty()
@@ -246,8 +252,7 @@ impl TemplateRegistry {
         }
 
         let mut entries = Vec::new();
-        let read_dir =
-            std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))?;
+        let read_dir = std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))?;
         for entry in read_dir {
             match entry {
                 Ok(entry) => entries.push(entry.path()),
@@ -307,9 +312,7 @@ impl TemplateRegistry {
         let configured_mcp_servers = load_configured_mcp_servers(&self.workdir, &mut report);
 
         for dir in self.template_dirs() {
-            if let Err(err) =
-                self.load_dir(&dir, &mut report, configured_mcp_servers.as_ref())
-            {
+            if let Err(err) = self.load_dir(&dir, &mut report, configured_mcp_servers.as_ref()) {
                 report
                     .validation_errors
                     .push(format!("{}: {err}", dir.display()));
@@ -445,7 +448,13 @@ fn load_configured_mcp_servers(
     report: &mut TemplateLoadReport,
 ) -> Option<HashSet<String>> {
     match find_mcp_config(workdir) {
-        Some(Ok((_path, config))) => Some(config.servers.into_iter().map(|server| server.name).collect()),
+        Some(Ok((_path, config))) => Some(
+            config
+                .servers
+                .into_iter()
+                .map(|server| server.name)
+                .collect(),
+        ),
         Some(Err(err)) => {
             report.validation_errors.push(err.to_string());
             None
@@ -530,7 +539,10 @@ mcp_servers = ["github"]
 "#,
         );
         write_template(
-            &workdir.join(".roko").join("templates").join("reviewer.toml"),
+            &workdir
+                .join(".roko")
+                .join("templates")
+                .join("reviewer.toml"),
             r#"
 name = "reviewer"
 description = "Review work"
@@ -540,7 +552,10 @@ max_turns = 8
 "#,
         );
         write_template(
-            &workdir.join(".roko").join("templates").join("reviewer-exp.toml"),
+            &workdir
+                .join(".roko")
+                .join("templates")
+                .join("reviewer-exp.toml"),
             r#"
 name = "reviewer-exp"
 description = "Review work with an experiment"
@@ -572,22 +587,30 @@ mcp_servers = ["github", "missing-server"]
         let report = registry.scan();
 
         assert_eq!(report.loaded, 3);
-        assert!(report
-            .validation_errors
-            .iter()
-            .any(|error| error.contains("broken.toml")));
-        assert!(report
-            .validation_errors
-            .iter()
-            .any(|error| error.contains("invalid model")));
-        assert!(report
-            .validation_errors
-            .iter()
-            .any(|error| error.contains("invalid role")));
-        assert!(report
-            .validation_errors
-            .iter()
-            .any(|error| error.contains("missing-server")));
+        assert!(
+            report
+                .validation_errors
+                .iter()
+                .any(|error| error.contains("broken.toml"))
+        );
+        assert!(
+            report
+                .validation_errors
+                .iter()
+                .any(|error| error.contains("invalid model"))
+        );
+        assert!(
+            report
+                .validation_errors
+                .iter()
+                .any(|error| error.contains("invalid role"))
+        );
+        assert!(
+            report
+                .validation_errors
+                .iter()
+                .any(|error| error.contains("missing-server"))
+        );
         assert!(registry.get("planner").is_some());
         assert!(registry.get("reviewer").is_some());
         assert!(registry.get("reviewer-exp").is_some());
@@ -617,18 +640,17 @@ mcp_servers = ["github", "missing-server"]
         };
 
         let signal = roko_core::Signal::builder(roko_core::Kind::Task)
-            .body(roko_core::Body::from_json(&serde_json::json!({
-                "pull_request": { "number": 42 },
-                "repository": { "full_name": "roko/example" }
-            }))
-            .unwrap())
+            .body(
+                roko_core::Body::from_json(&serde_json::json!({
+                    "pull_request": { "number": 42 },
+                    "repository": { "full_name": "roko/example" }
+                }))
+                .unwrap(),
+            )
             .build();
 
-        let rendered = TemplateRegistry::render_prompt_with_signal(
-            &template,
-            &HashMap::new(),
-            Some(&signal),
-        );
+        let rendered =
+            TemplateRegistry::render_prompt_with_signal(&template, &HashMap::new(), Some(&signal));
 
         assert!(rendered.contains("PR: 42"));
         assert!(rendered.contains("Repo: roko/example"));

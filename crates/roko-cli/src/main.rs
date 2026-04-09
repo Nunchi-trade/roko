@@ -19,9 +19,9 @@ use roko_cli::{
     PageId, PipeMode, Plan, PlanSummary, ReplMode, RepoRegistry, SessionStatus, Source,
     WizardInputs, config_cmd, load_layered, run_init_wizard, run_once,
 };
+use roko_core::config::schema::RokoConfig;
 use roko_core::{ContentHash, Context, Kind, Query, Substrate};
 use roko_core::{Headlines, TaskMetric, compute_headlines};
-use roko_core::config::schema::RokoConfig;
 use roko_fs::{FileSubstrate, FsObservabilitySinks, RokoLayout};
 use roko_learn::efficiency::compute_role_profiles;
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
@@ -510,6 +510,12 @@ enum EventSourcesCmd {
 enum DeployCmd {
     /// Deploy the current workspace to Railway via the public GraphQL API.
     Railway {
+        /// Working directory / repository root (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Generate `fly.toml` and deploy the current workspace with Fly.io.
+    Fly {
         /// Working directory / repository root (default: cwd / --repo).
         #[arg(long)]
         workdir: Option<PathBuf>,
@@ -2012,10 +2018,7 @@ async fn cmd_neuro(cli: &Cli, cmd: NeuroCmd) -> Result<i32> {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             let store = KnowledgeStore::for_workdir(&wd);
             let stats = store.stats().with_context(|| {
-                format!(
-                    "read knowledge store stats from {}",
-                    store.path().display()
-                )
+                format!("read knowledge store stats from {}", store.path().display())
             })?;
 
             if cli.json {
@@ -2078,13 +2081,13 @@ async fn cmd_neuro(cli: &Cli, cmd: NeuroCmd) -> Result<i32> {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             let store = KnowledgeStore::for_workdir(&wd);
             let before = store.stats().with_context(|| {
-                format!(
-                    "read knowledge store stats from {}",
-                    store.path().display()
-                )
+                format!("read knowledge store stats from {}", store.path().display())
             })?;
             store.gc(DEFAULT_GC_MIN_CONFIDENCE).with_context(|| {
-                format!("garbage collect knowledge store at {}", store.path().display())
+                format!(
+                    "garbage collect knowledge store at {}",
+                    store.path().display()
+                )
             })?;
             let after = store.stats().with_context(|| {
                 format!(
@@ -2691,7 +2694,17 @@ async fn cmd_replay(workdir: Option<PathBuf>, hash: String) -> Result<i32> {
 async fn cmd_deploy(cli: &Cli, cmd: DeployCmd) -> Result<i32> {
     match cmd {
         DeployCmd::Railway { workdir } => cmd_deploy_railway(cli, workdir).await,
+        DeployCmd::Fly { workdir } => cmd_deploy_fly(cli, workdir).await,
     }
+}
+
+async fn cmd_deploy_fly(cli: &Cli, workdir: Option<PathBuf>) -> Result<i32> {
+    let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
+
+    write_fly_toml(&workdir)?;
+    run_command_status(&workdir, "flyctl", &["deploy", "--remote-only"])?;
+
+    Ok(EXIT_SUCCESS)
 }
 
 async fn cmd_deploy_railway(cli: &Cli, workdir: Option<PathBuf>) -> Result<i32> {
@@ -2705,7 +2718,8 @@ async fn cmd_deploy_railway(cli: &Cli, workdir: Option<PathBuf>) -> Result<i32> 
         .as_deref()
         .ok_or_else(|| anyhow!("deploy.railway_api_token is required for Railway deployment"))?;
     let repo_slug = git_remote_slug(&workdir)?;
-    let branch = git_current_branch(&workdir).unwrap_or_else(|_| config.project.fresh_base_branch.clone());
+    let branch =
+        git_current_branch(&workdir).unwrap_or_else(|_| config.project.fresh_base_branch.clone());
     let env_vars = collect_railway_env_vars();
     let backend = roko_serve::deploy::railway_api::RailwayApiBackend::new(
         token.to_string(),
@@ -2738,14 +2752,21 @@ async fn cmd_deploy_railway(cli: &Cli, workdir: Option<PathBuf>) -> Result<i32> 
     Ok(EXIT_SUCCESS)
 }
 
+fn write_fly_toml(workdir: &Path) -> Result<PathBuf> {
+    let path = workdir.join("fly.toml");
+    std::fs::write(&path, FLY_TOML_TEMPLATE)
+        .with_context(|| format!("write {}", path.display()))?;
+    Ok(path)
+}
+
 fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
     let path = workdir.join("roko.toml");
     if !path.exists() {
         return Ok(RokoConfig::default());
     }
 
-    let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
     RokoConfig::from_toml(&text).with_context(|| format!("parse {}", path.display()))
 }
 
@@ -2784,7 +2805,9 @@ fn git_remote_slug(workdir: &Path) -> Result<String> {
         .to_string();
 
     if slug.split('/').count() != 2 {
-        return Err(anyhow!("invalid GitHub repo slug derived from origin: {slug}"));
+        return Err(anyhow!(
+            "invalid GitHub repo slug derived from origin: {slug}"
+        ));
     }
 
     Ok(slug)
@@ -2821,6 +2844,20 @@ fn collect_railway_env_vars() -> std::collections::HashMap<String, String> {
     vars
 }
 
+fn run_command_status(workdir: &Path, program: &str, args: &[&str]) -> Result<()> {
+    let status = std::process::Command::new(program)
+        .args(args)
+        .current_dir(workdir)
+        .status()
+        .with_context(|| format!("run {program} {}", args.join(" ")))?;
+
+    if !status.success() {
+        bail!("{program} {} failed with status {status}", args.join(" "));
+    }
+
+    Ok(())
+}
+
 fn run_command_output(workdir: &Path, program: &str, args: &[&str]) -> Result<String> {
     let output = std::process::Command::new(program)
         .args(args)
@@ -2830,15 +2867,32 @@ fn run_command_output(workdir: &Path, program: &str, args: &[&str]) -> Result<St
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "{program} {} failed: {}",
-            args.join(" "),
-            stderr.trim()
-        );
+        bail!("{program} {} failed: {}", args.join(" "), stderr.trim());
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
+
+const FLY_TOML_TEMPLATE: &str = r#"app = "roko-agent"
+primary_region = "iad"
+
+[build]
+dockerfile = "Dockerfile"
+
+[http_service]
+internal_port = 3000
+force_https = true
+
+[[http_service.checks]]
+interval = "30s"
+timeout = "5s"
+path = "/api/health"
+method = "GET"
+
+[mounts]
+source = "roko_data"
+destination = "/data/.roko"
+"#;
 
 // -----------------------------------------------------------------------
 // Helpers
@@ -3304,6 +3358,17 @@ mod tests {
             cli.command,
             Some(Command::Deploy {
                 cmd: DeployCmd::Railway { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_parses_deploy_fly_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "deploy", "fly"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Deploy {
+                cmd: DeployCmd::Fly { .. }
             })
         ));
     }

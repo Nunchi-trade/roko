@@ -34,12 +34,12 @@ use std::sync::Arc;
 use bardo_primitives::hdc::{HdcVector, text_fingerprint};
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex as SyncMutex;
+use roko_core::Signal;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex as AsyncMutex;
-use roko_core::Signal;
 
 /// Maximum serialized size (in bytes) of a single episode's `extra`
 /// field. Enforced in [`EpisodeLogger::append`] so that a runaway
@@ -326,7 +326,6 @@ impl Episode {
             self.trigger_kind, self.agent_template, actions, outcome
         )
     }
-
 }
 
 /// Derive a stable id by hashing `(agent_id, task_id, timestamp)` with
@@ -771,7 +770,10 @@ mod tests {
         let matched = episode_for_signal("code-implementer", &signal, Utc::now());
         tokio::fs::write(
             &path,
-            format!("{}\n", serde_json::to_string(&matched).expect("serialize episode")),
+            format!(
+                "{}\n",
+                serde_json::to_string(&matched).expect("serialize episode")
+            ),
         )
         .await
         .expect("write episodes");
@@ -810,7 +812,10 @@ mod tests {
 
         tokio::fs::write(
             &path,
-            format!("{}\n", serde_json::to_string(&episode).expect("serialize episode")),
+            format!(
+                "{}\n",
+                serde_json::to_string(&episode).expect("serialize episode")
+            ),
         )
         .await
         .expect("write episodes");
@@ -829,7 +834,10 @@ mod tests {
         let episode = episode_for_signal("code-implementer", &other_signal, Utc::now());
         tokio::fs::write(
             &path,
-            format!("{}\n", serde_json::to_string(&episode).expect("serialize episode")),
+            format!(
+                "{}\n",
+                serde_json::to_string(&episode).expect("serialize episode")
+            ),
         )
         .await
         .expect("write episodes");
@@ -851,7 +859,10 @@ mod tests {
         );
         tokio::fs::write(
             &path,
-            format!("{}\n", serde_json::to_string(&old_match).expect("serialize episode")),
+            format!(
+                "{}\n",
+                serde_json::to_string(&old_match).expect("serialize episode")
+            ),
         )
         .await
         .expect("write episodes");

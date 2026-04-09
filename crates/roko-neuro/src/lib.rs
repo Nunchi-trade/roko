@@ -93,16 +93,16 @@ pub struct KnowledgeEntry {
     pub hdc_vector: Option<Vec<u8>>,
 }
 
-pub mod knowledge_store;
 /// Episode distillation into durable knowledge candidates.
 pub mod distiller;
-/// Tier progression from raw episodes to playbooks.
-pub mod tier_progression;
 /// Helpers for asynchronously processing completed episodes.
 pub mod episode_completion;
+pub mod knowledge_store;
+/// Tier progression from raw episodes to playbooks.
+pub mod tier_progression;
 
 pub use distiller::{DistillationBackend, Distiller};
 pub use episode_completion::spawn_episode_distillation;
-pub use knowledge_store::{KnowledgeStats, KnowledgeStore, DEFAULT_GC_MIN_CONFIDENCE};
+pub use knowledge_store::{DEFAULT_GC_MIN_CONFIDENCE, KnowledgeStats, KnowledgeStore};
 #[cfg(feature = "hdc")]
 pub use knowledge_store::{MemoryHit, MemoryIndex};

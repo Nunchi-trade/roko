@@ -162,7 +162,14 @@ async fn dashboard(State(state): State<Arc<AppState>>) -> Json<Value> {
 async fn episodes(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let path = state.layout.episodes_path();
     let entries = read_jsonl_entries(&path).await?;
-    let capped: Vec<Value> = entries.into_iter().rev().take(MAX_JSONL_RESULTS).collect::<Vec<_>>().into_iter().rev().collect();
+    let capped: Vec<Value> = entries
+        .into_iter()
+        .rev()
+        .take(MAX_JSONL_RESULTS)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     Ok(Json(Value::Array(capped)))
 }
 

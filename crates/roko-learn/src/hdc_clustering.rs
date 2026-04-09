@@ -419,11 +419,8 @@ mod tests {
     #[test]
     fn similar_vectors_exceed_threshold_and_cluster_together() {
         let base = HdcVector::from_seed(b"similar-base");
-        let similar = HdcVector::bundle(&[
-            &base,
-            &base,
-            &HdcVector::from_seed(b"similar-base-noise"),
-        ]);
+        let similar =
+            HdcVector::bundle(&[&base, &base, &HdcVector::from_seed(b"similar-base-noise")]);
 
         let similarity = base.similarity(&similar);
         assert!(

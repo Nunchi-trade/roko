@@ -17,8 +17,10 @@ pub fn start_scheduler(state: Arc<AppState>) -> JoinHandle<()> {
             if config.scheduler.is_empty() {
                 Vec::new()
             } else {
-                vec![Box::new(CronEventSource::from_config(config.scheduler.clone()))
-                    as Box<dyn EventSource>]
+                vec![
+                    Box::new(CronEventSource::from_config(config.scheduler.clone()))
+                        as Box<dyn EventSource>,
+                ]
             }
         };
 

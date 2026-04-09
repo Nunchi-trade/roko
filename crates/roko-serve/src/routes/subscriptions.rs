@@ -17,19 +17,16 @@ use crate::state::AppState;
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/subscriptions", get(list_subscriptions).post(create_subscription))
+        .route(
+            "/subscriptions",
+            get(list_subscriptions).post(create_subscription),
+        )
         .route(
             "/subscriptions/{id}",
             put(update_subscription).delete(delete_subscription),
         )
-        .route(
-            "/subscriptions/{id}/enable",
-            post(enable_subscription),
-        )
-        .route(
-            "/subscriptions/{id}/disable",
-            post(disable_subscription),
-        )
+        .route("/subscriptions/{id}/enable", post(enable_subscription))
+        .route("/subscriptions/{id}/disable", post(disable_subscription))
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -63,9 +60,14 @@ impl From<&Subscription> for SubscriptionResponse {
 struct SubscriptionUpdateRequest(SubscriptionConfig);
 
 /// `GET /api/subscriptions` — list all subscriptions with their enabled status.
-async fn list_subscriptions(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::Value>, ApiError> {
+async fn list_subscriptions(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
     let subscriptions = state.subscriptions.all();
-    let items: Vec<SubscriptionResponse> = subscriptions.iter().map(SubscriptionResponse::from).collect();
+    let items: Vec<SubscriptionResponse> = subscriptions
+        .iter()
+        .map(SubscriptionResponse::from)
+        .collect();
     Ok(Json(json!({ "subscriptions": items })))
 }
 
@@ -100,7 +102,9 @@ async fn update_subscription(
     let path = subscription_path(&state, &id);
 
     if state.subscriptions.get_by_id(&id).is_none() {
-        return Err(ApiError::not_found(format!("subscription '{id}' not found")));
+        return Err(ApiError::not_found(format!(
+            "subscription '{id}' not found"
+        )));
     }
 
     write_subscription_file(&path, &config).await?;
@@ -112,7 +116,9 @@ async fn update_subscription(
         .update_by_id(&id, subscription)
         .ok_or_else(|| ApiError::not_found(format!("subscription '{id}' not found")))?;
 
-    Ok(Json(json!({ "subscription": SubscriptionResponse::from(&updated) })))
+    Ok(Json(
+        json!({ "subscription": SubscriptionResponse::from(&updated) }),
+    ))
 }
 
 /// `DELETE /api/subscriptions/:id` — remove the subscription file and registry entry.
@@ -132,7 +138,9 @@ async fn delete_subscription(
             .map_err(|e| ApiError::internal(format!("remove subscription file: {e}")))?;
     }
 
-    Ok(Json(json!({ "deleted": true, "subscription": SubscriptionResponse::from(&removed) })))
+    Ok(Json(
+        json!({ "deleted": true, "subscription": SubscriptionResponse::from(&removed) }),
+    ))
 }
 
 /// `POST /api/subscriptions/:id/enable` — mark a subscription enabled.
@@ -173,25 +181,27 @@ async fn set_subscription_enabled(
         .update_by_id(id, updated)
         .ok_or_else(|| ApiError::not_found(format!("subscription '{id}' not found")))?;
 
-    Ok(Json(json!({ "subscription": SubscriptionResponse::from(&updated) })))
+    Ok(Json(
+        json!({ "subscription": SubscriptionResponse::from(&updated) }),
+    ))
 }
 
 fn validate_subscription(config: SubscriptionConfig) -> Result<SubscriptionConfig, ApiError> {
     if config.template.trim().is_empty() {
-        return Err(ApiError::bad_request("subscription template must not be empty"));
+        return Err(ApiError::bad_request(
+            "subscription template must not be empty",
+        ));
     }
     if config.trigger.trim().is_empty() {
-        return Err(ApiError::bad_request("subscription trigger must not be empty"));
+        return Err(ApiError::bad_request(
+            "subscription trigger must not be empty",
+        ));
     }
     Ok(config)
 }
 
 fn subscription_status(enabled: bool) -> &'static str {
-    if enabled {
-        "enabled"
-    } else {
-        "disabled"
-    }
+    if enabled { "enabled" } else { "disabled" }
 }
 
 fn subscription_path(state: &AppState, id: &str) -> std::path::PathBuf {
@@ -207,7 +217,9 @@ fn next_subscription_id(state: &AppState, config: &SubscriptionConfig) -> String
     let mut candidate = base.clone();
     let mut suffix = 2usize;
 
-    while state.subscriptions.get_by_id(&candidate).is_some() || subscription_path(state, &candidate).exists() {
+    while state.subscriptions.get_by_id(&candidate).is_some()
+        || subscription_path(state, &candidate).exists()
+    {
         candidate = format!("{base}-{suffix}");
         suffix += 1;
     }
