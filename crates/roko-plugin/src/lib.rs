@@ -92,6 +92,14 @@ pub trait FeedbackCollector: Send + Sync + 'static {
     async fn collect(&self, since: DateTime<Utc>) -> Result<Vec<FeedbackSignal>>;
 }
 
+/// Top-level plugin metadata plus the event sources and feedback collectors it exposes.
+pub struct PluginManifest {
+    pub name: String,
+    pub version: String,
+    pub event_sources: Vec<Box<dyn EventSource>>,
+    pub feedback_collectors: Vec<Box<dyn FeedbackCollector>>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
