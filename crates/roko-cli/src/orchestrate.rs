@@ -42,7 +42,9 @@ use roko_gate::{
 use roko_learn::costs_db::CostRecord;
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::episode_logger::{Episode, GateVerdict, Usage};
-use roko_learn::runtime_feedback::{CompletedRunInput, LearningRuntime, LearningUpdate};
+use roko_learn::runtime_feedback::{
+    CompletedRunInput, LearningRuntime, LearningUpdate, read_efficiency_events,
+};
 use roko_orchestrator::worktree::{WorktreeConfig, WorktreeManager};
 use roko_orchestrator::{
     EventKind, EventLog, EventLogSnapshot, ExecutorAction, ExecutorEvent, ExecutorSnapshot,
@@ -1673,6 +1675,49 @@ impl PlanRunner {
 
         // Shut down any lingering agent processes.
         self.shutdown().await;
+
+        // Best-effort aggregate of efficiency telemetry for the whole run.
+        let efficiency_path = self.learning.paths().efficiency_jsonl.clone();
+        let efficiency_events = match read_efficiency_events(&efficiency_path).await {
+            Ok(events) => events,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    path = %efficiency_path.display(),
+                    "failed to read efficiency events"
+                );
+                self.efficiency_events.clone()
+            }
+        };
+        let total_input_tokens: u64 = efficiency_events.iter().map(|event| event.input_tokens).sum();
+        let total_output_tokens: u64 =
+            efficiency_events.iter().map(|event| event.output_tokens).sum();
+        let total_cost_usd: f64 = efficiency_events.iter().map(|event| event.cost_usd).sum();
+        let duration_secs: f64 = efficiency_events
+            .iter()
+            .map(|event| event.wall_time_ms)
+            .sum::<u64>() as f64
+            / 1000.0;
+        let tasks_completed: usize = self
+            .task_trackers
+            .values()
+            .map(|tracker| tracker.completed.len())
+            .sum();
+        let tasks_failed: usize = self
+            .task_trackers
+            .values()
+            .map(|tracker| tracker.failed.len())
+            .sum();
+
+        tracing::info!(
+            total_cost_usd = total_cost_usd,
+            total_input_tokens = total_input_tokens,
+            total_output_tokens = total_output_tokens,
+            duration_secs = duration_secs,
+            tasks_completed = tasks_completed,
+            tasks_failed = tasks_failed,
+            "plan run complete"
+        );
 
         // Final save before returning.
         if let Err(e) = self.save_state() {
