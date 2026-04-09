@@ -52,6 +52,7 @@ use roko_std::NoOpScorer;
 use roko_std::StaticToolRegistry;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken as TokioCancellationToken;
+use tracing::{Instrument, info_span, instrument};
 
 use crate::config::Config;
 use crate::task_parser::TasksFile;
@@ -1692,7 +1693,8 @@ impl PlanRunner {
     /// delegates to [`run_all()`] which drives the state machine. The phase
     /// handlers (handle_enriching, handle_implementing, etc.) use the
     /// trackers for task-level granularity.
-    pub async fn run_task_plans(&mut self, plans_dir: &Path) -> Result<OrchestrationReport> {
+    #[instrument(skip_all, fields(plan_dir = %path.display()))]
+    pub async fn run_task_plans(&mut self, path: &Path) -> Result<OrchestrationReport> {
         let watcher_cancel = TokioCancellationToken::new();
         let watcher_task = WatcherRunner {
             conductor: Arc::clone(&self.conductor),
@@ -1705,7 +1707,7 @@ impl PlanRunner {
 
         let result = async {
             // Pre-load task trackers for any plans not already tracked
-            let plan_dirs = Self::find_plan_dirs(plans_dir)?;
+            let plan_dirs = Self::find_plan_dirs(path)?;
             for plan_dir in &plan_dirs {
                 let name = plan_dir
                     .file_name()
@@ -2270,6 +2272,20 @@ impl PlanRunner {
     async fn handle_implementing_single(&mut self, plan_id: &str, task_id: &str) {
         eprintln!("[orchestrate] Implementing {plan_id}: dispatching task {task_id}");
 
+        let task_phase = self
+            .task_trackers
+            .get(plan_id)
+            .and_then(|tracker| {
+                tracker
+                    .tasks_file
+                    .tasks
+                    .iter()
+                    .find(|task| task.id == task_id)
+            })
+            .map(|task| task.status.as_str())
+            .unwrap_or("unknown");
+        let _span = info_span!("task", task_id = %task_id, phase = %task_phase).entered();
+
         // Track which task is being worked on (used by autofix if gates fail).
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
             tracker.last_impl_task_id = Some(task_id.to_string());
@@ -2398,7 +2414,7 @@ impl PlanRunner {
         }
 
         // ── Build agent configs sequentially (needs &mut self) ───────
-        let mut configs: Vec<(String, AgentRunConfig)> = Vec::with_capacity(task_dirs.len());
+        let mut configs: Vec<(String, String, AgentRunConfig)> = Vec::with_capacity(task_dirs.len());
 
         let plan_dir = self.workdir.join("plans").join(plan_id);
         let tasks_toml = plan_dir.join("tasks.toml");
@@ -2416,6 +2432,10 @@ impl PlanRunner {
             let task_def = tasks_file
                 .as_ref()
                 .and_then(|tf| tf.tasks.iter().find(|t| t.id == *tid).cloned());
+            let task_phase = task_def
+                .as_ref()
+                .map(|task| task.status.clone())
+                .unwrap_or_else(|| "unknown".into());
 
             let (prompt_text, model) = if let Some(ref td) = task_def {
                 let p = td.build_prompt(plan_id, &self.workdir);
@@ -2465,6 +2485,7 @@ impl PlanRunner {
 
             configs.push((
                 tid.clone(),
+                task_phase,
                 AgentRunConfig {
                     command: self.config.agent.command.clone(),
                     exec_dir: dir.clone(),
@@ -2497,12 +2518,13 @@ impl PlanRunner {
             let mut join_set = JoinSet::new();
             let mut launched = 0usize;
             while launched < concurrency_limit {
-                let Some((tid, cfg)) = pending.next() else {
+                let Some((tid, task_phase, cfg)) = pending.next() else {
                     break;
                 };
                 launched += 1;
                 join_set.spawn(async move {
-                    let result = run_prepared_agent(cfg).await;
+                    let span = info_span!("task", task_id = %tid, phase = %task_phase);
+                    let result = run_prepared_agent(cfg).instrument(span).await;
                     (tid, result)
                 });
             }
@@ -4049,6 +4071,11 @@ impl PlanRunner {
 
         // ── Run the agent with per-task model selection ─────────────
         let result: AgentResult = if self.config.agent.command == "claude" {
+            let task_role = task_def
+                .as_ref()
+                .and_then(|task| task.role.clone())
+                .unwrap_or_else(|| format!("{role:?}"));
+            let _span = info_span!("agent", model = %selected_model, role = %task_role).entered();
             let task_read_args = task_def
                 .as_ref()
                 .map(task_read_cli_args)
@@ -4076,6 +4103,11 @@ impl PlanRunner {
             }
             agent.run(&prompt, &ctx).await
         } else {
+            let task_role = task_def
+                .as_ref()
+                .and_then(|task| task.role.clone())
+                .unwrap_or_else(|| format!("{role:?}"));
+            let _span = info_span!("agent", model = %selected_model, role = %task_role).entered();
             let mut agent =
                 ExecAgent::new(&self.config.agent.command, self.config.agent.args.clone())
                     .with_timeout_ms(self.config.agent.timeout_ms);
@@ -4602,25 +4634,36 @@ impl PlanRunner {
         match rung {
             0 => {
                 let gate = CompileGate::cargo();
+                let _span = info_span!("gate", gate = %gate.name(), rung = %rung).entered();
                 vec![gate.verify(payload_sig, &ctx).await]
             }
             1 => {
                 let gate = TestGate::cargo();
+                let _span = info_span!("gate", gate = %gate.name(), rung = %rung).entered();
                 vec![gate.verify(payload_sig, &ctx).await]
             }
             2 => {
                 let gate = ClippyGate::cargo();
+                let _span = info_span!("gate", gate = %gate.name(), rung = %rung).entered();
                 vec![gate.verify(payload_sig, &ctx).await]
             }
             _ => {
                 let c = CompileGate::cargo();
                 let t = TestGate::cargo();
                 let cl = ClippyGate::cargo();
-                vec![
-                    c.verify(payload_sig, &ctx).await,
-                    t.verify(payload_sig, &ctx).await,
-                    cl.verify(payload_sig, &ctx).await,
-                ]
+                let compile = {
+                    let _span = info_span!("gate", gate = %c.name(), rung = %rung).entered();
+                    c.verify(payload_sig, &ctx).await
+                };
+                let test = {
+                    let _span = info_span!("gate", gate = %t.name(), rung = %rung).entered();
+                    t.verify(payload_sig, &ctx).await
+                };
+                let clippy = {
+                    let _span = info_span!("gate", gate = %cl.name(), rung = %rung).entered();
+                    cl.verify(payload_sig, &ctx).await
+                };
+                vec![compile, test, clippy]
             }
         }
     }
