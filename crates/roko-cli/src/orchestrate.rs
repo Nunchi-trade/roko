@@ -15,6 +15,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, anyhow};
 use bardo_runtime::cancel::CancelToken;
 use bardo_runtime::process::ProcessSupervisor;
+use serde::{Deserialize, Serialize};
 use roko_agent::translate::{ClaudeTranslator, RenderedTools, Translator};
 use roko_agent::{Agent, AgentResult, ClaudeCliAgent, ExecAgent};
 use roko_compose::{
@@ -133,6 +134,66 @@ impl ContextAttributionTracker {
             entry.0 += 1;
         }
         entry.1 += 1;
+    }
+}
+
+/// Tracks rolling EMA per-(task_tier, context_source_type).
+struct ContextAverageTracker {
+    path: PathBuf,
+    averages: HashMap<String, HashMap<String, ContextAverageStats>>,
+}
+
+/// Per-(task_tier, context_source_type) rolling average state.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+struct ContextAverageStats {
+    /// Exponential moving average of reference rate.
+    ema_reference_rate: f64,
+    /// Total observations seen for this pair.
+    total_observations: u64,
+}
+
+impl ContextAverageTracker {
+    fn load(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        let averages = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| {
+                serde_json::from_str::<
+                    HashMap<String, HashMap<String, ContextAverageStats>>,
+                >(&s)
+                .ok()
+            })
+            .unwrap_or_default();
+        Self { path, averages }
+    }
+
+    fn record(&mut self, tier: &str, source_type: &str, referenced: bool) {
+        const EMA_ALPHA: f64 = 0.1;
+        let tier_entry = self.averages.entry(tier.to_string()).or_default();
+        let stats = tier_entry.entry(source_type.to_string()).or_default();
+        let value = if referenced { 1.0 } else { 0.0 };
+
+        if stats.total_observations == 0 {
+            stats.ema_reference_rate = value;
+        } else {
+            stats.ema_reference_rate = EMA_ALPHA.mul_add(
+                value,
+                (1.0 - EMA_ALPHA) * stats.ema_reference_rate,
+            );
+        }
+        stats.total_observations += 1;
+    }
+
+    fn save(&self) -> std::io::Result<()> {
+        let json = serde_json::to_string_pretty(&self.averages)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = self.path.with_extension("json.tmp");
+        std::fs::write(&tmp, json)?;
+        std::fs::rename(&tmp, &self.path)?;
+        Ok(())
     }
 }
 
@@ -746,6 +807,8 @@ pub struct PlanRunner {
     conductor_signals: Vec<Signal>,
     /// Context attribution tracker for per-(tier, source_type) demotion decisions.
     attribution_tracker: ContextAttributionTracker,
+    /// Rolling EMA of reference rates per (task_tier, context_source_type).
+    context_average_tracker: ContextAverageTracker,
     /// Per-crate familiarity tracker for LinUCB context features.
     crate_familiarity_tracker: CrateFamiliarityTracker,
     /// Cumulative USD cost per plan_id.
@@ -1243,6 +1306,12 @@ impl PlanRunner {
             attribution_tracker: ContextAttributionTracker::load(
                 &workdir.join(".roko").join("context-attribution.jsonl"),
             ),
+            context_average_tracker: ContextAverageTracker::load(
+                workdir
+                    .join(".roko")
+                    .join("learn")
+                    .join("context-averages.json"),
+            ),
             crate_familiarity_tracker: CrateFamiliarityTracker::load(
                 workdir
                     .join(".roko")
@@ -1326,6 +1395,12 @@ impl PlanRunner {
             conductor_signals: Vec::new(),
             attribution_tracker: ContextAttributionTracker::load(
                 &workdir.join(".roko").join("context-attribution.jsonl"),
+            ),
+            context_average_tracker: ContextAverageTracker::load(
+                workdir
+                    .join(".roko")
+                    .join("learn")
+                    .join("context-averages.json"),
             ),
             crate_familiarity_tracker: CrateFamiliarityTracker::load(
                 workdir
@@ -1414,6 +1489,12 @@ impl PlanRunner {
             conductor_signals: Vec::new(),
             attribution_tracker: ContextAttributionTracker::load(
                 &workdir.join(".roko").join("context-attribution.jsonl"),
+            ),
+            context_average_tracker: ContextAverageTracker::load(
+                workdir
+                    .join(".roko")
+                    .join("learn")
+                    .join("context-averages.json"),
             ),
             crate_familiarity_tracker: CrateFamiliarityTracker::load(
                 workdir
@@ -5172,6 +5253,8 @@ impl PlanRunner {
                     .unwrap_or("unknown");
                 self.attribution_tracker
                     .record(tier_str, kind, was_referenced);
+                self.context_average_tracker
+                    .record(tier_str, kind, was_referenced);
             }
 
             let ref_rate = if total > 0 {
@@ -5226,6 +5309,17 @@ impl PlanRunner {
                     });
                     let _ = writeln!(file, "{}", per_source);
                 }
+            }
+
+            if let Err(e) = self.context_average_tracker.save() {
+                tracing::warn!(
+                    "[context] failed to persist context averages to {}: {e}",
+                    self.workdir
+                        .join(".roko")
+                        .join("learn")
+                        .join("context-averages.json")
+                        .display()
+                );
             }
         }
 
