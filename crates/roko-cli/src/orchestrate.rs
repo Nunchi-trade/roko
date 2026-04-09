@@ -5150,33 +5150,6 @@ impl PlanRunner {
         // watcher can compare consecutive outputs across turns.
         self.emit_agent_turn_signal(&result.output);
 
-        if !result.success {
-            self.observe_cascade_router(
-                plan_id,
-                task_def.as_ref(),
-                &selected_model,
-                0.0,
-            );
-            let task_phase = task_def
-                .as_ref()
-                .map(|task| task.status.as_str())
-                .unwrap_or("unknown");
-            let output_tail = result
-                .output
-                .body
-                .as_text()
-                .ok()
-                .map(|text| tail_output_lines(text, TASK_FAILURE_OUTPUT_TAIL_LINES));
-            let error = anyhow!("agent returned failure for plan={plan_id} task={task}");
-            return Err(with_task_failure_context(
-                error,
-                task,
-                task_phase,
-                "agent",
-                output_tail.as_deref(),
-            ));
-        }
-
         // ── Context attribution feedback ──────────────────────────────
         // Scan agent output for references to injected context sections.
         // This measures which context was actually useful, enabling the
@@ -5279,6 +5252,33 @@ impl PlanRunner {
                         .display()
                 );
             }
+        }
+
+        if !result.success {
+            self.observe_cascade_router(
+                plan_id,
+                task_def.as_ref(),
+                &selected_model,
+                0.0,
+            );
+            let task_phase = task_def
+                .as_ref()
+                .map(|task| task.status.as_str())
+                .unwrap_or("unknown");
+            let output_tail = result
+                .output
+                .body
+                .as_text()
+                .ok()
+                .map(|text| tail_output_lines(text, TASK_FAILURE_OUTPUT_TAIL_LINES));
+            let error = anyhow!("agent returned failure for plan={plan_id} task={task}");
+            return Err(with_task_failure_context(
+                error,
+                task,
+                task_phase,
+                "agent",
+                output_tail.as_deref(),
+            ));
         }
 
         // ── Cost recording ────────────────────────────────────────────
