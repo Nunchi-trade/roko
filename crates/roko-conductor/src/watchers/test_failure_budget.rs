@@ -1,88 +1,117 @@
-//! Test failure budget watcher: fires when pass rate drops below threshold.
+//! Test failure budget watcher: fires when test failures increase beyond
+//! the baseline observed earlier in the signal stream.
 //!
-//! Monitors `TestResult` signals for pass/fail counts and fires when the
-//! overall pass rate drops below [`MIN_PASS_RATE`].
+//! Monitors test gate verdict signals for structured failure counts and
+//! emits an intervention when the latest failure count exceeds the
+//! baseline failure count.
+
+use std::collections::HashMap;
 
 use roko_core::{Body, Context, Kind, Policy, Signal};
 
-/// Minimum acceptable test pass rate (0.0 to 1.0).
-pub const MIN_PASS_RATE: f64 = 0.90;
+/// Minimum increase in test failures required to fire.
+pub const MIN_FAILURE_INCREASE: u32 = 1;
 
 /// Tag key marking signals from this watcher.
 pub const WATCHER_NAME: &str = "test-failure-budget";
 
-/// Tag key on test-result signals indicating pass/fail.
-pub const TEST_OUTCOME_TAG: &str = "outcome";
-/// Tag value for passed tests.
-pub const TEST_PASSED: &str = "pass";
-/// Tag value for failed tests.
-pub const TEST_FAILED: &str = "fail";
+/// JSON field containing structured test counts on conductor gate signals.
+pub const TEST_COUNT_FIELD: &str = "test_count";
+/// JSON field containing the plan identifier.
+pub const PLAN_ID_FIELD: &str = "plan_id";
+/// JSON field containing the gate name.
+pub const GATE_FIELD: &str = "gate";
+/// JSON field containing the number of failed tests.
+pub const FAILED_FIELD: &str = "failed";
 
-/// Fires when the test pass rate drops below [`MIN_PASS_RATE`].
+/// Fires when the latest test failure count exceeds the baseline.
 ///
-/// Examines all `TestResult` signals in the stream, counts passes vs
-/// failures, and fires if the pass rate is below the threshold.
+/// The watcher scans the stream for test gate verdicts, remembers the
+/// earliest failure count it sees for each plan, and compares the latest
+/// count against that baseline.
 #[derive(Debug, Clone)]
 pub struct TestFailureBudgetWatcher {
-    /// Minimum pass rate before firing.
-    min_pass_rate: f64,
+    /// Minimum failure increase before firing.
+    min_failure_increase: u32,
 }
 
 impl Default for TestFailureBudgetWatcher {
     fn default() -> Self {
         Self {
-            min_pass_rate: MIN_PASS_RATE,
+            min_failure_increase: MIN_FAILURE_INCREASE,
         }
     }
 }
 
 impl TestFailureBudgetWatcher {
-    /// Create with a custom pass rate threshold.
+    /// Create with a custom failure increase threshold.
     #[must_use]
-    pub const fn new(min_pass_rate: f64) -> Self {
-        Self { min_pass_rate }
+    pub const fn new(min_failure_increase: u32) -> Self {
+        Self {
+            min_failure_increase,
+        }
     }
 }
 
 impl Policy for TestFailureBudgetWatcher {
     fn decide(&self, stream: &[Signal], _ctx: &Context) -> Vec<Signal> {
-        let mut passed = 0u64;
-        let mut failed = 0u64;
+        let mut baselines: HashMap<String, u32> = HashMap::new();
+        let mut latest: HashMap<String, u32> = HashMap::new();
 
         for s in stream {
-            if s.kind != Kind::TestResult {
+            if s.kind != Kind::GateVerdict {
                 continue;
             }
-            match s.tag(TEST_OUTCOME_TAG) {
-                Some(TEST_PASSED) => passed += 1,
-                Some(TEST_FAILED) => failed += 1,
-                _ => {}
+
+            let Ok(body) = s.body.as_json::<serde_json::Value>() else {
+                continue;
+            };
+            let Some(test_count) = body.get(TEST_COUNT_FIELD).and_then(|v| v.as_object()) else {
+                continue;
+            };
+            let Some(plan_id) = body.get(PLAN_ID_FIELD).and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(failed) = test_count
+                .get(FAILED_FIELD)
+                .and_then(|v| v.as_u64())
+                .and_then(|n| u32::try_from(n).ok())
+            else {
+                continue;
+            };
+
+            let plan_id = plan_id.to_owned();
+            baselines.entry(plan_id.clone()).or_insert(failed);
+            latest.insert(plan_id, failed);
+        }
+
+        let mut signals = Vec::new();
+        for (plan_id, current_failed) in latest {
+            let baseline_failed = match baselines.get(&plan_id).copied() {
+                Some(baseline) => baseline,
+                None => continue,
+            };
+            if current_failed.saturating_sub(baseline_failed) < self.min_failure_increase {
+                continue;
             }
-        }
 
-        let total = passed + failed;
-        if total == 0 {
-            return Vec::new();
-        }
-
-        #[allow(clippy::cast_precision_loss)]
-        let pass_rate = passed as f64 / total as f64;
-
-        if pass_rate < self.min_pass_rate {
-            vec![
+            let delta = current_failed.saturating_sub(baseline_failed);
+            signals.push(
                 Signal::builder(Kind::Custom("conductor.intervention".into()))
                     .body(Body::text(format!(
-                        "test pass rate {pass_rate:.1}% ({passed}/{total}) below threshold {:.0}%",
-                        self.min_pass_rate * 100.0
+                        "test failures increased for {plan_id}: {baseline_failed} -> {current_failed}"
                     )))
                     .tag("watcher", WATCHER_NAME)
                     .tag("severity", "warning")
-                    .tag("pass_rate", format!("{pass_rate:.3}"))
+                    .tag("plan_id", plan_id)
+                    .tag("baseline_failures", baseline_failed.to_string())
+                    .tag("current_failures", current_failed.to_string())
+                    .tag("failure_delta", delta.to_string())
                     .build(),
-            ]
-        } else {
-            Vec::new()
+            );
         }
+
+        signals
     }
 
     fn name(&self) -> &str {
@@ -94,10 +123,18 @@ impl Policy for TestFailureBudgetWatcher {
 mod tests {
     use super::*;
 
-    fn test_signal(outcome: &str) -> Signal {
-        Signal::builder(Kind::TestResult)
-            .body(Body::text("test output"))
-            .tag(TEST_OUTCOME_TAG, outcome)
+    fn test_signal(plan_id: &str, failed: u32) -> Signal {
+        Signal::builder(Kind::GateVerdict)
+            .body(Body::Json(serde_json::json!({
+                PLAN_ID_FIELD: plan_id,
+                GATE_FIELD: "test",
+                TEST_COUNT_FIELD: {
+                    "passed": 10u32.saturating_sub(failed),
+                    "failed": failed,
+                    "ignored": 0,
+                    "total": 10,
+                }
+            })))
             .build()
     }
 
@@ -108,61 +145,56 @@ mod tests {
     }
 
     #[test]
-    fn all_pass_no_fire() {
+    fn single_test_result_no_fire() {
         let w = TestFailureBudgetWatcher::default();
-        let stream: Vec<Signal> = (0..10).map(|_| test_signal(TEST_PASSED)).collect();
+        let stream = vec![test_signal("plan-1", 1)];
         assert!(w.decide(&stream, &Context::at(0)).is_empty());
     }
 
     #[test]
-    fn above_threshold_no_fire() {
+    fn unchanged_failure_count_no_fire() {
         let w = TestFailureBudgetWatcher::default();
-        // 9 pass, 1 fail = 90% — exactly at threshold
-        let mut stream: Vec<Signal> = (0..9).map(|_| test_signal(TEST_PASSED)).collect();
-        stream.push(test_signal(TEST_FAILED));
+        let stream = vec![test_signal("plan-1", 2), test_signal("plan-1", 2)];
         assert!(w.decide(&stream, &Context::at(0)).is_empty());
     }
 
     #[test]
-    fn below_threshold_fires() {
+    fn increased_failure_count_fires() {
         let w = TestFailureBudgetWatcher::default();
-        // 8 pass, 2 fail = 80% < 90%
-        let mut stream: Vec<Signal> = (0..8).map(|_| test_signal(TEST_PASSED)).collect();
-        stream.push(test_signal(TEST_FAILED));
-        stream.push(test_signal(TEST_FAILED));
+        let stream = vec![test_signal("plan-1", 1), test_signal("plan-1", 3)];
         let out = w.decide(&stream, &Context::at(0));
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].tag("watcher"), Some(WATCHER_NAME));
+        assert_eq!(out[0].tag("plan_id"), Some("plan-1"));
+        assert_eq!(out[0].tag("baseline_failures"), Some("1"));
+        assert_eq!(out[0].tag("current_failures"), Some("3"));
     }
 
     #[test]
-    fn all_fail_fires() {
-        let w = TestFailureBudgetWatcher::default();
-        let stream = vec![test_signal(TEST_FAILED), test_signal(TEST_FAILED)];
-        let out = w.decide(&stream, &Context::at(0));
-        assert_eq!(out.len(), 1);
-    }
-
-    #[test]
-    fn non_test_signals_ignored() {
+    fn multiple_plans_independent() {
         let w = TestFailureBudgetWatcher::default();
         let stream = vec![
-            Signal::builder(Kind::AgentOutput)
-                .body(Body::text("hi"))
-                .tag(TEST_OUTCOME_TAG, TEST_FAILED)
-                .build(),
+            test_signal("plan-a", 0),
+            test_signal("plan-b", 1),
+            test_signal("plan-a", 2),
+            test_signal("plan-b", 1),
         ];
+        let out = w.decide(&stream, &Context::at(0));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].tag("plan_id"), Some("plan-a"));
+    }
+
+    #[test]
+    fn custom_threshold_requires_larger_increase() {
+        let w = TestFailureBudgetWatcher::new(3);
+        let stream = vec![test_signal("plan-1", 1), test_signal("plan-1", 3)];
         assert!(w.decide(&stream, &Context::at(0)).is_empty());
     }
 
     #[test]
-    fn custom_threshold() {
-        let w = TestFailureBudgetWatcher::new(0.50);
-        // 4 pass, 6 fail = 40% < 50%
-        let mut stream: Vec<Signal> = (0..4).map(|_| test_signal(TEST_PASSED)).collect();
-        for _ in 0..6 {
-            stream.push(test_signal(TEST_FAILED));
-        }
+    fn custom_threshold_fires_when_met() {
+        let w = TestFailureBudgetWatcher::new(2);
+        let stream = vec![test_signal("plan-1", 1), test_signal("plan-1", 3)];
         let out = w.decide(&stream, &Context::at(0));
         assert_eq!(out.len(), 1);
     }

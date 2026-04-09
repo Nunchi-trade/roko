@@ -1801,17 +1801,6 @@ impl PlanRunner {
                             passed,
                         });
 
-                        // Conductor signal: gate verdict (§7).
-                        self.emit_conductor_signal(
-                            Kind::GateVerdict,
-                            serde_json::json!({
-                                "plan_id": &plan_id,
-                                "rung": rung,
-                                "passed": passed,
-                                "duration_ms": wall_ms,
-                            }),
-                        );
-
                         // Store gate failure context for AutoFix phase
                         if !passed {
                             let failed_gates: Vec<&GateResult> = self
@@ -4338,6 +4327,7 @@ impl PlanRunner {
     async fn run_gate_pipeline(&mut self, plan_id: &str, rung: u32) -> Result<bool> {
         let exec_dir = self.plan_exec_dir(plan_id).await;
         let payload = GatePayload::in_dir(&exec_dir).with_label(format!("{plan_id}:rung-{rung}"));
+        let started = std::time::Instant::now();
         let payload_sig = Signal::builder(Kind::Task)
             .body(Body::from_json(&payload)?)
             .provenance(Provenance::trusted("orchestrate"))
@@ -4387,6 +4377,29 @@ impl PlanRunner {
                 )
                 .inc();
         }
+
+        // Conductor signal: gate verdict (§7).
+        let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let test_count = verdicts.iter().find_map(|verdict| {
+            verdict.test_count.map(|test_count| {
+                serde_json::json!({
+                    "passed": test_count.passed,
+                    "failed": test_count.failed,
+                    "ignored": test_count.ignored,
+                    "total": test_count.total(),
+                })
+            })
+        });
+        self.emit_conductor_signal(
+            Kind::GateVerdict,
+            serde_json::json!({
+                "plan_id": plan_id,
+                "rung": rung,
+                "passed": all_passed,
+                "duration_ms": wall_ms,
+                "test_count": test_count,
+            }),
+        );
 
         if !all_passed {
             if let Some(state) = self.executor.plan_state_mut(plan_id) {
