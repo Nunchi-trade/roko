@@ -2,9 +2,11 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use roko_core::{Result, Signal};
+use cron::Schedule;
+use roko_core::{Body, Kind, Result, RokoError, Signal};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::str::FromStr;
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
 
@@ -71,6 +73,136 @@ pub trait EventSource: Send + Sync + 'static {
 
     /// Start the source and keep running until cancellation is requested.
     async fn start(&self, sender: SignalSender, cancel: CancellationToken) -> Result<()>;
+}
+
+/// A scheduled event source backed by cron expressions.
+#[derive(Debug, Clone)]
+pub struct CronEventSource {
+    schedules: Vec<CronSchedule>,
+}
+
+/// One cron schedule parsed from configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct CronSchedule {
+    /// Human-readable schedule name.
+    name: String,
+    /// Standard cron expression.
+    expression: String,
+    /// Signal kind emitted when the schedule fires.
+    signal_kind: String,
+    /// Extra structured metadata included in the emitted signal body.
+    #[serde(default)]
+    metadata: Value,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveCronSchedule {
+    schedule: CronSchedule,
+    parsed: Schedule,
+    next_fire: Option<DateTime<Utc>>,
+}
+
+impl CronEventSource {
+    fn compile_schedules(&self) -> Result<Vec<ActiveCronSchedule>> {
+        self.schedules
+            .iter()
+            .map(|schedule| {
+                let parsed = Schedule::from_str(&schedule.expression).map_err(|err| {
+                    RokoError::config(format!(
+                        "invalid cron expression for schedule '{}': {err}",
+                        schedule.name.as_str()
+                    ))
+                })?;
+                let next_fire = parsed.upcoming(Utc).next();
+                Ok(ActiveCronSchedule {
+                    schedule: schedule.clone(),
+                    parsed,
+                    next_fire,
+                })
+            })
+            .collect()
+    }
+}
+
+#[async_trait]
+impl EventSource for CronEventSource {
+    fn name(&self) -> &str {
+        "cron"
+    }
+
+    fn kind(&self) -> EventSourceKind {
+        EventSourceKind::Cron
+    }
+
+    async fn start(&self, sender: SignalSender, cancel: CancellationToken) -> Result<()> {
+        let mut schedules = self.compile_schedules()?;
+        if schedules.is_empty() {
+            cancel.cancelled().await;
+            return Ok(());
+        }
+
+        loop {
+            if cancel.is_cancelled() {
+                break;
+            }
+
+            let now = Utc::now();
+            let mut due = Vec::new();
+            let mut next_fire: Option<DateTime<Utc>> = None;
+
+            for (idx, active) in schedules.iter().enumerate() {
+                match active.next_fire {
+                    Some(fire_at) if fire_at <= now => due.push(idx),
+                    Some(fire_at) => {
+                        next_fire = Some(match next_fire {
+                            Some(current) => current.min(fire_at),
+                            None => fire_at,
+                        });
+                    }
+                    None => {}
+                }
+            }
+
+            if due.is_empty() {
+                let Some(fire_at) = next_fire else {
+                    cancel.cancelled().await;
+                    break;
+                };
+
+                let wait = fire_at.signed_duration_since(now).to_std().unwrap_or_default();
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    _ = tokio::time::sleep(wait) => {}
+                }
+                continue;
+            }
+
+            for idx in due {
+                let fired_at = Utc::now();
+                let signal = cron_signal(&schedules[idx].schedule, fired_at);
+                sender.send(signal).await.map_err(|_| {
+                    RokoError::cancelled(format!(
+                        "cron signal receiver dropped for schedule '{}'",
+                        schedules[idx].schedule.name.as_str()
+                    ))
+                })?;
+                schedules[idx].next_fire = schedules[idx].parsed.upcoming(Utc).next();
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn cron_signal(schedule: &CronSchedule, fired_at: DateTime<Utc>) -> Signal {
+    Signal::builder(Kind::Custom(schedule.signal_kind.clone()))
+        .body(Body::Json(serde_json::json!({
+            "name": schedule.name.clone(),
+            "expression": schedule.expression.clone(),
+            "fired_at": fired_at.to_rfc3339(),
+            "metadata": schedule.metadata.clone(),
+        })))
+        .build()
 }
 
 /// Periodically collects outcomes for previously emitted work.
@@ -223,6 +355,53 @@ mod tests {
             .await
             .expect("task should complete")
             .expect("source should exit cleanly");
+    }
+
+    #[test]
+    fn cron_signal_payload_includes_metadata() {
+        let schedule = CronSchedule {
+            name: "weekly-digest".to_string(),
+            expression: "0 9 * * MON".to_string(),
+            signal_kind: "scheduler:cron:weekly-digest".to_string(),
+            metadata: json!({ "team": "platform" }),
+        };
+
+        let signal = cron_signal(&schedule, DateTime::<Utc>::UNIX_EPOCH);
+
+        assert_eq!(
+            signal.kind,
+            Kind::Custom("scheduler:cron:weekly-digest".to_string())
+        );
+        assert_eq!(
+            signal.body,
+            Body::Json(json!({
+                "name": "weekly-digest",
+                "expression": "0 9 * * MON",
+                "fired_at": DateTime::<Utc>::UNIX_EPOCH.to_rfc3339(),
+                "metadata": { "team": "platform" },
+            }))
+        );
+    }
+
+    #[tokio::test]
+    async fn cron_event_source_rejects_invalid_expression() {
+        let source = CronEventSource {
+            schedules: vec![CronSchedule {
+                name: "broken".to_string(),
+                expression: "definitely not cron".to_string(),
+                signal_kind: "scheduler:cron:broken".to_string(),
+                metadata: json!({ "source": "test" }),
+            }],
+        };
+
+        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        let cancel = CancellationToken::new();
+
+        let err = source.start(sender, cancel).await.expect_err("invalid cron should fail");
+        assert!(
+            err.to_string().contains("broken"),
+            "error should include schedule name"
+        );
     }
 
     #[tokio::test]
