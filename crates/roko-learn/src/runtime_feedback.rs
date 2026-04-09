@@ -610,6 +610,14 @@ impl LearningRuntime {
             crate_familiarity: 0.5,
             has_prior_failure: !episode.success,
         };
+        if episode
+            .extra
+            .get("cascade_router_observed")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            return false;
+        }
         let reward = if episode.success { 1.0 } else { 0.0 };
         self.cascade_router
             .record_observation(&ctx, &slug, reward, episode.success);

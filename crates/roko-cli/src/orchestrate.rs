@@ -680,6 +680,20 @@ struct TaskTracker {
     gate_failure_count: u32,
 }
 
+fn role_hash_features(role: &str) -> [f64; 4] {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in role.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    [
+        (h & 0xFFFF) as f64 / 65535.0,
+        ((h >> 16) & 0xFFFF) as f64 / 65535.0,
+        ((h >> 32) & 0xFFFF) as f64 / 65535.0,
+        ((h >> 48) & 0xFFFF) as f64 / 65535.0,
+    ]
+}
+
 impl TaskTracker {
     fn new(tasks_file: TasksFile, plan_dir: PathBuf) -> Self {
         Self {
@@ -3187,36 +3201,90 @@ impl PlanRunner {
             .get(plan_id)
             .and_then(|t| t.tasks_file.tasks.iter().find(|td| td.id == task_id))
             .cloned();
+        let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let mut cascade_router_observed = false;
 
         // ── Observe cascade router for bandit learning (§9) ─────────
-        {
+        if result.success {
             use roko_core::TaskComplexityBand;
-            use roko_learn::model_router::RoutingContext;
+            use roko_learn::model_router::{CONTEXT_DIM, compute_routing_reward};
 
-            let complexity = task_def
-                .as_ref()
-                .map(|td| match td.tier.as_str() {
-                    "mechanical" | "fast" => TaskComplexityBand::Fast,
-                    "architectural" | "complex" | "premium" => TaskComplexityBand::Complex,
-                    _ => TaskComplexityBand::Standard,
-                })
-                .unwrap_or(TaskComplexityBand::Standard);
-            let routing_ctx = RoutingContext {
-                task_category: roko_core::TaskCategory::Implementation,
-                complexity,
-                iteration: 0,
-                role: AgentRole::Implementer,
-                crate_familiarity: 0.5,
-                has_prior_failure: false,
-            };
             let model = self.effective_model();
-            let reward = if result.success { 1.0 } else { 0.0 };
-            self.learning.cascade_router().record_observation(
-                &routing_ctx,
-                &model,
-                reward,
-                result.success,
-            );
+            if let Some(model_idx) = self.learning.cascade_router().model_index_for_slug(&model) {
+                let task_tier = task_def
+                    .as_ref()
+                    .map(|td| td.tier.as_str())
+                    .unwrap_or("focused");
+                // Keep the 17-dim LinUCB shape and reserve the trailing slots
+                // so the raw success-path observation matches the router schema.
+                let mut context_vec = vec![0.0; CONTEXT_DIM];
+                let tier_idx = match task_tier {
+                    "mechanical" => 0,
+                    "focused" => 1,
+                    "integrative" => 2,
+                    "architectural" => 3,
+                    _ => 1,
+                };
+                context_vec[tier_idx] = 1.0;
+
+                let complexity = match task_tier {
+                    "mechanical" => TaskComplexityBand::Fast,
+                    "architectural" => TaskComplexityBand::Complex,
+                    _ => TaskComplexityBand::Standard,
+                };
+                context_vec[4] = match complexity {
+                    TaskComplexityBand::Fast => 0.0,
+                    TaskComplexityBand::Complex => 1.0,
+                    TaskComplexityBand::Standard => 0.5,
+                    _ => 0.5,
+                };
+
+                let iteration = self
+                    .task_trackers
+                    .get(plan_id)
+                    .map(|tracker| f64::from(tracker.impl_round.saturating_add(1)))
+                    .unwrap_or(1.0);
+                context_vec[5] = (iteration / 10.0).min(1.0);
+                context_vec[6..10].copy_from_slice(&role_hash_features("Implementer"));
+                context_vec[10] = 0.5;
+                context_vec[11] = if self
+                    .task_trackers
+                    .get(plan_id)
+                    .is_some_and(|tracker| tracker.gate_failure_count > 0)
+                {
+                    1.0
+                } else {
+                    0.0
+                };
+                context_vec[16] = 1.0;
+
+                let normalized_cost = if self.config.budget.max_task_usd > 0.0 {
+                    (f64::from(result.usage.cost_usd) / self.config.budget.max_task_usd).min(1.0)
+                } else {
+                    0.0
+                };
+                let normalized_duration = {
+                    let timeout_ms = self.effective_task_timeout_ms(task_def.as_ref());
+                    if timeout_ms > 0 {
+                        (wall_ms as f64 / timeout_ms as f64).min(1.0)
+                    } else {
+                        0.0
+                    }
+                };
+                let reward = compute_routing_reward(1.0, normalized_cost, normalized_duration);
+
+                self.learning
+                    .cascade_router()
+                    .observe(context_vec, model_idx, reward);
+                cascade_router_observed = true;
+            } else {
+                tracing::debug!(
+                    plan_id = %plan_id,
+                    task_id = %task_id,
+                    model = %model,
+                    "skipping cascade observation: model not found in router arms"
+                );
+            }
         }
 
         if let Some(task_def) = task_def.as_ref()
@@ -3230,7 +3298,6 @@ impl PlanRunner {
             );
         }
 
-        let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let mut ep = Episode::new("Implementer", task_id).succeeded();
         ep.usage = Usage {
             wall_ms,
@@ -3241,6 +3308,12 @@ impl PlanRunner {
         };
         ep.input_signal_hash = plan_id.to_string();
         ep.output_signal_hash = result.output.id.to_string();
+        if cascade_router_observed {
+            ep.extra.insert(
+                "cascade_router_observed".to_string(),
+                serde_json::json!(true),
+            );
+        }
         let model = self.effective_model();
         let input = self.enrich_completed_run(ep, plan_id, task_id, "Implementer", &model, None, 1);
         self.record_and_check_learning(input, plan_id).await;

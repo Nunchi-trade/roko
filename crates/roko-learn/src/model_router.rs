@@ -422,22 +422,48 @@ impl LinUCBRouter {
     /// - `b_a = b_a + reward * x`
     pub fn update(&self, ctx: &RoutingContext, model_slug: &str, reward: f64) {
         let x = ctx.to_features();
-        let mut state = self.state.lock();
+        let Some(model_idx) = self.model_index(model_slug) else {
+            return;
+        };
+        self.update_features(&x, model_idx, reward);
+    }
 
-        if let Some(arm) = state.arms.iter_mut().find(|a| a.slug == model_slug) {
-            // A = A + x * x^T
-            for (i, row) in arm.a_matrix.iter_mut().enumerate() {
-                for (j, cell) in row.iter_mut().enumerate() {
-                    *cell += x[i] * x[j];
-                }
-            }
-            // b = b + reward * x
-            for (bi, xi) in arm.b_vector.iter_mut().zip(&x) {
-                *bi += reward * xi;
-            }
-            arm.observations += 1;
-            state.total_observations += 1;
+    /// Update the arm identified by `model_idx` with a precomputed feature vector.
+    ///
+    /// This is the lower-level observation entry point used by the cascade router
+    /// when it already has the raw context vector.
+    pub fn update_features(&self, x: &[f64], model_idx: usize, reward: f64) {
+        if x.len() != CONTEXT_DIM {
+            return;
         }
+
+        let mut state = self.state.lock();
+        let Some(arm) = state.arms.get_mut(model_idx) else {
+            return;
+        };
+
+        // A = A + x * x^T
+        for (i, row) in arm.a_matrix.iter_mut().enumerate() {
+            for (j, cell) in row.iter_mut().enumerate() {
+                *cell += x[i] * x[j];
+            }
+        }
+        // b = b + reward * x
+        for (bi, xi) in arm.b_vector.iter_mut().zip(x) {
+            *bi += reward * xi;
+        }
+        arm.observations += 1;
+        state.total_observations += 1;
+    }
+
+    /// Return the index of the arm for `model_slug`.
+    #[must_use]
+    pub fn model_index(&self, model_slug: &str) -> Option<usize> {
+        self.state
+            .lock()
+            .arms
+            .iter()
+            .position(|arm| slugs_match(&arm.slug, model_slug))
     }
 
     /// Snapshot of all arm statistics (clone under lock).
@@ -574,6 +600,22 @@ const fn complexity_to_tier(band: TaskComplexityBand) -> ModelTier {
         TaskComplexityBand::Complex => ModelTier::Premium,
         // Standard and forward-compat
         _ => ModelTier::Standard,
+    }
+}
+
+fn slugs_match(lhs: &str, rhs: &str) -> bool {
+    lhs == rhs || slug_family(lhs).is_some_and(|family| slug_family(rhs) == Some(family))
+}
+
+fn slug_family(slug: &str) -> Option<&'static str> {
+    if slug.contains("haiku") {
+        Some("haiku")
+    } else if slug.contains("sonnet") {
+        Some("sonnet")
+    } else if slug.contains("opus") {
+        Some("opus")
+    } else {
+        None
     }
 }
 

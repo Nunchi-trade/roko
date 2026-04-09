@@ -233,6 +233,12 @@ impl CascadeRouter {
         self.linucb.total_observations()
     }
 
+    /// Return the index of `slug` in the router's model list.
+    #[must_use]
+    pub fn model_index_for_slug(&self, slug: &str) -> Option<usize> {
+        self.linucb.model_index(slug)
+    }
+
     /// Route a context through the cascade, returning a recommendation.
     pub fn route(&self, ctx: &RoutingContext) -> CascadeModel {
         match self.current_stage() {
@@ -250,9 +256,34 @@ impl CascadeRouter {
         reward: f64,
         success: bool,
     ) {
+        let Some(model_idx) = self.model_index_for_slug(model_slug) else {
+            return;
+        };
+        self.observe_internal(&ctx.to_features(), model_idx, reward, success);
+    }
+
+    /// Record a successful observation from a raw 17-dim context vector.
+    ///
+    /// This is the success-path entry point used by orchestration when the
+    /// caller already has the model index in the router's arm list.
+    pub fn observe(&self, context_vec: Vec<f64>, model_idx: usize, reward: f64) {
+        self.observe_internal(&context_vec, model_idx, reward, true);
+    }
+
+    fn observe_internal(
+        &self,
+        context_vec: &[f64],
+        model_idx: usize,
+        reward: f64,
+        success: bool,
+    ) {
+        let Some(slug) = self.model_slugs.get(model_idx) else {
+            return;
+        };
+
         // Update confidence stats.
         let mut stats = self.confidence_stats.lock();
-        let entry = stats.entry(model_slug.to_string()).or_default();
+        let entry = stats.entry(slug.clone()).or_default();
         entry.trials += 1;
         if success {
             entry.successes += 1;
@@ -260,7 +291,7 @@ impl CascadeRouter {
         drop(stats);
 
         // Update LinUCB (always, so it's ready when stage transitions).
-        self.linucb.update(ctx, model_slug, reward);
+        self.linucb.update_features(context_vec, model_idx, reward);
     }
 
     /// Access the underlying `LinUCB` router (for introspection / persistence).
