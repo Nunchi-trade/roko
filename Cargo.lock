@@ -5092,6 +5092,7 @@ dependencies = [
  "roko-fs",
  "roko-gate",
  "roko-learn",
+ "roko-neuro",
  "roko-orchestrator",
  "roko-plugin",
  "roko-serve",
