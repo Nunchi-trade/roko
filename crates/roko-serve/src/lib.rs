@@ -119,6 +119,10 @@ impl ServerBuilder {
         let state = Arc::clone(self.state.get_or_insert_with(|| {
             Arc::new(build_app_state(workdir, cli_config, roko_config))
         }));
+        let dispatcher = Arc::new(dispatch::TemplateAgentDispatcher::new(
+            state.workdir.clone(),
+        ));
+        tokio::spawn(dispatch::dispatch_loop(Arc::clone(&state), dispatcher));
         let router = routes::build_router(
             Arc::clone(&state),
             &self.config.roko_config.server.cors_origins,

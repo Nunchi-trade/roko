@@ -15,22 +15,55 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use anyhow::Context;
+use anyhow::{Context as _, Result};
 use parking_lot::{Mutex, RwLock};
+use roko_agent::{Agent, AgentResult, ClaudeCliAgent, ExecAgent};
+use roko_core::{Body, Context as RokoContext, Gate, Kind, Provenance, Signal};
 use roko_core::config::schema::{RokoConfig, SubscriptionConfig, SubscriptionFilterConfig};
-use roko_core::{Body, ContentHash, Signal};
+use roko_core::{ContentHash, Verdict};
+use roko_gate::{ClippyGate, CompileGate, DiffGate, DiffPayload, GatePayload, TestGate};
+use roko_learn::episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage as EpisodeUsage};
 use serde::Deserialize;
 use serde_json::Value;
-use tracing::warn;
+use tracing::{info, warn};
 
-use crate::event_bus::EventBus;
 use crate::events::ServerEvent;
+use crate::state::{AppState, TemplateRunRecord};
+use crate::templates::{AgentTemplate, TemplateRegistry};
+use roko_cli::dispatch::{
+    Subscription as SharedSubscription,
+    SubscriptionRegistry as SharedSubscriptionRegistry,
+};
 
 /// Async agent-dispatch interface used by the routing loop.
 #[async_trait]
 pub trait AgentDispatcher: Send + Sync {
     /// Dispatch a signal through the agent template identified by `template`.
-    async fn dispatch(&self, template: String, signal: Signal);
+    async fn dispatch(&self, template: AgentTemplate, signal: Signal) -> Result<AgentResult>;
+}
+
+/// Template-backed agent runner used by the webhook dispatch loop.
+#[derive(Clone, Debug)]
+pub struct TemplateAgentDispatcher {
+    workdir: PathBuf,
+}
+
+impl TemplateAgentDispatcher {
+    /// Create a dispatcher rooted at `workdir`.
+    #[must_use]
+    pub fn new(workdir: PathBuf) -> Self {
+        Self { workdir }
+    }
+}
+
+#[async_trait]
+impl AgentDispatcher for TemplateAgentDispatcher {
+    async fn dispatch(&self, template: AgentTemplate, signal: Signal) -> Result<AgentResult> {
+        let system_prompt = TemplateRegistry::render_prompt(&template, &HashMap::new());
+        let agent = build_agent(&template, &system_prompt, &self.workdir)?;
+        let ctx = dispatch_context(&template, &signal);
+        Ok(agent.run(&signal, &ctx).await)
+    }
 }
 
 /// A subscription from signal trigger to agent template.
@@ -528,11 +561,11 @@ fn json_string_array_at<'a>(value: &'a Value, path: &[&str]) -> Vec<&'a str> {
 
 /// Central event routing loop for webhook-driven signals.
 pub async fn dispatch_loop(
-    event_bus: EventBus<ServerEvent>,
-    subscriptions: SubscriptionRegistry,
+    state: Arc<AppState>,
     dispatcher: Arc<dyn AgentDispatcher>,
 ) {
-    let mut rx = event_bus.subscribe();
+    let subscriptions: SharedSubscriptionRegistry = state.subscriptions.clone();
+    let mut rx = state.event_bus.subscribe();
 
     loop {
         let envelope = match rx.recv().await {
@@ -560,10 +593,11 @@ pub async fn dispatch_loop(
             if subscriptions.check_cooldown(&sub) && sub.check_dedup(&signal) {
                 let signal = signal.clone();
                 let dispatcher = Arc::clone(&dispatcher);
+                let state = Arc::clone(&state);
                 let subscriptions = subscriptions.clone();
                 let sub_for_task = sub.clone();
                 tokio::spawn(async move {
-                    dispatch_agent(sub_for_task.clone(), signal, dispatcher).await;
+                    dispatch_agent(state, sub_for_task.clone(), signal, dispatcher).await;
                     sub_for_task.release_concurrency(&subscriptions);
                 });
             } else {
@@ -574,13 +608,307 @@ pub async fn dispatch_loop(
 }
 
 async fn dispatch_agent(
-    subscription: Subscription,
+    state: Arc<AppState>,
+    subscription: SharedSubscription,
     signal: Signal,
     dispatcher: Arc<dyn AgentDispatcher>,
 ) {
-    dispatcher
-        .dispatch(subscription.template().to_owned(), signal)
-        .await;
+    let template_name = subscription.template().to_owned();
+    let template = {
+        let templates = state.templates.read().await;
+        templates.get(&template_name).cloned()
+    };
+
+    let Some(template) = template else {
+        warn!(
+            template = %template_name,
+            "no template found for matched subscription"
+        );
+        return;
+    };
+
+    if let Err(err) = dispatch_template(state, template, signal, dispatcher).await {
+        warn!(error = %err, template = %template_name, "agent dispatch failed");
+    }
+}
+
+async fn dispatch_template(
+    state: Arc<AppState>,
+    template: AgentTemplate,
+    signal: Signal,
+    dispatcher: Arc<dyn AgentDispatcher>,
+) -> Result<()> {
+    let dispatch_started = Instant::now();
+    let dispatch_signal = build_dispatch_signal(&template, &signal)?;
+    let dispatch_result = match dispatcher.dispatch(template.clone(), dispatch_signal.clone()).await
+    {
+        Ok(result) => result,
+        Err(err) => {
+            warn!(error = %err, template = %template.name, "agent backend failed");
+            let failure_output = dispatch_signal
+                .derive(
+                    Kind::AgentOutput,
+                    Body::text(format!("dispatch failed: {err}")),
+                )
+                .provenance(Provenance::trusted("roko-serve"))
+                .tag("agent", &template.agent.command)
+                .tag("failed", "true")
+                .build();
+            let result = AgentResult::fail(failure_output);
+            record_template_run(&state, &template.name, false).await;
+            append_episode(
+                &state,
+                &template,
+                &signal,
+                &result,
+                &[],
+                false,
+            )
+            .await;
+            state.event_bus.publish(ServerEvent::OperationCompleted {
+                op_id: format!("{}:{}", template.name, signal.id.to_hex()),
+                kind: format!("template_dispatch:{}", template.name),
+                success: false,
+            });
+            return Ok(());
+        }
+    };
+    let output = dispatch_result.output.clone();
+    let output_text = signal_body_to_text(&output.body);
+    let agent_name = output
+        .tag("agent")
+        .map_or_else(|| template.agent.command.clone(), ToString::to_string);
+
+    state.event_bus.publish(ServerEvent::AgentOutput {
+        agent_id: agent_name.clone(),
+        content: output_text.clone(),
+    });
+
+    let mut gate_verdicts = Vec::new();
+    let gate_outputs = run_template_gates(&state, &template, &output).await;
+    for verdict in gate_outputs {
+        gate_verdicts.push(GateVerdict::new(verdict.gate.clone(), verdict.passed));
+    }
+
+    let success = dispatch_result.success && gate_verdicts.iter().all(|verdict| verdict.passed);
+    record_template_run(&state, &template.name, success).await;
+    append_episode(
+        &state,
+        &template,
+        &signal,
+        &dispatch_result,
+        &gate_verdicts,
+        success,
+    )
+    .await;
+
+    let completion_kind = format!("template_dispatch:{}", template.name);
+    state.event_bus.publish(ServerEvent::OperationCompleted {
+        op_id: format!("{}:{}", template.name, signal.id.to_hex()),
+        kind: completion_kind,
+        success,
+    });
+
+    info!(
+        template = %template.name,
+        success,
+        elapsed_ms = dispatch_started.elapsed().as_millis(),
+        "template dispatch completed"
+    );
+
+    Ok(())
+}
+
+fn build_agent(
+    template: &AgentTemplate,
+    system_prompt: &str,
+    workdir: &Path,
+) -> Result<Box<dyn Agent>> {
+    if template.agent.command == "claude" {
+        let agent = ClaudeCliAgent::new(
+            &template.agent.command,
+            workdir,
+            template.agent.model.clone(),
+        )
+        .with_system_prompt(system_prompt.to_string())
+        .with_timeout_ms(120_000);
+        Ok(Box::new(agent))
+    } else {
+        let agent = ExecAgent::new(&template.agent.command, Vec::new())
+            .with_timeout_ms(120_000)
+            .with_name(format!("exec:{}", template.agent.command));
+        Ok(Box::new(agent))
+    }
+}
+
+fn dispatch_context(template: &AgentTemplate, signal: &Signal) -> RokoContext {
+    let mut ctx = RokoContext::now()
+        .with_attr("template", template.name.clone())
+        .with_attr("signal.id", signal.id.to_hex())
+        .with_attr("signal.kind", signal.kind.as_str().to_string())
+        .with_attr("signal.provenance", signal.provenance.author.clone());
+    if let Some(session) = signal.provenance.session.as_deref() {
+        ctx = ctx.with_attr("signal.session", session.to_string());
+    }
+    ctx.with_attr(
+        "signal.payload",
+        serde_json::to_string(&signal.body).unwrap_or_else(|_| signal.body.kind_hint().into()),
+    )
+}
+
+fn build_dispatch_signal(template: &AgentTemplate, signal: &Signal) -> Result<Signal> {
+    let mut context = serde_json::Map::new();
+    context.insert("signal".into(), serde_json::to_value(signal)?);
+    context.insert("template".into(), serde_json::to_value(template)?);
+
+    let mut body = String::new();
+    body.push_str("Signal context:\n");
+    body.push_str(&serde_json::to_string_pretty(&context)?);
+    if !template.prompt.sections.is_empty() {
+        body.push_str("\n\nTemplate sections:\n");
+        for section in &template.prompt.sections {
+            body.push_str("- ");
+            body.push_str(section);
+            body.push('\n');
+        }
+    }
+
+    Ok(Signal::builder(Kind::Prompt)
+        .body(Body::text(body))
+        .provenance(Provenance::trusted("roko-serve"))
+        .lineage([signal.id])
+        .tag("template", &template.name)
+        .tag("signal_kind", signal.kind.as_str())
+        .build())
+}
+
+fn signal_body_to_text(body: &Body) -> String {
+    match body {
+        Body::Text(text) => text.clone(),
+        Body::Json(value) => serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
+        Body::Bytes(bytes) => format!("<{} bytes>", bytes.len()),
+        Body::Empty => String::new(),
+    }
+}
+
+async fn run_template_gates(
+    state: &Arc<AppState>,
+    template: &AgentTemplate,
+    output: &Signal,
+) -> Vec<Verdict> {
+    if template.gates.names.is_empty() {
+        return Vec::new();
+    }
+
+    let mut verdicts = Vec::new();
+    for gate_name in &template.gates.names {
+        let verdict = run_named_gate(state, gate_name, output).await;
+        verdicts.push(verdict);
+    }
+    verdicts
+}
+
+async fn run_named_gate(
+    state: &Arc<AppState>,
+    gate_name: &str,
+    output: &Signal,
+) -> Verdict {
+    let ctx = RokoContext::now().with_attr("gate", gate_name.to_string());
+    let payload_signal = match gate_payload_signal(&state.workdir, gate_name, output) {
+        Ok(signal) => signal,
+        Err(err) => {
+            warn!(error = %err, gate = gate_name, "failed to build gate payload");
+            return Verdict::fail(gate_name, format!("failed to build gate payload: {err}"));
+        }
+    };
+
+    match gate_name {
+        "compile" => CompileGate::cargo().verify(&payload_signal, &ctx).await,
+        "test" => TestGate::cargo().verify(&payload_signal, &ctx).await,
+        "clippy" => ClippyGate::cargo().verify(&payload_signal, &ctx).await,
+        "diff" => DiffGate::new().verify(&payload_signal, &ctx).await,
+        other => {
+            warn!(gate = other, "unsupported template gate");
+            Verdict::fail(other, "unsupported template gate")
+        }
+    }
+}
+
+fn gate_payload_signal(workdir: &Path, gate_name: &str, output: &Signal) -> Result<Signal> {
+    let label = format!("{gate_name}:{}", output.id.to_hex());
+    if gate_name == "diff" {
+        let diff = std::process::Command::new("git")
+            .arg("diff")
+            .current_dir(workdir)
+            .output()
+            .context("run git diff")?;
+        let diff_text = String::from_utf8_lossy(&diff.stdout).into_owned();
+        let payload = DiffPayload::new(diff_text);
+        Ok(Signal::builder(Kind::Task)
+            .body(Body::from_json(&payload)?)
+            .provenance(Provenance::trusted("roko-serve"))
+            .tag("gate", gate_name)
+            .tag("label", label)
+            .build())
+    } else {
+        let payload = GatePayload::in_dir(workdir).with_label(label);
+        Ok(Signal::builder(Kind::Task)
+            .body(Body::from_json(&payload)?)
+            .provenance(Provenance::trusted("roko-serve"))
+            .tag("gate", gate_name)
+            .build())
+    }
+}
+
+async fn record_template_run(state: &Arc<AppState>, template_name: &str, success: bool) {
+    state
+        .template_runs
+        .write()
+        .await
+        .entry(template_name.to_string())
+        .or_default()
+        .push(TemplateRunRecord {
+            timestamp: chrono::Utc::now(),
+            trigger_kind: "webhook_dispatch".into(),
+            success,
+        });
+}
+
+async fn append_episode(
+    state: &Arc<AppState>,
+    template: &AgentTemplate,
+    signal: &Signal,
+    result: &AgentResult,
+    gate_verdicts: &[GateVerdict],
+    success: bool,
+) {
+    let agent_id = result
+        .output
+        .tag("agent")
+        .map_or_else(|| template.agent.command.clone(), ToString::to_string);
+    let mut episode = Episode::new(agent_id, signal.id.to_hex());
+    episode.kind = "agent_turn".into();
+    episode.input_signal_hash = signal.id.to_hex();
+    episode.output_signal_hash = result.output.id.to_hex();
+    episode.gate_verdicts = gate_verdicts.to_vec();
+    episode.success = success;
+    if !success {
+        episode.failure_reason = Some("agent dispatch or template gate failure".into());
+    }
+    episode.usage = EpisodeUsage {
+        input_tokens: result.usage.input_tokens.into(),
+        output_tokens: result.usage.output_tokens.into(),
+        cache_read_tokens: result.usage.cache_read_tokens.into(),
+        cache_write_tokens: result.usage.cache_create_tokens.into(),
+        cost_usd: f64::from(result.usage.cost_usd),
+        cost_usd_without_cache: f64::from(result.usage.cost_usd),
+        wall_ms: result.usage.wall_ms,
+    };
+
+    let logger = EpisodeLogger::new(state.layout.episodes_path());
+    if let Err(err) = logger.append(&episode).await {
+        warn!(error = %err, template = %template.name, "failed to append episode");
+    }
 }
 
 fn glob_match(pattern: &str, text: &str) -> bool {
