@@ -22,8 +22,10 @@ use std::sync::Arc;
 use crate::agent_exec::{AgentExecOpts, run_agent};
 use crate::task_parser::TasksFile;
 use anyhow::{Context as _, Result, anyhow};
+use roko_core::{Body, Kind, Provenance, Signal, Substrate};
 use roko_core::config::schema::RokoConfig;
 use roko_core::obs::MetricRegistry;
+use roko_fs::FileSubstrate;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // ─── Directory layout ──────────────────────────────���───────────────
@@ -218,6 +220,68 @@ fn validate_and_print_preview(path: &Path) -> Result<()> {
     }
 
     print_tasks_preview(path, &tasks_file);
+    Ok(())
+}
+
+fn tier_rank(tier: &str) -> u8 {
+    match tier {
+        "mechanical" => 0,
+        "focused" => 1,
+        "integrative" => 2,
+        "architectural" => 3,
+        _ => 1,
+    }
+}
+
+fn rank_to_complexity(rank: u8) -> &'static str {
+    match rank {
+        0 => "mechanical",
+        1 => "focused",
+        2 => "integrative",
+        3 => "architectural",
+        _ => "focused",
+    }
+}
+
+fn generated_plan_stats(paths: &[PathBuf]) -> Result<(usize, String)> {
+    if paths.is_empty() {
+        return Ok((0, "unknown".to_string()));
+    }
+
+    let mut task_count = 0usize;
+    let mut max_rank = 0u8;
+
+    for path in paths {
+        let tasks_file =
+            TasksFile::parse(path).with_context(|| format!("parse {}", path.display()))?;
+        task_count = task_count.saturating_add(tasks_file.tasks.len());
+        for task in &tasks_file.tasks {
+            max_rank = max_rank.max(tier_rank(task.tier.as_str()));
+        }
+    }
+
+    let estimated_complexity = if task_count == 0 {
+        "unknown".to_string()
+    } else {
+        rank_to_complexity(max_rank).to_string()
+    };
+
+    Ok((task_count, estimated_complexity))
+}
+
+async fn emit_prd_plan_signal(
+    workdir: &Path,
+    kind: Kind,
+    body: serde_json::Value,
+) -> Result<()> {
+    let substrate = FileSubstrate::open(workdir.join(".roko"))
+        .await
+        .with_context(|| format!("open {}", workdir.join(".roko").display()))?;
+    let signal = Signal::builder(kind)
+        .body(Body::Json(body))
+        .provenance(Provenance::trusted("roko.prd"))
+        .build();
+    substrate.put(signal).await?;
     Ok(())
 }
 
@@ -565,66 +629,106 @@ fn auto_plan_enabled(workdir: &Path) -> Result<bool> {
 /// Generate implementation plans from a published PRD file.
 pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path, dry_run: bool) -> Result<PathBuf> {
     let workdir = prd_workdir(prd_path)?;
-    let content = std::fs::read_to_string(prd_path)
-        .with_context(|| format!("read {}", prd_path.display()))?;
-    println!("📋 Generating plans from PRD: {slug}");
+    let result = async {
+        let content = std::fs::read_to_string(prd_path)
+            .with_context(|| format!("read {}", prd_path.display()))?;
+        println!("📋 Generating plans from PRD: {slug}");
 
-    let dry_run_workdir = if dry_run {
-        Some(DryRunWorkspace::new(&workdir)?)
-    } else {
-        None
-    };
-    let workdir_ref = dry_run_workdir
-        .as_ref()
-        .map_or(workdir.as_path(), |temp| temp.path());
+        let dry_run_workdir = if dry_run {
+            Some(DryRunWorkspace::new(&workdir)?)
+        } else {
+            None
+        };
+        let workdir_ref = dry_run_workdir
+            .as_ref()
+            .map_or(workdir.as_path(), |temp| temp.path());
 
-    let resolved = crate::load_layered(workdir_ref)?;
-    let system = crate::plan_generate::PLAN_GENERATOR_SYSTEM_PROMPT;
-    let plans_root = tasks_root(workdir_ref);
-    let tasks_before = snapshot_tasks_files(&plans_root);
-    let task_prompt = format!(
-        "Read the PRD at {path} and generate implementation plan directories \
-         under plans/. Each REQ-XXX requirement becomes one or more tasks. \
-         Each acceptance criterion becomes a task verification command. \
-         Search the codebase first to understand what already exists. \
-         Create plan.md and tasks.toml files directly, including per-task mcp_servers \
-         when a task needs a specific MCP server.\n\n\
-         PRD content:\n{content}",
-        path = prd_path.display()
-    );
+        let resolved = crate::load_layered(workdir_ref)?;
+        let system = crate::plan_generate::PLAN_GENERATOR_SYSTEM_PROMPT;
+        let plans_root = tasks_root(workdir_ref);
+        let tasks_before = snapshot_tasks_files(&plans_root);
+        let task_prompt = format!(
+            "Read the PRD at {path} and generate implementation plan directories \
+             under plans/. Each REQ-XXX requirement becomes one or more tasks. \
+             Each acceptance criterion becomes a task verification command. \
+             Search the codebase first to understand what already exists. \
+             Create plan.md and tasks.toml files directly, including per-task mcp_servers \
+             when a task needs a specific MCP server.\n\n\
+             PRD content:\n{content}",
+            path = prd_path.display()
+        );
 
-    let exit_code = run_agent(AgentExecOpts {
-        prompt: &task_prompt,
-        workdir: workdir_ref,
-        model: resolved.config.agent.model.as_deref(),
-        effort: Some(resolved.config.agent.effort.as_str()),
-        system_prompt: Some(system),
-        resume_session: None,
-        env_vars: &resolved.config.agent.env,
-    })
-    .await?;
-    if exit_code != 0 {
-        return Err(anyhow!(
-            "plan generation agent failed with exit code {exit_code}"
-        ));
-    }
-
-    if dry_run {
-        let changed = changed_tasks_files(&plans_root, &tasks_before);
-        if changed.is_empty() {
+        let exit_code = run_agent(AgentExecOpts {
+            prompt: &task_prompt,
+            workdir: workdir_ref,
+            model: resolved.config.agent.model.as_deref(),
+            effort: Some(resolved.config.agent.effort.as_str()),
+            system_prompt: Some(system),
+            resume_session: None,
+            env_vars: &resolved.config.agent.env,
+        })
+        .await?;
+        if exit_code != 0 {
             return Err(anyhow!(
-                "dry-run plan generation did not produce any tasks.toml files"
+                "plan generation agent failed with exit code {exit_code}"
             ));
         }
 
-        for path in &changed {
-            validate_and_print_preview(path)?;
-        }
-    } else {
-        warn_on_new_or_updated_tasks(&plans_root, &tasks_before);
-    }
+        let changed = changed_tasks_files(&plans_root, &tasks_before);
+        if dry_run {
+            if changed.is_empty() {
+                return Err(anyhow!(
+                    "dry-run plan generation did not produce any tasks.toml files"
+                ));
+            }
 
-    Ok(workdir.join("plans"))
+            for path in &changed {
+                validate_and_print_preview(path)?;
+            }
+        } else {
+            warn_on_new_or_updated_tasks(&plans_root, &tasks_before);
+        }
+
+        let (task_count, estimated_complexity) = generated_plan_stats(&changed)?;
+        Ok((workdir.join("plans"), task_count, estimated_complexity))
+    }
+    .await;
+
+    match result {
+        Ok((plans_root, task_count, estimated_complexity)) => {
+            if !dry_run
+                && let Err(err) = emit_prd_plan_signal(
+                    &workdir,
+                    Kind::Custom("prd:plan:generated".into()),
+                    serde_json::json!({
+                        "plan_path": plans_root.display().to_string(),
+                        "task_count": task_count,
+                        "estimated_complexity": estimated_complexity,
+                    }),
+                )
+                .await
+            {
+                tracing::warn!("[prd] failed to emit generated-plan signal: {err}");
+            }
+            Ok(plans_root)
+        }
+        Err(err) => {
+            if !dry_run
+                && let Err(signal_err) = emit_prd_plan_signal(
+                    &workdir,
+                    Kind::Custom("prd:plan:failed".into()),
+                    serde_json::json!({
+                        "plan_path": workdir.join("plans").display().to_string(),
+                        "error": format!("{err:#}"),
+                    }),
+                )
+                .await
+            {
+                tracing::warn!("[prd] failed to emit failed-plan signal: {signal_err}");
+            }
+            Err(err)
+        }
+    }
 }
 
 /// Build the system prompt for agent-assisted PRD commands.
