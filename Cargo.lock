@@ -4616,6 +4616,7 @@ dependencies = [
  "parking_lot",
  "proptest",
  "roko-core",
+ "roko-learn",
  "serde",
  "serde_json",
  "tracing",

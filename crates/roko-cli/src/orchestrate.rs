@@ -357,36 +357,27 @@ async fn load_efficiency_cost_signals(
 }
 
 /// Synchronous variant used by the main conductor check path.
-fn load_efficiency_cost_signals_sync(
+fn load_efficiency_signals_sync(
     path: &Path,
     budget_usd: Option<f64>,
 ) -> std::io::Result<Vec<Signal>> {
-    let Some(budget_usd) = budget_usd.filter(|budget| *budget > 0.0) else {
-        return Ok(Vec::new());
-    };
-
     let text = std::fs::read_to_string(path)?;
-    Ok(build_cost_overrun_signals(&text, budget_usd))
+    Ok(build_efficiency_signals(&text, budget_usd))
 }
 
-/// Convert the latest efficiency entries into the metric signals expected by `cost_overrun`.
-fn build_cost_overrun_signals(text: &str, budget_usd: f64) -> Vec<Signal> {
-    let Some(cost_usd) = latest_efficiency_cost(text) else {
-        return Vec::new();
-    };
+/// Convert the latest efficiency entries into the signals expected by the conductor.
+fn build_efficiency_signals(text: &str, budget_usd: Option<f64>) -> Vec<Signal> {
+    let mut signals = Vec::new();
 
-    vec![
-        Signal::builder(Kind::Metric)
-            .body(Body::text("plan cost"))
-            .tag("name", "plan_cost")
-            .tag("value", format!("{cost_usd:.6}"))
-            .build(),
-        Signal::builder(Kind::Metric)
-            .body(Body::text("plan budget"))
-            .tag("name", "plan_budget")
-            .tag("value", format!("{budget_usd:.6}"))
-            .build(),
-    ]
+    if let Some(budget_usd) = budget_usd.filter(|budget| *budget > 0.0) {
+        signals.extend(build_cost_overrun_signals(text, budget_usd));
+    }
+
+    if let Some(signal) = build_context_window_pressure_signal(text) {
+        signals.push(signal);
+    }
+
+    signals
 }
 
 /// Sum the cost from the latest valid efficiency events in the JSONL log.
@@ -409,6 +400,60 @@ fn latest_efficiency_cost(text: &str) -> Option<f64> {
     }
 
     (seen > 0).then_some(total)
+}
+
+fn build_cost_overrun_signals(text: &str, budget_usd: f64) -> Vec<Signal> {
+    let Some(cost_usd) = latest_efficiency_cost(text) else {
+        return Vec::new();
+    };
+
+    vec![
+        Signal::builder(Kind::Metric)
+            .body(Body::text("plan cost"))
+            .tag("name", "plan_cost")
+            .tag("value", format!("{cost_usd:.6}"))
+            .build(),
+        Signal::builder(Kind::Metric)
+            .body(Body::text("plan budget"))
+            .tag("name", "plan_budget")
+            .tag("value", format!("{budget_usd:.6}"))
+            .build(),
+    ]
+}
+
+fn build_context_window_pressure_signal(text: &str) -> Option<Signal> {
+    let event = latest_efficiency_event(text)?;
+    let body = Body::from_json(&event).unwrap_or_else(|_| {
+        Body::text(format!(
+            "{} tokens used on {}",
+            event.total_prompt_tokens, event.model
+        ))
+    });
+
+    Some(
+        Signal::builder(Kind::TokenUsage)
+            .body(body)
+            .tag("plan_id", event.plan_id)
+            .tag("task_id", event.task_id)
+            .tag("role", event.role)
+            .tag("model", event.model)
+            .tag("tokens_used", event.total_prompt_tokens.to_string())
+            .build(),
+    )
+}
+
+fn latest_efficiency_event(text: &str) -> Option<AgentEfficiencyEvent> {
+    for line in text.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(event) = serde_json::from_str::<AgentEfficiencyEvent>(trimmed) {
+            return Some(event);
+        }
+    }
+
+    None
 }
 
 // ─── PlanRunner ───────────────────────────────────────────────────────────
@@ -1162,11 +1207,11 @@ impl PlanRunner {
 
         let ctx = Context::now();
         let mut signals = self.conductor_signals.clone();
-        if let Ok(cost_signals) = load_efficiency_cost_signals_sync(
+        if let Ok(efficiency_signals) = load_efficiency_signals_sync(
             &self.learning.paths().efficiency_jsonl,
             self.executor.config().budget_usd,
         ) {
-            signals.extend(cost_signals);
+            signals.extend(efficiency_signals);
         }
         let decision = self.conductor.evaluate(&signals, &ctx);
         match &decision {
