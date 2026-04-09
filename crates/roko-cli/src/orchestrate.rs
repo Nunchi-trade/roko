@@ -1542,37 +1542,7 @@ impl PlanRunner {
             }
             ExecutorAction::RunVerify { plan_id } => {
                 eprintln!("[orchestrate] RunVerify plan={plan_id}");
-                match self.run_plan_verify_steps(&plan_id).await {
-                    Ok(()) => {
-                        if let Some(state) = self.executor.plan_state_mut(&plan_id) {
-                            state.last_error = None;
-                        }
-                        let _ = self.executor.apply_event(&plan_id, &ExecutorEvent::VerifyPassed);
-                    }
-                    Err((task_id, phase, command, error_output)) => {
-                        let msg = format!(
-                            "verify failed for {plan_id}/{task_id} in phase {phase}: {command}"
-                        );
-                        eprintln!(
-                            "[orchestrate] {msg}: {}",
-                            error_output.trim()
-                        );
-                        self.event_log.append(
-                            EventKind::ErrorOccurred,
-                            serde_json::json!({
-                                "plan_id": plan_id,
-                                "task_id": task_id,
-                                "phase": phase,
-                                "command": command,
-                                "error": error_output,
-                            }),
-                        );
-                        if let Some(state) = self.executor.plan_state_mut(&plan_id) {
-                            state.last_error = Some(msg);
-                        }
-                        let _ = self.executor.apply_event(&plan_id, &ExecutorEvent::VerifyFailed);
-                    }
-                }
+                self.finish_verify_round(&plan_id).await;
             }
             ExecutorAction::MergeBranch { plan_id } => {
                 eprintln!("[orchestrate] MergeBranch plan={plan_id}");
@@ -2673,7 +2643,9 @@ impl PlanRunner {
 
                 let event = ExecutorEvent::VerifyRegenDone;
                 self.log_transition(plan_id, &event);
-                let _ = self.executor.apply_event(plan_id, &event);
+                if self.executor.apply_event(plan_id, &event).is_ok() {
+                    self.finish_verify_round(plan_id).await;
+                }
             }
             Err(e) => {
                 eprintln!("[orchestrate] RegenVerify failed for {plan_id}: {e}");
@@ -2681,6 +2653,38 @@ impl PlanRunner {
                     plan_id,
                     &ExecutorEvent::Fatal(format!("regen-verify failed: {e}")),
                 );
+            }
+        }
+    }
+
+    /// Run the task verification pipeline and advance the phase based on the result.
+    async fn finish_verify_round(&mut self, plan_id: &str) {
+        match self.run_plan_verify_steps(plan_id).await {
+            Ok(()) => {
+                if let Some(state) = self.executor.plan_state_mut(plan_id) {
+                    state.last_error = None;
+                }
+                let _ = self.executor.apply_event(plan_id, &ExecutorEvent::VerifyPassed);
+            }
+            Err((task_id, phase, command, error_output)) => {
+                let msg = format!(
+                    "verify failed for {plan_id}/{task_id} in phase {phase}: {command}"
+                );
+                eprintln!("[orchestrate] {msg}: {}", error_output.trim());
+                self.event_log.append(
+                    EventKind::ErrorOccurred,
+                    serde_json::json!({
+                        "plan_id": plan_id,
+                        "task_id": task_id,
+                        "phase": phase,
+                        "command": command,
+                        "error": error_output,
+                    }),
+                );
+                if let Some(state) = self.executor.plan_state_mut(plan_id) {
+                    state.last_error = Some(msg);
+                }
+                let _ = self.executor.apply_event(plan_id, &ExecutorEvent::VerifyFailed);
             }
         }
     }
