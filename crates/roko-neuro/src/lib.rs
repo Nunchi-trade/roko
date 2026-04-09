@@ -66,3 +66,7 @@ pub struct KnowledgeEntry {
     #[serde(default)]
     pub hdc_vector: Option<Vec<u8>>,
 }
+
+pub mod knowledge_store;
+
+pub use knowledge_store::KnowledgeStore;

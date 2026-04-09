@@ -5318,10 +5318,12 @@ dependencies = [
  "anyhow",
  "bardo-primitives",
  "chrono",
+ "parking_lot",
  "roko-core",
  "roko-fs",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
