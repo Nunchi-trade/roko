@@ -7,8 +7,8 @@
 
 use crate::config::{
     AgentLayer, ConfigLayer, ConfigPaths, DetectedCli, ExecutorLayer, GateConfig, PromptLayer,
-    ResolvedConfig, ServeAuthLayer, ServeLayer, Source, ToolsLayer, detect_clis,
-    global_config_path, load_layered, resolve_paths,
+    ResolvedConfig, ServeAuthLayer, ServeDeployLayer, ServeDeployWebhookLayer, ServeLayer, Source,
+    ToolsLayer, detect_clis, global_config_path, load_layered, resolve_paths,
 };
 use anyhow::{Context as _, Result, anyhow};
 use roko_orchestrator::ExecutorConfig;
@@ -124,6 +124,7 @@ pub fn run_init_wizard(target: Option<PathBuf>, inputs: &WizardInputs) -> Result
                 enabled: Some(false),
                 api_key: Some(String::new()),
             }),
+            deploy: None,
         }),
     };
     let rendered = toml::to_string_pretty(&layer).context("serialize config")?;
@@ -621,6 +622,29 @@ fn apply_key_value(layer: &mut ConfigLayer, key: &str, value: &str) -> Result<()
             let auth = serve.auth.get_or_insert_with(ServeAuthLayer::default);
             auth.api_key = Some(value.into());
         }
+        "serve.deploy.provider" => {
+            let serve = layer.serve.get_or_insert_with(ServeLayer::default);
+            let deploy = serve.deploy.get_or_insert_with(ServeDeployLayer::default);
+            deploy.provider = Some(value.into());
+        }
+        "serve.deploy.environment" => {
+            let environment: Vec<String> = if value.trim_start().starts_with('[') {
+                serde_json::from_str(value)
+                    .context("parse JSON array for serve.deploy.environment")?
+            } else {
+                value.split_whitespace().map(String::from).collect()
+            };
+            let serve = layer.serve.get_or_insert_with(ServeLayer::default);
+            let deploy = serve.deploy.get_or_insert_with(ServeDeployLayer::default);
+            deploy.environment = Some(environment);
+        }
+        "serve.deploy.webhooks" => {
+            let webhooks: Vec<ServeDeployWebhookLayer> = serde_json::from_str(value)
+                .context("parse JSON array for serve.deploy.webhooks")?;
+            let serve = layer.serve.get_or_insert_with(ServeLayer::default);
+            let deploy = serve.deploy.get_or_insert_with(ServeDeployLayer::default);
+            deploy.webhooks = Some(webhooks);
+        }
         other => return Err(anyhow!("unknown key: {other}")),
     }
     Ok(())
@@ -968,6 +992,37 @@ mod tests {
         let auth = layer.serve.unwrap().auth.unwrap();
         assert_eq!(auth.enabled, Some(true));
         assert_eq!(auth.api_key, Some("secret".to_string()));
+    }
+
+    #[test]
+    fn apply_key_value_sets_serve_deploy() {
+        let mut layer = ConfigLayer::default();
+        apply_key_value(&mut layer, "serve.deploy.provider", "fly").unwrap();
+        apply_key_value(
+            &mut layer,
+            "serve.deploy.environment",
+            r#"["GITHUB_TOKEN", "SLACK_BOT_TOKEN"]"#,
+        )
+        .unwrap();
+        apply_key_value(
+            &mut layer,
+            "serve.deploy.webhooks",
+            r#"[{"provider":"github","owner":"nunchi","repo":"roko"}]"#,
+        )
+        .unwrap();
+        let deploy = layer.serve.unwrap().deploy.unwrap();
+        assert_eq!(deploy.provider, Some("fly".to_string()));
+        assert_eq!(
+            deploy.environment,
+            Some(vec![
+                "GITHUB_TOKEN".to_string(),
+                "SLACK_BOT_TOKEN".to_string()
+            ])
+        );
+        let webhook = &deploy.webhooks.unwrap()[0];
+        assert_eq!(webhook.provider, Some("github".to_string()));
+        assert_eq!(webhook.owner, Some("nunchi".to_string()));
+        assert_eq!(webhook.repo, Some("roko".to_string()));
     }
 
     #[test]

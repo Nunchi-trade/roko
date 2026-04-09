@@ -276,6 +276,19 @@ impl RokoConfig {
         let _ = writeln!(out, "[server]");
         let _ = writeln!(out, "bind = \"{}\"", cfg.server.bind);
         let _ = writeln!(out, "port = {}", cfg.server.port);
+
+        let _ = writeln!(out, "\n# -- Cloud deployment --");
+        let _ = writeln!(out, "[serve.deploy]");
+        let _ = writeln!(out, "provider = \"{}\"", cfg.serve.deploy.provider);
+        let _ = writeln!(out, "environment = {:?}", cfg.serve.deploy.environment);
+        let _ = writeln!(out, "\n[[serve.deploy.webhooks]]");
+        let _ = writeln!(out, "provider = \"github\"");
+        let _ = writeln!(out, "owner = \"nunchi\"");
+        let _ = writeln!(out, "repo = \"roko\"");
+        let _ = writeln!(out, "\n[[serve.deploy.webhooks]]");
+        let _ = writeln!(out, "provider = \"github\"");
+        let _ = writeln!(out, "owner = \"nunchi\"");
+        let _ = writeln!(out, "repo = \"collaboration\"");
     }
 
     fn write_example_scheduler(out: &mut String, _cfg: &Self) {
@@ -923,12 +936,16 @@ pub struct ServeConfig {
     /// Authentication settings for `/api/*`.
     #[serde(default)]
     pub auth: ServeAuthConfig,
+    /// Cloud deployment settings.
+    #[serde(default)]
+    pub deploy: ServeDeployConfig,
 }
 
 impl Default for ServeConfig {
     fn default() -> Self {
         Self {
             auth: ServeAuthConfig::default(),
+            deploy: ServeDeployConfig::default(),
         }
     }
 }
@@ -1181,6 +1198,71 @@ impl Default for ServeAuthConfig {
         Self {
             enabled: false,
             api_key: String::new(),
+        }
+    }
+}
+
+/// Cloud deployment settings attached to the API server configuration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServeDeployConfig {
+    /// Deployment provider, e.g. `"railway"` or `"fly"`.
+    #[serde(default = "default_serve_deploy_provider")]
+    pub provider: String,
+    /// Environment variables that must be present for deployment.
+    #[serde(default = "default_serve_deploy_environment")]
+    pub environment: Vec<String>,
+    /// Webhooks that should be registered after deploy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub webhooks: Vec<ServeDeployWebhookConfig>,
+}
+
+fn default_serve_deploy_provider() -> String {
+    "railway".into()
+}
+
+fn default_serve_deploy_environment() -> Vec<String> {
+    vec![
+        "GITHUB_TOKEN".into(),
+        "GITHUB_WEBHOOK_SECRET".into(),
+        "SLACK_BOT_TOKEN".into(),
+        "SLACK_SIGNING_SECRET".into(),
+    ]
+}
+
+impl Default for ServeDeployConfig {
+    fn default() -> Self {
+        Self {
+            provider: default_serve_deploy_provider(),
+            environment: default_serve_deploy_environment(),
+            webhooks: Vec::new(),
+        }
+    }
+}
+
+/// A webhook registration entry to run after deployment.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServeDeployWebhookConfig {
+    /// Webhook provider.
+    #[serde(default = "default_serve_deploy_webhook_provider")]
+    pub provider: String,
+    /// Repository owner.
+    #[serde(default)]
+    pub owner: String,
+    /// Repository name.
+    #[serde(default)]
+    pub repo: String,
+}
+
+fn default_serve_deploy_webhook_provider() -> String {
+    "github".into()
+}
+
+impl Default for ServeDeployWebhookConfig {
+    fn default() -> Self {
+        Self {
+            provider: default_serve_deploy_webhook_provider(),
+            owner: String::new(),
+            repo: String::new(),
         }
     }
 }
@@ -1525,6 +1607,30 @@ api_key = "secret"
     }
 
     #[test]
+    fn serve_deploy_section_parses() {
+        let toml = r#"
+[serve.deploy]
+provider = "fly"
+environment = ["GITHUB_TOKEN", "SLACK_BOT_TOKEN"]
+
+[[serve.deploy.webhooks]]
+provider = "github"
+owner = "nunchi"
+repo = "roko"
+"#;
+        let cfg = RokoConfig::from_toml(toml).expect("parse");
+        assert_eq!(cfg.serve.deploy.provider, "fly");
+        assert_eq!(
+            cfg.serve.deploy.environment,
+            vec!["GITHUB_TOKEN".to_string(), "SLACK_BOT_TOKEN".to_string()]
+        );
+        assert_eq!(cfg.serve.deploy.webhooks.len(), 1);
+        assert_eq!(cfg.serve.deploy.webhooks[0].provider, "github");
+        assert_eq!(cfg.serve.deploy.webhooks[0].owner, "nunchi");
+        assert_eq!(cfg.serve.deploy.webhooks[0].repo, "roko");
+    }
+
+    #[test]
     fn env_overrides_apply() {
         let mut cfg = RokoConfig::default();
         let env = |key: &str| -> Option<String> {
@@ -1632,6 +1738,8 @@ port = 3000
         assert!(example.contains("[learning]"));
         assert!(example.contains("[tui]"));
         assert!(example.contains("[serve.auth]"));
+        assert!(example.contains("[serve.deploy]"));
+        assert!(example.contains("[[serve.deploy.webhooks]]"));
         assert!(example.contains("[server]"));
     }
 

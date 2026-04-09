@@ -20,8 +20,8 @@ pub use presets::Preset;
 pub use schema::{
     AgentConfig, AgentRoleToggles, BudgetConfig, CURRENT_SCHEMA_VERSION, ConductorConfig,
     GatesConfig, LearningConfig, PrdConfig, ProjectConfig, RokoConfig, RoleOverride, RoutingConfig,
-    SchedulerConfig, SchedulerCronConfig, ServeAuthConfig, ServeConfig, ServerConfig, TuiConfig,
-    WatcherConfig, WatcherPathConfig,
+    SchedulerConfig, SchedulerCronConfig, ServeAuthConfig, ServeConfig, ServeDeployConfig,
+    ServeDeployWebhookConfig, ServerConfig, TuiConfig, WatcherConfig, WatcherPathConfig,
 };
 
 /// Error returned when loading a `roko.toml` file from disk.

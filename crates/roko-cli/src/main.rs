@@ -11,9 +11,9 @@
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::{Parser, Subcommand, ValueEnum};
+use octocrab::Octocrab;
 use octocrab::models::hooks::{Config as HookConfig, ContentType, Hook};
 use octocrab::models::webhook_events::WebhookEventType;
-use octocrab::Octocrab;
 use roko_agent::process::{cleanup_orphaned_agents, reap_orphaned_children};
 use roko_cli::serve_runtime::RokoCliRuntime;
 use roko_cli::tui::App;
@@ -2711,9 +2711,7 @@ async fn cmd_deploy(cli: &Cli, cmd: DeployCmd) -> Result<i32> {
     match cmd {
         DeployCmd::Railway { workdir } => cmd_deploy_railway(cli, workdir).await,
         DeployCmd::Fly { workdir } => cmd_deploy_fly(cli, workdir).await,
-        DeployCmd::Docker { workdir, registry } => {
-            cmd_deploy_docker(cli, workdir, registry).await
-        }
+        DeployCmd::Docker { workdir, registry } => cmd_deploy_docker(cli, workdir, registry).await,
     }
 }
 
@@ -2828,20 +2826,17 @@ fn resolve_docker_registry(workdir: &Path, registry: Option<String>) -> Result<S
     }
 
     let config = load_roko_config(workdir)?;
-    let worker_image = config
-        .deploy
-        .worker_image
-        .as_deref()
-        .ok_or_else(|| anyhow!("deploy.docker.registry is required or set deploy.worker_image"))?;
+    let worker_image =
+        config.deploy.worker_image.as_deref().ok_or_else(|| {
+            anyhow!("deploy.docker.registry is required or set deploy.worker_image")
+        })?;
 
     let registry = worker_image
         .rsplit_once('/')
         .map(|(registry, _)| registry)
         .filter(|registry| !registry.trim().is_empty())
         .ok_or_else(|| {
-            anyhow!(
-                "unable to derive Docker registry from deploy.worker_image: {worker_image}"
-            )
+            anyhow!("unable to derive Docker registry from deploy.worker_image: {worker_image}")
         })?;
 
     Ok(registry.trim().trim_end_matches('/').to_string())
@@ -3369,10 +3364,7 @@ mod tests {
         let cli = Cli::try_parse_from(["roko", "init", "--cloud"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Command::Init {
-                cloud: true,
-                ..
-            })
+            Some(Command::Init { cloud: true, .. })
         ));
     }
 

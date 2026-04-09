@@ -8,9 +8,9 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::path::{Path, PathBuf};
 
-use roko_core::config::ServeConfig;
 use roko_core::config::schema::RokoConfig;
 use roko_core::config::schema::SubscriptionConfig;
+use roko_core::config::{ServeConfig, ServeDeployConfig, ServeDeployWebhookConfig};
 use roko_orchestrator::ExecutorConfig;
 
 /// The top-level `roko.toml` document.
@@ -100,15 +100,30 @@ impl Config {
             config.data_dir = Some(PathBuf::from("/data/.roko"));
         }
         let rendered = config.to_toml()?;
+        let cloud_deploy = if cloud {
+            "\n# Auto-register webhooks after deploy\n\
+             [[serve.deploy.webhooks]]\n\
+             provider = \"github\"\n\
+             owner = \"nunchi\"\n\
+             repo = \"roko\"\n\
+             \n\
+             [[serve.deploy.webhooks]]\n\
+             provider = \"github\"\n\
+             owner = \"nunchi\"\n\
+             repo = \"collaboration\"\n"
+        } else {
+            ""
+        };
         Ok(format!(
             "# REQUIRED_ENV\n\
              # Required environment variables (set in .env or shell):\n\
              # GITHUB_TOKEN       — GitHub personal access token (for MCP GitHub server)\n\
+             # GITHUB_WEBHOOK_SECRET — GitHub webhook secret for deploy registration\n\
              # SLACK_BOT_TOKEN    — Slack bot token (for MCP Slack server)\n\
              # SLACK_SIGNING_SECRET — Slack webhook signing secret\n\
              # ANTHROPIC_API_KEY  — Claude API key (for direct API agents, not needed for CLI agents)\n\
              \n\
-             {rendered}\n\
+             {rendered}{cloud_deploy}\n\
              # PRD settings (parsed by `RokoConfig`)\n\
              [prd]\n\
              auto_plan = false\n"
@@ -861,6 +876,10 @@ impl ConfigLayer {
                         Some(auth) => auth.resolve(defaults.auth),
                         None => defaults.auth,
                     },
+                    deploy: match s.deploy {
+                        Some(deploy) => deploy.resolve(defaults.deploy),
+                        None => defaults.deploy,
+                    },
                 }
             }
             None => ServeConfig::default(),
@@ -1074,6 +1093,9 @@ pub struct ServeLayer {
     /// API auth settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<ServeAuthLayer>,
+    /// Cloud deployment settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deploy: Option<ServeDeployLayer>,
 }
 
 impl ServeLayer {
@@ -1082,6 +1104,11 @@ impl ServeLayer {
     pub fn merge(self, overlay: Self) -> Self {
         Self {
             auth: match (self.auth, overlay.auth) {
+                (Some(base), Some(overlay)) => Some(base.merge(overlay)),
+                (_, Some(overlay)) => Some(overlay),
+                (base, None) => base,
+            },
+            deploy: match (self.deploy, overlay.deploy) {
                 (Some(base), Some(overlay)) => Some(base.merge(overlay)),
                 (_, Some(overlay)) => Some(overlay),
                 (base, None) => base,
@@ -1120,6 +1147,74 @@ impl ServeAuthLayer {
         roko_core::config::ServeAuthConfig {
             enabled: self.enabled.unwrap_or(defaults.enabled),
             api_key: self.api_key.unwrap_or(defaults.api_key),
+        }
+    }
+}
+
+/// Partial cloud deployment settings — every field optional.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ServeDeployLayer {
+    /// Deployment provider, e.g. `railway` or `fly`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Environment variables required for deploy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<Vec<String>>,
+    /// Webhooks to register after deploy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webhooks: Option<Vec<ServeDeployWebhookLayer>>,
+}
+
+impl ServeDeployLayer {
+    /// Merge another layer on top — `overlay` wins.
+    #[must_use]
+    pub fn merge(self, overlay: Self) -> Self {
+        Self {
+            provider: overlay.provider.or(self.provider),
+            environment: overlay.environment.or(self.environment),
+            webhooks: overlay.webhooks.or(self.webhooks),
+        }
+    }
+
+    /// Resolve into a concrete [`ServeConfig::deploy`] value.
+    #[must_use]
+    pub fn resolve(self, defaults: ServeDeployConfig) -> ServeDeployConfig {
+        ServeDeployConfig {
+            provider: self.provider.unwrap_or(defaults.provider),
+            environment: self.environment.unwrap_or(defaults.environment),
+            webhooks: match self.webhooks {
+                Some(webhooks) => webhooks
+                    .into_iter()
+                    .map(ServeDeployWebhookLayer::resolve)
+                    .collect(),
+                None => defaults.webhooks,
+            },
+        }
+    }
+}
+
+/// Partial webhook registration settings — every field optional.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ServeDeployWebhookLayer {
+    /// Webhook provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Repository owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// Repository name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+}
+
+impl ServeDeployWebhookLayer {
+    /// Resolve into a concrete [`ServeDeployWebhookConfig`].
+    #[must_use]
+    pub fn resolve(self) -> ServeDeployWebhookConfig {
+        ServeDeployWebhookConfig {
+            provider: self.provider.unwrap_or_else(|| "github".to_string()),
+            owner: self.owner.unwrap_or_default(),
+            repo: self.repo.unwrap_or_default(),
         }
     }
 }
@@ -1631,6 +1726,33 @@ api_key = "secret"
     }
 
     #[test]
+    fn parses_serve_deploy_section_from_toml() {
+        let toml = r#"
+[agent]
+command = "cat"
+
+[serve.deploy]
+provider = "fly"
+environment = ["GITHUB_TOKEN", "SLACK_BOT_TOKEN"]
+
+[[serve.deploy.webhooks]]
+provider = "github"
+owner = "nunchi"
+repo = "roko"
+"#;
+        let cfg = Config::parse_toml(toml).unwrap();
+        assert_eq!(cfg.serve.deploy.provider, "fly");
+        assert_eq!(
+            cfg.serve.deploy.environment,
+            vec!["GITHUB_TOKEN".to_string(), "SLACK_BOT_TOKEN".to_string()]
+        );
+        assert_eq!(cfg.serve.deploy.webhooks.len(), 1);
+        assert_eq!(cfg.serve.deploy.webhooks[0].provider, "github");
+        assert_eq!(cfg.serve.deploy.webhooks[0].owner, "nunchi");
+        assert_eq!(cfg.serve.deploy.webhooks[0].repo, "roko");
+    }
+
+    #[test]
     fn interpolates_env_vars_in_string_values() {
         let path = std::env::var("PATH").expect("PATH must be set for tests");
         let toml = r#"
@@ -1689,6 +1811,17 @@ auto_replan = false
         assert!(!cfg.executor.auto_replan);
         assert!(!cfg.serve.auth.enabled);
         assert!(cfg.serve.auth.api_key.is_empty());
+        assert_eq!(cfg.serve.deploy.provider, "railway");
+        assert_eq!(
+            cfg.serve.deploy.environment,
+            vec![
+                "GITHUB_TOKEN".to_string(),
+                "GITHUB_WEBHOOK_SECRET".to_string(),
+                "SLACK_BOT_TOKEN".to_string(),
+                "SLACK_SIGNING_SECRET".to_string()
+            ]
+        );
+        assert!(cfg.serve.deploy.webhooks.is_empty());
     }
 
     #[test]
@@ -1718,6 +1851,12 @@ auto_plan = true
         assert_eq!(parsed.gates.len(), cfg.gates.len());
         assert_eq!(parsed.serve.auth.enabled, cfg.serve.auth.enabled);
         assert_eq!(parsed.serve.auth.api_key, cfg.serve.auth.api_key);
+        assert_eq!(parsed.serve.deploy.provider, cfg.serve.deploy.provider);
+        assert_eq!(
+            parsed.serve.deploy.environment,
+            cfg.serve.deploy.environment
+        );
+        assert_eq!(parsed.serve.deploy.webhooks, cfg.serve.deploy.webhooks);
     }
 
     #[test]
@@ -1916,9 +2055,11 @@ program = "echo"
         let rendered = Config::default_toml_template(false).unwrap();
         assert!(rendered.contains("# REQUIRED_ENV"));
         assert!(rendered.contains("GITHUB_TOKEN"));
+        assert!(rendered.contains("GITHUB_WEBHOOK_SECRET"));
         assert!(rendered.contains("SLACK_BOT_TOKEN"));
         assert!(rendered.contains("SLACK_SIGNING_SECRET"));
         assert!(rendered.contains("ANTHROPIC_API_KEY"));
+        assert!(rendered.contains("[serve.deploy]"));
         assert!(rendered.contains("[prd]"));
         assert!(rendered.contains("auto_plan = false"));
     }
@@ -1929,5 +2070,9 @@ program = "echo"
         assert!(rendered.contains(r#"log_format = "json""#));
         assert!(rendered.contains(r#"bind = "0.0.0.0""#));
         assert!(rendered.contains(r#"data_dir = "/data/.roko""#));
+        assert!(rendered.contains(r#"provider = "railway""#));
+        assert!(rendered.contains("GITHUB_WEBHOOK_SECRET"));
+        assert!(rendered.contains("Auto-register webhooks after deploy"));
+        assert!(rendered.contains("[[serve.deploy.webhooks]]"));
     }
 }
