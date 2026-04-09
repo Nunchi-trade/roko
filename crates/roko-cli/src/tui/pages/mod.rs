@@ -19,6 +19,8 @@ pub enum PageId {
     Correlations,
     /// Gate results and adaptive thresholds.
     GateResults,
+    /// Learning and routing feedback.
+    Learning,
     /// Efficiency parameters.
     Parameters,
     /// Efficiency experiments.
@@ -44,6 +46,7 @@ impl PageId {
             Self::Trends => "Trends",
             Self::Correlations => "Correlations",
             Self::GateResults => "Gate Results",
+            Self::Learning => "Learning",
             Self::Parameters => "Parameters",
             Self::Experiments => "Experiments",
             Self::Optimizer => "Optimizer",
@@ -62,6 +65,7 @@ impl PageId {
             Self::Trends => "trends",
             Self::Correlations => "correlations",
             Self::GateResults => "gate-results",
+            Self::Learning => "learning",
             Self::Parameters => "parameters",
             Self::Experiments => "experiments",
             Self::Optimizer => "optimizer",
@@ -80,6 +84,7 @@ impl PageId {
             | Self::Trends
             | Self::Correlations
             | Self::GateResults
+            | Self::Learning
             | Self::Parameters
             | Self::Experiments
             | Self::Optimizer => "efficiency",
@@ -369,6 +374,7 @@ mod tests {
     fn page_group_matches_expected_section() {
         assert_eq!(PageId::Health.group(), "efficiency");
         assert_eq!(PageId::PlanView.group(), "operations");
+        assert_eq!(PageId::Learning.group(), "efficiency");
     }
 
     #[test]

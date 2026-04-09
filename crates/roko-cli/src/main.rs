@@ -2177,6 +2177,7 @@ fn parse_dashboard_page(input: &str) -> Option<PageId> {
         "health" => PageId::Health,
         "trends" => PageId::Trends,
         "correlations" => PageId::Correlations,
+        "learning" => PageId::Learning,
         "parameters" => PageId::Parameters,
         "experiments" => PageId::Experiments,
         "optimizer" => PageId::Optimizer,
@@ -2193,6 +2194,7 @@ fn dashboard_page_slugs() -> Vec<&'static str> {
         PageId::Health,
         PageId::Trends,
         PageId::Correlations,
+        PageId::Learning,
         PageId::Parameters,
         PageId::Experiments,
         PageId::Optimizer,
@@ -2450,6 +2452,7 @@ mod tests {
             Some(PageId::AgentStatus)
         );
         assert_eq!(parse_dashboard_page("plan_view"), Some(PageId::PlanView));
+        assert_eq!(parse_dashboard_page("learning"), Some(PageId::Learning));
     }
 
     #[test]

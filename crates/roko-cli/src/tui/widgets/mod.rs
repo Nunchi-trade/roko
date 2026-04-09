@@ -14,11 +14,13 @@ use ratatui::widgets::{
 use ratatui::Frame;
 use serde_json::Value;
 use roko_learn::efficiency::AgentEfficiencyEvent;
+use roko_learn::prompt_experiment::{ExperimentStatus, ExperimentStore};
+use roko_core::task::{TaskCategory, TaskComplexityBand};
 
 use super::dashboard::{
-    AgentActivitySnapshot, CFactor, DashboardData, DashboardScaffold, GateFailureRow,
-    GateSummaryRow, GateThresholdRow, GateTrend, PlanExecutionSnapshot, build_agent_activity_snapshot,
-    read_json_value, read_jsonl_values,
+    AgentActivitySnapshot, CFactor, CascadeRouterState, DashboardData, DashboardScaffold,
+    GateFailureRow, GateSummaryRow, GateThresholdRow, GateTrend, PlanExecutionSnapshot,
+    build_agent_activity_snapshot, read_json_value, read_jsonl_values,
 };
 use super::pages::{PageId, PageRegistry};
 
@@ -174,6 +176,11 @@ pub fn render_page(
         return;
     }
 
+    if active_page == PageId::Learning {
+        render_learning_page(frame, area, data);
+        return;
+    }
+
     let rendered = page.render(dashboard);
     let content = Paragraph::new(rendered)
         .block(
@@ -230,6 +237,694 @@ fn render_gate_results_page(frame: &mut Frame<'_>, area: Rect, data: &DashboardD
     render_gate_summary_table(frame, sections[0], &data.gate_results_page.gate_rows);
     render_gate_thresholds_table(frame, sections[1], &data.gate_results_page.threshold_rows);
     render_gate_failures_list(frame, sections[2], &data.gate_results_page.failure_rows);
+}
+
+fn render_learning_page(frame: &mut Frame<'_>, area: Rect, data: &DashboardData) {
+    let block = Block::default().borders(Borders::ALL).title("Learning");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let sections = Layout::vertical([Constraint::Percentage(56), Constraint::Percentage(44)])
+    .split(inner);
+    let top = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(sections[0]);
+
+    render_cascade_router_table(frame, top[0], &data.cascade_router);
+    render_active_experiments_table(frame, top[1], &data.experiment_store);
+    render_learning_trends(frame, sections[1], &data.efficiency_events);
+}
+
+fn render_cascade_router_table(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    router: &CascadeRouterState,
+) {
+    let block = Block::default().borders(Borders::ALL).title("cascade router");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let rows = build_cascade_router_rows(router);
+    if rows.is_empty() {
+        let empty = Paragraph::new("no cascade-router data")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    let table_rows: Vec<Row<'_>> = rows
+        .iter()
+        .map(|row| {
+            Row::new(vec![
+                Cell::from(truncate_text(&row.model, 18)),
+                Cell::from(Span::styled(
+                    format_pct(row.weight),
+                    Style::default().fg(Color::Cyan),
+                )),
+                Cell::from(row.recommendations.to_string()),
+                Cell::from(Span::styled(
+                    format_float(row.ucb_score),
+                    Style::default().fg(Color::Yellow),
+                )),
+            ])
+        })
+        .collect();
+
+    let table = Table::new(
+        table_rows,
+        [
+            Constraint::Min(16),
+            Constraint::Length(10),
+            Constraint::Length(12),
+            Constraint::Length(10),
+        ],
+    )
+    .header(
+        Row::new(vec![
+            Cell::from("model"),
+            Cell::from("weight"),
+            Cell::from("recs"),
+            Cell::from("UCB"),
+        ])
+        .style(
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::BOLD),
+        ),
+    )
+    .column_spacing(1);
+
+    frame.render_widget(table, inner);
+}
+
+fn render_active_experiments_table(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    store: &ExperimentStore,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("active experiments");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let rows = build_active_experiment_rows(store);
+    if rows.is_empty() {
+        let empty = Paragraph::new("no active experiments")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    let table_rows: Vec<Row<'_>> = rows
+        .iter()
+        .map(|row| {
+            Row::new(vec![
+                Cell::from(truncate_text(&row.experiment, 18)),
+                Cell::from(truncate_text(&row.variants, 18)),
+                Cell::from(truncate_text(&row.sample_sizes, 18)),
+                Cell::from(truncate_text(&row.winner, 14)),
+                Cell::from(Span::styled(
+                    truncate_text(&row.significance, 14),
+                    significance_style(&row.significance),
+                )),
+            ])
+        })
+        .collect();
+
+    let table = Table::new(
+        table_rows,
+        [
+            Constraint::Min(16),
+            Constraint::Min(14),
+            Constraint::Min(14),
+            Constraint::Length(14),
+            Constraint::Length(16),
+        ],
+    )
+    .header(
+        Row::new(vec![
+            Cell::from("experiment"),
+            Cell::from("variants"),
+            Cell::from("samples"),
+            Cell::from("winner"),
+            Cell::from("significance"),
+        ])
+        .style(
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::BOLD),
+        ),
+    )
+    .column_spacing(1);
+
+    frame.render_widget(table, inner);
+}
+
+fn render_learning_trends(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    events: &[AgentEfficiencyEvent],
+) {
+    let blocks = Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+    let top = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(blocks[0]);
+    let bottom = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(blocks[1]);
+    let series = build_learning_trend_series(events);
+
+    render_learning_sparkline(
+        frame,
+        top[0],
+        "cost / task (7d)",
+        &series.cost_per_task,
+        Color::Yellow,
+    );
+    render_learning_sparkline(
+        frame,
+        top[1],
+        "tokens / task (7d)",
+        &series.tokens_per_task,
+        Color::Cyan,
+    );
+    render_learning_sparkline(
+        frame,
+        bottom[0],
+        "success rate (7d)",
+        &series.success_rate,
+        Color::Green,
+    );
+    render_learning_sparkline(
+        frame,
+        bottom[1],
+        "first-try rate (7d)",
+        &series.first_try_rate,
+        Color::Magenta,
+    );
+}
+
+fn render_learning_sparkline(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    title: &'static str,
+    data: &[u64],
+    color: Color,
+) {
+    let block = Block::default().borders(Borders::ALL).title(title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let spark = Sparkline::default()
+        .block(Block::default())
+        .data(data)
+        .style(Style::default().fg(color));
+    frame.render_widget(spark, inner);
+}
+
+fn build_cascade_router_rows(router: &CascadeRouterState) -> Vec<LearningCascadeRow> {
+    let mut rows = router
+        .model_slugs
+        .iter()
+        .chain(router.confidence_stats.keys())
+        .fold(Vec::<String>::new(), |mut acc, slug| {
+            if !acc.iter().any(|seen| seen == slug) {
+                acc.push(slug.clone());
+            }
+            acc
+        })
+        .into_iter()
+        .map(|model| {
+            let stats = router.confidence_stats.get(&model);
+            let trials = stats.map(|stats| stats.trials).unwrap_or_default();
+            let successes = stats.map(|stats| stats.successes).unwrap_or_default();
+            let ucb_score = confidence_upper_bound(trials, successes);
+            LearningCascadeRow {
+                model,
+                weight: ucb_score,
+                recommendations: 0,
+                ucb_score,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let total_weight = rows
+        .iter()
+        .map(|row| row.weight)
+        .sum::<f64>()
+        .max(f64::EPSILON);
+    for row in &mut rows {
+        row.weight /= total_weight;
+    }
+
+    let recommendations = cascade_recommendation_counts(&rows);
+    for row in &mut rows {
+        row.recommendations = recommendations.get(&row.model).copied().unwrap_or_default();
+    }
+
+    rows.sort_by(|a, b| {
+        b.weight
+            .partial_cmp(&a.weight)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.model.cmp(&b.model))
+    });
+    rows
+}
+
+fn cascade_recommendation_counts(rows: &[LearningCascadeRow]) -> HashMap<String, u64> {
+    let mut counts: HashMap<String, u64> = HashMap::new();
+    if rows.is_empty() {
+        return counts;
+    }
+
+    for category in [
+        TaskCategory::Scaffolding,
+        TaskCategory::Implementation,
+        TaskCategory::Integration,
+        TaskCategory::Verification,
+        TaskCategory::Research,
+        TaskCategory::Refactor,
+        TaskCategory::Infra,
+        TaskCategory::Docs,
+    ] {
+        let complexity = complexity_for_category(category);
+        let tier = tier_for_complexity(complexity);
+        let selected = select_model_for_tier(rows, tier)
+            .or_else(|| rows.first())
+            .map(|row| row.model.clone());
+        if let Some(model) = selected {
+            *counts.entry(model).or_default() += 1;
+        }
+    }
+
+    counts
+}
+
+fn build_active_experiment_rows(store: &ExperimentStore) -> Vec<LearningExperimentRow> {
+    let mut rows = store
+        .iter()
+        .filter(|experiment| experiment.status == ExperimentStatus::Running)
+        .map(|experiment| {
+            let mut variants = experiment
+                .variants
+                .iter()
+                .filter(|variant| variant.active)
+                .map(|variant| {
+                    let stats = experiment.stats.get(&variant.id).cloned().unwrap_or_default();
+                    (variant, stats)
+                })
+                .collect::<Vec<_>>();
+            variants.sort_by(|(a, _), (b, _)| a.id.cmp(&b.id));
+
+            let sample_sizes = variants
+                .iter()
+                .map(|(variant, stats)| format!("{}={}", variant.id, stats.trials))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let variant_names = variants
+                .iter()
+                .map(|(variant, _)| variant.name.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let winner = experiment
+                .winner_id
+                .clone()
+                .or_else(|| {
+                    variants
+                        .iter()
+                        .max_by(|(_, a), (_, b)| {
+                            a.success_rate()
+                                .partial_cmp(&b.success_rate())
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                                .then_with(|| b.trials.cmp(&a.trials))
+                                .then_with(|| a.successes.cmp(&b.successes))
+                        })
+                        .map(|(variant, _)| variant.id.clone())
+                })
+                .unwrap_or_else(|| String::from("-"));
+            let significance = experiment_significance_label(experiment, &variants);
+
+            LearningExperimentRow {
+                experiment: experiment.section_name.clone(),
+                variants: if variant_names.is_empty() {
+                    format!("{} variants", variants.len())
+                } else {
+                    format!("{} variants: {}", variants.len(), variant_names)
+                },
+                sample_sizes: if sample_sizes.is_empty() {
+                    String::from("-")
+                } else {
+                    sample_sizes
+                },
+                winner,
+                significance,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    rows.sort_by(|a, b| a.experiment.cmp(&b.experiment));
+    rows
+}
+
+fn experiment_significance_label(
+    experiment: &roko_learn::prompt_experiment::PromptExperiment,
+    variants: &[(&roko_learn::prompt_experiment::PromptVariant, roko_learn::prompt_experiment::VariantStats)],
+) -> String {
+    let active = variants
+        .iter()
+        .map(|(variant, stats)| (variant.id.as_str(), stats))
+        .collect::<Vec<_>>();
+
+    if active.len() < 2 {
+        return String::from("insufficient");
+    }
+
+    let best = active
+        .iter()
+        .max_by(|(_, a), (_, b)| {
+            a.success_rate()
+                .partial_cmp(&b.success_rate())
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.trials.cmp(&b.trials))
+        })
+        .copied();
+    let runner_up = active
+        .iter()
+        .filter(|(id, _)| Some(*id) != best.map(|(id, _)| id))
+        .max_by(|(_, a), (_, b)| {
+            a.success_rate()
+                .partial_cmp(&b.success_rate())
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.trials.cmp(&b.trials))
+        })
+        .copied();
+
+    let Some((best_id, best_stats)) = best else {
+        return String::from("insufficient");
+    };
+    let Some((runner_up_id, runner_up_stats)) = runner_up else {
+        return format!("winner {best_id}");
+    };
+
+    let p_value = two_proportion_p_value(
+        best_stats.successes,
+        best_stats.trials,
+        runner_up_stats.successes,
+        runner_up_stats.trials,
+    );
+    let gap = best_stats.success_rate() - runner_up_stats.success_rate();
+    let significant = p_value
+        .map(|p| p < 0.05 && gap >= experiment.min_effect_size)
+        .unwrap_or(false);
+
+    match p_value {
+        Some(p) if significant => format!("sig p={:.3}", p),
+        Some(p) => format!("p={:.3}", p),
+        None => format!("n.s. {best_id}/{runner_up_id}"),
+    }
+}
+
+fn build_learning_trend_series(events: &[AgentEfficiencyEvent]) -> LearningTrendSeries {
+    let today = Utc::now().date_naive();
+    let mut tasks: HashMap<(String, String), LearningTaskAggregate> = HashMap::new();
+
+    for event in events {
+        let key = (event.plan_id.clone(), event.task_id.clone());
+        tasks
+            .entry(key)
+            .or_insert_with(LearningTaskAggregate::default)
+            .record(event);
+    }
+
+    let mut buckets: BTreeMap<i64, LearningDayAggregate> = BTreeMap::new();
+    for aggregate in tasks.values() {
+        let Some(day) = aggregate.latest_day() else {
+            continue;
+        };
+        let age = today.signed_duration_since(day).num_days();
+        if !(0..7).contains(&age) {
+            continue;
+        }
+        let bucket = buckets.entry(age).or_default();
+        bucket.tasks += 1;
+        bucket.cost_usd += aggregate.cost_usd;
+        bucket.tokens += aggregate.tokens;
+        if aggregate.latest_passed {
+            bucket.successes += 1;
+        }
+        if aggregate.first_try_passed() {
+            bucket.first_try_successes += 1;
+        }
+    }
+
+    let series = |extract: fn(&LearningDayAggregate) -> f64| -> Vec<u64> {
+        (0..7)
+            .rev()
+            .map(|age| {
+                let bucket = buckets.get(&age).cloned().unwrap_or_default();
+                if bucket.tasks == 0 {
+                    return 0;
+                }
+                (extract(&bucket) * 100.0).round().max(0.0) as u64
+            })
+            .collect::<Vec<_>>()
+    };
+
+    LearningTrendSeries {
+        cost_per_task: (0..7)
+            .rev()
+            .map(|age| {
+                let bucket = buckets.get(&age).cloned().unwrap_or_default();
+                if bucket.tasks == 0 {
+                    0
+                } else {
+                    ((bucket.cost_usd / bucket.tasks as f64) * 100.0).round().max(0.0) as u64
+                }
+            })
+            .collect(),
+        tokens_per_task: (0..7)
+            .rev()
+            .map(|age| {
+                let bucket = buckets.get(&age).cloned().unwrap_or_default();
+                if bucket.tasks == 0 {
+                    0
+                } else {
+                    (bucket.tokens / bucket.tasks).max(0)
+                }
+            })
+            .collect(),
+        success_rate: series(|bucket| bucket.successes as f64 / bucket.tasks as f64),
+        first_try_rate: series(|bucket| bucket.first_try_successes as f64 / bucket.tasks as f64),
+    }
+}
+
+fn confidence_upper_bound(trials: u64, successes: u64) -> f64 {
+    if trials == 0 {
+        return 1.0;
+    }
+
+    let p = successes as f64 / trials as f64;
+    let width = 1.96 * (p * (1.0 - p) / trials as f64).sqrt();
+    (p + width).min(1.0)
+}
+
+fn select_model_for_tier<'a>(
+    rows: &'a [LearningCascadeRow],
+    tier: &str,
+) -> Option<&'a LearningCascadeRow> {
+    rows.iter()
+        .filter(|row| tier_for_model(&row.model) == tier)
+        .max_by(|a, b| {
+            a.weight
+                .partial_cmp(&b.weight)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.model.cmp(&b.model))
+        })
+}
+
+fn complexity_for_category(category: TaskCategory) -> TaskComplexityBand {
+    match category {
+        TaskCategory::Scaffolding | TaskCategory::Docs => TaskComplexityBand::Fast,
+        TaskCategory::Research | TaskCategory::Refactor => TaskComplexityBand::Complex,
+        TaskCategory::Implementation
+        | TaskCategory::Integration
+        | TaskCategory::Verification
+        | TaskCategory::Infra
+        | _ => TaskComplexityBand::Standard,
+    }
+}
+
+fn tier_for_complexity(complexity: TaskComplexityBand) -> &'static str {
+    match complexity {
+        TaskComplexityBand::Fast => "fast",
+        TaskComplexityBand::Complex => "premium",
+        _ => "standard",
+    }
+}
+
+fn tier_for_model(model: &str) -> &'static str {
+    let lower = model.to_ascii_lowercase();
+    if lower.contains("haiku") {
+        "fast"
+    } else if lower.contains("opus") || lower.contains("premium") {
+        "premium"
+    } else {
+        "standard"
+    }
+}
+
+fn significance_style(significance: &str) -> Style {
+    if significance.starts_with("sig") {
+        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+    } else if significance.starts_with('p') {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    }
+}
+
+fn format_float(value: f64) -> String {
+    format!("{value:.2}")
+}
+
+fn parse_efficiency_timestamp(timestamp: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(timestamp)
+        .ok()
+        .map(|parsed| parsed.with_timezone(&Utc))
+}
+
+fn two_proportion_p_value(
+    successes_a: u64,
+    trials_a: u64,
+    successes_b: u64,
+    trials_b: u64,
+) -> Option<f64> {
+    let z = two_proportion_z_score(successes_a, trials_a, successes_b, trials_b)?;
+    Some(2.0 * (1.0 - standard_normal_cdf(z.abs())))
+}
+
+fn two_proportion_z_score(
+    successes_a: u64,
+    trials_a: u64,
+    successes_b: u64,
+    trials_b: u64,
+) -> Option<f64> {
+    if trials_a == 0 || trials_b == 0 {
+        return None;
+    }
+
+    let p1 = successes_a as f64 / trials_a as f64;
+    let p2 = successes_b as f64 / trials_b as f64;
+    let pooled = (successes_a + successes_b) as f64 / (trials_a + trials_b) as f64;
+    let standard_error =
+        (pooled * (1.0 - pooled) * (1.0 / trials_a as f64 + 1.0 / trials_b as f64)).sqrt();
+    if standard_error == 0.0 {
+        return None;
+    }
+
+    Some((p1 - p2) / standard_error)
+}
+
+fn standard_normal_cdf(x: f64) -> f64 {
+    let t = 1.0 / (1.0 + 0.231_641_9 * x.abs());
+    let d = 0.398_942_3 * (-0.5 * x * x).exp();
+    let prob = d
+        * t
+        * (0.319_381_5
+            + t * (-0.356_563_8 + t * (1.781_478 + t * (-1.821_256 + t * 1.330_274))));
+    if x >= 0.0 { 1.0 - prob } else { prob }
+}
+
+#[derive(Debug, Clone)]
+struct LearningCascadeRow {
+    model: String,
+    weight: f64,
+    recommendations: u64,
+    ucb_score: f64,
+}
+
+#[derive(Debug, Clone)]
+struct LearningExperimentRow {
+    experiment: String,
+    variants: String,
+    sample_sizes: String,
+    winner: String,
+    significance: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LearningTrendSeries {
+    cost_per_task: Vec<u64>,
+    tokens_per_task: Vec<u64>,
+    success_rate: Vec<u64>,
+    first_try_rate: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LearningTaskAggregate {
+    cost_usd: f64,
+    tokens: u64,
+    first_timestamp: Option<DateTime<Utc>>,
+    first_iteration: u32,
+    first_passed: bool,
+    latest_timestamp: Option<DateTime<Utc>>,
+    latest_passed: bool,
+}
+
+impl LearningTaskAggregate {
+    fn record(&mut self, event: &AgentEfficiencyEvent) {
+        self.cost_usd += event.cost_usd;
+        self.tokens += event.total_tokens();
+
+        let Some(timestamp) = parse_efficiency_timestamp(&event.timestamp) else {
+            return;
+        };
+
+        if self.first_timestamp.map_or(true, |first| timestamp < first) {
+            self.first_timestamp = Some(timestamp);
+            self.first_iteration = event.iteration;
+            self.first_passed = event.gate_passed;
+        }
+
+        if self.latest_timestamp.map_or(true, |latest| timestamp > latest) {
+            self.latest_timestamp = Some(timestamp);
+            self.latest_passed = event.gate_passed;
+        }
+    }
+
+    fn latest_day(&self) -> Option<chrono::NaiveDate> {
+        self.latest_timestamp.map(|timestamp| timestamp.date_naive())
+    }
+
+    fn first_try_passed(&self) -> bool {
+        self.first_iteration == 1 && self.first_passed
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct LearningDayAggregate {
+    tasks: u64,
+    cost_usd: f64,
+    tokens: u64,
+    successes: u64,
+    first_try_successes: u64,
 }
 
 fn render_gate_summary_table(

@@ -77,6 +77,28 @@ pub fn scaffold_pages() -> Vec<PageScaffold> {
             ],
         ),
         PageScaffold::new(
+            PageId::Learning,
+            "Learning",
+            "Cascade routing, active experiments, and efficiency trends.",
+            vec![
+                WidgetScaffold::new(
+                    "cascade_router",
+                    "Cascade Router",
+                    "Model weights, recommendation counts, and UCB scores.",
+                ),
+                WidgetScaffold::new(
+                    "active_experiments",
+                    "Active Experiments",
+                    "Experiment names, variants, samples, winners, and significance.",
+                ),
+                WidgetScaffold::new(
+                    "efficiency_trends",
+                    "Efficiency Trends",
+                    "7-day sparklines for cost, tokens, success, and first-try rate.",
+                ),
+            ],
+        ),
+        PageScaffold::new(
             PageId::Parameters,
             "Parameters",
             "Runtime tunables and predicted impact metadata.",
