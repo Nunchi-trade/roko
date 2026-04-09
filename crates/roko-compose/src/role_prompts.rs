@@ -40,6 +40,8 @@ pub struct TaskContext {
     pub plan_id: Option<String>,
     /// Optional workspace label/path.
     pub workspace: Option<String>,
+    /// Optional structured context assembled for this task.
+    pub context_layer: Option<String>,
     /// Optional extra domain notes.
     pub domain_notes: Option<String>,
 }
@@ -65,6 +67,13 @@ impl TaskContext {
     #[must_use]
     pub fn with_workspace(mut self, workspace: impl Into<String>) -> Self {
         self.workspace = Some(workspace.into());
+        self
+    }
+
+    /// Attach a structured relevant-context section.
+    #[must_use]
+    pub fn with_context(mut self, context: impl Into<String>) -> Self {
+        self.context_layer = Some(context.into());
         self
     }
 
@@ -97,6 +106,12 @@ impl TaskContext {
             parts.push(notes.clone());
         }
         parts.join("\n")
+    }
+
+    fn context_layer(&self) -> Option<&str> {
+        self.context_layer
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
     }
 }
 
@@ -189,6 +204,9 @@ impl RoleSystemPromptSpec {
         if !domain.is_empty() {
             builder = builder.with_domain(domain);
         }
+        if let Some(context) = self.task_context.context_layer() {
+            builder = builder.with_context(context);
+        }
         let task = self.task_context.task_layer();
         if !task.is_empty() {
             builder = builder.with_task(task);
@@ -210,6 +228,9 @@ impl RoleSystemPromptSpec {
         let domain = self.task_context.domain_layer();
         if !domain.is_empty() {
             builder = builder.with_domain(domain);
+        }
+        if let Some(context) = self.task_context.context_layer() {
+            builder = builder.with_context(context);
         }
         let task = self.task_context.task_layer();
         if !task.is_empty() {
@@ -322,6 +343,7 @@ mod tests {
         let ctx = TaskContext::new("Implement task wiring")
             .with_plan_id("042-golem-mortality")
             .with_workspace("roko-cli orchestration")
+            .with_context("## Relevant Context\n\n### Knowledge\n- [Heuristic] Keep the prompt compact.")
             .with_domain_notes("Focus on runtime prompt-path parity.");
         let spec = RoleSystemPromptSpec::new(AgentRole::Implementer, ctx, "Read,Edit,Bash")
             .with_extra_conventions("Prefer additive changes.");
@@ -329,6 +351,7 @@ mod tests {
         assert!(prompt.contains("Plan: 042-golem-mortality"));
         assert!(prompt.contains("Task: Implement task wiring"));
         assert!(prompt.contains("Workspace: roko-cli orchestration"));
+        assert!(prompt.contains("## Relevant Context"));
         assert!(prompt.contains("Claude tool allowlist: Read,Edit,Bash"));
         assert!(prompt.contains("Prefer additive changes."));
     }

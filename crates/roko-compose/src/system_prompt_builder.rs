@@ -47,6 +47,8 @@ pub struct SystemPromptBuilder {
     conventions: Option<String>,
     /// Layer 3: Domain context — project-specific knowledge.
     domain: Option<String>,
+    /// Layer 3b: Relevant assembled context for the current task.
+    context: Option<String>,
     /// Layer 4: Task context — current task details.
     task: Option<String>,
     /// Layer 5: Tool instructions — available tools and how to use them.
@@ -68,6 +70,7 @@ impl SystemPromptBuilder {
             role_identity: role_identity.into(),
             conventions: None,
             domain: None,
+            context: None,
             task: None,
             tools: None,
             anti_patterns: Vec::new(),
@@ -86,6 +89,13 @@ impl SystemPromptBuilder {
     #[must_use]
     pub fn with_domain(mut self, domain: impl Into<String>) -> Self {
         self.domain = Some(domain.into());
+        self
+    }
+
+    /// Set layer 3b: relevant assembled context for the current task.
+    #[must_use]
+    pub fn with_context(mut self, context: impl Into<String>) -> Self {
+        self.context = Some(context.into());
         self
     }
 
@@ -130,7 +140,7 @@ impl SystemPromptBuilder {
 
     /// Build the final system prompt as a single string.
     ///
-    /// Layers are emitted in order 1-6, with cache markers between
+    /// Layers are emitted in order 1-7, with cache markers between
     /// stability tiers if enabled. Empty layers are skipped.
     #[must_use]
     pub fn build(&self) -> String {
@@ -165,6 +175,13 @@ impl SystemPromptBuilder {
             }
         }
 
+        // ── Layer 3b: Relevant Context (Session tier) ──
+        if let Some(ref context) = self.context {
+            if !context.is_empty() {
+                parts.push(format!("## Relevant Context\n\n{context}"));
+            }
+        }
+
         // ── Layer 6: Anti-Patterns (Session tier — grouped with 3) ──
         if !self.anti_patterns.is_empty() {
             let mut anti = String::from("## Anti-Patterns\n\nDo NOT:\n");
@@ -177,7 +194,9 @@ impl SystemPromptBuilder {
         }
 
         // Cache break: end of Session tier.
-        if self.cache_markers && (self.domain.is_some() || !self.anti_patterns.is_empty()) {
+        if self.cache_markers
+            && (self.domain.is_some() || self.context.is_some() || !self.anti_patterns.is_empty())
+        {
             parts.push("<!-- cache:session -->".to_string());
         }
 
@@ -199,7 +218,7 @@ impl SystemPromptBuilder {
     /// [`PromptAssembler`](crate::templates::assembly::PromptAssembler).
     #[must_use]
     pub fn build_sections(&self) -> Vec<PromptSection> {
-        let mut sections = Vec::with_capacity(6);
+        let mut sections = Vec::with_capacity(7);
 
         // Layer 1: Role Identity
         sections.push(
@@ -238,6 +257,18 @@ impl SystemPromptBuilder {
             if !domain.is_empty() {
                 sections.push(
                     PromptSection::new("domain_context", domain)
+                        .with_priority(SectionPriority::High)
+                        .with_cache_layer(CacheLayer::Session)
+                        .with_placement(Placement::Middle),
+                );
+            }
+        }
+
+        // Layer 3b: Relevant Context
+        if let Some(ref context) = self.context {
+            if !context.is_empty() {
+                sections.push(
+                    PromptSection::new("context_layer", format!("## Relevant Context\n{context}"))
                         .with_priority(SectionPriority::High)
                         .with_cache_layer(CacheLayer::Session)
                         .with_placement(Placement::Middle),
@@ -286,6 +317,9 @@ impl SystemPromptBuilder {
         if self.domain.as_ref().is_some_and(|s| !s.is_empty()) {
             count += 1;
         }
+        if self.context.as_ref().is_some_and(|s| !s.is_empty()) {
+            count += 1;
+        }
         if self.task.as_ref().is_some_and(|s| !s.is_empty()) {
             count += 1;
         }
@@ -308,6 +342,7 @@ mod tests {
         let prompt = SystemPromptBuilder::new("You are an implementer.")
             .with_conventions("Use snake_case. Use thiserror.")
             .with_domain("DeFi protocol: Uniswap v4 hooks")
+            .with_context("Knowledge about execution flow.")
             .with_task("Implement rate limiter in crates/golem-core")
             .with_tools("MCP tools: Read, Write, Bash")
             .with_anti_patterns(vec![
@@ -319,6 +354,7 @@ mod tests {
         assert!(prompt.contains("You are an implementer."));
         assert!(prompt.contains("snake_case"));
         assert!(prompt.contains("DeFi protocol"));
+        assert!(prompt.contains("Knowledge about execution flow."));
         assert!(prompt.contains("rate limiter"));
         assert!(prompt.contains("MCP tools"));
         assert!(prompt.contains("Never use unwrap()"));
@@ -339,6 +375,7 @@ mod tests {
         let prompt = SystemPromptBuilder::new("LAYER1_ROLE")
             .with_conventions("LAYER2_CONV")
             .with_domain("LAYER3_DOMAIN")
+            .with_context("LAYER3B_CONTEXT")
             .with_task("LAYER4_TASK")
             .with_tools("LAYER5_TOOLS")
             .add_anti_pattern("LAYER6_ANTI")
@@ -348,14 +385,16 @@ mod tests {
         let pos_conv = prompt.find("LAYER2_CONV").unwrap();
         let pos_tools = prompt.find("LAYER5_TOOLS").unwrap();
         let pos_domain = prompt.find("LAYER3_DOMAIN").unwrap();
+        let pos_context = prompt.find("LAYER3B_CONTEXT").unwrap();
         let pos_anti = prompt.find("LAYER6_ANTI").unwrap();
         let pos_task = prompt.find("LAYER4_TASK").unwrap();
 
-        // Order: role(1) -> conv(2) -> tools(5) -> domain(3) -> anti(6) -> task(4)
+        // Order: role(1) -> conv(2) -> tools(5) -> domain(3) -> context(3b) -> anti(6) -> task(4)
         assert!(pos_role < pos_conv, "role before conventions");
         assert!(pos_conv < pos_tools, "conventions before tools");
         assert!(pos_tools < pos_domain, "tools before domain");
-        assert!(pos_domain < pos_anti, "domain before anti-patterns");
+        assert!(pos_domain < pos_context, "domain before context");
+        assert!(pos_context < pos_anti, "context before anti-patterns");
         assert!(pos_anti < pos_task, "anti-patterns before task");
     }
 
@@ -364,6 +403,7 @@ mod tests {
         let prompt = SystemPromptBuilder::new("Role")
             .with_conventions("Conv")
             .with_domain("Domain")
+            .with_context("Context")
             .with_task("Task")
             .with_cache_markers()
             .build();
@@ -376,7 +416,7 @@ mod tests {
         let domain_pos = prompt.find("Domain").unwrap();
         assert!(sys_marker < domain_pos);
 
-        // Session marker comes after domain, before task.
+        // Session marker comes after the session-tier context, before task.
         let sess_marker = prompt.find("<!-- cache:session -->").unwrap();
         let task_pos = prompt.find("Task").unwrap();
         assert!(sess_marker < task_pos);
@@ -387,6 +427,7 @@ mod tests {
         let prompt = SystemPromptBuilder::new("Role")
             .with_conventions("Conv")
             .with_domain("Domain")
+            .with_context("Context")
             .build();
 
         assert!(!prompt.contains("<!-- cache:"));
@@ -397,12 +438,14 @@ mod tests {
         let prompt = SystemPromptBuilder::new("Role")
             .with_conventions("")
             .with_domain("")
+            .with_context("")
             .with_task("")
             .with_tools("")
             .build();
 
         assert!(!prompt.contains("Conventions"));
         assert!(!prompt.contains("Domain"));
+        assert!(!prompt.contains("Relevant Context"));
         assert!(!prompt.contains("Task"));
         assert!(!prompt.contains("Tool"));
     }
@@ -412,12 +455,13 @@ mod tests {
         let sections = SystemPromptBuilder::new("Role identity text")
             .with_conventions("Use snake_case")
             .with_domain("DeFi context")
+            .with_context("Assembly context")
             .with_task("Implement feature X")
             .with_tools("Use MCP tools")
             .add_anti_pattern("No unwrap()")
             .build_sections();
 
-        assert_eq!(sections.len(), 6);
+        assert_eq!(sections.len(), 7);
 
         // Layer 1: role_identity
         assert_eq!(sections[0].name, "role_identity");
@@ -438,16 +482,20 @@ mod tests {
         assert_eq!(sections[3].name, "domain_context");
         assert_eq!(sections[3].cache_layer, CacheLayer::Session);
 
-        // Layer 6: anti_patterns
-        assert_eq!(sections[4].name, "anti_patterns");
+        // Layer 3b: context_layer
+        assert_eq!(sections[4].name, "context_layer");
         assert_eq!(sections[4].cache_layer, CacheLayer::Session);
-        assert_eq!(sections[4].placement, Placement::End);
+
+        // Layer 6: anti_patterns
+        assert_eq!(sections[5].name, "anti_patterns");
+        assert_eq!(sections[5].cache_layer, CacheLayer::Session);
+        assert_eq!(sections[5].placement, Placement::End);
 
         // Layer 4: task_context
-        assert_eq!(sections[5].name, "task_context");
-        assert_eq!(sections[5].priority, SectionPriority::Critical);
-        assert_eq!(sections[5].cache_layer, CacheLayer::Task);
-        assert_eq!(sections[5].placement, Placement::End);
+        assert_eq!(sections[6].name, "task_context");
+        assert_eq!(sections[6].priority, SectionPriority::Critical);
+        assert_eq!(sections[6].cache_layer, CacheLayer::Task);
+        assert_eq!(sections[6].placement, Placement::End);
     }
 
     #[test]
@@ -471,11 +519,12 @@ mod tests {
             SystemPromptBuilder::new("Role")
                 .with_conventions("conv")
                 .with_domain("domain")
+                .with_context("context")
                 .with_task("task")
                 .with_tools("tools")
                 .add_anti_pattern("anti")
                 .layer_count(),
-            6
+            7
         );
     }
 
@@ -497,6 +546,7 @@ mod tests {
         let builder = SystemPromptBuilder::new("You are a test agent.")
             .with_conventions("Use thiserror.")
             .with_domain("Blockchain domain.")
+            .with_context("Recent context.")
             .with_task("Write unit tests.")
             .with_tools("MCP: Read, Bash.")
             .add_anti_pattern("No panics.");
@@ -542,6 +592,7 @@ mod tests {
         let sections = SystemPromptBuilder::new("Role")
             .with_conventions("Conv")
             .with_domain("Domain")
+            .with_context("Context")
             .with_task("Task")
             .with_tools("Tools")
             .add_anti_pattern("Anti")
