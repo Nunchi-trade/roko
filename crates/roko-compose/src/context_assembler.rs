@@ -308,6 +308,7 @@ fn knowledge_chunk(entry: KnowledgeEntry, idx: usize) -> ContextChunk {
     let confidence = entry.confidence.clamp(0.0, 1.0);
     let recency = recency_score(entry.created_at.timestamp());
     let track_record = knowledge_track_record(confidence, entry.source_episodes.len());
+    let source = entry.source.clone();
     let content = format!(
         "### Knowledge {:?}\nConfidence: {:.2}\nTags: {}\n```\n{}\n```",
         entry.kind,
@@ -324,6 +325,7 @@ fn knowledge_chunk(entry: KnowledgeEntry, idx: usize) -> ContextChunk {
         source: ContextSource::KnowledgeEntry {
             entry_id: entry.id,
             kind: format!("{:?}", entry.kind),
+            source,
         },
         relevance: track_record.max(relevance),
         track_record: Some(track_record),
@@ -580,6 +582,7 @@ fn signal_recency_score(created_at_ms: i64) -> f64 {
 fn score_chunk(task_text: &str, chunk: &ContextChunk, affect_state: Option<&PadState>) -> f64 {
     let similarity = semantic_similarity(task_text, &chunk.content);
     let source_priority = source_priority(&chunk.source);
+    let dream_bonus = dream_source_bonus(&chunk.source);
     let recency = chunk.recency.unwrap_or(0.5);
     let confidence = chunk.confidence.unwrap_or(0.5);
     let affect_bias = affect_bias(chunk, recency, affect_state);
@@ -588,11 +591,26 @@ fn score_chunk(task_text: &str, chunk: &ContextChunk, affect_state: Option<&PadS
         let uncertainty = (1.0 - confidence).clamp(0.1, 1.0);
         let active_score = track_record * similarity / uncertainty;
         if active_score > 0.0 {
-            return active_score + affect_bias;
+            return active_score + dream_bonus + affect_bias;
         }
     }
 
-    similarity * 0.3 + recency * 0.2 + confidence * 0.3 + source_priority * 0.2 + affect_bias
+    similarity * 0.3
+        + recency * 0.2
+        + confidence * 0.3
+        + source_priority * 0.2
+        + dream_bonus
+        + affect_bias
+}
+
+fn dream_source_bonus(source: &ContextSource) -> f64 {
+    match source {
+        ContextSource::KnowledgeEntry {
+            source: Some(source),
+            ..
+        } if source.eq_ignore_ascii_case("dream") => 0.15,
+        _ => 0.0,
+    }
 }
 
 fn affect_bias(chunk: &ContextChunk, recency: f64, affect_state: Option<&PadState>) -> f64 {
@@ -809,6 +827,7 @@ mod tests {
             source: ContextSource::KnowledgeEntry {
                 entry_id: "k1".into(),
                 kind: "Insight".into(),
+                source: None,
             },
             relevance: 0.9,
             track_record: Some(0.9),
@@ -866,6 +885,41 @@ mod tests {
     }
 
     #[test]
+    fn rank_boosts_dream_provenance_for_knowledge_chunks() {
+        let task_text = "reuse the successful cluster pattern";
+        let dream_chunk = ContextChunk {
+            content: "### Knowledge Insight\nConfidence: 0.80\nTags: dream, cluster\n```\nReuse the same cluster pattern for repeatable tasks.\n```"
+                .into(),
+            source: ContextSource::KnowledgeEntry {
+                entry_id: "dream".into(),
+                kind: "Insight".into(),
+                source: Some("dream".into()),
+            },
+            relevance: 0.6,
+            track_record: Some(0.8),
+            confidence: Some(0.8),
+            recency: Some(0.8),
+        };
+        let regular_chunk = ContextChunk {
+            content: "### Knowledge Insight\nConfidence: 0.80\nTags: cluster\n```\nReuse the same cluster pattern for repeatable tasks.\n```"
+                .into(),
+            source: ContextSource::KnowledgeEntry {
+                entry_id: "regular".into(),
+                kind: "Insight".into(),
+                source: None,
+            },
+            relevance: 0.6,
+            track_record: Some(0.8),
+            confidence: Some(0.8),
+            recency: Some(0.8),
+        };
+
+        assert!(
+            score_chunk(task_text, &dream_chunk, None) > score_chunk(task_text, &regular_chunk, None)
+        );
+    }
+
+    #[test]
     fn affect_bias_prefers_recent_action_oriented_knowledge() {
         let task_text = "deploy migration rollback";
         let recent_action = ContextChunk {
@@ -874,6 +928,7 @@ mod tests {
             source: ContextSource::KnowledgeEntry {
                 entry_id: "proc".into(),
                 kind: "Procedure".into(),
+                source: None,
             },
             relevance: 0.3,
             track_record: Some(0.9),
@@ -886,6 +941,7 @@ mod tests {
             source: ContextSource::KnowledgeEntry {
                 entry_id: "anti".into(),
                 kind: "AntiKnowledge".into(),
+                source: None,
             },
             relevance: 0.8,
             track_record: Some(0.8),
@@ -898,6 +954,7 @@ mod tests {
             source: ContextSource::KnowledgeEntry {
                 entry_id: "fact".into(),
                 kind: "Fact".into(),
+                source: None,
             },
             relevance: 0.7,
             track_record: Some(0.7),
@@ -933,6 +990,7 @@ mod tests {
             .add(KnowledgeEntry {
                 id: "k1".into(),
                 kind: KnowledgeKind::Insight,
+                source: None,
                 content: "Prompt assembly should keep high-value context near the edges.".into(),
                 confidence: 0.9,
                 source_episodes: vec![],
@@ -1015,6 +1073,7 @@ mod tests {
             .add(KnowledgeEntry {
                 id: "recent-proc".into(),
                 kind: KnowledgeKind::Procedure,
+                source: None,
                 content: "Use the rollback command after each migration".into(),
                 confidence: 0.9,
                 source_episodes: vec!["ep-a".into()],
@@ -1028,6 +1087,7 @@ mod tests {
             .add(KnowledgeEntry {
                 id: "older-anti".into(),
                 kind: KnowledgeKind::AntiKnowledge,
+                source: None,
                 content: "Never deploy without a rollback plan".into(),
                 confidence: 0.9,
                 source_episodes: vec!["ep-b".into()],
@@ -1041,6 +1101,7 @@ mod tests {
             .add(KnowledgeEntry {
                 id: "neutral-fact".into(),
                 kind: KnowledgeKind::Fact,
+                source: None,
                 content: "Deployments happen on weekdays".into(),
                 confidence: 0.9,
                 source_episodes: vec!["ep-c".into()],

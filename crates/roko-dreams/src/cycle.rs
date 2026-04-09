@@ -611,6 +611,7 @@ impl DreamDistillationCandidate {
         Some(KnowledgeEntry {
             id: derive_knowledge_id(self.kind, content, &self.source_episodes, &self.tags),
             kind: self.kind,
+            source: Some("dream".to_string()),
             content: content.to_string(),
             confidence,
             source_episodes: self.source_episodes,
@@ -731,6 +732,7 @@ fn playbook_knowledge_entry(
             &["playbook".to_string(), "dream".to_string()],
         ),
         kind: KnowledgeKind::Playbook,
+        source: Some("dream".to_string()),
         content,
         confidence: if playbook.steps.is_empty() { 0.0 } else { 1.0 },
         source_episodes: source_episodes.to_vec(),
@@ -764,6 +766,7 @@ fn build_regression_entry(cluster: &DreamCluster, created_at: DateTime<Utc>) -> 
             &[knowledge_kind_tag(kind).to_string()],
         ),
         kind,
+        source: Some("dream".to_string()),
         content,
         confidence: if cluster.failure_count > 0 { 0.9 } else { 0.0 },
         source_episodes: cluster.episode_ids.clone(),

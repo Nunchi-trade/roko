@@ -208,6 +208,7 @@ impl DistillationCandidate {
         Some(KnowledgeEntry {
             id: derive_knowledge_id(self.kind, content, &self.source_episodes, &self.tags),
             kind: self.kind,
+            source: None,
             content: content.to_string(),
             confidence,
             source_episodes: self.source_episodes,

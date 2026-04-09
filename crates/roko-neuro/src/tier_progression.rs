@@ -326,6 +326,7 @@ impl From<&InsightRecord> for KnowledgeEntry {
         Self {
             id: value.id.clone(),
             kind: KnowledgeKind::Insight,
+            source: None,
             content: value.summary(),
             confidence: value.confidence,
             source_episodes: value.source_episodes.clone(),
@@ -346,6 +347,7 @@ impl From<&HeuristicRule> for KnowledgeEntry {
         Self {
             id: value.id.clone(),
             kind: KnowledgeKind::Heuristic,
+            source: None,
             content: value.summary(),
             confidence: value.confidence,
             source_episodes: value.source_episodes.clone(),
@@ -366,6 +368,7 @@ impl From<&PlaybookCompilation> for KnowledgeEntry {
         Self {
             id: format!("playbook:{:016x}", stable_hash(value.markdown.as_bytes())),
             kind: KnowledgeKind::Playbook,
+            source: None,
             content: value.markdown.clone(),
             confidence: if value.rules.is_empty() { 0.0 } else { 1.0 },
             source_episodes: value

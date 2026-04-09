@@ -591,6 +591,7 @@ mod tests {
         KnowledgeEntry {
             id: id.to_owned(),
             kind,
+            source: None,
             content: content.to_owned(),
             confidence,
             source_episodes: source_episodes
@@ -812,6 +813,7 @@ mod tests {
             .add(KnowledgeEntry {
                 id: "oldest".to_owned(),
                 kind: KnowledgeKind::Fact,
+                source: None,
                 content: "first".to_owned(),
                 confidence: 0.8,
                 source_episodes: Vec::new(),
@@ -825,6 +827,7 @@ mod tests {
             .add(KnowledgeEntry {
                 id: "middle".to_owned(),
                 kind: KnowledgeKind::Procedure,
+                source: None,
                 content: "second".to_owned(),
                 confidence: 0.6,
                 source_episodes: Vec::new(),
@@ -838,6 +841,7 @@ mod tests {
             .add(KnowledgeEntry {
                 id: "newest".to_owned(),
                 kind: KnowledgeKind::Fact,
+                source: None,
                 content: "third".to_owned(),
                 confidence: 1.0,
                 source_episodes: Vec::new(),

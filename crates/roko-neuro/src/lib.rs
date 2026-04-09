@@ -70,6 +70,9 @@ pub struct KnowledgeEntry {
     /// Knowledge category.
     #[serde(default)]
     pub kind: KnowledgeKind,
+    /// Provenance label for the entry, if it came from a dedicated source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     /// The actual knowledge content.
     #[serde(default)]
     pub content: String,

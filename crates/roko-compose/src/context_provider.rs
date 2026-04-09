@@ -98,6 +98,8 @@ pub enum ContextSource {
         entry_id: String,
         /// Semantic kind of the entry.
         kind: String,
+        /// Provenance label for the knowledge entry, if available.
+        source: Option<String>,
     },
     /// Recent episode retrieved from the episode store.
     Episode {
