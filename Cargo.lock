@@ -4880,6 +4880,7 @@ dependencies = [
  "chrono",
  "roko-core",
  "serde",
+ "serde_json",
  "tokio",
  "tokio-util",
 ]

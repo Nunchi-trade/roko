@@ -3,17 +3,44 @@
 use chrono::{DateTime, Utc};
 use async_trait::async_trait;
 use roko_core::{Result, Signal};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
 /// Cloneable sender used by event sources to publish signals into Roko.
 pub type SignalSender = UnboundedSender<Signal>;
 
+/// Outcome reported by a feedback collector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum FeedbackOutcome {
+    /// The original work was accepted.
+    Approved,
+    /// The original work was rejected.
+    Rejected,
+    /// The original work received comments but no final verdict.
+    Commented,
+    /// The collector did not produce a meaningful signal.
+    Ignored,
+    /// The original work was merged.
+    Merged,
+}
+
 /// Feedback emitted by collectors when they observe the outcome of past work.
-///
-/// For now this is the same envelope as a core [`Signal`], which keeps the SDK
-/// flexible while the daemon-side schema for feedback evolves.
-pub type FeedbackSignal = Signal;
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FeedbackSignal {
+    /// Identifier of the original episode being reported on.
+    pub original_episode_id: String,
+    /// External service the feedback was collected from.
+    pub service: String,
+    /// Collector outcome for the original episode.
+    pub outcome: FeedbackOutcome,
+    /// Arbitrary structured metadata supplied by the service.
+    pub metadata: Value,
+    /// Time the feedback was observed.
+    pub timestamp: DateTime<Utc>,
+}
 
 /// Kinds of event sources supported by the plugin SDK.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -71,6 +98,7 @@ mod tests {
     use std::time::Duration;
 
     use roko_core::{Body, Kind, Signal};
+    use serde_json::json;
 
     struct DummyEventSource;
     struct DummyFeedbackCollector;
@@ -111,9 +139,13 @@ mod tests {
 
         async fn collect(&self, _since: DateTime<Utc>) -> Result<Vec<FeedbackSignal>> {
             Ok(vec![
-                Signal::builder(Kind::Task)
-                    .body(Body::text("review approved"))
-                    .build(),
+                FeedbackSignal {
+                    original_episode_id: "episode-123".to_string(),
+                    service: "github".to_string(),
+                    outcome: FeedbackOutcome::Approved,
+                    metadata: json!({ "reviewer": "alice" }),
+                    timestamp: DateTime::<Utc>::UNIX_EPOCH,
+                },
             ])
         }
     }
@@ -148,6 +180,10 @@ mod tests {
             .await
             .expect("collector should succeed");
         assert_eq!(feedback.len(), 1);
-        assert_eq!(feedback[0].body, Body::text("review approved"));
+        assert_eq!(feedback[0].original_episode_id, "episode-123");
+        assert_eq!(feedback[0].service, "github");
+        assert_eq!(feedback[0].outcome, FeedbackOutcome::Approved);
+        assert_eq!(feedback[0].metadata, json!({ "reviewer": "alice" }));
+        assert_eq!(feedback[0].timestamp, DateTime::<Utc>::UNIX_EPOCH);
     }
 }
