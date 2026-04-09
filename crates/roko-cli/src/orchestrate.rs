@@ -140,6 +140,7 @@ struct AgentRunConfig {
     mcp_config: Option<PathBuf>,
     fallback_model: Option<String>,
     env_vars: Vec<(String, String)>,
+    read_args: Vec<String>,
     extra_args: Vec<String>,
     resume_session: Option<String>,
     prompt: String,
@@ -159,6 +160,7 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
             .with_bare_mode(cfg.bare_mode)
             .with_effort(cfg.effort)
             .with_system_prompt(cfg.system_prompt)
+            .with_extra_args(cfg.read_args)
             .with_tools(cfg.tools_csv)
             .with_settings_json(roko_agent::claude_cli_agent::build_settings_json())
             .with_dangerously_skip_permissions(cfg.skip_permissions)
@@ -2110,6 +2112,10 @@ impl PlanRunner {
                     mcp_config: self.config.agent.mcp_config.clone(),
                     fallback_model: self.config.agent.fallback_model.clone(),
                     env_vars,
+                    read_args: task_def
+                        .as_ref()
+                        .map(task_read_cli_args)
+                        .unwrap_or_default(),
                     extra_args: self.config.agent.args.clone(),
                     resume_session: self.claude_resume_session.clone(),
                     prompt: prompt_text,
@@ -3187,7 +3193,7 @@ impl PlanRunner {
         // ── Build prompt: surgical (from TaskDef) or generic ────────
         // Also collect attribution keys for context feedback after the agent runs.
         let mut attribution_keys: Vec<(String, String)> = Vec::new();
-        let (task_text, selected_model) = if let Some(override_prompt) = prompt_override {
+        let (task_text, mut selected_model) = if let Some(override_prompt) = prompt_override {
             let model = model_override.unwrap_or_else(|| {
                 self.config
                     .agent
@@ -3229,44 +3235,70 @@ impl PlanRunner {
         };
 
         // ── Adaptive model selection via CascadeRouter ───────────────
-        let selected_model = {
+        if let Some(td) = task_def.as_ref() {
+            if td.model_hint.is_some() {
+                eprintln!(
+                    "[orchestrate] Task {} model_hint={} (skipping CascadeRouter)",
+                    td.id, selected_model
+                );
+            } else {
+                use roko_core::TaskComplexityBand;
+                use roko_learn::model_router::RoutingContext;
+
+                let cascade_router = self.learning.cascade_router();
+                let complexity = match td.tier.as_str() {
+                    "mechanical" | "fast" => TaskComplexityBand::Fast,
+                    "architectural" | "complex" | "premium" => TaskComplexityBand::Complex,
+                    _ => TaskComplexityBand::Standard,
+                };
+                let has_prior_failure = self
+                    .task_trackers
+                    .get(plan_id)
+                    .is_some_and(|t| t.last_gate_failure.is_some());
+                let routing_ctx = RoutingContext {
+                    task_category: roko_core::TaskCategory::Implementation,
+                    complexity,
+                    iteration: 0,
+                    role,
+                    crate_familiarity: 0.5,
+                    has_prior_failure,
+                };
+                let cascade = cascade_router.route(&routing_ctx);
+                // Use cascade recommendation only if it has enough observations.
+                // Otherwise stick with the statically selected model.
+                if cascade.stage != roko_learn::cascade_router::CascadeStage::Static {
+                    eprintln!(
+                        "[orchestrate] CascadeRouter recommends model={} (stage={:?})",
+                        cascade.primary.slug, cascade.stage
+                    );
+                    selected_model = cascade.primary.slug;
+                }
+            }
+        } else {
             use roko_core::TaskComplexityBand;
             use roko_learn::model_router::RoutingContext;
 
             let cascade_router = self.learning.cascade_router();
-            let complexity = task_def
-                .as_ref()
-                .map(|td| match td.tier.as_str() {
-                    "fast" => TaskComplexityBand::Fast,
-                    "complex" | "premium" => TaskComplexityBand::Complex,
-                    _ => TaskComplexityBand::Standard,
-                })
-                .unwrap_or(TaskComplexityBand::Standard);
-            let has_prior_failure = self
-                .task_trackers
-                .get(plan_id)
-                .is_some_and(|t| t.last_gate_failure.is_some());
             let routing_ctx = RoutingContext {
                 task_category: roko_core::TaskCategory::Implementation,
-                complexity,
+                complexity: TaskComplexityBand::Standard,
                 iteration: 0,
                 role,
                 crate_familiarity: 0.5,
-                has_prior_failure,
+                has_prior_failure: self
+                    .task_trackers
+                    .get(plan_id)
+                    .is_some_and(|t| t.last_gate_failure.is_some()),
             };
             let cascade = cascade_router.route(&routing_ctx);
-            // Use cascade recommendation only if it has enough observations
-            // Otherwise stick with the statically selected model
             if cascade.stage != roko_learn::cascade_router::CascadeStage::Static {
                 eprintln!(
                     "[orchestrate] CascadeRouter recommends model={} (stage={:?})",
                     cascade.primary.slug, cascade.stage
                 );
-                cascade.primary.slug
-            } else {
-                selected_model
+                selected_model = cascade.primary.slug;
             }
-        };
+        }
 
         // ── Provider health check ────────────────────────────────────
         let selected_model = if !self.learning.provider_health().is_healthy(&selected_model) {
@@ -3496,12 +3528,17 @@ impl PlanRunner {
 
         // ── Run the agent with per-task model selection ─────────────
         let result: AgentResult = if self.config.agent.command == "claude" {
+            let task_read_args = task_def
+                .as_ref()
+                .map(task_read_cli_args)
+                .unwrap_or_default();
             let mut agent =
                 ClaudeCliAgent::new(&self.config.agent.command, &exec_dir, &selected_model)
                     .with_timeout_ms(self.effective_task_timeout_ms(task_def.as_ref()))
                     .with_bare_mode(self.config.agent.bare_mode)
                     .with_effort(self.config.agent.effort.clone())
                     .with_system_prompt(role_instruction.clone())
+                    .with_extra_args(task_read_args)
                     .with_tools(claude_tools_csv)
                     .with_settings_json(roko_agent::claude_cli_agent::build_settings_json())
                     .with_dangerously_skip_permissions(claude_skip_permissions_for_role(role))
@@ -4844,6 +4881,20 @@ fn task_def_to_input(td: &crate::task_parser::TaskDef) -> roko_compose::TaskInpu
     }
 }
 
+/// Convert declared task context files into Claude CLI `--read` args.
+fn task_read_cli_args(task_def: &crate::task_parser::TaskDef) -> Vec<String> {
+    task_def
+        .context
+        .as_ref()
+        .map(|ctx| {
+            ctx.read_files
+                .iter()
+                .flat_map(|rf| ["--read".to_string(), rf.path.clone()])
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn file_contains_public_api(path: &str, content: &str) -> bool {
     let normalized = path.replace('\\', "/");
     if normalized.ends_with("/src/lib.rs") || normalized.ends_with("/src/mod.rs") {
@@ -5244,5 +5295,33 @@ command = "cargo check -p roko-cli"
         let truncated = truncate_doc_snippet(&content, 8);
         assert!(truncated.starts_with("aaaaaaaa"));
         assert!(truncated.contains("[... truncated]"));
+    }
+
+    #[test]
+    fn task_read_cli_args_emits_claude_read_flags() {
+        let task: crate::task_parser::TaskDef = toml::from_str(
+            r#"
+id = "T1"
+title = "Read context"
+depends_on = []
+
+[context]
+read_files = [
+    { path = "src/lib.rs" },
+    { path = "src/mod.rs" },
+]
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            task_read_cli_args(&task),
+            vec![
+                "--read".to_string(),
+                "src/lib.rs".to_string(),
+                "--read".to_string(),
+                "src/mod.rs".to_string(),
+            ]
+        );
     }
 }
