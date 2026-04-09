@@ -23,6 +23,7 @@ use roko_cli::{
     WizardInputs, config_cmd, load_layered, run_init_wizard, run_once,
 };
 use roko_core::config::schema::RokoConfig;
+use roko_core::config::ServeDeployWebhookConfig;
 use roko_core::{ContentHash, Context, Kind, Query, Substrate};
 use roko_core::{Headlines, TaskMetric, compute_headlines};
 use roko_fs::{FileSubstrate, FsObservabilitySinks, RokoLayout};
@@ -2744,14 +2745,14 @@ async fn cmd_deploy_railway(cli: &Cli, workdir: Option<PathBuf>) -> Result<i32> 
     run_release_build(&workdir).await?;
 
     let config = load_roko_config(&workdir)?;
-    let repo_registry = match load_layered(&workdir) {
-        Ok(resolved) => resolved.repo_registry,
+    let deploy_webhooks = match load_layered(&workdir) {
+        Ok(resolved) => resolved.config.serve.deploy.webhooks,
         Err(err) => {
             warn!(
                 error = %err,
-                "failed to load configured repos; skipping GitHub webhook registration"
+                "failed to load configured deploy webhooks; skipping GitHub webhook registration"
             );
-            RepoRegistry::default()
+            Vec::new()
         }
     };
     let deploy_config = &config.deploy;
@@ -2791,7 +2792,7 @@ async fn cmd_deploy_railway(cli: &Cli, workdir: Option<PathBuf>) -> Result<i32> 
         .as_deref()
         .ok_or_else(|| anyhow!("Railway deployment finished without a public URL"))?;
 
-    register_deployment_github_webhooks(&repo_registry, url, &config.webhooks.github.secret)
+    register_deployment_github_webhooks(&deploy_webhooks, url, &config.webhooks.github.secret)
         .await?;
 
     println!("{url}");
@@ -2866,11 +2867,11 @@ async fn run_release_build(workdir: &Path) -> Result<()> {
 }
 
 async fn register_deployment_github_webhooks(
-    repo_registry: &RepoRegistry,
+    webhooks: &[ServeDeployWebhookConfig],
     webhook_url: &str,
     secret: &str,
 ) -> Result<()> {
-    if repo_registry.is_empty() {
+    if webhooks.is_empty() {
         return Ok(());
     }
 
@@ -2893,36 +2894,43 @@ async fn register_deployment_github_webhooks(
         .context("build GitHub client")?;
 
     let mut registered = 0usize;
-    for repo in repo_registry.repos() {
-        let slug = match git_remote_slug(&repo.root) {
-            Ok(slug) => slug,
-            Err(err) => {
-                warn!(
-                    repo = %repo.config.name,
-                    path = %repo.root.display(),
-                    error = %err,
-                    "skipping GitHub webhook registration for repo with non-GitHub origin"
-                );
-                continue;
-            }
-        };
-
-        let Some((owner, repo_name)) = slug.split_once('/') else {
+    for webhook in webhooks {
+        if webhook.provider != "github" {
             warn!(
-                repo = %repo.config.name,
-                slug = %slug,
-                "skipping GitHub webhook registration for malformed repo slug"
+                provider = %webhook.provider,
+                owner = %webhook.owner,
+                repo = %webhook.repo,
+                "skipping non-GitHub deploy webhook registration"
             );
             continue;
-        };
+        }
 
-        match register_github_webhook(&github, owner, repo_name, webhook_url, secret).await {
+        if webhook.owner.trim().is_empty() || webhook.repo.trim().is_empty() {
+            warn!(
+                provider = %webhook.provider,
+                owner = %webhook.owner,
+                repo = %webhook.repo,
+                "skipping deploy webhook with empty repository coordinates"
+            );
+            continue;
+        }
+
+        match register_github_webhook(
+            &github,
+            webhook.owner.trim(),
+            webhook.repo.trim(),
+            webhook_url,
+            secret,
+        )
+        .await
+        {
             Ok(()) => {
                 registered += 1;
             }
             Err(err) => {
                 warn!(
-                    repo = %slug,
+                    owner = %webhook.owner,
+                    repo = %webhook.repo,
                     error = %err,
                     "failed to register GitHub webhook"
                 );
@@ -2944,6 +2952,21 @@ async fn register_github_webhook(
     webhook_url: &str,
     secret: &str,
 ) -> Result<()> {
+    let webhook_endpoint = format!("{}/webhooks/github", webhook_url.trim_end_matches('/'));
+
+    let existing_hooks: Vec<Hook> = github
+        .get(format!("/repos/{owner}/{repo}/hooks"), None::<&()>)
+        .await
+        .with_context(|| format!("list GitHub webhooks for {owner}/{repo}"))?;
+
+    if existing_hooks
+        .iter()
+        .any(|hook| hook.name == "web" && hook.config.url == webhook_endpoint)
+    {
+        info!(owner = %owner, repo = %repo, "GitHub webhook already registered");
+        return Ok(());
+    }
+
     let hook = Hook {
         name: "web".to_string(),
         active: true,
@@ -2956,7 +2979,7 @@ async fn register_github_webhook(
             WebhookEventType::CheckRun,
         ],
         config: HookConfig {
-            url: format!("{webhook_url}/webhooks/github"),
+            url: webhook_endpoint,
             content_type: Some(ContentType::Json),
             insecure_ssl: None,
             secret: Some(secret.to_string()),
