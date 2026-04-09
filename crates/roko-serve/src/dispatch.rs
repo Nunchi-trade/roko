@@ -38,6 +38,7 @@ use roko_learn::prompt_experiment::ExperimentStore;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
+use tokio::task::JoinHandle;
 use tracing::{info, warn};
 use uuid::Uuid;
 use roko_std::tool::StaticToolRegistry;
@@ -196,6 +197,15 @@ impl TemplateAgentDispatcher {
             base_mcp_config,
         }
     }
+}
+
+/// Start the subscription dispatch loop in the background.
+#[must_use]
+pub fn start_dispatch_loop(state: Arc<AppState>) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let dispatcher = Arc::new(TemplateAgentDispatcher::new(state.workdir.clone(), None));
+        dispatch_loop(state, dispatcher).await;
+    })
 }
 
 #[async_trait]

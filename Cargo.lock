@@ -5060,6 +5060,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sysinfo",
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.26.2",

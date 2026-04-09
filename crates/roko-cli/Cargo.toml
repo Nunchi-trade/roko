@@ -29,7 +29,7 @@ bardo-runtime = { path = "../bardo-runtime" }
 roko-serve = { path = "../roko-serve" }
 
 clap = { workspace = true, features = ["derive"] }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "net", "signal", "io-util"] }
 tokio-util = { workspace = true }
 futures = { workspace = true }
 parking_lot = { workspace = true }
@@ -52,6 +52,7 @@ octocrab = { workspace = true }
 base64 = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
+sysinfo = { workspace = true }
 ratatui = "0.29"
 crossterm = "0.28"
 dotenvy = "0.15"

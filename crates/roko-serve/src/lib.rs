@@ -9,10 +9,12 @@ pub mod dispatch;
 pub mod error;
 pub mod event_bus;
 pub mod events;
+pub mod fswatcher;
 pub mod feedback;
 pub mod plan_types;
 pub mod routes;
 pub mod runtime;
+pub mod scheduler;
 pub mod state;
 pub mod templates;
 
@@ -22,6 +24,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use tokio::net::TcpListener;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -181,6 +184,31 @@ pub async fn run_server(
     ServerBuilder::new(config).run().await
 }
 
+/// Run the HTTP server against an already constructed [`AppState`].
+pub async fn run_server_with_state(state: Arc<AppState>, bind: &str, port: u16) -> Result<()> {
+    let roko_config = state.roko_config.read().await.clone();
+    let router = routes::build_router(
+        Arc::clone(&state),
+        &roko_config.server.cors_origins,
+        roko_config.serve.auth.clone(),
+    );
+    let addr = format!("{bind}:{port}");
+    let listener = TcpListener::bind(&addr)
+        .await
+        .with_context(|| format!("bind to {addr}"))?;
+
+    info!("roko server listening on http://{addr}");
+    info!("workdir: {}", state.workdir.display());
+
+    axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown_on_cancel(Arc::clone(&state)))
+        .await
+        .context("axum server error")?;
+
+    info!("server stopped");
+    Ok(())
+}
+
 fn build_app_state(
     workdir: PathBuf,
     runtime: Arc<dyn CliRuntime>,
@@ -190,19 +218,12 @@ fn build_app_state(
     AppState::new(workdir, runtime, roko_config, deploy_backend)
 }
 
-fn start_builtin_event_sources(state: Arc<AppState>, roko_config: RokoConfig) {
-    let mut sources: Vec<Box<dyn EventSource>> = Vec::new();
-
-    if !roko_config.scheduler.is_empty() {
-        sources.push(Box::new(CronEventSource::from_config(roko_config.scheduler.clone())));
-    }
-
-    if !roko_config.watcher.is_empty() {
-        sources.push(Box::new(FileWatchEventSource::from_config(roko_config.watcher.clone())));
-    }
-
+pub(crate) fn start_event_source_group(
+    state: Arc<AppState>,
+    sources: Vec<Box<dyn EventSource>>,
+) -> JoinHandle<()> {
     if sources.is_empty() {
-        return;
+        return tokio::spawn(async {});
     }
 
     let cancel = CancellationToken::new();
@@ -237,6 +258,26 @@ fn start_builtin_event_sources(state: Arc<AppState>, roko_config: RokoConfig) {
             }
         });
     }
+
+    tokio::spawn(async {})
+}
+
+fn start_builtin_event_sources(state: Arc<AppState>, roko_config: RokoConfig) {
+    let mut sources: Vec<Box<dyn EventSource>> = Vec::new();
+
+    if !roko_config.scheduler.is_empty() {
+        sources.push(Box::new(CronEventSource::from_config(roko_config.scheduler.clone())));
+    }
+
+    if !roko_config.watcher.is_empty() {
+        sources.push(Box::new(FileWatchEventSource::from_config(roko_config.watcher.clone())));
+    }
+
+    if sources.is_empty() {
+        return;
+    }
+
+    let _ = start_event_source_group(state, sources);
 }
 
 async fn signal_ingest_loop(
@@ -266,6 +307,11 @@ async fn signal_ingest_loop(
             .event_bus
             .publish(ServerEvent::WebhookReceived { signal });
     }
+}
+
+async fn shutdown_on_cancel(state: Arc<AppState>) {
+    state.cancel.cancelled().await;
+    state.shutdown().await;
 }
 
 fn create_deploy_backend(roko_config: &RokoConfig) -> Arc<dyn deploy::DeployBackend> {

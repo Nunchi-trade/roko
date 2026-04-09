@@ -219,6 +219,11 @@ enum Command {
         #[command(subcommand)]
         cmd: EventSourcesCmd,
     },
+    /// Manage daemon mode.
+    Daemon {
+        #[command(subcommand)]
+        cmd: DaemonCmd,
+    },
     /// Launch the dashboard TUI, with text fallback for non-interactive use.
     Dashboard {
         /// Specific dashboard page slug to render.
@@ -712,6 +717,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             let _ = roko_cli::index::rebuild_all(&std::env::current_dir().unwrap_or_default());
             result
         }
+        Command::Daemon { cmd } => cmd_daemon(cli, cmd).await,
         Command::Dashboard {
             page,
             list_pages,
@@ -733,6 +739,22 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             roko_cli::worker::run_worker(port).await?;
             Ok(EXIT_SUCCESS)
         }
+    }
+}
+
+async fn cmd_daemon(_cli: &Cli, cmd: DaemonCmd) -> Result<i32> {
+    match cmd {
+        DaemonCmd::Start { foreground, port } => {
+            roko_cli::daemon::daemon_start(foreground, port).await?;
+            Ok(EXIT_SUCCESS)
+        }
+        DaemonCmd::Stop
+        | DaemonCmd::Status
+        | DaemonCmd::Logs { .. }
+        | DaemonCmd::Reload
+        | DaemonCmd::Restart { .. }
+        | DaemonCmd::Install
+        | DaemonCmd::Uninstall => Err(anyhow!("daemon subcommand not implemented yet")),
     }
 }
 
