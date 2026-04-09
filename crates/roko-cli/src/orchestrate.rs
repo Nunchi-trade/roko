@@ -1965,6 +1965,7 @@ impl PlanRunner {
         let started = std::time::Instant::now();
         let max_retries = 2u32;
         let mut succeeded = false;
+        let mut budget_aborted = false;
         let exec_dir = match self.task_exec_dir(plan_id, task_id).await {
             Ok(dir) => dir,
             Err(e) => {
@@ -2001,9 +2002,21 @@ impl PlanRunner {
                 .await
             {
                 Ok(result) => {
-                    self.record_task_success(plan_id, task_id, &result, &started)
-                        .await;
-                    succeeded = true;
+                    match self
+                        .record_task_success(plan_id, task_id, &result, &started)
+                        .await
+                    {
+                        Ok(()) => {
+                            succeeded = true;
+                        }
+                        Err(e) => {
+                            eprintln!("[orchestrate] task {task_id} aborted by plan budget: {e}");
+                            let _ = self
+                                .executor
+                                .apply_event(plan_id, &ExecutorEvent::Fatal(e.to_string()));
+                            budget_aborted = true;
+                        }
+                    }
                     break;
                 }
                 Err(e) => {
@@ -2023,7 +2036,7 @@ impl PlanRunner {
             eprintln!("[orchestrate] worktree cleanup failed for {task_id}: {e}");
         }
 
-        if !succeeded {
+        if !succeeded && !budget_aborted {
             eprintln!("[orchestrate] task {task_id} failed after {max_retries} retries");
             let _ = self.executor.apply_event(
                 plan_id,
@@ -2188,8 +2201,17 @@ impl PlanRunner {
         for (tid, agent_result) in &results {
             self.add_task_spend(plan_id, tid, f64::from(agent_result.usage.cost_usd));
             if agent_result.success {
-                self.record_task_success(plan_id, tid, agent_result, &started)
-                    .await;
+                if let Err(e) = self
+                    .record_task_success(plan_id, tid, agent_result, &started)
+                    .await
+                {
+                    eprintln!("[orchestrate] task {tid} aborted by plan budget: {e}");
+                    let _ = self
+                        .executor
+                        .apply_event(plan_id, &ExecutorEvent::Fatal(e.to_string()));
+                    any_fatal = true;
+                    break;
+                }
             } else {
                 eprintln!("[orchestrate] parallel task {tid} failed");
                 let err = anyhow!("agent returned non-success for task {tid}");
@@ -2405,7 +2427,7 @@ impl PlanRunner {
         task_id: &str,
         result: &AgentResult,
         started: &std::time::Instant,
-    ) {
+    ) -> Result<()> {
         *self.per_plan_agents.entry(plan_id.to_string()).or_default() += 1;
         self.agent_calls += 1;
 
@@ -2474,6 +2496,14 @@ impl PlanRunner {
         )
         .await;
 
+        let plan_spent = self.plan_costs.get(plan_id).copied().unwrap_or(0.0);
+        if plan_spent >= self.config.budget.max_plan_usd {
+            return Err(anyhow!(
+                "plan {plan_id} budget exhausted: ${plan_spent:.2} >= ${:.2} max",
+                self.config.budget.max_plan_usd
+            ));
+        }
+
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
             tracker.mark_completed(task_id);
         }
@@ -2482,6 +2512,7 @@ impl PlanRunner {
         self.emit_agent_trace(plan_id, task_id, true, wall_ms);
 
         eprintln!("[orchestrate] task {task_id} completed");
+        Ok(())
     }
 
     /// Record a completed run and check the returned `LearningUpdate` for
@@ -3656,6 +3687,13 @@ impl PlanRunner {
 
         let task_cost = f64::from(result.usage.cost_usd);
         self.add_task_spend(plan_id, task, task_cost);
+        let plan_spent = self.plan_costs.get(plan_id).copied().unwrap_or(0.0);
+        if plan_spent >= self.config.budget.max_plan_usd {
+            return Err(anyhow!(
+                "plan {plan_id} budget exhausted: ${plan_spent:.2} >= ${:.2} max",
+                self.config.budget.max_plan_usd
+            ));
+        }
 
         // Persist the output.
         substrate
