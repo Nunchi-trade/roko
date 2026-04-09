@@ -1139,6 +1139,56 @@ impl PlanRunner {
         }
     }
 
+    fn phase_label(kind: PhaseKind) -> &'static str {
+        match kind {
+            PhaseKind::Queued => "queued",
+            PhaseKind::Enriching => "enriching",
+            PhaseKind::Implementing => "implementing",
+            PhaseKind::Gating => "gating",
+            PhaseKind::Verifying => "verifying",
+            PhaseKind::Reviewing => "reviewing",
+            PhaseKind::DocRevision => "doc-revision",
+            PhaseKind::AutoFixing => "auto-fixing",
+            PhaseKind::RegeneratingVerify => "regenerating-verify",
+            PhaseKind::Merging => "merging",
+            PhaseKind::Complete => "complete",
+            PhaseKind::Done => "done",
+            PhaseKind::Failed => "failed",
+            PhaseKind::Skipped => "skipped",
+            _ => "unknown",
+        }
+    }
+
+    fn emit_execution_event(
+        &self,
+        plan_id: &str,
+        task_id: &str,
+        phase: PhaseKind,
+        status: &str,
+    ) {
+        self.emit_server_event(crate::serve::events::ServerEvent::Execution {
+            event: crate::serve::events::ExecutionEvent {
+                plan_id: plan_id.to_string(),
+                task_id: task_id.to_string(),
+                phase: Self::phase_label(phase).to_string(),
+                status: status.to_string(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+            },
+        });
+    }
+
+    fn apply_event_and_emit(
+        &mut self,
+        plan_id: &str,
+        task_id: &str,
+        event: &ExecutorEvent,
+        status: &str,
+    ) {
+        if let Ok(new_phase) = self.executor.apply_event(plan_id, event) {
+            self.emit_execution_event(plan_id, task_id, new_phase.kind(), status);
+        }
+    }
+
     /// Gracefully shut down all managed agent processes.
     pub async fn shutdown(&self) {
         let outcomes = self.supervisor.shutdown_all().await;
@@ -1544,7 +1594,7 @@ impl PlanRunner {
             if state.current_phase.kind() == PhaseKind::Queued
                 && self.executor.can_dispatch(plan_id)
             {
-                let _ = self.executor.apply_event(plan_id, &ExecutorEvent::Start);
+                self.apply_event_and_emit(plan_id, "plan", &ExecutorEvent::Start, "transitioned");
                 self.emit_server_event(crate::serve::events::ServerEvent::PlanStarted {
                     plan_id: plan_id.clone(),
                 });
@@ -1904,6 +1954,12 @@ impl PlanRunner {
                             gate: format!("rung-{rung}"),
                             passed,
                         });
+                        self.emit_execution_event(
+                            &plan_id,
+                            &format!("rung-{rung}"),
+                            PhaseKind::Gating,
+                            if passed { "passed" } else { "failed" },
+                        );
 
                         // Store gate failure context for AutoFix phase
                         if !passed {
@@ -1961,7 +2017,12 @@ impl PlanRunner {
                             }
                             ExecutorEvent::GateFailed
                         };
-                        let _ = self.executor.apply_event(&plan_id, &event);
+                        self.apply_event_and_emit(
+                            &plan_id,
+                            &format!("rung-{rung}"),
+                            &event,
+                            "transitioned",
+                        );
 
                         // Failure-driven re-planning (§9): after 3 consecutive
                         // gate failures, attempt to re-plan.
@@ -1982,9 +2043,12 @@ impl PlanRunner {
                             EventKind::ErrorOccurred,
                             serde_json::json!({"plan_id": plan_id, "error": e.to_string()}),
                         );
-                        let _ = self
-                            .executor
-                            .apply_event(&plan_id, &ExecutorEvent::GateFailed);
+                        self.apply_event_and_emit(
+                            &plan_id,
+                            &format!("rung-{rung}"),
+                            &ExecutorEvent::GateFailed,
+                            "transitioned",
+                        );
                     }
                 }
                 // Conductor check after gate results.
@@ -1992,13 +2056,20 @@ impl PlanRunner {
                     ConductorDecision::Continue => {}
                     ConductorDecision::Restart { reason, .. } => {
                         tracing::info!("[conductor] restarting {plan_id}: {reason}");
-                        let _ = self.executor.apply_event(&plan_id, &ExecutorEvent::Start);
+                        self.apply_event_and_emit(
+                            &plan_id,
+                            "plan",
+                            &ExecutorEvent::Start,
+                            "transitioned",
+                        );
                     }
                     ConductorDecision::Fail { reason, .. } => {
                         tracing::error!("[conductor] failing {plan_id}: {reason}");
-                        let _ = self.executor.apply_event(
+                        self.apply_event_and_emit(
                             &plan_id,
+                            "plan",
                             &ExecutorEvent::Fatal(format!("conductor: {reason}")),
+                            "failed",
                         );
                     }
                     _ => {}
@@ -2018,14 +2089,20 @@ impl PlanRunner {
                     Ok(()) => {
                         match self.run_post_merge_follow_up(&plan_id).await {
                             Ok(true) => {
-                                let _ = self
-                                    .executor
-                                    .apply_event(&plan_id, &ExecutorEvent::MergeSucceeded);
+                                self.apply_event_and_emit(
+                                    &plan_id,
+                                    "merge",
+                                    &ExecutorEvent::MergeSucceeded,
+                                    "transitioned",
+                                );
                             }
                             Ok(false) => {
-                                let _ = self
-                                    .executor
-                                    .apply_event(&plan_id, &ExecutorEvent::MergeFailed);
+                                self.apply_event_and_emit(
+                                    &plan_id,
+                                    "merge",
+                                    &ExecutorEvent::MergeFailed,
+                                    "failed",
+                                );
                             }
                             Err(e) => {
                                 tracing::error!(
@@ -2037,17 +2114,23 @@ impl PlanRunner {
                                 );
                                 // Keep historical behavior on infrastructure errors:
                                 // merge itself succeeded.
-                                let _ = self
-                                    .executor
-                                    .apply_event(&plan_id, &ExecutorEvent::MergeSucceeded);
+                                self.apply_event_and_emit(
+                                    &plan_id,
+                                    "merge",
+                                    &ExecutorEvent::MergeSucceeded,
+                                    "transitioned",
+                                );
                             }
                         }
                     }
                     Err(e) => {
                         tracing::error!("[orchestrate] merge failed for {plan_id}: {e}");
-                        let _ = self
-                            .executor
-                            .apply_event(&plan_id, &ExecutorEvent::MergeFailed);
+                        self.apply_event_and_emit(
+                            &plan_id,
+                            "merge",
+                            &ExecutorEvent::MergeFailed,
+                            "failed",
+                        );
                     }
                 }
                 // Conductor check after merge results.
@@ -2055,13 +2138,20 @@ impl PlanRunner {
                     ConductorDecision::Continue => {}
                     ConductorDecision::Restart { reason, .. } => {
                         tracing::info!("[conductor] restarting {plan_id}: {reason}");
-                        let _ = self.executor.apply_event(&plan_id, &ExecutorEvent::Start);
+                        self.apply_event_and_emit(
+                            &plan_id,
+                            "plan",
+                            &ExecutorEvent::Start,
+                            "transitioned",
+                        );
                     }
                     ConductorDecision::Fail { reason, .. } => {
                         tracing::error!("[conductor] failing {plan_id}: {reason}");
-                        let _ = self.executor.apply_event(
+                        self.apply_event_and_emit(
                             &plan_id,
+                            "plan",
                             &ExecutorEvent::Fatal(format!("conductor: {reason}")),
+                            "failed",
                         );
                     }
                     _ => {}
@@ -2082,7 +2172,7 @@ impl PlanRunner {
                 );
                 // Ensure TaskTracker exists for resume-from-snapshot case
                 self.ensure_task_tracker(&plan_id);
-                let _ = self.executor.apply_event(&plan_id, &ExecutorEvent::Start);
+                self.apply_event_and_emit(&plan_id, "plan", &ExecutorEvent::Start, "transitioned");
             }
             ExecutorAction::PausePlan { plan_id } => {
                 tracing::info!("[orchestrate] PausePlan {plan_id}");
@@ -2098,9 +2188,7 @@ impl PlanRunner {
                     EventKind::ErrorOccurred,
                     serde_json::json!({"plan_id": &plan_id, "error": reason.clone()}),
                 );
-                let _ = self
-                    .executor
-                    .apply_event(&plan_id, &ExecutorEvent::Fatal(reason));
+                self.apply_event_and_emit(&plan_id, "plan", &ExecutorEvent::Fatal(reason), "failed");
             }
             ExecutorAction::CompletePlan { plan_id } => {
                 tracing::info!("[orchestrate] CompletePlan {plan_id}");
@@ -2112,6 +2200,7 @@ impl PlanRunner {
                     EventKind::PhaseTransition,
                     serde_json::json!({"plan_id": &plan_id, "event": "CompletePlan"}),
                 );
+                self.emit_execution_event(&plan_id, "plan", PhaseKind::Complete, "transitioned");
             }
             ExecutorAction::Reorder {
                 plan_id,
@@ -2191,13 +2280,15 @@ impl PlanRunner {
 
                 let event = ExecutorEvent::EnrichmentDone;
                 self.log_transition(plan_id, &event);
-                let _ = self.executor.apply_event(plan_id, &event);
+                self.apply_event_and_emit(plan_id, "enrich", &event, "transitioned");
             }
             Err(e) => {
                 tracing::error!("[orchestrate] Enrichment failed for {plan_id}: {e}");
-                let _ = self.executor.apply_event(
+                self.apply_event_and_emit(
                     plan_id,
+                    "enrich",
                     &ExecutorEvent::Fatal(format!("enrichment failed: {e}")),
+                    "failed",
                 );
             }
         }
@@ -2247,7 +2338,12 @@ impl PlanRunner {
             if all_done {
                 let event = ExecutorEvent::ImplementationDone;
                 self.log_transition(plan_id, &event);
-                let _ = self.executor.apply_event(plan_id, &event);
+                let task_id = self
+                    .task_trackers
+                    .get(plan_id)
+                    .and_then(|tracker| tracker.last_impl_task_id.clone())
+                    .unwrap_or_else(|| "implementation".into());
+                self.apply_event_and_emit(plan_id, &task_id, &event, "transitioned");
             } else if self
                 .task_trackers
                 .get(plan_id)
@@ -2261,9 +2357,11 @@ impl PlanRunner {
                 tracing::error!(
                     "[orchestrate] {plan_id}: no ready tasks but not all done — blocked or failed"
                 );
-                let _ = self.executor.apply_event(
+                self.apply_event_and_emit(
                     plan_id,
+                    "implementation",
                     &ExecutorEvent::Fatal("all remaining tasks blocked or failed".into()),
+                    "failed",
                 );
             }
             return;
@@ -2292,20 +2390,27 @@ impl PlanRunner {
             tracing::info!("[orchestrate] {plan_id}: all tasks done, advancing to Gating");
             let event = ExecutorEvent::ImplementationDone;
             self.log_transition(plan_id, &event);
-            let _ = self.executor.apply_event(plan_id, &event);
+            let task_id = self
+                .task_trackers
+                .get(plan_id)
+                .and_then(|tracker| tracker.last_impl_task_id.clone())
+                .unwrap_or_else(|| "implementation".into());
+            self.apply_event_and_emit(plan_id, &task_id, &event, "transitioned");
         }
 
         // Conductor check after agent dispatch completes.
         match self.run_conductor_check(plan_id) {
             ConductorDecision::Restart { reason, .. } => {
                 tracing::info!("[conductor] restarting {plan_id}: {reason}");
-                let _ = self.executor.apply_event(plan_id, &ExecutorEvent::Start);
+                self.apply_event_and_emit(plan_id, "plan", &ExecutorEvent::Start, "transitioned");
             }
             ConductorDecision::Fail { reason, .. } => {
                 tracing::error!("[conductor] failing {plan_id}: {reason}");
-                let _ = self.executor.apply_event(
+                self.apply_event_and_emit(
                     plan_id,
+                    "plan",
                     &ExecutorEvent::Fatal(format!("conductor: {reason}")),
+                    "failed",
                 );
             }
             _ => {}
@@ -2351,11 +2456,13 @@ impl PlanRunner {
                 );
                 self.record_task_failure(plan_id, task_id, &e, &started, None)
                     .await;
-                let _ = self.executor.apply_event(
+                self.apply_event_and_emit(
                     plan_id,
+                    task_id,
                     &ExecutorEvent::Fatal(format!(
                         "failed to acquire worktree for task {task_id}: {e}"
                     )),
+                    "failed",
                 );
                 return;
             }
@@ -2388,9 +2495,12 @@ impl PlanRunner {
                         }
                         Err(e) => {
                             tracing::error!("[orchestrate] task {task_id} aborted by plan budget: {e}");
-                            let _ = self
-                                .executor
-                                .apply_event(plan_id, &ExecutorEvent::Fatal(e.to_string()));
+                            self.apply_event_and_emit(
+                                plan_id,
+                                task_id,
+                                &ExecutorEvent::Fatal(e.to_string()),
+                                "failed",
+                            );
                             budget_aborted = true;
                         }
                     }
@@ -2415,9 +2525,11 @@ impl PlanRunner {
 
         if !succeeded && !budget_aborted {
             tracing::error!("[orchestrate] task {task_id} failed after {max_retries} retries");
-            let _ = self.executor.apply_event(
+            self.apply_event_and_emit(
                 plan_id,
+                task_id,
                 &ExecutorEvent::Fatal(format!("task {task_id} failed after retries")),
+                "failed",
             );
         }
     }
@@ -2609,9 +2721,12 @@ impl PlanRunner {
                     .await
                 {
                     tracing::error!("[orchestrate] task {tid} aborted by plan budget: {e}");
-                    let _ = self
-                        .executor
-                        .apply_event(plan_id, &ExecutorEvent::Fatal(e.to_string()));
+                    self.apply_event_and_emit(
+                        plan_id,
+                        tid,
+                        &ExecutorEvent::Fatal(e.to_string()),
+                        "failed",
+                    );
                     any_fatal = true;
                     break;
                 }
@@ -2640,11 +2755,11 @@ impl PlanRunner {
                 .is_some_and(|t| t.ready_tasks(&completed_plans).is_empty())
         {
             // All remaining tasks are blocked by failures.
-            let _ = self.executor.apply_event(
+            self.apply_event_and_emit(
                 plan_id,
-                &ExecutorEvent::Fatal(
-                    "parallel batch had failures; remaining tasks blocked".into(),
-                ),
+                "implementation",
+                &ExecutorEvent::Fatal("parallel batch had failures; remaining tasks blocked".into()),
+                "failed",
             );
         }
     }
@@ -2911,6 +3026,8 @@ impl PlanRunner {
             tracker.mark_completed(task_id);
         }
 
+        self.emit_execution_event(plan_id, task_id, PhaseKind::Implementing, "completed");
+
         // Emit observability trace event for the successful agent dispatch.
         self.emit_agent_trace(plan_id, task_id, true, wall_ms);
 
@@ -2996,9 +3113,7 @@ impl PlanRunner {
                     tracker.gate_failure_count = 0;
                 }
                 // Reset to implementing phase so the updated plan gets executed.
-                let _ = self
-                    .executor
-                    .apply_event(plan_id, &ExecutorEvent::EnrichmentDone);
+                self.apply_event_and_emit(plan_id, "replan", &ExecutorEvent::EnrichmentDone, "transitioned");
             }
             Err(e) => {
                 tracing::error!("[orchestrate] Re-plan failed for {plan_id}: {e}");
@@ -3243,13 +3358,15 @@ impl PlanRunner {
 
                 let event = ExecutorEvent::AutoFixDone;
                 self.log_transition(plan_id, &event);
-                let _ = self.executor.apply_event(plan_id, &event);
+                self.apply_event_and_emit(plan_id, "fix", &event, "transitioned");
             }
             Err(e) => {
                 tracing::error!("[orchestrate] AutoFix failed for {plan_id}: {e}");
-                let _ = self.executor.apply_event(
+                self.apply_event_and_emit(
                     plan_id,
+                    "fix",
                     &ExecutorEvent::Fatal(format!("autofix failed: {e}")),
+                    "failed",
                 );
             }
         }
@@ -3292,14 +3409,22 @@ impl PlanRunner {
                 let event = ExecutorEvent::VerifyRegenDone;
                 self.log_transition(plan_id, &event);
                 if self.executor.apply_event(plan_id, &event).is_ok() {
+                    self.emit_execution_event(
+                        plan_id,
+                        "regen-verify",
+                        PhaseKind::Verifying,
+                        "transitioned",
+                    );
                     self.finish_verify_round(plan_id).await;
                 }
             }
             Err(e) => {
                 tracing::error!("[orchestrate] RegenVerify failed for {plan_id}: {e}");
-                let _ = self.executor.apply_event(
+                self.apply_event_and_emit(
                     plan_id,
+                    "regen-verify",
                     &ExecutorEvent::Fatal(format!("regen-verify failed: {e}")),
+                    "failed",
                 );
             }
         }
@@ -3312,9 +3437,12 @@ impl PlanRunner {
                 if let Some(state) = self.executor.plan_state_mut(plan_id) {
                     state.last_error = None;
                 }
-                let _ = self
-                    .executor
-                    .apply_event(plan_id, &ExecutorEvent::VerifyPassed);
+                self.apply_event_and_emit(
+                    plan_id,
+                    "verify",
+                    &ExecutorEvent::VerifyPassed,
+                    "transitioned",
+                );
             }
             Err((task_id, phase, command, error_output)) => {
                 let msg =
@@ -3357,9 +3485,12 @@ impl PlanRunner {
                 if let Some(state) = self.executor.plan_state_mut(plan_id) {
                     state.last_error = Some(format!("{error:#}"));
                 }
-                let _ = self
-                    .executor
-                    .apply_event(plan_id, &ExecutorEvent::VerifyFailed);
+                self.apply_event_and_emit(
+                    plan_id,
+                    "verify",
+                    &ExecutorEvent::VerifyFailed,
+                    "transitioned",
+                );
             }
         }
     }
@@ -3434,7 +3565,7 @@ impl PlanRunner {
                 if approved {
                     let event = ExecutorEvent::ReviewApproved;
                     self.log_transition(plan_id, &event);
-                    let _ = self.executor.apply_event(plan_id, &event);
+                    self.apply_event_and_emit(plan_id, "review", &event, "transitioned");
                 } else {
                     // Store feedback and reset tracker for reimplementation
                     if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
@@ -3456,7 +3587,7 @@ impl PlanRunner {
                     }
                     let event = ExecutorEvent::ReviewRejected;
                     self.log_transition(plan_id, &event);
-                    let _ = self.executor.apply_event(plan_id, &event);
+                    self.apply_event_and_emit(plan_id, "review", &event, "transitioned");
                 }
             }
             Err(e) => {
@@ -3464,7 +3595,7 @@ impl PlanRunner {
                 tracing::error!("[orchestrate] Review failed for {plan_id}: {e} — auto-approving");
                 let event = ExecutorEvent::ReviewApproved;
                 self.log_transition(plan_id, &event);
-                let _ = self.executor.apply_event(plan_id, &event);
+                self.apply_event_and_emit(plan_id, "review", &event, "transitioned");
             }
         }
     }
@@ -3517,7 +3648,7 @@ impl PlanRunner {
         // Always advance regardless of success/failure
         let event = ExecutorEvent::DocRevisionDone;
         self.log_transition(plan_id, &event);
-        let _ = self.executor.apply_event(plan_id, &event);
+        self.apply_event_and_emit(plan_id, "docs", &event, "transitioned");
     }
 
     /// Generic fallback agent handler with retry loop + model escalation.
@@ -3579,7 +3710,7 @@ impl PlanRunner {
                     }
                     let event = self.generic_completion_event(plan_id);
                     self.log_transition(plan_id, &event);
-                    let _ = self.executor.apply_event(plan_id, &event);
+                    self.apply_event_and_emit(plan_id, task, &event, "transitioned");
                     succeeded = true;
                     break;
                 }
@@ -3613,11 +3744,13 @@ impl PlanRunner {
                             EventKind::ErrorOccurred,
                             serde_json::json!({"plan_id": plan_id, "error": e.to_string(), "attempts": attempt + 1}),
                         );
-                        let _ = self.executor.apply_event(
+                        self.apply_event_and_emit(
                             plan_id,
+                            task,
                             &ExecutorEvent::Fatal(format!(
                                 "agent error after {attempt} retries: {e}"
                             )),
+                            "failed",
                         );
                     }
                 }

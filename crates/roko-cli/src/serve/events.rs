@@ -4,6 +4,22 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Progress emitted by the execution loop as plans move through phases,
+/// complete tasks, and finish gate checks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionEvent {
+    /// Plan identifier.
+    pub plan_id: String,
+    /// Task identifier, if applicable.
+    pub task_id: String,
+    /// Phase the execution is in or transitioning to.
+    pub phase: String,
+    /// Progress status, such as `transitioned`, `completed`, `passed`, or `failed`.
+    pub status: String,
+    /// ISO-8601 UTC timestamp.
+    pub timestamp: String,
+}
+
 /// A tagged union of all events the HTTP server can emit.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +43,12 @@ pub enum ServerEvent {
         task_id: String,
         gate: String,
         passed: bool,
+    },
+
+    /// Execution progress update streamed from the orchestrator.
+    Execution {
+        #[serde(flatten)]
+        event: ExecutionEvent,
     },
 
     /// The plan transitioned between execution phases.
