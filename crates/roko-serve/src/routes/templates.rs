@@ -34,7 +34,9 @@ async fn list_templates(State(state): State<Arc<AppState>>) -> Result<Json<Value
             json!({
                 "name": t.name,
                 "description": t.description,
-                "model": t.agent.model,
+                "model": t.model,
+                "role": t.role,
+                "output_format": t.output_format,
             })
         })
         .collect();
@@ -225,7 +227,7 @@ async fn deploy_template_cloud(
     let rendered_prompt =
         crate::templates::TemplateRegistry::render_prompt(&template, &body.params);
     let mut deploy_template = template.clone();
-    deploy_template.prompt.system = rendered_prompt;
+    deploy_template.system_prompt = rendered_prompt;
 
     let template_json = serde_json::to_vec(&deploy_template)
         .map_err(|e| ApiError::internal(format!("serialize template: {e}")))?;

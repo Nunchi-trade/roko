@@ -78,7 +78,7 @@ async fn create_deployment(
     // Render prompt with params and encode template as base64 JSON
     let rendered_prompt = TemplateRegistry::render_prompt(&template, &req.params);
     let mut deploy_template = template.clone();
-    deploy_template.prompt.system = rendered_prompt;
+    deploy_template.system_prompt = rendered_prompt;
 
     let template_json = serde_json::to_vec(&deploy_template)
         .map_err(|e| ApiError::internal(format!("serialize template: {e}")))?;

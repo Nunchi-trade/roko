@@ -1,15 +1,35 @@
 //! Agent template registry.
 //!
 //! Templates are TOML files stored under `.roko/templates/` that define
-//! reusable agent configurations (model, prompt, gates, parameters).
-//! The [`TemplateRegistry`] scans the directory on startup and supports
-//! CRUD operations plus simple `{{param}}` interpolation.
+//! reusable agent configurations. The [`TemplateRegistry`] scans the
+//! directory on startup and supports CRUD operations plus simple
+//! `{{param}}` interpolation.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+
+/// The expected output shape for an agent template.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TemplateOutputFormat {
+    /// Markdown-formatted output.
+    Markdown,
+    /// JSON-formatted output.
+    Json,
+    /// TOML-formatted output.
+    Toml,
+    /// No structured output requirement.
+    None,
+}
+
+impl Default for TemplateOutputFormat {
+    fn default() -> Self {
+        Self::Markdown
+    }
+}
 
 /// A reusable agent configuration template.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,67 +38,28 @@ pub struct AgentTemplate {
     pub name: String,
     /// Human-readable description.
     pub description: String,
-    /// Semver version string.
-    pub version: String,
-    /// Agent execution settings.
-    pub agent: TemplateAgent,
-    /// Prompt configuration.
-    pub prompt: TemplatePrompt,
-    /// Gate pipeline for this template.
-    #[serde(default)]
-    pub gates: TemplateGates,
-    /// User-supplied parameters for prompt interpolation.
-    #[serde(default)]
-    pub params: Vec<TemplateParam>,
-}
-
-/// Agent execution settings within a template.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TemplateAgent {
-    /// CLI command to invoke (e.g. `"claude"`).
-    pub command: String,
-    /// Model slug (e.g. `"claude-sonnet-4-20250514"`).
+    /// Default model slug or tier label.
     #[serde(default = "default_model")]
     pub model: String,
+    /// Role used to derive tool restrictions and prompt defaults.
+    pub role: String,
+    /// System prompt template with `{{variables}}` interpolation.
+    pub system_prompt: String,
     /// Maximum agent turns before forced stop.
     #[serde(default = "default_max_turns")]
     pub max_turns: u32,
-}
-
-/// Prompt sections within a template.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TemplatePrompt {
-    /// System prompt text (may contain `{{param}}` markers).
-    pub system: String,
-    /// Additional prompt section names to include.
+    /// Expected output format.
     #[serde(default)]
-    pub sections: Vec<String>,
-}
-
-/// Gate pipeline configuration within a template.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct TemplateGates {
-    /// Ordered list of gate names to run on agent output.
+    pub output_format: TemplateOutputFormat,
+    /// MCP server names required by this template.
     #[serde(default)]
-    pub names: Vec<String>,
-}
-
-/// A parameter that can be supplied at invocation time.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TemplateParam {
-    /// Parameter name (used as the `{{name}}` marker).
-    pub name: String,
-    /// Human-readable description.
+    pub mcp_servers: Vec<String>,
+    /// Tool allowlist glob patterns.
     #[serde(default)]
-    pub description: String,
-    /// Type hint: `"string"`, `"number"`, `"bool"`, `"select"`.
-    pub param_type: String,
-    /// For `"select"` types, the allowed values.
+    pub allowed_tools: Vec<String>,
+    /// Tool denylist glob patterns.
     #[serde(default)]
-    pub options: Vec<String>,
-    /// Default value (JSON-typed).
-    #[serde(default)]
-    pub default: serde_json::Value,
+    pub denied_tools: Vec<String>,
 }
 
 /// In-memory registry of agent templates backed by `.roko/templates/`.
@@ -156,7 +137,7 @@ impl TemplateRegistry {
     /// Render a template's system prompt by interpolating `{{param}}` markers
     /// with the supplied parameter values.
     pub fn render_prompt(template: &AgentTemplate, params: &HashMap<String, String>) -> String {
-        let mut out = template.prompt.system.clone();
+        let mut out = template.system_prompt.clone();
         for (key, value) in params {
             let marker = format!("{{{{{key}}}}}");
             out = out.replace(&marker, value);
@@ -166,9 +147,9 @@ impl TemplateRegistry {
 }
 
 fn default_model() -> String {
-    "claude-sonnet-4-20250514".into()
+    "sonnet".into()
 }
 
 const fn default_max_turns() -> u32 {
-    10
+    20
 }

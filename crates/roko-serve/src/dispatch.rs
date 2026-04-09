@@ -18,12 +18,11 @@ use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use chrono::Utc;
 use parking_lot::{Mutex, RwLock};
-use roko_agent::{Agent, AgentResult, ClaudeCliAgent, ExecAgent};
+use roko_agent::{Agent, AgentResult, ClaudeCliAgent};
 use roko_core::config::schema::{RokoConfig, SubscriptionConfig, SubscriptionFilterConfig};
 use roko_core::tool::ExternalAction;
-use roko_core::{Body, Context as RokoContext, Gate, Kind, Provenance, Signal};
+use roko_core::{Body, Context as RokoContext, Kind, Provenance, Signal};
 use roko_core::{ContentHash, Verdict};
-use roko_gate::{ClippyGate, CompileGate, DiffGate, DiffPayload, GatePayload, TestGate};
 use roko_learn::cascade_router::CascadeRouter;
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage as EpisodeUsage};
@@ -754,7 +753,7 @@ async fn dispatch_agent(
                     Body::text(format!("dispatch failed: {err}")),
                 )
                 .provenance(Provenance::trusted("roko-serve"))
-                .tag("agent", &template.agent.command)
+                .tag("agent", "claude")
                 .tag("failed", "true")
                 .build();
             DispatchOutcome {
@@ -799,7 +798,7 @@ async fn dispatch_template(
                     Body::text(format!("dispatch failed: {err}")),
                 )
                 .provenance(Provenance::trusted("roko-serve"))
-                .tag("agent", &template.agent.command)
+                .tag("agent", "claude")
                 .tag("failed", "true")
                 .build();
             let result = AgentResult::fail(failure_output);
@@ -820,7 +819,7 @@ async fn dispatch_template(
     let output_text = signal_body_to_text(&output.body);
     let agent_name = output
         .tag("agent")
-        .map_or_else(|| template.agent.command.clone(), ToString::to_string);
+        .map_or_else(|| "claude".to_string(), ToString::to_string);
 
     state.event_bus.publish(ServerEvent::AgentOutput {
         agent_id: agent_name.clone(),
@@ -862,21 +861,10 @@ fn build_agent(
     system_prompt: &str,
     workdir: &Path,
 ) -> Result<Box<dyn Agent>> {
-    if template.agent.command == "claude" {
-        let agent = ClaudeCliAgent::new(
-            &template.agent.command,
-            workdir,
-            template.agent.model.clone(),
-        )
+    let agent = ClaudeCliAgent::new("claude", workdir, template.model.clone())
         .with_system_prompt(system_prompt.to_string())
         .with_timeout_ms(120_000);
-        Ok(Box::new(agent))
-    } else {
-        let agent = ExecAgent::new(&template.agent.command, Vec::new())
-            .with_timeout_ms(120_000)
-            .with_name(format!("exec:{}", template.agent.command));
-        Ok(Box::new(agent))
-    }
+    Ok(Box::new(agent))
 }
 
 fn dispatch_context(template: &AgentTemplate, signal: &Signal) -> RokoContext {
@@ -902,14 +890,6 @@ fn build_dispatch_signal(template: &AgentTemplate, signal: &Signal) -> Result<Si
     let mut body = String::new();
     body.push_str("Signal context:\n");
     body.push_str(&serde_json::to_string_pretty(&context)?);
-    if !template.prompt.sections.is_empty() {
-        body.push_str("\n\nTemplate sections:\n");
-        for section in &template.prompt.sections {
-            body.push_str("- ");
-            body.push_str(section);
-            body.push('\n');
-        }
-    }
 
     Ok(Signal::builder(Kind::Prompt)
         .body(Body::text(body))
@@ -932,68 +912,12 @@ fn signal_body_to_text(body: &Body) -> String {
 }
 
 async fn run_template_gates(
-    state: &Arc<AppState>,
-    template: &AgentTemplate,
+    _state: &Arc<AppState>,
+    _template: &AgentTemplate,
     output: &Signal,
 ) -> Vec<Verdict> {
-    if template.gates.names.is_empty() {
-        return Vec::new();
-    }
-
-    let mut verdicts = Vec::new();
-    for gate_name in &template.gates.names {
-        let verdict = run_named_gate(state, gate_name, output).await;
-        verdicts.push(verdict);
-    }
-    verdicts
-}
-
-async fn run_named_gate(state: &Arc<AppState>, gate_name: &str, output: &Signal) -> Verdict {
-    let ctx = RokoContext::now().with_attr("gate", gate_name.to_string());
-    let payload_signal = match gate_payload_signal(&state.workdir, gate_name, output) {
-        Ok(signal) => signal,
-        Err(err) => {
-            warn!(error = %err, gate = gate_name, "failed to build gate payload");
-            return Verdict::fail(gate_name, format!("failed to build gate payload: {err}"));
-        }
-    };
-
-    match gate_name {
-        "compile" => CompileGate::cargo().verify(&payload_signal, &ctx).await,
-        "test" => TestGate::cargo().verify(&payload_signal, &ctx).await,
-        "clippy" => ClippyGate::cargo().verify(&payload_signal, &ctx).await,
-        "diff" => DiffGate::new().verify(&payload_signal, &ctx).await,
-        other => {
-            warn!(gate = other, "unsupported template gate");
-            Verdict::fail(other, "unsupported template gate")
-        }
-    }
-}
-
-fn gate_payload_signal(workdir: &Path, gate_name: &str, output: &Signal) -> Result<Signal> {
-    let label = format!("{gate_name}:{}", output.id.to_hex());
-    if gate_name == "diff" {
-        let diff = std::process::Command::new("git")
-            .arg("diff")
-            .current_dir(workdir)
-            .output()
-            .context("run git diff")?;
-        let diff_text = String::from_utf8_lossy(&diff.stdout).into_owned();
-        let payload = DiffPayload::new(diff_text);
-        Ok(Signal::builder(Kind::Task)
-            .body(Body::from_json(&payload)?)
-            .provenance(Provenance::trusted("roko-serve"))
-            .tag("gate", gate_name)
-            .tag("label", label)
-            .build())
-    } else {
-        let payload = GatePayload::in_dir(workdir).with_label(label);
-        Ok(Signal::builder(Kind::Task)
-            .body(Body::from_json(&payload)?)
-            .provenance(Provenance::trusted("roko-serve"))
-            .tag("gate", gate_name)
-            .build())
-    }
+    let _ = output;
+    Vec::new()
 }
 
 async fn record_template_run(state: &Arc<AppState>, template_name: &str, success: bool) {
@@ -1023,7 +947,7 @@ async fn append_dispatch_episode(
         .result
         .output
         .tag("agent")
-        .map_or_else(|| template.agent.command.clone(), ToString::to_string);
+        .map_or_else(|| "claude".to_string(), ToString::to_string);
     let episode_id = Uuid::new_v4().to_string();
     let turns = 1_u64;
     let tokens_used = u64::from(outcome.result.usage.total_tokens());
@@ -1033,7 +957,7 @@ async fn append_dispatch_episode(
     episode.id = episode_id.clone();
     episode.episode_id = episode_id;
     episode.agent_template = template.name.clone();
-    episode.model = template.agent.model.clone();
+    episode.model = template.model.clone();
     episode.trigger_kind = signal.kind.as_str().to_string();
     episode.trigger_signal_hash = signal.id.to_hex();
     episode.started_at = started_at;
@@ -1089,13 +1013,13 @@ async fn record_cascade_router_outcome(
         let mut seen = HashSet::new();
 
         for loaded in templates.list() {
-            let model = loaded.agent.model.clone();
+            let model = loaded.model.clone();
             if seen.insert(model.clone()) {
                 slugs.push(model);
             }
         }
 
-        let model = template.agent.model.clone();
+        let model = template.model.clone();
         if seen.insert(model.clone()) {
             slugs.push(model);
         }
@@ -1103,7 +1027,7 @@ async fn record_cascade_router_outcome(
         slugs
     };
 
-    record_cascade_router_observation(&state.workdir, model_slugs, &template.agent.model, success)?;
+    record_cascade_router_observation(&state.workdir, model_slugs, &template.model, success)?;
     Ok(())
 }
 

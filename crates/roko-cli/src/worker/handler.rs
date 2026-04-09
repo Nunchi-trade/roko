@@ -68,7 +68,7 @@ async fn status(State(state): State<Arc<WorkerState>>) -> impl IntoResponse {
     let last_task = state.last_task.read().await.clone();
     Json(json!({
         "template": state.template.name,
-        "model": state.template.agent.model,
+        "model": state.template.model,
         "last_task": last_task,
         "uptime_secs": state.started_at.elapsed().as_secs(),
     }))
@@ -106,8 +106,9 @@ async fn run_task(
 
     // Build a Config from the template's agent settings
     let mut config = Config::default();
-    config.agent.command = state.template.agent.command.clone();
-    config.agent.model = Some(state.template.agent.model.clone());
+    config.agent.command = "claude".to_string();
+    config.agent.model = Some(state.template.model.clone());
+    config.prompt.role = state.template.role.clone();
 
     // Run the universal loop
     let result = match crate::run::run_once(&workdir, &config, &prompt).await {
