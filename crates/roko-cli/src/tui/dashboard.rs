@@ -1413,6 +1413,7 @@ fn load_plan_summaries(root: &Path, state: &Value) -> Vec<PlanSummary> {
             title,
             task_count,
             completed,
+            old_format: false,
         });
     }
 

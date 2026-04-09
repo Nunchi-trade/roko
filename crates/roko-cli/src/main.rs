@@ -1176,6 +1176,24 @@ fn cmd_inject(
     Ok(EXIT_SUCCESS)
 }
 
+fn plan_has_old_tasks_format(workdir: &Path, plan_path: &Path) -> bool {
+    let Some(plan_stem) = plan_path.file_stem() else {
+        return false;
+    };
+
+    let tasks_path = roko_cli::plan::plans_dir(workdir)
+        .join(plan_stem)
+        .join("tasks.toml");
+    if !tasks_path.is_file() {
+        return false;
+    }
+
+    matches!(
+        roko_cli::task_parser::TasksFile::validate_modern_fields(&tasks_path),
+        Ok(issues) if !issues.is_empty()
+    )
+}
+
 async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
     match cmd {
         PlanCmd::List { workdir } => {
@@ -1194,6 +1212,7 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                         title: "(unloaded)".into(),
                         task_count: 0,
                         completed: false,
+                        old_format: plan_has_old_tasks_format(&wd, p),
                     }
                 })
                 .collect();
