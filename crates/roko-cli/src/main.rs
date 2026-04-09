@@ -26,7 +26,7 @@ use roko_learn::efficiency::compute_role_profiles;
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
 use roko_learn::prompt_experiment::ExperimentStore;
 use roko_learn::runtime_feedback::read_efficiency_events;
-use roko_neuro::KnowledgeStore;
+use roko_neuro::{DEFAULT_GC_MIN_CONFIDENCE, KnowledgeStore};
 use std::collections::BTreeMap;
 use std::env;
 use std::fmt::Write as _;
@@ -448,6 +448,12 @@ enum NeuroCmd {
     },
     /// Show aggregate statistics for the durable knowledge store.
     Stats {
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Run garbage collection on the durable knowledge store.
+    Gc {
         /// Working directory (default: cwd).
         #[arg(long)]
         workdir: Option<PathBuf>,
@@ -2051,6 +2057,47 @@ async fn cmd_neuro(cli: &Cli, cmd: NeuroCmd) -> Result<i32> {
 
             Ok(EXIT_SUCCESS)
         }
+        NeuroCmd::Gc { workdir } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            let store = KnowledgeStore::for_workdir(&wd);
+            let before = store.stats().with_context(|| {
+                format!(
+                    "read knowledge store stats from {}",
+                    store.path().display()
+                )
+            })?;
+            store.gc(DEFAULT_GC_MIN_CONFIDENCE).with_context(|| {
+                format!("garbage collect knowledge store at {}", store.path().display())
+            })?;
+            let after = store.stats().with_context(|| {
+                format!(
+                    "read knowledge store stats from {} after gc",
+                    store.path().display()
+                )
+            })?;
+            let removed = before.total_entries.saturating_sub(after.total_entries);
+
+            if cli.json {
+                let payload = serde_json::json!({
+                    "workdir": wd,
+                    "path": store.path(),
+                    "threshold": DEFAULT_GC_MIN_CONFIDENCE,
+                    "before": before.total_entries,
+                    "after": after.total_entries,
+                    "removed": removed,
+                });
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+                return Ok(EXIT_SUCCESS);
+            }
+
+            println!("Knowledge GC for {}:", store.path().display());
+            println!("  threshold: {:.3}", DEFAULT_GC_MIN_CONFIDENCE);
+            println!("  before: {}", before.total_entries);
+            println!("  after: {}", after.total_entries);
+            println!("  removed entries: {}", removed);
+
+            Ok(EXIT_SUCCESS)
+        }
     }
 }
 
@@ -3099,6 +3146,17 @@ mod tests {
             cli.command,
             Some(Command::Neuro {
                 cmd: NeuroCmd::Stats { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_parses_neuro_gc_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "neuro", "gc"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Neuro {
+                cmd: NeuroCmd::Gc { .. }
             })
         ));
     }
