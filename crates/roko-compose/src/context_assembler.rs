@@ -1,4 +1,4 @@
-//! Stage 1 context gathering for the 5-stage assembly pipeline.
+//! Stage 1 gathering and Stage 2 ranking for the 5-stage assembly pipeline.
 //!
 //! This module collects candidate context chunks from durable memory,
 //! recent episodes, task-local file context, and recent plan signals.
@@ -10,12 +10,16 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
+use chrono::Utc;
 use roko_core::{Body, Signal};
 use roko_learn::episode_logger::Episode;
 use roko_neuro::{EpisodeStore, KnowledgeEntry, KnowledgeStore};
 use serde::de::DeserializeOwned;
 
 use crate::{ContextSource, TaskInput};
+
+#[cfg(feature = "hdc")]
+use bardo_primitives::hdc::text_fingerprint;
 
 /// A single gathered context candidate.
 #[derive(Clone, Debug, PartialEq)]
@@ -26,9 +30,15 @@ pub struct ContextChunk {
     pub source: ContextSource,
     /// Heuristic relevance score in `[0.0, 1.0+]`.
     pub relevance: f64,
+    /// Pragmatic value proxy for active-inference scoring.
+    pub track_record: Option<f64>,
+    /// Confidence proxy for fallback scoring and uncertainty balancing.
+    pub confidence: Option<f64>,
+    /// Recency proxy for fallback scoring.
+    pub recency: Option<f64>,
 }
 
-/// Stage 1 gatherer for context assembly.
+/// Stage 1/2 gatherer and ranker for context assembly.
 #[derive(Debug, Clone)]
 pub struct ContextAssembler {
     knowledge_store: Arc<KnowledgeStore>,
@@ -73,7 +83,35 @@ impl ContextAssembler {
         chunks.extend(self.gather_read_files(workdir, task));
         chunks.extend(self.gather_recent_signals(plan_id, signals_path.as_ref()));
 
+        self.rank(&task_text, &mut chunks);
         chunks
+    }
+
+    /// Rank gathered chunks by descending score.
+    fn rank(&self, task_text: &str, chunks: &mut Vec<ContextChunk>) {
+        chunks.sort_by(|left, right| {
+            let right_score = score_chunk(task_text, right);
+            let left_score = score_chunk(task_text, left);
+            right_score
+                .partial_cmp(&left_score)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| {
+                    source_priority(&right.source)
+                        .partial_cmp(&source_priority(&left.source))
+                        .unwrap_or(Ordering::Equal)
+                })
+                .then_with(|| {
+                    right
+                        .relevance
+                        .partial_cmp(&left.relevance)
+                        .unwrap_or(Ordering::Equal)
+                })
+                .then_with(|| right.content.len().cmp(&left.content.len()))
+        });
+
+        for chunk in chunks.iter_mut() {
+            chunk.relevance = score_chunk(task_text, chunk);
+        }
     }
 
     fn gather_knowledge(&self, task_text: &str) -> Vec<ContextChunk> {
@@ -155,6 +193,9 @@ impl ContextAssembler {
                     lines: rf.lines.clone(),
                 },
                 relevance,
+                track_record: None,
+                confidence: Some(0.65),
+                recency: Some(relevance),
             });
         }
         chunks
@@ -185,6 +226,9 @@ impl ContextAssembler {
                         kind: signal.kind.as_str().to_string(),
                     },
                     relevance,
+                    track_record: None,
+                    confidence: Some(0.45),
+                    recency: Some(signal_recency_score(signal.created_at_ms)),
                 }
             })
             .collect()
@@ -193,10 +237,13 @@ impl ContextAssembler {
 
 fn knowledge_chunk(entry: KnowledgeEntry, idx: usize) -> ContextChunk {
     let relevance = (1.0 - (idx as f64 * 0.07)).max(0.3);
+    let confidence = entry.confidence.clamp(0.0, 1.0);
+    let recency = recency_score(entry.created_at.timestamp());
+    let track_record = knowledge_track_record(confidence, entry.source_episodes.len());
     let content = format!(
         "### Knowledge {:?}\nConfidence: {:.2}\nTags: {}\n```\n{}\n```",
         entry.kind,
-        entry.confidence,
+        confidence,
         if entry.tags.is_empty() {
             String::from("-")
         } else {
@@ -210,7 +257,10 @@ fn knowledge_chunk(entry: KnowledgeEntry, idx: usize) -> ContextChunk {
             entry_id: entry.id,
             kind: format!("{:?}", entry.kind),
         },
-        relevance,
+        relevance: track_record.max(relevance),
+        track_record: Some(track_record),
+        confidence: Some(confidence),
+        recency: Some(recency),
     }
 }
 
@@ -236,6 +286,10 @@ fn episode_chunk(episode: Episode, relevance: f64, plan_id: &str) -> ContextChun
         episode.completed_at.to_rfc3339(),
         summary,
     );
+    let gate_pass_ratio = gate_pass_ratio(&episode);
+    let confidence = episode_confidence(&episode, gate_pass_ratio);
+    let recency = recency_score(episode.completed_at.timestamp());
+    let track_record = episode_track_record(&episode, gate_pass_ratio);
 
     ContextChunk {
         content,
@@ -248,7 +302,10 @@ fn episode_chunk(episode: Episode, relevance: f64, plan_id: &str) -> ContextChun
             },
             task_id,
         },
-        relevance,
+        relevance: track_record.max(relevance),
+        track_record: Some(track_record),
+        confidence: Some(confidence),
+        recency: Some(recency),
     }
 }
 
@@ -318,6 +375,37 @@ fn episode_relevance(episode: &Episode, task: &TaskInput, plan_id: &str, task_te
         score += 0.15;
     }
     score.min(1.0)
+}
+
+fn knowledge_track_record(confidence: f64, source_episode_count: usize) -> f64 {
+    let confirmation = if source_episode_count > 1 {
+        1.0 + ((source_episode_count.saturating_sub(1) as f64) * 0.08).min(0.3)
+    } else {
+        1.0
+    };
+    (confidence * confirmation).clamp(0.0, 1.0)
+}
+
+fn gate_pass_ratio(episode: &Episode) -> f64 {
+    if episode.gate_verdicts.is_empty() {
+        if episode.success { 0.75 } else { 0.35 }
+    } else {
+        let passed = episode.gate_verdicts.iter().filter(|verdict| verdict.passed).count() as f64;
+        (passed / episode.gate_verdicts.len() as f64).clamp(0.0, 1.0)
+    }
+}
+
+fn episode_track_record(episode: &Episode, gate_pass_ratio: f64) -> f64 {
+    let success_bonus = if episode.success { 0.3 } else { 0.0 };
+    (0.4 + gate_pass_ratio * 0.45 + success_bonus).clamp(0.0, 1.0)
+}
+
+fn episode_confidence(episode: &Episode, gate_pass_ratio: f64) -> f64 {
+    if episode.success {
+        (0.55 + gate_pass_ratio * 0.4).clamp(0.0, 1.0)
+    } else {
+        (0.25 + gate_pass_ratio * 0.35).clamp(0.0, 1.0)
+    }
 }
 
 fn episode_search_text(episode: &Episode) -> String {
@@ -391,6 +479,51 @@ fn keyword_overlap(left: &str, right: &str) -> f64 {
         .count();
 
     matches as f64 / left_terms.len().max(right_terms.len()) as f64
+}
+
+#[cfg(feature = "hdc")]
+fn semantic_similarity(left: &str, right: &str) -> f64 {
+    let left_vec = text_fingerprint(left);
+    let right_vec = text_fingerprint(right);
+    left_vec.similarity(&right_vec) as f64
+}
+
+#[cfg(not(feature = "hdc"))]
+fn semantic_similarity(left: &str, right: &str) -> f64 {
+    keyword_overlap(left, right)
+}
+
+fn source_priority(source: &ContextSource) -> f64 {
+    match source {
+        ContextSource::KnowledgeEntry { .. } => 1.0,
+        ContextSource::Episode { .. } => 0.8,
+        ContextSource::InlineFile { .. } => 0.5,
+        ContextSource::RecentSignal { .. } => 0.3,
+        _ => 0.2,
+    }
+}
+
+fn signal_recency_score(created_at_ms: i64) -> f64 {
+    let now_ms = Utc::now().timestamp_millis();
+    let age_days = (now_ms.saturating_sub(created_at_ms)).max(0) as f64 / 86_400_000.0;
+    1.0 / (1.0 + age_days)
+}
+
+fn score_chunk(task_text: &str, chunk: &ContextChunk) -> f64 {
+    let similarity = semantic_similarity(task_text, &chunk.content);
+    let source_priority = source_priority(&chunk.source);
+    let recency = chunk.recency.unwrap_or(0.5);
+    let confidence = chunk.confidence.unwrap_or(0.5);
+
+    if let Some(track_record) = chunk.track_record {
+        let uncertainty = (1.0 - confidence).clamp(0.1, 1.0);
+        let active_score = track_record * similarity / uncertainty;
+        if active_score > 0.0 {
+            return active_score;
+        }
+    }
+
+    similarity * 0.3 + recency * 0.2 + confidence * 0.3 + source_priority * 0.2
 }
 
 fn tokenize(text: &str) -> Vec<String> {
@@ -501,6 +634,67 @@ mod tests {
             .build()
     }
 
+    fn inline_file_chunk(content: &str) -> ContextChunk {
+        ContextChunk {
+            content: content.into(),
+            source: ContextSource::InlineFile {
+                path: "src/lib.rs".into(),
+                lines: None,
+            },
+            relevance: 0.5,
+            track_record: None,
+            confidence: Some(0.6),
+            recency: Some(0.5),
+        }
+    }
+
+    fn knowledge_chunk_for_test(content: &str) -> ContextChunk {
+        ContextChunk {
+            content: content.into(),
+            source: ContextSource::KnowledgeEntry {
+                entry_id: "k1".into(),
+                kind: "Insight".into(),
+            },
+            relevance: 0.9,
+            track_record: Some(0.9),
+            confidence: Some(0.9),
+            recency: Some(0.9),
+        }
+    }
+
+    fn signal_chunk_for_test(content: &str) -> ContextChunk {
+        ContextChunk {
+            content: content.into(),
+            source: ContextSource::RecentSignal {
+                signal_id: "s1".into(),
+                plan_id: "plan-1".into(),
+                kind: "task:update".into(),
+            },
+            relevance: 0.2,
+            track_record: None,
+            confidence: Some(0.3),
+            recency: Some(0.2),
+        }
+    }
+
+    #[test]
+    fn rank_prefers_source_priority_in_fallback() {
+        let task_text = "implement context assembly";
+        let file_chunk = inline_file_chunk(task_text);
+        let signal_chunk = signal_chunk_for_test(task_text);
+
+        assert!(score_chunk(task_text, &file_chunk) > score_chunk(task_text, &signal_chunk));
+    }
+
+    #[test]
+    fn rank_prefers_active_inference_when_data_is_richer() {
+        let task_text = "wire ranked context chunks";
+        let knowledge_chunk = knowledge_chunk_for_test(task_text);
+        let signal_chunk = signal_chunk_for_test(task_text);
+
+        assert!(score_chunk(task_text, &knowledge_chunk) > score_chunk(task_text, &signal_chunk));
+    }
+
     #[test]
     fn gather_collects_ranked_chunks() {
         let dir = TempDir::new().expect("tempdir");
@@ -556,7 +750,9 @@ mod tests {
         .expect("write signals");
 
         let assembler = ContextAssembler::new(knowledge_store, episode_store);
-        let chunks = assembler.gather(workdir, &task_input(), "plan-1", &signals_path);
+        let task = task_input();
+        let task_text = task_query_text(&task);
+        let chunks = assembler.gather(workdir, &task, "plan-1", &signals_path);
 
         assert!(chunks.iter().any(|chunk| matches!(
             &chunk.source,
@@ -577,5 +773,8 @@ mod tests {
                 .count(),
             10
         );
+        assert!(chunks
+            .windows(2)
+            .all(|pair| score_chunk(&task_text, &pair[0]) >= score_chunk(&task_text, &pair[1])));
     }
 }

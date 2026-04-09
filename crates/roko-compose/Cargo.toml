@@ -14,12 +14,17 @@ workspace = true
 roko-core = { path = "../roko-core" }
 roko-learn = { path = "../roko-learn" }
 roko-neuro = { path = "../roko-neuro" }
+bardo-primitives = { path = "../bardo-primitives", optional = true }
 chrono = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
+
+[features]
+default = []
+hdc = ["dep:bardo-primitives", "roko-neuro/hdc"]
 
 [dev-dependencies]
 roko-std = { path = "../roko-std" }
