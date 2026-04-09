@@ -244,9 +244,19 @@ pub fn fingerprint(value: &impl serde::Serialize) -> HdcVector {
     HdcVector::from_seed(&seed)
 }
 
+/// Compute a deterministic HDC fingerprint for raw text.
+///
+/// This is a convenience wrapper for callers that already have a
+/// canonical text blob and do not need to serialize a structured value
+/// through `serde_json` first.
+#[must_use]
+pub fn text_fingerprint(text: &str) -> HdcVector {
+    HdcVector::from_seed(text.as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{fingerprint, HdcVector};
+    use super::{fingerprint, text_fingerprint, HdcVector};
 
     #[test]
     fn hdc_bind_involution() {
@@ -323,6 +333,13 @@ mod tests {
     fn hdc_fingerprint_is_deterministic() {
         let left = fingerprint(&serde_json::json!({"a": 1, "b": [2, 3]}));
         let right = fingerprint(&serde_json::json!({"a": 1, "b": [2, 3]}));
+        assert_eq!(left, right);
+    }
+
+    #[test]
+    fn hdc_text_fingerprint_is_deterministic() {
+        let left = text_fingerprint("trigger_kind=webhook_dispatch\nagent_template=a");
+        let right = text_fingerprint("trigger_kind=webhook_dispatch\nagent_template=a");
         assert_eq!(left, right);
     }
 }

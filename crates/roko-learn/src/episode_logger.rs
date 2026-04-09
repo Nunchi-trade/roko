@@ -31,6 +31,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use bardo_primitives::hdc::text_fingerprint;
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex as SyncMutex;
 use serde::{Deserialize, Serialize};
@@ -43,6 +44,7 @@ use tokio::sync::Mutex as AsyncMutex;
 /// field. Enforced in [`EpisodeLogger::append`] so that a runaway
 /// optimizer cannot blow up the log.
 const MAX_EXTRA_BYTES: usize = 16 * 1024;
+const TEXT_FINGERPRINT_KEY: &str = "text_fingerprint";
 
 /// Errors that can occur while appending to or reading from an episode
 /// log.
@@ -289,6 +291,36 @@ impl Episode {
         self.success = false;
         self.failure_reason = Some(reason.into());
         self
+    }
+
+    /// Attach a deterministic fingerprint of the completed episode text.
+    pub fn attach_text_fingerprint(&mut self) {
+        let text = self.completion_fingerprint_text();
+        let fingerprint = text_fingerprint(&text);
+        self.extra.insert(
+            TEXT_FINGERPRINT_KEY.to_string(),
+            serde_json::to_value(fingerprint)
+                .expect("HDC text fingerprint serialization should not fail"),
+        );
+    }
+
+    fn completion_fingerprint_text(&self) -> String {
+        let actions =
+            serde_json::to_string(&self.external_actions).unwrap_or_else(|_| "[]".to_string());
+        let outcome = if self.success {
+            "success".to_string()
+        } else {
+            self.failure_reason
+                .as_deref()
+                .filter(|reason| !reason.trim().is_empty())
+                .unwrap_or("failure")
+                .to_string()
+        };
+
+        format!(
+            "trigger_kind={}\nagent_template={}\nactions={}\noutcome={}",
+            self.trigger_kind, self.agent_template, actions, outcome
+        )
     }
 }
 
@@ -762,6 +794,33 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert!(!all[0].success);
         assert_eq!(all[0].failure_reason.as_deref(), Some("E0277:Send+Sync"));
+    }
+
+    #[test]
+    fn episode_text_fingerprint_is_written_to_metadata() {
+        let mut ep = Episode::new("agent-a", "task-a");
+        ep.trigger_kind = "webhook_dispatch".to_string();
+        ep.agent_template = "template-a".to_string();
+        ep.external_actions = vec![serde_json::json!({
+            "kind": "comment",
+            "target": "issue-1"
+        })];
+        ep.success = false;
+        ep.failure_reason = Some("gated".to_string());
+
+        ep.attach_text_fingerprint();
+
+        let stored = ep
+            .extra
+            .get(TEXT_FINGERPRINT_KEY)
+            .cloned()
+            .expect("fingerprint metadata");
+        let decoded: bardo_primitives::hdc::HdcVector =
+            serde_json::from_value(stored).expect("decode fingerprint");
+        let expected = text_fingerprint(
+            "trigger_kind=webhook_dispatch\nagent_template=template-a\nactions=[{\"kind\":\"comment\",\"target\":\"issue-1\"}]\noutcome=gated",
+        );
+        assert_eq!(decoded, expected);
     }
 
     #[tokio::test]

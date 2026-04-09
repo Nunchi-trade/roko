@@ -486,6 +486,7 @@ impl LearningRuntime {
     ) -> Result<LearningUpdate, LearningRuntimeError> {
         let mut update = LearningUpdate::default();
 
+        input.episode.attach_text_fingerprint();
         self.episode_logger.append(&input.episode).await?;
         update.episode_logged = ApplyStatus::Applied;
         if let Some(hook) = &self.episode_completion_hook {

@@ -1589,6 +1589,7 @@ async fn append_dispatch_episode(
         cost_usd_without_cache: f64::from(outcome.result.usage.cost_usd),
         wall_ms: outcome.result.usage.wall_ms,
     };
+    episode.attach_text_fingerprint();
 
     let logger = EpisodeLogger::new(state.layout.episodes_path());
     if let Err(err) = logger.append(&episode).await {
