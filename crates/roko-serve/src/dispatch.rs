@@ -44,14 +44,12 @@ pub struct Subscription {
 
 #[derive(Debug)]
 struct SubscriptionState {
-    last_triggered: Mutex<Option<Instant>>,
     recent_signals: Mutex<HashMap<ContentHash, Instant>>,
 }
 
 impl SubscriptionState {
     fn new() -> Self {
         Self {
-            last_triggered: Mutex::new(None),
             recent_signals: Mutex::new(HashMap::new()),
         }
     }
@@ -180,25 +178,6 @@ impl Subscription {
         registry.release_concurrency(self);
     }
 
-    /// Check and update the cooldown gate.
-    #[must_use]
-    pub fn check_cooldown(&self) -> bool {
-        if self.config.cooldown_secs == 0 {
-            return true;
-        }
-
-        let cooldown = Duration::from_secs(self.config.cooldown_secs);
-        let now = Instant::now();
-        let mut last = self.state.last_triggered.lock();
-        if let Some(previous) = *last {
-            if now.duration_since(previous) < cooldown {
-                return false;
-            }
-        }
-        *last = Some(now);
-        true
-    }
-
     /// Check and update the deduplication gate using the signal content hash.
     #[must_use]
     pub fn check_dedup(&self, signal: &Signal) -> bool {
@@ -228,6 +207,7 @@ impl Subscription {
 pub struct SubscriptionRegistry {
     subscriptions: Arc<RwLock<Vec<Subscription>>>,
     active_counts: Arc<Mutex<HashMap<usize, AtomicUsize>>>,
+    last_dispatches: Arc<Mutex<HashMap<usize, Instant>>>,
     next_subscription_id: Arc<AtomicUsize>,
 }
 
@@ -294,6 +274,7 @@ impl SubscriptionRegistry {
         Self {
             subscriptions: Arc::new(RwLock::new(subscriptions)),
             active_counts,
+            last_dispatches: Arc::new(Mutex::new(HashMap::new())),
             next_subscription_id,
         }
     }
@@ -304,6 +285,7 @@ impl SubscriptionRegistry {
         self.active_counts
             .lock()
             .insert(subscription_id, AtomicUsize::new(0));
+        self.last_dispatches.lock().remove(&subscription_id);
         self.subscriptions
             .write()
             .push(subscription.with_subscription_id(subscription_id));
@@ -356,6 +338,29 @@ impl SubscriptionRegistry {
         if let Some(active) = active_counts.get(&subscription.subscription_id()) {
             let _ = active.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
         }
+    }
+
+    /// Check and update the cooldown gate for `subscription`.
+    #[must_use]
+    pub fn check_cooldown(&self, subscription: &Subscription) -> bool {
+        if subscription.config.cooldown_secs == 0 {
+            return true;
+        }
+
+        let cooldown = Duration::from_secs(subscription.config.cooldown_secs);
+        let now = Instant::now();
+        let mut last_dispatches = self.last_dispatches.lock();
+        let Some(previous) = last_dispatches.get(&subscription.subscription_id()) else {
+            last_dispatches.insert(subscription.subscription_id(), now);
+            return true;
+        };
+
+        if now.duration_since(*previous) < cooldown {
+            return false;
+        }
+
+        last_dispatches.insert(subscription.subscription_id(), now);
+        true
     }
 }
 
@@ -552,7 +557,7 @@ pub async fn dispatch_loop(
                 continue;
             }
 
-            if sub.check_cooldown() && sub.check_dedup(&signal) {
+            if subscriptions.check_cooldown(&sub) && sub.check_dedup(&signal) {
                 let signal = signal.clone();
                 let dispatcher = Arc::clone(&dispatcher);
                 let subscriptions = subscriptions.clone();
@@ -649,6 +654,23 @@ mod tests {
 
         assert!(sub.check_dedup(&signal));
         assert!(!sub.check_dedup(&signal));
+    }
+
+    #[test]
+    fn cooldown_blocks_repeat_dispatches_within_window() {
+        let registry = SubscriptionRegistry::with_subscriptions(vec![
+            Subscription::new("reviewer", "github:*").with_cooldown(Duration::from_secs(60)),
+        ]);
+        let signal = Signal::builder(Kind::Custom("github:push".into()))
+            .body(Body::Json(serde_json::json!({"repo": "roko"})))
+            .provenance(Provenance::external("github:webhook"))
+            .build();
+
+        let matched = registry.find_matching(&signal);
+        let sub = matched.first().expect("subscription");
+
+        assert!(registry.check_cooldown(sub));
+        assert!(!registry.check_cooldown(sub));
     }
 
     #[test]
