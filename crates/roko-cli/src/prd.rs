@@ -17,6 +17,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, anyhow};
+use crate::agent_exec::{AgentExecOpts, run_agent};
 
 // ─── Directory layout ──────────────────────────────���───────────────
 
@@ -305,7 +306,7 @@ pub fn cmd_status(workdir: &Path, plans_dir: Option<&Path>) -> Result<()> {
 }
 
 /// `roko prd draft promote <slug>` — move draft to published.
-pub fn cmd_promote(workdir: &Path, slug: &str) -> Result<()> {
+pub async fn cmd_promote(workdir: &Path, slug: &str) -> Result<()> {
     ensure_dirs(workdir)?;
     let src = drafts_dir(workdir).join(format!("{slug}.md"));
     if !src.exists() {
@@ -327,7 +328,49 @@ pub fn cmd_promote(workdir: &Path, slug: &str) -> Result<()> {
     std::fs::write(&dst, &content)?;
     std::fs::remove_file(&src)?;
     println!("✅ Promoted: {}", dst.display());
+    if crate::load_layered(workdir)?.config.auto_plan {
+        let _ = generate_plan_from_prd(slug, &dst).await?;
+    }
     Ok(())
+}
+
+/// Generate implementation plans from a published PRD file.
+pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path) -> Result<PathBuf> {
+    let workdir = prd_workdir(prd_path)?;
+    let content = std::fs::read_to_string(prd_path)
+        .with_context(|| format!("read {}", prd_path.display()))?;
+    println!("📋 Generating plans from PRD: {slug}");
+
+    let resolved = crate::load_layered(&workdir)?;
+    let system = crate::plan_generate::PLAN_GENERATOR_SYSTEM_PROMPT;
+    let task_prompt = format!(
+        "Read the PRD at {path} and generate implementation plan directories \
+         under plans/. Each REQ-XXX requirement becomes one or more tasks. \
+         Each acceptance criterion becomes a task verification command. \
+         Search the codebase first to understand what already exists. \
+         Create plan.md and tasks.toml files directly, including per-task mcp_servers \
+         when a task needs a specific MCP server.\n\n\
+         PRD content:\n{content}",
+        path = prd_path.display()
+    );
+
+    let exit_code = run_agent(AgentExecOpts {
+        prompt: &task_prompt,
+        workdir: &workdir,
+        model: resolved.config.agent.model.as_deref(),
+        effort: Some(resolved.config.agent.effort.as_str()),
+        system_prompt: Some(system),
+        resume_session: None,
+        env_vars: &resolved.config.agent.env,
+    })
+    .await?;
+    if exit_code != 0 {
+        return Err(anyhow!(
+            "plan generation agent failed with exit code {exit_code}"
+        ));
+    }
+
+    Ok(workdir.join("plans"))
 }
 
 /// Build the system prompt for agent-assisted PRD commands.
@@ -422,6 +465,14 @@ fn usize_to_u32_saturating(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
+fn prd_workdir(prd_path: &Path) -> Result<PathBuf> {
+    prd_path
+        .ancestors()
+        .nth(4)
+        .map(Path::to_path_buf)
+        .ok_or_else(|| anyhow!("could not derive workdir from PRD path: {}", prd_path.display()))
+}
+
 // ─── Tests ─────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -471,7 +522,8 @@ mod tests {
     }
 
     #[test]
-    fn promote_moves_file() {
+    #[tokio::test]
+    async fn promote_moves_file() {
         let tmp = tempfile::tempdir().unwrap();
         ensure_dirs(tmp.path()).unwrap();
         let draft = drafts_dir(tmp.path()).join("test.md");
@@ -480,7 +532,7 @@ mod tests {
             "---\nstatus: draft\nupdated: 2020-01-01\n---\n# Test\n",
         )
         .unwrap();
-        cmd_promote(tmp.path(), "test").unwrap();
+        cmd_promote(tmp.path(), "test").await.unwrap();
         assert!(!draft.exists());
         let published = published_dir(tmp.path()).join("test.md");
         assert!(published.exists());

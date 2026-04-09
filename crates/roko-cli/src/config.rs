@@ -16,6 +16,9 @@ use roko_orchestrator::ExecutorConfig;
 pub struct Config {
     /// Agent backend (the CLI that will be invoked via `ExecAgent`).
     pub agent: AgentConfig,
+    /// Automatically generate a plan when a PRD is promoted.
+    #[serde(default)]
+    pub auto_plan: bool,
     /// Tool registry preferences.
     #[serde(default)]
     pub tools: ToolsConfig,
@@ -40,6 +43,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             agent: AgentConfig::default(),
+            auto_plan: false,
             tools: ToolsConfig::default(),
             prompt: PromptConfig::default(),
             gates: vec![GateConfig::default_shell_true()],
@@ -516,6 +520,9 @@ pub struct ConfigLayer {
     /// Agent backend overrides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentLayer>,
+    /// Automatically generate a plan when a PRD is promoted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_plan: Option<bool>,
     /// Tool registry preference overrides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<ToolsLayer>,
@@ -556,6 +563,9 @@ impl ConfigLayer {
                 None => a,
             });
         }
+        if let Some(auto_plan) = overlay.auto_plan {
+            self.auto_plan = Some(auto_plan);
+        }
         if let Some(t) = overlay.tools {
             self.tools = Some(match self.tools {
                 Some(base) => base.merge(t),
@@ -590,6 +600,7 @@ impl ConfigLayer {
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.agent.is_none()
+            && self.auto_plan.is_none()
             && self.tools.is_none()
             && self.prompt.is_none()
             && self.gates.is_none()
@@ -631,6 +642,7 @@ impl ConfigLayer {
             }
             None => ToolsConfig::default(),
         };
+        let auto_plan = self.auto_plan.unwrap_or(false);
         let prompt = match self.prompt {
             Some(p) => {
                 let defaults = PromptConfig::default();
@@ -680,6 +692,7 @@ impl ConfigLayer {
         };
         Config {
             agent,
+            auto_plan,
             tools,
             prompt,
             gates,
@@ -1031,6 +1044,8 @@ pub struct ResolvedConfig {
 /// Per-field provenance for [`ResolvedConfig`].
 #[derive(Clone, Debug)]
 pub struct ConfigSources {
+    /// Where `auto_plan` came from.
+    pub auto_plan: Source,
     /// Where `agent.command` came from.
     pub agent_command: Source,
     /// Where `agent.args` came from.
@@ -1100,6 +1115,8 @@ pub fn load_layered(workdir: &Path) -> Result<ResolvedConfig> {
 
 /// Compute per-field provenance from global + project layers.
 fn compute_sources(global: &ConfigLayer, project: &ConfigLayer) -> ConfigSources {
+    let g_auto_plan = global.auto_plan.is_some();
+    let p_auto_plan = project.auto_plan.is_some();
     let g_agent = global.agent.as_ref();
     let g_tools = global.tools.as_ref();
     let p_agent = project.agent.as_ref();
@@ -1118,6 +1135,7 @@ fn compute_sources(global: &ConfigLayer, project: &ConfigLayer) -> ConfigSources
     };
 
     ConfigSources {
+        auto_plan: pick(p_auto_plan, g_auto_plan),
         agent_command: pick(
             p_agent.and_then(|a| a.command.as_ref()).is_some(),
             g_agent.and_then(|a| a.command.as_ref()).is_some(),
@@ -1177,6 +1195,7 @@ fn sources_from_layer(layer: &ConfigLayer, present: Source, fallback: Source) ->
     let prompt = layer.prompt.as_ref();
     let pick = |is_set: bool| -> Source { if is_set { present } else { fallback } };
     ConfigSources {
+        auto_plan: pick(layer.auto_plan.is_some()),
         agent_command: pick(agent.and_then(|a| a.command.as_ref()).is_some()),
         agent_args: pick(agent.and_then(|a| a.args.as_ref()).is_some()),
         agent_model: pick(agent.and_then(|a| a.model.as_ref()).is_some()),
@@ -1458,11 +1477,25 @@ auto_replan = false
     }
 
     #[test]
+    fn layer_resolve_uses_auto_plan_override() {
+        let layer = ConfigLayer::parse_toml(
+            r#"
+auto_plan = true
+"#,
+        )
+        .unwrap();
+
+        let cfg = layer.resolve();
+        assert!(cfg.auto_plan);
+    }
+
+    #[test]
     fn default_config_roundtrips_through_toml() {
         let cfg = Config::default();
         let text = cfg.to_toml().unwrap();
         let parsed = Config::parse_toml(&text).unwrap();
         assert_eq!(parsed.agent.command, cfg.agent.command);
+        assert_eq!(parsed.auto_plan, cfg.auto_plan);
         assert_eq!(parsed.tools.prefer_mcp, cfg.tools.prefer_mcp);
         assert_eq!(parsed.tools.global_denied, cfg.tools.global_denied);
         assert_eq!(parsed.tools.mcp_timeout_secs, cfg.tools.mcp_timeout_secs);

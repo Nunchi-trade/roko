@@ -1773,7 +1773,7 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                 .await
             }
             PrdDraftCmd::Promote { slug } => {
-                roko_cli::prd::cmd_promote(&workdir, &slug)?;
+                roko_cli::prd::cmd_promote(&workdir, &slug).await?;
                 Ok(0)
             }
             PrdDraftCmd::List => {
@@ -1792,29 +1792,9 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
         },
         PrdCmd::Plan { slug } => {
             let prd_path = find_prd(&workdir, &slug)?;
-            let content = std::fs::read_to_string(&prd_path)?;
-            println!("📋 Generating plans from PRD: {slug}");
-            let system = roko_cli::plan_generate::PLAN_GENERATOR_SYSTEM_PROMPT;
-            let task_prompt = format!(
-                "Read the PRD at {path} and generate implementation plan directories \
-                 under plans/. Each REQ-XXX requirement becomes one or more tasks. \
-                 Each acceptance criterion becomes a task verification command. \
-                 Search the codebase first to understand what already exists. \
-                 Create plan.md and tasks.toml files directly, including per-task mcp_servers \
-                 when a task needs a specific MCP server.\n\n\
-                 PRD content:\n{content}",
-                path = prd_path.display()
-            );
-            run_agent(AgentExecOpts {
-                prompt: &task_prompt,
-                workdir: &workdir,
-                model: model_ref,
-                effort: effort_ref,
-                system_prompt: Some(system),
-                resume_session,
-                env_vars: &gw.vars,
-            })
-            .await
+            let _generated_plans_root =
+                roko_cli::prd::generate_plan_from_prd(&slug, &prd_path).await?;
+            Ok(0)
         }
         PrdCmd::Consolidate => {
             println!("🔄 Scanning all PRDs for duplicates, gaps, and inconsistencies...");

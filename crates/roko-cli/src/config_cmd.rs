@@ -105,6 +105,7 @@ pub fn run_init_wizard(target: Option<PathBuf>, inputs: &WizardInputs) -> Result
             clean_output: None,
             mcp_config: None,
         }),
+        auto_plan: None,
         tools: Some(ToolsLayer {
             prefer_mcp: Some(false),
             global_denied: Some(Vec::new()),
@@ -458,6 +459,11 @@ pub enum EditTarget {
 fn print_resolved(r: &ResolvedConfig) {
     println!("effective config:");
     println!(
+        "  auto_plan         = {} {}",
+        r.config.auto_plan,
+        r.sources.auto_plan.tag()
+    );
+    println!(
         "  agent.command      = {:?} {}",
         r.config.agent.command,
         r.sources.agent_command.tag()
@@ -533,6 +539,7 @@ fn print_resolved(r: &ResolvedConfig) {
         println!("  env    : {} (ROKO_CONFIG)", env.display());
     }
     let fully_default = r.sources.agent_command == Source::Default
+        && r.sources.auto_plan == Source::Default
         && r.sources.prompt_token_budget == Source::Default
         && r.sources.prompt_role == Source::Default
         && r.sources.tools_prefer_mcp == Source::Default;
