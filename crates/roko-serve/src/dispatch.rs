@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use chrono::Utc;
+use regex::Regex;
 use parking_lot::{Mutex, RwLock};
 use roko_agent::{
     Agent, AgentResult, ClaudeCliAgent,
@@ -631,12 +632,23 @@ fn subscription_filter_matches(filter: &SubscriptionFilterConfig, signal: &Signa
     }
 
     if !filter.branch.is_empty()
-        && !matches_any_glob(signal_branch_candidates(signal), &filter.branch)
+        && !matches_any_regex(signal_branch_candidates(signal), &filter.branch)
     {
         return false;
     }
 
     if !filter.path.is_empty() && !matches_any_glob(signal_path_candidates(signal), &filter.path) {
+        return false;
+    }
+
+    if !filter.label.is_empty() && !matches_any_exact(signal_label_candidates(signal), &filter.label)
+    {
+        return false;
+    }
+
+    if !filter.author.is_empty()
+        && !matches_any_exact(signal_author_candidates(signal), &filter.author)
+    {
         return false;
     }
 
@@ -656,6 +668,28 @@ fn matches_any_glob<'a>(
     })
 }
 
+fn matches_any_regex<'a>(
+    candidates: impl IntoIterator<Item = &'a str>,
+    patterns: &[String],
+) -> bool {
+    let candidates: Vec<&'a str> = candidates.into_iter().collect();
+    patterns.iter().any(|pattern| {
+        Regex::new(pattern).ok().is_some_and(|regex: Regex| {
+            candidates.iter().copied().any(|candidate| regex.is_match(candidate))
+        })
+    })
+}
+
+fn matches_any_exact<'a>(
+    candidates: impl IntoIterator<Item = &'a str>,
+    patterns: &[String],
+) -> bool {
+    let candidates: Vec<&'a str> = candidates.into_iter().collect();
+    patterns
+        .iter()
+        .any(|pattern| candidates.iter().copied().any(|candidate| candidate == pattern))
+}
+
 fn signal_repo_candidates(signal: &Signal) -> Vec<&str> {
     json_string_fields(
         &signal.body,
@@ -669,7 +703,7 @@ fn signal_repo_candidates(signal: &Signal) -> Vec<&str> {
 }
 
 fn signal_branch_candidates(signal: &Signal) -> Vec<&str> {
-    json_string_fields(
+    let mut values = json_string_fields(
         &signal.body,
         &[
             &["ref"],
@@ -678,7 +712,19 @@ fn signal_branch_candidates(signal: &Signal) -> Vec<&str> {
             &["pull_request", "base", "ref"],
             &["pull_request", "head", "ref"],
         ],
-    )
+    );
+
+    let mut normalized = Vec::new();
+    for value in &values {
+        if let Some(branch) = value.strip_prefix("refs/heads/") {
+            normalized.push(branch);
+        }
+        if let Some(branch) = value.strip_prefix("refs/tags/") {
+            normalized.push(branch);
+        }
+    }
+    values.extend(normalized);
+    values
 }
 
 fn signal_path_candidates(signal: &Signal) -> Vec<&str> {
@@ -705,11 +751,59 @@ fn signal_path_candidates(signal: &Signal) -> Vec<&str> {
     values
 }
 
+fn signal_label_candidates(signal: &Signal) -> Vec<&str> {
+    json_stringish_array_fields(
+        &signal.body,
+        &[
+            &["labels"],
+            &["issue", "labels"],
+            &["pull_request", "labels"],
+        ],
+    )
+}
+
+fn signal_author_candidates(signal: &Signal) -> Vec<&str> {
+    json_loginish_fields(
+        &signal.body,
+        &[
+            &["sender"],
+            &["user"],
+            &["issue", "user"],
+            &["pull_request", "user"],
+            &["pull_request_review", "user"],
+            &["review", "user"],
+            &["comment", "user"],
+            &["head_commit", "author"],
+            &["head_commit", "committer"],
+        ],
+    )
+}
+
 fn json_string_fields<'a>(body: &'a Body, paths: &[&[&str]]) -> Vec<&'a str> {
     match body {
         Body::Json(value) => paths
             .iter()
             .filter_map(|path| json_string_at(value, path))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn json_stringish_array_fields<'a>(body: &'a Body, paths: &[&[&str]]) -> Vec<&'a str> {
+    match body {
+        Body::Json(value) => paths
+            .iter()
+            .flat_map(|path| json_stringish_array_at(value, path))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn json_loginish_fields<'a>(body: &'a Body, paths: &[&[&str]]) -> Vec<&'a str> {
+    match body {
+        Body::Json(value) => paths
+            .iter()
+            .flat_map(|path| json_loginish_at(value, path))
             .collect(),
         _ => Vec::new(),
     }
@@ -756,6 +850,83 @@ fn json_string_array_at<'a>(value: &'a Value, path: &[&str]) -> Vec<&'a str> {
         Value::Array(items) => items.iter().filter_map(Value::as_str).collect(),
         _ => Vec::new(),
     }
+}
+
+fn json_stringish_array_at<'a>(value: &'a Value, path: &[&str]) -> Vec<&'a str> {
+    if let Some((head, tail)) = path.split_first() {
+        if *head == "*" {
+            return match value {
+                Value::Array(items) => items
+                    .iter()
+                    .flat_map(|item| json_stringish_array_at(item, tail))
+                    .collect(),
+                _ => Vec::new(),
+            };
+        }
+
+        return match value.get(*head) {
+            Some(next) => json_stringish_array_at(next, tail),
+            None => Vec::new(),
+        };
+    }
+
+    match value {
+        Value::String(s) => vec![s.as_str()],
+        Value::Array(items) => items.iter().flat_map(json_label_candidates).collect(),
+        Value::Object(_) => json_label_candidates(value).into_iter().collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn json_loginish_at<'a>(value: &'a Value, path: &[&str]) -> Vec<&'a str> {
+    if let Some((head, tail)) = path.split_first() {
+        if *head == "*" {
+            return match value {
+                Value::Array(items) => items
+                    .iter()
+                    .flat_map(|item| json_loginish_at(item, tail))
+                    .collect(),
+                _ => Vec::new(),
+            };
+        }
+
+        return match value.get(*head) {
+            Some(next) => json_loginish_at(next, tail),
+            None => Vec::new(),
+        };
+    }
+
+    match value {
+        Value::String(s) => vec![s.as_str()],
+        Value::Array(items) => items.iter().flat_map(json_login_candidates).collect(),
+        Value::Object(_) => json_login_candidates(value).into_iter().collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn json_label_candidates<'a>(value: &'a Value) -> Vec<&'a str> {
+    if let Some(label) = value.as_str() {
+        return vec![label];
+    }
+
+    value
+        .get("name")
+        .and_then(Value::as_str)
+        .map(|name| vec![name])
+        .unwrap_or_default()
+}
+
+fn json_login_candidates<'a>(value: &'a Value) -> Vec<&'a str> {
+    if let Some(login) = value.as_str() {
+        return vec![login];
+    }
+
+    value
+        .get("login")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("username").and_then(Value::as_str))
+        .map(|login| vec![login])
+        .unwrap_or_default()
 }
 
 /// Central event routing loop for webhook-driven signals.
@@ -1407,6 +1578,54 @@ mod tests {
         let matched = registry.find_matching(&signal);
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].template(), "reviewer");
+    }
+
+    #[test]
+    fn registry_applies_repo_branch_path_label_and_author_filters() {
+        let registry = SubscriptionRegistry::with_subscriptions(vec![
+            Subscription::new("repo", "github:**").with_filter(SubscriptionFilterConfig {
+                repo: vec!["roko/*".into()],
+                ..SubscriptionFilterConfig::default()
+            }),
+            Subscription::new("branch", "github:**").with_filter(SubscriptionFilterConfig {
+                branch: vec!["main".into()],
+                ..SubscriptionFilterConfig::default()
+            }),
+            Subscription::new("paths", "github:**").with_filter(SubscriptionFilterConfig {
+                path: vec!["src/**/*.rs".into()],
+                ..SubscriptionFilterConfig::default()
+            }),
+            Subscription::new("labels", "github:**").with_filter(SubscriptionFilterConfig {
+                label: vec!["bug".into()],
+                ..SubscriptionFilterConfig::default()
+            }),
+            Subscription::new("authors", "github:**").with_filter(SubscriptionFilterConfig {
+                author: vec!["octocat".into()],
+                ..SubscriptionFilterConfig::default()
+            }),
+        ]);
+
+        let signal = Signal::builder(Kind::Custom("github:push".into()))
+            .body(Body::Json(serde_json::json!({
+                "repository": { "full_name": "roko/roko" },
+                "ref": "refs/heads/main",
+                "head_commit": {
+                    "modified": ["src/lib.rs", "README.md"],
+                    "author": { "username": "octocat" }
+                },
+                "labels": [{ "name": "bug" }]
+            })))
+            .provenance(Provenance::external("github:webhook"))
+            .build();
+
+        let matched = registry.find_matching(&signal);
+        let templates = matched.iter().map(|sub| sub.template()).collect::<Vec<_>>();
+
+        assert!(templates.contains(&"repo"));
+        assert!(templates.contains(&"branch"));
+        assert!(templates.contains(&"paths"));
+        assert!(templates.contains(&"labels"));
+        assert!(templates.contains(&"authors"));
     }
 
     #[test]

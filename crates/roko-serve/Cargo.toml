@@ -29,6 +29,7 @@ base64 = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
 hmac = { workspace = true }
+regex = { workspace = true }
 reqwest = { workspace = true }
 octocrab = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

@@ -1009,13 +1009,33 @@ pub struct SubscriptionFilterConfig {
         alias = "paths"
     )]
     pub path: Vec<String>,
+    /// Label names to match against webhook payload label fields.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_glob_list",
+        skip_serializing_if = "Vec::is_empty",
+        alias = "labels"
+    )]
+    pub label: Vec<String>,
+    /// Author logins to match against webhook payload author fields.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_glob_list",
+        skip_serializing_if = "Vec::is_empty",
+        alias = "authors"
+    )]
+    pub author: Vec<String>,
 }
 
 impl SubscriptionFilterConfig {
     /// Returns `true` when no filter criteria are configured.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.repo.is_empty() && self.branch.is_empty() && self.path.is_empty()
+        self.repo.is_empty()
+            && self.branch.is_empty()
+            && self.path.is_empty()
+            && self.label.is_empty()
+            && self.author.is_empty()
     }
 }
 
