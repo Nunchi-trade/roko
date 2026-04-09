@@ -23,6 +23,7 @@ use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
 use crate::symbol_resolver::SymbolResolver;
 use crate::task_brief::TaskBriefGenerator;
 use serde::{Deserialize, Serialize};
+use tracing::info;
 
 // ─── Context tier ──────────────────────────────────────────────────────────
 
@@ -529,14 +530,22 @@ impl ContextProvider {
     /// Demote `Normal` sections to `Low` when their rolling reference rate is too small.
     fn apply_average_based_demotions(&self, sections: &mut [ContextSection], task_tier: &str) {
         for section in sections {
-            if section.section.priority != SectionPriority::Normal {
-                continue;
-            }
             let source_type = context_source_type(&section.source);
             let ref_rate = self.context_average_tracker.ref_rate(task_tier, source_type);
-            if ref_rate < CONTEXT_AVERAGE_DEMOTE_THRESHOLD {
-                section.section.priority = SectionPriority::Low;
-            }
+            let decision = if ref_rate < CONTEXT_AVERAGE_DEMOTE_THRESHOLD {
+                if section.section.priority == SectionPriority::Normal {
+                    section.section.priority = SectionPriority::Low;
+                }
+                "dropped"
+            } else {
+                "included"
+            };
+
+            info!(
+                "[context] {}: {} (ref_rate={ref_rate:.2})",
+                section.section.name,
+                decision
+            );
         }
     }
 
