@@ -15,3 +15,4 @@ roko-core = { path = "../roko-core" }
 async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["macros", "rt", "sync"] }
+tokio-util = { workspace = true }

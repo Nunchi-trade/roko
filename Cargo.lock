@@ -4880,6 +4880,7 @@ dependencies = [
  "roko-core",
  "serde",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
