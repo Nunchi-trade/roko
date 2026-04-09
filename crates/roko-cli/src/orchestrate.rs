@@ -4177,6 +4177,10 @@ impl PlanRunner {
         }
 
         // ── Conductor signal: agent output (§7) ──────────────────────
+        let timeout_secs = task_def
+            .as_ref()
+            .map(|td| td.timeout_secs)
+            .unwrap_or(self.executor.config().task_timeout_secs);
         self.emit_conductor_signal(
             Kind::Custom("conductor.agent_output".into()),
             serde_json::json!({
@@ -4186,6 +4190,7 @@ impl PlanRunner {
                 "model": &selected_model,
                 "cost_usd": task_cost,
                 "duration_ms": result.usage.wall_ms,
+                "timeout_secs": timeout_secs,
                 "tokens": u64::from(result.usage.input_tokens) + u64::from(result.usage.output_tokens),
                 "success": result.success,
             }),

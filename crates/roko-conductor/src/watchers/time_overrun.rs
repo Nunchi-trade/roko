@@ -1,28 +1,31 @@
-//! Time overrun watcher: fires when a plan exceeds its phase timeout.
+//! Time overrun watcher: fires when a task crosses the 80% timeout threshold.
 //!
-//! Monitors `PlanPhase` signals for phase-entry timestamps and compares
-//! the elapsed time against the configured phase timeout.
+//! Monitors task completion signals emitted by the orchestrator and compares
+//! the elapsed runtime against the task's declared `timeout_secs`.
 
-use crate::state_machine::phase_timeout;
-use roko_core::{Body, Context, Kind, Policy, Signal, TaskComplexityBand};
+use roko_core::{Body, Context, Kind, Policy, Signal};
+use serde::Deserialize;
 
 /// Tag key marking signals from this watcher.
 pub const WATCHER_NAME: &str = "time-overrun";
 
-/// Tag key on `PlanPhase` signals for the current phase name.
-pub const PHASE_TAG: &str = "phase";
-/// Tag key on `PlanPhase` signals for the phase-entry timestamp (ms).
-pub const PHASE_ENTERED_TAG: &str = "phase_entered_ms";
-/// Tag key on `PlanPhase` signals for task complexity band.
-pub const COMPLEXITY_TAG: &str = "complexity";
+/// Custom conductor signal kind carrying completed task timing data.
+pub const TASK_OUTPUT_KIND: &str = "conductor.agent_output";
 
-/// Fires when the current phase has exceeded its timeout.
-///
-/// Examines the most recent `PlanPhase` signal for `phase` and
-/// `phase_entered_ms` tags, computes the elapsed time relative to
-/// `ctx.now_ms`, and fires if it exceeds the configured timeout.
+/// Fraction of the timeout that triggers the early warning.
+pub const ALERT_THRESHOLD: f64 = 0.80;
+
+/// Fires when the latest task output exceeds 80% of its timeout.
 #[derive(Debug, Clone, Default)]
 pub struct TimeOverrunWatcher;
+
+#[derive(Debug, Clone, Deserialize)]
+struct TaskTimingEvent {
+    plan_id: String,
+    task: String,
+    duration_ms: u64,
+    timeout_secs: u64,
+}
 
 impl TimeOverrunWatcher {
     /// Create a new instance.
@@ -32,85 +35,68 @@ impl TimeOverrunWatcher {
     }
 }
 
-/// Parse a `PhaseKind` from its kebab-case string representation.
-fn parse_phase(s: &str) -> Option<roko_core::PhaseKind> {
-    match s {
-        "queued" => Some(roko_core::PhaseKind::Queued),
-        "enriching" => Some(roko_core::PhaseKind::Enriching),
-        "implementing" => Some(roko_core::PhaseKind::Implementing),
-        "gating" => Some(roko_core::PhaseKind::Gating),
-        "verifying" => Some(roko_core::PhaseKind::Verifying),
-        "reviewing" => Some(roko_core::PhaseKind::Reviewing),
-        "doc-revision" => Some(roko_core::PhaseKind::DocRevision),
-        "auto-fixing" => Some(roko_core::PhaseKind::AutoFixing),
-        "regenerating-verify" => Some(roko_core::PhaseKind::RegeneratingVerify),
-        "merging" => Some(roko_core::PhaseKind::Merging),
-        "complete" => Some(roko_core::PhaseKind::Complete),
-        "done" => Some(roko_core::PhaseKind::Done),
-        "failed" => Some(roko_core::PhaseKind::Failed),
-        "skipped" => Some(roko_core::PhaseKind::Skipped),
-        _ => None,
-    }
+fn task_is_timing_event(signal: &Signal) -> bool {
+    matches!(signal.kind, Kind::Custom(ref kind) if kind == TASK_OUTPUT_KIND)
 }
 
-/// Parse a `TaskComplexityBand` from its kebab-case string.
-fn parse_complexity(s: &str) -> TaskComplexityBand {
-    match s {
-        "complex" => TaskComplexityBand::Complex,
-        "standard" => TaskComplexityBand::Standard,
-        _ => TaskComplexityBand::Fast,
+fn extract_timing_event(signal: &Signal) -> Option<TaskTimingEvent> {
+    if !task_is_timing_event(signal) {
+        return None;
     }
+
+    signal.body.as_json::<TaskTimingEvent>().ok()
+}
+
+fn exceeds_threshold(duration_ms: u64, timeout_secs: u64) -> bool {
+    if timeout_secs == 0 {
+        return false;
+    }
+
+    let timeout_ms = timeout_secs.saturating_mul(1000);
+    duration_ms.saturating_mul(5) > timeout_ms.saturating_mul(4)
 }
 
 impl Policy for TimeOverrunWatcher {
-    fn decide(&self, stream: &[Signal], ctx: &Context) -> Vec<Signal> {
-        // Find the most recent PlanPhase signal.
-        let Some(signal) = stream.iter().rev().find(|s| s.kind == Kind::PlanPhase) else {
-            return Vec::new();
-        };
-
-        let Some(phase_str) = signal.tag(PHASE_TAG) else {
-            return Vec::new();
-        };
-
-        let Some(phase) = parse_phase(phase_str) else {
-            return Vec::new();
-        };
-
-        let Some(entered_ms) = signal
-            .tag(PHASE_ENTERED_TAG)
-            .and_then(|v| v.parse::<i64>().ok())
+    fn decide(&self, stream: &[Signal], _ctx: &Context) -> Vec<Signal> {
+        let Some(signal) = stream
+            .iter()
+            .rev()
+            .find(|signal| task_is_timing_event(signal))
         else {
             return Vec::new();
         };
 
-        let complexity = signal
-            .tag(COMPLEXITY_TAG)
-            .map_or(TaskComplexityBand::Standard, parse_complexity);
-
-        let Some(timeout_secs) = phase_timeout(phase, complexity) else {
+        let Some(event) = extract_timing_event(signal) else {
             return Vec::new();
         };
 
-        #[allow(clippy::cast_sign_loss)]
-        let elapsed_secs = ((ctx.now_ms - entered_ms).max(0) / 1000) as u64;
-
-        if elapsed_secs > timeout_secs {
-            vec![
-                Signal::builder(Kind::Custom("conductor.intervention".into()))
-                    .body(Body::text(format!(
-                        "phase {phase_str} exceeded timeout: {elapsed_secs}s > {timeout_secs}s"
-                    )))
-                    .tag("watcher", WATCHER_NAME)
-                    .tag("severity", "warning")
-                    .tag("phase", phase_str)
-                    .tag("elapsed_secs", elapsed_secs.to_string())
-                    .tag("timeout_secs", timeout_secs.to_string())
-                    .build(),
-            ]
-        } else {
-            Vec::new()
+        if !exceeds_threshold(event.duration_ms, event.timeout_secs) {
+            return Vec::new();
         }
+
+        let timeout_ms = event.timeout_secs.saturating_mul(1000);
+        let ratio = if timeout_ms > 0 {
+            event.duration_ms as f64 / timeout_ms as f64
+        } else {
+            0.0
+        };
+
+        vec![
+            Signal::builder(Kind::Custom("conductor.intervention".into()))
+                .body(Body::text(format!(
+                    "task {} exceeded 80% of timeout: {}ms of {}ms",
+                    event.task, event.duration_ms, timeout_ms
+                )))
+                .tag("watcher", WATCHER_NAME)
+                .tag("severity", "warning")
+                .tag("plan_id", event.plan_id)
+                .tag("task_id", event.task)
+                .tag("duration_ms", event.duration_ms.to_string())
+                .tag("timeout_secs", event.timeout_secs.to_string())
+                .tag("threshold", ALERT_THRESHOLD.to_string())
+                .tag("ratio", format!("{ratio:.3}"))
+                .build(),
+        ]
     }
 
     fn name(&self) -> &str {
@@ -122,20 +108,16 @@ impl Policy for TimeOverrunWatcher {
 mod tests {
     use super::*;
 
-    fn phase_signal(phase: &str, entered_ms: i64) -> Signal {
-        Signal::builder(Kind::PlanPhase)
-            .body(Body::text("phase update"))
-            .tag(PHASE_TAG, phase)
-            .tag(PHASE_ENTERED_TAG, entered_ms.to_string())
-            .build()
-    }
+    fn task_signal(task: &str, duration_ms: u64, timeout_secs: u64) -> Signal {
+        let event = TaskTimingEvent {
+            plan_id: "plan-1".into(),
+            task: task.into(),
+            duration_ms,
+            timeout_secs,
+        };
 
-    fn phase_signal_with_complexity(phase: &str, entered_ms: i64, complexity: &str) -> Signal {
-        Signal::builder(Kind::PlanPhase)
-            .body(Body::text("phase update"))
-            .tag(PHASE_TAG, phase)
-            .tag(PHASE_ENTERED_TAG, entered_ms.to_string())
-            .tag(COMPLEXITY_TAG, complexity)
+        Signal::builder(Kind::Custom(TASK_OUTPUT_KIND.into()))
+            .body(Body::from_json(&event).expect("serialize timing event"))
             .build()
     }
 
@@ -146,70 +128,54 @@ mod tests {
     }
 
     #[test]
-    fn within_timeout_no_fire() {
+    fn below_threshold_no_fire() {
         let w = TimeOverrunWatcher::new();
-        // Implementing, standard = 300s timeout, elapsed = 100s
-        let stream = vec![phase_signal("implementing", 0)];
-        let ctx = Context::at(100_000); // 100s later
-        assert!(w.decide(&stream, &ctx).is_empty());
+        let stream = vec![task_signal("task-1", 7_999, 10)];
+        assert!(w.decide(&stream, &Context::at(0)).is_empty());
     }
 
     #[test]
-    fn exceeds_timeout_fires() {
+    fn at_threshold_no_fire() {
         let w = TimeOverrunWatcher::new();
-        // Implementing, standard = 300s timeout, elapsed = 400s
-        let stream = vec![phase_signal("implementing", 0)];
-        let ctx = Context::at(400_000); // 400s later
-        let out = w.decide(&stream, &ctx);
+        let stream = vec![task_signal("task-1", 8_000, 10)];
+        assert!(w.decide(&stream, &Context::at(0)).is_empty());
+    }
+
+    #[test]
+    fn above_threshold_fires() {
+        let w = TimeOverrunWatcher::new();
+        let stream = vec![task_signal("task-1", 8_001, 10)];
+        let out = w.decide(&stream, &Context::at(0));
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].tag("watcher"), Some(WATCHER_NAME));
+        assert_eq!(out[0].tag("task_id"), Some("task-1"));
     }
 
     #[test]
-    fn complex_implementing_longer_timeout() {
-        let w = TimeOverrunWatcher::new();
-        // Complex implementing = 600s timeout
-        let stream = vec![phase_signal_with_complexity("implementing", 0, "complex")];
-        let ctx = Context::at(500_000); // 500s — within 600s timeout
-        assert!(w.decide(&stream, &ctx).is_empty());
-    }
-
-    #[test]
-    fn fast_implementing_shorter_timeout() {
-        let w = TimeOverrunWatcher::new();
-        // Fast implementing = 120s timeout
-        let stream = vec![phase_signal_with_complexity("implementing", 0, "fast")];
-        let ctx = Context::at(150_000); // 150s > 120s timeout
-        let out = w.decide(&stream, &ctx);
-        assert_eq!(out.len(), 1);
-    }
-
-    #[test]
-    fn terminal_phase_no_timeout() {
-        let w = TimeOverrunWatcher::new();
-        let stream = vec![phase_signal("complete", 0)];
-        let ctx = Context::at(999_999_000);
-        assert!(w.decide(&stream, &ctx).is_empty());
-    }
-
-    #[test]
-    fn missing_phase_tag_no_fire() {
+    fn uses_most_recent_task_signal() {
         let w = TimeOverrunWatcher::new();
         let stream = vec![
-            Signal::builder(Kind::PlanPhase)
-                .body(Body::text("no tags"))
-                .build(),
+            task_signal("task-1", 20_000, 10),
+            task_signal("task-2", 1_000, 10),
         ];
-        assert!(w.decide(&stream, &Context::at(999_000)).is_empty());
+        assert!(w.decide(&stream, &Context::at(0)).is_empty());
     }
 
     #[test]
-    fn merging_timeout_short() {
+    fn zero_timeout_no_fire() {
         let w = TimeOverrunWatcher::new();
-        // Merging = 60s timeout
-        let stream = vec![phase_signal("merging", 0)];
-        let ctx = Context::at(70_000); // 70s > 60s
-        let out = w.decide(&stream, &ctx);
-        assert_eq!(out.len(), 1);
+        let stream = vec![task_signal("task-1", 1_000, 0)];
+        assert!(w.decide(&stream, &Context::at(0)).is_empty());
+    }
+
+    #[test]
+    fn non_task_signal_ignored() {
+        let w = TimeOverrunWatcher::new();
+        let stream = vec![
+            Signal::builder(Kind::AgentOutput)
+                .body(Body::text("task finished"))
+                .build(),
+        ];
+        assert!(w.decide(&stream, &Context::at(0)).is_empty());
     }
 }
