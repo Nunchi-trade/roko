@@ -86,7 +86,8 @@ pub struct ClaudeCliAgent {
     fallback_model: Option<String>,
     bare_mode: bool,
     system_prompt: Option<String>,
-    tools: Option<String>,
+    allowed_tools: Option<String>,
+    max_turns: Option<u32>,
     settings_json: String,
     extra_args: Vec<String>,
     env: Vec<(String, String)>,
@@ -114,7 +115,8 @@ impl ClaudeCliAgent {
             fallback_model: Some("claude-haiku-4-5".to_string()),
             bare_mode: true,
             system_prompt: None,
-            tools: None,
+            allowed_tools: None,
+            max_turns: None,
             settings_json: build_settings_json(),
             extra_args: Vec::new(),
             env: Vec::new(),
@@ -171,7 +173,21 @@ impl ClaudeCliAgent {
     /// Attach a Claude tool allowlist, formatted as `Read,Edit,Bash`.
     #[must_use]
     pub fn with_tools(mut self, tools: impl Into<String>) -> Self {
-        self.tools = Some(tools.into());
+        self.allowed_tools = Some(tools.into());
+        self
+    }
+
+    /// Attach a Claude `--allowedTools` allowlist.
+    #[must_use]
+    pub fn with_allowed_tools(mut self, tools: impl Into<String>) -> Self {
+        self.allowed_tools = Some(tools.into());
+        self
+    }
+
+    /// Set the maximum number of turns Claude may take.
+    #[must_use]
+    pub const fn with_max_turns(mut self, max_turns: u32) -> Self {
+        self.max_turns = Some(max_turns);
         self
     }
 
@@ -299,6 +315,9 @@ impl ClaudeCliAgent {
         if self.dangerously_skip_permissions {
             cmd.arg("--dangerously-skip-permissions");
         }
+        if let Some(max_turns) = self.max_turns {
+            cmd.arg("--max-turns").arg(max_turns.to_string());
+        }
 
         if let Some(fallback_model) = &self.fallback_model
             && fallback_model != &self.model
@@ -308,10 +327,10 @@ impl ClaudeCliAgent {
         if let Some(system_prompt) = &self.system_prompt {
             cmd.arg("--append-system-prompt").arg(system_prompt);
         }
-        if let Some(tools) = &self.tools
+        if let Some(tools) = &self.allowed_tools
             && !tools.is_empty()
         {
-            cmd.arg("--tools").arg(tools);
+            cmd.arg("--allowedTools").arg(tools);
         }
         if let Some(mcp_config) = self.discovered_mcp_config() {
             cmd.arg("--mcp-config").arg(mcp_config);
@@ -569,7 +588,7 @@ printf '%s\n' '{{"type":"content_block_delta","delta":{{"text":"hello"}}}}'
 
         let agent = ClaudeCliAgent::new(&script, tmp.path(), "claude-test-model")
             .with_system_prompt("system guidance")
-            .with_tools("Read,Edit")
+            .with_allowed_tools("Read,Edit")
             .with_resume("session-123")
             .with_bare_mode(true);
 
@@ -590,7 +609,7 @@ printf '%s\n' '{{"type":"content_block_delta","delta":{{"text":"hello"}}}}'
         assert!(args_text.contains("system guidance"));
         assert!(args_text.contains("--settings"));
         assert!(args_text.contains("--dangerously-skip-permissions"));
-        assert!(args_text.contains("--tools"));
+        assert!(args_text.contains("--allowedTools"));
         assert!(args_text.contains("Read,Edit"));
         assert!(args_text.contains("--resume"));
         assert!(args_text.contains("session-123"));

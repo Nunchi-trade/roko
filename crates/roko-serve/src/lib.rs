@@ -123,6 +123,7 @@ impl ServerBuilder {
         );
         let dispatcher = Arc::new(dispatch::TemplateAgentDispatcher::new(
             state.workdir.clone(),
+            None,
         ));
         tokio::spawn(dispatch::dispatch_loop(Arc::clone(&state), dispatcher));
         let _feedback_loop = feedback::start_feedback_loop(Arc::clone(&state));

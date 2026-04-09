@@ -18,9 +18,16 @@ use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use chrono::Utc;
 use parking_lot::{Mutex, RwLock};
-use roko_agent::{Agent, AgentResult, ClaudeCliAgent};
+use roko_agent::{
+    Agent, AgentResult, ClaudeCliAgent,
+    mcp::{McpConfig, McpServerConfig, find_mcp_config},
+};
+use roko_compose::SystemPromptBuilder;
+use roko_core::agent::AgentRole;
 use roko_core::config::schema::{RokoConfig, SubscriptionConfig, SubscriptionFilterConfig};
 use roko_core::tool::ExternalAction;
+use roko_core::tool::role_allowlist::role_allowlist;
+use roko_core::tool::ToolRegistry;
 use roko_core::{Body, Context as RokoContext, Kind, Provenance, Signal};
 use roko_core::{ContentHash, Verdict};
 use roko_learn::cascade_router::CascadeRouter;
@@ -31,6 +38,7 @@ use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 use tracing::{info, warn};
 use uuid::Uuid;
+use roko_std::tool::StaticToolRegistry;
 
 use crate::events::ServerEvent;
 use crate::state::{AppState, TemplateRunRecord};
@@ -70,6 +78,7 @@ pub struct WebhookEpisodeMetadata {
 #[derive(Clone, Debug)]
 pub struct TemplateAgentDispatcher {
     workdir: PathBuf,
+    base_mcp_config: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -156,16 +165,27 @@ impl EfficiencyTracker {
 impl TemplateAgentDispatcher {
     /// Create a dispatcher rooted at `workdir`.
     #[must_use]
-    pub fn new(workdir: PathBuf) -> Self {
-        Self { workdir }
+    pub fn new(workdir: PathBuf, base_mcp_config: Option<PathBuf>) -> Self {
+        Self {
+            workdir,
+            base_mcp_config,
+        }
     }
 }
 
 #[async_trait]
 impl AgentDispatcher for TemplateAgentDispatcher {
     async fn dispatch(&self, template: AgentTemplate, signal: Signal) -> Result<AgentResult> {
-        let system_prompt = TemplateRegistry::render_prompt(&template, &HashMap::new());
-        let agent = build_agent(&template, &system_prompt, &self.workdir)?;
+        let system_prompt = build_template_system_prompt(&template);
+        let allowed_tools = build_allowed_tools_csv(&template);
+        let mcp_config = resolve_template_mcp_config(self.base_mcp_config.as_ref(), &self.workdir, &template)?;
+        let agent = build_agent(
+            &template,
+            &system_prompt,
+            &allowed_tools,
+            mcp_config.as_ref(),
+            &self.workdir,
+        )?;
         let ctx = dispatch_context(&template, &signal);
         Ok(agent.run(&signal, &ctx).await)
     }
@@ -859,12 +879,165 @@ async fn dispatch_template(
 fn build_agent(
     template: &AgentTemplate,
     system_prompt: &str,
+    allowed_tools: &str,
+    mcp_config: Option<&PathBuf>,
     workdir: &Path,
 ) -> Result<Box<dyn Agent>> {
-    let agent = ClaudeCliAgent::new("claude", workdir, template.model.clone())
+    let mut agent = ClaudeCliAgent::new("claude", workdir, template.model.clone())
         .with_system_prompt(system_prompt.to_string())
+        .with_allowed_tools(allowed_tools.to_string())
+        .with_max_turns(template.max_turns)
         .with_timeout_ms(120_000);
+    if let Some(path) = mcp_config {
+        agent = agent.with_mcp_config(path);
+    }
     Ok(Box::new(agent))
+}
+
+fn build_template_system_prompt(template: &AgentTemplate) -> String {
+    let role_prompt = TemplateRegistry::render_prompt(template, &HashMap::new());
+    let mut prompt = role_prompt;
+    if let Some(format_instructions) = output_format_instructions(&template.output_format) {
+        if !format_instructions.is_empty() {
+            if !prompt.is_empty() {
+                prompt.push_str("\n\n");
+            }
+            prompt.push_str(&format_instructions);
+        }
+    }
+    SystemPromptBuilder::new(prompt).build()
+}
+
+fn output_format_instructions(format: &crate::templates::TemplateOutputFormat) -> Option<String> {
+    match format {
+        crate::templates::TemplateOutputFormat::Markdown => Some(
+            "Output a valid Markdown document. Use prose, headings, lists, and fenced code blocks when helpful."
+                .to_string(),
+        ),
+        crate::templates::TemplateOutputFormat::Json => Some(
+            "Output valid JSON only. Do not wrap the response in markdown fences or extra prose."
+                .to_string(),
+        ),
+        crate::templates::TemplateOutputFormat::Toml => Some(
+            "Output valid TOML only. Do not wrap the response in markdown fences or extra prose."
+                .to_string(),
+        ),
+        crate::templates::TemplateOutputFormat::None => None,
+    }
+}
+
+fn build_allowed_tools_csv(template: &AgentTemplate) -> String {
+    let mut names = if template.allowed_tools.is_empty() {
+        default_allowed_tools_for_role(&template.role)
+    } else {
+        template.allowed_tools.clone()
+    };
+
+    if !template.denied_tools.is_empty() {
+        let denied: std::collections::HashSet<&str> =
+            template.denied_tools.iter().map(String::as_str).collect();
+        names.retain(|name| !denied.contains(name.as_str()));
+    }
+
+    names.dedup();
+    names.join(",")
+}
+
+fn default_allowed_tools_for_role(role_name: &str) -> Vec<String> {
+    let Some(role) = parse_agent_role(role_name) else {
+        return Vec::new();
+    };
+
+    let registry = StaticToolRegistry::new();
+    role_allowlist(role, registry.all())
+        .into_iter()
+        .map(|tool| tool.name.clone())
+        .collect()
+}
+
+fn parse_agent_role(role_name: &str) -> Option<AgentRole> {
+    let role_name = role_name.trim();
+    if role_name.is_empty() {
+        return None;
+    }
+
+    std::iter::once(AgentRole::Conductor)
+        .chain(AgentRole::ALL_AGENTS.iter().copied())
+        .find(|role| role.label().eq_ignore_ascii_case(role_name))
+}
+
+fn resolve_template_mcp_config(
+    base_mcp_config: Option<&PathBuf>,
+    workdir: &Path,
+    template: &AgentTemplate,
+) -> Result<Option<PathBuf>> {
+    if template.mcp_servers.is_empty() {
+        return Ok(base_mcp_config.cloned().or_else(|| {
+            find_mcp_config(workdir).and_then(|result| match result {
+                Ok((path, _)) => Some(path),
+                Err(err) => {
+                    warn!(error = %err, "failed to discover MCP config for template");
+                    None
+                }
+            })
+        }));
+    }
+
+    let discovered = if let Some(path) = base_mcp_config {
+        Some(path.clone())
+    } else {
+        match find_mcp_config(workdir) {
+            Some(Ok((path, _))) => Some(path),
+            Some(Err(err)) => return Err(err.into()),
+            None => None,
+        }
+    };
+
+    let Some(base_path) = discovered else {
+        anyhow::bail!(
+            "template '{}' requires MCP servers {:?}, but no MCP config was found",
+            template.name,
+            template.mcp_servers
+        );
+    };
+
+    let base_config = McpConfig::load(&base_path)
+        .with_context(|| format!("load MCP config {}", base_path.display()))?;
+    let requested: std::collections::HashSet<&str> =
+        template.mcp_servers.iter().map(String::as_str).collect();
+    let servers: Vec<McpServerConfig> = base_config
+        .servers
+        .into_iter()
+        .filter(|server| requested.contains(server.name.as_str()))
+        .collect();
+
+    if servers.len() != requested.len() {
+        let mut missing: Vec<String> = requested
+            .iter()
+            .copied()
+            .filter(|name| !servers.iter().any(|server| server.name == *name))
+            .map(str::to_string)
+            .collect();
+        missing.sort();
+        anyhow::bail!(
+            "template '{}' requires MCP servers that are missing from {}: {}",
+            template.name,
+            base_path.display(),
+            missing.join(", ")
+        );
+    }
+
+    let generated = McpConfig { servers };
+    let dir = std::env::temp_dir().join("roko-template-mcp");
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let path = dir.join(format!("{}-{}.mcp.json", template.name, Uuid::new_v4()));
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&generated)
+            .context("serialize template MCP config")?,
+    )
+    .with_context(|| format!("write {}", path.display()))?;
+    Ok(Some(path))
 }
 
 fn dispatch_context(template: &AgentTemplate, signal: &Signal) -> RokoContext {
@@ -1213,5 +1386,92 @@ filter = { path = "src/**/*.rs" }
         assert_eq!(matched[1].template(), "path-review");
 
         let _ = std::fs::remove_dir_all(&workdir);
+    }
+
+    #[test]
+    fn template_system_prompt_includes_output_format_guidance() {
+        let template = AgentTemplate {
+            name: "json-template".into(),
+            description: "Test template".into(),
+            model: "claude-test".into(),
+            role: "implementer".into(),
+            system_prompt: "You are the template role.".into(),
+            max_turns: 4,
+            output_format: crate::templates::TemplateOutputFormat::Json,
+            mcp_servers: Vec::new(),
+            allowed_tools: Vec::new(),
+            denied_tools: Vec::new(),
+        };
+
+        let prompt = build_template_system_prompt(&template);
+        assert!(prompt.contains("You are the template role."));
+        assert!(prompt.contains("Output valid JSON only"));
+    }
+
+    #[test]
+    fn allowed_tools_csv_respects_explicit_allowlist_and_denylist() {
+        let template = AgentTemplate {
+            name: "tools-template".into(),
+            description: "Test template".into(),
+            model: "claude-test".into(),
+            role: "implementer".into(),
+            system_prompt: "You are the template role.".into(),
+            max_turns: 4,
+            output_format: crate::templates::TemplateOutputFormat::Markdown,
+            mcp_servers: Vec::new(),
+            allowed_tools: vec!["read_file".into(), "grep".into(), "bash".into()],
+            denied_tools: vec!["grep".into()],
+        };
+
+        let tools_csv = build_allowed_tools_csv(&template);
+        assert_eq!(tools_csv, "read_file,bash");
+    }
+
+    #[test]
+    fn template_mcp_config_filters_requested_servers() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mcp_path = tmp.path().join(".mcp.json");
+        let config = McpConfig {
+            servers: vec![
+                McpServerConfig {
+                    name: "filesystem".into(),
+                    command: "npx".into(),
+                    args: vec!["-y".into(), "@modelcontextprotocol/server-filesystem".into()],
+                    env: Default::default(),
+                },
+                McpServerConfig {
+                    name: "git".into(),
+                    command: "mcp-git".into(),
+                    args: Vec::new(),
+                    env: Default::default(),
+                },
+            ],
+        };
+        std::fs::write(
+            &mcp_path,
+            serde_json::to_string_pretty(&config).expect("serialize"),
+        )
+        .expect("write mcp config");
+
+        let template = AgentTemplate {
+            name: "mcp-template".into(),
+            description: "Test template".into(),
+            model: "claude-test".into(),
+            role: "implementer".into(),
+            system_prompt: "You are the template role.".into(),
+            max_turns: 4,
+            output_format: crate::templates::TemplateOutputFormat::Markdown,
+            mcp_servers: vec!["filesystem".into()],
+            allowed_tools: Vec::new(),
+            denied_tools: Vec::new(),
+        };
+
+        let generated =
+            resolve_template_mcp_config(None, tmp.path(), &template).expect("resolve");
+        let generated = generated.expect("generated path");
+        let rendered = std::fs::read_to_string(&generated).expect("read generated config");
+        let parsed: McpConfig = serde_json::from_str(&rendered).expect("parse generated config");
+        assert_eq!(parsed.servers.len(), 1);
+        assert_eq!(parsed.servers[0].name, "filesystem");
     }
 }

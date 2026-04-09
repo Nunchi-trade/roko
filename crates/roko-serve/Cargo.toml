@@ -17,6 +17,7 @@ roko-learn = { path = "../roko-learn" }
 roko-gate = { path = "../roko-gate" }
 roko-fs = { path = "../roko-fs" }
 roko-compose = { path = "../roko-compose" }
+roko-std = { path = "../roko-std" }
 roko-orchestrator = { path = "../roko-orchestrator" }
 roko-conductor = { path = "../roko-conductor" }
 bardo-runtime = { path = "../bardo-runtime" }
