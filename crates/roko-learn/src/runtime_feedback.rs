@@ -834,6 +834,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn open_under_loads_persisted_cascade_router_state() {
+        let tmp = TempDir::new().unwrap();
+        let learn_root = tmp.path().join(".roko").join("learn");
+        let paths = LearningPaths::under(&learn_root);
+
+        let router = CascadeRouter::new(vec![
+            "claude-sonnet-4-20250514".to_string(),
+            "claude-haiku-4-5-20251001".to_string(),
+        ]);
+        let ctx = RoutingContext {
+            task_category: TaskCategory::Implementation,
+            complexity: TaskComplexityBand::Standard,
+            iteration: 0,
+            role: roko_core::agent::AgentRole::Implementer,
+            crate_familiarity: 0.5,
+            has_prior_failure: false,
+        };
+        for _ in 0..60 {
+            router.record_observation(&ctx, "claude-sonnet-4-20250514", 0.9, true);
+        }
+        router.save(&paths.cascade_router_json).unwrap();
+
+        let runtime = LearningRuntime::open_under(&learn_root).await.unwrap();
+        let loaded_router = runtime.cascade_router();
+
+        assert_eq!(loaded_router.total_observations(), 60);
+        assert_eq!(loaded_router.current_stage(), crate::cascade_router::CascadeStage::Confidence);
+        let routed = loaded_router.route(&ctx);
+        assert_eq!(routed.stage, crate::cascade_router::CascadeStage::Confidence);
+    }
+
+    #[tokio::test]
     async fn completed_run_updates_playbook_and_rule_outcomes() {
         let tmp = TempDir::new().unwrap();
         let paths = LearningPaths::under(tmp.path());
