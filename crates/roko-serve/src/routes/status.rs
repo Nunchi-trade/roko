@@ -42,18 +42,17 @@ pub fn routes() -> Router<Arc<AppState>> {
 }
 
 /// `GET /api/health` — liveness check.
-async fn health(State(state): State<Arc<AppState>>) -> Json<Value> {
+async fn health(State(state): State<Arc<AppState>>) -> (axum::http::StatusCode, Json<Value>) {
     let uptime_secs = state.started_at.elapsed().as_secs();
-    let active_plans = state.active_plans.read().await.len();
-    let active_agents = state.supervisor.count().await;
 
-    Json(json!({
+    (
+        axum::http::StatusCode::OK,
+        Json(json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_secs": uptime_secs,
-        "active_plans": active_plans,
-        "active_agents": active_agents,
-    }))
+        })),
+    )
 }
 
 /// `GET /api/status` — session status overview.
@@ -1477,42 +1476,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn health_reports_runtime_counts() {
+    async fn health_reports_status_version_and_uptime() {
         let (_dir, state) = test_state();
 
-        let plan_handle = PlanHandle {
-            id: "plan-1".into(),
-            plan_dir: std::path::PathBuf::from("/tmp/plan-1"),
-            status: OperationStatus::Running,
-            handle: tokio::spawn(async {}),
-        };
-        state
-            .active_plans
-            .write()
-            .await
-            .insert(plan_handle.id.clone(), plan_handle);
-
-        let _agent_id = state
-            .supervisor
-            .spawn(bardo_runtime::process::SpawnConfig {
-                program: "sleep".into(),
-                args: vec!["60".into()],
-                label: "health-test-agent".into(),
-                ..Default::default()
-            })
-            .await
-            .expect("spawn test agent");
-
         let response = health(State(state.clone())).await;
-        let body = response.0;
+        let body = response.1.0;
 
         assert_eq!(body["status"], "ok");
         assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
         assert!(body["uptime_secs"].as_u64().is_some());
-        assert_eq!(body["active_plans"].as_u64(), Some(1));
-        assert_eq!(body["active_agents"].as_u64(), Some(1));
-
-        state.supervisor.shutdown_all().await;
     }
 
     #[tokio::test]
