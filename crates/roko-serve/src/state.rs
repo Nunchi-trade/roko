@@ -156,13 +156,10 @@ impl AppState {
         let signal_root = layout.root().to_path_buf();
         let cancel = CancelToken::new();
         let supervisor = Arc::new(ProcessSupervisor::new(cancel.child()));
-        let templates_dir = workdir.join(".roko").join("templates");
         let subscriptions = SubscriptionRegistry::load_from_project(&workdir, &roko_config);
 
-        let mut template_registry = TemplateRegistry::new(templates_dir);
-        if let Err(e) = template_registry.scan() {
-            tracing::warn!("failed to scan templates: {e}");
-        }
+        let mut template_registry = TemplateRegistry::new(workdir.clone());
+        template_registry.scan();
 
         Self {
             workdir,

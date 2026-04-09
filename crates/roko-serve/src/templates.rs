@@ -6,10 +6,11 @@
 //! `{{param}}` interpolation.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use tracing::{info, warn};
 
 /// The expected output shape for an agent template.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,41 +63,158 @@ pub struct AgentTemplate {
     pub denied_tools: Vec<String>,
 }
 
-/// In-memory registry of agent templates backed by `.roko/templates/`.
+impl AgentTemplate {
+    /// Validate the template for common startup-time issues.
+    pub fn validate(&self, source_name: Option<&str>) -> std::result::Result<(), Vec<String>> {
+        let mut errors = Vec::new();
+
+        if self.name.trim().is_empty() {
+            errors.push("template name must not be empty".into());
+        }
+        if let Some(source_name) = source_name {
+            if !source_name.is_empty() && self.name != source_name {
+                errors.push(format!(
+                    "template name '{}' does not match filename stem '{}'",
+                    self.name, source_name
+                ));
+            }
+        }
+        if self.description.trim().is_empty() {
+            errors.push(format!("template '{}' must have a description", self.name));
+        }
+        if self.role.trim().is_empty() {
+            errors.push(format!("template '{}' must have a role", self.name));
+        }
+        if self.system_prompt.trim().is_empty() {
+            errors.push(format!("template '{}' must have a system_prompt", self.name));
+        }
+        if self.max_turns == 0 {
+            errors.push(format!("template '{}' must allow at least one turn", self.name));
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+}
+
+/// Startup scan result for template loading.
+#[derive(Debug, Default, Clone)]
+pub struct TemplateLoadReport {
+    /// Number of valid templates loaded into the registry.
+    pub loaded: usize,
+    /// Validation and parse errors encountered while loading.
+    pub validation_errors: Vec<String>,
+}
+
+/// In-memory registry of agent templates backed by workspace template dirs.
 pub struct TemplateRegistry {
     templates: HashMap<String, AgentTemplate>,
-    dir: PathBuf,
+    workdir: PathBuf,
 }
 
 impl TemplateRegistry {
-    /// Create an empty registry backed by the given directory.
-    pub fn new(dir: PathBuf) -> Self {
+    /// Create an empty registry rooted at the workspace directory.
+    pub fn new(workdir: PathBuf) -> Self {
         Self {
             templates: HashMap::new(),
-            dir,
+            workdir,
         }
     }
 
-    /// Scan the backing directory for `*.toml` files and load them.
-    pub fn scan(&mut self) -> Result<()> {
-        self.templates.clear();
-        if !self.dir.exists() {
+    fn template_dirs(&self) -> [PathBuf; 2] {
+        [
+            self.workdir.join("templates"),
+            self.workdir.join(".roko").join("templates"),
+        ]
+    }
+
+    fn load_dir(&mut self, dir: &Path, report: &mut TemplateLoadReport) -> Result<()> {
+        if !dir.exists() {
             return Ok(());
         }
-        let entries =
-            std::fs::read_dir(&self.dir).with_context(|| format!("read {}", self.dir.display()))?;
-        for entry in entries {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("toml") {
-                let text = std::fs::read_to_string(&path)
-                    .with_context(|| format!("read {}", path.display()))?;
-                let tpl: AgentTemplate =
-                    toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
-                self.templates.insert(tpl.name.clone(), tpl);
+
+        let mut entries = Vec::new();
+        let read_dir =
+            std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))?;
+        for entry in read_dir {
+            match entry {
+                Ok(entry) => entries.push(entry.path()),
+                Err(err) => report.validation_errors.push(format!(
+                    "{}: failed to read directory entry: {err}",
+                    dir.display()
+                )),
             }
         }
+        entries.sort();
+
+        for path in entries {
+            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+
+            let text = match std::fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(err) => {
+                    report
+                        .validation_errors
+                        .push(format!("{}: failed to read file: {err}", path.display()));
+                    continue;
+                }
+            };
+
+            let template: AgentTemplate = match toml::from_str(&text) {
+                Ok(template) => template,
+                Err(err) => {
+                    report
+                        .validation_errors
+                        .push(format!("{}: failed to parse TOML: {err}", path.display()));
+                    continue;
+                }
+            };
+
+            let stem = path.file_stem().and_then(|stem| stem.to_str());
+            if let Err(errors) = template.validate(stem) {
+                for error in errors {
+                    report
+                        .validation_errors
+                        .push(format!("{}: {error}", path.display()));
+                }
+                continue;
+            }
+
+            self.templates.insert(template.name.clone(), template);
+        }
+
         Ok(())
+    }
+
+    /// Scan the workspace template directories for `*.toml` files and load them.
+    pub fn scan(&mut self) -> TemplateLoadReport {
+        self.templates.clear();
+        let mut report = TemplateLoadReport::default();
+
+        for dir in self.template_dirs() {
+            if let Err(err) = self.load_dir(&dir, &mut report) {
+                report
+                    .validation_errors
+                    .push(format!("{}: {err}", dir.display()));
+            }
+        }
+        report.loaded = self.templates.len();
+
+        info!(
+            loaded = report.loaded,
+            validation_errors = report.validation_errors.len(),
+            "template scan completed"
+        );
+        for error in &report.validation_errors {
+            warn!("{error}");
+        }
+
+        report
     }
 
     /// Return all loaded templates.
@@ -111,9 +229,9 @@ impl TemplateRegistry {
 
     /// Insert (or overwrite) a template and persist it to disk.
     pub fn insert(&mut self, template: AgentTemplate) -> Result<()> {
-        std::fs::create_dir_all(&self.dir)
-            .with_context(|| format!("create {}", self.dir.display()))?;
-        let path = self.dir.join(format!("{}.toml", template.name));
+        let dir = self.workdir.join(".roko").join("templates");
+        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+        let path = dir.join(format!("{}.toml", template.name));
         let text = toml::to_string_pretty(&template).context("serialize template")?;
         std::fs::write(&path, text).with_context(|| format!("write {}", path.display()))?;
         self.templates.insert(template.name.clone(), template);
@@ -123,7 +241,11 @@ impl TemplateRegistry {
     /// Remove a template by name. Returns `true` if it existed.
     pub fn remove(&mut self, name: &str) -> Result<bool> {
         if self.templates.remove(name).is_some() {
-            let path = self.dir.join(format!("{name}.toml"));
+            let path = self
+                .workdir
+                .join(".roko")
+                .join("templates")
+                .join(format!("{name}.toml"));
             if path.exists() {
                 std::fs::remove_file(&path)
                     .with_context(|| format!("remove {}", path.display()))?;
@@ -152,4 +274,65 @@ fn default_model() -> String {
 
 const fn default_max_turns() -> u32 {
     20
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_template(path: &Path, contents: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, contents).unwrap();
+    }
+
+    #[test]
+    fn scan_loads_both_template_roots_and_reports_validation_errors() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let workdir = tempdir.path();
+
+        write_template(
+            &workdir.join("templates").join("planner.toml"),
+            r#"
+name = "planner"
+description = "Plan work"
+role = "planner"
+system_prompt = "You are a planner."
+max_turns = 12
+"#,
+        );
+        write_template(
+            &workdir.join(".roko").join("templates").join("reviewer.toml"),
+            r#"
+name = "reviewer"
+description = "Review work"
+role = "reviewer"
+system_prompt = "You are a reviewer."
+max_turns = 8
+"#,
+        );
+        write_template(
+            &workdir.join(".roko").join("templates").join("broken.toml"),
+            r#"
+name = "broken"
+description = ""
+role = ""
+system_prompt = ""
+max_turns = 0
+"#,
+        );
+
+        let mut registry = TemplateRegistry::new(workdir.to_path_buf());
+        let report = registry.scan();
+
+        assert_eq!(report.loaded, 2);
+        assert!(report
+            .validation_errors
+            .iter()
+            .any(|error| error.contains("broken.toml")));
+        assert!(registry.get("planner").is_some());
+        assert!(registry.get("reviewer").is_some());
+        assert!(registry.get("broken").is_none());
+    }
 }
