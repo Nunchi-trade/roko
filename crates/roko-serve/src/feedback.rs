@@ -491,6 +491,63 @@ fn parse_slack_resource(action: &ExternalAction) -> Result<(String, String)> {
     Ok((channel.to_string(), ts.to_string()))
 }
 
+fn slack_reaction_name(reaction: &Value) -> Option<&str> {
+    reaction
+        .get("name")
+        .and_then(Value::as_str)
+        .or_else(|| reaction.get("content").and_then(Value::as_str))
+}
+
+fn is_positive_slack_reaction(name: &str) -> bool {
+    matches!(
+        name,
+        "+1" | "thumbsup" | "white_check_mark" | "tada" | "heart" | "fire" | "rocket" | "👍" | "✅" | "🎉" | "❤️" | "🔥" | "🚀"
+    )
+}
+
+fn is_negative_slack_reaction(name: &str) -> bool {
+    matches!(name, "-1" | "thumbsdown" | "x" | "no_entry" | "👎" | "❌" | "🚫")
+}
+
+fn slack_reaction_sentiment(reactions: &[Value]) -> (u32, u32, f64) {
+    let positive = reactions
+        .iter()
+        .filter(|reaction| slack_reaction_name(reaction).is_some_and(is_positive_slack_reaction))
+        .map(|reaction| reaction.get("count").and_then(Value::as_u64).unwrap_or(1) as u32)
+        .sum();
+    let negative = reactions
+        .iter()
+        .filter(|reaction| slack_reaction_name(reaction).is_some_and(is_negative_slack_reaction))
+        .map(|reaction| reaction.get("count").and_then(Value::as_u64).unwrap_or(1) as u32)
+        .sum();
+    let total = positive + negative;
+    let sentiment = if total == 0 {
+        0.0
+    } else {
+        (positive as f64 - negative as f64) / total as f64
+    };
+
+    (positive, negative, sentiment)
+}
+
+fn slack_replier_id(message: &Value) -> Option<String> {
+    message
+        .get("user")
+        .and_then(Value::as_str)
+        .or_else(|| message.get("bot_id").and_then(Value::as_str))
+        .or_else(|| message.get("username").and_then(Value::as_str))
+        .map(str::to_string)
+}
+
+fn slack_unique_replier_count(messages: &[Value]) -> usize {
+    messages
+        .iter()
+        .skip(1)
+        .filter_map(slack_replier_id)
+        .collect::<HashSet<_>>()
+        .len()
+}
+
 async fn collect_slack_feedback(
     client: &Client,
     episode: &Episode,
@@ -536,6 +593,11 @@ async fn collect_slack_feedback(
                         .collect()
                 })
                 .unwrap_or_default();
+            let reaction_values = reactions_resp
+                .pointer("/message/reactions")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
 
             let replies_url = "https://slack.com/api/conversations.replies";
             let replies_resp = client
@@ -556,44 +618,31 @@ async fn collect_slack_feedback(
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
-            let reply_count = messages.len().saturating_sub(1);
+            let unique_repliers = slack_unique_replier_count(&messages);
 
-            if reactions.is_empty() && reply_count == 0 {
+            if reactions.is_empty() && unique_repliers == 0 {
                 return Ok(None);
             }
 
-            let positive = ["+1", "thumbsup", "white_check_mark", "tada", "heart", "fire", "rocket"];
-            let negative = ["-1", "thumbsdown", "x", "no_entry"];
-            let pos: u32 = reactions
-                .iter()
-                .filter(|(name, _)| positive.contains(&name.as_str()))
-                .map(|(_, count)| *count)
-                .sum();
-            let neg: u32 = reactions
-                .iter()
-                .filter(|(name, _)| negative.contains(&name.as_str()))
-                .map(|(_, count)| *count)
-                .sum();
-            let total = pos + neg;
-            let sentiment = if total == 0 {
-                0.0
-            } else {
-                (pos as f64 - neg as f64) / total as f64
-            };
+            let (positive_reactions, negative_reactions, sentiment) =
+                slack_reaction_sentiment(&reaction_values);
 
             Ok(Some(FeedbackObservation {
-                success: reply_count > 0 || pos > neg,
+                success: unique_repliers > 0 || positive_reactions > negative_reactions,
                 payload: json!({
                     "resource": {
                         "channel": channel,
                         "ts": ts,
                     },
                     "episode_id": episode.episode_id,
-                    "reply_count": reply_count,
+                    "reply_count": unique_repliers,
+                    "unique_repliers": unique_repliers,
                     "reactions": reactions.iter().map(|(name, count)| json!({
                         "name": name,
                         "count": count,
                     })).collect::<Vec<_>>(),
+                    "positive_reactions": positive_reactions,
+                    "negative_reactions": negative_reactions,
                     "sentiment": sentiment,
                 }),
             }))
@@ -636,5 +685,32 @@ mod tests {
         let (channel, ts) = parse_slack_resource(&action).expect("parse slack resource");
         assert_eq!(channel, "C12345");
         assert_eq!(ts, "1712345678.123456");
+    }
+
+    #[test]
+    fn classifies_slack_reactions_by_sentiment() {
+        let reactions = vec![
+            json!({"name": "thumbsup", "count": 2}),
+            json!({"name": "white_check_mark", "count": 1}),
+            json!({"name": "thumbsdown", "count": 3}),
+        ];
+
+        let (positive, negative, sentiment) = slack_reaction_sentiment(&reactions);
+        assert_eq!(positive, 3);
+        assert_eq!(negative, 3);
+        assert_eq!(sentiment, 0.0);
+    }
+
+    #[test]
+    fn counts_unique_slack_repliers() {
+        let messages = vec![
+            json!({"user": "Uroot"}),
+            json!({"user": "U1"}),
+            json!({"user": "U2"}),
+            json!({"user": "U1"}),
+            json!({"bot_id": "B1"}),
+        ];
+
+        assert_eq!(slack_unique_replier_count(&messages), 3);
     }
 }
