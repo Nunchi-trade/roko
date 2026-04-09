@@ -9,7 +9,7 @@
 
 #![allow(clippy::too_many_lines)]
 
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Context as _, Result, anyhow, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use roko_agent::process::{cleanup_orphaned_agents, reap_orphaned_children};
 use roko_cli::serve_runtime::RokoCliRuntime;
@@ -21,6 +21,7 @@ use roko_cli::{
 };
 use roko_core::{ContentHash, Context, Kind, Query, Substrate};
 use roko_core::{Headlines, TaskMetric, compute_headlines};
+use roko_core::config::schema::RokoConfig;
 use roko_fs::{FileSubstrate, FsObservabilitySinks, RokoLayout};
 use roko_learn::efficiency::compute_role_profiles;
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
@@ -224,6 +225,11 @@ enum Command {
     EventSources {
         #[command(subcommand)]
         cmd: EventSourcesCmd,
+    },
+    /// Manage cloud deployment targets.
+    Deploy {
+        #[command(subcommand)]
+        cmd: DeployCmd,
     },
     /// Manage daemon mode.
     Daemon {
@@ -501,6 +507,16 @@ enum EventSourcesCmd {
 }
 
 #[derive(Debug, Subcommand)]
+enum DeployCmd {
+    /// Deploy the current workspace to Railway via the public GraphQL API.
+    Railway {
+        /// Working directory / repository root (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum ConfigCmd {
     /// Interactive wizard: detects installed LLM CLIs, writes global config.
     Init {
@@ -748,6 +764,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             let _ = roko_cli::index::rebuild_all(&std::env::current_dir().unwrap_or_default());
             result
         }
+        Command::Deploy { cmd } => cmd_deploy(cli, cmd).await,
         Command::Daemon { cmd } => cmd_daemon(cli, cmd).await,
         Command::Dashboard {
             page,
@@ -2671,6 +2688,158 @@ async fn cmd_replay(workdir: Option<PathBuf>, hash: String) -> Result<i32> {
     Ok(EXIT_SUCCESS)
 }
 
+async fn cmd_deploy(cli: &Cli, cmd: DeployCmd) -> Result<i32> {
+    match cmd {
+        DeployCmd::Railway { workdir } => cmd_deploy_railway(cli, workdir).await,
+    }
+}
+
+async fn cmd_deploy_railway(cli: &Cli, workdir: Option<PathBuf>) -> Result<i32> {
+    let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
+    run_release_build(&workdir).await?;
+
+    let config = load_roko_config(&workdir)?;
+    let deploy_config = &config.deploy;
+    let token = deploy_config
+        .railway_api_token
+        .as_deref()
+        .ok_or_else(|| anyhow!("deploy.railway_api_token is required for Railway deployment"))?;
+    let repo_slug = git_remote_slug(&workdir)?;
+    let branch = git_current_branch(&workdir).unwrap_or_else(|_| config.project.fresh_base_branch.clone());
+    let env_vars = collect_railway_env_vars();
+    let backend = roko_serve::deploy::railway_api::RailwayApiBackend::new(
+        token.to_string(),
+        deploy_config.project_id.clone(),
+        deploy_config.environment_id.clone(),
+    );
+
+    let deployment = backend
+        .deploy_roko_app(&roko_serve::deploy::railway_api::RailwayDeploySpec {
+            project_name: config.project.name.clone(),
+            project_id: deploy_config.project_id.clone(),
+            environment_id: deploy_config.environment_id.clone(),
+            service_name: "roko".to_string(),
+            repo_slug,
+            branch,
+            dockerfile_path: "docker/roko.Dockerfile".to_string(),
+            root_directory: ".".to_string(),
+            healthcheck_path: "/api/health".to_string(),
+            volume_mount_path: "/workspace/.roko".to_string(),
+            region: deploy_config.default_region.clone(),
+            env_vars,
+        })
+        .await?;
+
+    let url = deployment
+        .url
+        .as_deref()
+        .ok_or_else(|| anyhow!("Railway deployment finished without a public URL"))?;
+    println!("{url}");
+    Ok(EXIT_SUCCESS)
+}
+
+fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
+    let path = workdir.join("roko.toml");
+    if !path.exists() {
+        return Ok(RokoConfig::default());
+    }
+
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("read {}", path.display()))?;
+    RokoConfig::from_toml(&text).with_context(|| format!("parse {}", path.display()))
+}
+
+async fn run_release_build(workdir: &Path) -> Result<()> {
+    let workdir = workdir.to_path_buf();
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("cargo")
+            .args(["build", "--release", "-p", "roko-cli"])
+            .current_dir(&workdir)
+            .output()
+    })
+    .await
+    .context("join cargo build task")?
+    .context("run cargo build")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "cargo build --release -p roko-cli failed: {}",
+            stderr.trim()
+        );
+    }
+
+    Ok(())
+}
+
+fn git_remote_slug(workdir: &Path) -> Result<String> {
+    let remote = run_command_output(workdir, "git", &["remote", "get-url", "origin"])?;
+    let remote = remote.trim();
+    let slug = remote
+        .strip_prefix("git@github.com:")
+        .or_else(|| remote.strip_prefix("https://github.com/"))
+        .or_else(|| remote.strip_prefix("ssh://git@github.com/"))
+        .ok_or_else(|| anyhow!("origin remote is not a GitHub URL: {remote}"))?
+        .trim_end_matches(".git")
+        .to_string();
+
+    if slug.split('/').count() != 2 {
+        return Err(anyhow!("invalid GitHub repo slug derived from origin: {slug}"));
+    }
+
+    Ok(slug)
+}
+
+fn git_current_branch(workdir: &Path) -> Result<String> {
+    let branch = run_command_output(workdir, "git", &["branch", "--show-current"])?;
+    let branch = branch.trim();
+    if branch.is_empty() {
+        bail!("unable to determine current git branch");
+    }
+    Ok(branch.to_string())
+}
+
+fn collect_railway_env_vars() -> std::collections::HashMap<String, String> {
+    const NAMES: &[&str] = &[
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+        "SLACK_TOKEN",
+        "SLACK_BOT_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "ROKO_SERVER_AUTH_TOKEN",
+    ];
+
+    let mut vars = std::collections::HashMap::new();
+    for name in NAMES {
+        if let Ok(value) = env::var(name) {
+            if !value.trim().is_empty() {
+                vars.insert((*name).to_string(), value);
+            }
+        }
+    }
+    vars
+}
+
+fn run_command_output(workdir: &Path, program: &str, args: &[&str]) -> Result<String> {
+    let output = std::process::Command::new(program)
+        .args(args)
+        .current_dir(workdir)
+        .output()
+        .with_context(|| format!("run {program} {}", args.join(" ")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "{program} {} failed: {}",
+            args.join(" "),
+            stderr.trim()
+        );
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 // -----------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------
@@ -3126,6 +3295,17 @@ mod tests {
     fn cli_parses_replay_subcommand() {
         let cli = Cli::try_parse_from(["roko", "replay", "abcd1234"]).unwrap();
         assert!(matches!(cli.command, Some(Command::Replay { .. })));
+    }
+
+    #[test]
+    fn cli_parses_deploy_railway_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "deploy", "railway"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Deploy {
+                cmd: DeployCmd::Railway { .. }
+            })
+        ));
     }
 
     #[test]

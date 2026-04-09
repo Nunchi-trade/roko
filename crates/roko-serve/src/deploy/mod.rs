@@ -104,14 +104,10 @@ pub fn create_backend(
         "railway-api" => {
             let token = api_token
                 .ok_or_else(|| anyhow::anyhow!("railway-api backend requires railway_api_token"))?;
-            let project = project_id
-                .ok_or_else(|| anyhow::anyhow!("railway-api backend requires project_id"))?;
-            let env = environment_id
-                .ok_or_else(|| anyhow::anyhow!("railway-api backend requires environment_id"))?;
             Ok(Box::new(railway_api::RailwayApiBackend::new(
                 token.to_string(),
-                project.to_string(),
-                env.to_string(),
+                project_id.map(str::to_owned),
+                environment_id.map(str::to_owned),
             )))
         }
         "railway-cli" => Ok(Box::new(railway_cli::RailwayCliBackend::new(
