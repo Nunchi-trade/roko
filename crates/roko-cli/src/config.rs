@@ -4,8 +4,8 @@
 //! sets a token budget for prompt composition, and lists the gates to run
 //! on the agent's output.
 
-use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use anyhow::{Context, Result, anyhow};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::path::{Path, PathBuf};
 
 use roko_core::config::ServeConfig;
@@ -61,7 +61,7 @@ impl Config {
 
     /// Parse a TOML config from a string.
     pub fn parse_toml(text: &str) -> Result<Self> {
-        toml::from_str(text).context("invalid roko.toml")
+        parse_toml_with_env(text, "invalid roko.toml")
     }
 
     /// Render this config back to a TOML string.
@@ -521,7 +521,7 @@ pub struct ConfigLayer {
 impl ConfigLayer {
     /// Parse a layer from a TOML string.
     pub fn parse_toml(text: &str) -> Result<Self> {
-        toml::from_str(text).context("invalid config toml")
+        parse_toml_with_env(text, "invalid config toml")
     }
 
     /// Read a layer from a file on disk.
@@ -673,6 +673,69 @@ impl ConfigLayer {
             serve,
         }
     }
+}
+
+fn parse_toml_with_env<T>(text: &str, context: &'static str) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    let mut value: toml::Value = toml::from_str(text).context(context)?;
+    interpolate_env_values(&mut value)?;
+    value.try_into().map_err(|err| anyhow!(err)).context(context)
+}
+
+fn interpolate_env_values(value: &mut toml::Value) -> Result<()> {
+    match value {
+        toml::Value::String(s) => {
+            *s = interpolate_env_string(s)?;
+        }
+        toml::Value::Array(items) => {
+            for item in items {
+                interpolate_env_values(item)?;
+            }
+        }
+        toml::Value::Table(entries) => {
+            for (_, item) in entries.iter_mut() {
+                interpolate_env_values(item)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn interpolate_env_string(input: &str) -> Result<String> {
+    let mut output = String::with_capacity(input.len());
+    let mut rest = input;
+
+    while let Some(start) = rest.find("${") {
+        output.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find('}') else {
+            output.push_str(&rest[start..]);
+            return Ok(output);
+        };
+        let var_name = &after[..end];
+        if var_name.is_empty()
+            || !var_name
+                .chars()
+                .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        {
+            output.push_str("${");
+            rest = &rest[start + 2..];
+            continue;
+        }
+        let value = std::env::var(var_name).map_err(|_| {
+            anyhow!(
+                "Config error: ${{{var_name}}} referenced but {var_name} not set. Set it in .env or environment."
+            )
+        })?;
+        output.push_str(&value);
+        rest = &after[end + 1..];
+    }
+
+    output.push_str(rest);
+    Ok(output)
 }
 
 /// Partial `AgentConfig` — every field optional.
@@ -1316,6 +1379,36 @@ api_key = "secret"
         let cfg = Config::parse_toml(toml).unwrap();
         assert!(cfg.serve.auth.enabled);
         assert_eq!(cfg.serve.auth.api_key, "secret");
+    }
+
+    #[test]
+    fn interpolates_env_vars_in_string_values() {
+        let path = std::env::var("PATH").expect("PATH must be set for tests");
+        let toml = r#"
+[agent]
+command = "${PATH}"
+args = ["--token=${PATH}"]
+
+[prompt]
+role = "prefix-${PATH}-suffix"
+"#;
+        let cfg = Config::parse_toml(toml).unwrap();
+        assert_eq!(cfg.agent.command, path);
+        assert_eq!(cfg.agent.args, vec![format!("--token={path}")]);
+        assert_eq!(cfg.prompt.role, format!("prefix-{path}-suffix"));
+    }
+
+    #[test]
+    fn missing_env_var_reports_clear_error() {
+        let toml = r#"
+[agent]
+command = "${ROKO_TEST_MISSING_SECRET_9B1C}"
+"#;
+        let err = Config::parse_toml(toml).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains(
+            "Config error: ${ROKO_TEST_MISSING_SECRET_9B1C} referenced but ROKO_TEST_MISSING_SECRET_9B1C not set. Set it in .env or environment."
+        ));
     }
 
     #[test]
