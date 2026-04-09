@@ -1501,10 +1501,15 @@ impl PlanRunner {
                         // Record gate episode.
                         let wall_ms =
                             u64::try_from(gate_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                        // Gate runs are local process work, so the episode records zero USD cost
+                        // while still carrying the latency field alongside it.
+                        let gate_cost_usd = 0.0;
                         let mut ep = Episode::new("gate", format!("{plan_id}:rung-{rung}"));
                         ep.success = passed;
                         ep.usage = Usage {
                             wall_ms,
+                            cost_usd: gate_cost_usd,
+                            cost_usd_without_cache: gate_cost_usd,
                             ..Usage::default()
                         };
                         ep.gate_verdicts
