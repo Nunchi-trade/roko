@@ -200,7 +200,6 @@ fn cron_signal(schedule: &CronSchedule, fired_at: DateTime<Utc>) -> Signal {
             "name": schedule.name.clone(),
             "expression": schedule.expression.clone(),
             "fired_at": fired_at.to_rfc3339(),
-            "metadata": schedule.metadata.clone(),
         })))
         .build()
 }
@@ -358,7 +357,7 @@ mod tests {
     }
 
     #[test]
-    fn cron_signal_payload_includes_metadata() {
+    fn cron_signal_payload_includes_cron_fields() {
         let schedule = CronSchedule {
             name: "weekly-digest".to_string(),
             expression: "0 9 * * MON".to_string(),
@@ -378,7 +377,6 @@ mod tests {
                 "name": "weekly-digest",
                 "expression": "0 9 * * MON",
                 "fired_at": DateTime::<Utc>::UNIX_EPOCH.to_rfc3339(),
-                "metadata": { "team": "platform" },
             }))
         );
     }
