@@ -59,6 +59,7 @@ pub mod score;
 pub mod secrets;
 pub mod shutdown;
 pub mod signal;
+pub mod signal_kinds;
 pub mod task;
 pub mod tool;
 pub mod traits;
@@ -88,6 +89,7 @@ pub use provenance::Provenance;
 pub use query::{Budget, Query};
 pub use score::Score;
 pub use signal::Signal;
+pub use signal_kinds::*;
 pub use task::{
     GlobalTaskId, PlanStatus, Task, TaskCategory, TaskComplexityBand, TaskContextWeight, TaskMeta,
     TaskQualityProfile, TaskReasoningLevel, TaskSpeedPriority, TaskStatus,
