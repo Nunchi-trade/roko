@@ -155,6 +155,9 @@ enum Command {
     Init {
         /// Directory to initialize (default: current dir).
         path: Option<PathBuf>,
+        /// Generate cloud-ready defaults for deployment.
+        #[arg(long)]
+        cloud: bool,
     },
     /// Seed a prompt and run the universal loop (compose -> agent -> gate -> persist).
     Run {
@@ -733,8 +736,8 @@ async fn dispatch(mut cli: Cli) -> Result<i32> {
 
 async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
     match command {
-        Command::Init { path } => {
-            cmd_init(path).await?;
+        Command::Init { path, cloud } => {
+            cmd_init(path, cloud).await?;
             Ok(EXIT_SUCCESS)
         }
         Command::Run { prompt, workdir } => cmd_run(cli, workdir, prompt).await,
@@ -2425,7 +2428,7 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
 // Make list_md_files public so main.rs can use it for draft list
 // (it's already pub in prd.rs)
 
-async fn cmd_init(path: Option<PathBuf>) -> Result<()> {
+async fn cmd_init(path: Option<PathBuf>, cloud: bool) -> Result<()> {
     let target = path.unwrap_or_else(|| PathBuf::from("."));
     tokio::fs::create_dir_all(&target)
         .await
@@ -2449,7 +2452,7 @@ async fn cmd_init(path: Option<PathBuf>) -> Result<()> {
             config_path.display()
         );
     } else {
-        let default = Config::default_toml_template()?;
+        let default = Config::default_toml_template(cloud)?;
         tokio::fs::write(&config_path, default)
             .await
             .with_context(|| format!("write {}", config_path.display()))?;
@@ -3226,7 +3229,25 @@ mod tests {
     #[test]
     fn cli_parses_init_subcommand() {
         let cli = Cli::try_parse_from(["roko", "init", "/tmp/project"]).unwrap();
-        assert!(matches!(cli.command, Some(Command::Init { .. })));
+        match cli.command {
+            Some(Command::Init { path, cloud }) => {
+                assert_eq!(path, Some(PathBuf::from("/tmp/project")));
+                assert!(!cloud);
+            }
+            other => panic!("expected init command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_init_cloud_flag() {
+        let cli = Cli::try_parse_from(["roko", "init", "--cloud"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Init {
+                cloud: true,
+                ..
+            })
+        ));
     }
 
     #[test]

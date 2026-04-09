@@ -42,6 +42,15 @@ pub struct Config {
     /// API serving options.
     #[serde(default)]
     pub serve: ServeConfig,
+    /// Structured log output format for cloud deployments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_format: Option<String>,
+    /// HTTP bind address for cloud deployments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind: Option<String>,
+    /// Persistent workspace directory for cloud deployments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_dir: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -56,6 +65,9 @@ impl Default for Config {
             executor: ExecutorConfig::default(),
             budget: BudgetConfig::default(),
             serve: ServeConfig::default(),
+            log_format: None,
+            bind: None,
+            data_dir: None,
         }
     }
 }
@@ -80,8 +92,14 @@ impl Config {
     }
 
     /// Render the default `roko.toml` template used by `roko init`.
-    pub fn default_toml_template() -> Result<String> {
-        let rendered = Self::default().to_toml()?;
+    pub fn default_toml_template(cloud: bool) -> Result<String> {
+        let mut config = Self::default();
+        if cloud {
+            config.log_format = Some("json".to_string());
+            config.bind = Some("0.0.0.0".to_string());
+            config.data_dir = Some(PathBuf::from("/data/.roko"));
+        }
+        let rendered = config.to_toml()?;
         Ok(format!(
             "# REQUIRED_ENV\n\
              # Required environment variables (set in .env or shell):\n\
@@ -857,6 +875,9 @@ impl ConfigLayer {
             executor,
             budget: BudgetConfig::default(),
             serve,
+            log_format: None,
+            bind: None,
+            data_dir: None,
         }
     }
 }
@@ -1892,7 +1913,7 @@ program = "echo"
 
     #[test]
     fn default_toml_template_includes_required_env_section() {
-        let rendered = Config::default_toml_template().unwrap();
+        let rendered = Config::default_toml_template(false).unwrap();
         assert!(rendered.contains("# REQUIRED_ENV"));
         assert!(rendered.contains("GITHUB_TOKEN"));
         assert!(rendered.contains("SLACK_BOT_TOKEN"));
@@ -1900,5 +1921,13 @@ program = "echo"
         assert!(rendered.contains("ANTHROPIC_API_KEY"));
         assert!(rendered.contains("[prd]"));
         assert!(rendered.contains("auto_plan = false"));
+    }
+
+    #[test]
+    fn cloud_default_toml_template_includes_cloud_settings() {
+        let rendered = Config::default_toml_template(true).unwrap();
+        assert!(rendered.contains(r#"log_format = "json""#));
+        assert!(rendered.contains(r#"bind = "0.0.0.0""#));
+        assert!(rendered.contains(r#"data_dir = "/data/.roko""#));
     }
 }
