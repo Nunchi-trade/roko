@@ -56,8 +56,6 @@ use crate::task_parser::TasksFile;
 /// Default number of actions between auto-saves.
 const AUTOSAVE_INTERVAL: usize = 5;
 const DEFAULT_WORKTREE_IDLE_TTL_SECS: u64 = 30 * 60;
-/// Maximum number of tasks to dispatch in parallel.
-const MAX_PARALLEL_TASKS: usize = 4;
 
 // ─── ContextAttributionTracker ────────────────────────────────────────────
 
@@ -1909,17 +1907,7 @@ impl PlanRunner {
             self.handle_implementing_single(plan_id, &ready[0]).await;
         } else {
             // ── Multiple ready tasks: parallel dispatch ──────────────
-            // Respect per-plan max_parallel from tasks.toml (§6) but cap
-            // it by the executor's plan-local concurrency limit.
-            let plan_cap = self
-                .task_trackers
-                .get(plan_id)
-                .map(|t| t.tasks_file.meta.max_parallel as usize)
-                .filter(|&n| n > 0)
-                .unwrap_or(MAX_PARALLEL_TASKS);
-            let executor_cap = self.executor.config().max_concurrent_tasks.max(1);
-            let effective_max = plan_cap.min(executor_cap);
-            let batch: Vec<String> = ready.into_iter().take(effective_max).collect();
+            let batch = ready;
             eprintln!(
                 "[orchestrate] Implementing {plan_id}: dispatching {} tasks in parallel: {}",
                 batch.len(),
@@ -2041,6 +2029,8 @@ impl PlanRunner {
     /// Each task gets its own worktree so agents don't step on each other.
     /// Failures are recorded individually; the batch does not abort on error.
     async fn handle_implementing_parallel(&mut self, plan_id: &str, task_ids: &[String]) {
+        let concurrency_limit = self.executor.config().max_concurrent_tasks.max(1);
+
         // Create per-task worktrees and record exec dirs.
         let shared_target = self.workdir.join("target");
         let mut task_dirs: Vec<(String, PathBuf)> = Vec::with_capacity(task_ids.len());
@@ -2146,21 +2136,34 @@ impl PlanRunner {
             ));
         }
 
-        // ── Run all agents in parallel ───────────────────────────────
-        let mut join_set = JoinSet::new();
-        for (tid, cfg) in configs {
-            join_set.spawn(async move {
-                let result = run_prepared_agent(cfg).await;
-                (tid, result)
-            });
-        }
-
         let mut results: Vec<(String, AgentResult)> = Vec::with_capacity(task_ids.len());
-        while let Some(joined) = join_set.join_next().await {
-            match joined {
-                Ok(pair) => results.push(pair),
-                Err(e) => {
-                    eprintln!("[orchestrate] parallel task join failed: {e}");
+        let mut pending = configs.into_iter();
+        loop {
+            // Run one dependency-level slice at a time, capping the number of
+            // spawned tasks to the configured executor limit.
+            let mut join_set = JoinSet::new();
+            let mut launched = 0usize;
+            while launched < concurrency_limit {
+                let Some((tid, cfg)) = pending.next() else {
+                    break;
+                };
+                launched += 1;
+                join_set.spawn(async move {
+                    let result = run_prepared_agent(cfg).await;
+                    (tid, result)
+                });
+            }
+
+            if launched == 0 {
+                break;
+            }
+
+            while let Some(joined) = join_set.join_next().await {
+                match joined {
+                    Ok(pair) => results.push(pair),
+                    Err(e) => {
+                        eprintln!("[orchestrate] parallel task join failed: {e}");
+                    }
                 }
             }
         }
