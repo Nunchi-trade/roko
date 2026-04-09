@@ -92,12 +92,37 @@ pub fn is_local_model(slug: &str) -> bool {
 /// Where a context section came from — used for attribution and feedback learning.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ContextSource {
+    /// Knowledge entry retrieved from the durable knowledge store.
+    KnowledgeEntry {
+        /// Knowledge entry identifier.
+        entry_id: String,
+        /// Semantic kind of the entry.
+        kind: String,
+    },
+    /// Recent episode retrieved from the episode store.
+    Episode {
+        /// Episode identifier.
+        episode_id: String,
+        /// Plan identifier associated with the episode.
+        plan_id: String,
+        /// Task identifier associated with the episode.
+        task_id: String,
+    },
     /// Inlined file content (from `read_files` in tasks.toml).
     InlineFile {
         /// File path relative to workdir.
         path: String,
         /// Optional line range (e.g. "40-80").
         lines: Option<String>,
+    },
+    /// Recent signal from the plan signal log.
+    RecentSignal {
+        /// Signal identifier.
+        signal_id: String,
+        /// Plan identifier.
+        plan_id: String,
+        /// Signal kind.
+        kind: String,
     },
     /// Resolved symbol signature (struct/fn/trait/enum definition).
     SymbolSignature {
@@ -293,6 +318,8 @@ pub struct TaskInput {
     pub id: String,
     /// Human-readable task title.
     pub title: String,
+    /// Optional task description from the plan file.
+    pub description: Option<String>,
     /// Complexity tier: mechanical, focused, integrative, architectural.
     pub tier: String,
     /// Files this task modifies.
@@ -972,7 +999,10 @@ fn add_full_context(
 /// Convert a context source into the stable source-type key used by learning data.
 const fn context_source_type(source: &ContextSource) -> &'static str {
     match source {
+        ContextSource::KnowledgeEntry { .. } => "knowledge",
+        ContextSource::Episode { .. } => "episode",
         ContextSource::InlineFile { .. } => "file",
+        ContextSource::RecentSignal { .. } => "signal",
         ContextSource::SymbolSignature { .. } => "symbol",
         ContextSource::AntiPattern => "anti_pattern",
         ContextSource::Verification => "verification",

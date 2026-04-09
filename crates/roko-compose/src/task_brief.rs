@@ -275,6 +275,7 @@ mod tests {
         TaskInput {
             id: id.into(),
             title: title.into(),
+            description: None,
             tier: "focused".into(),
             files: files.iter().map(|s| (*s).to_string()).collect(),
             read_files: vec![],

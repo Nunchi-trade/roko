@@ -8642,6 +8642,7 @@ fn task_def_to_input(td: &crate::task_parser::TaskDef) -> roko_compose::TaskInpu
     roko_compose::TaskInput {
         id: td.id.clone(),
         title: td.title.clone(),
+        description: td.description.clone(),
         tier: td.tier.clone(),
         files: td.files.clone(),
         read_files,
