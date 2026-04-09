@@ -1,19 +1,21 @@
 //! Webhook ingress endpoints.
 //!
-//! GitHub webhooks are verified with `X-Hub-Signature-256`, converted into
-//! typed [`roko_core::Signal`]s, and published onto the shared event bus.
+//! GitHub and Slack webhooks are verified, converted into typed
+//! [`roko_core::Signal`]s, and published onto the shared event bus.
 
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::Router;
 use hmac::{Hmac, Mac};
 use roko_core::signal_kinds;
 use roko_core::{Body, Kind, Provenance, Signal};
-use serde_json::Value;
+use serde_json::{Value, json};
 use sha2::Sha256;
 
 use crate::error::ApiError;
@@ -24,7 +26,9 @@ type HmacSha256 = Hmac<Sha256>;
 
 /// Build the webhook router.
 pub fn routes() -> Router<Arc<AppState>> {
-    Router::new().route("/webhooks/github", post(github_webhook))
+    Router::new()
+        .route("/webhooks/github", post(github_webhook))
+        .route("/webhooks/slack", post(slack_webhook))
 }
 
 /// `POST /webhooks/github` — verify the GitHub signature, convert the payload
@@ -77,6 +81,71 @@ async fn github_webhook(
     Ok(StatusCode::OK)
 }
 
+/// `POST /webhooks/slack` — verify the Slack signature, handle URL
+/// verification challenges, convert supported events into a `Signal`, and
+/// publish them to the server event bus.
+async fn slack_webhook(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let payload: Value = serde_json::from_slice(&body)
+        .map_err(|e| ApiError::bad_request(format!("invalid slack webhook json: {e}")))?;
+
+    if payload.get("type").and_then(Value::as_str) == Some("url_verification") {
+        let challenge = payload
+            .get("challenge")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ApiError::bad_request("missing slack challenge field"))?;
+
+        return Ok((StatusCode::OK, axum::Json(json!({ "challenge": challenge }))).into_response());
+    }
+
+    let secret = std::env::var("SLACK_SIGNING_SECRET")
+        .map_err(|_| ApiError::internal("slack webhook signing secret is not configured"))?;
+    if secret.trim().is_empty() {
+        return Err(ApiError::internal(
+            "slack webhook signing secret is not configured",
+        ));
+    }
+
+    let timestamp = headers
+        .get("X-Slack-Request-Timestamp")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| ApiError::unauthorized("missing X-Slack-Request-Timestamp header"))?;
+
+    verify_slack_timestamp(timestamp)?;
+
+    let received_signature = headers
+        .get("X-Slack-Signature")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| ApiError::unauthorized("missing X-Slack-Signature header"))?;
+
+    if !verify_slack_signature(&secret, timestamp, &body, received_signature) {
+        return Err(ApiError::unauthorized("invalid slack webhook signature"));
+    }
+
+    let event_type = payload
+        .get("event")
+        .and_then(|event| event.get("type"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad_request("missing slack event type"))?;
+
+    let kind = slack_signal_kind(event_type)
+        .ok_or_else(|| ApiError::bad_request(format!("unsupported slack event: {event_type}")))?;
+
+    let signal = Signal::builder(kind)
+        .body(Body::Json(payload))
+        .provenance(Provenance::external("slack:webhook"))
+        .build();
+
+    state
+        .event_bus
+        .publish(ServerEvent::WebhookReceived { signal });
+
+    Ok(StatusCode::OK.into_response())
+}
+
 fn github_signal_kind(event_type: &str, payload: &Value) -> Option<Kind> {
     match event_type {
         "push" => Some(Kind::Custom(signal_kinds::GITHUB_PUSH.into())),
@@ -110,6 +179,67 @@ fn verify_github_signature(secret: &str, body: &[u8], received_signature: &str) 
     let expected = mac.finalize().into_bytes();
 
     constant_time_eq(expected.as_ref(), &received_bytes)
+}
+
+fn slack_signal_kind(event_type: &str) -> Option<Kind> {
+    match event_type {
+        "message" => Some(Kind::Custom(signal_kinds::SLACK_MESSAGE.into())),
+        "reaction_added" => Some(Kind::Custom(signal_kinds::SLACK_REACTION.into())),
+        _ => None,
+    }
+}
+
+fn verify_slack_signature(
+    secret: &str,
+    timestamp: &str,
+    body: &[u8],
+    received_signature: &str,
+) -> bool {
+    let Some(received_bytes) = parse_slack_signature(received_signature) else {
+        return false;
+    };
+
+    let base = format!("v0:{timestamp}:");
+    let mut mac: HmacSha256 = match HmacSha256::new_from_slice(secret.as_bytes()) {
+        Ok(mac) => mac,
+        Err(_) => return false,
+    };
+    mac.update(base.as_bytes());
+    mac.update(body);
+    let expected = mac.finalize().into_bytes();
+
+    constant_time_eq(expected.as_ref(), &received_bytes)
+}
+
+fn parse_slack_signature(signature: &str) -> Option<[u8; 32]> {
+    let hex = signature.strip_prefix("v0=").unwrap_or(signature);
+    if hex.len() != 64 {
+        return None;
+    }
+
+    let mut out = [0u8; 32];
+    for (idx, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
+        out[idx] = (hex_value(chunk[0])? << 4) | hex_value(chunk[1])?;
+    }
+
+    Some(out)
+}
+
+fn verify_slack_timestamp(timestamp: &str) -> Result<(), ApiError> {
+    let timestamp = timestamp
+        .parse::<i64>()
+        .map_err(|_| ApiError::bad_request("invalid X-Slack-Request-Timestamp header"))?;
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| ApiError::internal("system clock is before unix epoch"))?
+        .as_secs() as i64;
+
+    if (now - timestamp).abs() > 300 {
+        return Err(ApiError::unauthorized("stale slack webhook timestamp"));
+    }
+
+    Ok(())
 }
 
 fn parse_github_signature(signature: &str) -> Option<[u8; 32]> {
@@ -185,6 +315,33 @@ mod tests {
 
         assert!(verify_github_signature(secret, body, &signature));
         assert!(!verify_github_signature(secret, body, "sha256=deadbeef"));
+    }
+
+    #[test]
+    fn maps_supported_slack_events_to_signal_kinds() {
+        let message = slack_signal_kind("message");
+        assert!(matches!(message.as_ref().map(Kind::as_str), Some(kind) if kind == signal_kinds::SLACK_MESSAGE));
+
+        let reaction = slack_signal_kind("reaction_added");
+        assert!(matches!(reaction.as_ref().map(Kind::as_str), Some(kind) if kind == signal_kinds::SLACK_REACTION));
+    }
+
+    #[test]
+    fn verifies_slack_signature() {
+        let secret = "secret";
+        let timestamp = "1712668800";
+        let body = br#"{"type":"event_callback","event":{"type":"message"}}"#;
+
+        let mut mac: TestHmacSha256 = match TestHmacSha256::new_from_slice(secret.as_bytes()) {
+            Ok(mac) => mac,
+            Err(_) => panic!("invalid test hmac key"),
+        };
+        mac.update(format!("v0:{timestamp}:").as_bytes());
+        mac.update(body);
+        let signature = format!("v0={}", hex_encode(mac.finalize().into_bytes().as_ref()));
+
+        assert!(verify_slack_signature(secret, timestamp, body, &signature));
+        assert!(!verify_slack_signature(secret, timestamp, body, "v0=deadbeef"));
     }
 
     #[test]
