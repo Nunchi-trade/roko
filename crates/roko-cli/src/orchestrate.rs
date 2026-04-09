@@ -45,6 +45,7 @@ use roko_learn::episode_logger::{Episode, GateVerdict, Usage};
 use roko_learn::runtime_feedback::{
     CompletedRunInput, LearningRuntime, LearningUpdate, read_efficiency_events,
 };
+use roko_learn::skill_library::SkillLibrary;
 use roko_orchestrator::worktree::{WorktreeConfig, WorktreeManager};
 use roko_orchestrator::{
     EventKind, EventLog, EventLogSnapshot, ExecutorAction, ExecutorEvent, ExecutorSnapshot,
@@ -52,6 +53,7 @@ use roko_orchestrator::{
 };
 use roko_std::NoOpScorer;
 use roko_std::StaticToolRegistry;
+use tokio::io::AsyncWriteExt;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken as TokioCancellationToken;
 use tracing::{Instrument, info_span, instrument};
@@ -396,6 +398,28 @@ fn load_efficiency_signals_sync(
     Ok(build_efficiency_signals(&text, budget_usd))
 }
 
+async fn load_or_create_skill_library(path: &Path) -> Result<SkillLibrary> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
+    match tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .await
+    {
+        Ok(mut file) => {
+            file.write_all(b"[]").await?;
+            file.flush().await?;
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(err) => return Err(err.into()),
+    }
+
+    Ok(SkillLibrary::new(path).await?)
+}
+
 /// Convert the latest efficiency entries into the signals expected by the conductor.
 fn build_efficiency_signals(text: &str, budget_usd: Option<f64>) -> Vec<Signal> {
     let mut signals = Vec::new();
@@ -518,6 +542,8 @@ pub struct PlanRunner {
     per_plan_gates: HashMap<String, Vec<(String, bool)>>,
     /// Episode logger for recording agent turns to `.roko/episodes.jsonl`.
     learning: LearningRuntime,
+    /// Skill library for reusable prompt patterns and successful task recipes.
+    skill_library: SkillLibrary,
     /// Process supervisor for tracking and cleaning up agent subprocesses.
     supervisor: ProcessSupervisor,
     /// Root cancellation token for coordinated shutdown.
@@ -923,6 +949,10 @@ impl PlanRunner {
         let learning = LearningRuntime::open_under(workdir.join(".roko").join("learn"))
             .await
             .map_err(|e| anyhow!("init learning runtime: {e}"))?;
+        let skill_library =
+            load_or_create_skill_library(&workdir.join(".roko").join("learn").join("skills.json"))
+                .await
+                .context("init skill library")?;
         let selected_mcp_servers = if any_task_without_mcp_list || requested_mcp_servers.is_empty()
         {
             None
@@ -951,6 +981,7 @@ impl PlanRunner {
             per_plan_agents: HashMap::new(),
             per_plan_gates: HashMap::new(),
             learning,
+            skill_library,
             supervisor: ProcessSupervisor::new(cancel.clone()),
             cancel,
             task_trackers,
@@ -998,6 +1029,10 @@ impl PlanRunner {
         let learning = LearningRuntime::open_under(workdir.join(".roko").join("learn"))
             .await
             .map_err(|e| anyhow!("init learning runtime: {e}"))?;
+        let skill_library =
+            load_or_create_skill_library(&workdir.join(".roko").join("learn").join("skills.json"))
+                .await
+                .context("init skill library")?;
         let (mcp_clients, tool_registry) = Self::setup_mcp(&config, workdir, None).await;
         let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
         obs_sinks
@@ -1019,6 +1054,7 @@ impl PlanRunner {
             per_plan_agents: HashMap::new(),
             per_plan_gates: HashMap::new(),
             learning,
+            skill_library,
             supervisor: ProcessSupervisor::new(cancel.clone()),
             cancel,
             task_trackers,
@@ -1070,6 +1106,10 @@ impl PlanRunner {
         let learning = LearningRuntime::open_under(workdir.join(".roko").join("learn"))
             .await
             .map_err(|e| anyhow!("init learning runtime: {e}"))?;
+        let skill_library =
+            load_or_create_skill_library(&workdir.join(".roko").join("learn").join("skills.json"))
+                .await
+                .context("init skill library")?;
         let (mcp_clients, tool_registry) = Self::setup_mcp(&config, workdir, None).await;
         let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
         obs_sinks
@@ -1091,6 +1131,7 @@ impl PlanRunner {
             per_plan_agents: HashMap::new(),
             per_plan_gates: HashMap::new(),
             learning,
+            skill_library,
             supervisor: ProcessSupervisor::new(cancel.clone()),
             cancel,
             task_trackers,
@@ -2946,7 +2987,7 @@ impl PlanRunner {
 
         // 1. Relevant skills from the skill library (search by role tag)
         let role_tag = format!("{role:?}").to_lowercase();
-        let skills = self.learning.skill_library().search_by_tag(&role_tag);
+        let skills = self.skill_library.search_by_tag(&role_tag);
         if !skills.is_empty() {
             // Track the top skill as the matched one for confidence updates.
             matched_skill_id = skills.first().map(|s| s.name.clone());
