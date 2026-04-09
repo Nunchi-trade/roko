@@ -13,7 +13,7 @@ use std::env;
 use std::ffi::OsStr;
 use std::io;
 use std::io::BufRead;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -331,6 +331,17 @@ fn make_tool_result(execution: ScriptExecution) -> Value {
 
 fn resolve_script_path(script_roots: &[PathBuf], name: &str) -> Result<ResolvedScript, String> {
     let requested = Path::new(name);
+
+    if requested
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(format!(
+            "script '{}' contains parent-directory traversal",
+            name
+        ));
+    }
+
     let mut candidates = Vec::new();
 
     for root in script_roots {
@@ -631,6 +642,20 @@ mod tests {
         let resolved = resolve_script_path(&[scripts_dir.clone()], "hello").expect("resolved");
         assert_eq!(resolved.path, fs::canonicalize(script).expect("canonical script"));
         assert_eq!(resolved.root, fs::canonicalize(scripts_dir).expect("canonical root"));
+    }
+
+    #[test]
+    fn rejects_parent_directory_traversal_in_script_name() {
+        let dir = temp_dir();
+        let scripts_dir = dir.join("scripts");
+        fs::create_dir_all(&scripts_dir).expect("create scripts dir");
+        fs::write(scripts_dir.join("safe.sh"), "#!/bin/sh\necho safe\n").expect("write script");
+
+        let err = resolve_script_path(&[scripts_dir], "../safe").expect_err("should reject");
+        assert!(
+            err.contains("parent-directory traversal"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
