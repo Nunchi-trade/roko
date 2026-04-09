@@ -1,7 +1,7 @@
 //! Background feedback collection for external actions recorded in episodes.
 //!
-//! The loop scans recent episodes, finds external actions performed in the
-//! last 24 hours, polls the corresponding external services for outcomes, and
+//! The loop scans recent episodes, finds external actions in the last 7 days,
+//! polls the corresponding external services on a 15m/6h schedule, and
 //! persists the collected feedback as normal signals.
 
 use std::collections::HashSet;
@@ -24,7 +24,9 @@ use crate::events::ServerEvent;
 use crate::state::AppState;
 
 const FEEDBACK_INTERVAL: Duration = Duration::from_secs(15 * 60);
-const RECENT_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
+const FEEDBACK_SHORT_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const FEEDBACK_LONG_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+const FEEDBACK_MAX_WINDOW: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const FEEDBACK_SOURCE: &str = "roko-serve:feedback";
 
 /// Start the feedback collection loop as a detached background task.
@@ -33,6 +35,7 @@ pub fn start_feedback_loop(state: Arc<AppState>) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = interval_at(TokioInstant::now() + FEEDBACK_INTERVAL, FEEDBACK_INTERVAL);
         let mut completed_actions = HashSet::new();
+        let mut last_polled_actions = std::collections::HashMap::new();
 
         loop {
             interval.tick().await;
@@ -41,7 +44,10 @@ pub fn start_feedback_loop(state: Arc<AppState>) -> JoinHandle<()> {
                 break;
             }
 
-            if let Err(err) = collect_feedback_cycle(&state, &mut completed_actions).await {
+            if let Err(err) =
+                collect_feedback_cycle(&state, &mut completed_actions, &mut last_polled_actions)
+                    .await
+            {
                 warn!(error = %err, "feedback collection failed");
             }
         }
@@ -51,8 +57,10 @@ pub fn start_feedback_loop(state: Arc<AppState>) -> JoinHandle<()> {
 async fn collect_feedback_cycle(
     state: &AppState,
     completed_actions: &mut HashSet<String>,
+    last_polled_actions: &mut std::collections::HashMap<String, DateTime<Utc>>,
 ) -> Result<()> {
     let episodes = load_recent_episodes(state).await?;
+    let now = Utc::now();
     let client = Client::builder()
         .user_agent("roko-serve-feedback/0.1")
         .build()
@@ -71,6 +79,10 @@ async fn collect_feedback_cycle(
             if completed_actions.contains(&key) {
                 continue;
             }
+            if !should_poll_action(&action, now, last_polled_actions.get(&key).copied()) {
+                continue;
+            }
+            last_polled_actions.insert(key.clone(), now);
 
             let feedback = match action.service.as_str() {
                 "github" => collect_github_feedback(&episode, &action).await?,
@@ -98,7 +110,8 @@ async fn load_recent_episodes(state: &AppState) -> Result<Vec<Episode>> {
     let episodes = EpisodeLogger::read_all_lossy(&path)
         .await
         .with_context(|| format!("load episodes from {}", path.display()))?;
-    let cutoff = Utc::now() - chrono::Duration::from_std(RECENT_WINDOW).unwrap_or_else(|_| chrono::Duration::hours(24));
+    let cutoff = Utc::now() - chrono::Duration::from_std(FEEDBACK_MAX_WINDOW)
+        .unwrap_or_else(|_| chrono::Duration::days(7));
 
     Ok(episodes
         .into_iter()
@@ -111,8 +124,29 @@ fn parse_external_action(value: Value) -> Option<ExternalAction> {
 }
 
 fn within_recent_window(performed_at: &DateTime<Utc>) -> bool {
-    let cutoff = Utc::now() - chrono::Duration::from_std(RECENT_WINDOW).unwrap_or_else(|_| chrono::Duration::hours(24));
+    let cutoff = Utc::now() - chrono::Duration::from_std(FEEDBACK_MAX_WINDOW)
+        .unwrap_or_else(|_| chrono::Duration::days(7));
     *performed_at >= cutoff
+}
+
+fn should_poll_action(
+    action: &ExternalAction,
+    now: DateTime<Utc>,
+    last_polled_at: Option<DateTime<Utc>>,
+) -> bool {
+    let interval = match now.signed_duration_since(action.performed_at).to_std() {
+        Ok(age) if age <= Duration::from_secs(24 * 60 * 60) => FEEDBACK_SHORT_INTERVAL,
+        Ok(age) if age <= FEEDBACK_MAX_WINDOW => FEEDBACK_LONG_INTERVAL,
+        _ => return false,
+    };
+
+    match last_polled_at {
+        None => true,
+        Some(last_polled_at) => now
+            .signed_duration_since(last_polled_at)
+            .to_std()
+            .map_or(true, |elapsed| elapsed >= interval),
+    }
 }
 
 fn action_key(episode: &Episode, action: &ExternalAction) -> String {
@@ -670,6 +704,58 @@ mod tests {
         let key = action_key(&episode, &action);
         assert!(key.contains("github"));
         assert!(key.contains("review_pr"));
+    }
+
+    #[test]
+    fn schedules_feedback_polls_by_age() {
+        let now = Utc::now();
+
+        let fresh_action = ExternalAction {
+            service: "github".into(),
+            action_type: "review_pr".into(),
+            resource_id: "owner/repo#12".into(),
+            metadata: json!({}),
+            performed_at: now - chrono::Duration::minutes(30),
+        };
+        assert!(should_poll_action(&fresh_action, now, None));
+        assert!(!should_poll_action(
+            &fresh_action,
+            now,
+            Some(now - chrono::Duration::minutes(14))
+        ));
+        assert!(should_poll_action(
+            &fresh_action,
+            now,
+            Some(now - chrono::Duration::minutes(15))
+        ));
+
+        let older_action = ExternalAction {
+            service: "slack".into(),
+            action_type: "post_message".into(),
+            resource_id: "C12345:1712345678.123456".into(),
+            metadata: json!({}),
+            performed_at: now - chrono::Duration::days(3),
+        };
+        assert!(should_poll_action(&older_action, now, None));
+        assert!(!should_poll_action(
+            &older_action,
+            now,
+            Some(now - chrono::Duration::hours(5))
+        ));
+        assert!(should_poll_action(
+            &older_action,
+            now,
+            Some(now - chrono::Duration::hours(6))
+        ));
+
+        let expired_action = ExternalAction {
+            service: "github".into(),
+            action_type: "create_issue".into(),
+            resource_id: "owner/repo#13".into(),
+            metadata: json!({}),
+            performed_at: now - chrono::Duration::days(8),
+        };
+        assert!(!should_poll_action(&expired_action, now, None));
     }
 
     #[test]
