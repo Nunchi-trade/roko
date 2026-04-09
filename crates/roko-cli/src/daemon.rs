@@ -341,6 +341,12 @@ pub async fn daemon_stop() -> Result<()> {
     Ok(())
 }
 
+/// Restart the active daemon for the current working directory.
+pub async fn daemon_restart(port: u16) -> Result<()> {
+    daemon_stop().await?;
+    daemon_start(false, port).await
+}
+
 /// Print daemon status for the current working directory.
 pub async fn daemon_status() -> Result<()> {
     let workdir = std::env::current_dir().context("resolve current working directory")?;
