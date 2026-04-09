@@ -69,6 +69,13 @@ kind = "compile"
 [[gate]]
 kind = "test"
 
+[scheduler]
+
+[[scheduler.cron]]
+name = "weekly-digest"
+expression = "0 9 * * MON"
+signal_kind = "scheduler:cron:weekly-digest"
+
 [webhooks.github]
 secret = "${GITHUB_WEBHOOK_SECRET}"
 enabled = true
