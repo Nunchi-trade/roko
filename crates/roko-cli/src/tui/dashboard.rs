@@ -6,7 +6,10 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{self, Write as _};
+use std::fs::File;
+use std::io::{BufRead as _, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -35,6 +38,28 @@ const EFFICIENCY_FILE: &str = "efficiency.jsonl";
 const EXPERIMENTS_FILE: &str = "experiments.json";
 const GATE_THRESHOLDS_FILE: &str = "gate-thresholds.json";
 const CASCADE_ROUTER_FILE: &str = "cascade-router.json";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct FileStamp {
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+impl FileStamp {
+    fn from_path(path: &Path) -> Option<Self> {
+        let meta = std::fs::metadata(path).ok()?;
+        Some(Self {
+            modified: meta.modified().ok(),
+            len: meta.len(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct JsonlState {
+    stamp: FileStamp,
+    offset: u64,
+}
 
 /// In-memory scaffold of all placeholder dashboard pages.
 #[derive(Debug, Clone)]
@@ -211,6 +236,10 @@ pub struct DashboardSummary {
 pub struct DashboardData {
     /// Workspace root used for refreshes.
     root: PathBuf,
+    /// Cached executor state from `.roko/state/executor.json`.
+    executor_state: Value,
+    /// Last observed state file metadata.
+    executor_state_stamp: FileStamp,
     /// Plans from executor state.
     pub plans: Vec<PlanSummary>,
     /// Currently executing tasks.
@@ -223,22 +252,44 @@ pub struct DashboardData {
     pub efficiency: EfficiencySummary,
     /// Raw efficiency events from `.roko/learn/efficiency.jsonl`.
     pub efficiency_events: Vec<AgentEfficiencyEvent>,
+    /// Last observed efficiency file metadata.
+    efficiency_stamp: FileStamp,
     /// Cascade router state from `.roko/learn/cascade-router.json`.
     pub cascade_router: CascadeRouterState,
     /// Full experiment store from `.roko/learn/experiments.json`.
     pub experiment_store: ExperimentStore,
     /// Experiments from `.roko/learn/experiments.json`.
     pub experiments: Vec<ExperimentSummary>,
+    /// Last observed experiments file metadata.
+    experiments_stamp: FileStamp,
     /// Gate-results page data derived from signals and adaptive thresholds.
     pub gate_results_page: GateResultsPageData,
+    /// Cached adaptive thresholds from `.roko/learn/gate-thresholds.json`.
+    adaptive_thresholds: Option<AdaptiveThresholds>,
+    /// Last observed gate-thresholds file metadata.
+    gate_thresholds_stamp: FileStamp,
     /// Most recent signals from `.roko/signals.jsonl`.
     pub recent_signals: Vec<SignalSummary>,
+    /// Cached signal-derived gate results when executor state does not provide them.
+    signal_gate_results: Vec<GateResultSummary>,
+    /// Parsed gate-related signals for the gate-results page.
+    gate_signal_summaries: Vec<GateSignalSummary>,
+    /// Last observed signals file metadata and offset.
+    signals_state: JsonlState,
     /// Snapshot of the currently executing plan for the Plan Execution page.
     pub current_plan_execution: Option<PlanExecutionSnapshot>,
+    /// Last observed episodes file metadata and offset.
+    episodes_state: JsonlState,
+    /// Cached episodes for plan execution rendering.
+    episodes: Vec<Episode>,
     /// Conductor alerts filtered from signals.
     pub conductor_alerts: Vec<AlertSummary>,
     /// Latest C-Factor snapshot, if present.
     pub cfactor: Option<CFactor>,
+    /// Last observed C-Factor file metadata.
+    cfactor_stamp: FileStamp,
+    /// Cascade router file metadata.
+    cascade_router_stamp: FileStamp,
 }
 
 impl DashboardData {
@@ -249,68 +300,266 @@ impl DashboardData {
         let roko_dir = root.join(".roko");
         let learn_dir = roko_dir.join("learn");
         let state_path = roko_dir.join("state").join("executor.json");
-        let state = read_json_value(&state_path).unwrap_or(Value::Null);
         let signals_path = roko_dir.join("signals.jsonl");
+        let episodes_path = roko_dir.join(MEMORY_DIR).join(EPISODES_FILE);
+        let efficiency_path = learn_dir.join(EFFICIENCY_FILE);
+        let experiments_path = learn_dir.join(EXPERIMENTS_FILE);
+        let gate_thresholds_path = learn_dir.join(GATE_THRESHOLDS_FILE);
+        let cascade_router_path = learn_dir.join(CASCADE_ROUTER_FILE);
+        let cfactor_path = learn_dir.join("c-factor.jsonl");
+
+        let state = read_json_value(&state_path).unwrap_or(Value::Null);
+        let state_stamp = file_stamp(&state_path);
+        let (recent_signals, gate_signal_summaries, signal_gate_results, signals_state) =
+            load_signal_state(&signals_path);
+        let episodes_state = load_episodes_state(&episodes_path);
+        let episodes = load_episodes_from_path(&episodes_path);
 
         let plans = load_plan_summaries(&root, &state);
         let active_tasks = load_active_tasks(&state);
         let agents = load_agents(&state);
-        let gate_results = load_gate_results(&state, &signals_path);
-        let efficiency_events = read_efficiency_events_sync(&learn_dir.join(EFFICIENCY_FILE));
-        let efficiency = load_efficiency_summary(&learn_dir.join(EFFICIENCY_FILE));
+        let gate_results = load_gate_results(&state, &signal_gate_results);
+        let efficiency_events = read_efficiency_events_sync(&efficiency_path);
+        let efficiency = load_efficiency_summary(&efficiency_path);
         let cascade_router =
-            load_json_opt::<CascadeRouterState>(&learn_dir.join(CASCADE_ROUTER_FILE))
-                .unwrap_or_default();
+            load_json_opt::<CascadeRouterState>(&cascade_router_path).unwrap_or_default();
+        let cascade_router_stamp = file_stamp(&cascade_router_path);
         let experiment_store =
-            load_json_opt::<ExperimentStore>(&learn_dir.join(EXPERIMENTS_FILE)).unwrap_or_default();
+            load_json_opt::<ExperimentStore>(&experiments_path).unwrap_or_default();
+        let experiments_stamp = file_stamp(&experiments_path);
         let mut experiments = experiment_store
             .iter()
             .map(ExperimentSummary::from_experiment)
             .collect::<Vec<_>>();
         experiments.sort_by(|a, b| a.experiment_id.cmp(&b.experiment_id));
-        let gate_signals = load_gate_signal_summaries(&signals_path);
-        let adaptive_thresholds =
-            load_json_opt::<AdaptiveThresholds>(&learn_dir.join(GATE_THRESHOLDS_FILE));
+        let adaptive_thresholds = load_json_opt::<AdaptiveThresholds>(&gate_thresholds_path);
+        let gate_thresholds_stamp = file_stamp(&gate_thresholds_path);
         let gate_results_page =
-            build_gate_results_page_data(&gate_signals, adaptive_thresholds.as_ref());
-        let recent_signals = load_recent_signals(&signals_path, 100);
+            build_gate_results_page_data(&gate_signal_summaries, adaptive_thresholds.as_ref());
         let conductor_alerts = recent_signals
             .iter()
             .filter(|signal| signal.kind.starts_with("conductor:alert:"))
             .map(AlertSummary::from_signal)
             .collect();
-        let cfactor = load_latest_jsonl_value::<CFactor>(&learn_dir.join("c-factor.jsonl"));
-        let current_plan_execution = load_current_plan_execution(
-            &root,
-            &state,
-            &roko_dir.join(EPISODES_FILE),
-        );
+        let cfactor = load_latest_jsonl_value::<CFactor>(&cfactor_path);
+        let cfactor_stamp = file_stamp(&cfactor_path);
+        let current_plan_execution =
+            load_current_plan_execution(&root, &state, &episodes);
+        let efficiency_stamp = file_stamp(&efficiency_path);
 
         Self {
             root,
+            executor_state: state,
+            executor_state_stamp: state_stamp,
             plans,
             active_tasks,
             agents,
             gate_results,
             efficiency,
             efficiency_events,
+            efficiency_stamp,
             cascade_router,
             experiment_store,
             experiments,
+            experiments_stamp,
             gate_results_page,
+            adaptive_thresholds,
+            gate_thresholds_stamp,
             recent_signals,
+            signal_gate_results,
+            gate_signal_summaries,
+            signals_state,
             current_plan_execution,
+            episodes_state,
+            episodes,
             conductor_alerts,
             cfactor,
+            cfactor_stamp,
+            cascade_router_stamp,
         }
     }
 
     /// Refresh the snapshot from the stored workspace root.
     pub async fn refresh(&mut self) -> Result<()> {
-        let root = self.root.clone();
-        let refreshed = tokio::task::spawn_blocking(move || Self::load_best_effort(root)).await?;
+        let mut snapshot = std::mem::take(self);
+        let refreshed = tokio::task::spawn_blocking(move || -> Result<Self> {
+            snapshot.refresh_sync()?;
+            Ok(snapshot)
+        })
+        .await??;
         *self = refreshed;
         Ok(())
+    }
+
+    fn refresh_sync(&mut self) -> Result<()> {
+        let roko_dir = self.root.join(".roko");
+        let state_path = roko_dir.join("state").join("executor.json");
+        let signals_path = roko_dir.join("signals.jsonl");
+        let episodes_path = roko_dir.join(MEMORY_DIR).join(EPISODES_FILE);
+        let efficiency_path = roko_dir.join("learn").join(EFFICIENCY_FILE);
+        let experiments_path = roko_dir.join("learn").join(EXPERIMENTS_FILE);
+        let gate_thresholds_path = roko_dir.join("learn").join(GATE_THRESHOLDS_FILE);
+        let cascade_router_path = roko_dir.join("learn").join(CASCADE_ROUTER_FILE);
+        let cfactor_path = roko_dir.join("learn").join("c-factor.jsonl");
+
+        let mut state_changed = false;
+        let stamp = file_stamp(&state_path);
+        if stamp != self.executor_state_stamp {
+            self.executor_state_stamp = stamp;
+            self.executor_state = read_json_value(&state_path).unwrap_or(Value::Null);
+            state_changed = true;
+        }
+
+        let stamp = file_stamp(&signals_path);
+        if stamp != self.signals_state.stamp {
+            self.refresh_signals(&signals_path, stamp);
+        }
+
+        let stamp = file_stamp(&episodes_path);
+        if stamp != self.episodes_state.stamp {
+            self.refresh_episodes(&episodes_path, stamp);
+        }
+
+        let stamp = file_stamp(&efficiency_path);
+        if stamp != self.efficiency_stamp {
+            self.efficiency_stamp = stamp;
+            self.efficiency_events = read_efficiency_events_sync(&efficiency_path);
+            self.efficiency = load_efficiency_summary(&efficiency_path);
+        }
+
+        let stamp = file_stamp(&experiments_path);
+        if stamp != self.experiments_stamp {
+            self.experiments_stamp = stamp;
+            self.experiment_store =
+                load_json_opt::<ExperimentStore>(&experiments_path).unwrap_or_default();
+            self.experiments = self
+                .experiment_store
+                .iter()
+                .map(ExperimentSummary::from_experiment)
+                .collect::<Vec<_>>();
+            self.experiments
+                .sort_by(|a, b| a.experiment_id.cmp(&b.experiment_id));
+        }
+
+        let stamp = file_stamp(&gate_thresholds_path);
+        if stamp != self.gate_thresholds_stamp {
+            self.gate_thresholds_stamp = stamp;
+            self.adaptive_thresholds =
+                load_json_opt::<AdaptiveThresholds>(&gate_thresholds_path);
+            self.rebuild_gate_results_page();
+        }
+
+        let stamp = file_stamp(&cascade_router_path);
+        if stamp != self.cascade_router_stamp {
+            self.cascade_router_stamp = stamp;
+            self.cascade_router =
+                load_json_opt::<CascadeRouterState>(&cascade_router_path).unwrap_or_default();
+        }
+
+        let stamp = file_stamp(&cfactor_path);
+        if stamp != self.cfactor_stamp {
+            self.cfactor_stamp = stamp;
+            self.cfactor = load_latest_jsonl_value::<CFactor>(&cfactor_path);
+        }
+
+        if state_changed {
+            self.plans = load_plan_summaries(&self.root, &self.executor_state);
+            self.active_tasks = load_active_tasks(&self.executor_state);
+            self.agents = load_agents(&self.executor_state);
+            self.gate_results = load_gate_results(&self.executor_state, &self.signal_gate_results);
+            self.current_plan_execution =
+                load_current_plan_execution(&self.root, &self.executor_state, &self.episodes);
+        }
+
+        Ok(())
+    }
+
+    fn refresh_signals(&mut self, signals_path: &Path, stamp: FileStamp) {
+        let should_reset = stamp.len < self.signals_state.offset
+            || (stamp.modified != self.signals_state.stamp.modified
+                && stamp.len <= self.signals_state.offset);
+        if should_reset {
+            self.recent_signals.clear();
+            self.signal_gate_results.clear();
+            self.gate_signal_summaries.clear();
+            self.signals_state.offset = 0;
+        }
+
+        let values = if should_reset {
+            read_jsonl_values(signals_path)
+        } else {
+            read_jsonl_values_from_offset(signals_path, self.signals_state.offset)
+        };
+
+        for value in values {
+            if let Some(signal) = SignalSummary::from_value(&value) {
+                self.recent_signals.push(signal);
+            }
+            if let Some(gate_signal) = GateSignalSummary::from_value(&value) {
+                self.gate_signal_summaries.push(gate_signal);
+            }
+            if let Some(gate_result) = signal_gate_result_from_value(&value) {
+                self.signal_gate_results.push(gate_result);
+            }
+        }
+
+        if self.recent_signals.len() > 100 {
+            let keep_from = self.recent_signals.len() - 100;
+            self.recent_signals.drain(0..keep_from);
+        }
+
+        self.signals_state = JsonlState {
+            stamp,
+            offset: stamp.len,
+        };
+        self.rebuild_signal_dependent_fields();
+    }
+
+    fn refresh_episodes(&mut self, episodes_path: &Path, stamp: FileStamp) {
+        let should_reset = stamp.len < self.episodes_state.offset
+            || (stamp.modified != self.episodes_state.stamp.modified
+                && stamp.len <= self.episodes_state.offset);
+        if should_reset {
+            self.episodes.clear();
+            self.episodes_state.offset = 0;
+        }
+
+        let episodes = if should_reset {
+            load_episodes_from_path(episodes_path)
+        } else {
+            load_episodes_from_offset(episodes_path, self.episodes_state.offset)
+        };
+
+        if should_reset {
+            self.episodes = episodes;
+        } else {
+            self.episodes.extend(episodes);
+        }
+
+        self.episodes_state = JsonlState {
+            stamp,
+            offset: stamp.len,
+        };
+        self.current_plan_execution =
+            load_current_plan_execution(&self.root, &self.executor_state, &self.episodes);
+    }
+
+    fn rebuild_signal_dependent_fields(&mut self) {
+        self.gate_results = load_gate_results(&self.executor_state, &self.signal_gate_results);
+        self.rebuild_gate_results_page();
+        self.conductor_alerts = self
+            .recent_signals
+            .iter()
+            .filter(|signal| signal.kind.starts_with("conductor:alert:"))
+            .map(AlertSummary::from_signal)
+            .collect();
+    }
+
+    fn rebuild_gate_results_page(&mut self) {
+        self.gate_results_page = build_gate_results_page_data(
+            &self.gate_signal_summaries,
+            self.adaptive_thresholds.as_ref(),
+        );
     }
 
     /// Workspace root used to load dashboard artifacts.
@@ -1095,7 +1344,7 @@ fn load_agents(state: &Value) -> Vec<AgentSummary> {
     agents
 }
 
-fn load_gate_results(state: &Value, signals_path: &Path) -> Vec<GateResultSummary> {
+fn load_gate_results(state: &Value, signal_gate_results: &[GateResultSummary]) -> Vec<GateResultSummary> {
     let mut gate_results = Vec::new();
 
     if let Some(plan_states) = state.get("plan_states").and_then(Value::as_object) {
@@ -1128,25 +1377,7 @@ fn load_gate_results(state: &Value, signals_path: &Path) -> Vec<GateResultSummar
     }
 
     if gate_results.is_empty() {
-        gate_results.extend(
-            read_jsonl_values(signals_path)
-                .into_iter()
-                .filter(|entry| {
-                    entry
-                        .get("kind")
-                        .and_then(Value::as_str)
-                        .is_some_and(|kind| is_gate_result_kind(kind))
-                })
-                .filter_map(|entry| {
-            let plan_id = entry
-                .pointer("/tags/plan_id")
-                .and_then(Value::as_str)
-                .or_else(|| entry.pointer("/body/data/plan_id").and_then(Value::as_str))
-                .or_else(|| entry.pointer("/body/plan_id").and_then(Value::as_str))
-                .unwrap_or("unknown");
-                    GateResultSummary::from_signal(&entry, plan_id)
-                }),
-        );
+        gate_results.extend(signal_gate_results.iter().cloned());
     }
 
     gate_results.sort_by(|a, b| {
@@ -1193,7 +1424,7 @@ fn load_task_trackers(root: &Path) -> HashMap<String, TaskTrackerSnapshot> {
 fn load_current_plan_execution(
     root: &Path,
     state: &Value,
-    episodes_path: &Path,
+    episodes: &[Episode],
 ) -> Option<PlanExecutionSnapshot> {
     let plan_states = state.get("plan_states").and_then(Value::as_object)?;
     let trackers = load_task_trackers(root);
@@ -1240,7 +1471,6 @@ fn load_current_plan_execution(
     } else {
         tasks_file.meta.plan.clone()
     };
-    let episodes = load_episodes(episodes_path);
     let current_episode = latest_episode_for_plan(&episodes, &plan_id, current_task_id.as_deref())
         .or_else(|| latest_episode_for_plan(&episodes, &plan_id, None));
     let agent_output_tail = current_episode
@@ -1691,6 +1921,121 @@ fn load_latest_jsonl_value<T: serde::de::DeserializeOwned>(path: &Path) -> Optio
         .rev()
         .find(|line| !line.trim().is_empty())
         .and_then(|line| serde_json::from_str(line).ok())
+}
+
+fn file_stamp(path: &Path) -> FileStamp {
+    FileStamp::from_path(path).unwrap_or_default()
+}
+
+fn load_signal_state(
+    path: &Path,
+) -> (Vec<SignalSummary>, Vec<GateSignalSummary>, Vec<GateResultSummary>, JsonlState) {
+    let values = read_jsonl_values(path);
+    let (recent_signals, gate_signal_summaries, signal_gate_results) =
+        collect_signal_records(values);
+    let stamp = file_stamp(path);
+    (
+        recent_signals,
+        gate_signal_summaries,
+        signal_gate_results,
+        JsonlState {
+            stamp,
+            offset: stamp.len,
+        },
+    )
+}
+
+fn load_episodes_state(path: &Path) -> JsonlState {
+    let stamp = file_stamp(path);
+    JsonlState {
+        stamp,
+        offset: stamp.len,
+    }
+}
+
+fn load_episodes_from_path(path: &Path) -> Vec<Episode> {
+    load_episodes(path)
+}
+
+fn load_episodes_from_offset(path: &Path, offset: u64) -> Vec<Episode> {
+    read_jsonl_values_from_offset(path, offset)
+        .into_iter()
+        .filter_map(|entry| serde_json::from_value::<Episode>(entry).ok())
+        .collect()
+}
+
+fn collect_signal_records(
+    values: Vec<Value>,
+) -> (Vec<SignalSummary>, Vec<GateSignalSummary>, Vec<GateResultSummary>) {
+    let mut recent_signals = Vec::new();
+    let mut gate_signal_summaries = Vec::new();
+    let mut signal_gate_results = Vec::new();
+    for value in values {
+        if let Some(signal) = SignalSummary::from_value(&value) {
+            recent_signals.push(signal);
+        }
+        if let Some(gate_signal) = GateSignalSummary::from_value(&value) {
+            gate_signal_summaries.push(gate_signal);
+        }
+        if let Some(gate_result) = signal_gate_result_from_value(&value) {
+            signal_gate_results.push(gate_result);
+        }
+    }
+
+    if recent_signals.len() > 100 {
+        let keep_from = recent_signals.len() - 100;
+        recent_signals = recent_signals.split_off(keep_from);
+    }
+
+    (recent_signals, gate_signal_summaries, signal_gate_results)
+}
+
+fn read_jsonl_values_from_offset(path: &Path, offset: u64) -> Vec<Value> {
+    let Ok(file) = File::open(path) else {
+        return Vec::new();
+    };
+    let mut reader = BufReader::new(file);
+    if reader.seek(SeekFrom::Start(offset)).is_err() {
+        return Vec::new();
+    }
+
+    let mut values = Vec::new();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let Ok(bytes) = reader.read_line(&mut line) else {
+            break;
+        };
+        if bytes == 0 {
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+            values.push(value);
+        }
+    }
+
+    values
+}
+
+fn signal_gate_result_from_value(value: &Value) -> Option<GateResultSummary> {
+    if !value
+        .get("kind")
+        .and_then(Value::as_str)
+        .is_some_and(is_gate_result_kind)
+    {
+        return None;
+    }
+    let plan_id = value
+        .pointer("/tags/plan_id")
+        .and_then(Value::as_str)
+        .or_else(|| value.pointer("/body/data/plan_id").and_then(Value::as_str))
+        .or_else(|| value.pointer("/body/plan_id").and_then(Value::as_str))
+        .unwrap_or("unknown");
+    GateResultSummary::from_signal(value, plan_id)
 }
 
 pub(crate) fn read_json_value(path: &Path) -> Option<Value> {
