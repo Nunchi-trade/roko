@@ -3,14 +3,17 @@
 //! Templates are TOML files stored under `.roko/templates/` that define
 //! reusable agent configurations. The [`TemplateRegistry`] scans the
 //! directory on startup and supports CRUD operations plus simple
-//! `{{param}}` interpolation.
+//! `{{key}}` interpolation.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
+
+use roko_core::{Body, Signal};
 
 /// The expected output shape for an agent template.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,7 +47,7 @@ pub struct AgentTemplate {
     pub model: String,
     /// Role used to derive tool restrictions and prompt defaults.
     pub role: String,
-    /// System prompt template with `{{variables}}` interpolation.
+    /// System prompt template with `{{key}}` interpolation.
     pub system_prompt: String,
     /// Maximum agent turns before forced stop.
     #[serde(default = "default_max_turns")]
@@ -256,15 +259,64 @@ impl TemplateRegistry {
         }
     }
 
-    /// Render a template's system prompt by interpolating `{{param}}` markers
-    /// with the supplied parameter values.
+    /// Render a template's system prompt by interpolating `{{key}}` markers
+    /// with the supplied parameter values and built-in context values.
     pub fn render_prompt(template: &AgentTemplate, params: &HashMap<String, String>) -> String {
+        Self::render_prompt_with_signal(template, params, None)
+    }
+
+    /// Render a template's system prompt with an attached signal context.
+    ///
+    /// This supports the same `{{key}}` replacement as [`render_prompt`],
+    /// plus signal-derived fields such as `signal.payload.*`.
+    pub fn render_prompt_with_signal(
+        template: &AgentTemplate,
+        params: &HashMap<String, String>,
+        signal: Option<&Signal>,
+    ) -> String {
+        let mut values = params.clone();
+        values.insert("timestamp".to_string(), Utc::now().to_rfc3339());
+        values.insert(
+            "env.GITHUB_TOKEN".to_string(),
+            std::env::var("GITHUB_TOKEN").unwrap_or_default(),
+        );
+
+        if let Some(signal) = signal {
+            values.insert(
+                "signal.payload.pull_request.number".to_string(),
+                signal_json_string(signal, &["pull_request", "number"]).unwrap_or_default(),
+            );
+            values.insert(
+                "signal.payload.repository.full_name".to_string(),
+                signal_json_string(signal, &["repository", "full_name"]).unwrap_or_default(),
+            );
+        }
+
         let mut out = template.system_prompt.clone();
-        for (key, value) in params {
+        for (key, value) in values {
             let marker = format!("{{{{{key}}}}}");
-            out = out.replace(&marker, value);
+            out = out.replace(&marker, &value);
         }
         out
+    }
+}
+
+fn signal_json_string(signal: &Signal, path: &[&str]) -> Option<String> {
+    let Body::Json(value) = &signal.body else {
+        return None;
+    };
+
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+
+    match current {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        serde_json::Value::Null => Some(String::new()),
+        other => Some(other.to_string()),
     }
 }
 
@@ -334,5 +386,48 @@ max_turns = 0
         assert!(registry.get("planner").is_some());
         assert!(registry.get("reviewer").is_some());
         assert!(registry.get("broken").is_none());
+    }
+
+    #[test]
+    fn render_prompt_interpolates_builtin_and_signal_values() {
+        let template = AgentTemplate {
+            name: "demo".into(),
+            description: "Demo".into(),
+            model: "sonnet".into(),
+            role: "implementer".into(),
+            system_prompt: [
+                "PR: {{signal.payload.pull_request.number}}",
+                "Repo: {{signal.payload.repository.full_name}}",
+                "Token: {{env.GITHUB_TOKEN}}",
+                "Time: {{timestamp}}",
+            ]
+            .join("\n"),
+            max_turns: 1,
+            output_format: TemplateOutputFormat::Markdown,
+            mcp_servers: Vec::new(),
+            allowed_tools: Vec::new(),
+            denied_tools: Vec::new(),
+        };
+
+        let signal = roko_core::Signal::builder(roko_core::Kind::Task)
+            .body(roko_core::Body::from_json(&serde_json::json!({
+                "pull_request": { "number": 42 },
+                "repository": { "full_name": "roko/example" }
+            }))
+            .unwrap())
+            .build();
+
+        let rendered = TemplateRegistry::render_prompt_with_signal(
+            &template,
+            &HashMap::new(),
+            Some(&signal),
+        );
+
+        assert!(rendered.contains("PR: 42"));
+        assert!(rendered.contains("Repo: roko/example"));
+        assert!(!rendered.contains("{{signal.payload.pull_request.number}}"));
+        assert!(!rendered.contains("{{signal.payload.repository.full_name}}"));
+        assert!(!rendered.contains("{{env.GITHUB_TOKEN}}"));
+        assert!(!rendered.contains("{{timestamp}}"));
     }
 }

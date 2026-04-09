@@ -176,7 +176,7 @@ impl TemplateAgentDispatcher {
 #[async_trait]
 impl AgentDispatcher for TemplateAgentDispatcher {
     async fn dispatch(&self, template: AgentTemplate, signal: Signal) -> Result<AgentResult> {
-        let system_prompt = build_template_system_prompt(&template);
+        let system_prompt = build_template_system_prompt(&template, Some(&signal));
         let allowed_tools = build_allowed_tools_csv(&template);
         let mcp_config = resolve_template_mcp_config(self.base_mcp_config.as_ref(), &self.workdir, &template)?;
         let agent = build_agent(
@@ -894,8 +894,11 @@ fn build_agent(
     Ok(Box::new(agent))
 }
 
-fn build_template_system_prompt(template: &AgentTemplate) -> String {
-    let role_prompt = TemplateRegistry::render_prompt(template, &HashMap::new());
+fn build_template_system_prompt(template: &AgentTemplate, signal: Option<&Signal>) -> String {
+    let role_prompt = match signal {
+        Some(signal) => TemplateRegistry::render_prompt_with_signal(template, &HashMap::new(), Some(signal)),
+        None => TemplateRegistry::render_prompt(template, &HashMap::new()),
+    };
     let mut prompt = role_prompt;
     if let Some(format_instructions) = output_format_instructions(&template.output_format) {
         if !format_instructions.is_empty() {
@@ -1403,7 +1406,7 @@ filter = { path = "src/**/*.rs" }
             denied_tools: Vec::new(),
         };
 
-        let prompt = build_template_system_prompt(&template);
+        let prompt = build_template_system_prompt(&template, None);
         assert!(prompt.contains("You are the template role."));
         assert!(prompt.contains("Output valid JSON only"));
     }
