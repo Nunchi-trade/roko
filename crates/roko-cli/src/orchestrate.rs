@@ -307,6 +307,8 @@ pub struct PlanRunner {
     attribution_tracker: ContextAttributionTracker,
     /// Cumulative USD cost per plan_id.
     plan_costs: HashMap<String, f64>,
+    /// Cumulative USD cost per plan/task dispatch key.
+    task_costs: HashMap<String, f64>,
     /// Metric registry for counters/histograms/gauges (prometheus-style).
     metrics: Arc<MetricRegistry>,
     /// Format-selection bandit for adaptive tool-call format per model/role.
@@ -698,6 +700,7 @@ impl PlanRunner {
                 &workdir.join(".roko").join("context-attribution.jsonl"),
             ),
             plan_costs: HashMap::new(),
+            task_costs: HashMap::new(),
             metrics,
             format_bandit: ProfileBandit::with_static_profiles(),
             mcp_clients,
@@ -765,6 +768,7 @@ impl PlanRunner {
                 &workdir.join(".roko").join("context-attribution.jsonl"),
             ),
             plan_costs: HashMap::new(),
+            task_costs: HashMap::new(),
             metrics,
             format_bandit: ProfileBandit::with_static_profiles(),
             mcp_clients,
@@ -836,6 +840,7 @@ impl PlanRunner {
                 &workdir.join(".roko").join("context-attribution.jsonl"),
             ),
             plan_costs: HashMap::new(),
+            task_costs: HashMap::new(),
             metrics,
             format_bandit: ProfileBandit::with_static_profiles(),
             mcp_clients,
@@ -2038,6 +2043,13 @@ impl PlanRunner {
         let mut task_dirs: Vec<(String, PathBuf)> = Vec::with_capacity(task_ids.len());
         let started = std::time::Instant::now();
         for tid in task_ids {
+            if let Err(e) = self.ensure_task_budget_available(plan_id, tid) {
+                eprintln!(
+                    "[orchestrate] task budget exhausted before dispatch for {plan_id}/{tid}: {e}"
+                );
+                self.record_task_failure(plan_id, tid, &e, &started, None).await;
+                continue;
+            }
             match self.task_exec_dir(plan_id, tid).await {
                 Ok(dir) => task_dirs.push((tid.clone(), dir)),
                 Err(e) => {
@@ -2174,6 +2186,7 @@ impl PlanRunner {
         // ── Process results sequentially ─────────────────────────────
         let mut any_fatal = false;
         for (tid, agent_result) in &results {
+            self.add_task_spend(plan_id, tid, f64::from(agent_result.usage.cost_usd));
             if agent_result.success {
                 self.record_task_success(plan_id, tid, agent_result, &started)
                     .await;
@@ -3186,6 +3199,39 @@ impl PlanRunner {
             .await
     }
 
+    /// Build the per-task budget ledger key used for cumulative spend tracking.
+    fn task_budget_key(plan_id: &str, task: &str) -> String {
+        format!("{plan_id}::{task}")
+    }
+
+    /// Return the cumulative spend recorded for a plan/task dispatch key.
+    fn task_spent(&self, plan_id: &str, task: &str) -> f64 {
+        self.task_costs
+            .get(&Self::task_budget_key(plan_id, task))
+            .copied()
+            .unwrap_or(0.0)
+    }
+
+    /// Record spend against a plan/task dispatch key.
+    fn add_task_spend(&mut self, plan_id: &str, task: &str, cost: f64) {
+        *self
+            .task_costs
+            .entry(Self::task_budget_key(plan_id, task))
+            .or_insert(0.0) += cost;
+    }
+
+    /// Abort before dispatch if the cumulative task budget is already exhausted.
+    fn ensure_task_budget_available(&self, plan_id: &str, task: &str) -> Result<()> {
+        let task_spent = self.task_spent(plan_id, task);
+        let max_task_usd = self.config.budget.max_task_usd;
+        if task_spent >= max_task_usd {
+            return Err(anyhow!(
+                "task {plan_id}/{task} budget exhausted: ${task_spent:.2} >= max_task_usd ${max_task_usd:.2}"
+            ));
+        }
+        Ok(())
+    }
+
     /// Core agent dispatch with optional prompt, model, and system-prompt overrides.
     async fn dispatch_agent_with(
         &mut self,
@@ -3204,6 +3250,7 @@ impl PlanRunner {
         };
 
         // ── Budget check before dispatch ─────────────────────────────
+        self.ensure_task_budget_available(plan_id, task)?;
         let plan_spent = self.plan_costs.get(plan_id).copied().unwrap_or(0.0);
         let budget = &self.config.budget;
         if plan_spent >= budget.max_plan_usd {
@@ -3607,6 +3654,9 @@ impl PlanRunner {
             agent.run(&prompt, &ctx).await
         };
 
+        let task_cost = f64::from(result.usage.cost_usd);
+        self.add_task_spend(plan_id, task, task_cost);
+
         // Persist the output.
         substrate
             .put(result.output.clone())
@@ -3711,7 +3761,6 @@ impl PlanRunner {
         }
 
         // ── Cost recording ────────────────────────────────────────────
-        let task_cost = f64::from(result.usage.cost_usd);
         if task_cost > self.config.budget.max_task_usd {
             return Err(anyhow!(
                 "task {task} cost ${task_cost:.2} exceeds max_task_usd ${:.2}",
