@@ -339,6 +339,77 @@ pub async fn daemon_stop() -> Result<()> {
     Ok(())
 }
 
+/// Print daemon status for the current working directory.
+pub async fn daemon_status() -> Result<()> {
+    let workdir = std::env::current_dir().context("resolve current working directory")?;
+    let info = match read_daemon_info(&workdir)? {
+        Some(info) => info,
+        None => {
+            print_daemon_status_table(
+                DaemonState::Stopped,
+                None,
+                None,
+                None,
+                None,
+                None,
+                count_signals_processed(&workdir).await?,
+            );
+            return Ok(());
+        }
+    };
+
+    let pid_alive = pid_is_alive(info.pid)?;
+    let state = if pid_alive {
+        info.state.clone()
+    } else {
+        DaemonState::Stopped
+    };
+    let port = Some(info.port);
+    let signals_processed = count_signals_processed(&workdir).await?;
+
+    if !pid_alive {
+        print_daemon_status_table(
+            state,
+            Some(info.pid),
+            port,
+            None,
+            None,
+            None,
+            signals_processed,
+        );
+        return Ok(());
+    }
+
+    let socket_path = daemon_socket_path(&workdir);
+    let mut stream = UnixStream::connect(&socket_path)
+        .await
+        .with_context(|| format!("connect {}", socket_path.display()))?;
+    stream
+        .write_all(b"status")
+        .await
+        .context("send daemon status request")?;
+    stream.shutdown().await.context("close daemon status request")?;
+
+    let mut buf = Vec::new();
+    stream
+        .read_to_end(&mut buf)
+        .await
+        .context("read daemon status response")?;
+    let response: DaemonStatusResponse = serde_json::from_slice(&buf)
+        .with_context(|| format!("parse daemon status response from {}", socket_path.display()))?;
+
+    print_daemon_status_table(
+        state,
+        Some(info.pid),
+        port,
+        Some(response.uptime_secs),
+        Some(response.active_agents),
+        Some(response.subscriptions),
+        signals_processed,
+    );
+    Ok(())
+}
+
 fn ensure_runtime_dirs(workdir: &Path) -> Result<()> {
     fs::create_dir_all(daemon_root_dir(workdir))
         .with_context(|| format!("create {}", daemon_root_dir(workdir).display()))?;
@@ -438,6 +509,83 @@ fn pid_is_alive(pid: u32) -> Result<bool> {
     let mut system = System::new_all();
     system.refresh_processes(ProcessesToUpdate::All, true);
     Ok(system.process(Pid::from_u32(pid)).is_some())
+}
+
+#[derive(Debug, Deserialize)]
+struct DaemonStatusResponse {
+    active_agents: usize,
+    subscriptions: usize,
+    uptime_secs: u64,
+}
+
+fn print_daemon_status_table(
+    state: DaemonState,
+    pid: Option<u32>,
+    port: Option<u16>,
+    uptime_secs: Option<u64>,
+    active_agents: Option<usize>,
+    subscriptions: Option<usize>,
+    total_signals_processed: usize,
+) {
+    println!("{:<26}{}", "field", "value");
+    println!("{:-<26}{}", "", "");
+    println!("{:<26}{}", "state", state);
+    println!(
+        "{:<26}{}",
+        "PID",
+        pid.map_or_else(|| "n/a".to_string(), |value| value.to_string())
+    );
+    println!(
+        "{:<26}{}",
+        "port",
+        port.map_or_else(|| "n/a".to_string(), |value| value.to_string())
+    );
+    println!(
+        "{:<26}{}",
+        "uptime",
+        uptime_secs.map_or_else(|| "n/a".to_string(), format_uptime)
+    );
+    println!(
+        "{:<26}{}",
+        "active agents",
+        active_agents.map_or_else(|| "n/a".to_string(), |value| value.to_string())
+    );
+    println!(
+        "{:<26}{}",
+        "subscriptions",
+        subscriptions.map_or_else(|| "n/a".to_string(), |value| value.to_string())
+    );
+    println!(
+        "{:<26}{}",
+        "total signals processed",
+        total_signals_processed
+    );
+}
+
+fn format_uptime(total_secs: u64) -> String {
+    let days = total_secs / 86_400;
+    let hours = (total_secs % 86_400) / 3_600;
+    let minutes = (total_secs % 3_600) / 60;
+    let seconds = total_secs % 60;
+
+    if days > 0 {
+        format!("{days}d {hours:02}h {minutes:02}m {seconds:02}s")
+    } else if hours > 0 {
+        format!("{hours}h {minutes:02}m {seconds:02}s")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds:02}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+async fn count_signals_processed(workdir: &Path) -> Result<usize> {
+    let path = workdir.join(".roko").join("signals.jsonl");
+    match tokio::fs::read_to_string(&path).await {
+        Ok(text) => Ok(text.lines().filter(|line| !line.trim().is_empty()).count()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(err) => Err(err).with_context(|| format!("read {}", path.display())),
+    }
 }
 
 #[cfg(unix)]

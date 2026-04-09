@@ -752,8 +752,11 @@ async fn cmd_daemon(_cli: &Cli, cmd: DaemonCmd) -> Result<i32> {
             roko_cli::daemon::daemon_stop().await?;
             Ok(EXIT_SUCCESS)
         }
-        DaemonCmd::Status
-        | DaemonCmd::Logs { .. }
+        DaemonCmd::Status => {
+            roko_cli::daemon::daemon_status().await?;
+            Ok(EXIT_SUCCESS)
+        }
+        DaemonCmd::Logs { .. }
         | DaemonCmd::Reload
         | DaemonCmd::Restart { .. }
         | DaemonCmd::Install
