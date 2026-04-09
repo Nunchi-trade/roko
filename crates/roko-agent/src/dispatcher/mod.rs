@@ -168,7 +168,30 @@ impl ToolDispatcher {
             Self::emit_terminal_audit(ctx, &call, &ToolResult::err(err.clone()), timeout_ms);
             return ToolResult::err(err);
         };
-        // 3. Authorize against the role's capabilities. The `satisfied_by`
+        // 3. Apply task-level tool filters before capability checks.
+        if let Some(reason) = tool_filter_block_reason(
+            &call.name,
+            ctx.allowed_tools.as_deref(),
+            ctx.denied_tools.as_deref(),
+        ) {
+            let err = ToolError::PermissionDenied(reason.clone());
+            Self::emit_audit(
+                ctx,
+                &call,
+                "tool_filter",
+                "denied",
+                &json!({
+                    "tool": call.name,
+                    "allowed_tools": ctx.allowed_tools.clone(),
+                    "denied_tools": ctx.denied_tools.clone(),
+                    "error": err.to_string(),
+                    "error_kind": tool_error_kind(&err),
+                }),
+            );
+            Self::emit_terminal_audit(ctx, &call, &ToolResult::err(err.clone()), timeout_ms);
+            return ToolResult::err(err);
+        }
+        // 4. Authorize against the role's capabilities. The `satisfied_by`
         //    method wants `ToolPermissions` (what the role grants); we
         //    build one from `ctx.capabilities` (a `ToolPermission` — same
         //    flags, different type).
@@ -425,6 +448,32 @@ fn duration_to_ms(duration: Duration) -> u64 {
     }
 }
 
+fn tool_filter_block_reason(
+    tool_name: &str,
+    allowed_tools: Option<&[String]>,
+    denied_tools: Option<&[String]>,
+) -> Option<String> {
+    if let Some(denied_tools) = denied_tools {
+        if denied_tools.iter().any(|name| name == tool_name) {
+            return Some(format!(
+                "tool '{tool_name}' is blocked because it is listed in denied_tools: [{}]",
+                denied_tools.join(", ")
+            ));
+        }
+    }
+
+    if let Some(allowed_tools) = allowed_tools {
+        if !allowed_tools.iter().any(|name| name == tool_name) {
+            return Some(format!(
+                "tool '{tool_name}' is blocked because it is not listed in allowed_tools: [{}]",
+                allowed_tools.join(", ")
+            ));
+        }
+    }
+
+    None
+}
+
 const fn tool_error_kind(err: &ToolError) -> &'static str {
     match err {
         ToolError::PermissionDenied(_) => "permission_denied",
@@ -649,6 +698,59 @@ mod tests {
         match res {
             ToolResult::Err(ToolError::PermissionDenied(msg)) => {
                 assert!(msg.contains("echo"), "msg should name the tool: {msg}");
+            }
+            other => panic!("expected PermissionDenied, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn allowlist_blocks_unlisted_tool_with_clear_error() {
+        let registry: Arc<dyn ToolRegistry> = Arc::new(VecToolRegistry::from_tools(vec![tool(
+            "echo",
+            ToolPermission::read_only(),
+            ToolConcurrency::Parallel,
+        )]));
+        let resolver = resolver_from([("echo", Arc::new(EchoHandler) as Arc<dyn ToolHandler>)]);
+        let d = ToolDispatcher::new(registry, resolver);
+        let ctx = ToolContext::testing("/tmp")
+            .with_allowed_tools(Some(vec!["read_file".into(), "grep".into()]));
+        let res = d
+            .dispatch(ToolCall::new("c", "echo", serde_json::json!({})), &ctx)
+            .await;
+        match res {
+            ToolResult::Err(ToolError::PermissionDenied(msg)) => {
+                assert!(msg.contains("echo"), "msg should name the tool: {msg}");
+                assert!(
+                    msg.contains("allowed_tools"),
+                    "msg should explain the allowlist reason: {msg}"
+                );
+            }
+            other => panic!("expected PermissionDenied, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn denylist_blocks_listed_tool_with_clear_error() {
+        let registry: Arc<dyn ToolRegistry> = Arc::new(VecToolRegistry::from_tools(vec![tool(
+            "echo",
+            ToolPermission::read_only(),
+            ToolConcurrency::Parallel,
+        )]));
+        let resolver = resolver_from([("echo", Arc::new(EchoHandler) as Arc<dyn ToolHandler>)]);
+        let d = ToolDispatcher::new(registry, resolver);
+        let ctx = ToolContext::testing("/tmp")
+            .with_allowed_tools(Some(vec!["echo".into(), "grep".into()]))
+            .with_denied_tools(Some(vec!["echo".into()]));
+        let res = d
+            .dispatch(ToolCall::new("c", "echo", serde_json::json!({})), &ctx)
+            .await;
+        match res {
+            ToolResult::Err(ToolError::PermissionDenied(msg)) => {
+                assert!(msg.contains("echo"), "msg should name the tool: {msg}");
+                assert!(
+                    msg.contains("denied_tools"),
+                    "msg should explain the denylist reason: {msg}"
+                );
             }
             other => panic!("expected PermissionDenied, got {other:?}"),
         }

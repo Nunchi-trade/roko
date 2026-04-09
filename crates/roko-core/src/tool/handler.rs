@@ -124,6 +124,10 @@ pub struct ToolContext {
     /// role's [`ToolPermissions`](crate::ToolPermissions) and any
     /// per-call restrictions).
     pub capabilities: ToolPermission,
+    /// Optional allowlist of tool names for the current task.
+    pub allowed_tools: Option<Vec<String>>,
+    /// Optional denylist of tool names for the current task.
+    pub denied_tools: Option<Vec<String>>,
     /// Where to publish audit signals (coarse-grained orchestration events).
     pub audit_sink: Arc<dyn AuditSink>,
     /// Where to publish execution trace events (fine-grained per-call timelines).
@@ -150,6 +154,8 @@ impl ToolContext {
             worktree_path: worktree_path.into(),
             timeout,
             capabilities,
+            allowed_tools: None,
+            denied_tools: None,
             audit_sink,
             trace_sink,
             metrics_sink,
@@ -171,6 +177,8 @@ impl ToolContext {
                 git: true,
                 network: false,
             },
+            allowed_tools: None,
+            denied_tools: None,
             audit_sink: Arc::new(NoopAuditSink),
             trace_sink: Arc::new(NoopTraceSink),
             metrics_sink: Arc::new(NoopMetricsSink),
@@ -206,6 +214,20 @@ impl ToolContext {
         self
     }
 
+    /// Replace the task-level tool allowlist.
+    #[must_use]
+    pub fn with_allowed_tools(mut self, allowed_tools: Option<Vec<String>>) -> Self {
+        self.allowed_tools = allowed_tools;
+        self
+    }
+
+    /// Replace the task-level tool denylist.
+    #[must_use]
+    pub fn with_denied_tools(mut self, denied_tools: Option<Vec<String>>) -> Self {
+        self.denied_tools = denied_tools;
+        self
+    }
+
     /// Short-cut: is the context's [`CancelToken`] tripped?
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
@@ -225,6 +247,8 @@ impl std::fmt::Debug for ToolContext {
             .field("worktree_path", &self.worktree_path)
             .field("timeout", &self.timeout)
             .field("capabilities", &self.capabilities)
+            .field("allowed_tools", &self.allowed_tools)
+            .field("denied_tools", &self.denied_tools)
             .field("audit_sink", &"Arc<dyn AuditSink>")
             .field("trace_sink", &"Arc<dyn TraceSink>")
             .field("metrics_sink", &"Arc<dyn MetricsSink>")
