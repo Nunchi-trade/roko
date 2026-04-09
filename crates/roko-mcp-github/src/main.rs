@@ -7,12 +7,15 @@
 use anyhow::Context;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use reqwest::blocking::Client;
-use reqwest::header::{ACCEPT, HeaderMap, HeaderValue, USER_AGENT};
+use reqwest::blocking::{Client, RequestBuilder, Response};
+use reqwest::header::{ACCEPT, HeaderMap, HeaderValue, RETRY_AFTER, USER_AGENT};
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::env;
 use std::io::{self, BufRead, Write};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
@@ -1108,6 +1111,92 @@ fn github_token() -> Option<String> {
         .or_else(|| env::var("GH_TOKEN").ok().filter(|token| !token.is_empty()))
 }
 
+const RATE_LIMIT_REMAINING_THRESHOLD: u32 = 10;
+const RATE_LIMIT_INITIAL_BACKOFF_MS: u64 = 1_000;
+const RATE_LIMIT_MAX_BACKOFF_MS: u64 = 30_000;
+const RATE_LIMIT_MAX_RETRIES: u32 = 5;
+
+fn send_github_request<F>(mut build_request: F, context: &str) -> Result<Response, JsonRpcError>
+where
+    F: FnMut() -> RequestBuilder,
+{
+    let mut attempt = 0;
+
+    loop {
+        let response = build_request()
+            .send()
+            .map_err(|err| JsonRpcError::internal_error(format!("call GitHub API ({context}): {err}")))?;
+
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            if attempt >= RATE_LIMIT_MAX_RETRIES {
+                let status = response.status();
+                let body = response
+                    .text()
+                    .unwrap_or_else(|err| format!("failed to read rate limit response body: {err}"));
+                return Err(JsonRpcError::internal_error(format!(
+                    "GitHub API returned {status}: {}",
+                    body.trim()
+                )));
+            }
+
+            let delay = retry_after_delay(response.headers())
+                .unwrap_or_else(|| exponential_backoff_delay(attempt));
+            thread::sleep(delay);
+            attempt += 1;
+            continue;
+        }
+
+        if let Some(delay) = low_rate_limit_delay(response.headers()) {
+            thread::sleep(delay);
+        }
+
+        return Ok(response);
+    }
+}
+
+fn low_rate_limit_delay(headers: &HeaderMap) -> Option<Duration> {
+    let remaining = headers
+        .get("x-ratelimit-remaining")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u32>().ok())?;
+
+    if remaining >= RATE_LIMIT_REMAINING_THRESHOLD {
+        return None;
+    }
+
+    if let Some(reset_delay) = reset_delay(headers) {
+        return Some(reset_delay);
+    }
+
+    Some(Duration::from_secs(1))
+}
+
+fn reset_delay(headers: &HeaderMap) -> Option<Duration> {
+    let reset_at = headers
+        .get("x-ratelimit-reset")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())?;
+
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    (reset_at > now).then(|| Duration::from_secs(reset_at - now))
+}
+
+fn retry_after_delay(headers: &HeaderMap) -> Option<Duration> {
+    headers
+        .get(RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+}
+
+fn exponential_backoff_delay(attempt: u32) -> Duration {
+    let factor = 1u64.checked_shl(attempt).unwrap_or(u64::MAX);
+    let delay_ms = RATE_LIMIT_INITIAL_BACKOFF_MS
+        .saturating_mul(factor)
+        .min(RATE_LIMIT_MAX_BACKOFF_MS);
+    Duration::from_millis(delay_ms)
+}
+
 fn list_pull_requests(
     client: &Client,
     args: &ListPrsArguments,
@@ -1116,11 +1205,6 @@ fn list_pull_requests(
         "https://api.github.com/repos/{}/{}/pulls",
         args.owner, args.repo
     );
-    let mut request = client.get(url);
-    if let Some(token) = github_token() {
-        request = request.bearer_auth(token);
-    }
-
     let mut query: Vec<(&str, String)> = Vec::with_capacity(4);
     query.push((
         "state",
@@ -1140,10 +1224,16 @@ fn list_pull_requests(
         args.per_page.unwrap_or(30).clamp(1, 100).to_string(),
     ));
 
-    let response = request
-        .query(&query)
-        .send()
-        .map_err(|err| JsonRpcError::internal_error(format!("call GitHub API: {err}")))?;
+    let response = send_github_request(
+        || {
+            let mut request = client.get(&url);
+            if let Some(token) = github_token() {
+                request = request.bearer_auth(token);
+            }
+            request.query(&query)
+        },
+        "list pull requests",
+    )?;
 
     let status = response.status();
     let body = response
@@ -1166,11 +1256,6 @@ fn list_issues(
     api_base_url: &str,
 ) -> Result<Vec<GithubIssue>, JsonRpcError> {
     let url = format!("{api_base_url}/repos/{}/{}/issues", args.owner, args.repo);
-    let mut request = client.get(url);
-    if let Some(token) = github_token() {
-        request = request.bearer_auth(token);
-    }
-
     let mut query: Vec<(&str, String)> = Vec::with_capacity(5);
     query.push((
         "state",
@@ -1191,10 +1276,16 @@ fn list_issues(
         args.per_page.unwrap_or(30).clamp(1, 100).to_string(),
     ));
 
-    let response = request
-        .query(&query)
-        .send()
-        .map_err(|err| JsonRpcError::internal_error(format!("call GitHub API: {err}")))?;
+    let response = send_github_request(
+        || {
+            let mut request = client.get(&url);
+            if let Some(token) = github_token() {
+                request = request.bearer_auth(token);
+            }
+            request.query(&query)
+        },
+        "list issues",
+    )?;
 
     let status = response.status();
     let body = response
@@ -1222,14 +1313,16 @@ fn get_pull_request(
     number: u64,
 ) -> Result<GithubPullRequestDetails, JsonRpcError> {
     let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls/{number}");
-    let mut request = client.get(url);
-    if let Some(token) = github_token() {
-        request = request.bearer_auth(token);
-    }
-
-    let response = request
-        .send()
-        .map_err(|err| JsonRpcError::internal_error(format!("call GitHub API: {err}")))?;
+    let response = send_github_request(
+        || {
+            let mut request = client.get(&url);
+            if let Some(token) = github_token() {
+                request = request.bearer_auth(token);
+            }
+            request
+        },
+        "get pull request",
+    )?;
 
     let status = response.status();
     let body = response
@@ -1253,15 +1346,16 @@ fn list_pull_request_reviews(
     number: u64,
 ) -> Result<Vec<GithubPullRequestReview>, JsonRpcError> {
     let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls/{number}/reviews");
-    let mut request = client.get(url);
-    if let Some(token) = github_token() {
-        request = request.bearer_auth(token);
-    }
-
-    let response = request
-        .query(&[("per_page", "100")])
-        .send()
-        .map_err(|err| JsonRpcError::internal_error(format!("call GitHub API: {err}")))?;
+    let response = send_github_request(
+        || {
+            let mut request = client.get(&url);
+            if let Some(token) = github_token() {
+                request = request.bearer_auth(token);
+            }
+            request.query(&[("per_page", "100")])
+        },
+        "list pull request reviews",
+    )?;
 
     let status = response.status();
     let body = response
@@ -1285,11 +1379,6 @@ fn create_pull_request(
     api_base_url: &str,
 ) -> Result<GithubCreatePullRequestResponse, JsonRpcError> {
     let url = format!("{api_base_url}/repos/{}/{}/pulls", args.owner, args.repo);
-    let mut request = client.post(url);
-    if let Some(token) = github_token() {
-        request = request.bearer_auth(token);
-    }
-
     let mut payload = serde_json::json!({
         "title": args.title,
         "body": args.body,
@@ -1300,10 +1389,16 @@ fn create_pull_request(
         payload["draft"] = Value::Bool(draft);
     }
 
-    let response = request
-        .json(&payload)
-        .send()
-        .map_err(|err| JsonRpcError::internal_error(format!("call GitHub API: {err}")))?;
+    let response = send_github_request(
+        || {
+            let mut request = client.post(&url);
+            if let Some(token) = github_token() {
+                request = request.bearer_auth(token);
+            }
+            request.json(&payload)
+        },
+        "create pull request",
+    )?;
 
     let status = response.status();
     let body = response
@@ -1329,11 +1424,6 @@ fn create_issue(
     api_base_url: &str,
 ) -> Result<GithubCreateIssueResponse, JsonRpcError> {
     let url = format!("{api_base_url}/repos/{}/{}/issues", args.owner, args.repo);
-    let mut request = client.post(url);
-    if let Some(token) = github_token() {
-        request = request.bearer_auth(token);
-    }
-
     let mut payload = serde_json::json!({
         "title": args.title,
         "body": args.body,
@@ -1349,10 +1439,16 @@ fn create_issue(
         payload["assignees"] = Value::Array(assignees.iter().cloned().map(Value::String).collect());
     }
 
-    let response = request
-        .json(&payload)
-        .send()
-        .map_err(|err| JsonRpcError::internal_error(format!("call GitHub API: {err}")))?;
+    let response = send_github_request(
+        || {
+            let mut request = client.post(&url);
+            if let Some(token) = github_token() {
+                request = request.bearer_auth(token);
+            }
+            request.json(&payload)
+        },
+        "create issue",
+    )?;
 
     let status = response.status();
     let body = response
@@ -1378,17 +1474,19 @@ fn get_repository_file(
         "https://api.github.com/repos/{}/{}/contents/{}",
         args.owner, args.repo, args.path
     );
-    let mut request = client.get(url);
-    if let Some(token) = github_token() {
-        request = request.bearer_auth(token);
-    }
-    if let Some(ref_name) = &args.ref_name {
-        request = request.query(&[("ref", ref_name)]);
-    }
-
-    let response = request
-        .send()
-        .map_err(|err| JsonRpcError::internal_error(format!("call GitHub API: {err}")))?;
+    let response = send_github_request(
+        || {
+            let mut request = client.get(&url);
+            if let Some(token) = github_token() {
+                request = request.bearer_auth(token);
+            }
+            if let Some(ref_name) = &args.ref_name {
+                request = request.query(&[("ref", ref_name)]);
+            }
+            request
+        },
+        "get repository file",
+    )?;
 
     let status = response.status();
     let body = response
@@ -1465,21 +1563,22 @@ fn search_code(
     }
 
     let url = format!("{api_base_url}/search/code");
-    let mut request = client.get(url);
-    if let Some(token) = github_token() {
-        request = request.bearer_auth(token);
-    }
-
     let search_query = format!("{query} repo:{owner}/{repo}");
     let mut params: Vec<(&str, String)> = vec![("q", search_query)];
     if let Some(per_page) = args.per_page {
         params.push(("per_page", per_page.clamp(1, 100).to_string()));
     }
 
-    let response = request
-        .query(&params)
-        .send()
-        .map_err(|err| JsonRpcError::internal_error(format!("call GitHub API: {err}")))?;
+    let response = send_github_request(
+        || {
+            let mut request = client.get(&url);
+            if let Some(token) = github_token() {
+                request = request.bearer_auth(token);
+            }
+            request.query(&params)
+        },
+        "search code",
+    )?;
 
     let status = response.status();
     let body = response
@@ -1513,19 +1612,20 @@ fn create_pull_request_comment(
         "{api_base_url}/repos/{}/{}/issues/{}/comments",
         args.owner, args.repo, args.number
     );
-    let mut request = client.post(url);
-    if let Some(token) = github_token() {
-        request = request.bearer_auth(token);
-    }
-
     let payload = serde_json::json!({
         "body": args.body,
     });
 
-    let response = request
-        .json(&payload)
-        .send()
-        .map_err(|err| JsonRpcError::internal_error(format!("call GitHub API: {err}")))?;
+    let response = send_github_request(
+        || {
+            let mut request = client.post(&url);
+            if let Some(token) = github_token() {
+                request = request.bearer_auth(token);
+            }
+            request.json(&payload)
+        },
+        "create pull request comment",
+    )?;
 
     let status = response.status();
     let body = response
@@ -1552,20 +1652,21 @@ fn submit_pull_request_review(
         "{api_base_url}/repos/{}/{}/pulls/{}/reviews",
         args.owner, args.repo, args.number
     );
-    let mut request = client.post(url);
-    if let Some(token) = github_token() {
-        request = request.bearer_auth(token);
-    }
-
     let payload = serde_json::json!({
         "body": args.body,
         "event": args.event.as_str(),
     });
 
-    let response = request
-        .json(&payload)
-        .send()
-        .map_err(|err| JsonRpcError::internal_error(format!("call GitHub API: {err}")))?;
+    let response = send_github_request(
+        || {
+            let mut request = client.post(&url);
+            if let Some(token) = github_token() {
+                request = request.bearer_auth(token);
+            }
+            request.json(&payload)
+        },
+        "submit pull request review",
+    )?;
 
     let status = response.status();
     let body = response
@@ -1592,11 +1693,6 @@ fn merge_pull_request(
         "{api_base_url}/repos/{}/{}/pulls/{}/merge",
         args.owner, args.repo, args.number
     );
-    let mut request = client.put(url);
-    if let Some(token) = github_token() {
-        request = request.bearer_auth(token);
-    }
-
     let mut payload = serde_json::json!({
         "merge_method": args.merge_method.as_str(),
     });
@@ -1604,10 +1700,16 @@ fn merge_pull_request(
         payload["commit_title"] = Value::String(commit_title.clone());
     }
 
-    let response = request
-        .json(&payload)
-        .send()
-        .map_err(|err| JsonRpcError::internal_error(format!("call GitHub API: {err}")))?;
+    let response = send_github_request(
+        || {
+            let mut request = client.put(&url);
+            if let Some(token) = github_token() {
+                request = request.bearer_auth(token);
+            }
+            request.json(&payload)
+        },
+        "merge pull request",
+    )?;
 
     let status = response.status();
     let body = response
@@ -1973,6 +2075,29 @@ mod tests {
         let decoded = decode_github_file_content("SGVs\nbG8gV29y\nbGQh").expect("decoded");
 
         assert_eq!(decoded, b"Hello World!");
+    }
+
+    #[test]
+    fn low_rate_limit_delay_triggers_below_threshold() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-ratelimit-remaining", HeaderValue::from_static("9"));
+
+        assert_eq!(low_rate_limit_delay(&headers), Some(Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn low_rate_limit_delay_does_not_trigger_at_threshold() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-ratelimit-remaining", HeaderValue::from_static("10"));
+
+        assert_eq!(low_rate_limit_delay(&headers), None);
+    }
+
+    #[test]
+    fn exponential_backoff_delay_doubles_and_caps() {
+        assert_eq!(exponential_backoff_delay(0), Duration::from_secs(1));
+        assert_eq!(exponential_backoff_delay(1), Duration::from_secs(2));
+        assert_eq!(exponential_backoff_delay(6), Duration::from_secs(30));
     }
 
     #[test]
