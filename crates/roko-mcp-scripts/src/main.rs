@@ -8,16 +8,21 @@
 use roko_mcp_stdio::{JsonRpcError, JsonRpcRequest, serve_stdio};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::env;
 use std::ffi::OsStr;
 use std::io;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::time::Duration;
+use tokio::process::Command;
+use tokio::time::timeout;
 
 #[derive(Debug, Clone)]
 struct AppConfig {
     working_dir: PathBuf,
+    timeout: Duration,
+    env_allowlist: BTreeSet<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -57,17 +62,24 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let config = AppConfig::from_env()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     serve_stdio(io::stdin().lock(), io::stdout().lock(), |request| {
-        handle_request(request, &config)
+        handle_request(request, &config, &runtime)
     })?;
     Ok(())
 }
 
-fn handle_request(request: JsonRpcRequest, config: &AppConfig) -> Result<Value, JsonRpcError> {
+fn handle_request(
+    request: JsonRpcRequest,
+    config: &AppConfig,
+    runtime: &tokio::runtime::Runtime,
+) -> Result<Value, JsonRpcError> {
     match request.method.as_str() {
         "initialize" => Ok(handle_initialize()),
         "tools/list" => Ok(handle_tools_list()),
-        "tools/call" => handle_tools_call(request.params, config),
+        "tools/call" => handle_tools_call(request.params, config, runtime),
         _ => Err(JsonRpcError::method_not_found(&request.method)),
     }
 }
@@ -118,11 +130,15 @@ fn handle_tools_list() -> Value {
     })
 }
 
-fn handle_tools_call(params: Value, config: &AppConfig) -> Result<Value, JsonRpcError> {
+fn handle_tools_call(
+    params: Value,
+    config: &AppConfig,
+    runtime: &tokio::runtime::Runtime,
+) -> Result<Value, JsonRpcError> {
     let params: ToolsCallParams = serde_json::from_value(params)
         .map_err(|err| JsonRpcError::invalid_params(format!("invalid tools/call params: {err}")))?;
     match params.name.as_str() {
-        "run_script" => handle_run_script(params.arguments, config),
+        "run_script" => handle_run_script(params.arguments, config, runtime),
         "list_scripts" => handle_list_scripts(config),
         _ => Err(JsonRpcError::invalid_params(format!(
             "unknown tool: {}",
@@ -131,11 +147,15 @@ fn handle_tools_call(params: Value, config: &AppConfig) -> Result<Value, JsonRpc
     }
 }
 
-fn handle_run_script(arguments: Value, config: &AppConfig) -> Result<Value, JsonRpcError> {
+fn handle_run_script(
+    arguments: Value,
+    config: &AppConfig,
+    runtime: &tokio::runtime::Runtime,
+) -> Result<Value, JsonRpcError> {
     let args: RunScriptArguments = serde_json::from_value(arguments)
         .map_err(|err| JsonRpcError::invalid_params(format!("invalid run_script args: {err}")))?;
 
-    let execution = execute_script(config, &args.name, &args.args);
+    let execution = runtime.block_on(execute_script(config, &args.name, &args.args));
     Ok(make_tool_result(execution))
 }
 
@@ -153,7 +173,7 @@ fn handle_list_scripts(config: &AppConfig) -> Result<Value, JsonRpcError> {
     }))
 }
 
-fn execute_script(config: &AppConfig, name: &str, args: &[String]) -> ScriptExecution {
+async fn execute_script(config: &AppConfig, name: &str, args: &[String]) -> ScriptExecution {
     let working_dir = config.working_dir.clone();
     let resolved = match resolve_script_path(&working_dir, name) {
         Ok(path) => path,
@@ -170,20 +190,32 @@ fn execute_script(config: &AppConfig, name: &str, args: &[String]) -> ScriptExec
     };
 
     let (command, command_args) = command_for_script(&resolved, args);
-    let output = match Command::new(&command)
-        .args(&command_args)
+    let mut cmd = Command::new(&command);
+    cmd.args(&command_args)
         .current_dir(&working_dir)
-        .output()
-    {
-        Ok(output) => output,
-        Err(err) => {
+        .kill_on_drop(true);
+    apply_env_allowlist(&mut cmd, &config.env_allowlist);
+
+    let output = match timeout(config.timeout, cmd.output()).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(err)) => {
             return ScriptExecution {
                 command,
                 script_path: resolved,
                 args: args.to_vec(),
                 stdout: String::new(),
-                stderr: format!("failed to spawn script: {err}"),
+                stderr: format!("failed to run script: {err}"),
                 exit_code: 127,
+            };
+        }
+        Err(_) => {
+            return ScriptExecution {
+                command,
+                script_path: resolved,
+                args: args.to_vec(),
+                stdout: String::new(),
+                stderr: format!("script timed out after {}s", config.timeout.as_secs()),
+                exit_code: 124,
             };
         }
     };
@@ -196,6 +228,47 @@ fn execute_script(config: &AppConfig, name: &str, args: &[String]) -> ScriptExec
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         exit_code: output.status.code().unwrap_or(-1),
     }
+}
+
+fn apply_env_allowlist(cmd: &mut Command, env_allowlist: &BTreeSet<String>) {
+    cmd.env_clear();
+    for (key, value) in filtered_env_entries(env_allowlist, env::vars()) {
+        cmd.env(key, value);
+    }
+}
+
+fn filtered_env_entries(
+    env_allowlist: &BTreeSet<String>,
+    source: impl IntoIterator<Item = (String, String)>,
+) -> Vec<(String, String)> {
+    source
+        .into_iter()
+        .filter(|(key, _)| env_allowlist.contains(key) || key == "PATH")
+        .collect()
+}
+
+fn default_env_allowlist() -> BTreeSet<String> {
+    BTreeSet::from([String::from("PATH")])
+}
+
+fn parse_timeout_secs(value: impl AsRef<str>) -> anyhow::Result<u64> {
+    let value = value.as_ref().trim();
+    let secs = value
+        .parse::<u64>()
+        .map_err(|err| anyhow::anyhow!("invalid timeout secs '{value}': {err}"))?;
+    Ok(secs)
+}
+
+fn parse_env_allowlist(value: impl AsRef<str>) -> BTreeSet<String> {
+    let mut allowlist = BTreeSet::new();
+    for key in value.as_ref().split(',') {
+        let key = key.trim();
+        if !key.is_empty() {
+            allowlist.insert(key.to_string());
+        }
+    }
+    allowlist.insert("PATH".to_string());
+    allowlist
 }
 
 fn make_tool_result(execution: ScriptExecution) -> Value {
@@ -387,6 +460,18 @@ impl AppConfig {
                     .map(|dir| dir.join(".roko/scripts"))
                     .unwrap_or_else(|_| PathBuf::from(".roko/scripts"))
             });
+        let mut timeout = env::var("ROKO_MCP_SCRIPTS_TIMEOUT_SECS")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| parse_timeout_secs(value))
+            .transpose()?
+            .map(Duration::from_secs)
+            .unwrap_or_else(|| Duration::from_secs(60));
+        let mut env_allowlist = env::var("ROKO_MCP_SCRIPTS_ENV_ALLOWLIST")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| parse_env_allowlist(&value))
+            .unwrap_or_else(default_env_allowlist);
         let mut args = env::args_os().skip(1);
 
         while let Some(arg) = args.next() {
@@ -404,11 +489,32 @@ impl AppConfig {
                 value if value.starts_with("--scripts-dir=") => {
                     working_dir = PathBuf::from(value.trim_start_matches("--scripts-dir="));
                 }
+                "--timeout-secs" => {
+                    let value = args.next().ok_or_else(|| anyhow::anyhow!("missing value for {arg}"))?;
+                    timeout = Duration::from_secs(parse_timeout_secs(value.to_string_lossy())?);
+                }
+                value if value.starts_with("--timeout-secs=") => {
+                    timeout = Duration::from_secs(parse_timeout_secs(
+                        value.trim_start_matches("--timeout-secs="),
+                    )?);
+                }
+                "--env-allowlist" => {
+                    let value = args.next().ok_or_else(|| anyhow::anyhow!("missing value for {arg}"))?;
+                    env_allowlist = parse_env_allowlist(value.to_string_lossy());
+                }
+                value if value.starts_with("--env-allowlist=") => {
+                    env_allowlist =
+                        parse_env_allowlist(value.trim_start_matches("--env-allowlist="));
+                }
                 _ => {}
             }
         }
 
-        Ok(Self { working_dir })
+        Ok(Self {
+            working_dir,
+            timeout,
+            env_allowlist,
+        })
     }
 }
 
@@ -482,6 +588,38 @@ mod tests {
         let (command, args) = command_for_script(script, &["one".into(), "two".into()]);
         assert_eq!(command, "python3");
         assert_eq!(args, vec!["/tmp/example.py", "one", "two"]);
+    }
+
+    #[test]
+    fn filtered_env_entries_keeps_only_allowlisted_keys_and_path() {
+        let allowlist = BTreeSet::from([String::from("KEEP")]);
+        let source = vec![
+            (String::from("KEEP"), String::from("yes")),
+            (String::from("DROP"), String::from("no")),
+            (String::from("PATH"), String::from("/usr/bin")),
+        ];
+
+        let filtered = filtered_env_entries(&allowlist, source);
+        assert!(filtered.contains(&(String::from("KEEP"), String::from("yes"))));
+        assert!(filtered.contains(&(String::from("PATH"), String::from("/usr/bin"))));
+        assert!(!filtered.contains(&(String::from("DROP"), String::from("no"))));
+    }
+
+    #[tokio::test]
+    async fn execute_script_times_out_and_reports_failure() {
+        let dir = temp_dir();
+        let script = dir.join("slow.sh");
+        fs::write(&script, "#!/bin/bash\nsleep 1\n").expect("write script");
+
+        let config = AppConfig {
+            working_dir: dir,
+            timeout: Duration::from_millis(50),
+            env_allowlist: default_env_allowlist(),
+        };
+
+        let execution = execute_script(&config, "slow", &[]).await;
+        assert_eq!(execution.exit_code, 124);
+        assert!(execution.stderr.contains("timed out"));
     }
 
     fn temp_dir() -> PathBuf {
