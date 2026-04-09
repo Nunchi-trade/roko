@@ -6,7 +6,7 @@
 
 use anyhow::Context;
 use reqwest::blocking::Client;
-use reqwest::header::{ACCEPT, HeaderMap, HeaderValue, USER_AGENT};
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::env;
@@ -123,12 +123,39 @@ struct CreatePrArguments {
     draft: Option<bool>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ReviewPrArguments {
+    owner: String,
+    repo: String,
+    number: u64,
+    body: String,
+    event: GithubReviewEvent,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum PullRequestState {
     Open,
     Closed,
     All,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum GithubReviewEvent {
+    Approve,
+    RequestChanges,
+    Comment,
+}
+
+impl GithubReviewEvent {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Approve => "APPROVE",
+            Self::RequestChanges => "REQUEST_CHANGES",
+            Self::Comment => "COMMENT",
+        }
+    }
 }
 
 impl PullRequestState {
@@ -645,7 +672,9 @@ fn dispatch_tool_call(name: &str, arguments: Value) -> Result<Value, JsonRpcErro
         "github.get_branch" => handle_get_branch(arguments),
         "github.compare_branches" => handle_compare_branches(arguments),
         "github.get_actions_status" => handle_get_actions_status(arguments),
-        _ => Err(JsonRpcError::invalid_params(format!("unknown tool: {name}"))),
+        _ => Err(JsonRpcError::invalid_params(format!(
+            "unknown tool: {name}"
+        ))),
     }
 }
 
@@ -660,8 +689,9 @@ fn unsupported_tool(name: &str) -> Result<Value, JsonRpcError> {
 }
 
 fn handle_list_prs(arguments: Value) -> Result<Value, JsonRpcError> {
-    let args: ListPrsArguments = serde_json::from_value(arguments)
-        .map_err(|err| JsonRpcError::invalid_params(format!("invalid github.list_prs args: {err}")))?;
+    let args: ListPrsArguments = serde_json::from_value(arguments).map_err(|err| {
+        JsonRpcError::invalid_params(format!("invalid github.list_prs args: {err}"))
+    })?;
     let client = github_client()?;
     let prs = list_pull_requests(&client, &args)?;
     Ok(serde_json::json!({
@@ -674,8 +704,9 @@ fn handle_list_prs(arguments: Value) -> Result<Value, JsonRpcError> {
 }
 
 fn handle_get_pr(arguments: Value) -> Result<Value, JsonRpcError> {
-    let args: GetPrArguments = serde_json::from_value(arguments)
-        .map_err(|err| JsonRpcError::invalid_params(format!("invalid github.get_pr args: {err}")))?;
+    let args: GetPrArguments = serde_json::from_value(arguments).map_err(|err| {
+        JsonRpcError::invalid_params(format!("invalid github.get_pr args: {err}"))
+    })?;
     let client = github_client()?;
     let pr = get_pull_request(&client, &args.owner, &args.repo, args.number)?;
     let reviews = list_pull_request_reviews(&client, &args.owner, &args.repo, args.number)?;
@@ -689,13 +720,14 @@ fn handle_get_pr(arguments: Value) -> Result<Value, JsonRpcError> {
 }
 
 fn handle_create_pr(arguments: Value) -> Result<Value, JsonRpcError> {
-    let args: CreatePrArguments = serde_json::from_value(arguments)
-        .map_err(|err| JsonRpcError::invalid_params(format!("invalid github.create_pr args: {err}")))?;
+    let args: CreatePrArguments = serde_json::from_value(arguments).map_err(|err| {
+        JsonRpcError::invalid_params(format!("invalid github.create_pr args: {err}"))
+    })?;
     let client = github_client()?;
     let pr = create_pull_request(&client, &args, "https://api.github.com")?;
-    let html_url = pr.html_url.ok_or_else(|| {
-        JsonRpcError::internal_error("GitHub API response missing html_url")
-    })?;
+    let html_url = pr
+        .html_url
+        .ok_or_else(|| JsonRpcError::internal_error("GitHub API response missing html_url"))?;
 
     Ok(serde_json::json!({
         "content": [{
@@ -715,8 +747,27 @@ fn handle_comment_pr(arguments: Value) -> Result<Value, JsonRpcError> {
 }
 
 fn handle_review_pr(arguments: Value) -> Result<Value, JsonRpcError> {
-    let _ = arguments;
-    unsupported_tool("github.review_pr")
+    let args: ReviewPrArguments = serde_json::from_value(arguments).map_err(|err| {
+        JsonRpcError::invalid_params(format!("invalid github.review_pr args: {err}"))
+    })?;
+    let client = github_client()?;
+    let review = submit_pull_request_review(&client, &args, "https://api.github.com")?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": serde_json::json!({
+                "id": review.id,
+                "state": review.state.as_str(),
+                "body": review.body,
+                "submitted_at": review.submitted_at,
+                "html_url": review.html_url,
+                "commit_id": review.commit_id,
+                "author": review.user.as_ref().map(|user| user.login.clone())
+            }).to_string()
+        }],
+        "isError": false
+    }))
 }
 
 fn handle_merge_pr(arguments: Value) -> Result<Value, JsonRpcError> {
@@ -803,10 +854,7 @@ fn github_client() -> Result<Client, JsonRpcError> {
         ACCEPT,
         HeaderValue::from_static("application/vnd.github+json"),
     );
-    headers.insert(
-        USER_AGENT,
-        HeaderValue::from_static("roko-mcp-github/0.1"),
-    );
+    headers.insert(USER_AGENT, HeaderValue::from_static("roko-mcp-github/0.1"));
 
     Client::builder()
         .default_headers(headers)
@@ -835,14 +883,23 @@ fn list_pull_requests(
     }
 
     let mut query: Vec<(&str, String)> = Vec::with_capacity(4);
-    query.push(("state", args.state.unwrap_or(PullRequestState::Open).as_str().to_string()));
+    query.push((
+        "state",
+        args.state
+            .unwrap_or(PullRequestState::Open)
+            .as_str()
+            .to_string(),
+    ));
     if let Some(head) = &args.head {
         query.push(("head", head.clone()));
     }
     if let Some(base) = &args.base {
         query.push(("base", base.clone()));
     }
-    query.push(("per_page", args.per_page.unwrap_or(30).clamp(1, 100).to_string()));
+    query.push((
+        "per_page",
+        args.per_page.unwrap_or(30).clamp(1, 100).to_string(),
+    ));
 
     let response = request
         .query(&query)
@@ -923,8 +980,9 @@ fn list_pull_request_reviews(
         )));
     }
 
-    serde_json::from_str(&body)
-        .map_err(|err| JsonRpcError::internal_error(format!("parse GitHub pull request reviews: {err}")))
+    serde_json::from_str(&body).map_err(|err| {
+        JsonRpcError::internal_error(format!("parse GitHub pull request reviews: {err}"))
+    })
 }
 
 fn create_pull_request(
@@ -964,8 +1022,51 @@ fn create_pull_request(
         )));
     }
 
-    serde_json::from_str(&body)
-        .map_err(|err| JsonRpcError::internal_error(format!("parse GitHub pull request creation response: {err}")))
+    serde_json::from_str(&body).map_err(|err| {
+        JsonRpcError::internal_error(format!(
+            "parse GitHub pull request creation response: {err}"
+        ))
+    })
+}
+
+fn submit_pull_request_review(
+    client: &Client,
+    args: &ReviewPrArguments,
+    api_base_url: &str,
+) -> Result<GithubPullRequestReview, JsonRpcError> {
+    let url = format!(
+        "{api_base_url}/repos/{}/{}/pulls/{}/reviews",
+        args.owner, args.repo, args.number
+    );
+    let mut request = client.post(url);
+    if let Some(token) = github_token() {
+        request = request.bearer_auth(token);
+    }
+
+    let payload = serde_json::json!({
+        "body": args.body,
+        "event": args.event.as_str(),
+    });
+
+    let response = request
+        .json(&payload)
+        .send()
+        .map_err(|err| JsonRpcError::internal_error(format!("call GitHub API: {err}")))?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|err| JsonRpcError::internal_error(format!("read GitHub response: {err}")))?;
+    if !status.is_success() {
+        return Err(JsonRpcError::internal_error(format!(
+            "GitHub API returned {status}: {}",
+            body.trim()
+        )));
+    }
+
+    serde_json::from_str(&body).map_err(|err| {
+        JsonRpcError::internal_error(format!("parse GitHub pull request review response: {err}"))
+    })
 }
 
 fn summarize_pull_request(
@@ -991,7 +1092,10 @@ fn summarize_pull_request(
         GithubReviewState::Dismissed,
         GithubReviewState::Pending,
     ] {
-        let count = reviews.iter().filter(|review| review.state == state).count();
+        let count = reviews
+            .iter()
+            .filter(|review| review.state == state)
+            .count();
         review_counts.insert(state.as_str().to_string(), Value::from(count as u64));
     }
 
@@ -1180,8 +1284,8 @@ fn write_response<W: Write>(writer: &mut W, response: JsonRpcResponse) -> anyhow
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::io::{BufRead, BufReader, Read, Write};
     use std::io::Cursor;
+    use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
     use std::thread;
 
@@ -1220,8 +1324,7 @@ mod tests {
         })
         .expect("stdio transport");
 
-        let response: Value =
-            serde_json::from_slice(&output).expect("parse error response json");
+        let response: Value = serde_json::from_slice(&output).expect("parse error response json");
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["id"], Value::Null);
         assert_eq!(response["error"]["code"], JsonRpcError::PARSE_ERROR);
@@ -1250,9 +1353,17 @@ mod tests {
             .iter()
             .find(|tool| tool["name"] == "github.get_pr")
             .expect("github.get_pr tool");
-        assert_eq!(get_pr["description"], "Get a pull request with diff stats and review summary.");
-        assert_eq!(get_pr["inputSchema"]["required"], json!(["owner", "repo", "number"]));
-        assert!(get_pr["inputSchema"]["properties"].get("include_diff").is_none());
+        assert_eq!(
+            get_pr["description"],
+            "Get a pull request with diff stats and review summary."
+        );
+        assert_eq!(
+            get_pr["inputSchema"]["required"],
+            json!(["owner", "repo", "number"])
+        );
+        assert!(get_pr["inputSchema"]["properties"]
+            .get("include_diff")
+            .is_none());
     }
 
     #[test]
@@ -1351,10 +1462,22 @@ mod tests {
         assert_eq!(summary["pull_request"]["number"], 17);
         assert_eq!(summary["pull_request"]["diff_stats"]["additions"], 12);
         assert_eq!(summary["pull_request"]["diff_stats"]["changed_files"], 2);
-        assert_eq!(summary["pull_request"]["review_state"]["latest"], "COMMENTED");
-        assert_eq!(summary["pull_request"]["review_state"]["counts"]["APPROVED"], 1);
-        assert_eq!(summary["pull_request"]["review_state"]["counts"]["COMMENTED"], 1);
-        assert_eq!(summary["pull_request"]["head"]["repo"]["full_name"], "octo/hello-world");
+        assert_eq!(
+            summary["pull_request"]["review_state"]["latest"],
+            "COMMENTED"
+        );
+        assert_eq!(
+            summary["pull_request"]["review_state"]["counts"]["APPROVED"],
+            1
+        );
+        assert_eq!(
+            summary["pull_request"]["review_state"]["counts"]["COMMENTED"],
+            1
+        );
+        assert_eq!(
+            summary["pull_request"]["head"]["repo"]["full_name"],
+            "octo/hello-world"
+        );
     }
 
     #[test]
@@ -1442,7 +1565,9 @@ mod tests {
             let (stream, _) = listener.accept().expect("accept request");
             let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
             let mut request_line = String::new();
-            reader.read_line(&mut request_line).expect("read request line");
+            reader
+                .read_line(&mut request_line)
+                .expect("read request line");
             assert!(request_line.starts_with("POST /repos/octo/hello-world/pulls HTTP/1.1"));
 
             let mut content_length = 0usize;
@@ -1453,7 +1578,7 @@ mod tests {
                 if header.is_empty() {
                     break;
                 }
-                if let Some(value) = header.strip_prefix("Content-Length: ") {
+                if let Some(value) = header.to_ascii_lowercase().strip_prefix("content-length: ") {
                     content_length = value.parse().expect("parse content length");
                 }
             }
@@ -1498,11 +1623,96 @@ mod tests {
             draft: Some(true),
         };
 
-        let pr = create_pull_request(&client, &args, &format!("http://{}", addr)).expect("create pr");
+        let pr =
+            create_pull_request(&client, &args, &format!("http://{}", addr)).expect("create pr");
         assert_eq!(pr.number, 17);
         assert_eq!(
             pr.html_url.as_deref(),
             Some("https://github.com/octo/hello-world/pull/17")
+        );
+
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn submit_pull_request_review_posts_expected_payload_and_returns_review() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept request");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+            let mut request_line = String::new();
+            reader
+                .read_line(&mut request_line)
+                .expect("read request line");
+            assert!(
+                request_line.starts_with("POST /repos/octo/hello-world/pulls/17/reviews HTTP/1.1")
+            );
+
+            let mut content_length = 0usize;
+            loop {
+                let mut header_line = String::new();
+                reader.read_line(&mut header_line).expect("read header");
+                let header = header_line.trim_end();
+                if header.is_empty() {
+                    break;
+                }
+                if let Some(value) = header.to_ascii_lowercase().strip_prefix("content-length: ") {
+                    content_length = value.parse().expect("parse content length");
+                }
+            }
+
+            let mut body = vec![0u8; content_length];
+            reader.read_exact(&mut body).expect("read request body");
+            let body_json: Value = serde_json::from_slice(&body).expect("parse request body");
+            assert_eq!(
+                body_json,
+                json!({
+                    "body": "Looks good to me.",
+                    "event": "APPROVE"
+                })
+            );
+
+            let mut writer = stream;
+            let response_body = json!({
+                "id": 88,
+                "state": "APPROVED",
+                "body": "Looks good to me.",
+                "submitted_at": "2026-04-08T15:30:00Z",
+                "commit_id": "abc123",
+                "html_url": "https://github.com/octo/hello-world/pull/17#pullrequestreview-88",
+                "user": {
+                    "login": "octocat"
+                }
+            })
+            .to_string();
+            write!(
+                writer,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            )
+            .expect("write response");
+        });
+
+        let client = github_client().expect("client");
+        let args = ReviewPrArguments {
+            owner: "octo".to_string(),
+            repo: "hello-world".to_string(),
+            number: 17,
+            body: "Looks good to me.".to_string(),
+            event: GithubReviewEvent::Approve,
+        };
+
+        let review = submit_pull_request_review(&client, &args, &format!("http://{}", addr))
+            .expect("submit review");
+        assert_eq!(review.id, 88);
+        assert_eq!(review.state, GithubReviewState::Approved);
+        assert_eq!(review.body.as_deref(), Some("Looks good to me."));
+        assert_eq!(
+            review.html_url.as_deref(),
+            Some("https://github.com/octo/hello-world/pull/17#pullrequestreview-88")
         );
 
         server.join().expect("server thread");
