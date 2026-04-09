@@ -1487,6 +1487,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn extract_skill_persists_to_disk() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("skills.json");
+        let library = SkillLibrary::new(&path).await.unwrap();
+
+        let request = SkillExtractionRequest::new(
+            vec!["src/lib.rs".into()],
+            "implementation",
+            vec!["extract_skill".into()],
+            "gpt-5".to_string(),
+            "prompt-hash-1234".to_string(),
+            vec![
+                SkillGateResult::new("compile", true, 0.98),
+                SkillGateResult::new("test", true, 0.93),
+            ],
+        );
+
+        let extracted = library.extract_skill(request).await;
+        assert!(extracted.is_some());
+
+        let reloaded = SkillLibrary::new(&path).await.unwrap();
+        assert_eq!(reloaded.len(), 1);
+        assert!(reloaded.get(extracted.as_ref().unwrap().name.as_str()).is_some());
+    }
+
+    #[tokio::test]
     async fn prune_stale_removes_old_keeps_minimum() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("skills.json");
