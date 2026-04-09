@@ -297,7 +297,7 @@ enum PlanCmd {
         #[arg(long)]
         from_file: Option<PathBuf>,
     },
-    /// Regenerate an existing plan, filling in missing metadata (tier, verify, context).
+    /// Regenerate an existing plan from its source PRD / plan extract.
     Regenerate {
         /// Path to the plan directory (containing tasks.toml).
         plan_dir: PathBuf,
@@ -1451,25 +1451,30 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
 
             let existing = std::fs::read_to_string(&tasks_path)
                 .with_context(|| format!("read {}", tasks_path.display()))?;
-
-            // Validate the existing plan and show issues.
-            if let Ok(tf) = roko_cli::task_parser::TasksFile::parse(&tasks_path) {
-                let issues = tf.validate();
-                if issues.is_empty() {
-                    eprintln!("Plan already has full metadata. Nothing to regenerate.");
-                    return Ok(EXIT_SUCCESS);
-                }
-                eprintln!("Validation issues ({}):", issues.len());
-                for issue in &issues {
-                    eprintln!("  - {issue}");
-                }
-            }
+            let existing_tasks = roko_cli::task_parser::TasksFile::parse(&tasks_path).ok();
+            let source_path = find_plan_source_document(&plan_dir)?;
+            let source_content = std::fs::read_to_string(&source_path)
+                .with_context(|| format!("read {}", source_path.display()))?;
 
             if dry_run {
-                eprintln!("\n[dry-run] Would regenerate {}", tasks_path.display());
                 let system =
-                    roko_cli::plan_generate::build_regeneration_prompt(&workdir, &existing);
-                eprintln!("Prompt length: {} chars", system.len());
+                    roko_cli::plan_generate::build_generation_prompt(&workdir, &source_content, "prd");
+                let task_prompt = format!(
+                    "Regenerate the plan at {} from the source PRD above. \
+                     Rewrite tasks.toml in place with full modern metadata: tier, model_hint, \
+                     max_loc, files, allowed_tools, denied_tools, mcp_servers, depends_on, \
+                     [task.context], and [[task.verify]]. Preserve the status of any task that \
+                     is already marked done in the existing file. Do not create new plan \
+                     directories.\n\n## Existing tasks.toml\n\n```toml\n{existing}\n```",
+                    tasks_path.display(),
+                    existing = existing,
+                );
+                eprintln!(
+                    "\n[dry-run] Would regenerate {} from {}",
+                    tasks_path.display(),
+                    source_path.display()
+                );
+                eprintln!("Prompt length: {} chars", system.len() + task_prompt.len());
                 return Ok(EXIT_SUCCESS);
             }
 
@@ -1477,18 +1482,20 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             let model = model_from_config(&workdir);
             let model_ref = model.as_deref();
 
-            let system = roko_cli::plan_generate::build_regeneration_prompt(&workdir, &existing);
+            let system =
+                roko_cli::plan_generate::build_generation_prompt(&workdir, &source_content, "prd");
             let task_prompt = format!(
-                "Regenerate the tasks.toml at {} with full metadata. \
-                Read the codebase to fill in description, tier, model_hint, max_loc, \
-                context (read_files with line ranges, symbols, anti_patterns), \
-                and mcp_servers (per-task MCP server names) \
-                and verify steps for each task. \
-                Write the updated tasks.toml back to the same file.",
-                tasks_path.display()
+                "Regenerate the plan at {} from the source PRD above. \
+                 Rewrite tasks.toml in place with full modern metadata: tier, model_hint, \
+                 max_loc, files, allowed_tools, denied_tools, mcp_servers, depends_on, \
+                 [task.context], and [[task.verify]]. Preserve the status of any task that \
+                 is already marked done in the existing file. Do not create new plan \
+                 directories.\n\n## Existing tasks.toml\n\n```toml\n{existing}\n```",
+                tasks_path.display(),
+                existing = existing,
             );
 
-            run_agent(AgentExecOpts {
+            let exit_code = match run_agent(AgentExecOpts {
                 prompt: &task_prompt,
                 workdir: &workdir,
                 model: model_ref,
@@ -1498,6 +1505,61 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 env_vars: &gw.vars,
             })
             .await
+            {
+                Ok(code) => code,
+                Err(err) => {
+                    std::fs::write(&tasks_path, &existing)
+                        .with_context(|| format!("restore {}", tasks_path.display()))?;
+                    return Err(err);
+                }
+            };
+
+            if exit_code != 0 {
+                std::fs::write(&tasks_path, &existing)
+                    .with_context(|| format!("restore {}", tasks_path.display()))?;
+                anyhow::bail!("plan regeneration agent failed with exit code {exit_code}");
+            }
+
+            let regenerated = match roko_cli::task_parser::TasksFile::parse(&tasks_path) {
+                Ok(tasks) => tasks,
+                Err(err) => {
+                    std::fs::write(&tasks_path, &existing)
+                        .with_context(|| format!("restore {}", tasks_path.display()))?;
+                    return Err(err);
+                }
+            };
+
+            let merged = preserve_completed_task_status(existing_tasks.as_ref(), regenerated, &plan_dir);
+            let rendered = toml::to_string_pretty(&merged)
+                .context("serialize regenerated tasks.toml")?;
+            if let Err(err) = std::fs::write(&tasks_path, rendered) {
+                std::fs::write(&tasks_path, &existing)
+                    .with_context(|| format!("restore {}", tasks_path.display()))?;
+                return Err(err.into());
+            }
+
+            match roko_cli::task_parser::TasksFile::validate_modern_fields(&tasks_path) {
+                Ok(issues) if !issues.is_empty() => {
+                    std::fs::write(&tasks_path, &existing)
+                        .with_context(|| format!("restore {}", tasks_path.display()))?;
+                    anyhow::bail!(
+                        "regenerated tasks.toml is missing modern fields: {}",
+                        issues
+                            .into_iter()
+                            .map(|issue| format!("{}: {:?}", issue.task_id, issue.missing_fields))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    );
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    std::fs::write(&tasks_path, &existing)
+                        .with_context(|| format!("restore {}", tasks_path.display()))?;
+                    return Err(err);
+                }
+            }
+
+            Ok(EXIT_SUCCESS)
         }
     }
 }
@@ -1694,6 +1756,85 @@ fn find_prd(workdir: &Path, slug: &str) -> Result<PathBuf> {
         return Ok(draft);
     }
     anyhow::bail!("PRD not found: {slug} (checked published/ and drafts/)");
+}
+
+fn find_plan_source_document(plan_dir: &Path) -> Result<PathBuf> {
+    for candidate in ["source-prd.md", "prd-extract.md", "plan.md"] {
+        let path = plan_dir.join(candidate);
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+
+    anyhow::bail!(
+        "no source PRD found in {} (looked for source-prd.md, prd-extract.md, and plan.md)",
+        plan_dir.display()
+    )
+}
+
+fn normalize_task_title(title: &str) -> String {
+    title
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn preserve_completed_task_status(
+    old_tasks: Option<&roko_cli::task_parser::TasksFile>,
+    mut regenerated: roko_cli::task_parser::TasksFile,
+    plan_dir: &Path,
+) -> roko_cli::task_parser::TasksFile {
+    if let Some(old_tasks) = old_tasks {
+        let completed: Vec<&roko_cli::task_parser::TaskDef> = old_tasks
+            .tasks
+            .iter()
+            .filter(|task| task.status.eq_ignore_ascii_case("done"))
+            .collect();
+
+        for task in &mut regenerated.tasks {
+            let normalized = normalize_task_title(&task.title);
+            if completed.iter().any(|old| {
+                old.id == task.id
+                    || normalize_task_title(&old.title) == normalized
+                    || normalize_task_title(&old.title).contains(&normalized)
+                    || normalized.contains(&normalize_task_title(&old.title))
+            }) {
+                task.status = "done".to_string();
+            }
+        }
+
+        regenerated.meta.iteration = old_tasks.meta.iteration.saturating_add(1);
+        if regenerated.meta.plan.trim().is_empty() {
+            regenerated.meta.plan = old_tasks.meta.plan.clone();
+        }
+    }
+
+    if regenerated.meta.plan.trim().is_empty() {
+        regenerated.meta.plan = plan_dir
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown-plan".to_string());
+    }
+
+    regenerated.meta.total = regenerated.tasks.len() as u32;
+    regenerated.meta.done = regenerated
+        .tasks
+        .iter()
+        .filter(|task| task.status.eq_ignore_ascii_case("done"))
+        .count() as u32;
+    regenerated.meta.status = if regenerated.meta.total > 0
+        && regenerated.meta.done == regenerated.meta.total
+    {
+        "complete".to_string()
+    } else {
+        "ready".to_string()
+    };
+
+    regenerated
 }
 
 async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {

@@ -49,7 +49,7 @@ echo "[2/4] starting mirage-rs on :${PORT} (forking mainnet via $ETH_RPC)…"
 MIRAGE_DASHBOARD_DIR="$MIRAGE_DIR/static" \
   cargo run -p mirage-rs --features chain,roko --bin mirage-rs -- \
     --rpc-url "$ETH_RPC" \
-    --block-time 50 \
+    --block-interval-ms 50 \
     --enable-hdc --enable-knowledge --enable-stigmergy 2>&1 &
 PIDS+=($!)
 sleep 5
