@@ -1968,10 +1968,25 @@ impl PlanRunner {
         }
 
         let wt_id = format!("{plan_id}-{task_id}");
-        let exec_dir = self.task_exec_dir(plan_id, task_id).await;
         let started = std::time::Instant::now();
         let max_retries = 2u32;
         let mut succeeded = false;
+        let exec_dir = match self.task_exec_dir(plan_id, task_id).await {
+            Ok(dir) => dir,
+            Err(e) => {
+                eprintln!(
+                    "[orchestrate] task worktree acquisition failed for {plan_id}/{task_id}: {e}"
+                );
+                self.record_task_failure(plan_id, task_id, &e, &started).await;
+                let _ = self.executor.apply_event(
+                    plan_id,
+                    &ExecutorEvent::Fatal(format!(
+                        "failed to acquire worktree for task {task_id}: {e}"
+                    )),
+                );
+                return;
+            }
+        };
 
         for attempt in 0..=max_retries {
             if attempt > 0 {
@@ -2029,9 +2044,17 @@ impl PlanRunner {
         // Create per-task worktrees and record exec dirs.
         let shared_target = self.workdir.join("target");
         let mut task_dirs: Vec<(String, PathBuf)> = Vec::with_capacity(task_ids.len());
+        let started = std::time::Instant::now();
         for tid in task_ids {
-            let dir = self.task_exec_dir(plan_id, tid).await;
-            task_dirs.push((tid.clone(), dir));
+            match self.task_exec_dir(plan_id, tid).await {
+                Ok(dir) => task_dirs.push((tid.clone(), dir)),
+                Err(e) => {
+                    eprintln!(
+                        "[orchestrate] task worktree acquisition failed for {plan_id}/{tid}: {e}"
+                    );
+                    self.record_task_failure(plan_id, tid, &e, &started).await;
+                }
+            }
         }
 
         // Track all tasks as in-progress.
@@ -2042,7 +2065,6 @@ impl PlanRunner {
         }
 
         // ── Build agent configs sequentially (needs &mut self) ───────
-        let started = std::time::Instant::now();
         let mut configs: Vec<(String, AgentRunConfig)> = Vec::with_capacity(task_dirs.len());
 
         let plan_dir = self.workdir.join("plans").join(plan_id);
@@ -4005,18 +4027,16 @@ impl PlanRunner {
 
     /// Create (or fall back to plan-level) worktree for an individual task
     /// within a plan, so parallel tasks get isolated working directories.
-    async fn task_exec_dir(&self, plan_id: &str, task_id: &str) -> PathBuf {
+    async fn task_exec_dir(&self, plan_id: &str, task_id: &str) -> Result<PathBuf> {
         self.clear_stale_worktree_locks().await;
         let wt_id = format!("{plan_id}-{task_id}");
-        match self.worktrees.create(&wt_id, "HEAD").await {
-            Ok(handle) => handle.path.clone(),
-            Err(e) => {
-                eprintln!(
-                    "[orchestrate] task worktree failed for {task_id}: {e}, falling back to plan dir"
-                );
-                self.plan_exec_dir(plan_id).await
-            }
-        }
+        let branch = format!("roko/task/{plan_id}/{task_id}");
+        let handle = self
+            .worktrees
+            .create(&wt_id, &branch)
+            .await
+            .map_err(|e| anyhow!("create task worktree {wt_id}: {e}"))?;
+        Ok(handle.path)
     }
 
     async fn run_gate_rung(payload_sig: &Signal, rung: u32) -> Vec<Verdict> {
