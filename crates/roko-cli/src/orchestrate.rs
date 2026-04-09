@@ -63,7 +63,7 @@ use tokio_util::sync::CancellationToken as TokioCancellationToken;
 use tracing::{Instrument, info_span, instrument};
 
 use crate::config::Config;
-use crate::task_parser::TasksFile;
+use crate::task_parser::{TaskValidationIssue, TasksFile};
 
 /// Default number of actions between auto-saves.
 const AUTOSAVE_INTERVAL: usize = 5;
@@ -304,6 +304,80 @@ fn crate_name_for_path(path: &str) -> Option<String> {
         [first, ..] if *first == "Cargo.toml" => Some("workspace".to_string()),
         _ => None,
     }
+}
+
+fn log_tasks_validation_issue(plan_id: &str, plan_base: &str, tasks_path: &Path, issue: &TaskValidationIssue) {
+    match issue {
+        TaskValidationIssue::MissingRequiredField { task_id, field } => {
+            tracing::error!(
+                target: "plan_validation",
+                plan_id = %plan_id,
+                plan_base = %plan_base,
+                tasks_path = %tasks_path.display(),
+                issue = "missing_required_field",
+                task_id = %task_id,
+                field = field,
+                "tasks.toml validation failed"
+            );
+        }
+        TaskValidationIssue::UnknownDependency {
+            task_id,
+            dependency,
+        } => {
+            tracing::error!(
+                target: "plan_validation",
+                plan_id = %plan_id,
+                plan_base = %plan_base,
+                tasks_path = %tasks_path.display(),
+                issue = "unknown_dependency",
+                task_id = %task_id,
+                dependency = %dependency,
+                "tasks.toml validation failed"
+            );
+        }
+        TaskValidationIssue::CircularDependency { cycle } => {
+            tracing::error!(
+                target: "plan_validation",
+                plan_id = %plan_id,
+                plan_base = %plan_base,
+                tasks_path = %tasks_path.display(),
+                issue = "circular_dependency",
+                cycle = ?cycle,
+                "tasks.toml validation failed"
+            );
+        }
+        TaskValidationIssue::NoStartNode => {
+            tracing::error!(
+                target: "plan_validation",
+                plan_id = %plan_id,
+                plan_base = %plan_base,
+                tasks_path = %tasks_path.display(),
+                issue = "no_start_node",
+                "tasks.toml validation failed"
+            );
+        }
+    }
+}
+
+fn validate_tasks_file_for_execution(
+    plan_id: &str,
+    plan_base: &str,
+    tasks_path: &Path,
+    tasks_file: &TasksFile,
+) -> Result<()> {
+    let issues = tasks_file.validate_structure();
+    if issues.is_empty() {
+        return Ok(());
+    }
+
+    for issue in &issues {
+        log_tasks_validation_issue(plan_id, plan_base, tasks_path, issue);
+    }
+
+    Err(anyhow!(
+        "tasks.toml validation failed for {}",
+        tasks_path.display()
+    ))
 }
 
 // ─── Parallel agent execution ────────────────────────────────────────────
@@ -1468,21 +1542,32 @@ impl PlanRunner {
             // Parse tasks.toml if it exists, log task count and parallel groups
             let tasks_path = plans_dir.join(&plan_info.base).join("tasks.toml");
             if tasks_path.exists() {
-                if let Ok(tf) = crate::task_parser::TasksFile::parse(&tasks_path) {
-                    let groups = tf.parallel_groups();
-                    let model_tiers: Vec<String> = tf
-                        .tasks
-                        .iter()
-                        .map(|t| format!("{}:{}", t.id, t.tier))
-                        .collect();
-                    tracing::info!(
-                        "[orchestrate] Plan {plan_id}: {} tasks, {} parallel groups, max_parallel={}, tiers=[{}]",
-                        tf.tasks.len(),
-                        groups.len(),
-                        tf.meta.max_parallel,
-                        model_tiers.join(", ")
+                let tf = TasksFile::parse(&tasks_path).map_err(|e| {
+                    tracing::error!(
+                        target: "plan_validation",
+                        plan_id = %plan_id,
+                        plan_base = %plan_info.base,
+                        tasks_path = %tasks_path.display(),
+                        issue = "parse_error",
+                        error = %e,
+                        "tasks.toml validation failed"
                     );
-                }
+                    anyhow!("tasks.toml parse failed for {}: {e}", tasks_path.display())
+                })?;
+                validate_tasks_file_for_execution(&plan_id, &plan_info.base, &tasks_path, &tf)?;
+                let groups = tf.parallel_groups();
+                let model_tiers: Vec<String> = tf
+                    .tasks
+                    .iter()
+                    .map(|t| format!("{}:{}", t.id, t.tier))
+                    .collect();
+                tracing::info!(
+                    "[orchestrate] Plan {plan_id}: {} tasks, {} parallel groups, max_parallel={}, tiers=[{}]",
+                    tf.tasks.len(),
+                    groups.len(),
+                    tf.meta.max_parallel,
+                    model_tiers.join(", ")
+                );
             }
 
             let state = PlanState::new(&plan_id);
@@ -1504,20 +1589,31 @@ impl PlanRunner {
                 .unwrap_or_else(|| plan_info.base.clone());
             let tasks_path = plans_dir.join(&plan_info.base).join("tasks.toml");
             if tasks_path.exists() {
-                if let Ok(tf) = TasksFile::parse(&tasks_path) {
-                    for task in &tf.tasks {
-                        match task.mcp_servers.as_ref() {
-                            Some(servers) if !servers.is_empty() => {
-                                requested_mcp_servers.extend(servers.iter().cloned());
-                            }
-                            _ => {
-                                any_task_without_mcp_list = true;
-                            }
+                let tf = TasksFile::parse(&tasks_path).map_err(|e| {
+                    tracing::error!(
+                        target: "plan_validation",
+                        plan_id = %plan_id,
+                        plan_base = %plan_info.base,
+                        tasks_path = %tasks_path.display(),
+                        issue = "parse_error",
+                        error = %e,
+                        "tasks.toml validation failed"
+                    );
+                    anyhow!("tasks.toml parse failed for {}: {e}", tasks_path.display())
+                })?;
+                validate_tasks_file_for_execution(&plan_id, &plan_info.base, &tasks_path, &tf)?;
+                for task in &tf.tasks {
+                    match task.mcp_servers.as_ref() {
+                        Some(servers) if !servers.is_empty() => {
+                            requested_mcp_servers.extend(servers.iter().cloned());
+                        }
+                        _ => {
+                            any_task_without_mcp_list = true;
                         }
                     }
-                    let pdir = plans_dir.join(&plan_info.base);
-                    task_trackers.insert(plan_id, TaskTracker::new(tf, pdir));
                 }
+                let pdir = plans_dir.join(&plan_info.base);
+                task_trackers.insert(plan_id, TaskTracker::new(tf, pdir));
             }
         }
 

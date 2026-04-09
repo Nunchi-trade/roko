@@ -6,7 +6,7 @@
 //! and `verify` sections) and produces [`TaskDef`]s that the executor uses
 //! to select models, assemble context, and verify results.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context as _, Result};
@@ -41,6 +41,8 @@ fn default_max_parallel() -> u32 {
 pub struct TaskDef {
     pub id: String,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub role: Option<String>,
     pub status: String,
     /// Task complexity tier: mechanical, focused, integrative, architectural.
@@ -84,6 +86,8 @@ struct TaskDefSerde {
     pub id: String,
     pub title: String,
     #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
     pub role: Option<String>,
     #[serde(default = "default_status")]
     pub status: String,
@@ -126,6 +130,7 @@ impl From<TaskDefSerde> for TaskDef {
         let mut task = Self {
             id: raw.id,
             title: raw.title,
+            description: raw.description,
             role: raw.role,
             status: raw.status,
             tier: raw.tier,
@@ -147,6 +152,52 @@ impl From<TaskDefSerde> for TaskDef {
         };
         task.apply_role_tool_defaults();
         task
+    }
+}
+
+/// Structural validation issue detected in a `tasks.toml` file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskValidationIssue {
+    /// A required field was missing or empty.
+    MissingRequiredField {
+        /// Task identifier being validated.
+        task_id: String,
+        /// Missing field name.
+        field: &'static str,
+    },
+    /// A dependency points at a task that does not exist in the plan.
+    UnknownDependency {
+        /// Task identifier being validated.
+        task_id: String,
+        /// Missing dependency identifier.
+        dependency: String,
+    },
+    /// One or more tasks participate in a dependency cycle.
+    CircularDependency {
+        /// Task identifiers involved in the cycle.
+        cycle: Vec<String>,
+    },
+    /// No task starts without dependencies.
+    NoStartNode,
+}
+
+impl std::fmt::Display for TaskValidationIssue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingRequiredField { task_id, field } => {
+                write!(f, "{task_id}: missing required field `{field}`")
+            }
+            Self::UnknownDependency {
+                task_id,
+                dependency,
+            } => {
+                write!(f, "{task_id}: depends on unknown task `{dependency}`")
+            }
+            Self::CircularDependency { cycle } => {
+                write!(f, "circular dependency detected: {}", cycle.join(" -> "))
+            }
+            Self::NoStartNode => write!(f, "no task without dependencies found"),
+        }
     }
 }
 
@@ -491,8 +542,128 @@ impl TasksFile {
                 issues.push(format!("{tid}: missing context.read_files"));
             }
         }
+        issues.extend(
+            self.validate_structure()
+                .into_iter()
+                .map(|issue| issue.to_string()),
+        );
         issues
     }
+
+    /// Validate the task graph structure required for execution.
+    pub fn validate_structure(&self) -> Vec<TaskValidationIssue> {
+        let mut issues = Vec::new();
+        let task_ids: HashSet<&str> = self.tasks.iter().map(|task| task.id.as_str()).collect();
+
+        for task in &self.tasks {
+            let tid = task.id.trim();
+            if tid.is_empty() {
+                issues.push(TaskValidationIssue::MissingRequiredField {
+                    task_id: task.id.clone(),
+                    field: "id",
+                });
+            }
+            if task.title.trim().is_empty() {
+                issues.push(TaskValidationIssue::MissingRequiredField {
+                    task_id: task.id.clone(),
+                    field: "title",
+                });
+            }
+            if task
+                .description
+                .as_ref()
+                .is_none_or(|description| description.trim().is_empty())
+            {
+                issues.push(TaskValidationIssue::MissingRequiredField {
+                    task_id: task.id.clone(),
+                    field: "description",
+                });
+            }
+
+            for dependency in &task.depends_on {
+                if !task_ids.contains(dependency.as_str()) {
+                    issues.push(TaskValidationIssue::UnknownDependency {
+                        task_id: task.id.clone(),
+                        dependency: dependency.clone(),
+                    });
+                }
+            }
+        }
+
+        if !self.tasks.iter().any(|task| task.depends_on.is_empty()) {
+            issues.push(TaskValidationIssue::NoStartNode);
+        }
+
+        let mut valid_deps: HashMap<&str, Vec<&str>> = HashMap::new();
+        for task in &self.tasks {
+            valid_deps.insert(
+                task.id.as_str(),
+                task.depends_on
+                    .iter()
+                    .filter_map(|dep| task_ids.contains(dep.as_str()).then_some(dep.as_str()))
+                    .collect(),
+            );
+        }
+
+        let cycles = detect_cycle_nodes(&valid_deps);
+        if !cycles.is_empty() {
+            issues.push(TaskValidationIssue::CircularDependency { cycle: cycles });
+        }
+
+        issues
+    }
+}
+
+fn detect_cycle_nodes(deps: &HashMap<&str, Vec<&str>>) -> Vec<String> {
+    fn dfs<'a>(
+        node: &'a str,
+        deps: &HashMap<&'a str, Vec<&'a str>>,
+        state: &mut HashMap<&'a str, u8>,
+        stack: &mut Vec<&'a str>,
+        positions: &mut HashMap<&'a str, usize>,
+        cycle_nodes: &mut HashSet<String>,
+    ) {
+        state.insert(node, 1);
+        positions.insert(node, stack.len());
+        stack.push(node);
+
+        if let Some(children) = deps.get(node) {
+            for child in children {
+                match state.get(child).copied().unwrap_or(0) {
+                    0 => dfs(child, deps, state, stack, positions, cycle_nodes),
+                    1 => {
+                        if let Some(start) = positions.get(child).copied() {
+                            for entry in &stack[start..] {
+                                cycle_nodes.insert((*entry).to_string());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        stack.pop();
+        positions.remove(node);
+        state.insert(node, 2);
+    }
+
+    let mut state: HashMap<&str, u8> = HashMap::new();
+    let mut stack: Vec<&str> = Vec::new();
+    let mut positions: HashMap<&str, usize> = HashMap::new();
+    let mut cycle_nodes: HashSet<String> = HashSet::new();
+    let mut nodes: Vec<&str> = deps.keys().copied().collect();
+    nodes.sort_unstable();
+
+    for node in nodes {
+        if state.get(node).copied().unwrap_or(0) == 0 {
+            dfs(node, deps, &mut state, &mut stack, &mut positions, &mut cycle_nodes);
+        }
+    }
+
+    let mut cycles: Vec<String> = cycle_nodes.into_iter().collect();
+    cycles.sort();
+    cycles
 }
 
 /// Extract lines from content given a range like "40-80" or "10-".
@@ -668,6 +839,7 @@ command = "cargo check -p roko-cli"
         let task = TaskDef {
             id: "T1".into(),
             title: "test".into(),
+            description: Some("test task".into()),
             role: None,
             status: "ready".into(),
             tier: "mechanical".into(),
@@ -778,6 +950,96 @@ depends_on = ["T3"]
     }
 
     #[test]
+    fn validate_structure_accepts_valid_plan() {
+        let tasks: TasksFile = toml::from_str(
+            r#"
+[meta]
+plan = "test"
+total = 2
+
+[[task]]
+id = "T1"
+title = "first"
+description = "bootstrap"
+depends_on = []
+
+[[task]]
+id = "T2"
+title = "second"
+description = "follow up"
+depends_on = ["T1"]
+"#,
+        )
+        .unwrap();
+
+        assert!(tasks.validate_structure().is_empty());
+    }
+
+    #[test]
+    fn validate_structure_reports_graph_problems() {
+        let tasks: TasksFile = toml::from_str(
+            r#"
+[meta]
+plan = "test"
+total = 3
+
+[[task]]
+id = "T1"
+title = "first"
+description = "one"
+depends_on = ["T2"]
+
+[[task]]
+id = "T2"
+title = "second"
+description = "two"
+depends_on = ["T1"]
+
+[[task]]
+id = "T3"
+title = "third"
+description = "three"
+depends_on = ["missing"]
+"#,
+        )
+        .unwrap();
+
+        let issues = tasks.validate_structure();
+        assert!(issues
+            .iter()
+            .any(|issue| matches!(issue, TaskValidationIssue::UnknownDependency { .. })));
+        assert!(issues
+            .iter()
+            .any(|issue| matches!(issue, TaskValidationIssue::CircularDependency { .. })));
+        assert!(issues
+            .iter()
+            .any(|issue| matches!(issue, TaskValidationIssue::NoStartNode)));
+    }
+
+    #[test]
+    fn validate_structure_reports_missing_description() {
+        let tasks: TasksFile = toml::from_str(
+            r#"
+[meta]
+plan = "test"
+total = 1
+
+[[task]]
+id = "T1"
+title = "first"
+depends_on = []
+"#,
+        )
+        .unwrap();
+
+        let issues = tasks.validate_structure();
+        assert!(issues.iter().any(|issue| matches!(
+            issue,
+            TaskValidationIssue::MissingRequiredField { field: "description", .. }
+        )));
+    }
+
+    #[test]
     fn extract_line_range_works() {
         let content = "line 1\nline 2\nline 3\nline 4\nline 5\n";
         assert_eq!(extract_line_range(content, "2-4"), "line 2\nline 3\nline 4");
@@ -808,6 +1070,7 @@ depends_on = ["other-plan:T3"]
         let task = TaskDef {
             id: "T1".into(),
             title: "test task".into(),
+            description: Some("test task".into()),
             role: None,
             status: "ready".into(),
             tier: "focused".into(),
@@ -841,6 +1104,7 @@ depends_on = ["other-plan:T3"]
         let task = TaskDef {
             id: "T1".into(),
             title: "test task".into(),
+            description: Some("test task".into()),
             role: None,
             status: "ready".into(),
             tier: "focused".into(),

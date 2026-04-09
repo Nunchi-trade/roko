@@ -1446,7 +1446,7 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             let system = roko_cli::plan_generate::build_regeneration_prompt(&workdir, &existing);
             let task_prompt = format!(
                 "Regenerate the tasks.toml at {} with full metadata. \
-                Read the codebase to fill in tier, model_hint, max_loc, \
+                Read the codebase to fill in description, tier, model_hint, max_loc, \
                 context (read_files with line ranges, symbols, anti_patterns), \
                 and mcp_servers (per-task MCP server names) \
                 and verify steps for each task. \
