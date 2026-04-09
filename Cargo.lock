@@ -5152,6 +5152,7 @@ name = "roko-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bardo-primitives",
  "blake3",
  "chrono",
  "parking_lot",

@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
 use crate::symbol_resolver::SymbolResolver;
 use crate::task_brief::TaskBriefGenerator;
+use roko_core::OperatingFrequency;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
@@ -63,6 +64,26 @@ impl ContextTier {
             Self::Surgical => 4_000,
             Self::Focused => 12_000,
             Self::Full => 24_000,
+        }
+    }
+}
+
+impl From<OperatingFrequency> for ContextTier {
+    fn from(value: OperatingFrequency) -> Self {
+        match value {
+            OperatingFrequency::Gamma => Self::Surgical,
+            OperatingFrequency::Theta => Self::Focused,
+            OperatingFrequency::Delta => Self::Full,
+        }
+    }
+}
+
+impl From<ContextTier> for OperatingFrequency {
+    fn from(value: ContextTier) -> Self {
+        match value {
+            ContextTier::Surgical => Self::Gamma,
+            ContextTier::Focused => Self::Theta,
+            ContextTier::Full => Self::Delta,
         }
     }
 }
@@ -1132,6 +1153,7 @@ fn scope_text_to_files(text: &str, files: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roko_core::OperatingFrequency;
 
     #[test]
     fn context_tier_from_task_and_model() {
@@ -1179,6 +1201,22 @@ mod tests {
             ContextTier::from_task_and_model("focused", "mistral:7b"),
             ContextTier::Surgical
         );
+    }
+
+    #[test]
+    fn operating_frequency_maps_to_context_tier() {
+        assert_eq!(
+            ContextTier::from(OperatingFrequency::Gamma),
+            ContextTier::Surgical
+        );
+        assert_eq!(
+            ContextTier::from(OperatingFrequency::Theta),
+            ContextTier::Focused
+        );
+        assert_eq!(ContextTier::from(OperatingFrequency::Delta), ContextTier::Full);
+        assert_eq!(OperatingFrequency::from(ContextTier::Surgical), OperatingFrequency::Gamma);
+        assert_eq!(OperatingFrequency::from(ContextTier::Focused), OperatingFrequency::Theta);
+        assert_eq!(OperatingFrequency::from(ContextTier::Full), OperatingFrequency::Delta);
     }
 
     #[test]
