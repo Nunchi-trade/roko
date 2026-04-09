@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use anyhow::{Context as _, Result};
+use chrono::Utc;
 use parking_lot::{Mutex, RwLock};
 use roko_agent::{Agent, AgentResult, ClaudeCliAgent, ExecAgent};
 use roko_core::{Body, Context as RokoContext, Gate, Kind, Provenance, Signal};
@@ -23,7 +24,7 @@ use roko_core::config::schema::{RokoConfig, SubscriptionConfig, SubscriptionFilt
 use roko_core::{ContentHash, Verdict};
 use roko_gate::{ClippyGate, CompileGate, DiffGate, DiffPayload, GatePayload, TestGate};
 use roko_learn::episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage as EpisodeUsage};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::{info, warn};
 
@@ -40,6 +41,49 @@ use roko_cli::dispatch::{
 pub trait AgentDispatcher: Send + Sync {
     /// Dispatch a signal through the agent template identified by `template`.
     async fn dispatch(&self, template: AgentTemplate, signal: Signal) -> Result<AgentResult>;
+}
+
+/// Record of an external side-effect performed by an event-driven agent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExternalAction {
+    /// External service that received the action.
+    #[serde(default)]
+    pub service: String,
+    /// Service-specific action name, such as `review_pr` or `post_message`.
+    #[serde(default)]
+    pub action_type: String,
+    /// Resource identifier the action targeted.
+    #[serde(default)]
+    pub resource_id: String,
+    /// Additional structured metadata for the action.
+    #[serde(default)]
+    pub metadata: Value,
+    /// Time when the action was performed.
+    #[serde(default = "Utc::now")]
+    pub performed_at: chrono::DateTime<Utc>,
+}
+
+/// Extended episode metadata for webhook- and event-driven agents.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WebhookEpisodeMetadata {
+    /// Signal kind that triggered the agent.
+    #[serde(default)]
+    pub trigger_kind: String,
+    /// Content hash of the trigger signal.
+    #[serde(default)]
+    pub trigger_signal_hash: String,
+    /// Source integration that emitted the trigger.
+    #[serde(default)]
+    pub trigger_source: String,
+    /// Template name used to dispatch the agent.
+    #[serde(default)]
+    pub agent_template: String,
+    /// Optional experiment variant for A/B testing.
+    #[serde(default)]
+    pub experiment_variant: Option<String>,
+    /// External actions performed while handling the trigger.
+    #[serde(default)]
+    pub external_actions: Vec<ExternalAction>,
 }
 
 /// Template-backed agent runner used by the webhook dispatch loop.
