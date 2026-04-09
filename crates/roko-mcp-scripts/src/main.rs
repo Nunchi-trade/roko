@@ -1,15 +1,17 @@
 //! MCP server for executing scripts from a configured directory.
 //!
-//! Exposes a single `run_script` tool that resolves a script beneath the
-//! configured root directory, executes it, and returns captured stdout/stderr
-//! in the MCP tool result payload.
+//! Exposes `run_script` and `list_scripts` tools for scripts beneath the
+//! configured root directory. Scripts can be listed with descriptions from
+//! a `# description:` comment near the top of the file, executed, and return
+//! captured stdout/stderr in the MCP tool result payload.
 
 use roko_mcp_stdio::{JsonRpcError, JsonRpcRequest, serve_stdio};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::env;
 use std::ffi::OsStr;
 use std::io;
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -30,6 +32,12 @@ struct RunScriptArguments {
     name: String,
     #[serde(default)]
     args: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ScriptEntry {
+    name: String,
+    description: String,
 }
 
 #[derive(Debug)]
@@ -98,6 +106,14 @@ fn handle_tools_list() -> Value {
                 "required": ["name"],
                 "additionalProperties": false
             }
+        }, {
+            "name": "list_scripts",
+            "description": "List scripts available in the configured directory with descriptions.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }
         }]
     })
 }
@@ -107,6 +123,7 @@ fn handle_tools_call(params: Value, config: &AppConfig) -> Result<Value, JsonRpc
         .map_err(|err| JsonRpcError::invalid_params(format!("invalid tools/call params: {err}")))?;
     match params.name.as_str() {
         "run_script" => handle_run_script(params.arguments, config),
+        "list_scripts" => handle_list_scripts(config),
         _ => Err(JsonRpcError::invalid_params(format!(
             "unknown tool: {}",
             params.name
@@ -120,6 +137,20 @@ fn handle_run_script(arguments: Value, config: &AppConfig) -> Result<Value, Json
 
     let execution = execute_script(config, &args.name, &args.args);
     Ok(make_tool_result(execution))
+}
+
+fn handle_list_scripts(config: &AppConfig) -> Result<Value, JsonRpcError> {
+    let scripts = list_scripts(&config.working_dir).map_err(|err| {
+        JsonRpcError::internal_error(format!("failed to list scripts: {err}"))
+    })?;
+
+    Ok(json!({
+        "content": [{
+            "type": "text",
+            "text": json!({ "scripts": scripts }).to_string(),
+        }],
+        "isError": false
+    }))
 }
 
 fn execute_script(config: &AppConfig, name: &str, args: &[String]) -> ScriptExecution {
@@ -234,6 +265,88 @@ fn resolve_script_path(working_dir: &Path, name: &str) -> Result<PathBuf, String
     ))
 }
 
+fn list_scripts(root: &Path) -> io::Result<Vec<ScriptEntry>> {
+    let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut scripts = Vec::new();
+    collect_scripts(&canonical_root, &canonical_root, &mut scripts)?;
+    scripts.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(scripts)
+}
+
+fn collect_scripts(
+    root: &Path,
+    dir: &Path,
+    scripts: &mut Vec<ScriptEntry>,
+) -> io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+
+        if file_type.is_dir() {
+            collect_scripts(root, &path, scripts)?;
+            continue;
+        }
+
+        if !file_type.is_file() {
+            continue;
+        }
+
+        if !is_supported_script(&path) {
+            continue;
+        }
+
+        let canonical = match std::fs::canonicalize(&path) {
+            Ok(path) => path,
+            Err(_) => continue,
+        };
+
+        if !canonical.starts_with(root) {
+            continue;
+        }
+
+        let rel = match canonical.strip_prefix(root) {
+            Ok(rel) => rel,
+            Err(_) => continue,
+        };
+
+        let name = rel.to_string_lossy().replace('\\', "/");
+        let description = read_script_description(&canonical)?.unwrap_or_default();
+        scripts.push(ScriptEntry { name, description });
+    }
+
+    Ok(())
+}
+
+fn is_supported_script(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(OsStr::to_str),
+        Some("sh" | "py" | "js" | "rb")
+    )
+}
+
+fn read_script_description(path: &Path) -> io::Result<Option<String>> {
+    let file = std::fs::File::open(path)?;
+    let mut lines = io::BufReader::new(file).lines();
+
+    let first = lines.next().transpose()?;
+    let second = lines.next().transpose()?;
+    let candidates = [first, second];
+
+    for line in candidates.into_iter().flatten() {
+        let trimmed = line.trim();
+        if let Some(description) = trimmed.strip_prefix("# description:") {
+            let description = description.trim();
+            if !description.is_empty() {
+                return Ok(Some(description.to_string()));
+            }
+            return Ok(Some(String::new()));
+        }
+    }
+
+    Ok(None)
+}
+
 fn command_for_script(script_path: &Path, args: &[String]) -> (String, Vec<String>) {
     let command = match script_path.extension().and_then(OsStr::to_str) {
         Some("py") => "python3",
@@ -259,11 +372,21 @@ fn empty_json_object() -> Value {
 
 impl AppConfig {
     fn from_env() -> anyhow::Result<Self> {
-        let mut working_dir = env::var("ROKO_MCP_SCRIPTS_DIR")
+        let mut working_dir = env::var("ROKO_SCRIPTS_DIR")
             .ok()
             .filter(|value| !value.trim().is_empty())
             .map(PathBuf::from)
-            .unwrap_or(env::current_dir()?);
+            .or_else(|| {
+                env::var("ROKO_MCP_SCRIPTS_DIR")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(PathBuf::from)
+            })
+            .unwrap_or_else(|| {
+                env::current_dir()
+                    .map(|dir| dir.join(".roko/scripts"))
+                    .unwrap_or_else(|_| PathBuf::from(".roko/scripts"))
+            });
         let mut args = env::args_os().skip(1);
 
         while let Some(arg) = args.next() {
@@ -305,6 +428,52 @@ mod tests {
 
         let resolved = resolve_script_path(&dir, "hello").expect("resolved");
         assert_eq!(resolved, fs::canonicalize(script).expect("canonical script"));
+    }
+
+    #[test]
+    fn list_scripts_discovers_scripts_with_descriptions() {
+        let dir = temp_dir();
+        let scripts_dir = dir.join("scripts");
+        fs::create_dir_all(&scripts_dir).expect("create scripts dir");
+
+        let script = scripts_dir.join("hello.sh");
+        fs::write(
+            &script,
+            "#!/bin/bash\n# description: say hello\nprintf 'hello\\n'\n",
+        )
+        .expect("write script");
+
+        let nested_dir = scripts_dir.join("nested");
+        fs::create_dir_all(&nested_dir).expect("create nested dir");
+        let nested_script = nested_dir.join("build.py");
+        fs::write(
+            &nested_script,
+            "#!/usr/bin/env python3\n# description: build things\nprint('build')\n",
+        )
+        .expect("write nested script");
+
+        let scripts = list_scripts(&scripts_dir).expect("list scripts");
+        assert_eq!(scripts.len(), 2);
+        assert_eq!(scripts[0].name, "hello.sh");
+        assert_eq!(scripts[0].description, "say hello");
+        assert_eq!(scripts[1].name, "nested/build.py");
+        assert_eq!(scripts[1].description, "build things");
+    }
+
+    #[test]
+    fn read_script_description_uses_first_non_shebang_line() {
+        let dir = temp_dir();
+        let script = dir.join("tool.sh");
+        fs::write(
+            &script,
+            "#!/bin/bash\n# description: first line comment\n",
+        )
+        .expect("write script");
+
+        assert_eq!(
+            read_script_description(&script).expect("description"),
+            Some("first line comment".into())
+        );
     }
 
     #[test]
