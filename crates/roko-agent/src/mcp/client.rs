@@ -144,6 +144,7 @@ impl StdioTransport {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit())
+            .kill_on_drop(true)
             .spawn()
             .map_err(|e| McpError::Transport(format!("failed to spawn {command}: {e}")))?;
 

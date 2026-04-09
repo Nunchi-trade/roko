@@ -535,7 +535,7 @@ pub struct PlanRunner {
     /// MCP server clients spawned at plan-run startup.
     /// MCP server clients (kept alive for lifecycle management).
     #[allow(dead_code)]
-    mcp_clients: Vec<roko_agent::mcp::McpClient<roko_agent::mcp::StdioTransport>>,
+    mcp_clients: tokio::sync::Mutex<Vec<roko_agent::mcp::McpClient<roko_agent::mcp::StdioTransport>>>,
     /// Dynamic tool registry combining static tools with MCP-discovered tools.
     tool_registry: Option<Arc<roko_agent::mcp::DynamicToolRegistry>>,
     /// Filesystem-backed observability sinks (traces + metrics).
@@ -698,6 +698,7 @@ impl PlanRunner {
     async fn setup_mcp(
         config: &Config,
         workdir: &Path,
+        selected_servers: Option<&HashSet<String>>,
     ) -> (
         Vec<roko_agent::mcp::McpClient<roko_agent::mcp::StdioTransport>>,
         Option<Arc<roko_agent::mcp::DynamicToolRegistry>>,
@@ -729,17 +730,31 @@ impl PlanRunner {
             _ => return (Vec::new(), None),
         };
 
+        let selected_servers = selected_servers.filter(|names| !names.is_empty());
         let mut clients = Vec::new();
         let mut all_server_tools = Vec::new();
 
         for server in &mcp_config.servers {
+            if selected_servers.is_some_and(|names| !names.contains(&server.name)) {
+                continue;
+            }
             match StdioTransport::spawn(&server.command, &server.args) {
                 Ok(transport) => {
                     let client = McpClient::new(transport);
-                    // Initialize the server
-                    if let Err(e) = client.initialize().await {
-                        tracing::warn!("MCP server '{}' initialize failed: {e}", server.name);
-                        continue;
+                    match tokio::time::timeout(Duration::from_secs(10), client.initialize()).await
+                    {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => {
+                            tracing::warn!("MCP server '{}' initialize failed: {e}", server.name);
+                            continue;
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                "MCP server '{}' initialize timed out after 10s",
+                                server.name
+                            );
+                            continue;
+                        }
                     }
                     // List available tools
                     match client.list_tools().await {
@@ -870,6 +885,8 @@ impl PlanRunner {
 
         // Pre-populate task trackers for plans with tasks.toml
         let mut task_trackers = HashMap::new();
+        let mut requested_mcp_servers: HashSet<String> = HashSet::new();
+        let mut any_task_without_mcp_list = false;
         for plan_info in &plans {
             let plan_id = plan_info
                 .frontmatter
@@ -879,6 +896,16 @@ impl PlanRunner {
             let tasks_path = plans_dir.join(&plan_info.base).join("tasks.toml");
             if tasks_path.exists() {
                 if let Ok(tf) = TasksFile::parse(&tasks_path) {
+                    for task in &tf.tasks {
+                        match task.mcp_servers.as_ref() {
+                            Some(servers) if !servers.is_empty() => {
+                                requested_mcp_servers.extend(servers.iter().cloned());
+                            }
+                            _ => {
+                                any_task_without_mcp_list = true;
+                            }
+                        }
+                    }
                     let pdir = plans_dir.join(&plan_info.base);
                     task_trackers.insert(plan_id, TaskTracker::new(tf, pdir));
                 }
@@ -889,7 +916,14 @@ impl PlanRunner {
         let learning = LearningRuntime::open_under(workdir.join(".roko").join("learn"))
             .await
             .map_err(|e| anyhow!("init learning runtime: {e}"))?;
-        let (mcp_clients, tool_registry) = Self::setup_mcp(&config, workdir).await;
+        let selected_mcp_servers = if any_task_without_mcp_list || requested_mcp_servers.is_empty()
+        {
+            None
+        } else {
+            Some(requested_mcp_servers)
+        };
+        let (mcp_clients, tool_registry) =
+            Self::setup_mcp(&config, workdir, selected_mcp_servers.as_ref()).await;
         let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
         obs_sinks
             .initialize()
@@ -922,7 +956,7 @@ impl PlanRunner {
             task_costs: HashMap::new(),
             metrics,
             format_bandit: ProfileBandit::with_static_profiles(),
-            mcp_clients,
+            mcp_clients: tokio::sync::Mutex::new(mcp_clients),
             tool_registry,
             obs_sinks,
             health_probes,
@@ -957,7 +991,7 @@ impl PlanRunner {
         let learning = LearningRuntime::open_under(workdir.join(".roko").join("learn"))
             .await
             .map_err(|e| anyhow!("init learning runtime: {e}"))?;
-        let (mcp_clients, tool_registry) = Self::setup_mcp(&config, workdir).await;
+        let (mcp_clients, tool_registry) = Self::setup_mcp(&config, workdir, None).await;
         let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
         obs_sinks
             .initialize()
@@ -990,7 +1024,7 @@ impl PlanRunner {
             task_costs: HashMap::new(),
             metrics,
             format_bandit: ProfileBandit::with_static_profiles(),
-            mcp_clients,
+            mcp_clients: tokio::sync::Mutex::new(mcp_clients),
             tool_registry,
             obs_sinks,
             health_probes,
@@ -1029,7 +1063,7 @@ impl PlanRunner {
         let learning = LearningRuntime::open_under(workdir.join(".roko").join("learn"))
             .await
             .map_err(|e| anyhow!("init learning runtime: {e}"))?;
-        let (mcp_clients, tool_registry) = Self::setup_mcp(&config, workdir).await;
+        let (mcp_clients, tool_registry) = Self::setup_mcp(&config, workdir, None).await;
         let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
         obs_sinks
             .initialize()
@@ -1062,7 +1096,7 @@ impl PlanRunner {
             task_costs: HashMap::new(),
             metrics,
             format_bandit: ProfileBandit::with_static_profiles(),
-            mcp_clients,
+            mcp_clients: tokio::sync::Mutex::new(mcp_clients),
             tool_registry,
             obs_sinks,
             health_probes,
@@ -1127,6 +1161,8 @@ impl PlanRunner {
         if let Err(e) = self.learning.save_cascade_router() {
             eprintln!("[orchestrate] save cascade router: {e}");
         }
+        let mut mcp_clients = self.mcp_clients.lock().await;
+        mcp_clients.clear();
     }
 
     /// The root cancellation token — callers can cancel to trigger shutdown.

@@ -54,6 +54,8 @@ pub struct TaskDef {
     pub allowed_tools: Option<Vec<String>>,
     /// Tool names this task is forbidden to use.
     pub denied_tools: Option<Vec<String>>,
+    /// MCP server names this task needs.
+    pub mcp_servers: Option<Vec<String>>,
     /// Task IDs this task depends on.
     pub depends_on: Vec<String>,
     /// Plan IDs this task depends on before dispatching.
@@ -89,6 +91,8 @@ struct TaskDefSerde {
     #[serde(default)]
     pub denied_tools: Option<Vec<String>>,
     #[serde(default)]
+    pub mcp_servers: Option<Vec<String>>,
+    #[serde(default)]
     pub depends_on: Vec<String>,
     #[serde(default)]
     pub depends_on_plan: Vec<String>,
@@ -115,6 +119,7 @@ impl From<TaskDefSerde> for TaskDef {
             files: raw.files,
             allowed_tools: raw.allowed_tools,
             denied_tools: raw.denied_tools,
+            mcp_servers: raw.mcp_servers,
             depends_on: raw.depends_on,
             depends_on_plan: raw.depends_on_plan,
             context: raw.context,
@@ -560,6 +565,7 @@ command = "cargo check -p roko-cli"
             task.allowed_tools,
             Some(vec!["read_file".into(), "grep".into()])
         );
+        assert!(task.mcp_servers.is_none());
         assert_eq!(
             task.denied_tools,
             Some(
@@ -592,6 +598,7 @@ command = "cargo check -p roko-cli"
             files: vec![],
             allowed_tools: None,
             denied_tools: None,
+            mcp_servers: None,
             depends_on: vec![],
             depends_on_plan: vec![],
             context: None,
@@ -727,6 +734,7 @@ depends_on = ["other-plan:T3"]
             files: vec![],
             allowed_tools: None,
             denied_tools: None,
+            mcp_servers: None,
             depends_on: vec![],
             depends_on_plan: vec![],
             context: None,
@@ -756,6 +764,7 @@ depends_on = ["other-plan:T3"]
             files: vec![],
             allowed_tools: None,
             denied_tools: None,
+            mcp_servers: None,
             depends_on: vec![],
             depends_on_plan: vec![],
             context: None,
