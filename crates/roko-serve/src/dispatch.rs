@@ -24,11 +24,13 @@ use roko_core::config::schema::{RokoConfig, SubscriptionConfig, SubscriptionFilt
 use roko_core::{ContentHash, Verdict};
 use roko_core::tool::ExternalAction;
 use roko_gate::{ClippyGate, CompileGate, DiffGate, DiffPayload, GatePayload, TestGate};
+use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::cascade_router::CascadeRouter;
 use roko_learn::episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage as EpisodeUsage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
+use tokio::io::AsyncWriteExt;
 use tracing::{info, warn};
 
 use crate::events::ServerEvent;
@@ -80,6 +82,80 @@ struct DispatchOutcome {
     result: AgentResult,
     gate_verdicts: Vec<GateVerdict>,
     success: bool,
+}
+
+#[derive(Debug, Clone)]
+struct EfficiencyTracker {
+    path: PathBuf,
+}
+
+impl EfficiencyTracker {
+    fn new(workdir: &Path) -> Self {
+        Self {
+            path: workdir.join(".roko").join("learn").join("efficiency.jsonl"),
+        }
+    }
+
+    async fn record_event(
+        &self,
+        template_name: &str,
+        turns: u64,
+        tokens: u64,
+        success: bool,
+    ) -> Result<()> {
+        if let Some(parent) = self.path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("create {}", parent.display()))?;
+        }
+
+        let event = AgentEfficiencyEvent {
+            agent_id: template_name.to_string(),
+            role: template_name.to_string(),
+            backend: "roko-serve".to_string(),
+            model: template_name.to_string(),
+            plan_id: String::new(),
+            task_id: String::new(),
+            input_tokens: tokens,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            cost_usd: 0.0,
+            cost_usd_without_cache: 0.0,
+            prompt_sections: Vec::new(),
+            total_prompt_tokens: tokens,
+            system_prompt_tokens: 0,
+            tools_available: 0,
+            tools_used: 0,
+            tool_calls: Vec::new(),
+            wall_time_ms: 0,
+            duration_ms: 0,
+            time_to_first_token_ms: 0,
+            was_warm_start: false,
+            iteration: turns.min(u64::from(u32::MAX)) as u32,
+            gate_passed: success,
+            outcome: if success {
+                "success".to_string()
+            } else {
+                "failure".to_string()
+            },
+            gate_errors: Vec::new(),
+            model_used: template_name.to_string(),
+            strategy_attempted: String::new(),
+            timestamp: Utc::now().to_rfc3339(),
+        };
+
+        let mut line = serde_json::to_string(&event)?;
+        line.push('\n');
+        let mut file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .await
+            .with_context(|| format!("open {}", self.path.display()))?;
+        file.write_all(line.as_bytes()).await?;
+        Ok(())
+    }
 }
 
 impl TemplateAgentDispatcher {
@@ -988,6 +1064,14 @@ async fn append_dispatch_episode(
     if let Err(err) = record_cascade_router_outcome(state, template, outcome.result.success).await
     {
         warn!(error = %err, template = %template.name, "failed to record cascade router outcome");
+    }
+
+    let efficiency = EfficiencyTracker::new(&state.workdir);
+    if let Err(err) = efficiency
+        .record_event(&template.name, turns, tokens_used, outcome.success)
+        .await
+    {
+        warn!(error = %err, template = %template.name, "failed to record efficiency event");
     }
 }
 
