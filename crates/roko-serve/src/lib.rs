@@ -5,6 +5,7 @@
 //! CLI flow.
 
 pub mod deploy;
+pub mod dispatch;
 pub mod event_bus;
 pub mod error;
 pub mod events;
