@@ -124,6 +124,14 @@ struct CreatePrArguments {
 }
 
 #[derive(Debug, Deserialize)]
+struct CommentPrArguments {
+    owner: String,
+    repo: String,
+    number: u64,
+    body: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct ReviewPrArguments {
     owner: String,
     repo: String,
@@ -254,6 +262,13 @@ struct GithubPullRequestDetails {
 struct GithubCreatePullRequestResponse {
     number: u64,
     html_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubIssueComment {
+    id: u64,
+    html_url: Option<String>,
+    body: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -742,8 +757,26 @@ fn handle_create_pr(arguments: Value) -> Result<Value, JsonRpcError> {
 }
 
 fn handle_comment_pr(arguments: Value) -> Result<Value, JsonRpcError> {
-    let _ = arguments;
-    unsupported_tool("github.comment_pr")
+    let args: CommentPrArguments = serde_json::from_value(arguments).map_err(|err| {
+        JsonRpcError::invalid_params(format!("invalid github.comment_pr args: {err}"))
+    })?;
+    let client = github_client()?;
+    let comment = create_pull_request_comment(&client, &args, "https://api.github.com")?;
+    let html_url = comment
+        .html_url
+        .ok_or_else(|| JsonRpcError::internal_error("GitHub API response missing html_url"))?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": serde_json::json!({
+                "id": comment.id,
+                "html_url": html_url,
+                "body": comment.body
+            }).to_string()
+        }],
+        "isError": false
+    }))
 }
 
 fn handle_review_pr(arguments: Value) -> Result<Value, JsonRpcError> {
@@ -1026,6 +1059,42 @@ fn create_pull_request(
         JsonRpcError::internal_error(format!(
             "parse GitHub pull request creation response: {err}"
         ))
+    })
+}
+
+fn create_pull_request_comment(
+    client: &Client,
+    args: &CommentPrArguments,
+    api_base_url: &str,
+) -> Result<GithubIssueComment, JsonRpcError> {
+    let url = format!("{api_base_url}/repos/{}/{}/issues/{}/comments", args.owner, args.repo, args.number);
+    let mut request = client.post(url);
+    if let Some(token) = github_token() {
+        request = request.bearer_auth(token);
+    }
+
+    let payload = serde_json::json!({
+        "body": args.body,
+    });
+
+    let response = request
+        .json(&payload)
+        .send()
+        .map_err(|err| JsonRpcError::internal_error(format!("call GitHub API: {err}")))?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|err| JsonRpcError::internal_error(format!("read GitHub response: {err}")))?;
+    if !status.is_success() {
+        return Err(JsonRpcError::internal_error(format!(
+            "GitHub API returned {status}: {}",
+            body.trim()
+        )));
+    }
+
+    serde_json::from_str(&body).map_err(|err| {
+        JsonRpcError::internal_error(format!("parse GitHub issue comment response: {err}"))
     })
 }
 
