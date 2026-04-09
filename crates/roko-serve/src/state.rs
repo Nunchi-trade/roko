@@ -22,6 +22,7 @@ use crate::deploy::{DeployBackend, Deployment};
 use crate::event_bus::EventBus;
 use roko_core::obs::metrics::MetricRegistry;
 use roko_fs::layout::RokoLayout;
+use roko_cli::dispatch::SubscriptionRegistry;
 
 use crate::events::ServerEvent;
 use crate::templates::TemplateRegistry;
@@ -116,6 +117,8 @@ pub struct AppState {
     pub supervisor: Arc<ProcessSupervisor>,
     /// Event bus for streaming server events to clients.
     pub event_bus: EventBus<ServerEvent>,
+    /// Event subscriptions loaded at startup.
+    pub subscriptions: SubscriptionRegistry,
     /// CLI-level configuration (`roko.toml`).
     pub config: RwLock<roko_cli::Config>,
     /// Full `roko.toml` schema configuration.
@@ -148,6 +151,7 @@ impl AppState {
         let cancel = CancelToken::new();
         let supervisor = Arc::new(ProcessSupervisor::new(cancel.child()));
         let templates_dir = workdir.join(".roko").join("templates");
+        let subscriptions = SubscriptionRegistry::load_from_project(&workdir, &roko_config);
 
         let mut template_registry = TemplateRegistry::new(templates_dir);
         if let Err(e) = template_registry.scan() {
@@ -162,6 +166,7 @@ impl AppState {
             metrics: Arc::new(MetricRegistry::new()),
             supervisor,
             event_bus: EventBus::new(1024),
+            subscriptions,
             config: RwLock::new(config),
             roko_config: RwLock::new(roko_config),
             active_runs: RwLock::new(HashMap::new()),

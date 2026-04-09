@@ -44,6 +44,8 @@ pub mod event_bus;
 pub mod error;
 #[path = "../../roko-serve/src/events.rs"]
 pub mod events;
+#[path = "../../roko-serve/src/dispatch.rs"]
+pub mod dispatch;
 #[path = "../../roko-serve/src/routes/mod.rs"]
 pub mod routes;
 #[path = "../../roko-serve/src/state.rs"]
@@ -54,6 +56,7 @@ pub mod templates;
 /// Backwards-compatible namespace for server-related modules.
 pub mod serve {
     pub use crate::deploy;
+    pub use crate::dispatch;
     pub use crate::event_bus;
     pub use crate::error;
     pub use crate::events;
