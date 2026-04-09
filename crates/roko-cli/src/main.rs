@@ -25,6 +25,7 @@ use roko_learn::prompt_experiment::ExperimentStore;
 use roko_learn::runtime_feedback::read_efficiency_events;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::env;
 use std::path::{Path, PathBuf};
 
 // -----------------------------------------------------------------------
@@ -436,14 +437,18 @@ enum ConfigCmd {
 
 fn main() {
     let cli = Cli::parse();
+    let filter = tracing_subscriber::EnvFilter::try_new(
+        env::var("ROKO_LOG").unwrap_or_else(|_| "info".to_string()),
+    )
+    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     if cli.log_format == LogFormat::Json {
         tracing_subscriber::fmt()
             .json()
-            .with_env_filter("roko=info")
+            .with_env_filter(filter)
             .init();
     } else {
         tracing_subscriber::fmt()
-            .with_env_filter("roko=info")
+            .with_env_filter(filter)
             .init();
     }
 
