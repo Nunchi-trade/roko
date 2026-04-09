@@ -27,6 +27,13 @@ struct SlackPostMessageArguments {
 }
 
 #[derive(Debug, Deserialize)]
+struct SlackReplyArguments {
+    channel: String,
+    thread_ts: String,
+    text: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct SlackPostMessageResponse {
     ok: bool,
     #[serde(default)]
@@ -93,6 +100,20 @@ fn handle_tools_list() -> Value {
                     "required": ["channel", "text"],
                     "additionalProperties": false
                 }
+            }),
+            serde_json::json!({
+                "name": "slack_reply",
+                "description": "Reply to a Slack thread.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "channel": {"type": "string"},
+                        "thread_ts": {"type": "string"},
+                        "text": {"type": "string"}
+                    },
+                    "required": ["channel", "thread_ts", "text"],
+                    "additionalProperties": false
+                }
             })
         ]
     })
@@ -107,6 +128,7 @@ fn handle_tools_call(params: Value) -> Result<Value, JsonRpcError> {
 fn dispatch_tool_call(name: &str, arguments: Value) -> Result<Value, JsonRpcError> {
     match name {
         "slack.post_message" => handle_slack_post_message(arguments),
+        "slack_reply" => handle_slack_reply(arguments),
         _ => Err(JsonRpcError::invalid_params(format!(
             "unknown tool: {name}"
         ))),
@@ -123,7 +145,39 @@ fn handle_slack_post_message(arguments: Value) -> Result<Value, JsonRpcError> {
     })?;
 
     let client = SlackClient::from_env()?;
-    let response = client.post_message(&args)?;
+    let response = client.post_message(&args.channel, &args.text, args.thread_ts.as_deref())?;
+    let SlackPostMessageResponse {
+        ok: _,
+        error: _,
+        channel,
+        ts,
+        message,
+    } = response;
+    let channel = channel
+        .ok_or_else(|| JsonRpcError::internal_error("Slack API response missing channel"))?;
+    let ts = ts
+        .ok_or_else(|| JsonRpcError::internal_error("Slack API response missing ts"))?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": serde_json::json!({
+                "channel": channel,
+                "ts": ts,
+                "message": message
+            }).to_string()
+        }],
+        "isError": false
+    }))
+}
+
+fn handle_slack_reply(arguments: Value) -> Result<Value, JsonRpcError> {
+    let args: SlackReplyArguments = serde_json::from_value(arguments).map_err(|err| {
+        JsonRpcError::invalid_params(format!("invalid slack_reply args: {err}"))
+    })?;
+
+    let client = SlackClient::from_env()?;
+    let response = client.post_message(&args.channel, &args.text, Some(&args.thread_ts))?;
     let SlackPostMessageResponse {
         ok: _,
         error: _,
@@ -167,7 +221,9 @@ impl SlackClient {
 
     fn post_message(
         &self,
-        args: &SlackPostMessageArguments,
+        channel: &str,
+        text: &str,
+        thread_ts: Option<&str>,
     ) -> Result<SlackPostMessageResponse, JsonRpcError> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json; charset=utf-8"));
@@ -177,11 +233,11 @@ impl SlackClient {
         headers.insert(AUTHORIZATION, auth_value);
 
         let mut body = serde_json::json!({
-            "channel": args.channel,
-            "text": args.text,
+            "channel": channel,
+            "text": text,
         });
-        if let Some(thread_ts) = &args.thread_ts {
-            body["thread_ts"] = Value::String(thread_ts.clone());
+        if let Some(thread_ts) = thread_ts {
+            body["thread_ts"] = Value::String(thread_ts.to_owned());
         }
 
         let response = self
@@ -214,9 +270,11 @@ mod tests {
     #[test]
     fn tools_list_contains_post_message() {
         let tools = handle_tools_list()["tools"].as_array().expect("tools array");
-        assert_eq!(tools.len(), 1);
+        assert_eq!(tools.len(), 2);
         assert_eq!(tools[0]["name"], "slack.post_message");
         assert_eq!(tools[0]["inputSchema"]["required"], serde_json::json!(["channel", "text"]));
+        assert_eq!(tools[1]["name"], "slack_reply");
+        assert_eq!(tools[1]["inputSchema"]["required"], serde_json::json!(["channel", "thread_ts", "text"]));
     }
 
     #[test]
