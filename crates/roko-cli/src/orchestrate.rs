@@ -324,7 +324,7 @@ impl WatcherRunner {
                                         Ok(substrate) => {
                                             for signal in alert_signals {
                                                 if let Err(e) = substrate.put(signal).await {
-                                                    eprintln!(
+                                                    tracing::error!(
                                                         "[conductor] watcher runner failed to persist alert to {}: {e}",
                                                         self.signals_path.display()
                                                     );
@@ -332,7 +332,7 @@ impl WatcherRunner {
                                             }
                                         }
                                         Err(e) => {
-                                            eprintln!(
+                                            tracing::error!(
                                                 "[conductor] watcher runner failed to open {}: {e}",
                                                 root.display()
                                             );
@@ -342,7 +342,7 @@ impl WatcherRunner {
                             }
                         }
                         Err(e) => {
-                            eprintln!(
+                            tracing::error!(
                                 "[conductor] watcher runner failed to read {}: {e}",
                                 self.signals_path.display()
                             );
@@ -856,7 +856,7 @@ impl PlanRunner {
             if let Some(ref fm) = plan_info.frontmatter {
                 if !fm.depends_on.is_empty() {
                     plan_deps.insert(plan_id.clone(), fm.depends_on.clone());
-                    eprintln!(
+                    tracing::info!(
                         "[orchestrate] Plan {plan_id} depends on: {:?}",
                         fm.depends_on
                     );
@@ -873,7 +873,7 @@ impl PlanRunner {
                         .iter()
                         .map(|t| format!("{}:{}", t.id, t.tier))
                         .collect();
-                    eprintln!(
+                    tracing::info!(
                         "[orchestrate] Plan {plan_id}: {} tasks, {} parallel groups, max_parallel={}, tiers=[{}]",
                         tf.tasks.len(),
                         groups.len(),
@@ -1143,16 +1143,16 @@ impl PlanRunner {
     pub async fn shutdown(&self) {
         let outcomes = self.supervisor.shutdown_all().await;
         if !outcomes.is_empty() {
-            eprintln!("[orchestrate] shut down {} agent processes", outcomes.len());
+            tracing::info!("[orchestrate] shut down {} agent processes", outcomes.len());
         }
         // Dump prometheus metrics for post-mortem debugging.
         let metrics_dir = self.workdir.join(".roko").join("metrics");
         if let Err(e) = std::fs::create_dir_all(&metrics_dir) {
-            eprintln!("[orchestrate] create metrics dir: {e}");
+            tracing::error!("[orchestrate] create metrics dir: {e}");
         } else {
             let prom = self.metrics.render_prometheus();
             if let Err(e) = std::fs::write(metrics_dir.join("prometheus.txt"), &prom) {
-                eprintln!("[orchestrate] write prometheus.txt: {e}");
+                tracing::error!("[orchestrate] write prometheus.txt: {e}");
             }
         }
         // Persist adaptive gate thresholds.
@@ -1162,11 +1162,11 @@ impl PlanRunner {
             .join("learn")
             .join("gate-thresholds.json");
         if let Err(e) = self.adaptive_thresholds.save(&thresholds_path) {
-            eprintln!("[orchestrate] save adaptive thresholds: {e}");
+            tracing::error!("[orchestrate] save adaptive thresholds: {e}");
         }
         // Persist cascade router observations.
         if let Err(e) = self.learning.save_cascade_router() {
-            eprintln!("[orchestrate] save cascade router: {e}");
+            tracing::error!("[orchestrate] save cascade router: {e}");
         }
         let mut mcp_clients = self.mcp_clients.lock().await;
         mcp_clients.clear();
@@ -1236,7 +1236,7 @@ impl PlanRunner {
     /// Returns the decision and logs non-continue outcomes.
     fn run_conductor_check(&mut self, plan_id: &str) -> ConductorDecision {
         if self.conductor.circuit_breaker().is_broken(plan_id) {
-            eprintln!("[conductor] pausing {plan_id}: circuit breaker tripped");
+            tracing::error!("[conductor] pausing {plan_id}: circuit breaker tripped");
             let _ = self.executor.pause_plan(plan_id);
             let error_output = self
                 .conductor
@@ -1280,10 +1280,10 @@ impl PlanRunner {
         match &decision {
             ConductorDecision::Continue => {}
             ConductorDecision::Restart { watcher, reason } => {
-                eprintln!("[conductor] {plan_id}: RESTART ({watcher}) — {reason}");
+                tracing::info!("[conductor] {plan_id}: RESTART ({watcher}) — {reason}");
             }
             ConductorDecision::Fail { watcher, reason } => {
-                eprintln!("[conductor] {plan_id}: FAIL ({watcher}) — {reason}");
+                tracing::error!("[conductor] {plan_id}: FAIL ({watcher}) — {reason}");
             }
             _ => {}
         }
@@ -1522,10 +1522,10 @@ impl PlanRunner {
         self.clear_stale_worktree_locks().await;
         // Clean up stale worktrees from previous runs (§6).
         if let Err(e) = self.worktrees.prune().await {
-            eprintln!("[orchestrate] worktree prune failed: {e}");
+            tracing::error!("[orchestrate] worktree prune failed: {e}");
         }
         if let Err(e) = self.worktrees.reclaim_idle().await {
-            eprintln!("[orchestrate] worktree reclaim failed: {e}");
+            tracing::error!("[orchestrate] worktree reclaim failed: {e}");
         }
 
         // Start plans whose cross-plan dependencies are already satisfied (§10).
@@ -1558,7 +1558,7 @@ impl PlanRunner {
         loop {
             iteration += 1;
             if iteration > max_iterations {
-                eprintln!("[orchestrate] hit max iterations ({max_iterations}), stopping");
+                tracing::error!("[orchestrate] hit max iterations ({max_iterations}), stopping");
                 break;
             }
 
@@ -1599,7 +1599,7 @@ impl PlanRunner {
             // Auto-save periodically.
             if self.actions_since_save >= AUTOSAVE_INTERVAL {
                 if let Err(e) = self.save_state() {
-                    eprintln!("[orchestrate] auto-save failed: {e}");
+                    tracing::error!("[orchestrate] auto-save failed: {e}");
                 }
                 self.actions_since_save = 0;
             }
@@ -1607,7 +1607,7 @@ impl PlanRunner {
 
         // Clean up worktrees after completion (§6).
         if let Err(e) = self.worktrees.reclaim_idle().await {
-            eprintln!("[orchestrate] post-run worktree reclaim failed: {e}");
+            tracing::error!("[orchestrate] post-run worktree reclaim failed: {e}");
         }
 
         // Build the report.
@@ -1721,7 +1721,7 @@ impl PlanRunner {
 
         // Final save before returning.
         if let Err(e) = self.save_state() {
-            eprintln!("[orchestrate] final save failed: {e}");
+            tracing::error!("[orchestrate] final save failed: {e}");
         }
 
         Ok(OrchestrationReport {
@@ -1817,7 +1817,7 @@ impl PlanRunner {
                 role,
                 task,
             } => {
-                eprintln!("[orchestrate] SpawnAgent plan={plan_id} role={role:?} task={task}");
+                tracing::info!("[orchestrate] SpawnAgent plan={plan_id} role={role:?} task={task}");
                 self.event_log.append(
                     EventKind::AgentSpawned,
                     serde_json::json!({"plan_id": plan_id, "role": format!("{role:?}"), "task": task}),
@@ -1851,7 +1851,7 @@ impl PlanRunner {
                 }
             }
             ExecutorAction::RunGate { plan_id, rung } => {
-                eprintln!("[orchestrate] RunGate plan={plan_id} rung={rung}");
+                tracing::info!("[orchestrate] RunGate plan={plan_id} rung={rung}");
                 let gate_started = std::time::Instant::now();
                 match self.run_gate_pipeline(&plan_id, rung).await {
                     Ok(passed) => {
@@ -1977,7 +1977,7 @@ impl PlanRunner {
                         }
                     }
                     Err(e) => {
-                        eprintln!("[orchestrate] gate failed for {plan_id}: {e}");
+                        tracing::error!("[orchestrate] gate failed for {plan_id}: {e}");
                         self.event_log.append(
                             EventKind::ErrorOccurred,
                             serde_json::json!({"plan_id": plan_id, "error": e.to_string()}),
@@ -1991,11 +1991,11 @@ impl PlanRunner {
                 match self.run_conductor_check(&plan_id) {
                     ConductorDecision::Continue => {}
                     ConductorDecision::Restart { reason, .. } => {
-                        eprintln!("[conductor] restarting {plan_id}: {reason}");
+                        tracing::info!("[conductor] restarting {plan_id}: {reason}");
                         let _ = self.executor.apply_event(&plan_id, &ExecutorEvent::Start);
                     }
                     ConductorDecision::Fail { reason, .. } => {
-                        eprintln!("[conductor] failing {plan_id}: {reason}");
+                        tracing::error!("[conductor] failing {plan_id}: {reason}");
                         let _ = self.executor.apply_event(
                             &plan_id,
                             &ExecutorEvent::Fatal(format!("conductor: {reason}")),
@@ -2005,11 +2005,11 @@ impl PlanRunner {
                 }
             }
             ExecutorAction::RunVerify { plan_id } => {
-                eprintln!("[orchestrate] RunVerify plan={plan_id}");
+                tracing::info!("[orchestrate] RunVerify plan={plan_id}");
                 self.finish_verify_round(&plan_id).await;
             }
             ExecutorAction::MergeBranch { plan_id } => {
-                eprintln!("[orchestrate] MergeBranch plan={plan_id}");
+                tracing::info!("[orchestrate] MergeBranch plan={plan_id}");
                 self.event_log.append(
                     EventKind::MergeAttempted,
                     serde_json::json!({"plan_id": plan_id}),
@@ -2028,7 +2028,7 @@ impl PlanRunner {
                                     .apply_event(&plan_id, &ExecutorEvent::MergeFailed);
                             }
                             Err(e) => {
-                                eprintln!(
+                                tracing::error!(
                                     "[orchestrate] post-merge checks failed for {plan_id}: {e}"
                                 );
                                 self.event_log.append(
@@ -2044,7 +2044,7 @@ impl PlanRunner {
                         }
                     }
                     Err(e) => {
-                        eprintln!("[orchestrate] merge failed for {plan_id}: {e}");
+                        tracing::error!("[orchestrate] merge failed for {plan_id}: {e}");
                         let _ = self
                             .executor
                             .apply_event(&plan_id, &ExecutorEvent::MergeFailed);
@@ -2054,11 +2054,11 @@ impl PlanRunner {
                 match self.run_conductor_check(&plan_id) {
                     ConductorDecision::Continue => {}
                     ConductorDecision::Restart { reason, .. } => {
-                        eprintln!("[conductor] restarting {plan_id}: {reason}");
+                        tracing::info!("[conductor] restarting {plan_id}: {reason}");
                         let _ = self.executor.apply_event(&plan_id, &ExecutorEvent::Start);
                     }
                     ConductorDecision::Fail { reason, .. } => {
-                        eprintln!("[conductor] failing {plan_id}: {reason}");
+                        tracing::error!("[conductor] failing {plan_id}: {reason}");
                         let _ = self.executor.apply_event(
                             &plan_id,
                             &ExecutorEvent::Fatal(format!("conductor: {reason}")),
@@ -2068,7 +2068,7 @@ impl PlanRunner {
                 }
             }
             ExecutorAction::DispatchPlan { plan_id } => {
-                eprintln!("[orchestrate] DispatchPlan {plan_id}");
+                tracing::info!("[orchestrate] DispatchPlan {plan_id}");
                 self.metrics
                     .register_counter(
                         "roko_plans_total",
@@ -2085,15 +2085,15 @@ impl PlanRunner {
                 let _ = self.executor.apply_event(&plan_id, &ExecutorEvent::Start);
             }
             ExecutorAction::PausePlan { plan_id } => {
-                eprintln!("[orchestrate] PausePlan {plan_id}");
+                tracing::info!("[orchestrate] PausePlan {plan_id}");
                 self.executor.pause_plan(&plan_id);
             }
             ExecutorAction::ResumePlan { plan_id } => {
-                eprintln!("[orchestrate] ResumePlan {plan_id}");
+                tracing::info!("[orchestrate] ResumePlan {plan_id}");
                 self.executor.resume_plan(&plan_id);
             }
             ExecutorAction::FailPlan { plan_id, reason } => {
-                eprintln!("[orchestrate] FailPlan {plan_id}: {reason}");
+                tracing::error!("[orchestrate] FailPlan {plan_id}: {reason}");
                 self.event_log.append(
                     EventKind::ErrorOccurred,
                     serde_json::json!({"plan_id": &plan_id, "error": reason.clone()}),
@@ -2103,7 +2103,7 @@ impl PlanRunner {
                     .apply_event(&plan_id, &ExecutorEvent::Fatal(reason));
             }
             ExecutorAction::CompletePlan { plan_id } => {
-                eprintln!("[orchestrate] CompletePlan {plan_id}");
+                tracing::info!("[orchestrate] CompletePlan {plan_id}");
                 if let Some(state) = self.executor.plan_state_mut(&plan_id) {
                     state.current_phase = roko_core::PlanPhase::Complete;
                     state.paused = false;
@@ -2117,7 +2117,7 @@ impl PlanRunner {
                 plan_id,
                 new_position,
             } => {
-                eprintln!("[orchestrate] Reorder {plan_id} -> {new_position}");
+                tracing::info!("[orchestrate] Reorder {plan_id} -> {new_position}");
                 self.executor.reorder_plan(&plan_id, new_position);
                 self.event_log.append(
                     EventKind::PhaseTransition,
@@ -2178,13 +2178,13 @@ impl PlanRunner {
 
                 if let Some(tracker) = self.task_trackers.get(plan_id) {
                     let groups = tracker.tasks_file.parallel_groups();
-                    eprintln!(
+                    tracing::info!(
                         "[orchestrate] Enriching {plan_id}: {} tasks, {} parallel groups",
                         tracker.tasks_file.tasks.len(),
                         groups.len(),
                     );
                 } else {
-                    eprintln!(
+                    tracing::info!(
                         "[orchestrate] Enriching {plan_id}: no tasks.toml, using generic strategist enrichment"
                     );
                 }
@@ -2194,7 +2194,7 @@ impl PlanRunner {
                 let _ = self.executor.apply_event(plan_id, &event);
             }
             Err(e) => {
-                eprintln!("[orchestrate] Enrichment failed for {plan_id}: {e}");
+                tracing::error!("[orchestrate] Enrichment failed for {plan_id}: {e}");
                 let _ = self.executor.apply_event(
                     plan_id,
                     &ExecutorEvent::Fatal(format!("enrichment failed: {e}")),
@@ -2253,12 +2253,12 @@ impl PlanRunner {
                 .get(plan_id)
                 .is_some_and(|tracker| tracker.has_tasks_blocked_by_plans(&completed_plans))
             {
-                eprintln!(
+                tracing::info!(
                     "[orchestrate] {plan_id}: implementation blocked by dependent plan(s), pausing"
                 );
                 self.executor.pause_plan(plan_id);
             } else {
-                eprintln!(
+                tracing::error!(
                     "[orchestrate] {plan_id}: no ready tasks but not all done — blocked or failed"
                 );
                 let _ = self.executor.apply_event(
@@ -2275,7 +2275,7 @@ impl PlanRunner {
         } else {
             // ── Multiple ready tasks: parallel dispatch ──────────────
             let batch = ready;
-            eprintln!(
+            tracing::info!(
                 "[orchestrate] Implementing {plan_id}: dispatching {} tasks in parallel: {}",
                 batch.len(),
                 batch.join(", "),
@@ -2289,7 +2289,7 @@ impl PlanRunner {
             .get(plan_id)
             .is_some_and(TaskTracker::all_tasks_done);
         if all_done {
-            eprintln!("[orchestrate] {plan_id}: all tasks done, advancing to Gating");
+            tracing::info!("[orchestrate] {plan_id}: all tasks done, advancing to Gating");
             let event = ExecutorEvent::ImplementationDone;
             self.log_transition(plan_id, &event);
             let _ = self.executor.apply_event(plan_id, &event);
@@ -2298,11 +2298,11 @@ impl PlanRunner {
         // Conductor check after agent dispatch completes.
         match self.run_conductor_check(plan_id) {
             ConductorDecision::Restart { reason, .. } => {
-                eprintln!("[conductor] restarting {plan_id}: {reason}");
+                tracing::info!("[conductor] restarting {plan_id}: {reason}");
                 let _ = self.executor.apply_event(plan_id, &ExecutorEvent::Start);
             }
             ConductorDecision::Fail { reason, .. } => {
-                eprintln!("[conductor] failing {plan_id}: {reason}");
+                tracing::error!("[conductor] failing {plan_id}: {reason}");
                 let _ = self.executor.apply_event(
                     plan_id,
                     &ExecutorEvent::Fatal(format!("conductor: {reason}")),
@@ -2315,7 +2315,7 @@ impl PlanRunner {
 
     /// Dispatch a single task with retry logic (up to 2 retries).
     async fn handle_implementing_single(&mut self, plan_id: &str, task_id: &str) {
-        eprintln!("[orchestrate] Implementing {plan_id}: dispatching task {task_id}");
+        tracing::info!("[orchestrate] Implementing {plan_id}: dispatching task {task_id}");
 
         let task_phase = self
             .task_trackers
@@ -2346,7 +2346,7 @@ impl PlanRunner {
         let exec_dir = match self.task_exec_dir(plan_id, task_id).await {
             Ok(dir) => dir,
             Err(e) => {
-                eprintln!(
+                tracing::error!(
                     "[orchestrate] task worktree acquisition failed for {plan_id}/{task_id}: {e}"
                 );
                 self.record_task_failure(plan_id, task_id, &e, &started, None)
@@ -2363,7 +2363,7 @@ impl PlanRunner {
 
         for attempt in 0..=max_retries {
             if attempt > 0 {
-                eprintln!("[orchestrate] Retry {attempt}/{max_retries} for {plan_id}/{task_id}");
+                tracing::info!("[orchestrate] Retry {attempt}/{max_retries} for {plan_id}/{task_id}");
             }
 
             match self
@@ -2387,7 +2387,7 @@ impl PlanRunner {
                             succeeded = true;
                         }
                         Err(e) => {
-                            eprintln!("[orchestrate] task {task_id} aborted by plan budget: {e}");
+                            tracing::error!("[orchestrate] task {task_id} aborted by plan budget: {e}");
                             let _ = self
                                 .executor
                                 .apply_event(plan_id, &ExecutorEvent::Fatal(e.to_string()));
@@ -2397,7 +2397,7 @@ impl PlanRunner {
                     break;
                 }
                 Err(e) => {
-                    eprintln!(
+                    tracing::error!(
                         "[orchestrate] task {task_id} failed (attempt {}): {e}",
                         attempt + 1
                     );
@@ -2410,11 +2410,11 @@ impl PlanRunner {
         }
 
         if let Err(e) = self.worktrees.remove(&wt_id).await {
-            eprintln!("[orchestrate] worktree cleanup failed for {task_id}: {e}");
+            tracing::error!("[orchestrate] worktree cleanup failed for {task_id}: {e}");
         }
 
         if !succeeded && !budget_aborted {
-            eprintln!("[orchestrate] task {task_id} failed after {max_retries} retries");
+            tracing::error!("[orchestrate] task {task_id} failed after {max_retries} retries");
             let _ = self.executor.apply_event(
                 plan_id,
                 &ExecutorEvent::Fatal(format!("task {task_id} failed after retries")),
@@ -2434,7 +2434,7 @@ impl PlanRunner {
         let started = std::time::Instant::now();
         for tid in task_ids {
             if let Err(e) = self.ensure_task_budget_available(plan_id, tid) {
-                eprintln!(
+                tracing::error!(
                     "[orchestrate] task budget exhausted before dispatch for {plan_id}/{tid}: {e}"
                 );
                 self.record_task_failure(plan_id, tid, &e, &started, None)
@@ -2444,7 +2444,7 @@ impl PlanRunner {
             match self.task_exec_dir(plan_id, tid).await {
                 Ok(dir) => task_dirs.push((tid.clone(), dir)),
                 Err(e) => {
-                    eprintln!(
+                    tracing::error!(
                         "[orchestrate] task worktree acquisition failed for {plan_id}/{tid}: {e}"
                     );
                     self.record_task_failure(plan_id, tid, &e, &started, None)
@@ -2593,7 +2593,7 @@ impl PlanRunner {
                 match joined {
                     Ok(pair) => results.push(pair),
                     Err(e) => {
-                        eprintln!("[orchestrate] parallel task join failed: {e}");
+                        tracing::error!("[orchestrate] parallel task join failed: {e}");
                     }
                 }
             }
@@ -2608,7 +2608,7 @@ impl PlanRunner {
                     .record_task_success(plan_id, tid, agent_result, &started)
                     .await
                 {
-                    eprintln!("[orchestrate] task {tid} aborted by plan budget: {e}");
+                    tracing::error!("[orchestrate] task {tid} aborted by plan budget: {e}");
                     let _ = self
                         .executor
                         .apply_event(plan_id, &ExecutorEvent::Fatal(e.to_string()));
@@ -2616,7 +2616,7 @@ impl PlanRunner {
                     break;
                 }
             } else {
-                eprintln!("[orchestrate] parallel task {tid} failed");
+                tracing::error!("[orchestrate] parallel task {tid} failed");
                 let err = anyhow!("agent returned non-success for task {tid}");
                 self.record_task_failure(plan_id, tid, &err, &started, Some(agent_result))
                     .await;
@@ -2628,7 +2628,7 @@ impl PlanRunner {
         for tid in task_ids {
             let wt_id = format!("{plan_id}-{tid}");
             if let Err(e) = self.worktrees.remove(&wt_id).await {
-                eprintln!("[orchestrate] worktree cleanup failed for {tid}: {e}");
+                tracing::error!("[orchestrate] worktree cleanup failed for {tid}: {e}");
             }
         }
 
@@ -2928,7 +2928,7 @@ impl PlanRunner {
     async fn record_and_check_learning(&mut self, input: CompletedRunInput, plan_id: &str) {
         match self.learning.record_completed_run(input).await {
             Ok(update) => self.handle_learning_update(&update, plan_id),
-            Err(e) => eprintln!("[orchestrate] episode log failed: {e}"),
+            Err(e) => tracing::error!("[orchestrate] episode log failed: {e}"),
         }
     }
 
@@ -2977,7 +2977,7 @@ impl PlanRunner {
              and provide updated implementation steps."
         );
 
-        eprintln!("[orchestrate] Attempting re-plan for {plan_id} after repeated gate failures");
+        tracing::info!("[orchestrate] Attempting re-plan for {plan_id} after repeated gate failures");
         match self
             .dispatch_agent_with(
                 plan_id,
@@ -2991,7 +2991,7 @@ impl PlanRunner {
             .await
         {
             Ok(_result) => {
-                eprintln!("[orchestrate] Re-plan completed for {plan_id}");
+                tracing::info!("[orchestrate] Re-plan completed for {plan_id}");
                 if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
                     tracker.gate_failure_count = 0;
                 }
@@ -3001,7 +3001,7 @@ impl PlanRunner {
                     .apply_event(plan_id, &ExecutorEvent::EnrichmentDone);
             }
             Err(e) => {
-                eprintln!("[orchestrate] Re-plan failed for {plan_id}: {e}");
+                tracing::error!("[orchestrate] Re-plan failed for {plan_id}: {e}");
             }
         }
     }
@@ -3197,7 +3197,7 @@ impl PlanRunner {
         };
 
         if !gate_context.is_empty() {
-            eprintln!(
+            tracing::info!(
                 "[orchestrate] AutoFix {plan_id}: gate failure phase={gate_phase} context ({} chars)",
                 gate_context.len()
             );
@@ -3246,7 +3246,7 @@ impl PlanRunner {
                 let _ = self.executor.apply_event(plan_id, &event);
             }
             Err(e) => {
-                eprintln!("[orchestrate] AutoFix failed for {plan_id}: {e}");
+                tracing::error!("[orchestrate] AutoFix failed for {plan_id}: {e}");
                 let _ = self.executor.apply_event(
                     plan_id,
                     &ExecutorEvent::Fatal(format!("autofix failed: {e}")),
@@ -3296,7 +3296,7 @@ impl PlanRunner {
                 }
             }
             Err(e) => {
-                eprintln!("[orchestrate] RegenVerify failed for {plan_id}: {e}");
+                tracing::error!("[orchestrate] RegenVerify failed for {plan_id}: {e}");
                 let _ = self.executor.apply_event(
                     plan_id,
                     &ExecutorEvent::Fatal(format!("regen-verify failed: {e}")),
@@ -3400,7 +3400,7 @@ impl PlanRunner {
                         approved = false;
                     }
                 }
-                eprintln!(
+                tracing::info!(
                     "[orchestrate] Review {plan_id}: verdict={} drift={}",
                     if approved { "approved" } else { "revise" },
                     drift_report
@@ -3461,7 +3461,7 @@ impl PlanRunner {
             }
             Err(e) => {
                 // On infrastructure error, auto-approve (don't block pipeline)
-                eprintln!("[orchestrate] Review failed for {plan_id}: {e} — auto-approving");
+                tracing::error!("[orchestrate] Review failed for {plan_id}: {e} — auto-approving");
                 let event = ExecutorEvent::ReviewApproved;
                 self.log_transition(plan_id, &event);
                 let _ = self.executor.apply_event(plan_id, &event);
@@ -3509,7 +3509,7 @@ impl PlanRunner {
                 self.record_and_check_learning(input, plan_id).await;
             }
             Err(e) => {
-                eprintln!(
+                tracing::error!(
                     "[orchestrate] DocRevision failed for {plan_id}: {e} — continuing (non-blocking)"
                 );
             }
@@ -3543,7 +3543,7 @@ impl PlanRunner {
                     .unwrap_or(1);
                 let next_idx = (current_idx + attempt as usize).min(escalation_models.len() - 1);
                 let escalated = escalation_models[next_idx];
-                eprintln!(
+                tracing::info!(
                     "[orchestrate] Retry {attempt}/{max_retries} for {plan_id}/{task} — escalating to {escalated} (error: {last_error})"
                 );
             }
@@ -3575,7 +3575,7 @@ impl PlanRunner {
                         attempt + 1,
                     );
                     if let Err(e) = self.learning.record_completed_run(input).await {
-                        eprintln!("[orchestrate] episode log failed: {e}");
+                        tracing::error!("[orchestrate] episode log failed: {e}");
                     }
                     let event = self.generic_completion_event(plan_id);
                     self.log_transition(plan_id, &event);
@@ -3586,7 +3586,7 @@ impl PlanRunner {
                 Err(e) => {
                     last_error = e.to_string();
                     if attempt == max_retries {
-                        eprintln!(
+                        tracing::error!(
                             "[orchestrate] agent failed for {plan_id} after {max_retries} retries: {e}"
                         );
                         let wall_ms =
@@ -3625,7 +3625,7 @@ impl PlanRunner {
         }
 
         if !succeeded {
-            eprintln!("[orchestrate] All retries exhausted for {plan_id}/{task}");
+            tracing::error!("[orchestrate] All retries exhausted for {plan_id}/{task}");
         }
     }
 
@@ -3833,7 +3833,7 @@ impl PlanRunner {
                     .unwrap_or("claude-sonnet-4-6"),
                 Some(&self.config.agent.tier_models),
             );
-            eprintln!(
+            tracing::info!(
                 "[orchestrate] Task {} tier={} model={} max_loc={:?} context={} verify={}",
                 td.id,
                 td.tier,
@@ -3858,7 +3858,7 @@ impl PlanRunner {
         // ── Adaptive model selection via CascadeRouter ───────────────
         if let Some(td) = task_def.as_ref() {
             if td.model_hint.is_some() {
-                eprintln!(
+                tracing::info!(
                     "[orchestrate] Task {} model_hint={} (skipping CascadeRouter)",
                     td.id, selected_model
                 );
@@ -3888,7 +3888,7 @@ impl PlanRunner {
                 // Use cascade recommendation only if it has enough observations.
                 // Otherwise stick with the statically selected model.
                 if cascade.stage != roko_learn::cascade_router::CascadeStage::Static {
-                    eprintln!(
+                    tracing::info!(
                         "[orchestrate] CascadeRouter recommends model={} (stage={:?})",
                         cascade.primary.slug, cascade.stage
                     );
@@ -3913,7 +3913,7 @@ impl PlanRunner {
             };
             let cascade = cascade_router.route(&routing_ctx);
             if cascade.stage != roko_learn::cascade_router::CascadeStage::Static {
-                eprintln!(
+                tracing::info!(
                     "[orchestrate] CascadeRouter recommends model={} (stage={:?})",
                     cascade.primary.slug, cascade.stage
                 );
@@ -3974,7 +3974,7 @@ impl PlanRunner {
                 &prior_outputs,
             );
 
-            eprintln!(
+            tracing::info!(
                 "[orchestrate] Context tier={:?} sections={} tokens_est={} budget={}",
                 resolved.tier,
                 resolved.sections.len(),
@@ -4006,9 +4006,9 @@ impl PlanRunner {
                     .attribution_tracker
                     .should_demote(&tier_str, source_type);
                 if demoted {
-                    eprintln!("[context] {source_type}: demoted (ref_rate={rate:.2})");
+                    tracing::info!("[context] {source_type}: demoted (ref_rate={rate:.2})");
                 } else {
-                    eprintln!("[context] {source_type}: included (ref_rate={rate:.2})");
+                    tracing::info!("[context] {source_type}: included (ref_rate={rate:.2})");
                 }
                 !demoted
             });
@@ -4071,7 +4071,7 @@ impl PlanRunner {
             complexity,
         );
         let selected_format = self.format_bandit.select(&bandit_key);
-        eprintln!(
+        tracing::info!(
             "[orchestrate] format_bandit: model={selected_model} role={role:?} tools={tool_count} → {selected_format:?}",
         );
 
@@ -4106,7 +4106,7 @@ impl PlanRunner {
                 .into_signal()
                 .map_err(|e| anyhow!("learned-context section: {e}"))?;
             sections.push(learned_section);
-            eprintln!(
+            tracing::info!(
                 "[orchestrate] injected learned context ({} chars)",
                 learned.text.len()
             );
@@ -4334,7 +4334,7 @@ impl PlanRunner {
                 0.0
             };
 
-            eprintln!(
+            tracing::info!(
                 "[orchestrate] Context attribution: {referenced}/{total} sections referenced (ref_rate={ref_rate:.2})"
             );
 
@@ -4541,7 +4541,7 @@ impl PlanRunner {
             return Ok(());
         }
 
-        eprintln!(
+        tracing::info!(
             "[orchestrate] Running {} verify steps for {}",
             verify_steps.len(),
             task_id
@@ -4556,12 +4556,12 @@ impl PlanRunner {
 
             match output {
                 Ok(o) if o.status.success() => {
-                    eprintln!("  ✅ [{}] {}", step.phase, step.command);
+                    tracing::info!("  ✅ [{}] {}", step.phase, step.command);
                 }
                 Ok(o) => {
                     let stderr = String::from_utf8_lossy(&o.stderr);
                     let msg = step.fail_msg.as_deref().unwrap_or("verification failed");
-                    eprintln!(
+                    tracing::error!(
                         "  ❌ [{}] {} — {}: {}",
                         step.phase,
                         step.command,
@@ -4576,7 +4576,7 @@ impl PlanRunner {
                     ));
                 }
                 Err(e) => {
-                    eprintln!("  ❌ [{}] {} — spawn error: {e}", step.phase, step.command);
+                    tracing::error!("  ❌ [{}] {} — spawn error: {e}", step.phase, step.command);
                     return Err((
                         task_id.to_string(),
                         step.phase.clone(),
@@ -4742,7 +4742,7 @@ impl PlanRunner {
         match self.worktrees.ensure_for_plan(plan_id).await {
             Ok(handle) => handle.path,
             Err(err) => {
-                eprintln!(
+                tracing::error!(
                     "[orchestrate] worktree unavailable for plan={plan_id}, using repo root: {err}"
                 );
                 self.workdir.clone()
@@ -4823,12 +4823,12 @@ impl PlanRunner {
             .collect();
 
         if steps_to_run.is_empty() {
-            eprintln!("[orchestrate] {plan_id}: no task verify steps declared");
+            tracing::info!("[orchestrate] {plan_id}: no task verify steps declared");
             return Ok(());
         }
 
         let exec_dir = self.plan_exec_dir(plan_id).await;
-        eprintln!(
+        tracing::info!(
             "[orchestrate] Running plan verify for {plan_id} across {} task(s)",
             steps_to_run.len()
         );
@@ -4849,14 +4849,14 @@ impl PlanRunner {
     async fn clear_stale_worktree_locks(&self) {
         match self.worktrees.clear_stale_locks() {
             Ok(cleared) if !cleared.is_empty() => {
-                eprintln!(
+                tracing::info!(
                     "[orchestrate] cleared {} stale worktree lock(s)",
                     cleared.len()
                 );
             }
             Ok(_) => {}
             Err(e) => {
-                eprintln!("[orchestrate] stale lock cleanup failed: {e}");
+                tracing::error!("[orchestrate] stale lock cleanup failed: {e}");
             }
         }
     }
