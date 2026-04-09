@@ -322,6 +322,9 @@ enum PrdCmd {
     Plan {
         /// PRD slug (filename without .md).
         slug: String,
+        /// Preview generation without writing tasks.toml files.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Scan all PRDs for duplicates, gaps, and inconsistencies.
     Consolidate,
@@ -1793,10 +1796,10 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                 Ok(0)
             }
         },
-        PrdCmd::Plan { slug } => {
+        PrdCmd::Plan { slug, dry_run } => {
             let prd_path = find_prd(&workdir, &slug)?;
             let _generated_plans_root =
-                roko_cli::prd::generate_plan_from_prd(&slug, &prd_path).await?;
+                roko_cli::prd::generate_plan_from_prd(&slug, &prd_path, dry_run).await?;
             Ok(0)
         }
         PrdCmd::Consolidate => {

@@ -24,6 +24,7 @@ use crate::task_parser::TasksFile;
 use anyhow::{Context as _, Result, anyhow};
 use roko_core::config::schema::RokoConfig;
 use roko_core::obs::MetricRegistry;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // ─── Directory layout ──────────────────────────────���───────────────
 
@@ -100,16 +101,124 @@ fn warn_on_tasks_quality(path: &Path) {
 }
 
 fn warn_on_new_or_updated_tasks(root: &Path, before: &HashMap<PathBuf, u64>) {
+    for path in changed_tasks_files(root, before) {
+        warn_on_tasks_quality(&path);
+    }
+}
+
+fn changed_tasks_files(root: &Path, before: &HashMap<PathBuf, u64>) -> Vec<PathBuf> {
     let after = snapshot_tasks_files(root);
-    let mut paths: Vec<PathBuf> = after.keys().cloned().collect();
+    let mut paths: Vec<PathBuf> = after
+        .keys()
+        .filter(|path| after.get(*path) != before.get(*path))
+        .cloned()
+        .collect();
     paths.sort();
-    for path in paths {
-        let current = after.get(&path);
-        let previous = before.get(&path);
-        if current != previous {
-            warn_on_tasks_quality(&path);
+    paths
+}
+
+fn copy_workspace_for_dry_run(src: &Path, dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst).with_context(|| format!("create {}", dst.display()))?;
+    copy_workspace_dir(src, dst)
+}
+
+struct DryRunWorkspace {
+    path: PathBuf,
+}
+
+impl DryRunWorkspace {
+    fn new(src: &Path) -> Result<Self> {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("compute dry-run workspace timestamp")?
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "roko-prd-dry-run-{}-{}",
+            std::process::id(),
+            unique
+        ));
+        copy_workspace_for_dry_run(src, &path)?;
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for DryRunWorkspace {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+fn copy_workspace_dir(src: &Path, dst: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(src).with_context(|| format!("read {}", src.display()))? {
+        let entry = entry.with_context(|| format!("read {}", src.display()))?;
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if matches!(name.as_ref(), ".git" | "target") {
+            continue;
+        }
+
+        let dest = dst.join(name.as_ref());
+        let ty = entry
+            .file_type()
+            .with_context(|| format!("inspect {}", path.display()))?;
+        if ty.is_dir() {
+            std::fs::create_dir_all(&dest).with_context(|| format!("create {}", dest.display()))?;
+            copy_workspace_dir(&path, &dest)?;
+        } else if ty.is_file() {
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("create {}", parent.display()))?;
+            }
+            std::fs::copy(&path, &dest)
+                .with_context(|| format!("copy {} -> {}", path.display(), dest.display()))?;
         }
     }
+    Ok(())
+}
+
+fn print_tasks_preview(path: &Path, tasks_file: &TasksFile) {
+    println!("📄 {}", path.display());
+    println!(
+        "  plan: {}  tasks: {}  status: {}  max_parallel: {}  estimated_minutes: {}",
+        tasks_file.meta.plan,
+        tasks_file.tasks.len(),
+        tasks_file.meta.status,
+        tasks_file.meta.max_parallel,
+        tasks_file.meta.estimated_total_minutes,
+    );
+    for task in &tasks_file.tasks {
+        let mut details = format!("  - {} [{}] {}", task.id, task.tier, task.title);
+        details.push_str(&format!(" | files={} deps={} verify={}", task.files.len(), task.depends_on.len(), task.verify.len()));
+        println!("{details}");
+    }
+}
+
+fn validate_and_print_preview(path: &Path) -> Result<()> {
+    let tasks_file = TasksFile::parse(path).with_context(|| format!("parse {}", path.display()))?;
+    let issues = tasks_file.validate();
+    if !issues.is_empty() {
+        eprintln!("❌ Dry-run validation failed for {}:", path.display());
+        for issue in &issues {
+            eprintln!("  - {issue}");
+        }
+        return Err(anyhow!("dry-run plan validation failed for {}", path.display()));
+    }
+
+    let warnings = tasks_file.quality_warnings();
+    if !warnings.is_empty() {
+        eprintln!("⚠️  Plan quality warnings for {}:", path.display());
+        for warning in &warnings {
+            eprintln!("  - {warning}");
+        }
+    }
+
+    print_tasks_preview(path, &tasks_file);
+    Ok(())
 }
 
 /// Ensure the PRD directory structure exists.
@@ -407,7 +516,7 @@ pub async fn cmd_promote(workdir: &Path, slug: &str, auto_execute: bool) -> Resu
     std::fs::remove_file(&src)?;
     println!("✅ Promoted: {}", dst.display());
     if auto_plan_enabled(workdir)? {
-        let plans_root = generate_plan_from_prd(slug, &dst).await?;
+        let plans_root = generate_plan_from_prd(slug, &dst, false).await?;
         if auto_execute {
             run_generated_plans(workdir, &plans_root).await?;
         }
@@ -454,15 +563,24 @@ fn auto_plan_enabled(workdir: &Path) -> Result<bool> {
 }
 
 /// Generate implementation plans from a published PRD file.
-pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path) -> Result<PathBuf> {
+pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path, dry_run: bool) -> Result<PathBuf> {
     let workdir = prd_workdir(prd_path)?;
     let content = std::fs::read_to_string(prd_path)
         .with_context(|| format!("read {}", prd_path.display()))?;
     println!("📋 Generating plans from PRD: {slug}");
 
-    let resolved = crate::load_layered(&workdir)?;
+    let dry_run_workdir = if dry_run {
+        Some(DryRunWorkspace::new(&workdir)?)
+    } else {
+        None
+    };
+    let workdir_ref = dry_run_workdir
+        .as_ref()
+        .map_or(workdir.as_path(), |temp| temp.path());
+
+    let resolved = crate::load_layered(workdir_ref)?;
     let system = crate::plan_generate::PLAN_GENERATOR_SYSTEM_PROMPT;
-    let plans_root = tasks_root(&workdir);
+    let plans_root = tasks_root(workdir_ref);
     let tasks_before = snapshot_tasks_files(&plans_root);
     let task_prompt = format!(
         "Read the PRD at {path} and generate implementation plan directories \
@@ -477,7 +595,7 @@ pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path) -> Result<PathB
 
     let exit_code = run_agent(AgentExecOpts {
         prompt: &task_prompt,
-        workdir: &workdir,
+        workdir: workdir_ref,
         model: resolved.config.agent.model.as_deref(),
         effort: Some(resolved.config.agent.effort.as_str()),
         system_prompt: Some(system),
@@ -491,7 +609,20 @@ pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path) -> Result<PathB
         ));
     }
 
-    warn_on_new_or_updated_tasks(&plans_root, &tasks_before);
+    if dry_run {
+        let changed = changed_tasks_files(&plans_root, &tasks_before);
+        if changed.is_empty() {
+            return Err(anyhow!(
+                "dry-run plan generation did not produce any tasks.toml files"
+            ));
+        }
+
+        for path in &changed {
+            validate_and_print_preview(path)?;
+        }
+    } else {
+        warn_on_new_or_updated_tasks(&plans_root, &tasks_before);
+    }
 
     Ok(workdir.join("plans"))
 }
