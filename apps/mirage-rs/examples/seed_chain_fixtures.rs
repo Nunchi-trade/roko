@@ -536,12 +536,22 @@ async fn exercise_rest_api(client: &reqwest::Client, base: &str) -> usize {
         &format!("{base}/pheromones?sort=intensity&order=desc&limit=5"),
     )
     .await;
-    check!("GET /api/pheromones (list)", pheromone_list.as_ref().map(|v| v.clone()).map_err(|e| e.clone()));
+    check!(
+        "GET /api/pheromones (list)",
+        pheromone_list
+            .as_ref()
+            .map(|v| v.clone())
+            .map_err(|e| e.clone())
+    );
 
     // Extract a pheromone ID for the projection endpoint.
-    let pheromone_id: Option<u64> = pheromone_list
-        .ok()
-        .and_then(|v| v.get("pheromones")?.as_array()?.first()?.get("id")?.as_u64());
+    let pheromone_id: Option<u64> = pheromone_list.ok().and_then(|v| {
+        v.get("pheromones")?
+            .as_array()?
+            .first()?
+            .get("id")?
+            .as_u64()
+    });
 
     check!(
         "GET /api/pheromones/summary",
@@ -595,7 +605,13 @@ async fn exercise_rest_api(client: &reqwest::Client, base: &str) -> usize {
         }),
     )
     .await;
-    check!("POST /api/knowledge/entries (post insight)", post_insight_resp.as_ref().map(|v| v.clone()).map_err(|e| e.clone()));
+    check!(
+        "POST /api/knowledge/entries (post insight)",
+        post_insight_resp
+            .as_ref()
+            .map(|v| v.clone())
+            .map_err(|e| e.clone())
+    );
 
     // Extract the insight ID for confirm/challenge.
     let insight_id: Option<String> = post_insight_resp
@@ -643,12 +659,7 @@ async fn exercise_rest_api(client: &reqwest::Client, base: &str) -> usize {
     // Trigger decay sweep.
     check!(
         "POST /api/knowledge/decay",
-        rest_post(
-            client,
-            &format!("{base}/knowledge/decay"),
-            json!({}),
-        )
-        .await
+        rest_post(client, &format!("{base}/knowledge/decay"), json!({}),).await
     );
 
     // Edges.
@@ -730,21 +741,13 @@ async fn exercise_rest_api(client: &reqwest::Client, base: &str) -> usize {
     // GET heartbeat for one agent.
     check!(
         "GET /api/agents/rest-agent-alpha/heartbeat",
-        rest_get(
-            client,
-            &format!("{base}/agents/rest-agent-alpha/heartbeat"),
-        )
-        .await
+        rest_get(client, &format!("{base}/agents/rest-agent-alpha/heartbeat"),).await
     );
 
     // GET stats for one agent.
     check!(
         "GET /api/agents/rest-agent-alpha/stats",
-        rest_get(
-            client,
-            &format!("{base}/agents/rest-agent-alpha/stats"),
-        )
-        .await
+        rest_get(client, &format!("{base}/agents/rest-agent-alpha/stats"),).await
     );
 
     // GET trace for one agent.
@@ -766,7 +769,10 @@ async fn exercise_rest_api(client: &reqwest::Client, base: &str) -> usize {
     // --- Summary ----------------------------------------------------------
 
     println!();
-    println!("  REST API verification: {pass} passed, {fail} failed (of {})", pass + fail);
+    println!(
+        "  REST API verification: {pass} passed, {fail} failed (of {})",
+        pass + fail
+    );
 
     fail
 }

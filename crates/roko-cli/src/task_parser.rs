@@ -51,17 +51,23 @@ pub struct TaskDef {
     #[serde(default)]
     pub max_loc: Option<u32>,
     /// Files this task modifies.
-    #[serde(default)]
+    #[serde(default, alias = "write_files")]
     pub files: Vec<String>,
     /// Task IDs this task depends on.
     #[serde(default)]
     pub depends_on: Vec<String>,
+    /// Plan IDs this task depends on before dispatching.
+    #[serde(default)]
+    pub depends_on_plan: Vec<String>,
     /// Surgical context specification.
     #[serde(default)]
     pub context: Option<TaskContext>,
     /// Verification pipeline.
     #[serde(default)]
     pub verify: Vec<VerifyStep>,
+    /// Per-task timeout in seconds.
+    #[serde(default = "default_timeout_secs")]
+    pub timeout_secs: u64,
     /// Free-form acceptance criteria (legacy format, strings).
     #[serde(default)]
     pub acceptance: Vec<String>,
@@ -73,6 +79,10 @@ fn default_status() -> String {
 
 fn default_tier() -> String {
     "focused".into()
+}
+
+fn default_timeout_secs() -> u64 {
+    600
 }
 
 impl TaskDef {
@@ -107,8 +117,7 @@ impl TaskDef {
 
     /// Whether this task is ready to execute (status = "ready" and all deps done).
     pub fn is_ready(&self, completed: &[String]) -> bool {
-        self.status == "ready"
-            && self.depends_on.iter().all(|dep| completed.contains(dep))
+        self.status == "ready" && self.depends_on.iter().all(|dep| completed.contains(dep))
     }
 
     /// Build the agent prompt from task title + surgical context.
@@ -169,7 +178,11 @@ impl TaskDef {
         if !self.verify.is_empty() {
             prompt.push_str("\n## Verification (these commands must pass after your changes)\n");
             for v in &self.verify {
-                prompt.push_str(&format!("- `{}` — {}\n", v.command, v.fail_msg.as_deref().unwrap_or("must succeed")));
+                prompt.push_str(&format!(
+                    "- `{}` — {}\n",
+                    v.command,
+                    v.fail_msg.as_deref().unwrap_or("must succeed")
+                ));
             }
         } else if !self.acceptance.is_empty() {
             prompt.push_str("\n## Acceptance criteria\n");
@@ -267,10 +280,9 @@ pub struct TasksFile {
 impl TasksFile {
     /// Parse a tasks.toml file.
     pub fn parse(path: &Path) -> Result<Self> {
-        let content = std::fs::read_to_string(path)
-            .with_context(|| format!("read {}", path.display()))?;
-        toml::from_str(&content)
-            .with_context(|| format!("parse tasks.toml at {}", path.display()))
+        let content =
+            std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        toml::from_str(&content).with_context(|| format!("parse tasks.toml at {}", path.display()))
     }
 
     /// Get all tasks that are ready to execute (deps satisfied).
@@ -339,7 +351,11 @@ impl TasksFile {
             if task.verify.is_empty() {
                 issues.push(format!("{tid}: missing verify steps"));
             }
-            if task.context.as_ref().is_none_or(|c| c.read_files.is_empty()) {
+            if task
+                .context
+                .as_ref()
+                .is_none_or(|c| c.read_files.is_empty())
+            {
                 issues.push(format!("{tid}: missing context.read_files"));
             }
         }
@@ -358,7 +374,13 @@ fn extract_line_range(content: &str, range: &str) -> String {
         .saturating_sub(1);
     let end = parts
         .get(1)
-        .and_then(|s| if s.is_empty() { None } else { s.parse::<usize>().ok() })
+        .and_then(|s| {
+            if s.is_empty() {
+                None
+            } else {
+                s.parse::<usize>().ok()
+            }
+        })
         .unwrap_or(lines.len())
         .min(lines.len());
     lines[start..end].join("\n")
@@ -408,7 +430,7 @@ title = "Wire module"
 tier = "focused"
 model_hint = "claude-sonnet-4-6"
 max_loc = 50
-files = ["src/main.rs"]
+write_files = ["src/main.rs"]
 depends_on = []
 
 [task.context]
@@ -432,6 +454,8 @@ command = "cargo check -p roko-cli"
         assert_eq!(task.tier, "focused");
         assert_eq!(task.model_hint.as_deref(), Some("claude-sonnet-4-6"));
         assert_eq!(task.max_loc, Some(50));
+        assert_eq!(task.files, vec!["src/main.rs"]);
+        assert_eq!(task.timeout_secs, 600);
         assert!(task.context.is_some());
         let ctx = task.context.as_ref().unwrap();
         assert_eq!(ctx.read_files.len(), 1);
@@ -451,13 +475,18 @@ command = "cargo check -p roko-cli"
             max_loc: None,
             files: vec![],
             depends_on: vec![],
+            depends_on_plan: vec![],
             context: None,
             verify: vec![],
+            timeout_secs: 600,
             acceptance: vec![],
         };
         assert_eq!(task.effective_model("fallback", None), "claude-haiku-4-5");
 
-        let t2 = TaskDef { tier: "architectural".into(), ..task.clone() };
+        let t2 = TaskDef {
+            tier: "architectural".into(),
+            ..task.clone()
+        };
         assert_eq!(t2.effective_model("fallback", None), "claude-opus-4-6");
 
         let t3 = TaskDef {
@@ -470,7 +499,8 @@ command = "cargo check -p roko-cli"
 
     #[test]
     fn ready_tasks_respects_deps() {
-        let tasks: TasksFile = toml::from_str(r#"
+        let tasks: TasksFile = toml::from_str(
+            r#"
 [meta]
 plan = "test"
 total = 3
@@ -489,7 +519,9 @@ depends_on = ["T1"]
 id = "T3"
 title = "independent"
 depends_on = []
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let ready = tasks.ready_tasks(&[]);
         assert_eq!(ready.len(), 2); // T1 and T3
@@ -502,7 +534,8 @@ depends_on = []
 
     #[test]
     fn parallel_groups_computes_levels() {
-        let tasks: TasksFile = toml::from_str(r#"
+        let tasks: TasksFile = toml::from_str(
+            r#"
 [meta]
 plan = "test"
 total = 4
@@ -526,7 +559,9 @@ depends_on = ["T1"]
 id = "T4"
 title = "depends on T3"
 depends_on = ["T3"]
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let groups = tasks.parallel_groups();
         assert_eq!(groups.len(), 3);
@@ -544,7 +579,8 @@ depends_on = ["T3"]
 
     #[test]
     fn update_cross_refs() {
-        let mut tasks: TasksFile = toml::from_str(r#"
+        let mut tasks: TasksFile = toml::from_str(
+            r#"
 [meta]
 plan = "test"
 total = 1
@@ -553,7 +589,9 @@ total = 1
 id = "T1"
 title = "depends on external"
 depends_on = ["other-plan:T3"]
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         tasks.update_cross_refs("other-plan:T3", "other-plan:T5");
         assert_eq!(tasks.tasks[0].depends_on[0], "other-plan:T5");
     }
@@ -569,8 +607,10 @@ depends_on = ["other-plan:T3"]
             max_loc: None,
             files: vec![],
             depends_on: vec![],
+            depends_on_plan: vec![],
             context: None,
             verify: vec![],
+            timeout_secs: 600,
             acceptance: vec![],
         };
         let original = "Original task prompt";
@@ -593,8 +633,10 @@ depends_on = ["other-plan:T3"]
             max_loc: None,
             files: vec![],
             depends_on: vec![],
+            depends_on_plan: vec![],
             context: None,
             verify: vec![],
+            timeout_secs: 600,
             acceptance: vec![],
         };
         let original = "Original prompt";

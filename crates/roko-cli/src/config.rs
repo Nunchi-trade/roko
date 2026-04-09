@@ -8,6 +8,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+use roko_orchestrator::ExecutorConfig;
+
 /// The top-level `roko.toml` document.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Config {
@@ -19,6 +21,9 @@ pub struct Config {
     /// Gates to run on the agent output, in declaration order.
     #[serde(default, rename = "gate")]
     pub gates: Vec<GateConfig>,
+    /// Executor runtime settings.
+    #[serde(default)]
+    pub executor: ExecutorConfig,
     /// Cost budget configuration.
     #[serde(default)]
     pub budget: BudgetConfig,
@@ -30,6 +35,7 @@ impl Default for Config {
             agent: AgentConfig::default(),
             prompt: PromptConfig::default(),
             gates: vec![GateConfig::default_shell_true()],
+            executor: ExecutorConfig::default(),
             budget: BudgetConfig::default(),
         }
     }
@@ -149,8 +155,12 @@ pub struct EscalationConfig {
 }
 
 impl EscalationConfig {
-    const fn default_max_retries() -> u32 { 3 }
-    const fn default_escalate() -> bool { true }
+    const fn default_max_retries() -> u32 {
+        3
+    }
+    const fn default_escalate() -> bool {
+        true
+    }
 }
 
 impl Default for EscalationConfig {
@@ -180,10 +190,18 @@ pub struct BudgetConfig {
 }
 
 impl BudgetConfig {
-    const fn default_max_plan() -> f64 { 10.0 }
-    const fn default_max_task() -> f64 { 1.0 }
-    const fn default_max_session() -> f64 { 50.0 }
-    const fn default_warn_pct() -> u32 { 80 }
+    const fn default_max_plan() -> f64 {
+        10.0
+    }
+    const fn default_max_task() -> f64 {
+        1.0
+    }
+    const fn default_max_session() -> f64 {
+        50.0
+    }
+    const fn default_warn_pct() -> u32 {
+        80
+    }
 }
 
 impl Default for BudgetConfig {
@@ -235,9 +253,15 @@ pub struct ContextBudgetConfig {
 }
 
 impl ContextBudgetConfig {
-    const fn default_surgical() -> usize { 4_000 }
-    const fn default_focused() -> usize { 12_000 }
-    const fn default_full() -> usize { 24_000 }
+    const fn default_surgical() -> usize {
+        4_000
+    }
+    const fn default_focused() -> usize {
+        12_000
+    }
+    const fn default_full() -> usize {
+        24_000
+    }
 
     /// Convert to the ContextBudgets type used by roko-compose.
     #[must_use]
@@ -434,6 +458,9 @@ pub struct ConfigLayer {
     /// Gate list (replaces rather than merges if present).
     #[serde(default, rename = "gate", skip_serializing_if = "Option::is_none")]
     pub gates: Option<Vec<GateConfig>>,
+    /// Executor settings overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executor: Option<ExecutorLayer>,
 }
 
 impl ConfigLayer {
@@ -468,13 +495,22 @@ impl ConfigLayer {
         if let Some(g) = overlay.gates {
             self.gates = Some(g);
         }
+        if let Some(e) = overlay.executor {
+            self.executor = Some(match self.executor {
+                Some(base) => base.merge(e),
+                None => e,
+            });
+        }
         self
     }
 
     /// True if this layer has no fields set.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.agent.is_none() && self.prompt.is_none() && self.gates.is_none()
+        self.agent.is_none()
+            && self.prompt.is_none()
+            && self.gates.is_none()
+            && self.executor.is_none()
     }
 
     /// Resolve into a concrete [`Config`], filling missing fields with defaults.
@@ -514,10 +550,32 @@ impl ConfigLayer {
             None => PromptConfig::default(),
         };
         let gates = self.gates.unwrap_or_default();
+        let executor = match self.executor {
+            Some(e) => {
+                let defaults = ExecutorConfig::default();
+                ExecutorConfig {
+                    max_concurrent_plans: e
+                        .max_concurrent_plans
+                        .unwrap_or(defaults.max_concurrent_plans),
+                    max_concurrent_tasks: e
+                        .max_concurrent_tasks
+                        .unwrap_or(defaults.max_concurrent_tasks),
+                    max_auto_fix_iterations: e
+                        .max_auto_fix_iterations
+                        .unwrap_or(defaults.max_auto_fix_iterations),
+                    max_merge_attempts: e.max_merge_attempts.unwrap_or(defaults.max_merge_attempts),
+                    task_timeout_secs: e.task_timeout_secs.unwrap_or(defaults.task_timeout_secs),
+                    budget_usd: e.budget_usd.or(defaults.budget_usd),
+                    auto_replan: e.auto_replan.unwrap_or(defaults.auto_replan),
+                }
+            }
+            None => ExecutorConfig::default(),
+        };
         Config {
             agent,
             prompt,
             gates,
+            executor,
             budget: BudgetConfig::default(),
         }
     }
@@ -589,6 +647,50 @@ pub struct PromptLayer {
     /// Files to inject as prompt sections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub files: Option<Vec<PromptFile>>,
+}
+
+/// Partial `ExecutorConfig` — every field optional.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ExecutorLayer {
+    /// Maximum number of plans executing concurrently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_plans: Option<usize>,
+    /// Maximum number of tasks executing concurrently within a plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_tasks: Option<usize>,
+    /// Maximum auto-fix iterations before declaring failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_auto_fix_iterations: Option<u32>,
+    /// Maximum merge retry attempts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_merge_attempts: Option<u32>,
+    /// Per-task timeout in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_timeout_secs: Option<u64>,
+    /// Optional cost cap in USD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_usd: Option<f64>,
+    /// Whether to auto-replan after repeated gate failures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_replan: Option<bool>,
+}
+
+impl ExecutorLayer {
+    /// Merge another layer on top — `overlay` wins.
+    #[must_use]
+    pub fn merge(self, overlay: Self) -> Self {
+        Self {
+            max_concurrent_plans: overlay.max_concurrent_plans.or(self.max_concurrent_plans),
+            max_concurrent_tasks: overlay.max_concurrent_tasks.or(self.max_concurrent_tasks),
+            max_auto_fix_iterations: overlay
+                .max_auto_fix_iterations
+                .or(self.max_auto_fix_iterations),
+            max_merge_attempts: overlay.max_merge_attempts.or(self.max_merge_attempts),
+            task_timeout_secs: overlay.task_timeout_secs.or(self.task_timeout_secs),
+            budget_usd: overlay.budget_usd.or(self.budget_usd),
+            auto_replan: overlay.auto_replan.or(self.auto_replan),
+        }
+    }
 }
 
 impl PromptLayer {

@@ -505,7 +505,11 @@ impl DashboardSnapshot {
             }
         }
         let _ = writeln!(out, "prompt tokens vs pass rate:");
-        let _ = writeln!(out, "  {:>10}  {:>6}  {:>9}  bar", "tokens", "count", "pass rate");
+        let _ = writeln!(
+            out,
+            "  {:>10}  {:>6}  {:>9}  bar",
+            "tokens", "count", "pass rate"
+        );
         for (bucket, (total, passed)) in &buckets {
             let rate = if *total > 0 {
                 *passed as f64 / *total as f64
@@ -527,8 +531,12 @@ impl DashboardSnapshot {
         // cost vs pass rate.
         let _ = writeln!(out);
         let _ = writeln!(out, "cost vs pass rate:");
-        let cost_buckets: Vec<(f64, &str)> =
-            vec![(0.001, "<$0.001"), (0.01, "<$0.01"), (0.1, "<$0.10"), (f64::MAX, ">=$0.10")];
+        let cost_buckets: Vec<(f64, &str)> = vec![
+            (0.001, "<$0.001"),
+            (0.01, "<$0.01"),
+            (0.1, "<$0.10"),
+            (f64::MAX, ">=$0.10"),
+        ];
         let _ = writeln!(out, "  {:>10}  {:>6}  {:>9}", "range", "count", "pass rate");
         let mut prev = 0.0_f64;
         for (threshold, label) in &cost_buckets {
@@ -541,7 +549,13 @@ impl DashboardSnapshot {
             let passed = matching.iter().filter(|e| e.gate_passed).count();
             if total > 0 {
                 let rate = count_to_f64(passed) / count_to_f64(total);
-                let _ = writeln!(out, "  {:>10}  {:>6}  {:>9}", label, total, format_pct(rate));
+                let _ = writeln!(
+                    out,
+                    "  {:>10}  {:>6}  {:>9}",
+                    label,
+                    total,
+                    format_pct(rate)
+                );
             }
             prev = *threshold;
         }
@@ -567,7 +581,11 @@ impl DashboardSnapshot {
             }
             if !snap.confidence_stats.is_empty() {
                 let _ = writeln!(out, "  confidence-stage stats:");
-                let _ = writeln!(out, "    {:>20}  {:>8}  {:>8}  {:>9}", "model", "trials", "passes", "pass rate");
+                let _ = writeln!(
+                    out,
+                    "    {:>20}  {:>8}  {:>8}  {:>9}",
+                    "model", "trials", "passes", "pass rate"
+                );
                 let mut stats: Vec<_> = snap.confidence_stats.iter().collect();
                 stats.sort_by(|a, b| b.1.trials.cmp(&a.1.trials));
                 for (model, s) in stats {
@@ -580,7 +598,10 @@ impl DashboardSnapshot {
                     let _ = writeln!(
                         out,
                         "    {:>20}  {:>8}  {:>8}  {:>9}",
-                        model, s.trials, s.successes, format_pct(rate)
+                        model,
+                        s.trials,
+                        s.successes,
+                        format_pct(rate)
                     );
                 }
             }
@@ -590,7 +611,11 @@ impl DashboardSnapshot {
         // Adaptive gate thresholds.
         if let Some(at) = &self.adaptive_thresholds {
             let _ = writeln!(out, "adaptive gate thresholds:");
-            let _ = writeln!(out, "  {:>5}  {:>12}  {:>6}  {:>12}  {:>4}", "rung", "ema pass rate", "obs", "consec pass", "skip");
+            let _ = writeln!(
+                out,
+                "  {:>5}  {:>12}  {:>6}  {:>12}  {:>4}",
+                "rung", "ema pass rate", "obs", "consec pass", "skip"
+            );
             let mut rungs: Vec<_> = at.all_rungs().collect();
             rungs.sort_by_key(|(r, _)| *r);
             for (rung, stats) in rungs {
@@ -659,7 +684,11 @@ impl DashboardSnapshot {
 
         // Show EMA confidence per rung.
         let _ = writeln!(out, "gate EMA confidence by rung:");
-        let _ = writeln!(out, "  {:>5}  {:>12}  {:>12}  {:>6}", "rung", "ema pass", "observations", "retries");
+        let _ = writeln!(
+            out,
+            "  {:>5}  {:>12}  {:>12}  {:>6}",
+            "rung", "ema pass", "observations", "retries"
+        );
         let mut rungs: Vec<_> = at.all_rungs().collect();
         rungs.sort_by_key(|(r, _)| *r);
         for (rung, stats) in &rungs {
@@ -685,13 +714,11 @@ impl DashboardSnapshot {
         let _ = writeln!(out, "optimization cycle:");
         let _ = writeln!(out, "  total observations: {total_obs}");
         let _ = writeln!(out, "  avg ema pass rate: {}", format_pct(avg_ema));
-        let skippable: usize = rungs.iter().filter(|(r, _)| at.should_skip_rung(**r)).count();
-        let _ = writeln!(
-            out,
-            "  skippable rungs: {} / {}",
-            skippable,
-            rungs.len()
-        );
+        let skippable: usize = rungs
+            .iter()
+            .filter(|(r, _)| at.should_skip_rung(**r))
+            .count();
+        let _ = writeln!(out, "  skippable rungs: {} / {}", skippable, rungs.len());
 
         // Experiment store summary if present.
         if let Some(store) = &self.experiments {
@@ -765,11 +792,7 @@ impl DashboardSnapshot {
         let state: serde_json::Value = serde_json::from_str(&state_text).ok()?;
 
         let mut out = page_header(page);
-        let _ = writeln!(
-            out,
-            "source: {}",
-            state_path.display()
-        );
+        let _ = writeln!(out, "source: {}", state_path.display());
 
         // Show task list from the executor state.
         if let Some(tasks) = state.get("tasks").and_then(|t| t.as_array()) {
@@ -788,7 +811,10 @@ impl DashboardSnapshot {
                 .count();
             let pending = total - done - failed - running;
             let _ = writeln!(out);
-            let _ = writeln!(out, "tasks: {total} total, {done} done, {failed} failed, {running} running, {pending} pending");
+            let _ = writeln!(
+                out,
+                "tasks: {total} total, {done} done, {failed} failed, {running} running, {pending} pending"
+            );
             let _ = writeln!(out);
 
             // Task table.
@@ -798,10 +824,7 @@ impl DashboardSnapshot {
                     .get("status")
                     .and_then(|s| s.as_str())
                     .unwrap_or("unknown");
-                let id = task
-                    .get("id")
-                    .and_then(|s| s.as_str())
-                    .unwrap_or("-");
+                let id = task.get("id").and_then(|s| s.as_str()).unwrap_or("-");
                 let _ = writeln!(out, "  {:>4}  {:>10}  {:>30}", i, status, id);
             }
         } else {

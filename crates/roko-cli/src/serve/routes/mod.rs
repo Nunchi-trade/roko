@@ -29,10 +29,8 @@ pub fn build_router(state: Arc<AppState>, cors_origins: &[String]) -> Router {
     let cors = if cors_origins.is_empty() {
         CorsLayer::permissive()
     } else {
-        let allowed: Vec<axum::http::HeaderValue> = cors_origins
-            .iter()
-            .filter_map(|o| o.parse().ok())
-            .collect();
+        let allowed: Vec<axum::http::HeaderValue> =
+            cors_origins.iter().filter_map(|o| o.parse().ok()).collect();
         CorsLayer::new()
             .allow_origin(allowed)
             .allow_methods(Any)

@@ -168,11 +168,17 @@ pub fn rebuild_plans_index(workdir: &Path) -> Result<()> {
         total_done += done;
     }
 
-    let _ = writeln!(out, "\n**Total**: {} plans, {} tasks, {} done ({:.0}%)",
+    let _ = writeln!(
+        out,
+        "\n**Total**: {} plans, {} tasks, {} done ({:.0}%)",
         plan_dirs.len(),
         total_tasks,
         total_done,
-        if total_tasks > 0 { total_done as f64 / total_tasks as f64 * 100.0 } else { 0.0 }
+        if total_tasks > 0 {
+            total_done as f64 / total_tasks as f64 * 100.0
+        } else {
+            0.0
+        }
     );
 
     std::fs::write(plans_index_path(workdir), &out)?;
@@ -240,7 +246,10 @@ pub fn rebuild_master_index(workdir: &Path) -> Result<()> {
         .lines()
         .filter(|l| l.starts_with("- "))
         .count();
-    let _ = writeln!(out, "## PRDs ({published_count} published, {drafts_count} drafts, {ideas_count} ideas)");
+    let _ = writeln!(
+        out,
+        "## PRDs ({published_count} published, {drafts_count} drafts, {ideas_count} ideas)"
+    );
     let _ = writeln!(out, "→ [Full index](.roko/prd/INDEX.md)\n");
 
     // Plans summary
@@ -261,7 +270,10 @@ pub fn rebuild_master_index(workdir: &Path) -> Result<()> {
             }
         }
     }
-    let _ = writeln!(out, "## Plans ({plan_count} plans, {task_count} tasks, {done_count} done)");
+    let _ = writeln!(
+        out,
+        "## Plans ({plan_count} plans, {task_count} tasks, {done_count} done)"
+    );
     let _ = writeln!(out, "→ [Full index](plans/INDEX.md)\n");
 
     // Research summary
@@ -288,7 +300,15 @@ pub fn rebuild_master_index(workdir: &Path) -> Result<()> {
     // Config
     let config_exists = workdir.join("roko.toml").exists();
     let _ = writeln!(out, "## Config");
-    let _ = writeln!(out, "- `roko.toml`: {}", if config_exists { "✅ present" } else { "❌ missing" });
+    let _ = writeln!(
+        out,
+        "- `roko.toml`: {}",
+        if config_exists {
+            "✅ present"
+        } else {
+            "❌ missing"
+        }
+    );
 
     std::fs::write(master_index_path(workdir), &out)?;
     Ok(())
@@ -403,7 +423,8 @@ mod tests {
         std::fs::write(
             drafts.join("test-prd.md"),
             "---\ntitle: Test PRD\nstatus: draft\ncreated: 2026-04-08\n---\n# Test\n",
-        ).unwrap();
+        )
+        .unwrap();
         rebuild_prd_index(tmp.path()).unwrap();
         let content = std::fs::read_to_string(prd_index_path(tmp.path())).unwrap();
         assert!(content.contains("test-prd"));
@@ -420,7 +441,8 @@ mod tests {
             "[meta]\nplan = \"test\"\nmax_parallel = 2\n\n\
              [[task]]\nid = \"T1\"\nstatus = \"done\"\n\n\
              [[task]]\nid = \"T2\"\nstatus = \"ready\"\n",
-        ).unwrap();
+        )
+        .unwrap();
         rebuild_plans_index(tmp.path()).unwrap();
         let content = std::fs::read_to_string(plans_index_path(tmp.path())).unwrap();
         assert!(content.contains("test-plan"));

@@ -7,7 +7,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::serve::error::ApiError;
 use crate::serve::events::ServerEvent;
@@ -24,9 +24,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 }
 
 /// `GET /api/research` — list research artifacts from `.roko/research/`.
-async fn list_research(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Value>, ApiError> {
+async fn list_research(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let dir = state.workdir.join(".roko").join("research");
     if !dir.is_dir() {
         return Ok(Json(json!([])));
@@ -94,9 +92,7 @@ async fn enhance_tasks(
 }
 
 /// `POST /api/research/analyze` — analyze execution data.
-async fn analyze(
-    State(state): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, ApiError> {
+async fn analyze(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, ApiError> {
     spawn_research_op(&state, "analyze", "execution_data").await
 }
 

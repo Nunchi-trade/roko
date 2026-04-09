@@ -7,7 +7,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::serve::error::ApiError;
 use crate::serve::events::ServerEvent;
@@ -25,9 +25,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 }
 
 /// `GET /api/templates` — list all templates from the registry.
-async fn list_templates(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Value>, ApiError> {
+async fn list_templates(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let registry = state.templates.read().await;
     let items: Vec<Value> = registry
         .list()
@@ -189,9 +187,9 @@ async fn deploy_template_cloud(
     name: String,
     body: DeployRequest,
 ) -> Result<(axum::http::StatusCode, Json<Value>), ApiError> {
+    use crate::serve::deploy::DeploySpec;
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD as BASE64;
-    use crate::serve::deploy::DeploySpec;
 
     // Look up and render template
     let templates = state.templates.read().await;

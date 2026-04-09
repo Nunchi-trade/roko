@@ -32,9 +32,7 @@ impl TaskBriefGenerator {
     /// Create a new brief generator with default settings.
     #[must_use]
     pub const fn new() -> Self {
-        Self {
-            max_plan_lines: 30,
-        }
+        Self { max_plan_lines: 30 }
     }
 
     /// Override the maximum plan lines to include.
@@ -121,9 +119,7 @@ fn extract_why(plan: &str, task: &TaskInput, max_lines: usize) -> String {
     let mut relevant_lines = Vec::new();
 
     // Build a set of search terms: filenames + basenames + title words
-    let mut search_terms: Vec<String> = task.files.iter()
-        .map(|f| f.to_ascii_lowercase())
-        .collect();
+    let mut search_terms: Vec<String> = task.files.iter().map(|f| f.to_ascii_lowercase()).collect();
 
     // Add basenames
     for f in &task.files {
@@ -137,14 +133,40 @@ fn extract_why(plan: &str, task: &TaskInput, max_lines: usize) -> String {
 
     // Add significant words from the task title (skip common words)
     let skip_words: &[&str] = &[
-        "the", "a", "an", "in", "to", "for", "and", "or", "of", "with", "from",
-        "into", "on", "at", "by", "is", "are", "was", "were", "be", "been",
-        "add", "wire", "implement", "create", "update", "fix", "remove",
+        "the",
+        "a",
+        "an",
+        "in",
+        "to",
+        "for",
+        "and",
+        "or",
+        "of",
+        "with",
+        "from",
+        "into",
+        "on",
+        "at",
+        "by",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "add",
+        "wire",
+        "implement",
+        "create",
+        "update",
+        "fix",
+        "remove",
     ];
     for word in task.title.split_whitespace() {
         let lower = word.to_ascii_lowercase();
         // Only include words that are meaningful (3+ chars, not common)
-        if lower.len() >= 3 && !skip_words.contains(&lower.as_str())
+        if lower.len() >= 3
+            && !skip_words.contains(&lower.as_str())
             && !search_terms.contains(&lower)
         {
             search_terms.push(lower);
@@ -167,8 +189,12 @@ fn extract_why(plan: &str, task: &TaskInput, max_lines: usize) -> String {
             if lower.contains(term.as_str()) {
                 // File path matches are worth more than title word matches
                 if term.contains('/')
-                    || Path::new(term).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
-                    || Path::new(term).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("toml"))
+                    || Path::new(term)
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
+                    || Path::new(term)
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"))
                 {
                     score += 3;
                 } else {
@@ -213,7 +239,11 @@ fn generate_how(task: &TaskInput, siblings: &[SiblingTask]) -> String {
                     "running" | "in_progress" => " (running)",
                     _ => "",
                 };
-                let _ = writeln!(how, "- **{}**: {}{}", sibling.id, sibling.title, status_marker);
+                let _ = writeln!(
+                    how,
+                    "- **{}**: {}{}",
+                    sibling.id, sibling.title, status_marker
+                );
             } else {
                 let _ = writeln!(how, "- **{dep_id}** (external)");
             }

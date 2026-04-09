@@ -7,7 +7,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::serve::error::ApiError;
 use crate::serve::events::ServerEvent;
@@ -50,10 +50,7 @@ async fn start_run(
             match crate::run::run_once(&workdir, &config, &prompt).await {
                 Ok(report) => {
                     let success = report.overall_success();
-                    bus.emit(ServerEvent::RunCompleted {
-                        run_id,
-                        success,
-                    });
+                    bus.emit(ServerEvent::RunCompleted { run_id, success });
                 }
                 Err(e) => {
                     bus.emit(ServerEvent::Error {
@@ -75,7 +72,11 @@ async fn start_run(
         handle,
     };
 
-    state.active_runs.write().await.insert(run_id.clone(), run_handle);
+    state
+        .active_runs
+        .write()
+        .await
+        .insert(run_id.clone(), run_handle);
 
     Ok((
         axum::http::StatusCode::ACCEPTED,

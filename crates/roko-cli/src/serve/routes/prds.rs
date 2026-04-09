@@ -7,7 +7,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::serve::error::ApiError;
 use crate::serve::events::ServerEvent;
@@ -25,9 +25,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 }
 
 /// `GET /api/prds` — list PRD slugs from drafts/ and published/.
-async fn list_prds(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Value>, ApiError> {
+async fn list_prds(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let prd_dir = state.workdir.join(".roko").join("prd");
     let mut entries = Vec::new();
 
@@ -226,9 +224,7 @@ async fn plan_from_prd(
 }
 
 /// `GET /api/prds/status` — coverage report (draft/published/plan counts).
-async fn prds_coverage(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Value>, ApiError> {
+async fn prds_coverage(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let prd_dir = state.workdir.join(".roko").join("prd");
     let drafts = count_md_files(&prd_dir.join("drafts")).await;
     let published = count_md_files(&prd_dir.join("published")).await;
@@ -314,10 +310,7 @@ async fn count_entries(dir: &std::path::Path) -> usize {
 }
 
 /// Count entries in a directory matching a predicate.
-async fn count_entries_with(
-    dir: &std::path::Path,
-    pred: impl Fn(&str) -> bool,
-) -> usize {
+async fn count_entries_with(dir: &std::path::Path, pred: impl Fn(&str) -> bool) -> usize {
     let Ok(mut rd) = tokio::fs::read_dir(dir).await else {
         return 0;
     };

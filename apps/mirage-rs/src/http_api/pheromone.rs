@@ -9,7 +9,10 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::{ApiError, ApiState, MAX_K, MAX_LIMIT, MIN_BUCKET_WIDTH, PaginatedResponse, now_secs, with_cache_control};
+use super::{
+    ApiError, ApiState, MAX_K, MAX_LIMIT, MIN_BUCKET_WIDTH, PaginatedResponse, now_secs,
+    with_cache_control,
+};
 use crate::chain::{PheromoneKind, pheromone::PheromoneId};
 
 // ---------------------------------------------------------------------------
@@ -483,8 +486,7 @@ pub async fn pheromone_projection(
             let offset = step_secs * i as u64;
             let elapsed = now.saturating_sub(pheromone.deposited_at) as f64 + offset as f64;
             let projected = if tau > 0.0 {
-                pheromone.base_intensity as f64
-                    * (-elapsed / tau * std::f64::consts::LN_2).exp()
+                pheromone.base_intensity as f64 * (-elapsed / tau * std::f64::consts::LN_2).exp()
             } else {
                 0.0
             };

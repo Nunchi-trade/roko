@@ -5,7 +5,7 @@ use std::sync::Arc;
 use axum::extract::{Path, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use bardo_runtime::process::ProcessId;
 
@@ -21,9 +21,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 }
 
 /// `GET /api/agents` — list all managed agent processes.
-async fn list_agents(
-    State(state): State<Arc<AppState>>,
-) -> Json<Value> {
+async fn list_agents(State(state): State<Arc<AppState>>) -> Json<Value> {
     let entries = state.supervisor.list().await;
     let items: Vec<Value> = entries
         .into_iter()
@@ -43,9 +41,7 @@ async fn get_agent(
     Path(id): Path<u64>,
 ) -> Result<Json<Value>, ApiError> {
     let entries = state.supervisor.list().await;
-    let found = entries
-        .into_iter()
-        .find(|(pid, _)| pid.0 == id);
+    let found = entries.into_iter().find(|(pid, _)| pid.0 == id);
 
     match found {
         Some((pid, label)) => Ok(Json(json!({
@@ -61,19 +57,15 @@ async fn stop_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<u64>,
 ) -> Result<Json<Value>, ApiError> {
-    state
-        .supervisor
-        .shutdown(ProcessId(id))
-        .await
-        .map_or_else(
-            || Err(ApiError::not_found(format!("agent {id} not found"))),
-            |o| {
-                Ok(Json(json!({
-                    "id": id,
-                    "outcome": format!("{o:?}"),
-                })))
-            },
-        )
+    state.supervisor.shutdown(ProcessId(id)).await.map_or_else(
+        || Err(ApiError::not_found(format!("agent {id} not found"))),
+        |o| {
+            Ok(Json(json!({
+                "id": id,
+                "outcome": format!("{o:?}"),
+            })))
+        },
+    )
 }
 
 /// `GET /api/agents/:id/episodes` — filter episodes for a specific agent.
@@ -86,9 +78,7 @@ async fn agent_episodes(
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Json(json!([]))),
         Err(e) => {
-            return Err(ApiError::internal(format!(
-                "read episodes: {e}"
-            )));
+            return Err(ApiError::internal(format!("read episodes: {e}")));
         }
     };
 
@@ -100,10 +90,7 @@ async fn agent_episodes(
         .filter(|v| {
             // Match on agent_id field (could be numeric or string).
             v.get("agent_id")
-                .is_some_and(|a| {
-                    a.as_str() == Some(&agent_id_str)
-                        || a.as_u64() == Some(id)
-                })
+                .is_some_and(|a| a.as_str() == Some(&agent_id_str) || a.as_u64() == Some(id))
         })
         .collect();
 

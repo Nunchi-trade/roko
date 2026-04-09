@@ -42,8 +42,7 @@ pub async fn run_server(workdir: PathBuf, bind: Option<String>, port: Option<u16
     let roko_config: RokoConfig = if roko_toml_path.exists() {
         let text = std::fs::read_to_string(&roko_toml_path)
             .with_context(|| format!("read {}", roko_toml_path.display()))?;
-        toml::from_str(&text)
-            .with_context(|| format!("parse {}", roko_toml_path.display()))?
+        toml::from_str(&text).with_context(|| format!("parse {}", roko_toml_path.display()))?
     } else {
         warn!(
             "no roko.toml found at {}; using defaults",
@@ -91,7 +90,10 @@ pub async fn run_server(workdir: PathBuf, bind: Option<String>, port: Option<u16
         ) {
             Ok(b) => Arc::from(b),
             Err(e) => {
-                warn!("failed to create deploy backend '{}': {e}; falling back to manual", dc.backend);
+                warn!(
+                    "failed to create deploy backend '{}': {e}; falling back to manual",
+                    dc.backend
+                );
                 Arc::from(
                     deploy::create_backend("manual", None, None, None)
                         .expect("manual backend cannot fail"),
@@ -100,7 +102,12 @@ pub async fn run_server(workdir: PathBuf, bind: Option<String>, port: Option<u16
         }
     };
 
-    let state = Arc::new(AppState::new(workdir.clone(), config, roko_config, deploy_backend));
+    let state = Arc::new(AppState::new(
+        workdir.clone(),
+        config,
+        roko_config,
+        deploy_backend,
+    ));
     let router = routes::build_router(Arc::clone(&state), &cors_origins);
 
     // -- Bind and serve -----------------------------------------------------

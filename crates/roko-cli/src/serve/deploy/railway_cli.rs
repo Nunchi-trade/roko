@@ -138,15 +138,9 @@ impl DeployBackend for RailwayCliBackend {
     }
 
     async fn teardown(&self, deployment_id: &str) -> Result<()> {
-        self.railway_cmd(&[
-            "service",
-            "delete",
-            "--service",
-            deployment_id,
-            "--yes",
-        ])
-        .await
-        .context("railway service delete failed")?;
+        self.railway_cmd(&["service", "delete", "--service", deployment_id, "--yes"])
+            .await
+            .context("railway service delete failed")?;
         info!(%deployment_id, "torn down Railway service via CLI");
         Ok(())
     }

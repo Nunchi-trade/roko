@@ -53,7 +53,13 @@ fn ctx_with_exec() -> ToolContext {
     ToolContext::new(
         "/tmp",
         Duration::from_secs(5),
-        ToolPermission { read: true, write: true, exec: true, git: true, network: true },
+        ToolPermission {
+            read: true,
+            write: true,
+            exec: true,
+            git: true,
+            network: true,
+        },
         Arc::new(roko_core::tool::NoopAuditSink),
         Arc::new(roko_core::tool::NoopTraceSink),
         Arc::new(roko_core::tool::NoopMetricsSink),
@@ -110,7 +116,9 @@ async fn network_rfc1918_blocked() {
         )]));
     let resolver = resolver_from(vec![(
         "web_fetch",
-        Arc::new(NoopHandler { tool_name: "web_fetch" }) as Arc<dyn ToolHandler>,
+        Arc::new(NoopHandler {
+            tool_name: "web_fetch",
+        }) as Arc<dyn ToolHandler>,
     )]);
 
     let policy = SafetyPolicy {
@@ -148,7 +156,9 @@ async fn network_rfc1918_blocked() {
         )]));
     let resolver2 = resolver_from(vec![(
         "web_fetch",
-        Arc::new(NoopHandler { tool_name: "web_fetch" }) as Arc<dyn ToolHandler>,
+        Arc::new(NoopHandler {
+            tool_name: "web_fetch",
+        }) as Arc<dyn ToolHandler>,
     )]);
     let policy2 = SafetyPolicy {
         bash: None,
@@ -254,10 +264,7 @@ async fn rate_limit_exceeded() {
             serde_json::json!({ "command": "echo hello" }),
         );
         let res = dispatcher.dispatch(call, &ctx).await;
-        assert!(
-            res.is_ok(),
-            "call {i} should succeed, got {res:?}"
-        );
+        assert!(res.is_ok(), "call {i} should succeed, got {res:?}");
     }
 
     // 4th call should be blocked by rate limiter.
@@ -297,11 +304,7 @@ async fn safe_calls_pass_through_with_all_policies() {
     let policy = SafetyPolicy::defaults();
     let dispatcher = ToolDispatcher::new(registry, resolver).with_safety_policy(policy);
 
-    let call = ToolCall::new(
-        "safe",
-        "bash",
-        serde_json::json!({ "command": "ls -la" }),
-    );
+    let call = ToolCall::new("safe", "bash", serde_json::json!({ "command": "ls -la" }));
     let result = dispatcher.dispatch(call, &ctx_with_exec()).await;
     assert!(
         result.is_ok(),

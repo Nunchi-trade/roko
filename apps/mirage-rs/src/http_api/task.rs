@@ -245,10 +245,7 @@ pub async fn start_task(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let now = now_secs();
     let mut chain = state.chain.write();
-    chain
-        .task_store
-        .start(id, now)
-        .map_err(task_error_to_api)?;
+    chain.task_store.start(id, now).map_err(task_error_to_api)?;
 
     let assignee = chain
         .task_store
@@ -301,10 +298,13 @@ pub async fn complete_task(
         .unwrap_or_default();
 
     if !assignee.is_empty() {
-        chain.agent_registry.add_stats_delta(&assignee, &AgentStats {
-            tasks_completed: 1,
-            ..AgentStats::default()
-        });
+        chain.agent_registry.add_stats_delta(
+            &assignee,
+            &AgentStats {
+                tasks_completed: 1,
+                ..AgentStats::default()
+            },
+        );
     }
 
     let _ = chain.task_bus.send(crate::chain::TaskEvent::Completed {
@@ -363,10 +363,13 @@ pub async fn fail_task(
         .map_err(task_error_to_api)?;
 
     if !assignee.is_empty() {
-        chain.agent_registry.add_stats_delta(&assignee, &AgentStats {
-            tasks_failed: 1,
-            ..AgentStats::default()
-        });
+        chain.agent_registry.add_stats_delta(
+            &assignee,
+            &AgentStats {
+                tasks_failed: 1,
+                ..AgentStats::default()
+            },
+        );
     }
 
     let new_state = chain

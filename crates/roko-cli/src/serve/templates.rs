@@ -110,8 +110,8 @@ impl TemplateRegistry {
             if path.extension().and_then(|e| e.to_str()) == Some("toml") {
                 let text = std::fs::read_to_string(&path)
                     .with_context(|| format!("read {}", path.display()))?;
-                let tpl: AgentTemplate = toml::from_str(&text)
-                    .with_context(|| format!("parse {}", path.display()))?;
+                let tpl: AgentTemplate =
+                    toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
                 self.templates.insert(tpl.name.clone(), tpl);
             }
         }

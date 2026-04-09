@@ -7,7 +7,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::plan::{Plan, PlanTask};
 use crate::serve::error::ApiError;
@@ -24,9 +24,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 }
 
 /// `GET /api/plans` — list plans from `.roko/plans/`.
-async fn list_plans(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Value>, ApiError> {
+async fn list_plans(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let plans_dir = state.workdir.join(".roko").join("plans");
     if !plans_dir.is_dir() {
         return Ok(Json(json!([])));
@@ -154,7 +152,9 @@ async fn execute_plan(
     {
         let active = state.active_plans.read().await;
         if active.contains_key(&id) {
-            return Err(ApiError::conflict(format!("plan {id} is already executing")));
+            return Err(ApiError::conflict(format!(
+                "plan {id} is already executing"
+            )));
         }
     }
 
@@ -300,10 +300,7 @@ async fn load_plan_file(path: &std::path::Path) -> Result<Plan, ApiError> {
         .await
         .map_err(|e| ApiError::internal(format!("read plan file: {e}")))?;
 
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("json");
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("json");
 
     let raw: RawPlan = match ext {
         "toml" => toml::from_str(&content)

@@ -1413,19 +1413,16 @@ pub fn handle_register_agent(
     role: String,
 ) -> Result<bool, ErrorObjectOwned> {
     let address = alloy_primitives::hex::decode(address_hex.trim_start_matches("0x"))
-        .map_err(|e| {
-            ErrorObjectOwned::owned(err_code::INVALID, e.to_string(), None::<()>)
-        })?;
+        .map_err(|e| ErrorObjectOwned::owned(err_code::INVALID, e.to_string(), None::<()>))?;
     let mut chain = chain.write();
     let timestamp = crate::http_api::now_secs();
     let registered = chain
         .agent_registry
         .register(id.clone(), address, role.clone(), timestamp);
     if registered {
-        let _ = chain.agent_bus.send(crate::chain::AgentEvent::Registered {
-            agent_id: id,
-            role,
-        });
+        let _ = chain
+            .agent_bus
+            .send(crate::chain::AgentEvent::Registered { agent_id: id, role });
     }
     Ok(registered)
 }
@@ -1464,7 +1461,7 @@ pub fn handle_agent_trace(
                 err_code::INVALID,
                 format!("invalid phase: {phase}; expected retrieve, reason, act, or verify"),
                 None::<()>,
-            ))
+            ));
         }
     };
     let mut chain = chain.write();

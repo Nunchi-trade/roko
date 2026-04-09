@@ -18,10 +18,7 @@ use serde_json::Value;
 use tower::ServiceExt;
 
 use mirage_rs::{
-    chain::{
-        KnowledgeKind, PheromoneKind,
-        projection::project_tokens,
-    },
+    chain::{KnowledgeKind, PheromoneKind, projection::project_tokens},
     chain_rpc::{ChainContext, ChainToggles},
     http_api::{self, ApiState, ProjectionCache},
 };
@@ -164,8 +161,12 @@ async fn get_json(router: &axum::Router, uri: &str) -> (StatusCode, Value) {
     let body = axum::body::to_bytes(resp.into_body(), 1_048_576)
         .await
         .unwrap();
-    let json: Value = serde_json::from_slice(&body)
-        .unwrap_or_else(|_| panic!("failed to parse JSON from GET {uri}: {}", String::from_utf8_lossy(&body)));
+    let json: Value = serde_json::from_slice(&body).unwrap_or_else(|_| {
+        panic!(
+            "failed to parse JSON from GET {uri}: {}",
+            String::from_utf8_lossy(&body)
+        )
+    });
     (status, json)
 }
 
@@ -182,8 +183,12 @@ async fn post_json(router: &axum::Router, uri: &str, body: Value) -> (StatusCode
     let bytes = axum::body::to_bytes(resp.into_body(), 1_048_576)
         .await
         .unwrap();
-    let json: Value = serde_json::from_slice(&bytes)
-        .unwrap_or_else(|_| panic!("failed to parse JSON from POST {uri}: {}", String::from_utf8_lossy(&bytes)));
+    let json: Value = serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+        panic!(
+            "failed to parse JSON from POST {uri}: {}",
+            String::from_utf8_lossy(&bytes)
+        )
+    });
     (status, json)
 }
 
@@ -200,7 +205,10 @@ async fn test_health_returns_ok() {
     // Chain counts nested under "chain.counts".
     let counts = &json["chain"]["counts"];
     assert!(counts["insights"].is_number(), "expected insights count");
-    assert!(counts["pheromones"].is_number(), "expected pheromones count");
+    assert!(
+        counts["pheromones"].is_number(),
+        "expected pheromones count"
+    );
     assert!(counts["agents"].is_number(), "expected agents count");
     // Toggles also present
     assert!(json["chain"]["toggles"].is_object(), "expected toggles");
@@ -217,7 +225,10 @@ async fn test_stats_returns_complete_response() {
     assert!(json["insights"]["total"].is_number());
 
     // pheromones section
-    assert!(json["pheromones"].is_object(), "expected pheromones section");
+    assert!(
+        json["pheromones"].is_object(),
+        "expected pheromones section"
+    );
     assert_eq!(json["pheromones"]["total"], 3);
 
     // toggles
@@ -256,7 +267,10 @@ async fn test_list_pheromones_with_data() {
     // Each item should have an id and kind
     for item in items {
         assert!(item["id"].is_number(), "pheromone should have id");
-        assert!(item["kind"].is_string(), "pheromone should have kind string");
+        assert!(
+            item["kind"].is_string(),
+            "pheromone should have kind string"
+        );
     }
 }
 
@@ -307,7 +321,10 @@ async fn test_pheromone_heatmap() {
     let (status, json) = get_json(&router, "/pheromones/heatmap").await;
     assert_eq!(status, StatusCode::OK);
     assert!(json["buckets"].is_array(), "heatmap should have buckets");
-    assert!(json["bucket_seconds"].is_number(), "heatmap should have bucket_seconds");
+    assert!(
+        json["bucket_seconds"].is_number(),
+        "heatmap should have bucket_seconds"
+    );
     assert!(json["timestamp"].is_number());
     // Each bucket should have the expected fields
     if let Some(buckets) = json["buckets"].as_array() {
@@ -358,7 +375,10 @@ async fn test_deposit_pheromone_invalid_kind() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
-        json["error"].as_str().unwrap().contains("unknown pheromone kind"),
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("unknown pheromone kind"),
         "expected error about unknown kind, got: {}",
         json["error"]
     );
@@ -383,16 +403,15 @@ async fn test_pheromone_projection() {
     let id = deposit_json["id"].as_u64().unwrap();
 
     // GET projection for this pheromone
-    let (status, proj_json) = get_json(
-        &router,
-        &format!("/pheromones/{id}/projection"),
-    )
-    .await;
+    let (status, proj_json) = get_json(&router, &format!("/pheromones/{id}/projection")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(proj_json["id"], id);
     assert_eq!(proj_json["kind"], "wisdom");
     assert!(proj_json["base_intensity"].is_number());
-    assert!(proj_json["points"].is_array(), "projection should have points array");
+    assert!(
+        proj_json["points"].is_array(),
+        "projection should have points array"
+    );
 }
 
 // ===========================================================================
@@ -436,10 +455,16 @@ async fn test_semantic_search() {
 
     let results = json["results"].as_array().unwrap();
     // Should return ranked results
-    assert!(!results.is_empty(), "search should return at least one result");
+    assert!(
+        !results.is_empty(),
+        "search should return at least one result"
+    );
     // Results should have similarity scores
     for result in results {
-        assert!(result["similarity"].is_number(), "result should have similarity");
+        assert!(
+            result["similarity"].is_number(),
+            "result should have similarity"
+        );
         assert!(result["id"].is_string(), "result should have id");
     }
 }
@@ -592,8 +617,14 @@ async fn test_trigger_decay() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(decay_json["ok"], true);
-    assert!(decay_json["pruned"].is_number(), "should report pruned count");
-    assert!(decay_json["remaining"].is_number(), "should report remaining count");
+    assert!(
+        decay_json["pruned"].is_number(),
+        "should report pruned count"
+    );
+    assert!(
+        decay_json["remaining"].is_number(),
+        "should report remaining count"
+    );
     assert!(decay_json["timestamp"].is_number());
 }
 
@@ -700,7 +731,12 @@ async fn test_register_agent_duplicate() {
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
-    assert!(json["error"].as_str().unwrap().contains("already registered"));
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("already registered")
+    );
 }
 
 #[tokio::test]
@@ -749,7 +785,10 @@ async fn test_agent_trace_not_found() {
     // verify the behavior as-implemented)
     assert_eq!(status, StatusCode::OK);
     // Nonexistent agent returns {"error": "agent not found", "agent_id": "..."}
-    assert!(json.get("error").is_some(), "expected error field for missing agent");
+    assert!(
+        json.get("error").is_some(),
+        "expected error field for missing agent"
+    );
 }
 
 #[tokio::test]
@@ -799,9 +838,18 @@ async fn test_agent_stats() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["agent_id"], "agent-0");
     // Stats fields are flat on the response, not nested under "stats"
-    assert!(json["confirmations_given"].is_number(), "should have confirmations_given");
-    assert!(json["challenges_given"].is_number(), "should have challenges_given");
-    assert!(json["registered_at"].is_number(), "should have registered_at");
+    assert!(
+        json["confirmations_given"].is_number(),
+        "should have confirmations_given"
+    );
+    assert!(
+        json["challenges_given"].is_number(),
+        "should have challenges_given"
+    );
+    assert!(
+        json["registered_at"].is_number(),
+        "should have registered_at"
+    );
 }
 
 // ===========================================================================
@@ -997,11 +1045,8 @@ async fn test_full_knowledge_lifecycle() {
     assert_eq!(status, StatusCode::OK);
 
     // 4. Search should still find it
-    let (status, search) = get_json(
-        &router,
-        "/knowledge/search?q=DEX+aggregators+optimal+price",
-    )
-    .await;
+    let (status, search) =
+        get_json(&router, "/knowledge/search?q=DEX+aggregators+optimal+price").await;
     assert_eq!(status, StatusCode::OK);
     assert!(!search["results"].as_array().unwrap().is_empty());
 
@@ -1036,7 +1081,12 @@ async fn test_post_insight_invalid_kind() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(json["error"].as_str().unwrap().contains("unknown knowledge kind"));
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("unknown knowledge kind")
+    );
 }
 
 // ===========================================================================

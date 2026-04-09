@@ -345,7 +345,10 @@ pub fn prd_agent_prompt(workdir: &Path, task: &str) -> String {
     // Include the master index so the agent knows everything that exists
     let master_index = std::fs::read_to_string(workdir.join(".roko/INDEX.md")).unwrap_or_default();
     if !master_index.is_empty() {
-        let _ = writeln!(prompt, "## Master Index (what already exists — do NOT duplicate)\n");
+        let _ = writeln!(
+            prompt,
+            "## Master Index (what already exists — do NOT duplicate)\n"
+        );
         let _ = writeln!(prompt, "{master_index}\n---\n");
     }
 

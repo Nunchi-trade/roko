@@ -180,7 +180,12 @@ impl AgentRegistry {
     }
 
     /// Get traces with pagination.
-    pub fn get_traces(&self, id: &str, limit: usize, offset: usize) -> Option<(&[AgentTrace], usize)> {
+    pub fn get_traces(
+        &self,
+        id: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Option<(&[AgentTrace], usize)> {
         self.traces.get(id).map(|traces| {
             let total = traces.len();
             let start = offset.min(total);

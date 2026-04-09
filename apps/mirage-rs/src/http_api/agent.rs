@@ -166,12 +166,10 @@ pub async fn register_agent(
         .register(req.id.clone(), address, req.role.clone(), now);
 
     if registered {
-        let _ = chain
-            .agent_bus
-            .send(crate::chain::AgentEvent::Registered {
-                agent_id: req.id.clone(),
-                role: req.role.clone(),
-            });
+        let _ = chain.agent_bus.send(crate::chain::AgentEvent::Registered {
+            agent_id: req.id.clone(),
+            role: req.role.clone(),
+        });
     }
 
     if registered {
@@ -227,13 +225,11 @@ pub async fn agent_heartbeat(
         chain.agent_registry.add_stats_delta(&id, &delta);
     }
 
-    let _ = chain
-        .agent_bus
-        .send(crate::chain::AgentEvent::Heartbeat {
-            agent_id: id.clone(),
-            block: 0,
-            timestamp: now,
-        });
+    let _ = chain.agent_bus.send(crate::chain::AgentEvent::Heartbeat {
+        agent_id: id.clone(),
+        block: 0,
+        timestamp: now,
+    });
 
     Ok(Json(serde_json::json!({
         "ok": true,
@@ -264,24 +260,22 @@ pub async fn post_agent_trace(
         });
     }
 
-    let _ = chain
-        .agent_bus
-        .send(crate::chain::AgentEvent::Trace {
-            agent_id: id.clone(),
-            trace: chain
-                .agent_registry
-                .get_traces(&id, 1, 0)
-                .and_then(|(t, _)| t.last().cloned())
-                .unwrap_or_else(|| crate::chain::agent::AgentTrace {
-                    cycle: 0,
-                    phase: crate::chain::agent::CognitivePhase::Act,
-                    reads: vec![],
-                    reasoning: String::new(),
-                    action: String::new(),
-                    action_id: String::new(),
-                    timestamp: now_secs(),
-                }),
-        });
+    let _ = chain.agent_bus.send(crate::chain::AgentEvent::Trace {
+        agent_id: id.clone(),
+        trace: chain
+            .agent_registry
+            .get_traces(&id, 1, 0)
+            .and_then(|(t, _)| t.last().cloned())
+            .unwrap_or_else(|| crate::chain::agent::AgentTrace {
+                cycle: 0,
+                phase: crate::chain::agent::CognitivePhase::Act,
+                reads: vec![],
+                reasoning: String::new(),
+                action: String::new(),
+                action_id: String::new(),
+                timestamp: now_secs(),
+            }),
+    });
 
     Ok(Json(serde_json::json!({
         "ok": true,

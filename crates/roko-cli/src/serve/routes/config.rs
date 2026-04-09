@@ -17,9 +17,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 }
 
 /// `GET /api/config` — return the current `RokoConfig` as JSON.
-async fn get_config(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Value>, ApiError> {
+async fn get_config(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let cfg = state.roko_config.read().await;
     let value = serde_json::to_value(&*cfg)
         .map_err(|e| ApiError::internal(format!("serialize config: {e}")))?;
@@ -65,9 +63,7 @@ fn merge_json(base: &mut Value, patch: &Value) {
     match (base, patch) {
         (Value::Object(base_map), Value::Object(patch_map)) => {
             for (k, v) in patch_map {
-                let entry = base_map
-                    .entry(k.clone())
-                    .or_insert(Value::Null);
+                let entry = base_map.entry(k.clone()).or_insert(Value::Null);
                 merge_json(entry, v);
             }
         }

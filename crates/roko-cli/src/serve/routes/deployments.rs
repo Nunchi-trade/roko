@@ -10,7 +10,7 @@ use axum::{Json, Router};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::{error, info};
 
 use crate::serve::deploy::{DeploySpec, DeploymentStatus};
@@ -21,8 +21,14 @@ use crate::serve::templates::TemplateRegistry;
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/deployments", post(create_deployment).get(list_deployments))
-        .route("/deployments/{id}", get(get_deployment).delete(teardown_deployment))
+        .route(
+            "/deployments",
+            post(create_deployment).get(list_deployments),
+        )
+        .route(
+            "/deployments/{id}",
+            get(get_deployment).delete(teardown_deployment),
+        )
         .route("/deployments/{id}/logs", get(get_logs))
         .route("/deployments/{id}/task", post(proxy_task))
         .route("/deployments/{id}/callback", post(receive_callback))
@@ -291,9 +297,9 @@ async fn teardown_deployment(
         }
     }
 
-    state.event_bus.emit(ServerEvent::DeploymentTornDown {
-        id: id.clone(),
-    });
+    state
+        .event_bus
+        .emit(ServerEvent::DeploymentTornDown { id: id.clone() });
 
     Ok(Json(json!({ "id": id, "status": "torn_down" })))
 }
@@ -370,7 +376,10 @@ async fn receive_callback(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let success = body.get("success").and_then(Value::as_bool).unwrap_or(false);
+    let success = body
+        .get("success")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
 
     info!(%id, %success, "received worker callback");
 

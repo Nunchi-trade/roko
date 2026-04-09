@@ -29,7 +29,7 @@ use thiserror::Error;
 use tokio::process::Command;
 
 /// Locks older than this are considered stale (§15.7).
-const STALE_LOCK_SECS: u64 = 300;
+const STALE_LOCK_SECS: u64 = 60;
 
 /// Configuration handed to [`WorktreeManager::new`].
 #[derive(Debug, Clone)]
@@ -75,7 +75,7 @@ pub enum WorktreeHealth {
     Ok,
     /// Worktree directory is missing from disk.
     Missing,
-    /// A stale `.git/index.lock` was found (> 5 minutes old).
+    /// A stale `.git/index.lock` was found (> 60 seconds old).
     StaleLock,
     /// HEAD is not on the expected branch (detached or switched).
     Detached,
@@ -410,7 +410,7 @@ impl WorktreeManager {
         Ok(removed)
     }
 
-    /// Remove stale `.git/index.lock` files (older than 5 minutes)
+    /// Remove stale `.git/index.lock` files (older than 60 seconds)
     /// across the main repo and all git-tracked worktrees (§15.7).
     pub fn clear_stale_locks(&self) -> Result<Vec<PathBuf>, WorktreeError> {
         let mut cleared = Vec::new();

@@ -22,14 +22,14 @@ use crate::efficiency::AgentEfficiencyEvent;
 use crate::episode_logger::{Episode, EpisodeLogger, LoggerError};
 use crate::model_router::RoutingContext;
 use crate::pattern_discovery::{EpisodeView, PatternMiner};
-use crate::prompt_experiment::ExperimentStore;
-use roko_core::agent::AgentRole;
-use roko_core::task::{TaskCategory, TaskComplexityBand};
 use crate::playbook::PlaybookStore;
 use crate::playbook_rules::PlaybookRules;
+use crate::prompt_experiment::ExperimentStore;
 use crate::provider_health::ProviderHealthTracker;
 use crate::regression::{RegressionReport, RegressionThresholds, detect_regressions};
 use crate::skill_library::{SkillLibrary, SkillLibraryError, TemplatePatternGenerator};
+use roko_core::agent::AgentRole;
+use roko_core::task::{TaskCategory, TaskComplexityBand};
 
 /// Filesystem locations used by [`LearningRuntime`].
 /// Thin wrapper that materializes the action slice required by [`EpisodeView`]
@@ -272,12 +272,14 @@ impl LearningRuntime {
         let task_metrics = load_task_metrics(&paths.task_metrics_jsonl).await?;
 
         let pattern_miner = parking_lot::Mutex::new(PatternMiner::new(3, 0.5));
-        let cascade_router = CascadeRouter::load_or_new(&paths.cascade_router_json, vec![
-            "claude-sonnet-4-20250514".into(),
-            "claude-haiku-4-5-20251001".into(),
-        ]);
-        let context_pack_cache =
-            ContextPackCache::new(256, paths.root.join("context-cache.json"));
+        let cascade_router = CascadeRouter::load_or_new(
+            &paths.cascade_router_json,
+            vec![
+                "claude-sonnet-4-20250514".into(),
+                "claude-haiku-4-5-20251001".into(),
+            ],
+        );
+        let context_pack_cache = ContextPackCache::new(256, paths.root.join("context-cache.json"));
         let experiment_store = ExperimentStore::load_or_new(&paths.experiments_json);
 
         Ok(Self {
@@ -325,8 +327,7 @@ impl LearningRuntime {
 
         let pattern_miner = parking_lot::Mutex::new(PatternMiner::new(3, 0.5));
         let cascade_router = CascadeRouter::load_or_new(&paths.cascade_router_json, models);
-        let context_pack_cache =
-            ContextPackCache::new(256, paths.root.join("context-cache.json"));
+        let context_pack_cache = ContextPackCache::new(256, paths.root.join("context-cache.json"));
         let experiment_store = ExperimentStore::load_or_new(&paths.experiments_json);
 
         Ok(Self {
@@ -590,16 +591,16 @@ impl LearningRuntime {
         let Ok(role) = serde_json::from_str::<AgentRole>(&role_json) else {
             return false;
         };
-        let category_str = extra_string(episode, "task_category")
-            .unwrap_or_else(|| "implementation".to_string());
+        let category_str =
+            extra_string(episode, "task_category").unwrap_or_else(|| "implementation".to_string());
         let cat_json = format!("\"{category_str}\"");
         let task_category =
             serde_json::from_str::<TaskCategory>(&cat_json).unwrap_or(TaskCategory::Implementation);
-        let complexity_str = extra_string(episode, "complexity_band")
-            .unwrap_or_else(|| "standard".to_string());
+        let complexity_str =
+            extra_string(episode, "complexity_band").unwrap_or_else(|| "standard".to_string());
         let cplx_json = format!("\"{complexity_str}\"");
-        let complexity =
-            serde_json::from_str::<TaskComplexityBand>(&cplx_json).unwrap_or(TaskComplexityBand::Standard);
+        let complexity = serde_json::from_str::<TaskComplexityBand>(&cplx_json)
+            .unwrap_or(TaskComplexityBand::Standard);
 
         let ctx = RoutingContext {
             task_category,

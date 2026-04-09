@@ -289,7 +289,15 @@ impl CascadeRouter {
                 .confidence_stats
                 .lock()
                 .iter()
-                .map(|(k, v)| (k.clone(), PersistedModelStats { trials: v.trials, successes: v.successes }))
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        PersistedModelStats {
+                            trials: v.trials,
+                            successes: v.successes,
+                        },
+                    )
+                })
                 .collect(),
         };
         let json = serde_json::to_string_pretty(&snapshot)
@@ -335,10 +343,13 @@ impl CascadeRouter {
                 // Restore confidence stats.
                 let mut stats = router.confidence_stats.lock();
                 for (model, persisted) in snap.confidence_stats {
-                    stats.insert(model, ModelStats {
-                        trials: persisted.trials,
-                        successes: persisted.successes,
-                    });
+                    stats.insert(
+                        model,
+                        ModelStats {
+                            trials: persisted.trials,
+                            successes: persisted.successes,
+                        },
+                    );
                 }
                 drop(stats);
                 router

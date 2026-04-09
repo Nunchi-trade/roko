@@ -19,33 +19,25 @@ pub fn routes() -> Router<Arc<AppState>> {
 }
 
 /// `GET /api/learning/efficiency` — read `.roko/learn/efficiency.jsonl`.
-async fn efficiency(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Value>, ApiError> {
+async fn efficiency(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let path = state.workdir.join(".roko/learn/efficiency.jsonl");
     read_jsonl(&path).await
 }
 
 /// `GET /api/learning/cascade-router` — read `.roko/learn/cascade-router.json`.
-async fn cascade_router(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Value>, ApiError> {
+async fn cascade_router(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let path = state.workdir.join(".roko/learn/cascade-router.json");
     read_json_file(&path).await
 }
 
 /// `GET /api/learning/experiments` — read `.roko/learn/experiments.json`.
-async fn experiments(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Value>, ApiError> {
+async fn experiments(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let path = state.workdir.join(".roko/learn/experiments.json");
     read_json_file(&path).await
 }
 
 /// `GET /api/learning/gate-thresholds` — read `.roko/learn/gate-thresholds.json`.
-async fn gate_thresholds(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Value>, ApiError> {
+async fn gate_thresholds(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let path = state.workdir.join(".roko/learn/gate-thresholds.json");
     read_json_file(&path).await
 }
@@ -60,10 +52,7 @@ async fn read_json_file(path: &std::path::Path) -> Result<Json<Value>, ApiError>
             return Ok(Json(Value::Null));
         }
         Err(e) => {
-            return Err(ApiError::internal(format!(
-                "read {}: {e}",
-                path.display()
-            )));
+            return Err(ApiError::internal(format!("read {}: {e}", path.display())));
         }
     };
     let value: Value = serde_json::from_str(&content)
@@ -79,10 +68,7 @@ async fn read_jsonl(path: &std::path::Path) -> Result<Json<Value>, ApiError> {
             return Ok(Json(Value::Array(Vec::new())));
         }
         Err(e) => {
-            return Err(ApiError::internal(format!(
-                "read {}: {e}",
-                path.display()
-            )));
+            return Err(ApiError::internal(format!("read {}: {e}", path.display())));
         }
     };
     let entries: Vec<Value> = content

@@ -106,6 +106,7 @@ pub fn run_init_wizard(target: Option<PathBuf>, inputs: &WizardInputs) -> Result
             files: None,
         }),
         gates,
+        executor: None,
     };
     let rendered = toml::to_string_pretty(&layer).context("serialize config")?;
 

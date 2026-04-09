@@ -6,7 +6,7 @@ use axum::extract::{Path, Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::serve::error::ApiError;
 use crate::serve::state::AppState;
@@ -31,9 +31,7 @@ async fn health() -> Json<Value> {
 }
 
 /// `GET /api/status` — session status overview.
-async fn session_status(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Value>, ApiError> {
+async fn session_status(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let ss = crate::status::SessionStatus::offline(state.workdir.clone());
     Ok(Json(json!({
         "session_id": ss.session_id,
@@ -46,26 +44,20 @@ async fn session_status(
 }
 
 /// `GET /api/metrics` — metric snapshots as JSON.
-async fn metrics(
-    State(state): State<Arc<AppState>>,
-) -> Json<Value> {
+async fn metrics(State(state): State<Arc<AppState>>) -> Json<Value> {
     let snapshots = state.metrics.snapshot();
     Json(serde_json::to_value(snapshots).unwrap_or(json!([])))
 }
 
 /// `GET /api/dashboard` — dashboard scaffold as JSON.
-async fn dashboard(
-    State(state): State<Arc<AppState>>,
-) -> Json<Value> {
+async fn dashboard(State(state): State<Arc<AppState>>) -> Json<Value> {
     let scaffold = crate::tui::DashboardScaffold::new_in(&state.workdir);
     let text = format!("{scaffold:?}");
     Json(json!({ "rendered": text }))
 }
 
 /// `GET /api/episodes` — read episodes JSONL as a JSON array.
-async fn episodes(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Value>, ApiError> {
+async fn episodes(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let path = state.layout.episodes_path();
     read_jsonl_array(&path).await
 }
@@ -83,7 +75,14 @@ async fn signals(
     let path = state.workdir.join(".roko").join("signals.jsonl");
     let entries = read_jsonl_entries(&path).await?;
     let limited = match q.limit {
-        Some(n) => entries.into_iter().rev().take(n).collect::<Vec<_>>().into_iter().rev().collect(),
+        Some(n) => entries
+            .into_iter()
+            .rev()
+            .take(n)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect(),
         None => entries,
     };
     Ok(Json(Value::Array(limited)))
@@ -95,7 +94,9 @@ async fn operation_status(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let ops = state.operations.read().await;
-    let handle = ops.get(&id).ok_or_else(|| ApiError::not_found("operation not found"))?;
+    let handle = ops
+        .get(&id)
+        .ok_or_else(|| ApiError::not_found("operation not found"))?;
     let result = Json(json!({
         "id": id,
         "kind": handle.kind,

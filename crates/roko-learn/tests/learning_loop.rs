@@ -10,7 +10,7 @@ use tempfile::TempDir;
 use roko_core::agent::AgentRole;
 use roko_core::task::{TaskCategory, TaskComplexityBand};
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
-use roko_learn::model_router::{LinUCBRouter, RoutingContext, COLD_START_THRESHOLD};
+use roko_learn::model_router::{COLD_START_THRESHOLD, LinUCBRouter, RoutingContext};
 use roko_learn::provider_health::ProviderHealthTracker;
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -93,7 +93,10 @@ fn bandit_persistence_roundtrip() {
     assert_eq!(reloaded.total_observations(), 3);
 
     let stats = reloaded.arm_stats();
-    let sonnet = stats.iter().find(|a| a.slug == "claude-sonnet-4-5").unwrap();
+    let sonnet = stats
+        .iter()
+        .find(|a| a.slug == "claude-sonnet-4-5")
+        .unwrap();
     assert_eq!(sonnet.observations, 1);
     let haiku = stats.iter().find(|a| a.slug == "claude-haiku-3-5").unwrap();
     assert_eq!(haiku.observations, 1);
@@ -210,8 +213,8 @@ fn all_unhealthy_fallback_still_selects() {
     let tracker = ProviderHealthTracker::with_config(1, Duration::from_secs(600));
     tracker.record_failure("cl");
 
-    let router = LinUCBRouter::new(vec!["claude-sonnet-4-5".to_string()])
-        .with_health_tracker(tracker);
+    let router =
+        LinUCBRouter::new(vec!["claude-sonnet-4-5".to_string()]).with_health_tracker(tracker);
 
     let ctx = default_ctx();
 
@@ -223,5 +226,8 @@ fn all_unhealthy_fallback_still_selects() {
     // Even though provider is unhealthy, select_model should return
     // *something* rather than panicking.
     let model = router.select_model(&ctx);
-    assert!(!model.slug.is_empty(), "should return a model even when all unhealthy");
+    assert!(
+        !model.slug.is_empty(),
+        "should return a model even when all unhealthy"
+    );
 }

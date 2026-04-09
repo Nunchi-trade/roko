@@ -1107,7 +1107,10 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 if events_path.exists() {
                     let log_json = std::fs::read_to_string(&events_path)
                         .map_err(|e| anyhow!("read event log: {e}"))?;
-                    roko_cli::PlanRunner::from_snapshots(&exec_json, &log_json, &wd, config, metrics).await?
+                    roko_cli::PlanRunner::from_snapshots(
+                        &exec_json, &log_json, &wd, config, metrics,
+                    )
+                    .await?
                 } else {
                     roko_cli::PlanRunner::from_snapshot(&exec_json, &wd, config, metrics).await?
                 }
@@ -1169,7 +1172,9 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             })
         }
         PlanCmd::Generate { source, from_file } => {
-            use roko_cli::agent_exec::{run_agent, AgentExecOpts, load_gateway_env, model_from_config};
+            use roko_cli::agent_exec::{
+                AgentExecOpts, load_gateway_env, model_from_config, run_agent,
+            };
 
             let workdir = std::env::current_dir().context("resolve cwd")?;
             let gw = load_gateway_env(&workdir);
@@ -1191,7 +1196,11 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 text
             };
 
-            let source_type = if from_file.is_some() { "file" } else { "prompt" };
+            let source_type = if from_file.is_some() {
+                "file"
+            } else {
+                "prompt"
+            };
             let system = roko_cli::plan_generate::build_generation_prompt(
                 &workdir,
                 &source_text,
@@ -1214,10 +1223,13 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 system_prompt: Some(&system),
                 resume_session: None,
                 env_vars: &gw.vars,
-            }).await
+            })
+            .await
         }
         PlanCmd::Regenerate { plan_dir, dry_run } => {
-            use roko_cli::agent_exec::{run_agent, AgentExecOpts, load_gateway_env, model_from_config};
+            use roko_cli::agent_exec::{
+                AgentExecOpts, load_gateway_env, model_from_config, run_agent,
+            };
 
             let workdir = std::env::current_dir().context("resolve cwd")?;
             let tasks_path = plan_dir.join("tasks.toml");
@@ -1243,7 +1255,8 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
 
             if dry_run {
                 eprintln!("\n[dry-run] Would regenerate {}", tasks_path.display());
-                let system = roko_cli::plan_generate::build_regeneration_prompt(&workdir, &existing);
+                let system =
+                    roko_cli::plan_generate::build_regeneration_prompt(&workdir, &existing);
                 eprintln!("Prompt length: {} chars", system.len());
                 return Ok(EXIT_SUCCESS);
             }
@@ -1270,7 +1283,8 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 system_prompt: Some(&system),
                 resume_session: None,
                 env_vars: &gw.vars,
-            }).await
+            })
+            .await
         }
     }
 }
@@ -1860,14 +1874,13 @@ async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>) -> Result<()> {
     let concluded = exp_store.concluded_count();
     if running > 0 || concluded > 0 {
         println!();
-        println!(
-            "prompt experiments: {running} running, {concluded} concluded"
-        );
+        println!("prompt experiments: {running} running, {concluded} concluded");
     }
 
     // Adaptive threshold summary.
     let thresholds_path = learn_dir.join("gate-thresholds.json");
-    let thresholds = roko_gate::adaptive_threshold::AdaptiveThresholds::load_or_new(&thresholds_path);
+    let thresholds =
+        roko_gate::adaptive_threshold::AdaptiveThresholds::load_or_new(&thresholds_path);
     let rung_count: usize = thresholds.all_rungs().count();
     if rung_count > 0 {
         println!();
@@ -1878,7 +1891,11 @@ async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>) -> Result<()> {
                 stats.ema_pass_rate * 100.0,
                 thresholds.suggested_max_retries(*rung),
                 stats.total_observations,
-                if thresholds.should_skip_rung(*rung) { "yes" } else { "no" },
+                if thresholds.should_skip_rung(*rung) {
+                    "yes"
+                } else {
+                    "no"
+                },
             );
         }
     }

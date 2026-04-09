@@ -370,10 +370,7 @@ impl TaskStore {
             .filter(|t| state.is_none() || Some(t.state) == state)
             .filter(|t| kind.is_none() || kind == Some(t.kind.as_str()))
             .filter(|t| {
-                assignee.is_none()
-                    || t.assignee
-                        .as_deref()
-                        .is_some_and(|a| Some(a) == assignee)
+                assignee.is_none() || t.assignee.as_deref().is_some_and(|a| Some(a) == assignee)
             })
             .collect();
         // Sort by id ascending (creation order).

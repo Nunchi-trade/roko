@@ -130,9 +130,7 @@ async fn run_task(
     *state.last_task.write().await = Some(result.clone());
 
     // Callback to control plane if configured
-    if let (Some(url), Some(dep_id)) =
-        (&state.control_plane_url, &state.deployment_id)
-    {
+    if let (Some(url), Some(dep_id)) = (&state.control_plane_url, &state.deployment_id) {
         let callback_url = format!("{url}/api/deployments/{dep_id}/callback");
         let client = reqwest::Client::new();
         if let Err(e) = client.post(&callback_url).json(&result).send().await {

@@ -94,14 +94,15 @@ impl SymbolResolver {
             let prefix = &name[..pos];
             let suffix = &name[pos + 2..];
             // If prefix contains :: (e.g., "module::Type::method"), take last two parts
-            prefix.rfind("::").map_or(
-                (prefix, Some(suffix)),
-                |pos2| (&prefix[pos2 + 2..], Some(suffix)),
-            )
+            prefix.rfind("::").map_or((prefix, Some(suffix)), |pos2| {
+                (&prefix[pos2 + 2..], Some(suffix))
+            })
         });
 
         for file_path in rs_files {
-            let Ok(content) = std::fs::read_to_string(file_path) else { continue };
+            let Ok(content) = std::fs::read_to_string(file_path) else {
+                continue;
+            };
 
             let relative = file_path
                 .strip_prefix(&self.workdir)
@@ -148,7 +149,9 @@ fn collect_rs_files(workdir: &Path) -> Vec<PathBuf> {
 }
 
 fn collect_rs_recursive(dir: &Path, files: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
 
     for entry in entries.flatten() {
         let path = entry.path();
@@ -230,10 +233,10 @@ fn find_method_in_impl(
 
         // Check for impl blocks: `impl TypeName {` or `impl TypeName for TraitName {`
         if !in_impl
-            && (trimmed.starts_with("impl ")
-                || trimmed.starts_with("impl<"))
+            && (trimmed.starts_with("impl ") || trimmed.starts_with("impl<"))
             && trimmed.contains(type_name)
-            && (trimmed.contains('{') || lines.get(i + 1).is_some_and(|l| l.trim().starts_with('{')))
+            && (trimmed.contains('{')
+                || lines.get(i + 1).is_some_and(|l| l.trim().starts_with('{')))
         {
             in_impl = true;
             brace_depth = 0;
@@ -295,9 +298,7 @@ fn matches_definition(line: &str, keyword: &str, name: &str) -> bool {
         if line.starts_with(pat.as_str()) {
             // Make sure the name is followed by a word boundary
             let rest = &line[pat.len()..];
-            if rest.is_empty()
-                || rest.starts_with(|c: char| !c.is_alphanumeric() && c != '_')
-            {
+            if rest.is_empty() || rest.starts_with(|c: char| !c.is_alphanumeric() && c != '_') {
                 return true;
             }
         }
@@ -325,11 +326,10 @@ fn matches_fn_definition(line: &str, name: &str) -> bool {
 
     for pat in &patterns {
         if line.starts_with(pat.as_str()) || line.contains(pat.as_str()) {
-            let after = line.find(pat.as_str())
+            let after = line
+                .find(pat.as_str())
                 .map_or("", |pos| &line[pos + pat.len()..]);
-            if after.is_empty()
-                || after.starts_with(|c: char| !c.is_alphanumeric() && c != '_')
-            {
+            if after.is_empty() || after.starts_with(|c: char| !c.is_alphanumeric() && c != '_') {
                 return true;
             }
         }
@@ -360,9 +360,7 @@ fn extract_signature(lines: &[&str], start: usize, kind: SymbolKind) -> String {
             }
             sig
         }
-        SymbolKind::Impl | SymbolKind::Unknown => {
-            lines.get(start).unwrap_or(&"").to_string()
-        }
+        SymbolKind::Impl | SymbolKind::Unknown => lines.get(start).unwrap_or(&"").to_string(),
     }
 }
 
@@ -444,7 +442,11 @@ mod tests {
 
     #[test]
     fn matches_struct_definition() {
-        assert!(matches_definition("pub struct TaskDef {", "struct", "TaskDef"));
+        assert!(matches_definition(
+            "pub struct TaskDef {",
+            "struct",
+            "TaskDef"
+        ));
         assert!(matches_definition(
             "pub(crate) struct TaskDef {",
             "struct",

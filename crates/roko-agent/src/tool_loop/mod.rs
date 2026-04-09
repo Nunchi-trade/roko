@@ -241,6 +241,11 @@ impl ToolLoop {
                 };
             }
 
+            // Inject the assistant's tool-call message into conversation history.
+            if let Some(assistant_msg) = self.translator.render_assistant_message(&response) {
+                messages.push(assistant_msg);
+            }
+
             // Dispatch tool calls (§36.41 parallel/serial batching).
             let results = self.dispatcher.dispatch_batch(calls.clone(), ctx).await;
             all_calls.extend(calls);

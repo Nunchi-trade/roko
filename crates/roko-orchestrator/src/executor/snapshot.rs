@@ -20,10 +20,13 @@ use super::plan_state::PlanState;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutorSnapshot {
     /// Per-plan mutable state, keyed by `plan_id`.
+    #[serde(default)]
     pub plan_states: HashMap<String, PlanState>,
     /// Queue order: `plan_id`s in execution priority order.
+    #[serde(default)]
     pub queue_order: Vec<String>,
     /// Unix millisecond timestamp when the snapshot was taken.
+    #[serde(default)]
     pub timestamp_ms: u64,
 }
 

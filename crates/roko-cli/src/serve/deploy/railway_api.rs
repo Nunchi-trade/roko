@@ -4,10 +4,10 @@
 //! using `reqwest`. Mutations: `serviceCreate`, `variableCollectionUpsert`,
 //! `serviceInstanceDeploy`. Queries: service status, deployment logs.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use chrono::Utc;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::{debug, info};
 
 use super::{DeployBackend, DeploySpec, Deployment, DeploymentStatus};

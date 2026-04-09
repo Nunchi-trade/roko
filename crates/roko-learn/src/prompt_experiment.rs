@@ -257,18 +257,15 @@ impl ExperimentStore {
 
     /// Find a running experiment for the given prompt section name.
     pub fn active_for_section(&self, section_name: &str) -> Option<&PromptExperiment> {
-        self.experiments.values().find(|e| {
-            e.section_name == section_name && e.status == ExperimentStatus::Running
-        })
+        self.experiments
+            .values()
+            .find(|e| e.section_name == section_name && e.status == ExperimentStatus::Running)
     }
 
     /// Assign a variant for a given prompt section, if an active experiment exists.
     ///
     /// Returns `(variant_id, variant_content)` or `None` if no experiment.
-    pub fn assign_variant_for_section(
-        &self,
-        section_name: &str,
-    ) -> Option<(String, String)> {
+    pub fn assign_variant_for_section(&self, section_name: &str) -> Option<(String, String)> {
         let experiment = self.active_for_section(section_name)?;
         let variant = experiment.assign_variant()?;
         Some((variant.id.clone(), variant.content.clone()))

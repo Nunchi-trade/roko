@@ -209,9 +209,6 @@ mod tests {
         at.save(&path).unwrap();
 
         let loaded = AdaptiveThresholds::load_or_new(&path);
-        assert_eq!(
-            loaded.rung_stats(1).unwrap().total_observations,
-            10
-        );
+        assert_eq!(loaded.rung_stats(1).unwrap().total_observations, 10);
     }
 }

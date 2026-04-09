@@ -50,8 +50,6 @@ pub use scorer::SectionScorer;
 pub use system_prompt_builder::SystemPromptBuilder;
 pub use templates::{
     PlanSlice, PromptAssembler, PromptBudget, QuickFixInput, QuickFixTemplate, QuickReviewerInput,
-    QuickReviewerTemplate, RolePromptTemplate, Reviewer, ReviewerInput, ReviewerTemplate,
-    ScribeInput, ScribeTemplate,
-    scribe::ScribeVariant,
-    budget_for,
+    QuickReviewerTemplate, Reviewer, ReviewerInput, ReviewerTemplate, RolePromptTemplate,
+    ScribeInput, ScribeTemplate, budget_for, scribe::ScribeVariant,
 };

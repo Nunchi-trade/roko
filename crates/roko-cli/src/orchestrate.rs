@@ -17,15 +17,16 @@ use bardo_runtime::process::ProcessSupervisor;
 use roko_agent::translate::{ClaudeTranslator, RenderedTools, Translator};
 use roko_agent::{Agent, AgentResult, ClaudeCliAgent, ExecAgent};
 use roko_compose::{
-    ContextProvider, PlanArtifacts, Placement, PromptComposer, PromptSection,
-    RoleSystemPromptSpec, SectionPriority, TaskContext,
+    ContextProvider, Placement, PlanArtifacts, PromptComposer, PromptSection, RoleSystemPromptSpec,
+    SectionPriority, TaskContext,
 };
 use roko_conductor::{Conductor, ConductorDecision};
-use roko_core::obs::{LabelSet, MetricRegistry};
-use roko_core::tool::{FormatBandit, ProfileBandit, ToolTraceEvent, TraceSink};
-use roko_core::tool::trace::{FailureKind, FailureTrace, TraceStep};
+use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::obs::health::{AlwaysUpProbe, ProbeRegistry};
+use roko_core::obs::{LabelSet, MetricRegistry};
 use roko_core::tool::TraceId;
+use roko_core::tool::trace::{FailureKind, FailureTrace, TraceStep};
+use roko_core::tool::{FormatBandit, ProfileBandit, ToolTraceEvent, TraceSink};
 use roko_core::{
     AgentRole, Body, Budget, Composer, Context, Gate, Kind, PhaseKind, Provenance, Signal,
     Substrate, Verdict,
@@ -33,21 +34,21 @@ use roko_core::{
 use roko_fs::FileSubstrate;
 use roko_fs::observability::FsObservabilitySinks;
 use roko_gate::{
-    adaptive_threshold::AdaptiveThresholds,
-    clippy_gate::ClippyGate, compile::CompileGate, payload::GatePayload, test_gate::TestGate,
+    adaptive_threshold::AdaptiveThresholds, clippy_gate::ClippyGate, compile::CompileGate,
+    payload::GatePayload, test_gate::TestGate,
 };
-use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_learn::costs_db::CostRecord;
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::episode_logger::{Episode, GateVerdict, Usage};
 use roko_learn::runtime_feedback::{CompletedRunInput, LearningRuntime, LearningUpdate};
 use roko_orchestrator::worktree::{WorktreeConfig, WorktreeManager};
 use roko_orchestrator::{
-    EventKind, EventLog, EventLogSnapshot, ExecutorAction, ExecutorConfig, ExecutorEvent,
-    ExecutorSnapshot, GateResult, ParallelExecutor, PlanState, PostMergeRunner, discover_plans,
+    EventKind, EventLog, EventLogSnapshot, ExecutorAction, ExecutorEvent, ExecutorSnapshot,
+    GateResult, ParallelExecutor, PlanState, PostMergeRunner, discover_plans,
 };
 use roko_std::NoOpScorer;
 use roko_std::StaticToolRegistry;
+use tokio::task::JoinSet;
 
 use crate::config::Config;
 use crate::task_parser::TasksFile;
@@ -174,8 +175,8 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
         }
         agent.run(&prompt_signal, &ctx).await
     } else {
-        let mut agent = ExecAgent::new(&cfg.command, cfg.extra_args)
-            .with_timeout_ms(cfg.timeout_ms);
+        let mut agent =
+            ExecAgent::new(&cfg.command, cfg.extra_args).with_timeout_ms(cfg.timeout_ms);
         for (k, v) in &cfg.env_vars {
             agent = agent.with_env_var(k, v);
         }
@@ -324,7 +325,8 @@ pub struct PlanRunner {
     /// In-memory efficiency events collected during this run.
     efficiency_events: Vec<AgentEfficiencyEvent>,
     /// Optional event bus sender for HTTP API event streaming.
-    server_event_bus: Option<bardo_runtime::event_bus::BusSender<crate::serve::events::ServerEvent>>,
+    server_event_bus:
+        Option<bardo_runtime::event_bus::BusSender<crate::serve::events::ServerEvent>>,
 }
 
 /// Tracks per-task completion within a plan. Lives in PlanRunner (CLI crate),
@@ -376,10 +378,11 @@ impl TaskTracker {
     #[cfg(test)]
     #[allow(dead_code)]
     fn next_ready_task(&self) -> Option<&crate::task_parser::TaskDef> {
-        self.tasks_file
-            .tasks
-            .iter()
-            .find(|t| !self.completed.contains(&t.id) && !self.failed.contains(&t.id) && t.is_ready(&self.completed))
+        self.tasks_file.tasks.iter().find(|t| {
+            !self.completed.contains(&t.id)
+                && !self.failed.contains(&t.id)
+                && t.is_ready(&self.completed)
+        })
     }
 
     /// Return ALL ready tasks (deps satisfied, not completed, not failed).
@@ -441,9 +444,7 @@ impl PlanRunner {
         Vec<roko_agent::mcp::McpClient<roko_agent::mcp::StdioTransport>>,
         Option<Arc<roko_agent::mcp::DynamicToolRegistry>>,
     ) {
-        use roko_agent::mcp::{
-            McpClient, StdioTransport, find_mcp_config, mcp_to_tool_def,
-        };
+        use roko_agent::mcp::{McpClient, StdioTransport, find_mcp_config, mcp_to_tool_def};
         use roko_core::tool::VecToolRegistry;
 
         // Resolve MCP config: explicit path in config, or walk-up discovery.
@@ -498,10 +499,7 @@ impl PlanRunner {
                             clients.push(client);
                         }
                         Err(e) => {
-                            tracing::warn!(
-                                "MCP server '{}' list_tools failed: {e}",
-                                server.name
-                            );
+                            tracing::warn!("MCP server '{}' list_tools failed: {e}", server.name);
                         }
                     }
                 }
@@ -543,7 +541,12 @@ impl PlanRunner {
     ///
     /// Returns an error if the plans directory doesn't exist, contains no
     /// plans, or plan discovery fails.
-    pub async fn from_plans_dir(plans_dir: &Path, workdir: &Path, config: Config, metrics: Arc<MetricRegistry>) -> Result<Self> {
+    pub async fn from_plans_dir(
+        plans_dir: &Path,
+        workdir: &Path,
+        config: Config,
+        metrics: Arc<MetricRegistry>,
+    ) -> Result<Self> {
         if !plans_dir.exists() {
             return Err(anyhow!(
                 "plans directory does not exist: {}",
@@ -557,7 +560,7 @@ impl PlanRunner {
             return Err(anyhow!("no plans found in {}", plans_dir.display()));
         }
 
-        let mut executor = ParallelExecutor::new(ExecutorConfig::default());
+        let mut executor = ParallelExecutor::new(config.executor.clone());
 
         // Track cross-plan dependencies from frontmatter
         let mut plan_deps: HashMap<String, Vec<String>> = HashMap::new();
@@ -597,6 +600,15 @@ impl PlanRunner {
                         tf.meta.max_parallel,
                         model_tiers.join(", ")
                     );
+
+                    for task in &tf.tasks {
+                        if !task.depends_on_plan.is_empty() {
+                            plan_deps
+                                .entry(plan_id.clone())
+                                .or_default()
+                                .extend(task.depends_on_plan.iter().cloned());
+                        }
+                    }
                 }
             }
 
@@ -630,7 +642,9 @@ impl PlanRunner {
             .map_err(|e| anyhow!("init learning runtime: {e}"))?;
         let (mcp_clients, tool_registry) = Self::setup_mcp(&config, workdir).await;
         let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
-        obs_sinks.initialize().context("initialize observability sinks")?;
+        obs_sinks
+            .initialize()
+            .context("initialize observability sinks")?;
         roko_core::obs::register_standard_metrics(&metrics);
         let health_probes = Self::build_health_probes(&config);
         Ok(Self {
@@ -650,7 +664,7 @@ impl PlanRunner {
             supervisor: ProcessSupervisor::new(cancel.clone()),
             cancel,
             task_trackers,
-            conductor: Conductor::default(),
+            conductor: Conductor::new(),
             conductor_signals: Vec::new(),
             attribution_tracker: ContextAttributionTracker::load(
                 &workdir.join(".roko").join("context-attribution.jsonl"),
@@ -663,7 +677,10 @@ impl PlanRunner {
             obs_sinks,
             health_probes,
             adaptive_thresholds: AdaptiveThresholds::load_or_new(
-                &workdir.join(".roko").join("learn").join("gate-thresholds.json"),
+                &workdir
+                    .join(".roko")
+                    .join("learn")
+                    .join("gate-thresholds.json"),
             ),
             efficiency_events: Vec::new(),
             server_event_bus: None,
@@ -675,10 +692,15 @@ impl PlanRunner {
     /// # Errors
     ///
     /// Returns an error if snapshot parsing fails.
-    pub async fn from_snapshot(snapshot_json: &str, workdir: &Path, config: Config, metrics: Arc<MetricRegistry>) -> Result<Self> {
+    pub async fn from_snapshot(
+        snapshot_json: &str,
+        workdir: &Path,
+        config: Config,
+        metrics: Arc<MetricRegistry>,
+    ) -> Result<Self> {
         let snapshot =
             ExecutorSnapshot::from_json(snapshot_json).map_err(|e| anyhow!("bad snapshot: {e}"))?;
-        let executor = ParallelExecutor::from_snapshot(ExecutorConfig::default(), snapshot);
+        let executor = ParallelExecutor::from_snapshot(config.executor.clone(), snapshot);
         let task_trackers = Self::restore_task_trackers(workdir);
         let cancel = CancelToken::new();
         let learning = LearningRuntime::open_under(workdir.join(".roko").join("learn"))
@@ -686,7 +708,9 @@ impl PlanRunner {
             .map_err(|e| anyhow!("init learning runtime: {e}"))?;
         let (mcp_clients, tool_registry) = Self::setup_mcp(&config, workdir).await;
         let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
-        obs_sinks.initialize().context("initialize observability sinks")?;
+        obs_sinks
+            .initialize()
+            .context("initialize observability sinks")?;
         roko_core::obs::register_standard_metrics(&metrics);
         let health_probes = Self::build_health_probes(&config);
         Ok(Self {
@@ -706,7 +730,7 @@ impl PlanRunner {
             supervisor: ProcessSupervisor::new(cancel.clone()),
             cancel,
             task_trackers,
-            conductor: Conductor::default(),
+            conductor: Conductor::new(),
             conductor_signals: Vec::new(),
             attribution_tracker: ContextAttributionTracker::load(
                 &workdir.join(".roko").join("context-attribution.jsonl"),
@@ -719,7 +743,10 @@ impl PlanRunner {
             obs_sinks,
             health_probes,
             adaptive_thresholds: AdaptiveThresholds::load_or_new(
-                &workdir.join(".roko").join("learn").join("gate-thresholds.json"),
+                &workdir
+                    .join(".roko")
+                    .join("learn")
+                    .join("gate-thresholds.json"),
             ),
             efficiency_events: Vec::new(),
             server_event_bus: None,
@@ -742,7 +769,7 @@ impl PlanRunner {
             .map_err(|e| anyhow!("bad executor snapshot: {e}"))?;
         let log_snap: EventLogSnapshot = serde_json::from_str(event_log_json)
             .map_err(|e| anyhow!("bad event log snapshot: {e}"))?;
-        let executor = ParallelExecutor::from_snapshot(ExecutorConfig::default(), exec_snap);
+        let executor = ParallelExecutor::from_snapshot(config.executor.clone(), exec_snap);
         let event_log = EventLog::restore(log_snap);
         let task_trackers = Self::restore_task_trackers(workdir);
         let cancel = CancelToken::new();
@@ -751,7 +778,9 @@ impl PlanRunner {
             .map_err(|e| anyhow!("init learning runtime: {e}"))?;
         let (mcp_clients, tool_registry) = Self::setup_mcp(&config, workdir).await;
         let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
-        obs_sinks.initialize().context("initialize observability sinks")?;
+        obs_sinks
+            .initialize()
+            .context("initialize observability sinks")?;
         roko_core::obs::register_standard_metrics(&metrics);
         let health_probes = Self::build_health_probes(&config);
         Ok(Self {
@@ -771,7 +800,7 @@ impl PlanRunner {
             supervisor: ProcessSupervisor::new(cancel.clone()),
             cancel,
             task_trackers,
-            conductor: Conductor::default(),
+            conductor: Conductor::new(),
             conductor_signals: Vec::new(),
             attribution_tracker: ContextAttributionTracker::load(
                 &workdir.join(".roko").join("context-attribution.jsonl"),
@@ -784,7 +813,10 @@ impl PlanRunner {
             obs_sinks,
             health_probes,
             adaptive_thresholds: AdaptiveThresholds::load_or_new(
-                &workdir.join(".roko").join("learn").join("gate-thresholds.json"),
+                &workdir
+                    .join(".roko")
+                    .join("learn")
+                    .join("gate-thresholds.json"),
             ),
             efficiency_events: Vec::new(),
             server_event_bus: None,
@@ -829,7 +861,11 @@ impl PlanRunner {
             }
         }
         // Persist adaptive gate thresholds.
-        let thresholds_path = self.workdir.join(".roko").join("learn").join("gate-thresholds.json");
+        let thresholds_path = self
+            .workdir
+            .join(".roko")
+            .join("learn")
+            .join("gate-thresholds.json");
         if let Err(e) = self.adaptive_thresholds.save(&thresholds_path) {
             eprintln!("[orchestrate] save adaptive thresholds: {e}");
         }
@@ -919,9 +955,7 @@ impl PlanRunner {
 
     /// Push a conductor signal so watchers can detect anomalies (§7).
     fn emit_conductor_signal(&mut self, kind: Kind, body: serde_json::Value) {
-        let sig = Signal::builder(kind)
-            .body(Body::Json(body))
-            .build();
+        let sig = Signal::builder(kind).body(Body::Json(body)).build();
         self.conductor_signals.push(sig);
     }
 
@@ -1014,7 +1048,10 @@ impl PlanRunner {
 
     /// Restore task trackers from `.roko/state/task-trackers.json` + plan dirs.
     fn restore_task_trackers(workdir: &Path) -> HashMap<String, TaskTracker> {
-        let tracker_path = workdir.join(".roko").join("state").join("task-trackers.json");
+        let tracker_path = workdir
+            .join(".roko")
+            .join("state")
+            .join("task-trackers.json");
         let snap: Vec<serde_json::Value> = std::fs::read_to_string(&tracker_path)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
@@ -1034,11 +1071,19 @@ impl PlanRunner {
 
             let completed: Vec<String> = entry["completed"]
                 .as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
             let failed: Vec<String> = entry["failed"]
                 .as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
             let current_group_index = entry["current_group_index"].as_u64().unwrap_or(0) as usize;
             let impl_round = entry["impl_round"].as_u64().unwrap_or(0) as u32;
@@ -1064,6 +1109,7 @@ impl PlanRunner {
     /// Returns an error if agent dispatch, gate execution, or substrate
     /// I/O fails fatally (per-plan failures are recorded in the report).
     pub async fn run_all(&mut self) -> Result<OrchestrationReport> {
+        self.clear_stale_worktree_locks().await;
         // Clean up stale worktrees from previous runs (§6).
         if let Err(e) = self.worktrees.prune().await {
             eprintln!("[orchestrate] worktree prune failed: {e}");
@@ -1082,10 +1128,17 @@ impl PlanRunner {
             .cloned()
             .collect();
         for plan_id in &plan_ids {
-            let _ = self.executor.apply_event(plan_id, &ExecutorEvent::Start);
-            self.emit_server_event(crate::serve::events::ServerEvent::PlanStarted {
-                plan_id: plan_id.clone(),
-            });
+            let Some(state) = self.executor.plan_state(plan_id) else {
+                continue;
+            };
+            if state.current_phase.kind() == PhaseKind::Queued
+                && self.executor.can_dispatch(plan_id)
+            {
+                let _ = self.executor.apply_event(plan_id, &ExecutorEvent::Start);
+                self.emit_server_event(crate::serve::events::ServerEvent::PlanStarted {
+                    plan_id: plan_id.clone(),
+                });
+            }
         }
 
         // Maximum iterations to prevent infinite loops.
@@ -1133,8 +1186,12 @@ impl PlanRunner {
             .iter()
             .map(|id| {
                 let state = self.executor.plan_state(id);
-                let succeeded =
-                    state.is_some_and(|s| s.current_phase.kind() == PhaseKind::Complete);
+                let succeeded = state.is_some_and(|s| {
+                    matches!(
+                        s.current_phase.kind(),
+                        PhaseKind::Complete | PhaseKind::Done
+                    )
+                });
                 PlanRunReport {
                     plan_id: id.clone(),
                     succeeded,
@@ -1156,7 +1213,11 @@ impl PlanRunner {
         for p in &plans {
             let status = if p.succeeded { "succeeded" } else { "failed" };
             self.metrics
-                .register_counter("roko_plans_total", "", LabelSet::from_pairs(&[("status", status)]))
+                .register_counter(
+                    "roko_plans_total",
+                    "",
+                    LabelSet::from_pairs(&[("status", status)]),
+                )
                 .inc();
 
             // Log cost summary from plan_costs HashMap.
@@ -1224,6 +1285,19 @@ impl PlanRunner {
             }
         }
 
+        let mut plan_deps: HashMap<String, Vec<String>> = HashMap::new();
+        for (plan_id, tracker) in &self.task_trackers {
+            for task in &tracker.tasks_file.tasks {
+                if !task.depends_on_plan.is_empty() {
+                    plan_deps
+                        .entry(plan_id.clone())
+                        .or_default()
+                        .extend(task.depends_on_plan.iter().cloned());
+                }
+            }
+        }
+        self.executor.set_plan_dependencies(plan_deps);
+
         self.run_all().await
     }
 
@@ -1241,13 +1315,12 @@ impl PlanRunner {
         }
 
         // Otherwise, look for plan subdirectories.
-        for entry in std::fs::read_dir(plans_dir)
-            .with_context(|| format!("read {}", plans_dir.display()))?
+        for entry in
+            std::fs::read_dir(plans_dir).with_context(|| format!("read {}", plans_dir.display()))?
         {
             let entry = entry?;
             let path = entry.path();
-            if path.is_dir()
-                && (path.join("tasks.toml").exists() || path.join("plan.md").exists())
+            if path.is_dir() && (path.join("tasks.toml").exists() || path.join("plan.md").exists())
             {
                 dirs.push(path);
             }
@@ -1293,7 +1366,9 @@ impl PlanRunner {
                     (AgentRole::Strategist, "enrich") => self.handle_enriching(&plan_id).await,
                     (AgentRole::Implementer, _) => self.handle_implementing(&plan_id).await,
                     (AgentRole::AutoFixer, "fix") => self.handle_autofix(&plan_id).await,
-                    (AgentRole::AutoFixer, "regen-verify") => self.handle_regen_verify(&plan_id).await,
+                    (AgentRole::AutoFixer, "regen-verify") => {
+                        self.handle_regen_verify(&plan_id).await
+                    }
                     (AgentRole::Auditor, "review") => self.handle_reviewing(&plan_id).await,
                     (AgentRole::Scribe, "docs") => self.handle_doc_revision(&plan_id).await,
                     _ => self.handle_generic_agent(&plan_id, role, &task).await,
@@ -1314,14 +1389,25 @@ impl PlanRunner {
                             serde_json::json!({"plan_id": plan_id, "rung": rung, "passed": passed}),
                         );
                         // Record gate episode.
-                        let wall_ms = u64::try_from(gate_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                        let wall_ms =
+                            u64::try_from(gate_started.elapsed().as_millis()).unwrap_or(u64::MAX);
                         let mut ep = Episode::new("gate", format!("{plan_id}:rung-{rung}"));
                         ep.success = passed;
-                        ep.usage = Usage { wall_ms, ..Usage::default() };
-                        ep.gate_verdicts.push(GateVerdict::new(format!("rung-{rung}"), passed));
+                        ep.usage = Usage {
+                            wall_ms,
+                            ..Usage::default()
+                        };
+                        ep.gate_verdicts
+                            .push(GateVerdict::new(format!("rung-{rung}"), passed));
                         ep.input_signal_hash.clone_from(&plan_id);
                         let gate_input = self.enrich_completed_run(
-                            ep, &plan_id, &format!("rung-{rung}"), "gate", "n/a", Some(passed), 1,
+                            ep,
+                            &plan_id,
+                            &format!("rung-{rung}"),
+                            "gate",
+                            "n/a",
+                            Some(passed),
+                            1,
                         );
                         self.record_and_check_learning(gate_input, &plan_id).await;
 
@@ -1355,29 +1441,36 @@ impl PlanRunner {
                                 let failed_gates: Vec<&GateResult> = self
                                     .executor
                                     .plan_state(&plan_id)
-                                    .map(|s| {
-                                        s.gate_results
-                                            .iter()
-                                            .filter(|g| !g.passed)
-                                            .collect()
-                                    })
+                                    .map(|s| s.gate_results.iter().filter(|g| !g.passed).collect())
                                     .unwrap_or_default();
                                 let failure_summaries: Vec<String> = failed_gates
                                     .iter()
                                     .map(|g| format!("{}: {}", g.gate_name, g.summary))
                                     .collect();
                                 // Determine the primary failure phase (compile > test > clippy > other)
-                                let phase = failed_gates.iter()
+                                let phase = failed_gates
+                                    .iter()
                                     .map(|g| g.gate_name.as_str())
                                     .find(|n| *n == "compile")
-                                    .or_else(|| failed_gates.iter().map(|g| g.gate_name.as_str()).find(|n| *n == "test"))
-                                    .or_else(|| failed_gates.iter().map(|g| g.gate_name.as_str()).find(|n| *n == "clippy"))
+                                    .or_else(|| {
+                                        failed_gates
+                                            .iter()
+                                            .map(|g| g.gate_name.as_str())
+                                            .find(|n| *n == "test")
+                                    })
+                                    .or_else(|| {
+                                        failed_gates
+                                            .iter()
+                                            .map(|g| g.gate_name.as_str())
+                                            .find(|n| *n == "clippy")
+                                    })
                                     .unwrap_or("unknown");
                                 tracker.last_gate_failure = Some(failure_summaries.join("\n"));
                                 tracker.last_gate_failure_phase = Some(phase.to_string());
 
                                 // Emit a FailureTrace for observability.
-                                let trace_id = Self::trace_id_for(&plan_id, &format!("gate-fail-{rung}"));
+                                let trace_id =
+                                    Self::trace_id_for(&plan_id, &format!("gate-fail-{rung}"));
                                 let evidence = failed_gates
                                     .iter()
                                     .map(|g| format!("{}: {}", g.gate_name, g.summary))
@@ -1413,11 +1506,12 @@ impl PlanRunner {
                         // Failure-driven re-planning (§9): after 3 consecutive
                         // gate failures, attempt to re-plan.
                         if !passed {
-                            let failure_count = self.task_trackers
+                            let failure_count = self
+                                .task_trackers
                                 .get(&plan_id)
                                 .map(|t| t.gate_failure_count)
                                 .unwrap_or(0);
-                            if failure_count >= 3 {
+                            if failure_count >= 3 && self.executor.config().auto_replan {
                                 self.attempt_replan(&plan_id).await;
                             }
                         }
@@ -1512,7 +1606,11 @@ impl PlanRunner {
             ExecutorAction::DispatchPlan { plan_id } => {
                 eprintln!("[orchestrate] DispatchPlan {plan_id}");
                 self.metrics
-                    .register_counter("roko_plans_total", "", LabelSet::from_pairs(&[("status", "started")]))
+                    .register_counter(
+                        "roko_plans_total",
+                        "",
+                        LabelSet::from_pairs(&[("status", "started")]),
+                    )
                     .inc();
                 self.event_log.append(
                     EventKind::PlanStarted,
@@ -1530,10 +1628,39 @@ impl PlanRunner {
                 eprintln!("[orchestrate] ResumePlan {plan_id}");
                 self.executor.resume_plan(&plan_id);
             }
-            _ => {
-                // Future ExecutorAction variants — log and skip.
-                eprintln!("[orchestrate] unhandled action: {action:?}");
+            ExecutorAction::FailPlan { plan_id, reason } => {
+                eprintln!("[orchestrate] FailPlan {plan_id}: {reason}");
+                self.event_log.append(
+                    EventKind::ErrorOccurred,
+                    serde_json::json!({"plan_id": &plan_id, "error": reason.clone()}),
+                );
+                let _ = self
+                    .executor
+                    .apply_event(&plan_id, &ExecutorEvent::Fatal(reason));
             }
+            ExecutorAction::CompletePlan { plan_id } => {
+                eprintln!("[orchestrate] CompletePlan {plan_id}");
+                if let Some(state) = self.executor.plan_state_mut(&plan_id) {
+                    state.current_phase = roko_core::PlanPhase::Complete;
+                    state.paused = false;
+                }
+                self.event_log.append(
+                    EventKind::PhaseTransition,
+                    serde_json::json!({"plan_id": &plan_id, "event": "CompletePlan"}),
+                );
+            }
+            ExecutorAction::Reorder {
+                plan_id,
+                new_position,
+            } => {
+                eprintln!("[orchestrate] Reorder {plan_id} -> {new_position}");
+                self.executor.reorder_plan(&plan_id, new_position);
+                self.event_log.append(
+                    EventKind::PhaseTransition,
+                    serde_json::json!({"plan_id": &plan_id, "event": "Reorder", "new_position": new_position}),
+                );
+            }
+            _ => unreachable!("non-exhaustive ExecutorAction variant"),
         }
     }
 
@@ -1552,7 +1679,9 @@ impl PlanRunner {
                 groups.len(),
             );
         } else {
-            eprintln!("[orchestrate] Enriching {plan_id}: no tasks.toml, proceeding with generic flow");
+            eprintln!(
+                "[orchestrate] Enriching {plan_id}: no tasks.toml, proceeding with generic flow"
+            );
         }
 
         let event = ExecutorEvent::EnrichmentDone;
@@ -1566,7 +1695,8 @@ impl PlanRunner {
     async fn handle_implementing(&mut self, plan_id: &str) {
         // If no tracker, fall through to generic agent
         if !self.task_trackers.contains_key(plan_id) {
-            self.handle_generic_agent(plan_id, AgentRole::Implementer, "next").await;
+            self.handle_generic_agent(plan_id, AgentRole::Implementer, "next")
+                .await;
             return;
         }
 
@@ -1575,19 +1705,37 @@ impl PlanRunner {
             let Some(tracker) = self.task_trackers.get(plan_id) else {
                 return; // unreachable: checked above
             };
-            tracker.ready_tasks().iter().map(|t| t.id.clone()).collect()
+            let groups = tracker.tasks_file.parallel_groups();
+            groups
+                .get(tracker.current_group_index)
+                .map(|group| {
+                    group
+                        .iter()
+                        .filter(|t| {
+                            !tracker.completed.contains(&t.id)
+                                && !tracker.failed.contains(&t.id)
+                                && t.is_ready(&tracker.completed)
+                        })
+                        .map(|t| t.id.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
         };
 
         if ready.is_empty() {
             // No ready tasks — check if all done or blocked
-            let all_done = self.task_trackers.get(plan_id)
+            let all_done = self
+                .task_trackers
+                .get(plan_id)
                 .is_some_and(TaskTracker::all_tasks_done);
             if all_done {
                 let event = ExecutorEvent::ImplementationDone;
                 self.log_transition(plan_id, &event);
                 let _ = self.executor.apply_event(plan_id, &event);
             } else {
-                eprintln!("[orchestrate] {plan_id}: no ready tasks but not all done — blocked or failed");
+                eprintln!(
+                    "[orchestrate] {plan_id}: no ready tasks but not all done — blocked or failed"
+                );
                 let _ = self.executor.apply_event(
                     plan_id,
                     &ExecutorEvent::Fatal("all remaining tasks blocked or failed".into()),
@@ -1601,14 +1749,16 @@ impl PlanRunner {
             self.handle_implementing_single(plan_id, &ready[0]).await;
         } else {
             // ── Multiple ready tasks: parallel dispatch ──────────────
-            // Respect per-plan max_parallel from tasks.toml (§6), falling
-            // back to the global MAX_PARALLEL_TASKS constant.
-            let effective_max = self
+            // Respect per-plan max_parallel from tasks.toml (§6) but cap
+            // it by the executor's plan-local concurrency limit.
+            let plan_cap = self
                 .task_trackers
                 .get(plan_id)
                 .map(|t| t.tasks_file.meta.max_parallel as usize)
                 .filter(|&n| n > 0)
                 .unwrap_or(MAX_PARALLEL_TASKS);
+            let executor_cap = self.executor.config().max_concurrent_tasks.max(1);
+            let effective_max = plan_cap.min(executor_cap);
             let batch: Vec<String> = ready.into_iter().take(effective_max).collect();
             eprintln!(
                 "[orchestrate] Implementing {plan_id}: dispatching {} tasks in parallel: {}",
@@ -1619,7 +1769,10 @@ impl PlanRunner {
         }
 
         // Check if all tasks are now done
-        let all_done = self.task_trackers.get(plan_id).is_some_and(TaskTracker::all_tasks_done);
+        let all_done = self
+            .task_trackers
+            .get(plan_id)
+            .is_some_and(TaskTracker::all_tasks_done);
         if all_done {
             eprintln!("[orchestrate] {plan_id}: all tasks done, advancing to Gating");
             let event = ExecutorEvent::ImplementationDone;
@@ -1654,20 +1807,31 @@ impl PlanRunner {
             tracker.last_impl_task_id = Some(task_id.to_string());
         }
 
+        let wt_id = format!("{plan_id}-{task_id}");
+        let exec_dir = self.task_exec_dir(plan_id, task_id).await;
         let started = std::time::Instant::now();
         let max_retries = 2u32;
         let mut succeeded = false;
 
         for attempt in 0..=max_retries {
             if attempt > 0 {
-                eprintln!(
-                    "[orchestrate] Retry {attempt}/{max_retries} for {plan_id}/{task_id}"
-                );
+                eprintln!("[orchestrate] Retry {attempt}/{max_retries} for {plan_id}/{task_id}");
             }
 
-            match self.dispatch_agent(plan_id, AgentRole::Implementer, task_id).await {
+            match self
+                .dispatch_agent_with(
+                    plan_id,
+                    AgentRole::Implementer,
+                    task_id,
+                    None,
+                    None,
+                    Some(exec_dir.clone()),
+                )
+                .await
+            {
                 Ok(result) => {
-                    self.record_task_success(plan_id, task_id, &result, &started).await;
+                    self.record_task_success(plan_id, task_id, &result, &started)
+                        .await;
                     succeeded = true;
                     break;
                 }
@@ -1677,10 +1841,15 @@ impl PlanRunner {
                         attempt + 1
                     );
                     if attempt == max_retries {
-                        self.record_task_failure(plan_id, task_id, &e, &started).await;
+                        self.record_task_failure(plan_id, task_id, &e, &started)
+                            .await;
                     }
                 }
             }
+        }
+
+        if let Err(e) = self.worktrees.remove(&wt_id).await {
+            eprintln!("[orchestrate] worktree cleanup failed for {task_id}: {e}");
         }
 
         if !succeeded {
@@ -1728,63 +1897,93 @@ impl PlanRunner {
         let skip_perms = role == AgentRole::Implementer || role == AgentRole::AutoFixer;
 
         for (tid, dir) in &task_dirs {
-            let task_def = tasks_file.as_ref()
+            let task_def = tasks_file
+                .as_ref()
                 .and_then(|tf| tf.tasks.iter().find(|t| t.id == *tid).cloned());
 
             let (prompt_text, model) = if let Some(ref td) = task_def {
                 let p = td.build_prompt(plan_id, &self.workdir);
                 let m = td.effective_model(
-                    self.config.agent.model.as_deref().unwrap_or("claude-sonnet-4-6"),
+                    self.config
+                        .agent
+                        .model
+                        .as_deref()
+                        .unwrap_or("claude-sonnet-4-6"),
                     Some(&self.config.agent.tier_models),
                 );
                 (p, m)
             } else {
-                let p = format!("Plan: {plan_id}\nTask: {tid}\n\nImplement the task described above.");
-                let m = self.config.agent.model.clone().unwrap_or_else(|| "claude-opus-4-6".into());
+                let p =
+                    format!("Plan: {plan_id}\nTask: {tid}\n\nImplement the task described above.");
+                let m = self
+                    .config
+                    .agent
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| "claude-opus-4-6".into());
                 (p, m)
             };
 
             let system_prompt = build_system_prompt(role, plan_id, tid, &claude_tools_csv);
-            let env_vars: Vec<(String, String)> = self.config.agent.env.iter()
+            let env_vars: Vec<(String, String)> = self
+                .config
+                .agent
+                .env
+                .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
-                .chain(std::iter::once(("CARGO_TARGET_DIR".into(), shared_target.display().to_string())))
+                .chain(std::iter::once((
+                    "CARGO_TARGET_DIR".into(),
+                    shared_target.display().to_string(),
+                )))
                 .collect();
 
-            configs.push((tid.clone(), AgentRunConfig {
-                command: self.config.agent.command.clone(),
-                exec_dir: dir.clone(),
-                model,
-                timeout_ms: self.config.agent.timeout_ms,
-                bare_mode: self.config.agent.bare_mode,
-                effort: self.config.agent.effort.clone(),
-                system_prompt,
-                tools_csv: claude_tools_csv.clone(),
-                mcp_config: self.config.agent.mcp_config.clone(),
-                fallback_model: self.config.agent.fallback_model.clone(),
-                env_vars,
-                extra_args: self.config.agent.args.clone(),
-                resume_session: self.claude_resume_session.clone(),
-                prompt: prompt_text,
-                skip_permissions: skip_perms,
-            }));
+            configs.push((
+                tid.clone(),
+                AgentRunConfig {
+                    command: self.config.agent.command.clone(),
+                    exec_dir: dir.clone(),
+                    model,
+                    timeout_ms: self.effective_task_timeout_ms(task_def.as_ref()),
+                    bare_mode: self.config.agent.bare_mode,
+                    effort: self.config.agent.effort.clone(),
+                    system_prompt,
+                    tools_csv: claude_tools_csv.clone(),
+                    mcp_config: self.config.agent.mcp_config.clone(),
+                    fallback_model: self.config.agent.fallback_model.clone(),
+                    env_vars,
+                    extra_args: self.config.agent.args.clone(),
+                    resume_session: self.claude_resume_session.clone(),
+                    prompt: prompt_text,
+                    skip_permissions: skip_perms,
+                },
+            ));
         }
 
         // ── Run all agents in parallel ───────────────────────────────
-        let futs: Vec<_> = configs
-            .into_iter()
-            .map(|(tid, cfg)| async move {
+        let mut join_set = JoinSet::new();
+        for (tid, cfg) in configs {
+            join_set.spawn(async move {
                 let result = run_prepared_agent(cfg).await;
                 (tid, result)
-            })
-            .collect();
+            });
+        }
 
-        let results = futures::future::join_all(futs).await;
+        let mut results: Vec<(String, AgentResult)> = Vec::with_capacity(task_ids.len());
+        while let Some(joined) = join_set.join_next().await {
+            match joined {
+                Ok(pair) => results.push(pair),
+                Err(e) => {
+                    eprintln!("[orchestrate] parallel task join failed: {e}");
+                }
+            }
+        }
 
         // ── Process results sequentially ─────────────────────────────
         let mut any_fatal = false;
         for (tid, agent_result) in &results {
             if agent_result.success {
-                self.record_task_success(plan_id, tid, agent_result, &started).await;
+                self.record_task_success(plan_id, tid, agent_result, &started)
+                    .await;
             } else {
                 eprintln!("[orchestrate] parallel task {tid} failed");
                 let err = anyhow!("agent returned non-success for task {tid}");
@@ -1801,11 +2000,18 @@ impl PlanRunner {
             }
         }
 
-        if any_fatal && self.task_trackers.get(plan_id).is_some_and(|t| t.ready_tasks().is_empty()) {
+        if any_fatal
+            && self
+                .task_trackers
+                .get(plan_id)
+                .is_some_and(|t| t.ready_tasks().is_empty())
+        {
             // All remaining tasks are blocked by failures.
             let _ = self.executor.apply_event(
                 plan_id,
-                &ExecutorEvent::Fatal("parallel batch had failures; remaining tasks blocked".into()),
+                &ExecutorEvent::Fatal(
+                    "parallel batch had failures; remaining tasks blocked".into(),
+                ),
             );
         }
     }
@@ -1839,8 +2045,7 @@ impl PlanRunner {
             session_id: plan_id.to_string(),
         };
 
-        let mut input = CompletedRunInput::from_episode(ep)
-            .with_cost_record(cost);
+        let mut input = CompletedRunInput::from_episode(ep).with_cost_record(cost);
         input.provider = Some(model.to_string());
 
         // Flow matched skill/rule/experiment IDs from the task tracker so
@@ -1907,11 +2112,7 @@ impl PlanRunner {
             matched_skill_id = skills.first().map(|s| s.name.clone());
             let mut skill_section = String::from("## Relevant Skills from Past Successes\n");
             for skill in skills.iter().take(3) {
-                skill_section.push_str(&format!(
-                    "- **{}**: {}\n",
-                    skill.name,
-                    skill.summary
-                ));
+                skill_section.push_str(&format!("- **{}**: {}\n", skill.name, skill.summary));
             }
             parts.push(skill_section);
         }
@@ -2006,10 +2207,12 @@ impl PlanRunner {
 
         // ── Observe cascade router for bandit learning (§9) ─────────
         {
-            use roko_learn::model_router::RoutingContext;
             use roko_core::TaskComplexityBand;
+            use roko_learn::model_router::RoutingContext;
 
-            let task_def = self.task_trackers.get(plan_id)
+            let task_def = self
+                .task_trackers
+                .get(plan_id)
                 .and_then(|t| t.tasks_file.tasks.iter().find(|td| td.id == task_id));
             let complexity = task_def
                 .map(|td| match td.tier.as_str() {
@@ -2029,7 +2232,10 @@ impl PlanRunner {
             let model = self.effective_model();
             let reward = if result.success { 1.0 } else { 0.0 };
             self.learning.cascade_router().record_observation(
-                &routing_ctx, &model, reward, result.success,
+                &routing_ctx,
+                &model,
+                reward,
+                result.success,
             );
         }
 
@@ -2049,8 +2255,16 @@ impl PlanRunner {
         self.record_and_check_learning(input, plan_id).await;
 
         // Emit efficiency event for this agent turn.
-        self.emit_efficiency_event(plan_id, task_id, "Implementer", &model, result, wall_ms, true)
-            .await;
+        self.emit_efficiency_event(
+            plan_id,
+            task_id,
+            "Implementer",
+            &model,
+            result,
+            wall_ms,
+            true,
+        )
+        .await;
 
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
             tracker.mark_completed(task_id);
@@ -2118,7 +2332,14 @@ impl PlanRunner {
 
         eprintln!("[orchestrate] Attempting re-plan for {plan_id} after repeated gate failures");
         match self
-            .dispatch_agent_with(plan_id, AgentRole::Strategist, "replan", Some(prompt), None, None)
+            .dispatch_agent_with(
+                plan_id,
+                AgentRole::Strategist,
+                "replan",
+                Some(prompt),
+                None,
+                None,
+            )
             .await
         {
             Ok(_result) => {
@@ -2147,7 +2368,10 @@ impl PlanRunner {
     ) {
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let mut ep = Episode::new("Implementer", task_id).failed(error.to_string());
-        ep.usage = Usage { wall_ms, ..Usage::default() };
+        ep.usage = Usage {
+            wall_ms,
+            ..Usage::default()
+        };
         ep.input_signal_hash = plan_id.to_string();
         let model = self.effective_model();
         let input = self.enrich_completed_run(ep, plan_id, task_id, "Implementer", &model, None, 1);
@@ -2213,8 +2437,16 @@ impl PlanRunner {
 
                 // Model selection: mechanical tier (Haiku-class) for compile errors
                 // (fast iteration), focused tier (Sonnet-class) for test/logic failures.
-                let fix_tier = if gate_phase == "compile" { "mechanical" } else { "focused" };
-                let model = self.config.agent.tier_models.get(fix_tier)
+                let fix_tier = if gate_phase == "compile" {
+                    "mechanical"
+                } else {
+                    "focused"
+                };
+                let model = self
+                    .config
+                    .agent
+                    .tier_models
+                    .get(fix_tier)
                     .cloned()
                     .unwrap_or_else(|| match fix_tier {
                         "mechanical" => "claude-haiku-4-5".into(),
@@ -2228,7 +2460,17 @@ impl PlanRunner {
         };
 
         let started = std::time::Instant::now();
-        match self.dispatch_agent_with(plan_id, AgentRole::AutoFixer, "fix", fix_prompt, fix_model, None).await {
+        match self
+            .dispatch_agent_with(
+                plan_id,
+                AgentRole::AutoFixer,
+                "fix",
+                fix_prompt,
+                fix_model,
+                None,
+            )
+            .await
+        {
             Ok(result) => {
                 *self.per_plan_agents.entry(plan_id.to_string()).or_default() += 1;
                 self.agent_calls += 1;
@@ -2245,7 +2487,8 @@ impl PlanRunner {
                 ep.input_signal_hash = plan_id.to_string();
                 ep.output_signal_hash = result.output.id.to_string();
                 let model = self.effective_model();
-                let input = self.enrich_completed_run(ep, plan_id, "fix", "AutoFixer", &model, None, 1);
+                let input =
+                    self.enrich_completed_run(ep, plan_id, "fix", "AutoFixer", &model, None, 1);
                 self.record_and_check_learning(input, plan_id).await;
 
                 // Reset for retry: increment iteration, clear gate results
@@ -2270,7 +2513,10 @@ impl PlanRunner {
     /// RegeneratingVerify phase: dispatch fixer with verify-specific context.
     async fn handle_regen_verify(&mut self, plan_id: &str) {
         let started = std::time::Instant::now();
-        match self.dispatch_agent(plan_id, AgentRole::AutoFixer, "regen-verify").await {
+        match self
+            .dispatch_agent(plan_id, AgentRole::AutoFixer, "regen-verify")
+            .await
+        {
             Ok(result) => {
                 *self.per_plan_agents.entry(plan_id.to_string()).or_default() += 1;
                 self.agent_calls += 1;
@@ -2287,7 +2533,15 @@ impl PlanRunner {
                 ep.input_signal_hash = plan_id.to_string();
                 ep.output_signal_hash = result.output.id.to_string();
                 let model = self.effective_model();
-                let input = self.enrich_completed_run(ep, plan_id, "regen-verify", "AutoFixer", &model, None, 1);
+                let input = self.enrich_completed_run(
+                    ep,
+                    plan_id,
+                    "regen-verify",
+                    "AutoFixer",
+                    &model,
+                    None,
+                    1,
+                );
                 self.record_and_check_learning(input, plan_id).await;
 
                 let event = ExecutorEvent::VerifyRegenDone;
@@ -2311,7 +2565,17 @@ impl PlanRunner {
         // Build review prompt from ReviewerTemplate with available context.
         let review_prompt = self.build_review_prompt(plan_id).await;
 
-        match self.dispatch_agent_with(plan_id, AgentRole::Auditor, "review", Some(review_prompt), None, None).await {
+        match self
+            .dispatch_agent_with(
+                plan_id,
+                AgentRole::Auditor,
+                "review",
+                Some(review_prompt),
+                None,
+                None,
+            )
+            .await
+        {
             Ok(result) => {
                 *self.per_plan_agents.entry(plan_id.to_string()).or_default() += 1;
                 self.agent_calls += 1;
@@ -2336,7 +2600,8 @@ impl PlanRunner {
                 ep.input_signal_hash = plan_id.to_string();
                 ep.output_signal_hash = result.output.id.to_string();
                 let model = self.effective_model();
-                let input = self.enrich_completed_run(ep, plan_id, "review", "Auditor", &model, None, 1);
+                let input =
+                    self.enrich_completed_run(ep, plan_id, "review", "Auditor", &model, None, 1);
                 self.record_and_check_learning(input, plan_id).await;
 
                 if approved {
@@ -2371,7 +2636,17 @@ impl PlanRunner {
         // Build doc-revision prompt from ScribeTemplate with available context.
         let doc_prompt = self.build_doc_revision_prompt(plan_id).await;
 
-        match self.dispatch_agent_with(plan_id, AgentRole::Scribe, "docs", Some(doc_prompt), None, None).await {
+        match self
+            .dispatch_agent_with(
+                plan_id,
+                AgentRole::Scribe,
+                "docs",
+                Some(doc_prompt),
+                None,
+                None,
+            )
+            .await
+        {
             Ok(result) => {
                 *self.per_plan_agents.entry(plan_id.to_string()).or_default() += 1;
                 self.agent_calls += 1;
@@ -2388,11 +2663,14 @@ impl PlanRunner {
                 ep.input_signal_hash = plan_id.to_string();
                 ep.output_signal_hash = result.output.id.to_string();
                 let model = self.effective_model();
-                let input = self.enrich_completed_run(ep, plan_id, "docs", "Scribe", &model, None, 1);
+                let input =
+                    self.enrich_completed_run(ep, plan_id, "docs", "Scribe", &model, None, 1);
                 self.record_and_check_learning(input, plan_id).await;
             }
             Err(e) => {
-                eprintln!("[orchestrate] DocRevision failed for {plan_id}: {e} — continuing (non-blocking)");
+                eprintln!(
+                    "[orchestrate] DocRevision failed for {plan_id}: {e} — continuing (non-blocking)"
+                );
             }
         }
         // Always advance regardless of success/failure
@@ -2412,8 +2690,16 @@ impl PlanRunner {
 
         for attempt in 0..=max_retries {
             if attempt > 0 {
-                let current = self.config.agent.model.as_deref().unwrap_or("claude-sonnet-4-6");
-                let current_idx = escalation_models.iter().position(|m| *m == current).unwrap_or(1);
+                let current = self
+                    .config
+                    .agent
+                    .model
+                    .as_deref()
+                    .unwrap_or("claude-sonnet-4-6");
+                let current_idx = escalation_models
+                    .iter()
+                    .position(|m| *m == current)
+                    .unwrap_or(1);
                 let next_idx = (current_idx + attempt as usize).min(escalation_models.len() - 1);
                 let escalated = escalation_models[next_idx];
                 eprintln!(
@@ -2438,7 +2724,15 @@ impl PlanRunner {
                     ep.output_signal_hash = result.output.id.to_string();
                     let model = self.effective_model();
                     let role_str = format!("{role:?}");
-                    let input = self.enrich_completed_run(ep, plan_id, task, &role_str, &model, None, attempt + 1);
+                    let input = self.enrich_completed_run(
+                        ep,
+                        plan_id,
+                        task,
+                        &role_str,
+                        &model,
+                        None,
+                        attempt + 1,
+                    );
                     if let Err(e) = self.learning.record_completed_run(input).await {
                         eprintln!("[orchestrate] episode log failed: {e}");
                     }
@@ -2451,14 +2745,28 @@ impl PlanRunner {
                 Err(e) => {
                     last_error = e.to_string();
                     if attempt == max_retries {
-                        eprintln!("[orchestrate] agent failed for {plan_id} after {max_retries} retries: {e}");
-                        let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                        eprintln!(
+                            "[orchestrate] agent failed for {plan_id} after {max_retries} retries: {e}"
+                        );
+                        let wall_ms =
+                            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                         let mut ep = Episode::new(format!("{role:?}"), task).failed(e.to_string());
-                        ep.usage = Usage { wall_ms, ..Usage::default() };
+                        ep.usage = Usage {
+                            wall_ms,
+                            ..Usage::default()
+                        };
                         ep.input_signal_hash = plan_id.to_string();
                         let model = self.effective_model();
                         let role_str = format!("{role:?}");
-                        let input = self.enrich_completed_run(ep, plan_id, task, &role_str, &model, None, attempt + 1);
+                        let input = self.enrich_completed_run(
+                            ep,
+                            plan_id,
+                            task,
+                            &role_str,
+                            &model,
+                            None,
+                            attempt + 1,
+                        );
                         self.record_and_check_learning(input, plan_id).await;
                         self.event_log.append(
                             EventKind::ErrorOccurred,
@@ -2466,7 +2774,9 @@ impl PlanRunner {
                         );
                         let _ = self.executor.apply_event(
                             plan_id,
-                            &ExecutorEvent::Fatal(format!("agent error after {attempt} retries: {e}")),
+                            &ExecutorEvent::Fatal(format!(
+                                "agent error after {attempt} retries: {e}"
+                            )),
                         );
                     }
                 }
@@ -2487,7 +2797,8 @@ impl PlanRunner {
         let tasks_path = plan_dir.join("tasks.toml");
         if tasks_path.exists() {
             if let Ok(tf) = TasksFile::parse(&tasks_path) {
-                self.task_trackers.insert(plan_id.to_string(), TaskTracker::new(tf, plan_dir));
+                self.task_trackers
+                    .insert(plan_id.to_string(), TaskTracker::new(tf, plan_dir));
             }
         }
     }
@@ -2514,9 +2825,9 @@ impl PlanRunner {
 
     fn all_terminal(&self, plan_ids: &[String]) -> bool {
         plan_ids.iter().all(|id| {
-            self.executor
-                .plan_state(id)
-                .is_none_or(PlanState::is_terminal)
+            self.executor.plan_state(id).is_none_or(|state| {
+                state.is_terminal() || state.current_phase.kind() == PhaseKind::Done
+            })
         })
     }
 
@@ -2551,7 +2862,8 @@ impl PlanRunner {
         role: AgentRole,
         task: &str,
     ) -> Result<AgentResult> {
-        self.dispatch_agent_with(plan_id, role, task, None, None, None).await
+        self.dispatch_agent_with(plan_id, role, task, None, None, None)
+            .await
     }
 
     /// Core agent dispatch with optional prompt and model overrides.
@@ -2596,7 +2908,8 @@ impl PlanRunner {
         } else {
             None
         };
-        let task_def = tasks_file.as_ref()
+        let task_def = tasks_file
+            .as_ref()
             .and_then(|tf| tf.tasks.iter().find(|t| t.id == task).cloned());
 
         // ── Build prompt: surgical (from TaskDef) or generic ────────
@@ -2604,13 +2917,21 @@ impl PlanRunner {
         let mut attribution_keys: Vec<(String, String)> = Vec::new();
         let (task_text, selected_model) = if let Some(override_prompt) = prompt_override {
             let model = model_override.unwrap_or_else(|| {
-                self.config.agent.model.clone().unwrap_or_else(|| "claude-sonnet-4-6".into())
+                self.config
+                    .agent
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| "claude-sonnet-4-6".into())
             });
             (override_prompt, model)
         } else if let Some(ref td) = task_def {
             let prompt = td.build_prompt(plan_id, &self.workdir);
             let model = td.effective_model(
-                self.config.agent.model.as_deref().unwrap_or("claude-sonnet-4-6"),
+                self.config
+                    .agent
+                    .model
+                    .as_deref()
+                    .unwrap_or("claude-sonnet-4-6"),
                 Some(&self.config.agent.tier_models),
             );
             eprintln!(
@@ -2624,15 +2945,21 @@ impl PlanRunner {
             );
             (prompt, model)
         } else {
-            let text = format!("Plan: {plan_id}\nTask: {task}\n\nImplement the task described above.");
-            let model = self.config.agent.model.clone().unwrap_or_else(|| "claude-opus-4-6".into());
+            let text =
+                format!("Plan: {plan_id}\nTask: {task}\n\nImplement the task described above.");
+            let model = self
+                .config
+                .agent
+                .model
+                .clone()
+                .unwrap_or_else(|| "claude-opus-4-6".into());
             (text, model)
         };
 
         // ── Adaptive model selection via CascadeRouter ───────────────
         let selected_model = {
-            use roko_learn::model_router::RoutingContext;
             use roko_core::TaskComplexityBand;
+            use roko_learn::model_router::RoutingContext;
 
             let cascade_router = self.learning.cascade_router();
             let complexity = task_def
@@ -2643,7 +2970,8 @@ impl PlanRunner {
                     _ => TaskComplexityBand::Standard,
                 })
                 .unwrap_or(TaskComplexityBand::Standard);
-            let has_prior_failure = self.task_trackers
+            let has_prior_failure = self
+                .task_trackers
                 .get(plan_id)
                 .is_some_and(|t| t.last_gate_failure.is_some());
             let routing_ctx = RoutingContext {
@@ -2670,7 +2998,10 @@ impl PlanRunner {
 
         // ── Provider health check ────────────────────────────────────
         let selected_model = if !self.learning.provider_health().is_healthy(&selected_model) {
-            let fallback = self.config.agent.fallback_model
+            let fallback = self
+                .config
+                .agent
+                .fallback_model
                 .clone()
                 .unwrap_or_else(|| "claude-sonnet-4-6".into());
             tracing::warn!(
@@ -2695,7 +3026,8 @@ impl PlanRunner {
             let siblings: Vec<roko_compose::SiblingTask> = tasks_file
                 .as_ref()
                 .map(|tf| {
-                    tf.tasks.iter()
+                    tf.tasks
+                        .iter()
                         .filter(|t| t.id != td.id)
                         .map(|t| roko_compose::SiblingTask {
                             id: t.id.clone(),
@@ -2745,7 +3077,9 @@ impl PlanRunner {
                     ContextSource::SiblingTasks => "sibling_tasks",
                 };
                 let rate = self.attribution_tracker.ref_rate(&tier_str, source_type);
-                let demoted = self.attribution_tracker.should_demote(&tier_str, source_type);
+                let demoted = self
+                    .attribution_tracker
+                    .should_demote(&tier_str, source_type);
                 if demoted {
                     eprintln!("[context] {source_type}: demoted (ref_rate={rate:.2})");
                 } else {
@@ -2779,13 +3113,13 @@ impl PlanRunner {
             Vec::new()
         };
 
-        let claude_tools_csv = claude_tool_allowlist_with(
-            role,
-            self.tool_registry.as_deref(),
-        );
+        let claude_tools_csv = claude_tool_allowlist_with(role, self.tool_registry.as_deref());
 
         // ── Adaptive format selection via bandit ─────────────────────
-        let tool_count = claude_tools_csv.split(',').filter(|s| !s.is_empty()).count();
+        let tool_count = claude_tools_csv
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .count();
         let complexity = task_def
             .as_ref()
             .map(|td| match td.tier.as_str() {
@@ -2822,7 +3156,8 @@ impl PlanRunner {
         let mut sections = vec![role_section];
         for cs in context_sections {
             sections.push(
-                cs.into_signal().map_err(|e| anyhow!("context section: {e}"))?
+                cs.into_signal()
+                    .map_err(|e| anyhow!("context section: {e}"))?,
             );
         }
 
@@ -2888,16 +3223,17 @@ impl PlanRunner {
 
         // ── Run the agent with per-task model selection ─────────────
         let result: AgentResult = if self.config.agent.command == "claude" {
-            let mut agent = ClaudeCliAgent::new(&self.config.agent.command, &exec_dir, &selected_model)
-                .with_timeout_ms(self.config.agent.timeout_ms)
-                .with_bare_mode(self.config.agent.bare_mode)
-                .with_effort(self.config.agent.effort.clone())
-                .with_system_prompt(role_instruction.clone())
-                .with_tools(claude_tools_csv)
-                .with_settings_json(roko_agent::claude_cli_agent::build_settings_json())
-                .with_dangerously_skip_permissions(claude_skip_permissions_for_role(role))
-                .with_optional_resume(self.claude_resume_session.clone())
-                .with_extra_args(self.config.agent.args.clone());
+            let mut agent =
+                ClaudeCliAgent::new(&self.config.agent.command, &exec_dir, &selected_model)
+                    .with_timeout_ms(self.effective_task_timeout_ms(task_def.as_ref()))
+                    .with_bare_mode(self.config.agent.bare_mode)
+                    .with_effort(self.config.agent.effort.clone())
+                    .with_system_prompt(role_instruction.clone())
+                    .with_tools(claude_tools_csv)
+                    .with_settings_json(roko_agent::claude_cli_agent::build_settings_json())
+                    .with_dangerously_skip_permissions(claude_skip_permissions_for_role(role))
+                    .with_optional_resume(self.claude_resume_session.clone())
+                    .with_extra_args(self.config.agent.args.clone());
             if let Some(mcp_path) = &self.config.agent.mcp_config {
                 agent = agent.with_mcp_config(mcp_path);
             }
@@ -2958,8 +3294,12 @@ impl PlanRunner {
                     referenced += 1;
                 }
                 // Update rolling attribution tracker per (tier, source_type).
-                let tier_str = task_def.as_ref().map(|td| td.tier.as_str()).unwrap_or("unknown");
-                self.attribution_tracker.record(tier_str, kind, was_referenced);
+                let tier_str = task_def
+                    .as_ref()
+                    .map(|td| td.tier.as_str())
+                    .unwrap_or("unknown");
+                self.attribution_tracker
+                    .record(tier_str, kind, was_referenced);
             }
 
             let ref_rate = if total > 0 {
@@ -3066,7 +3406,10 @@ impl PlanRunner {
             role: format!("{role:?}"),
             plan_id: plan_id.to_string(),
             task_id: task.to_string(),
-            complexity_band: task_def.as_ref().map(|td| td.tier.clone()).unwrap_or_default(),
+            complexity_band: task_def
+                .as_ref()
+                .map(|td| td.tier.clone())
+                .unwrap_or_default(),
             input_tokens: u64::from(result.usage.input_tokens),
             output_tokens: u64::from(result.usage.output_tokens),
             cached_tokens: u64::from(result.usage.cache_read_tokens),
@@ -3079,10 +3422,18 @@ impl PlanRunner {
         // ── Metric instrumentation ──────────────────────────────────────
         #[allow(clippy::cast_precision_loss)]
         {
-            let status = if result.success { "succeeded" } else { "failed" };
+            let status = if result.success {
+                "succeeded"
+            } else {
+                "failed"
+            };
             let role_str = format!("{role:?}");
             self.metrics
-                .register_counter("roko_tasks_total", "", LabelSet::from_pairs(&[("status", status), ("role", &role_str)]))
+                .register_counter(
+                    "roko_tasks_total",
+                    "",
+                    LabelSet::from_pairs(&[("status", status), ("role", &role_str)]),
+                )
                 .inc();
             self.metrics
                 .register_histogram(
@@ -3092,9 +3443,14 @@ impl PlanRunner {
                     roko_core::obs::LLM_LATENCY_BUCKETS.to_vec(),
                 )
                 .observe(result.usage.wall_ms as f64 / 1000.0);
-            let total_tokens = u64::from(result.usage.input_tokens) + u64::from(result.usage.output_tokens);
+            let total_tokens =
+                u64::from(result.usage.input_tokens) + u64::from(result.usage.output_tokens);
             self.metrics
-                .register_counter("roko_llm_tokens_total", "", LabelSet::from_pairs(&[("role", &role_str)]))
+                .register_counter(
+                    "roko_llm_tokens_total",
+                    "",
+                    LabelSet::from_pairs(&[("role", &role_str)]),
+                )
                 .inc_by(total_tokens);
             // Cost metric — scale to millionths to use integer counter.
             #[allow(clippy::cast_sign_loss)]
@@ -3128,7 +3484,8 @@ impl PlanRunner {
             if let Err((task_id, _phase, command, _error_output)) =
                 self.run_verify_steps(&td.id, &td.verify, &exec_dir).await
             {
-                let msg = td.verify
+                let msg = td
+                    .verify
                     .iter()
                     .find(|s| s.command == command)
                     .and_then(|s| s.fail_msg.as_deref())
@@ -3140,6 +3497,8 @@ impl PlanRunner {
                     msg
                 ));
             }
+            self.verify_declared_write_files(&td.id, &td.files, &exec_dir)
+                .await?;
         }
 
         Ok(result)
@@ -3159,7 +3518,11 @@ impl PlanRunner {
             return Ok(());
         }
 
-        eprintln!("[orchestrate] Running {} verify steps for {}", verify_steps.len(), task_id);
+        eprintln!(
+            "[orchestrate] Running {} verify steps for {}",
+            verify_steps.len(),
+            task_id
+        );
         for step in verify_steps {
             let output = tokio::process::Command::new("sh")
                 .arg("-c")
@@ -3175,7 +3538,13 @@ impl PlanRunner {
                 Ok(o) => {
                     let stderr = String::from_utf8_lossy(&o.stderr);
                     let msg = step.fail_msg.as_deref().unwrap_or("verification failed");
-                    eprintln!("  ❌ [{}] {} — {}: {}", step.phase, step.command, msg, stderr.trim());
+                    eprintln!(
+                        "  ❌ [{}] {} — {}: {}",
+                        step.phase,
+                        step.command,
+                        msg,
+                        stderr.trim()
+                    );
                     return Err((
                         task_id.to_string(),
                         step.phase.clone(),
@@ -3306,6 +3675,7 @@ impl PlanRunner {
     }
 
     async fn plan_exec_dir(&self, plan_id: &str) -> PathBuf {
+        self.clear_stale_worktree_locks().await;
         match self.worktrees.ensure_for_plan(plan_id).await {
             Ok(handle) => handle.path,
             Err(err) => {
@@ -3320,6 +3690,7 @@ impl PlanRunner {
     /// Create (or fall back to plan-level) worktree for an individual task
     /// within a plan, so parallel tasks get isolated working directories.
     async fn task_exec_dir(&self, plan_id: &str, task_id: &str) -> PathBuf {
+        self.clear_stale_worktree_locks().await;
         let wt_id = format!("{plan_id}-{task_id}");
         match self.worktrees.create(&wt_id, "HEAD").await {
             Ok(handle) => handle.path.clone(),
@@ -3360,6 +3731,23 @@ impl PlanRunner {
             }
         }
     }
+
+    /// Remove stale git worktree locks before creating or using worktrees.
+    async fn clear_stale_worktree_locks(&self) {
+        match self.worktrees.clear_stale_locks() {
+            Ok(cleared) if !cleared.is_empty() => {
+                eprintln!(
+                    "[orchestrate] cleared {} stale worktree lock(s)",
+                    cleared.len()
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("[orchestrate] stale lock cleanup failed: {e}");
+            }
+        }
+    }
+
     /// Build a review prompt using the ReviewerTemplate with available context.
     async fn build_review_prompt(&self, plan_id: &str) -> String {
         use roko_compose::templates::reviewer::{Reviewer, ReviewerInput, ReviewerTemplate};
@@ -3622,6 +4010,79 @@ impl PlanRunner {
         }
         manifest
     }
+
+    /// Effective per-task timeout, taking the task TOML override when present.
+    fn effective_task_timeout_ms(&self, task_def: Option<&crate::task_parser::TaskDef>) -> u64 {
+        let secs = task_def
+            .map(|td| td.timeout_secs)
+            .unwrap_or(self.executor.config().task_timeout_secs);
+        secs.saturating_mul(1000)
+    }
+
+    /// Enforce the task's declared write-file scope after successful execution.
+    async fn verify_declared_write_files(
+        &self,
+        task_id: &str,
+        allowed_files: &[String],
+        exec_dir: &Path,
+    ) -> Result<()> {
+        if allowed_files.is_empty() {
+            return Ok(());
+        }
+
+        let output = tokio::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(exec_dir)
+            .output()
+            .await
+            .with_context(|| format!("git status for {task_id}"))?;
+
+        if !output.status.success() {
+            return Err(anyhow!(
+                "git status failed for {task_id}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+
+        let allowed: Vec<&str> = allowed_files.iter().map(String::as_str).collect();
+        let changed: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| {
+                if line.len() < 4 {
+                    return None;
+                }
+                let path = line[3..].trim();
+                if path.is_empty() {
+                    None
+                } else if let Some((_, new_path)) = path.rsplit_once(" -> ") {
+                    Some(new_path.trim().to_string())
+                } else {
+                    Some(path.to_string())
+                }
+            })
+            .collect();
+
+        let mut unexpected = Vec::new();
+        for path in changed {
+            let permitted = allowed.iter().any(|declared| {
+                path == *declared
+                    || path.starts_with(&format!("{declared}/"))
+                    || path.starts_with(&format!("{declared}\\"))
+            });
+            if !permitted {
+                unexpected.push(path);
+            }
+        }
+
+        if !unexpected.is_empty() {
+            return Err(anyhow!(
+                "task {task_id} modified files outside write_files scope: {}",
+                unexpected.join(", ")
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 // ─── Role-specific system prompts ────────────────────────────────────────
@@ -3704,8 +4165,10 @@ fn parse_review_verdict(output: &str) -> bool {
     if lower.contains("verdict = \"approve\"") || lower.contains("verdict: approve") {
         return true;
     }
-    if lower.contains("verdict = \"revise\"") || lower.contains("verdict: revise")
-        || lower.contains("verdict = \"reject\"") || lower.contains("verdict: reject")
+    if lower.contains("verdict = \"revise\"")
+        || lower.contains("verdict: revise")
+        || lower.contains("verdict = \"reject\"")
+        || lower.contains("verdict: reject")
     {
         return false;
     }
@@ -3726,11 +4189,14 @@ fn parse_review_verdict(output: &str) -> bool {
 fn task_def_to_input(td: &crate::task_parser::TaskDef) -> roko_compose::TaskInput {
     let (read_files, symbols, anti_patterns, prior_failures) = match &td.context {
         Some(ctx) => (
-            ctx.read_files.iter().map(|rf| roko_compose::ReadFileSpec {
-                path: rf.path.clone(),
-                lines: rf.lines.clone(),
-                why: rf.why.clone(),
-            }).collect(),
+            ctx.read_files
+                .iter()
+                .map(|rf| roko_compose::ReadFileSpec {
+                    path: rf.path.clone(),
+                    lines: rf.lines.clone(),
+                    why: rf.why.clone(),
+                })
+                .collect(),
             ctx.symbols.clone(),
             ctx.anti_patterns.clone(),
             ctx.prior_failures.clone(),
@@ -3747,11 +4213,15 @@ fn task_def_to_input(td: &crate::task_parser::TaskDef) -> roko_compose::TaskInpu
         symbols,
         anti_patterns,
         prior_failures,
-        verify_commands: td.verify.iter().map(|v| roko_compose::VerifySpec {
-            phase: v.phase.clone(),
-            command: v.command.clone(),
-            fail_msg: v.fail_msg.clone(),
-        }).collect(),
+        verify_commands: td
+            .verify
+            .iter()
+            .map(|v| roko_compose::VerifySpec {
+                phase: v.phase.clone(),
+                command: v.command.clone(),
+                fail_msg: v.fail_msg.clone(),
+            })
+            .collect(),
         acceptance: td.acceptance.clone(),
         depends_on: td.depends_on.clone(),
         max_loc: td.max_loc,

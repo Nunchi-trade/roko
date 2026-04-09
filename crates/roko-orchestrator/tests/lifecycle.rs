@@ -21,8 +21,7 @@ use roko_orchestrator::{
 #[test]
 fn full_lifecycle_with_audit_chain() {
     let chain = AuditChain::new();
-    let mut ex = ParallelExecutor::new(ExecutorConfig::default())
-        .with_audit_chain(chain.clone());
+    let mut ex = ParallelExecutor::new(ExecutorConfig::default()).with_audit_chain(chain.clone());
 
     ex.add_plan(PlanState::new("lifecycle-1"));
 
@@ -35,7 +34,9 @@ fn full_lifecycle_with_audit_chain() {
     ));
 
     // 1. Queued -> Enriching
-    let phase = ex.apply_event("lifecycle-1", &ExecutorEvent::Start).unwrap();
+    let phase = ex
+        .apply_event("lifecycle-1", &ExecutorEvent::Start)
+        .unwrap();
     assert_eq!(phase.kind(), PhaseKind::Enriching);
 
     // 2. Enriching -> Implementing
@@ -87,7 +88,12 @@ fn full_lifecycle_with_audit_chain() {
 
     // Audit chain has exactly 8 entries (one per transition).
     let audit = ex.audit_chain().unwrap();
-    assert_eq!(audit.len(), 8, "expected 8 audit entries, got {}", audit.len());
+    assert_eq!(
+        audit.len(),
+        8,
+        "expected 8 audit entries, got {}",
+        audit.len()
+    );
     assert!(audit.verify(), "audit chain must be valid");
 
     // All entries should reference the plan_id as the resource.
@@ -133,8 +139,7 @@ fn lifecycle_without_audit_chain() {
 #[test]
 fn multi_plan_lifecycle_with_audit_chain() {
     let chain = AuditChain::new();
-    let mut ex = ParallelExecutor::new(ExecutorConfig::default())
-        .with_audit_chain(chain.clone());
+    let mut ex = ParallelExecutor::new(ExecutorConfig::default()).with_audit_chain(chain.clone());
 
     ex.add_plan(PlanState::new("plan-a"));
     ex.add_plan(PlanState::new("plan-b"));

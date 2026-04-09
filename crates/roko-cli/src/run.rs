@@ -10,8 +10,8 @@ use crate::config::{Config, GateConfig, PromptFile};
 use crate::episode::EpisodePolicy;
 use anyhow::{Context as _, Result, anyhow};
 use chrono::Utc;
-use roko_agent::translate::{ClaudeTranslator, RenderedTools, Translator};
-use roko_agent::{Agent, AgentResult, ClaudeCliAgent, ExecAgent};
+use roko_agent::translate::{ClaudeTranslator, OllamaTranslator, RenderedTools, Translator};
+use roko_agent::{Agent, AgentResult, ClaudeCliAgent, ExecAgent, OllamaLlmBackend};
 use roko_compose::{
     Placement, PromptComposer, PromptSection, RoleSystemPromptSpec, SectionPriority, TaskContext,
 };
@@ -324,6 +324,8 @@ async fn dispatch_agent(
             agent = agent.with_env_var(k, v);
         }
         agent.run(prompt, ctx).await
+    } else if config.agent.command == "ollama" {
+        run_ollama_agentic_single(workdir, config, prompt_text).await
     } else {
         let mut agent = ExecAgent::new(&config.agent.command, config.agent.args.clone())
             .with_timeout_ms(config.agent.timeout_ms);
@@ -331,6 +333,91 @@ async fn dispatch_agent(
             agent = agent.with_env_var(k, v);
         }
         agent.run(prompt, ctx).await
+    }
+}
+
+/// Ollama agentic path for `roko run`.
+async fn run_ollama_agentic_single(
+    workdir: &Path,
+    config: &Config,
+    prompt_text: &str,
+) -> AgentResult {
+    use roko_agent::dispatcher::ToolDispatcher;
+    use roko_agent::tool_loop::{StopReason, ToolLoop};
+    use roko_core::tool::{ToolContext, ToolHandler};
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    let started = Instant::now();
+    let model = config
+        .agent
+        .model
+        .clone()
+        .unwrap_or_else(|| "llama3.1:8b".to_string());
+
+    let base_url = config
+        .agent
+        .env
+        .iter()
+        .find(|(k, _)| k == "OLLAMA_HOST")
+        .map(|(_, v)| v.clone())
+        .unwrap_or_else(|| "http://localhost:11434".to_string());
+
+    let registry = Arc::new(StaticToolRegistry::new());
+    let tools: Vec<roko_core::tool::ToolDef> = registry.all().into_iter().cloned().collect();
+    let resolver: Arc<dyn roko_agent::dispatcher::HandlerResolver> =
+        Arc::new(|name: &str| -> Option<Arc<dyn ToolHandler>> {
+            roko_std::tool::handlers::handler_for(name)
+        });
+    let dispatcher = Arc::new(ToolDispatcher::new(
+        registry as Arc<dyn ToolRegistry>,
+        resolver,
+    ));
+    let translator: Arc<dyn Translator> = Arc::new(OllamaTranslator);
+    let backend: Arc<dyn roko_agent::tool_loop::LlmBackend> = Arc::new(
+        OllamaLlmBackend::new(&model)
+            .with_base_url(base_url)
+            .with_timeout_ms(config.agent.timeout_ms),
+    );
+    let tool_loop = ToolLoop::new(translator, dispatcher, backend);
+
+    let system_prompt = build_system_prompt(&config.prompt.role, prompt_text, "");
+    let tool_ctx = ToolContext::testing(workdir);
+
+    let output = tool_loop
+        .run(&system_prompt, prompt_text, &tools, &tool_ctx)
+        .await;
+
+    let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let agent_name = format!("ollama:{model}");
+    let success = matches!(output.stop_reason, StopReason::Stop);
+    let body_text = if success {
+        output.final_text.clone()
+    } else {
+        format!(
+            "agent stopped: {:?} after {} iterations",
+            output.stop_reason, output.iterations
+        )
+    };
+
+    let sig = Signal::builder(Kind::AgentOutput)
+        .body(Body::text(body_text))
+        .provenance(Provenance::agent(&agent_name))
+        .tag("agent", &agent_name)
+        .tag("model", &model)
+        .tag("tool_calls", output.tool_calls.len().to_string())
+        .tag("iterations", output.iterations.to_string())
+        .build();
+
+    let usage = roko_agent::usage::Usage {
+        wall_ms,
+        ..Default::default()
+    };
+
+    if success {
+        AgentResult::ok(sig).with_usage(usage)
+    } else {
+        AgentResult::fail(sig).with_usage(usage)
     }
 }
 

@@ -102,9 +102,8 @@ pub fn create_backend(
 ) -> Result<Box<dyn DeployBackend>> {
     match backend_name {
         "railway-api" => {
-            let token = api_token.ok_or_else(|| {
-                anyhow::anyhow!("railway-api backend requires railway_api_token")
-            })?;
+            let token = api_token
+                .ok_or_else(|| anyhow::anyhow!("railway-api backend requires railway_api_token"))?;
             let project = project_id
                 .ok_or_else(|| anyhow::anyhow!("railway-api backend requires project_id"))?;
             let env = environment_id

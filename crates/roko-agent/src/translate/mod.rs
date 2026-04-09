@@ -72,6 +72,12 @@ pub trait Translator: Send + Sync {
     /// Serialize tool results back into the shape the backend consumes
     /// on the next turn (typically role=`"tool"`, `tool_call_id`, content).
     fn render_results(&self, results: &[(ToolCall, ToolResult)]) -> RenderedResults;
+
+    /// Extract the assistant message from a backend response for injection
+    /// into conversation history. Returns `None` by default.
+    fn render_assistant_message(&self, _response: &BackendResponse) -> Option<serde_json::Value> {
+        None
+    }
 }
 
 // ─── Payload enums ────────────────────────────────────────────────────────

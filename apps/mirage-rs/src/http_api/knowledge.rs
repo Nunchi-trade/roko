@@ -7,7 +7,9 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::{ApiError, ApiState, MAX_K, MAX_LIMIT, PaginatedResponse, now_secs, with_cache_control};
+use super::{
+    ApiError, ApiState, MAX_K, MAX_LIMIT, PaginatedResponse, now_secs, with_cache_control,
+};
 use crate::chain::{KnowledgeKind, KnowledgeState, PheromoneKind, insight::InsightId};
 
 // ---------------------------------------------------------------------------
@@ -496,9 +498,7 @@ pub async fn post_insight(
     );
 
     let (outcome_str, id_hex, similarity) = match &outcome {
-        crate::chain::knowledge::PostOutcome::Accepted { id } => {
-            ("accepted", id.to_hex(), None)
-        }
+        crate::chain::knowledge::PostOutcome::Accepted { id } => ("accepted", id.to_hex(), None),
         crate::chain::knowledge::PostOutcome::Duplicate {
             existing_id,
             similarity,
@@ -509,7 +509,10 @@ pub async fn post_insight(
     };
 
     // Update author's insights_posted stat
-    if matches!(outcome, crate::chain::knowledge::PostOutcome::Accepted { .. }) {
+    if matches!(
+        outcome,
+        crate::chain::knowledge::PostOutcome::Accepted { .. }
+    ) {
         let author_str = String::from_utf8_lossy(&broadcast_author_for_stats).into_owned();
         chain.agent_registry.add_stats_delta(
             &author_str,
@@ -521,7 +524,10 @@ pub async fn post_insight(
     }
 
     #[cfg(feature = "roko")]
-    if matches!(outcome, crate::chain::knowledge::PostOutcome::Accepted { .. }) {
+    if matches!(
+        outcome,
+        crate::chain::knowledge::PostOutcome::Accepted { .. }
+    ) {
         if let Some(bus) = &chain.insight_bus {
             if let Ok(event_id) = parse_insight_id(&id_hex) {
                 bus.broadcast(crate::roko_bridge::InsightEvent::Posted {
@@ -684,12 +690,7 @@ pub async fn trigger_decay(
     let before = chain
         .knowledge
         .entries()
-        .filter(|e| {
-            !matches!(
-                e.state,
-                KnowledgeState::Pruned | KnowledgeState::Stale
-            )
-        })
+        .filter(|e| !matches!(e.state, KnowledgeState::Pruned | KnowledgeState::Stale))
         .count();
 
     chain.knowledge.apply_decay(now);
@@ -697,12 +698,7 @@ pub async fn trigger_decay(
     let after = chain
         .knowledge
         .entries()
-        .filter(|e| {
-            !matches!(
-                e.state,
-                KnowledgeState::Pruned | KnowledgeState::Stale
-            )
-        })
+        .filter(|e| !matches!(e.state, KnowledgeState::Pruned | KnowledgeState::Stale))
         .count();
 
     let pruned = before.saturating_sub(after);

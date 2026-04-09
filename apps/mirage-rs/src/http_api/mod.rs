@@ -107,10 +107,7 @@ pub fn with_cache_control<T: Serialize>(
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-async fn request_id_middleware(
-    mut request: axum::extract::Request,
-    next: Next,
-) -> Response {
+async fn request_id_middleware(mut request: axum::extract::Request, next: Next) -> Response {
     let id = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
     let value = HeaderValue::from_str(&format!("req-{id}")).unwrap();
     request
@@ -186,15 +183,30 @@ pub fn build_router(state: ApiState) -> Router {
         // Health
         .route("/health", get(health))
         // Pheromone field
-        .route("/pheromones", get(pheromone::list_pheromones).post(pheromone::deposit_pheromone))
+        .route(
+            "/pheromones",
+            get(pheromone::list_pheromones).post(pheromone::deposit_pheromone),
+        )
         .route("/pheromones/summary", get(pheromone::pheromone_summary))
         .route("/pheromones/query", post(pheromone::query_pheromones))
         .route("/pheromones/heatmap", get(pheromone::pheromone_heatmap))
-        .route("/pheromones/{id}/projection", get(pheromone::pheromone_projection))
+        .route(
+            "/pheromones/{id}/projection",
+            get(pheromone::pheromone_projection),
+        )
         // Knowledge graph
-        .route("/knowledge/entries", get(knowledge::list_entries).post(knowledge::post_insight))
-        .route("/knowledge/entries/{id}/confirm", post(knowledge::confirm_entry))
-        .route("/knowledge/entries/{id}/challenge", post(knowledge::challenge_entry))
+        .route(
+            "/knowledge/entries",
+            get(knowledge::list_entries).post(knowledge::post_insight),
+        )
+        .route(
+            "/knowledge/entries/{id}/confirm",
+            post(knowledge::confirm_entry),
+        )
+        .route(
+            "/knowledge/entries/{id}/challenge",
+            post(knowledge::challenge_entry),
+        )
         .route("/knowledge/decay", post(knowledge::trigger_decay))
         .route("/knowledge/edges", get(knowledge::list_edges))
         .route("/knowledge/search", get(knowledge::search_knowledge))
@@ -202,9 +214,18 @@ pub fn build_router(state: ApiState) -> Router {
         // Agent topology
         .route("/agents/topology", get(topology::agent_topology))
         // Agent registry
-        .route("/agents", get(agent::list_agents).post(agent::register_agent))
-        .route("/agents/{id}/trace", get(agent::get_agent_trace).post(agent::post_agent_trace))
-        .route("/agents/{id}/heartbeat", get(agent::get_agent_heartbeat).post(agent::agent_heartbeat))
+        .route(
+            "/agents",
+            get(agent::list_agents).post(agent::register_agent),
+        )
+        .route(
+            "/agents/{id}/trace",
+            get(agent::get_agent_trace).post(agent::post_agent_trace),
+        )
+        .route(
+            "/agents/{id}/heartbeat",
+            get(agent::get_agent_heartbeat).post(agent::agent_heartbeat),
+        )
         .route("/agents/{id}/stats", get(agent::get_agent_stats))
         // Task tracking
         .route("/tasks", get(task::list_tasks).post(task::create_task))

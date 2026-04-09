@@ -116,6 +116,13 @@ impl Translator for OllamaTranslator {
         Ok(out)
     }
 
+    fn render_assistant_message(&self, response: &BackendResponse) -> Option<serde_json::Value> {
+        let BackendResponse::Json(json) = response else {
+            return None;
+        };
+        json.get("message").cloned()
+    }
+
     fn render_results(&self, results: &[(ToolCall, ToolResult)]) -> RenderedResults {
         let msgs: Vec<serde_json::Value> = results
             .iter()

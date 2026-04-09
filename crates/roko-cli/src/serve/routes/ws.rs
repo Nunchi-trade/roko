@@ -6,13 +6,13 @@
 
 use std::sync::Arc;
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::Router;
 use axum::extract::State;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use axum::routing::get;
-use axum::Router;
-use futures::stream::StreamExt;
 use futures::SinkExt;
+use futures::stream::StreamExt;
 use serde::Deserialize;
 use tracing::{debug, warn};
 
@@ -23,10 +23,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 }
 
 /// `GET /ws` — upgrade to a WebSocket connection.
-async fn ws_upgrade(
-    State(state): State<Arc<AppState>>,
-    ws: WebSocketUpgrade,
-) -> impl IntoResponse {
+async fn ws_upgrade(State(state): State<Arc<AppState>>, ws: WebSocketUpgrade) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_ws(state, socket))
 }
 
@@ -115,18 +112,12 @@ async fn handle_ws(state: Arc<AppState>, socket: WebSocket) {
 ///
 /// Filter strings are matched against the event's serde `type` tag.
 /// An empty filter accepts all events.
-fn matches_filter(
-    event: &crate::serve::events::ServerEvent,
-    filter: &[String],
-) -> bool {
+fn matches_filter(event: &crate::serve::events::ServerEvent, filter: &[String]) -> bool {
     // Serialize to extract the "type" field cheaply.
     let Ok(val) = serde_json::to_value(event) else {
         return true;
     };
-    let event_type = val
-        .get("type")
-        .and_then(|t| t.as_str())
-        .unwrap_or("");
+    let event_type = val.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
     filter.iter().any(|f| event_type.contains(f.as_str()))
 }

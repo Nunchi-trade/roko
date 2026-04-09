@@ -77,7 +77,8 @@ pub fn is_local_model(slug: &str) -> bool {
         || lower.starts_with("deepseek")
         || lower.starts_with("phi")
         || lower.starts_with("starcoder")
-        || lower.contains(':') && !lower.starts_with("claude")
+        || lower.contains(':')
+            && !lower.starts_with("claude")
             && !lower.starts_with("gpt")
             && !lower.starts_with("composer")
             && !lower.starts_with("cursor")
@@ -303,7 +304,9 @@ impl PlanArtifacts {
     /// Read a plan artifact if it exists on disk.
     fn read_artifact(&self, filename: &str) -> Option<String> {
         let path = self.plan_dir.join(filename);
-        std::fs::read_to_string(&path).ok().filter(|s| !s.trim().is_empty())
+        std::fs::read_to_string(&path)
+            .ok()
+            .filter(|s| !s.trim().is_empty())
     }
 
     /// Read the plan-level brief (brief.md).
@@ -433,7 +436,14 @@ impl ContextProvider {
 
         // ── Tier 2: Focused (Sonnet+) ──────────────────────────────
         if tier == ContextTier::Focused || tier == ContextTier::Full {
-            self.add_focused_context(&mut sections, task, plan_artifacts, siblings, prior_outputs, budget);
+            self.add_focused_context(
+                &mut sections,
+                task,
+                plan_artifacts,
+                siblings,
+                prior_outputs,
+                budget,
+            );
         }
 
         // ── Tier 3: Full (Opus) ────────────────────────────────────
@@ -479,17 +489,15 @@ impl ContextProvider {
     }
 
     /// Add inline file contents as context sections.
-    fn add_inline_files(
-        &self,
-        sections: &mut Vec<ContextSection>,
-        task: &TaskInput,
-    ) {
+    fn add_inline_files(&self, sections: &mut Vec<ContextSection>, task: &TaskInput) {
         for rf in &task.read_files {
             let full_path = self.workdir.join(&rf.path);
             if !full_path.exists() {
                 continue;
             }
-            let Ok(content) = std::fs::read_to_string(&full_path) else { continue };
+            let Ok(content) = std::fs::read_to_string(&full_path) else {
+                continue;
+            };
 
             let lines_to_show = rf.lines.as_ref().map_or_else(
                 || content.lines().take(100).collect::<Vec<_>>().join("\n"),
@@ -508,7 +516,10 @@ impl ContextProvider {
             let formatted = format!(
                 "### `{}` {}\nWhy: {}\n```\n{}\n```",
                 rf.path,
-                rf.lines.as_deref().map(|l| format!("(lines {l})")).unwrap_or_default(),
+                rf.lines
+                    .as_deref()
+                    .map(|l| format!("(lines {l})"))
+                    .unwrap_or_default(),
                 rf.why,
                 lines_to_show,
             );
@@ -527,11 +538,7 @@ impl ContextProvider {
     }
 
     /// Add resolved symbol signatures as context sections.
-    fn add_symbol_signatures(
-        &self,
-        sections: &mut Vec<ContextSection>,
-        task: &TaskInput,
-    ) {
+    fn add_symbol_signatures(&self, sections: &mut Vec<ContextSection>, task: &TaskInput) {
         use std::fmt::Write;
 
         if !task.symbols.is_empty() {
@@ -564,7 +571,9 @@ impl ContextProvider {
 /// Add anti-patterns as context sections.
 fn add_anti_patterns(sections: &mut Vec<ContextSection>, task: &TaskInput) {
     if !task.anti_patterns.is_empty() {
-        let content = task.anti_patterns.iter()
+        let content = task
+            .anti_patterns
+            .iter()
             .map(|ap| format!("- {ap}"))
             .collect::<Vec<_>>()
             .join("\n");
@@ -583,7 +592,9 @@ fn add_anti_patterns(sections: &mut Vec<ContextSection>, task: &TaskInput) {
 /// Add prior failures as context sections.
 fn add_prior_failures(sections: &mut Vec<ContextSection>, task: &TaskInput) {
     if !task.prior_failures.is_empty() {
-        let content = task.prior_failures.iter()
+        let content = task
+            .prior_failures
+            .iter()
             .enumerate()
             .map(|(i, f)| format!("### Attempt {}\n{f}", i + 1))
             .collect::<Vec<_>>()
@@ -603,16 +614,17 @@ fn add_prior_failures(sections: &mut Vec<ContextSection>, task: &TaskInput) {
 /// Add verification commands or acceptance criteria as context sections.
 fn add_verification(sections: &mut Vec<ContextSection>, task: &TaskInput) {
     if !task.verify_commands.is_empty() {
-        let content = task.verify_commands.iter()
+        let content = task
+            .verify_commands
+            .iter()
             .map(|v| {
                 let msg = v.fail_msg.as_deref().unwrap_or("must succeed");
                 format!("- `{}` — {msg}", v.command)
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let formatted = format!(
-            "## Verification (these commands must pass after your changes)\n{content}"
-        );
+        let formatted =
+            format!("## Verification (these commands must pass after your changes)\n{content}");
 
         sections.push(ContextSection {
             section: PromptSection::new("verification", &formatted)
@@ -622,7 +634,9 @@ fn add_verification(sections: &mut Vec<ContextSection>, task: &TaskInput) {
             source: ContextSource::Verification,
         });
     } else if !task.acceptance.is_empty() {
-        let content = task.acceptance.iter()
+        let content = task
+            .acceptance
+            .iter()
             .map(|a| format!("- {a}"))
             .collect::<Vec<_>>()
             .join("\n");
@@ -652,11 +666,9 @@ impl ContextProvider {
     ) {
         // 1. Task-scoped brief (What/Why/How)
         let plan_doc = plan_artifacts.plan_doc();
-        let brief = self.brief_generator.generate(
-            task,
-            plan_doc.as_deref(),
-            siblings,
-        );
+        let brief = self
+            .brief_generator
+            .generate(task, plan_doc.as_deref(), siblings);
         if !brief.is_empty() {
             sections.push(ContextSection {
                 section: PromptSection::new("task_brief", &brief)
@@ -670,7 +682,8 @@ impl ContextProvider {
 
         // 2. Sibling tasks (just IDs + titles for orientation)
         if !siblings.is_empty() {
-            let content = siblings.iter()
+            let content = siblings
+                .iter()
                 .map(|s| {
                     let marker = if task.depends_on.contains(&s.id) {
                         " ← depends on"
@@ -701,11 +714,13 @@ impl ContextProvider {
         }
 
         // 3. Prior task outputs (from completed dependencies)
-        let relevant_outputs: Vec<_> = prior_outputs.iter()
+        let relevant_outputs: Vec<_> = prior_outputs
+            .iter()
             .filter(|o| task.depends_on.contains(&o.task_id))
             .collect();
         if !relevant_outputs.is_empty() {
-            let content = relevant_outputs.iter()
+            let content = relevant_outputs
+                .iter()
                 .map(|o| format!("### {} output\n{}", o.task_id, o.summary))
                 .collect::<Vec<_>>()
                 .join("\n\n");
@@ -718,7 +733,11 @@ impl ContextProvider {
                     .with_placement(Placement::Middle)
                     .with_hard_cap(4_000),
                 source: ContextSource::PriorTaskOutput {
-                    task_id: relevant_outputs.iter().map(|o| o.task_id.clone()).collect::<Vec<_>>().join(","),
+                    task_id: relevant_outputs
+                        .iter()
+                        .map(|o| o.task_id.clone())
+                        .collect::<Vec<_>>()
+                        .join(","),
                 },
             });
         }
@@ -762,7 +781,8 @@ impl ContextProvider {
         // Sort by priority ascending (lowest first = dropped first),
         // then by size descending (within same priority, drop biggest first)
         sections.sort_by(|a, b| {
-            (a.section.priority as u8).cmp(&(b.section.priority as u8))
+            (a.section.priority as u8)
+                .cmp(&(b.section.priority as u8))
                 .then(b.estimated_tokens().cmp(&a.estimated_tokens()))
         });
 
@@ -881,7 +901,13 @@ fn extract_line_range(content: &str, range: &str) -> String {
         .saturating_sub(1);
     let end = parts
         .get(1)
-        .and_then(|s| if s.is_empty() { None } else { s.parse::<usize>().ok() })
+        .and_then(|s| {
+            if s.is_empty() {
+                None
+            } else {
+                s.parse::<usize>().ok()
+            }
+        })
         .unwrap_or(lines.len())
         .min(lines.len());
     lines[start..end].join("\n")
@@ -1072,13 +1098,11 @@ mod tests {
         let workdir = PathBuf::from("/tmp/test");
         let provider = ContextProvider::new(workdir);
 
-        let sections = vec![
-            ContextSection {
-                section: PromptSection::new("critical_big", &"x".repeat(8000))
-                    .with_priority(SectionPriority::Critical),
-                source: ContextSource::Verification,
-            },
-        ];
+        let sections = vec![ContextSection {
+            section: PromptSection::new("critical_big", &"x".repeat(8000))
+                .with_priority(SectionPriority::Critical),
+            source: ContextSource::Verification,
+        }];
 
         // Budget is tiny but critical sections survive
         let result = provider.enforce_budget(sections, 10);
