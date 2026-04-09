@@ -638,6 +638,10 @@ impl LearningRuntime {
                 "dominance": state.dominance,
             }),
         );
+        episode.extra.insert(
+            "affect_confidence".to_string(),
+            serde_json::json!(state.confidence),
+        );
     }
 
     /// Update the cascade router from episode metadata if role + model are available.
@@ -669,6 +673,7 @@ impl LearningRuntime {
             role,
             crate_familiarity,
             has_prior_failure: !episode.success,
+            affect_confidence: extra_f64(episode, "affect_confidence").unwrap_or(0.5),
         };
         if episode
             .extra
@@ -687,6 +692,11 @@ impl LearningRuntime {
     /// Return the current arousal value tracked for a task key.
     pub fn task_arousal(&self, task_id: impl AsRef<str>) -> f64 {
         self.affect_engine.lock().get_state(task_id).arousal
+    }
+
+    /// Return the current task confidence tracked for a task key.
+    pub fn task_confidence(&self, task_id: impl AsRef<str>) -> f64 {
+        self.affect_engine.lock().get_state(task_id).confidence
     }
 
     /// Return the current task arousal with queue-wait motivation applied.
@@ -963,6 +973,7 @@ mod tests {
             role: roko_core::agent::AgentRole::Implementer,
             crate_familiarity: 0.5,
             has_prior_failure: false,
+            affect_confidence: 0.5,
         };
         for _ in 0..60 {
             router.record_observation(&ctx, "claude-sonnet-4-20250514", 0.9, true);

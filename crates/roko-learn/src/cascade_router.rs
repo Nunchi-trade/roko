@@ -88,6 +88,8 @@ pub struct CascadeSelection {
 
 /// Threshold for transitioning from Confidence to UCB stage.
 const CONFIDENCE_TO_UCB_THRESHOLD: u64 = 200;
+/// Affect confidence below which the router biases toward stronger models.
+const LOW_AFFECT_CONFIDENCE_THRESHOLD: f64 = 0.3;
 
 /// Per-model observation record for the confidence stage.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -180,6 +182,15 @@ fn fallback_for_tier(tier: ModelTier) -> Option<String> {
         ModelTier::Standard => Some("claude-haiku-3-5".to_string()),
         // Premium and forward-compat: fall back to sonnet
         _ => Some("claude-sonnet-4-5".to_string()),
+    }
+}
+
+fn low_confidence_tier_bonus(tier: ModelTier) -> f64 {
+    match tier {
+        ModelTier::Premium => 0.15,
+        ModelTier::Standard => 0.05,
+        ModelTier::Fast => 0.0,
+        _ => 0.05,
     }
 }
 
@@ -444,6 +455,7 @@ impl CascadeRouter {
 
     fn route_confidence(&self, ctx: &RoutingContext) -> CascadeModel {
         let stats = self.confidence_stats.lock();
+        let low_confidence = ctx.affect_confidence < LOW_AFFECT_CONFIDENCE_THRESHOLD;
 
         // Find the model with the highest upper confidence bound on pass rate.
         let mut best_slug = self
@@ -455,9 +467,14 @@ impl CascadeRouter {
 
         for slug in &self.model_slugs {
             let s = stats.get(slug).cloned().unwrap_or_default();
-            let ucb = s.upper_bound();
-            if ucb > best_ucb {
-                best_ucb = ucb;
+            let tier_bonus = if low_confidence {
+                low_confidence_tier_bonus(slug_to_tier(slug))
+            } else {
+                0.0
+            };
+            let score = s.upper_bound() + tier_bonus;
+            if score > best_ucb {
+                best_ucb = score;
                 best_slug.clone_from(slug);
             }
         }
@@ -539,6 +556,7 @@ mod tests {
             role: AgentRole::Implementer,
             crate_familiarity: 0.5,
             has_prior_failure: false,
+            affect_confidence: 0.5,
         }
     }
 
@@ -650,6 +668,40 @@ mod tests {
             result.primary.slug, "claude-sonnet-4-5",
             "confidence stage should prefer the high-pass-rate model"
         );
+    }
+
+    // ── Test 7b: low affect confidence biases toward stronger model ──────
+
+    #[test]
+    fn low_affect_confidence_prefers_opus_over_sonnet() {
+        let cascade = CascadeRouter::new(test_slugs());
+        let mut ctx = default_ctx();
+
+        for _ in 0..20 {
+            cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.9, true);
+        }
+        for _ in 0..15 {
+            cascade.record_observation(&ctx, "claude-opus-4", 0.9, true);
+        }
+        for _ in 0..10 {
+            cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.1, false);
+        }
+        for _ in 0..5 {
+            cascade.record_observation(&ctx, "claude-opus-4", 0.1, false);
+        }
+
+        assert_eq!(cascade.current_stage(), CascadeStage::Confidence);
+
+        ctx.affect_confidence = 0.2;
+        let low_confidence = cascade.route(&ctx);
+        assert_eq!(
+            low_confidence.primary.slug, "claude-opus-4",
+            "low affect confidence should bias toward the stronger premium model"
+        );
+
+        ctx.affect_confidence = 0.9;
+        let high_confidence = cascade.route(&ctx);
+        assert_eq!(high_confidence.primary.slug, "claude-sonnet-4-5");
     }
 
     // ── Test 8: stage labels are correct ────────────────────────────────

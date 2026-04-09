@@ -23,6 +23,7 @@ fn default_ctx() -> RoutingContext {
         role: AgentRole::Implementer,
         crate_familiarity: 0.5,
         has_prior_failure: false,
+        affect_confidence: 0.5,
     }
 }
 

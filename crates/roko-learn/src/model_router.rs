@@ -83,6 +83,8 @@ pub struct RoutingContext {
     pub crate_familiarity: f64,
     /// Whether a prior attempt at this task has failed.
     pub has_prior_failure: bool,
+    /// Affect-derived confidence hint in `[0.0, 1.0]`.
+    pub affect_confidence: f64,
 }
 
 impl RoutingContext {
@@ -659,6 +661,7 @@ mod tests {
             role: AgentRole::Implementer,
             crate_familiarity: 0.5,
             has_prior_failure: false,
+            affect_confidence: 0.5,
         }
     }
 

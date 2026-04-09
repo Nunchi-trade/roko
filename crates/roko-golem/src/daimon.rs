@@ -20,6 +20,9 @@ pub struct AffectState {
     /// Dominance dimension in `[-1.0, 1.0]`.
     /// Agency and control push this positive; blocked or stuck pushes it negative.
     pub dominance: f64,
+    /// Motivational confidence in `[0.0, 1.0]`.
+    /// Repeated failure pushes this down; success restores it toward neutral.
+    pub confidence: f64,
     /// Last time this affect state was updated.
     pub updated_at: DateTime<Utc>,
 }
@@ -30,6 +33,7 @@ impl Default for AffectState {
             pleasure: 0.0,
             arousal: 0.0,
             dominance: 0.0,
+            confidence: 0.5,
             updated_at: Utc::now(),
         }
     }
@@ -45,10 +49,11 @@ impl AffectState {
         }
     }
 
-    fn apply_delta(&mut self, pleasure: f64, arousal: f64, dominance: f64) {
+    fn apply_delta(&mut self, pleasure: f64, arousal: f64, dominance: f64, confidence: f64) {
         self.pleasure = (self.pleasure + pleasure).clamp(-1.0, 1.0);
         self.arousal = (self.arousal + arousal).clamp(-1.0, 1.0);
         self.dominance = (self.dominance + dominance).clamp(-1.0, 1.0);
+        self.confidence = (self.confidence + confidence).clamp(0.0, 1.0);
         self.updated_at = Utc::now();
     }
 
@@ -56,6 +61,7 @@ impl AffectState {
         self.pleasure = (self.pleasure * factor).clamp(-1.0, 1.0);
         self.arousal = (self.arousal * factor).clamp(-1.0, 1.0);
         self.dominance = (self.dominance * factor).clamp(-1.0, 1.0);
+        self.confidence = (0.5 + (self.confidence - 0.5) * factor).clamp(0.0, 1.0);
         self.updated_at = Utc::now();
     }
 
@@ -148,25 +154,25 @@ impl AffectEngine {
     /// Appraisal trigger: task succeeded.
     #[must_use]
     pub fn on_task_success(&mut self, task_id: impl Into<String>) -> AffectState {
-        self.adjust(task_id.into(), 0.1, 0.0, 0.1)
+        self.adjust(task_id.into(), 0.1, 0.0, 0.1, 0.08)
     }
 
     /// Appraisal trigger: task failed.
     #[must_use]
     pub fn on_task_failure(&mut self, task_id: impl Into<String>) -> AffectState {
-        self.adjust(task_id.into(), -0.2, 0.0, -0.15)
+        self.adjust(task_id.into(), -0.2, 0.0, -0.15, -0.15)
     }
 
     /// Appraisal trigger: gate passed.
     #[must_use]
     pub fn on_gate_pass(&mut self, task_id: impl Into<String>) -> AffectState {
-        self.adjust(task_id.into(), 0.05, 0.0, 0.0)
+        self.adjust(task_id.into(), 0.05, 0.0, 0.0, 0.03)
     }
 
     /// Appraisal trigger: gate failed.
     #[must_use]
     pub fn on_gate_fail(&mut self, task_id: impl Into<String>) -> AffectState {
-        self.adjust(task_id.into(), -0.1, 0.0, -0.05)
+        self.adjust(task_id.into(), -0.1, 0.0, -0.05, -0.08)
     }
 
     /// Appraisal trigger: deadline proximity raises arousal as deadline approaches.
@@ -177,14 +183,14 @@ impl AffectEngine {
         deadline_proximity: f64,
     ) -> AffectState {
         let proximity = deadline_proximity.clamp(0.0, 1.0);
-        self.adjust(task_id.into(), 0.0, proximity * 0.4, 0.0)
+        self.adjust(task_id.into(), 0.0, proximity * 0.4, 0.0, 0.0)
     }
 
     /// Appraisal trigger: blocked work raises arousal and lowers dominance.
     #[must_use]
     pub fn on_blocked(&mut self, task_id: impl Into<String>, blocker_count: usize) -> AffectState {
         let blockers = blocker_count.max(1).min(5) as f64;
-        self.adjust(task_id.into(), 0.0, blockers * 0.05, -(blockers * 0.08))
+        self.adjust(task_id.into(), 0.0, blockers * 0.05, -(blockers * 0.08), -0.02 * blockers)
     }
 
     /// Queue-wait motivation signal.
@@ -224,6 +230,7 @@ impl AffectEngine {
         pleasure: f64,
         arousal: f64,
         dominance: f64,
+        confidence: f64,
     ) -> AffectState {
         let now = Utc::now();
         let state = self
@@ -239,7 +246,7 @@ impl AffectEngine {
             decay_state(state, elapsed_hours, self.half_life_hours);
         }
 
-        state.apply_delta(pleasure, arousal, dominance);
+        state.apply_delta(pleasure, arousal, dominance, confidence);
         state.clone()
     }
 
@@ -514,6 +521,7 @@ mod tests {
                 pleasure,
                 arousal,
                 dominance,
+                confidence: 0.5,
                 updated_at: now,
             };
 
@@ -529,6 +537,7 @@ mod tests {
             pleasure: 0.0,
             arousal: 0.0,
             dominance: 0.0,
+            confidence: 0.5,
             updated_at: Utc::now(),
         };
 
@@ -542,10 +551,12 @@ mod tests {
         let state = engine.on_task_success("task-1");
         assert_eq!(state.pleasure, 0.1);
         assert_eq!(state.dominance, 0.1);
+        assert!(state.confidence > 0.5);
 
         let state = engine.on_task_failure("task-1");
         assert!((state.pleasure - -0.1).abs() < f64::EPSILON);
         assert!((state.dominance - -0.05).abs() < f64::EPSILON);
+        assert!(state.confidence < 0.5);
 
         let state = engine.on_gate_pass("task-1");
         assert!((state.pleasure - -0.05).abs() < f64::EPSILON);
@@ -618,6 +629,20 @@ mod tests {
         assert_eq!(state.pleasure, 0.0);
         assert_eq!(state.arousal, 0.0);
         assert_eq!(state.dominance, 0.0);
+        assert!((state.confidence - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn repeated_failures_lower_confidence_below_routing_threshold() {
+        let mut engine = AffectEngine::new();
+
+        let _ = engine.on_task_failure("task-confidence");
+        let state = engine.on_task_failure("task-confidence");
+
+        assert!(
+            state.confidence < 0.3,
+            "repeated failures should lower affect confidence enough to bias routing"
+        );
     }
 
     #[test]

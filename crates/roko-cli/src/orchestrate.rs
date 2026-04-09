@@ -974,12 +974,13 @@ fn role_hash_features(role: &str) -> [f64; 4] {
     ]
 }
 
-fn cascade_context_vec(
+fn cascade_routing_context(
     runner: &PlanRunner,
     plan_id: &str,
+    task_id: &str,
     role: AgentRole,
     task_def: Option<&crate::task_parser::TaskDef>,
-) -> Vec<f64> {
+) -> roko_learn::model_router::RoutingContext {
     use roko_core::TaskCategory;
     use roko_core::TaskComplexityBand;
     use roko_learn::model_router::RoutingContext;
@@ -1000,6 +1001,7 @@ fn cascade_context_vec(
         .is_some_and(|tracker| tracker.last_gate_failure.is_some());
 
     let crate_familiarity = runner.crate_familiarity_tracker.score_for_task(task_def);
+    let affect_confidence = runner.learning.task_confidence(task_id);
 
     RoutingContext {
         task_category: TaskCategory::Implementation,
@@ -1008,8 +1010,18 @@ fn cascade_context_vec(
         role,
         crate_familiarity,
         has_prior_failure,
+        affect_confidence,
     }
-    .to_features()
+}
+
+fn cascade_context_vec(
+    runner: &PlanRunner,
+    plan_id: &str,
+    task_id: &str,
+    role: AgentRole,
+    task_def: Option<&crate::task_parser::TaskDef>,
+) -> Vec<f64> {
+    cascade_routing_context(runner, plan_id, task_id, role, task_def).to_features()
 }
 
 impl TaskTracker {
@@ -4032,6 +4044,7 @@ impl PlanRunner {
     fn observe_cascade_router(
         &self,
         plan_id: &str,
+        task_id: &str,
         task_def: Option<&crate::task_parser::TaskDef>,
         model_slug: &str,
         reward: f64,
@@ -4041,7 +4054,8 @@ impl PlanRunner {
             .cascade_router()
             .model_index_for_slug(model_slug)
         {
-            let context_vec = cascade_context_vec(self, plan_id, AgentRole::Implementer, task_def);
+            let context_vec =
+                cascade_context_vec(self, plan_id, task_id, AgentRole::Implementer, task_def);
             self.learning
                 .cascade_router()
                 .observe(context_vec, model_idx, reward);
@@ -5575,7 +5589,7 @@ impl PlanRunner {
             .and_then(|t| t.tasks_file.tasks.iter().find(|td| td.id == task_id))
             .cloned();
         if let Some(model) = selected_model {
-            self.observe_cascade_router(plan_id, task_def.as_ref(), model, 0.0);
+            self.observe_cascade_router(plan_id, task_id, task_def.as_ref(), model, 0.0);
         }
         let mut ep = Episode::new("Implementer", task_id).failed(error.to_string());
         if let Some(task_def) = task_def.as_ref() {
@@ -6557,20 +6571,22 @@ impl PlanRunner {
             .unwrap_or(true);
         if use_cascade {
             let cascade_router = self.learning.cascade_router();
-            let context_vec = cascade_context_vec(self, plan_id, role, task_def.as_ref());
-            let selection = cascade_router.select(context_vec);
-            if selection.observations > roko_learn::model_router::COLD_START_THRESHOLD {
+            let routing_ctx =
+                cascade_routing_context(self, plan_id, task, role, task_def.as_ref());
+            let selection = cascade_router.route(&routing_ctx);
+            let observations = cascade_router.total_observations();
+            if observations > roko_learn::model_router::COLD_START_THRESHOLD {
                 tracing::info!(
                     "[orchestrate] CascadeRouter recommends model={} (stage={}, observations={})",
-                    selection.model.slug,
+                    selection.primary.slug,
                     selection.stage,
-                    selection.observations
+                    observations
                 );
-                selected_model = selection.model.slug;
+                selected_model = selection.primary.slug;
             } else {
                 tracing::info!(
                     "[orchestrate] CascadeRouter cold-start observations={} (keeping static model={})",
-                    selection.observations,
+                    observations,
                     selected_model
                 );
             }
@@ -7089,7 +7105,7 @@ impl PlanRunner {
         }
 
         if !result.success {
-            self.observe_cascade_router(plan_id, task_def.as_ref(), &selected_model, 0.0);
+            self.observe_cascade_router(plan_id, task, task_def.as_ref(), &selected_model, 0.0);
             let task_phase = task_def
                 .as_ref()
                 .map(|task| task.status.as_str())
@@ -7238,7 +7254,7 @@ impl PlanRunner {
                         .as_text()
                         .ok()
                         .map(|text| tail_output_lines(text, TASK_FAILURE_OUTPUT_TAIL_LINES));
-                    self.observe_cascade_router(plan_id, task_def.as_ref(), &selected_model, 0.0);
+                    self.observe_cascade_router(plan_id, task, task_def.as_ref(), &selected_model, 0.0);
                     let error = anyhow!(
                         "verify failed for {task_id}: {command} — {msg}; stderr/stdout:\n{error_output}"
                     );
