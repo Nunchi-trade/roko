@@ -788,7 +788,12 @@ fn register_chain_methods(
     module.register_async_method("chain_agentHeartbeat", |params, ctx, _| async move {
         let (id,): (String,) = params.parse().map_err(invalid_params)?;
         let chain = require_chain(&ctx)?;
-        Ok::<_, ErrorObjectOwned>(crate::chain_rpc::handle_agent_heartbeat(&chain, id))
+        let current_block = ctx.state.read().fork.local_block_number;
+        Ok::<_, ErrorObjectOwned>(crate::chain_rpc::handle_agent_heartbeat(
+            &chain,
+            id,
+            current_block,
+        ))
     })?;
 
     module.register_async_method("chain_agentTrace", |params, ctx, _| async move {

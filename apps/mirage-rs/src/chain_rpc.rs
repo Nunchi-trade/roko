@@ -1428,14 +1428,20 @@ pub fn handle_register_agent(
 }
 
 /// Handle `chain_agentHeartbeat(id)`.
-pub fn handle_agent_heartbeat(chain: &Arc<RwLock<ChainContext>>, id: String) -> bool {
+pub fn handle_agent_heartbeat(
+    chain: &Arc<RwLock<ChainContext>>,
+    id: String,
+    current_block: u64,
+) -> bool {
     let mut chain = chain.write();
     let timestamp = crate::http_api::now_secs();
-    let ok = chain.agent_registry.heartbeat(&id, 0, timestamp);
+    let ok = chain
+        .agent_registry
+        .heartbeat(&id, current_block, timestamp);
     if ok {
         let _ = chain.agent_bus.send(crate::chain::AgentEvent::Heartbeat {
             agent_id: id,
-            block: 0,
+            block: current_block,
             timestamp,
         });
     }

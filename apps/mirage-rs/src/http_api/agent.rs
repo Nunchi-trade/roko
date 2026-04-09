@@ -79,20 +79,21 @@ pub async fn get_agent_heartbeat(
     State(state): State<ApiState>,
     Path(id): Path<String>,
 ) -> Json<serde_json::Value> {
+    let current_block = state.mirage_state.read().fork.local_block_number;
     let chain = state.chain.read();
     let timeout_blocks: u64 = 200;
     match chain.agent_registry.get_agent(&id) {
         Some(agent) => {
             let alive = chain
                 .agent_registry
-                .is_alive(&id, 0, timeout_blocks)
+                .is_alive(&id, current_block, timeout_blocks)
                 .unwrap_or(false);
             Json(serde_json::json!({
                 "agent_id": id,
                 "alive": alive,
                 "last_block": agent.last_heartbeat_block,
                 "last_timestamp": agent.last_heartbeat_ts,
-                "blocks_since": 0u64.saturating_sub(agent.last_heartbeat_block),
+                "blocks_since": current_block.saturating_sub(agent.last_heartbeat_block),
                 "timeout_blocks": timeout_blocks,
             }))
         }
@@ -206,9 +207,10 @@ pub async fn agent_heartbeat(
     Json(req): Json<HeartbeatRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let now = now_secs();
+    let current_block = state.mirage_state.read().fork.local_block_number;
     let mut chain = state.chain.write();
 
-    let ok = chain.agent_registry.heartbeat(&id, 0, now);
+    let ok = chain.agent_registry.heartbeat(&id, current_block, now);
     if !ok {
         return Err(ApiError {
             error: format!("agent '{}' not found", id),
@@ -227,13 +229,14 @@ pub async fn agent_heartbeat(
 
     let _ = chain.agent_bus.send(crate::chain::AgentEvent::Heartbeat {
         agent_id: id.clone(),
-        block: 0,
+        block: current_block,
         timestamp: now,
     });
 
     Ok(Json(serde_json::json!({
         "ok": true,
         "agent_id": id,
+        "block": current_block,
         "timestamp": now,
     })))
 }
