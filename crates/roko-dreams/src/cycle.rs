@@ -32,6 +32,11 @@ use serde_json::{Value, json};
 
 const DREAMS_SUCCESS_REGRESSION_THRESHOLD: f64 = 0.20;
 const DREAMS_REGRESSION_MIN_RECORDS: usize = 5;
+const DREAMS_PERFORMANCE_STALL_MIN_PLANS: usize = 5;
+const DREAMS_PERFORMANCE_SUCCESS_IMPROVEMENT: f64 = 0.01;
+const DREAMS_PERFORMANCE_COST_IMPROVEMENT: f64 = 0.01;
+const DREAMS_PERFORMANCE_STALLED_NOTE: &str =
+    "performance stalled — consider: changing decomposition strategy, adjusting model tier, reviewing failing patterns";
 const SIGNALS_LOG_FILE: &str = "signals.jsonl";
 
 /// Agent hook used by the dream cycle to review a consolidation batch.
@@ -76,6 +81,9 @@ pub struct DreamCycleReport {
     pub regressions_detected: Vec<KnowledgeEntry>,
     /// Cross-domain strategy hypotheses synthesized from structurally similar clusters.
     pub strategy_hypotheses: Vec<KnowledgeEntry>,
+    /// High-level learning notes for the next cycle.
+    #[serde(default)]
+    pub performance_notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -398,6 +406,7 @@ impl DreamCycle {
         let mut analysis = progression.analyze(&batch);
         progression.replay_heuristics(&mut analysis, &batch);
         let review_entries = review_insights_from_heuristics(&analysis, started_at);
+        let performance_notes = performance_stall_notes(&batch);
         let mut clusters = cluster_episodes(batch);
         let mut written_knowledge_ids = BTreeSet::new();
 
@@ -453,6 +462,7 @@ impl DreamCycle {
             playbooks_created,
             regressions_detected,
             strategy_hypotheses,
+            performance_notes,
         };
 
         let counterfactuals = build_counterfactuals(&clusters, started_at);
@@ -596,6 +606,102 @@ fn success_rate(episodes: &[Episode]) -> Option<(usize, usize, f64)> {
     }
     let successes = episodes.iter().filter(|episode| episode.success).count();
     Some((successes, records, successes as f64 / records as f64))
+}
+
+#[derive(Debug, Clone)]
+struct PlanPerformanceSummary {
+    plan_id: String,
+    first_seen_at: DateTime<Utc>,
+    success_rate: f64,
+    cost_per_success_usd: f64,
+}
+
+#[derive(Debug, Default)]
+struct PlanPerformanceAccumulator {
+    first_seen_at: Option<DateTime<Utc>>,
+    episode_count: usize,
+    success_count: usize,
+    total_cost_usd: f64,
+}
+
+impl PlanPerformanceAccumulator {
+    fn record(&mut self, episode: &Episode) {
+        self.first_seen_at = Some(match self.first_seen_at.take() {
+            Some(existing) => existing.min(episode.timestamp),
+            None => episode.timestamp,
+        });
+        self.episode_count += 1;
+        self.success_count += usize::from(episode.success);
+        self.total_cost_usd += episode.usage.cost_usd;
+    }
+
+    fn success_rate(&self) -> f64 {
+        if self.episode_count == 0 {
+            0.0
+        } else {
+            self.success_count as f64 / self.episode_count as f64
+        }
+    }
+
+    fn cost_per_success_usd(&self) -> f64 {
+        self.total_cost_usd / self.success_count.max(1) as f64
+    }
+}
+
+fn summarize_plan_performance(episodes: &[Episode]) -> Vec<PlanPerformanceSummary> {
+    let mut by_plan: BTreeMap<String, PlanPerformanceAccumulator> = BTreeMap::new();
+    for episode in episodes {
+        by_plan
+            .entry(episode_plan_id(episode))
+            .or_default()
+            .record(episode);
+    }
+
+    let mut plans: Vec<PlanPerformanceSummary> = by_plan
+        .into_iter()
+        .filter_map(|(plan_id, accumulator)| {
+            accumulator.first_seen_at.map(|first_seen_at| PlanPerformanceSummary {
+                plan_id,
+                first_seen_at,
+                success_rate: accumulator.success_rate(),
+                cost_per_success_usd: accumulator.cost_per_success_usd(),
+            })
+        })
+        .collect();
+    plans.sort_by(|left, right| {
+        left.first_seen_at
+            .cmp(&right.first_seen_at)
+            .then_with(|| left.plan_id.cmp(&right.plan_id))
+    });
+    plans
+}
+
+fn performance_stall_notes(episodes: &[Episode]) -> Vec<String> {
+    let plans = summarize_plan_performance(episodes);
+    if plans.len() < DREAMS_PERFORMANCE_STALL_MIN_PLANS {
+        return Vec::new();
+    }
+
+    let mut streak = 1usize;
+    for window in plans.windows(2) {
+        let previous = &window[0];
+        let current = &window[1];
+        let improved_success = current.success_rate
+            > previous.success_rate + DREAMS_PERFORMANCE_SUCCESS_IMPROVEMENT;
+        let improved_cost = current.cost_per_success_usd
+            < previous.cost_per_success_usd * (1.0 - DREAMS_PERFORMANCE_COST_IMPROVEMENT);
+        if improved_success || improved_cost {
+            streak = 1;
+        } else {
+            streak += 1;
+        }
+    }
+
+    if streak >= DREAMS_PERFORMANCE_STALL_MIN_PLANS {
+        vec![DREAMS_PERFORMANCE_STALLED_NOTE.to_string()]
+    } else {
+        Vec::new()
+    }
 }
 
 #[derive(Debug)]
@@ -2213,6 +2319,51 @@ mod tests {
         let signal_log = tmp.path().join(".roko").join("signals.jsonl");
         let signals = read_signals(&signal_log);
         assert!(signals.iter().all(|signal| signal.kind.as_str() != "dreams:regression"));
+    }
+
+    #[tokio::test]
+    async fn performance_stall_note_emitted_after_five_non_improving_plans() {
+        let tmp = TempDir::new().expect("tempdir");
+        let episodes_path = tmp.path().join(".roko").join("episodes.jsonl");
+        let knowledge_path = tmp
+            .path()
+            .join(".roko")
+            .join("neuro")
+            .join("knowledge.jsonl");
+        let playbooks_root = tmp.path().join(".roko").join("playbooks");
+        let logger = EpisodeLogger::new(&episodes_path);
+        let knowledge_store = Arc::new(KnowledgeStore::new(&knowledge_path));
+        let playbook_store = Arc::new(PlaybookStore::new(&playbooks_root));
+        let dispatcher = Arc::new(MockDispatcher {
+            response: r#"<|json|>{"entries":[]}<|/json|>"#.to_string(),
+        });
+
+        let base = Utc::now() - chrono::Duration::hours(1);
+        for idx in 0..5 {
+            let ep = episode_at(
+                &format!("stall-{idx}"),
+                &format!("plan-{idx}"),
+                "implementation",
+                "claude-haiku-4-5",
+                true,
+                None,
+                base + chrono::Duration::minutes(i64::from(idx)),
+            );
+            write_episode(&logger, &ep).await;
+        }
+
+        let mut cycle = DreamCycle::new(
+            Arc::new(logger),
+            knowledge_store,
+            playbook_store,
+            dispatcher,
+        );
+
+        let report = cycle.run().await.expect("run");
+        assert!(report
+            .performance_notes
+            .iter()
+            .any(|note| note == DREAMS_PERFORMANCE_STALLED_NOTE));
     }
 
     #[test]

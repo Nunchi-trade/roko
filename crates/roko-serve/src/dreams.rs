@@ -364,6 +364,7 @@ mod tests {
             playbooks_created: 0,
             regressions_detected: Vec::new(),
             strategy_hypotheses: Vec::new(),
+            performance_notes: Vec::new(),
         };
 
         apply_dream_affect_feedback_to_engine(&mut engine, &report);
