@@ -14,7 +14,10 @@ use ratatui::Frame;
 use serde_json::Value;
 use roko_learn::efficiency::AgentEfficiencyEvent;
 
-use super::dashboard::{read_json_value, read_jsonl_values, DashboardData, DashboardScaffold, CFactor};
+use super::dashboard::{
+    CFactor, DashboardData, DashboardScaffold, PlanExecutionSnapshot, read_json_value,
+    read_jsonl_values,
+};
 use super::pages::{PageId, PageRegistry};
 
 /// Render the dashboard shell.
@@ -154,6 +157,11 @@ pub fn render_page(
         return;
     }
 
+    if active_page == PageId::PlanView {
+        render_plan_execution_page(frame, area, data, scroll);
+        return;
+    }
+
     let rendered = page.render(dashboard);
     let content = Paragraph::new(rendered)
         .block(
@@ -183,6 +191,258 @@ fn render_overview_page(frame: &mut Frame<'_>, area: Rect, data: &DashboardData)
     render_health_indicators(frame, columns[1], data);
     render_alerts(frame, columns[2], data);
     render_summary_bar(frame, body[1], data);
+}
+
+fn render_plan_execution_page(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    data: &DashboardData,
+    scroll: u16,
+) {
+    let outer = Block::default().borders(Borders::ALL).title("Plan Execution");
+    let inner = outer.inner(area);
+    frame.render_widget(outer, area);
+
+    let Some(execution) = data.current_plan_execution.as_ref() else {
+        let empty = Paragraph::new("no active plan")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        frame.render_widget(empty, inner);
+        return;
+    };
+
+    let top_height = 3.min(inner.height);
+    let rest = inner.height.saturating_sub(top_height);
+    let top = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: top_height,
+    };
+    let body = Rect {
+        x: inner.x,
+        y: inner.y.saturating_add(top_height),
+        width: inner.width,
+        height: rest,
+    };
+
+    let title_label = format!(
+        "{}  [{}/{}]",
+        execution.plan_title, execution.tasks_done, execution.tasks_total
+    );
+    let progress = if execution.tasks_total == 0 {
+        0.0
+    } else {
+        (execution.tasks_done as f64 / execution.tasks_total as f64).clamp(0.0, 1.0)
+    };
+    let gauge = Gauge::default()
+        .block(Block::default().borders(Borders::ALL).title(title_label))
+        .ratio(progress)
+        .label(Span::styled(
+            format!("{}/{}", execution.tasks_done, execution.tasks_total),
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ))
+        .gauge_style(Style::default().fg(Color::Cyan).bg(Color::Black));
+    frame.render_widget(gauge, top);
+
+    let split = Layout::horizontal([Constraint::Percentage(72), Constraint::Percentage(28)]).split(body);
+    let left = split[0];
+    let right = split[1];
+
+    let left_parts = Layout::vertical([
+        Constraint::Min(8),
+        Constraint::Length(8.max(body.height / 3)),
+    ])
+    .split(left);
+
+    render_plan_execution_table(frame, left_parts[0], execution);
+    render_plan_execution_output(frame, left_parts[1], execution, scroll);
+    render_plan_execution_sidebar(frame, right, execution, data);
+}
+
+fn render_plan_execution_table(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    execution: &PlanExecutionSnapshot,
+) {
+    let block = Block::default().borders(Borders::ALL).title("tasks");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let rows: Vec<Row<'_>> = execution
+        .tasks
+        .iter()
+        .map(|task| {
+            let phase_style = phase_style(&task.phase);
+            let mut row_style = Style::default();
+            if task.is_current {
+                row_style = row_style.add_modifier(Modifier::BOLD);
+            }
+            Row::new(vec![
+                Cell::from(task.task_id.clone()),
+                Cell::from(truncate_text(&task.title, 40)),
+                Cell::from(Span::styled(task.phase.clone(), phase_style)),
+                Cell::from(task.model.clone()),
+                Cell::from(task.duration.clone()),
+            ])
+            .style(row_style)
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(12),
+            Constraint::Min(24),
+            Constraint::Length(14),
+            Constraint::Length(18),
+            Constraint::Length(10),
+        ],
+    )
+    .header(
+        Row::new(vec![
+            Cell::from("task id"),
+            Cell::from("title"),
+            Cell::from("phase"),
+            Cell::from("model"),
+            Cell::from("duration"),
+        ])
+        .style(
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::BOLD),
+        ),
+    )
+    .column_spacing(1);
+
+    frame.render_widget(table, inner);
+}
+
+fn render_plan_execution_output(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    execution: &PlanExecutionSnapshot,
+    scroll: u16,
+) {
+    let block = Block::default().borders(Borders::ALL).title("agent stderr");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let text = if execution.agent_output_tail.is_empty() {
+        String::from("<no agent stderr captured>")
+    } else {
+        execution.agent_output_tail.join("\n")
+    };
+
+    let paragraph = Paragraph::new(text)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
+    frame.render_widget(paragraph, inner);
+}
+
+fn render_plan_execution_sidebar(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    execution: &PlanExecutionSnapshot,
+    data: &DashboardData,
+) {
+    let block = Block::default().borders(Borders::ALL).title("current task");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let Some(task) = execution.current_task.as_ref() else {
+        let empty = Paragraph::new("no current task")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        frame.render_widget(empty, inner);
+        return;
+    };
+
+    let gate_rows = data
+        .gate_results
+        .iter()
+        .filter(|gate| gate.plan_id == execution.plan_id)
+        .collect::<Vec<_>>();
+
+    let mut lines = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled("task", Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD)),
+        Span::raw(": "),
+        Span::raw(&task.task_id),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            "description",
+            Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(": "),
+        Span::raw(truncate_text(&task.description, 200)),
+    ]));
+    lines.push(Line::from(" "));
+    lines.push(Line::from(Span::styled(
+        "read_files",
+        Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
+    )));
+    if task.read_files.is_empty() {
+        lines.push(Line::from("  <none>"));
+    } else {
+        for file in &task.read_files {
+            let mut text = format!("  - {}", file.path);
+            if let Some(lines_range) = file.lines.as_deref() {
+                text.push_str(&format!(" ({lines_range})"));
+            }
+            if !file.why.trim().is_empty() {
+                text.push_str(&format!(" — {}", file.why));
+            }
+            lines.push(Line::from(text));
+        }
+    }
+    lines.push(Line::from(" "));
+    lines.push(Line::from(Span::styled(
+        "write_files",
+        Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
+    )));
+    if task.write_files.is_empty() {
+        lines.push(Line::from("  <none>"));
+    } else {
+        for file in &task.write_files {
+            lines.push(Line::from(format!("  - {file}")));
+        }
+    }
+    lines.push(Line::from(" "));
+    lines.push(Line::from(Span::styled(
+        "gate_results",
+        Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
+    )));
+    if gate_rows.is_empty() {
+        lines.push(Line::from("  <none>"));
+    } else {
+        for gate in gate_rows {
+            lines.push(Line::from(vec![
+                Span::raw("  - "),
+                Span::styled(
+                    gate.gate_name.clone(),
+                    phase_style(if gate.passed { "done" } else { "failed" }),
+                ),
+                Span::raw(" ["),
+                Span::raw(if gate.passed { "pass" } else { "fail" }),
+                Span::raw("] "),
+                Span::raw(format!("{}ms", gate.duration_ms)),
+                if gate.summary.trim().is_empty() {
+                    Span::raw("")
+                } else {
+                    Span::raw(format!(" — {}", truncate_text(&gate.summary, 120)))
+                },
+            ]));
+        }
+    }
+
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, inner);
 }
 
 fn render_plan_overview(frame: &mut Frame<'_>, area: Rect, data: &DashboardData) {
@@ -661,6 +921,16 @@ fn gauge_style(status: &str, completed: bool) -> Style {
     }
 }
 
+fn phase_style(phase: &str) -> Style {
+    match phase.to_ascii_lowercase().as_str() {
+        "implementing" => Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+        "gating" => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        "done" => Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+        "failed" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        _ => Style::default().fg(Color::Gray),
+    }
+}
+
 fn severity_style(severity: &str) -> Style {
     match severity.to_ascii_lowercase().as_str() {
         "critical" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
@@ -680,6 +950,23 @@ fn truncate_alert_message(message: &str, max: usize) -> String {
         }
     }
     if chars.next().is_some() && max > 3 {
+        out.truncate(out.len().saturating_sub(3));
+        out.push_str("...");
+    }
+    out
+}
+
+fn truncate_text(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let mut out = String::new();
+    for _ in 0..max_chars {
+        if let Some(ch) = chars.next() {
+            out.push(ch);
+        } else {
+            return out;
+        }
+    }
+    if chars.next().is_some() && max_chars > 3 {
         out.truncate(out.len().saturating_sub(3));
         out.push_str("...");
     }

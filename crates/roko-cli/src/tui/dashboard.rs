@@ -4,7 +4,7 @@
 //! best-effort learning snapshot on top so the health and trends pages
 //! can render real stats when the memory JSONL files are present.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{self, Write as _};
 use std::path::{Path, PathBuf};
 
@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::plan::{PlanSummary, plans_dir};
-use crate::task_parser::TasksFile;
+use crate::task_parser::{TaskDef, TasksFile};
 use roko_core::metric::{Headlines, TaskMetric, compute_headlines};
 use roko_gate::adaptive_threshold::AdaptiveThresholds;
 use roko_learn::efficiency::AgentEfficiencyEvent;
@@ -221,6 +221,8 @@ pub struct DashboardData {
     pub experiments: Vec<ExperimentSummary>,
     /// Most recent signals from `.roko/signals.jsonl`.
     pub recent_signals: Vec<SignalSummary>,
+    /// Snapshot of the currently executing plan for the Plan Execution page.
+    pub current_plan_execution: Option<PlanExecutionSnapshot>,
     /// Conductor alerts filtered from signals.
     pub conductor_alerts: Vec<AlertSummary>,
     /// Latest C-Factor snapshot, if present.
@@ -253,6 +255,11 @@ impl DashboardData {
             .map(AlertSummary::from_signal)
             .collect();
         let cfactor = load_latest_jsonl_value::<CFactor>(&learn_dir.join("c-factor.jsonl"));
+        let current_plan_execution = load_current_plan_execution(
+            &root,
+            &state,
+            &roko_dir.join(EPISODES_FILE),
+        );
 
         Self {
             root,
@@ -264,6 +271,7 @@ impl DashboardData {
             cascade_router,
             experiments,
             recent_signals,
+            current_plan_execution,
             conductor_alerts,
             cfactor,
         }
@@ -315,6 +323,46 @@ pub struct GateResultSummary {
     pub rung: u32,
     pub duration_ms: u64,
     pub summary: String,
+}
+
+/// Snapshot of the currently executing plan.
+#[derive(Debug, Clone, Default)]
+pub struct PlanExecutionSnapshot {
+    pub plan_id: String,
+    pub plan_title: String,
+    pub tasks_done: usize,
+    pub tasks_total: usize,
+    pub tasks: Vec<PlanExecutionTaskRow>,
+    pub current_task: Option<PlanExecutionTaskDetail>,
+    pub agent_output_tail: Vec<String>,
+}
+
+/// One row in the execution task table.
+#[derive(Debug, Clone)]
+pub struct PlanExecutionTaskRow {
+    pub task_id: String,
+    pub title: String,
+    pub phase: String,
+    pub model: String,
+    pub duration: String,
+    pub is_current: bool,
+}
+
+/// Detail block for the current task.
+#[derive(Debug, Clone)]
+pub struct PlanExecutionTaskDetail {
+    pub task_id: String,
+    pub description: String,
+    pub read_files: Vec<ReadFileSnapshot>,
+    pub write_files: Vec<String>,
+}
+
+/// Flattened read-file context for display.
+#[derive(Debug, Clone)]
+pub struct ReadFileSnapshot {
+    pub path: String,
+    pub lines: Option<String>,
+    pub why: String,
 }
 
 /// Aggregate learning efficiency snapshot.
@@ -720,6 +768,379 @@ fn load_gate_results(state: &Value, signals_path: &Path) -> Vec<GateResultSummar
             .then_with(|| a.rung.cmp(&b.rung))
     });
     gate_results
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TaskTrackerSnapshot {
+    plan_id: String,
+    #[serde(default)]
+    completed: Vec<String>,
+    #[serde(default)]
+    failed: Vec<String>,
+    #[serde(default)]
+    current_group_index: usize,
+}
+
+fn load_task_trackers(root: &Path) -> HashMap<String, TaskTrackerSnapshot> {
+    let path = root.join(".roko").join("state").join("task-trackers.json");
+    let Some(value) = read_json_value(&path) else {
+        return HashMap::new();
+    };
+    let Some(entries) = value.as_array() else {
+        return HashMap::new();
+    };
+
+    let mut trackers = HashMap::new();
+    for entry in entries {
+        let Ok(record) = serde_json::from_value::<TaskTrackerSnapshot>(entry.clone()) else {
+            continue;
+        };
+        if !record.plan_id.trim().is_empty() {
+            trackers.insert(record.plan_id.clone(), record);
+        }
+    }
+    trackers
+}
+
+fn load_current_plan_execution(
+    root: &Path,
+    state: &Value,
+    episodes_path: &Path,
+) -> Option<PlanExecutionSnapshot> {
+    let plan_states = state.get("plan_states").and_then(Value::as_object)?;
+    let trackers = load_task_trackers(root);
+
+    let mut candidates = plan_states
+        .iter()
+        .filter_map(|(plan_id, plan_state)| {
+            let phase = current_phase_label(plan_state)?;
+            if matches!(
+                phase.to_ascii_lowercase().as_str(),
+                "complete" | "done" | "failed" | "skipped"
+            ) {
+                return None;
+            }
+            let priority = execution_phase_priority(&phase);
+            let started_at_ms = plan_state
+                .get("started_at_ms")
+                .and_then(Value::as_u64)
+                .unwrap_or_default();
+            Some((priority, started_at_ms, plan_id.clone()))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)).then_with(|| a.2.cmp(&b.2)));
+
+    let plan_id = candidates
+        .first()
+        .map(|(_, _, plan_id)| plan_id.clone())
+        .or_else(|| trackers.keys().next().cloned())?;
+
+    let plan_state = plan_states.get(&plan_id)?;
+    let plan_phase = current_phase_label(plan_state).unwrap_or_else(|| String::from("queued"));
+    let plan_dir = plans_dir(root).join(&plan_id);
+    let tasks_file = TasksFile::parse(&plan_dir.join("tasks.toml")).ok()?;
+    let tracker = trackers.get(&plan_id);
+    let completed: HashSet<String> = tracker
+        .map(|tracker| tracker.completed.iter().cloned().collect())
+        .unwrap_or_default();
+    let failed: HashSet<String> = tracker
+        .map(|tracker| tracker.failed.iter().cloned().collect())
+        .unwrap_or_default();
+    let current_task_id = current_task_id(&tasks_file, tracker, &completed, &failed);
+    let plan_title = if tasks_file.meta.plan.trim().is_empty() {
+        plan_id.clone()
+    } else {
+        tasks_file.meta.plan.clone()
+    };
+    let episodes = load_episodes(episodes_path);
+    let current_episode = latest_episode_for_plan(&episodes, &plan_id, current_task_id.as_deref())
+        .or_else(|| latest_episode_for_plan(&episodes, &plan_id, None));
+    let agent_output_tail = current_episode
+        .as_ref()
+        .and_then(extract_episode_output_text)
+        .map(|text| tail_lines(&text, 20))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+
+    let current_task = current_task_id.as_ref().and_then(|task_id| {
+        tasks_file
+            .tasks
+            .iter()
+            .find(|task| task.id == *task_id)
+            .map(|task| build_task_detail(task))
+    });
+
+    let mut tasks = Vec::with_capacity(tasks_file.tasks.len());
+    for task in &tasks_file.tasks {
+        let phase = task_phase_label(
+            task,
+            &plan_phase,
+            current_task_id.as_deref(),
+            tracker,
+            &completed,
+            &failed,
+        );
+        let model = task
+            .model_hint
+            .clone()
+            .unwrap_or_else(|| default_model_for_tier(&task.tier));
+        let duration = latest_episode_for_task(&episodes, &plan_id, &task.id)
+            .map(|episode| format_duration_ms(episode.usage.wall_ms))
+            .unwrap_or_else(|| String::from("--"));
+
+        tasks.push(PlanExecutionTaskRow {
+            task_id: task.id.clone(),
+            title: task.title.clone(),
+            phase,
+            model,
+            duration,
+            is_current: current_task_id.as_deref() == Some(task.id.as_str()),
+        });
+    }
+
+    Some(PlanExecutionSnapshot {
+        plan_id: plan_id.clone(),
+        plan_title,
+        tasks_done: completed.len(),
+        tasks_total: tasks_file.tasks.len(),
+        tasks,
+        current_task,
+        agent_output_tail,
+    })
+}
+
+fn current_task_id(
+    tasks_file: &TasksFile,
+    tracker: Option<&TaskTrackerSnapshot>,
+    completed: &HashSet<String>,
+    failed: &HashSet<String>,
+) -> Option<String> {
+    let groups = tasks_file.parallel_groups();
+    if let Some(tracker) = tracker {
+        if let Some(group) = groups
+            .get(tracker.current_group_index.min(groups.len().saturating_sub(1)))
+            .or_else(|| groups.last())
+        {
+            if let Some(task) = group
+                .iter()
+                .find(|task| !completed.contains(&task.id) && !failed.contains(&task.id))
+            {
+                return Some(task.id.clone());
+            }
+        }
+    }
+
+    tasks_file
+        .tasks
+        .iter()
+        .find(|task| !completed.contains(&task.id) && !failed.contains(&task.id))
+        .map(|task| task.id.clone())
+}
+
+fn build_task_detail(task: &TaskDef) -> PlanExecutionTaskDetail {
+    let read_files = task
+        .context
+        .as_ref()
+        .map(|ctx| {
+            ctx.read_files
+                .iter()
+                .map(|rf| ReadFileSnapshot {
+                    path: rf.path.clone(),
+                    lines: rf.lines.clone(),
+                    why: rf.why.clone(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    PlanExecutionTaskDetail {
+        task_id: task.id.clone(),
+        description: task.title.clone(),
+        read_files,
+        write_files: task.files.clone(),
+    }
+}
+
+fn task_phase_label(
+    task: &TaskDef,
+    plan_phase: &str,
+    current_task_id: Option<&str>,
+    tracker: Option<&TaskTrackerSnapshot>,
+    completed: &HashSet<String>,
+    failed: &HashSet<String>,
+) -> String {
+    let _ = tracker;
+    if completed.contains(&task.id) {
+        return String::from("Done");
+    }
+    if failed.contains(&task.id) {
+        return String::from("Failed");
+    }
+    if current_task_id == Some(task.id.as_str()) {
+        return match plan_phase.to_ascii_lowercase().as_str() {
+            "implementing" => String::from("Implementing"),
+            "gating" => String::from("Gating"),
+            "verifying" => String::from("Verifying"),
+            "reviewing" => String::from("Reviewing"),
+            "doc-revision" => String::from("Doc Revision"),
+            "auto-fixing" => String::from("Auto Fixing"),
+            "regenerating-verify" => String::from("Regenerating Verify"),
+            other => title_case_phase(other),
+        };
+    }
+    String::from("Queued")
+}
+
+fn title_case_phase(phase: &str) -> String {
+    let mut out = String::new();
+    let mut capitalize = true;
+    for ch in phase.chars() {
+        if ch == '-' || ch == '_' {
+            out.push(' ');
+            capitalize = true;
+            continue;
+        }
+        if capitalize {
+            out.extend(ch.to_uppercase());
+            capitalize = false;
+        } else {
+            out.push(ch);
+        }
+    }
+    if out.is_empty() {
+        String::from("Unknown")
+    } else {
+        out
+    }
+}
+
+fn execution_phase_priority(phase: &str) -> u8 {
+    match phase.to_ascii_lowercase().as_str() {
+        "implementing" => 5,
+        "gating" => 4,
+        "verifying" => 3,
+        "reviewing" => 2,
+        "doc-revision" => 2,
+        "auto-fixing" => 2,
+        "regenerating-verify" => 1,
+        "enriching" => 1,
+        "queued" => 0,
+        _ => 0,
+    }
+}
+
+fn default_model_for_tier(tier: &str) -> String {
+    match tier.to_ascii_lowercase().as_str() {
+        "mechanical" => String::from("claude-haiku-4-5"),
+        "focused" | "integrative" => String::from("claude-sonnet-4-6"),
+        "architectural" => String::from("claude-opus-4-6"),
+        _ => String::from("claude-sonnet-4-6"),
+    }
+}
+
+fn load_episodes(path: &Path) -> Vec<Episode> {
+    read_jsonl_values(path)
+        .into_iter()
+        .filter_map(|entry| serde_json::from_value::<Episode>(entry).ok())
+        .collect()
+}
+
+fn latest_episode_for_plan(
+    episodes: &[Episode],
+    plan_id: &str,
+    task_id: Option<&str>,
+) -> Option<Episode> {
+    episodes
+        .iter()
+        .rev()
+        .find(|episode| episode_matches_plan(episode, plan_id, task_id))
+        .cloned()
+}
+
+fn latest_episode_for_task(episodes: &[Episode], plan_id: &str, task_id: &str) -> Option<Episode> {
+    episodes
+        .iter()
+        .rev()
+        .find(|episode| episode_matches_plan(episode, plan_id, Some(task_id)))
+        .cloned()
+}
+
+fn episode_matches_plan(episode: &Episode, plan_id: &str, task_id: Option<&str>) -> bool {
+    let matches_plan = episode.input_signal_hash == plan_id
+        || episode.extra.get("plan_id").and_then(Value::as_str) == Some(plan_id);
+    if !matches_plan {
+        return false;
+    }
+
+    if let Some(task_id) = task_id {
+        return episode.task_id == task_id
+            || episode.extra.get("task_id").and_then(Value::as_str) == Some(task_id);
+    }
+
+    true
+}
+
+fn extract_episode_output_text(episode: &Episode) -> Option<String> {
+    for key in [
+        "stderr",
+        "agent_stderr",
+        "output",
+        "stdout",
+        "agent_output",
+        "output_tail",
+        "detail",
+        "text",
+    ] {
+        if let Some(value) = episode.extra.get(key).and_then(json_value_to_text) {
+            if !value.trim().is_empty() {
+                return Some(value);
+            }
+        }
+    }
+
+    episode
+        .failure_reason
+        .as_deref()
+        .map(ToOwned::to_owned)
+        .filter(|text| !text.trim().is_empty())
+}
+
+fn json_value_to_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(items) => Some(
+            items
+                .iter()
+                .filter_map(json_value_to_text)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        Value::Null => None,
+        other => Some(other.to_string()),
+    }
+}
+
+fn tail_lines(text: &str, line_count: usize) -> String {
+    let mut lines: Vec<&str> = text.lines().rev().take(line_count).collect();
+    lines.reverse();
+    lines.join("\n")
+}
+
+fn format_duration_ms(duration_ms: u64) -> String {
+    if duration_ms == 0 {
+        return String::from("--");
+    }
+    if duration_ms < 1000 {
+        return format!("{duration_ms}ms");
+    }
+    let secs = duration_ms / 1000;
+    if secs < 60 {
+        return format!("{secs}s");
+    }
+    let mins = secs / 60;
+    format!("{mins}m {}s", secs % 60)
 }
 
 fn load_efficiency_summary(path: &Path) -> EfficiencySummary {
@@ -2083,6 +2504,115 @@ mod tests {
             .expect("plan view page should render");
         assert!(rendered.contains("Plan View"));
         assert!(rendered.contains("task-1"));
+    }
+
+    #[test]
+    fn current_plan_execution_snapshot_uses_tracker_and_episode_tail() {
+        let tmpdir = tempdir().expect("tempdir");
+        let root = tmpdir.path();
+        let state_dir = root.join(".roko/state");
+        let plan_dir = root.join(".roko/plans/plan-a");
+        let memory_dir = root.join(".roko");
+
+        fs::create_dir_all(&state_dir).expect("state dir");
+        fs::create_dir_all(&plan_dir).expect("plan dir");
+
+        let executor_state = serde_json::json!({
+            "plan_states": {
+                "plan-a": {
+                    "current_phase": { "kind": "implementing" },
+                    "started_at_ms": 1_700_000_000_000u64,
+                    "assigned_agents": ["agent-a"]
+                }
+            }
+        });
+        write_json(&state_dir.join("executor.json"), &executor_state);
+
+        let tracker_state = serde_json::json!([
+            {
+                "plan_id": "plan-a",
+                "completed": ["task-1"],
+                "failed": [],
+                "current_group_index": 0
+            }
+        ]);
+        write_json(&state_dir.join("task-trackers.json"), &tracker_state);
+
+        fs::write(
+            plan_dir.join("tasks.toml"),
+            r#"
+[meta]
+plan = "Plan A"
+iteration = 1
+total = 2
+done = 1
+status = "running"
+
+[[task]]
+id = "task-1"
+title = "Bootstrap"
+status = "done"
+tier = "focused"
+files = ["src/bootstrap.rs"]
+
+  [[task.context.read_files]]
+  path = "src/bootstrap.rs"
+  why = "history"
+
+[[task]]
+id = "task-2"
+title = "Wire dashboard"
+status = "ready"
+tier = "focused"
+files = ["src/dashboard.rs"]
+
+  [[task.context.read_files]]
+  path = "src/dashboard.rs"
+  lines = "1-20"
+  why = "current work"
+"#,
+        )
+        .expect("tasks.toml");
+
+        let mut episode = Episode::new("agent-a", "task-2");
+        episode.input_signal_hash = "plan-a".to_string();
+        episode.extra.insert("plan_id".to_string(), serde_json::json!("plan-a"));
+        episode.extra.insert("task_id".to_string(), serde_json::json!("task-2"));
+        episode.extra.insert(
+            "stderr".to_string(),
+            serde_json::json!(
+                (1..=25)
+                    .map(|n| format!("stderr line {n}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+        );
+        write_jsonl(
+            &memory_dir.join("episodes.jsonl"),
+            &[serde_json::to_string(&episode).expect("episode json")],
+        );
+
+        let data = DashboardData::load_best_effort(root);
+        let execution = data
+            .current_plan_execution
+            .expect("plan execution snapshot should be present");
+
+        assert_eq!(execution.plan_id, "plan-a");
+        assert_eq!(execution.plan_title, "Plan A");
+        assert_eq!(execution.tasks_done, 1);
+        assert_eq!(execution.tasks_total, 2);
+        assert_eq!(execution.tasks.len(), 2);
+        assert_eq!(
+            execution
+                .current_task
+                .as_ref()
+                .expect("current task")
+                .task_id,
+            "task-2"
+        );
+        assert_eq!(execution.agent_output_tail.len(), 20);
+        assert_eq!(execution.agent_output_tail.first().expect("tail head"), "stderr line 6");
+        assert_eq!(execution.agent_output_tail.last().expect("tail last"), "stderr line 25");
     }
 
     #[test]
