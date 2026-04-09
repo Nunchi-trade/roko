@@ -161,6 +161,15 @@ struct GetFileArguments {
 }
 
 #[derive(Debug, Deserialize)]
+struct SearchCodeArguments {
+    query: String,
+    owner: String,
+    repo: String,
+    #[serde(default)]
+    per_page: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
 struct CommentPrArguments {
     owner: String,
     repo: String,
@@ -297,6 +306,26 @@ struct GithubIssue {
 struct GithubRepositoryRef {
     full_name: String,
     html_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubCodeSearchResponse {
+    total_count: u64,
+    incomplete_results: bool,
+    items: Vec<GithubCodeSearchItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubCodeSearchItem {
+    name: String,
+    path: String,
+    sha: String,
+    html_url: Option<String>,
+    git_url: Option<String>,
+    repository: GithubRepositoryRef,
+    score: f64,
+    #[serde(default)]
+    text_matches: Vec<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -686,7 +715,7 @@ fn handle_tools_list() -> Value {
                         "repo": {"type": "string"},
                         "per_page": {"type": "integer", "minimum": 1}
                     },
-                    "required": ["query"],
+                    "required": ["query", "owner", "repo"],
                     "additionalProperties": false
                 })
             ),
@@ -1011,8 +1040,18 @@ fn handle_get_file(arguments: Value) -> Result<Value, JsonRpcError> {
 }
 
 fn handle_search_code(arguments: Value) -> Result<Value, JsonRpcError> {
-    let _ = arguments;
-    unsupported_tool("github.search_code")
+    let args: SearchCodeArguments = serde_json::from_value(arguments).map_err(|err| {
+        JsonRpcError::invalid_params(format!("invalid github.search_code args: {err}"))
+    })?;
+    let client = github_client()?;
+    let results = search_code(&client, &args, "https://api.github.com")?;
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": summarize_code_search(&results).to_string()
+        }],
+        "isError": false
+    }))
 }
 
 fn handle_list_commits(arguments: Value) -> Result<Value, JsonRpcError> {
@@ -1401,6 +1440,63 @@ fn get_repository_file(
     })
 }
 
+fn search_code(
+    client: &Client,
+    args: &SearchCodeArguments,
+    api_base_url: &str,
+) -> Result<GithubCodeSearchResponse, JsonRpcError> {
+    let owner = args.owner.trim();
+    let repo = args.repo.trim();
+    let query = args.query.trim();
+    if owner.is_empty() {
+        return Err(JsonRpcError::invalid_params(
+            "github.search_code owner must not be empty",
+        ));
+    }
+    if repo.is_empty() {
+        return Err(JsonRpcError::invalid_params(
+            "github.search_code repo must not be empty",
+        ));
+    }
+    if query.is_empty() {
+        return Err(JsonRpcError::invalid_params(
+            "github.search_code query must not be empty",
+        ));
+    }
+
+    let url = format!("{api_base_url}/search/code");
+    let mut request = client.get(url);
+    if let Some(token) = github_token() {
+        request = request.bearer_auth(token);
+    }
+
+    let search_query = format!("{query} repo:{owner}/{repo}");
+    let mut params: Vec<(&str, String)> = vec![("q", search_query)];
+    if let Some(per_page) = args.per_page {
+        params.push(("per_page", per_page.clamp(1, 100).to_string()));
+    }
+
+    let response = request
+        .query(&params)
+        .send()
+        .map_err(|err| JsonRpcError::internal_error(format!("call GitHub API: {err}")))?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|err| JsonRpcError::internal_error(format!("read GitHub response: {err}")))?;
+    if !status.is_success() {
+        return Err(JsonRpcError::internal_error(format!(
+            "GitHub API returned {status}: {}",
+            body.trim()
+        )));
+    }
+
+    serde_json::from_str(&body).map_err(|err| {
+        JsonRpcError::internal_error(format!("parse GitHub code search response: {err}"))
+    })
+}
+
 fn decode_github_file_content(content: &str) -> Result<Vec<u8>, JsonRpcError> {
     let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
     BASE64
@@ -1655,6 +1751,28 @@ fn summarize_issues(issues: &[GithubIssue]) -> Value {
                 "labels": issue.labels.iter().map(|label| label.name.clone()).collect::<Vec<_>>(),
                 "assignee": issue.assignee.as_ref().map(|user| user.login.clone()),
                 "created_at": issue.created_at.clone()
+            })
+        }).collect::<Vec<_>>()
+    })
+}
+
+fn summarize_code_search(results: &GithubCodeSearchResponse) -> Value {
+    serde_json::json!({
+        "total_count": results.total_count,
+        "incomplete_results": results.incomplete_results,
+        "items": results.items.iter().map(|item| {
+            serde_json::json!({
+                "name": item.name.clone(),
+                "path": item.path.clone(),
+                "sha": item.sha.clone(),
+                "html_url": item.html_url.clone(),
+                "git_url": item.git_url.clone(),
+                "repository": {
+                    "full_name": item.repository.full_name.clone(),
+                    "html_url": item.repository.html_url.clone(),
+                },
+                "score": item.score,
+                "text_matches": &item.text_matches,
             })
         }).collect::<Vec<_>>()
     })
@@ -2104,6 +2222,86 @@ mod tests {
                 ]
             })
         );
+    }
+
+    #[test]
+    fn search_code_queries_the_repositories_endpoint_and_summarizes_results() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+            let mut request_line = String::new();
+            reader
+                .read_line(&mut request_line)
+                .expect("read request line");
+            assert!(
+                request_line.starts_with(
+                    "GET /search/code?q=handle_search+repo%3Aocto%2Fhello-world&per_page=2 HTTP/1.1"
+                ),
+                "unexpected request line: {request_line}"
+            );
+
+            loop {
+                let mut header_line = String::new();
+                reader.read_line(&mut header_line).expect("read header");
+                if header_line.trim_end().is_empty() {
+                    break;
+                }
+            }
+
+            let body = serde_json::json!({
+                "total_count": 1,
+                "incomplete_results": false,
+                "items": [
+                    {
+                        "name": "mod.rs",
+                        "path": "crates/roko-agent/src/mcp/mod.rs",
+                        "sha": "abc123",
+                        "html_url": "https://github.com/octo/hello-world/blob/main/crates/roko-agent/src/mcp/mod.rs",
+                        "git_url": "https://api.github.com/repos/octo/hello-world/git/blobs/abc123",
+                        "repository": {
+                            "full_name": "octo/hello-world",
+                            "html_url": "https://github.com/octo/hello-world"
+                        },
+                        "score": 42.5
+                    }
+                ]
+            })
+            .to_string();
+
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+        });
+
+        let client = github_client().expect("client");
+        let args = SearchCodeArguments {
+            query: "handle_search".to_string(),
+            owner: "octo".to_string(),
+            repo: "hello-world".to_string(),
+            per_page: Some(2),
+        };
+
+        let results = search_code(&client, &args, &format!("http://{addr}")).expect("search code");
+        let summary = summarize_code_search(&results);
+
+        assert_eq!(summary["total_count"], 1);
+        assert_eq!(summary["incomplete_results"], false);
+        assert_eq!(summary["items"][0]["name"], "mod.rs");
+        assert_eq!(
+            summary["items"][0]["repository"]["full_name"],
+            "octo/hello-world"
+        );
+        assert_eq!(summary["items"][0]["score"], 42.5);
+
+        server.join().expect("server thread");
     }
 
     #[test]
