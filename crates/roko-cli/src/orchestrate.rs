@@ -1443,58 +1443,48 @@ impl PlanRunner {
 
                         // Store gate failure context for AutoFix phase
                         if !passed {
-                            if let Some(tracker) = self.task_trackers.get_mut(&plan_id) {
-                                let failed_gates: Vec<&GateResult> = self
-                                    .executor
-                                    .plan_state(&plan_id)
-                                    .map(|s| s.gate_results.iter().filter(|g| !g.passed).collect())
-                                    .unwrap_or_default();
-                                let failure_summaries: Vec<String> = failed_gates
-                                    .iter()
-                                    .map(|g| format!("{}: {}", g.gate_name, g.summary))
-                                    .collect();
-                                // Determine the primary failure phase (compile > test > clippy > other)
-                                let phase = failed_gates
-                                    .iter()
-                                    .map(|g| g.gate_name.as_str())
-                                    .find(|n| *n == "compile")
-                                    .or_else(|| {
-                                        failed_gates
-                                            .iter()
-                                            .map(|g| g.gate_name.as_str())
-                                            .find(|n| *n == "test")
-                                    })
-                                    .or_else(|| {
-                                        failed_gates
-                                            .iter()
-                                            .map(|g| g.gate_name.as_str())
-                                            .find(|n| *n == "clippy")
-                                    })
-                                    .unwrap_or("unknown");
-                                tracker.last_gate_failure = Some(failure_summaries.join("\n"));
-                                tracker.last_gate_failure_phase = Some(phase.to_string());
+                            let failed_gates: Vec<&GateResult> = self
+                                .executor
+                                .plan_state(&plan_id)
+                                .map(|s| s.gate_results.iter().filter(|g| !g.passed).collect())
+                                .unwrap_or_default();
+                            let failure_context = self
+                                .executor
+                                .plan_state(&plan_id)
+                                .and_then(|state| state.last_error.clone())
+                                .unwrap_or_default();
+                            let phase = Self::primary_failed_gate_name_from_results(&failed_gates)
+                                .unwrap_or("unknown");
 
-                                // Emit a FailureTrace for observability.
-                                let trace_id =
-                                    Self::trace_id_for(&plan_id, &format!("gate-fail-{rung}"));
-                                let evidence = failed_gates
+                            if let Some(tracker) = self.task_trackers.get_mut(&plan_id) {
+                                tracker.last_gate_failure = Some(failure_context.clone());
+                                tracker.last_gate_failure_phase = Some(phase.to_string());
+                            }
+
+                            // Emit a FailureTrace for observability.
+                            let trace_id =
+                                Self::trace_id_for(&plan_id, &format!("gate-fail-{rung}"));
+                            let evidence = if failure_context.is_empty() {
+                                failed_gates
                                     .iter()
                                     .map(|g| format!("{}: {}", g.gate_name, g.summary))
                                     .collect::<Vec<_>>()
-                                    .join("; ");
-                                let ft = FailureTrace::new(
-                                    trace_id,
-                                    TraceStep::Execute,
-                                    FailureKind::ToolHandlerError,
-                                    evidence,
-                                );
-                                let event = ToolTraceEvent::Custom {
-                                    name: "failure_trace".to_string(),
-                                    data: serde_json::to_value(&ft).unwrap_or_default(),
-                                    at_ms: now_unix_ms_i64(),
-                                };
-                                self.obs_sinks.trace_sink.append(trace_id, event);
-                            }
+                                    .join("; ")
+                            } else {
+                                failure_context.clone()
+                            };
+                            let ft = FailureTrace::new(
+                                trace_id,
+                                TraceStep::Execute,
+                                FailureKind::ToolHandlerError,
+                                evidence,
+                            );
+                            let event = ToolTraceEvent::Custom {
+                                name: "failure_trace".to_string(),
+                                data: serde_json::to_value(&ft).unwrap_or_default(),
+                                at_ms: now_unix_ms_i64(),
+                            };
+                            self.obs_sinks.trace_sink.append(trace_id, event);
                         }
                         let event = if passed {
                             if let Some(tracker) = self.task_trackers.get_mut(&plan_id) {
@@ -2449,6 +2439,47 @@ impl PlanRunner {
         }
     }
 
+    fn primary_failed_gate_name_from_results<'a>(
+        verdicts: &'a [&'a GateResult],
+    ) -> Option<&'a str> {
+        verdicts
+            .iter()
+            .find(|v| {
+                !v.passed && matches!(v.gate_name.as_str(), "compile" | "test" | "clippy")
+            })
+            .map(|v| v.gate_name.as_str())
+            .or_else(|| {
+                verdicts
+                    .iter()
+                    .find(|v| !v.passed)
+                    .map(|v| v.gate_name.as_str())
+            })
+    }
+
+    fn format_gate_failure_context(verdicts: &[Verdict]) -> String {
+        let mut sections = Vec::new();
+        for verdict in verdicts.iter().filter(|v| !v.passed) {
+            let mut section = format!("{}: {}", verdict.gate, verdict.reason.trim());
+            if let Some(digest) = verdict.error_digest.as_deref().map(str::trim).filter(|s| !s.is_empty())
+            {
+                section.push_str("\n\nerror_digest:\n");
+                section.push_str(digest);
+            }
+            if let Some(detail) = verdict.detail.as_deref().map(str::trim).filter(|s| !s.is_empty())
+            {
+                section.push_str("\n\nstderr/stdout:\n");
+                section.push_str(&detail.chars().take(4000).collect::<String>());
+            }
+            sections.push(section);
+        }
+
+        if sections.is_empty() {
+            String::new()
+        } else {
+            sections.join("\n\n---\n\n")
+        }
+    }
+
     /// Record a failed task: episode log + mark failed in tracker.
     async fn record_task_failure(
         &mut self,
@@ -2499,6 +2530,11 @@ impl PlanRunner {
             .task_trackers
             .get(plan_id)
             .and_then(|t| t.last_gate_failure.clone())
+            .or_else(|| {
+                self.executor
+                    .plan_state(plan_id)
+                    .and_then(|state| state.last_error.clone())
+            })
             .unwrap_or_default();
 
         let gate_phase = self
@@ -2507,6 +2543,41 @@ impl PlanRunner {
             .and_then(|t| t.last_gate_failure_phase.clone())
             .unwrap_or_else(|| "unknown".into());
 
+        let tracker = self.task_trackers.get(plan_id);
+        let last_task_id = tracker.and_then(|t| t.last_impl_task_id.as_deref());
+        let task_def = tracker.and_then(|t| {
+            last_task_id.and_then(|tid| t.tasks_file.tasks.iter().find(|td| td.id == tid))
+        });
+
+        let fix_tier = if gate_phase == "compile" {
+            "mechanical"
+        } else {
+            "focused"
+        };
+        let fix_model = self
+            .config
+            .agent
+            .tier_models
+            .get(fix_tier)
+            .cloned()
+            .unwrap_or_else(|| match fix_tier {
+                "mechanical" => "claude-haiku-4-5".into(),
+                _ => "claude-sonnet-4-6".into(),
+            });
+
+        let fix_prompt = if let Some(td) = task_def {
+            let original_prompt = td.build_prompt(plan_id, &self.workdir);
+            td.build_fix_prompt(&original_prompt, &gate_phase, &gate_context)
+        } else {
+            let truncated = gate_context.chars().take(4000).collect::<String>();
+            format!(
+                "Plan: {plan_id}\nTask: fix\n\n## Verification Failed\n\n\
+                 Phase: {gate_phase}\n\n\
+                 Error output:\n```\n{truncated}\n```\n\n\
+                 Fix the issue and ensure all verification steps pass."
+            )
+        };
+
         if !gate_context.is_empty() {
             eprintln!(
                 "[orchestrate] AutoFix {plan_id}: gate failure phase={gate_phase} context ({} chars)",
@@ -2514,50 +2585,14 @@ impl PlanRunner {
             );
         }
 
-        // Build fix prompt from the last implemented task's definition + gate failure
-        let (fix_prompt, fix_model) = {
-            let tracker = self.task_trackers.get(plan_id);
-            let last_task_id = tracker.and_then(|t| t.last_impl_task_id.as_deref());
-            let task_def = tracker.and_then(|t| {
-                last_task_id.and_then(|tid| t.tasks_file.tasks.iter().find(|td| td.id == tid))
-            });
-
-            if let Some(td) = task_def {
-                let original_prompt = td.build_prompt(plan_id, &self.workdir);
-                let prompt = td.build_fix_prompt(&original_prompt, &gate_phase, &gate_context);
-
-                // Model selection: mechanical tier (Haiku-class) for compile errors
-                // (fast iteration), focused tier (Sonnet-class) for test/logic failures.
-                let fix_tier = if gate_phase == "compile" {
-                    "mechanical"
-                } else {
-                    "focused"
-                };
-                let model = self
-                    .config
-                    .agent
-                    .tier_models
-                    .get(fix_tier)
-                    .cloned()
-                    .unwrap_or_else(|| match fix_tier {
-                        "mechanical" => "claude-haiku-4-5".into(),
-                        _ => "claude-sonnet-4-6".into(),
-                    });
-
-                (Some(prompt), Some(model))
-            } else {
-                (None, None)
-            }
-        };
-
         let started = std::time::Instant::now();
         match self
             .dispatch_agent_with(
                 plan_id,
                 AgentRole::AutoFixer,
                 "fix",
-                fix_prompt,
-                fix_model,
+                Some(fix_prompt),
+                Some(fix_model),
                 None,
                 None,
             )
@@ -3742,6 +3777,12 @@ impl PlanRunner {
                     LabelSet::from_pairs(&[("gate", &v.gate), ("verdict", verdict_str)]),
                 )
                 .inc();
+        }
+
+        if !all_passed {
+            if let Some(state) = self.executor.plan_state_mut(plan_id) {
+                state.last_error = Some(Self::format_gate_failure_context(&verdicts));
+            }
         }
         Ok(all_passed)
     }
