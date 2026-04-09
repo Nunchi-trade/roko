@@ -265,6 +265,7 @@ pub async fn daemon_start(foreground: bool, port: u16) -> Result<()> {
             }
         }
     });
+    let reload_signal_task = tokio::spawn(wait_for_reload_signal(Arc::clone(&state)));
     let signal_task = tokio::spawn(wait_for_shutdown_signal());
 
     tokio::select! {
@@ -287,6 +288,7 @@ pub async fn daemon_start(foreground: bool, port: u16) -> Result<()> {
         &info,
         shutdown_request,
         http_shutdown,
+        reload_signal_task,
         server,
         ipc_server,
     )
@@ -685,7 +687,7 @@ struct DaemonStatusResponse {
     uptime_secs: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct DaemonReloadResponse {
     ok: bool,
     command: String,
@@ -853,28 +855,9 @@ async fn handle_ipc_command(
     }
 
     if request == "reload" {
-        let subscriptions_report = {
-            let roko_config = state.roko_config.read().await.clone();
-            let registry = roko_serve::dispatch::SubscriptionRegistry::load_from_project(
-                &state.workdir,
-                &roko_config,
-            );
-            state.subscriptions.replace_with(registry.all())
-        };
-
-        let templates_report = {
-            let mut templates = state.templates.write().await;
-            templates.scan()
-        };
-
-        let response = json!({
-            "ok": true,
-            "command": "reload",
-            "subscriptions": subscriptions_report,
-            "templates": templates_report.loaded,
-            "loaded": subscriptions_report + templates_report.loaded,
-        });
-        stream.write_all(response.to_string().as_bytes()).await?;
+        let response = reload_daemon_runtime(&state).await;
+        let response = serde_json::to_string(&response).context("serialize daemon reload response")?;
+        stream.write_all(response.as_bytes()).await?;
         stream.write_all(b"\n").await?;
         return Ok(());
     }
@@ -900,6 +883,50 @@ async fn handle_ipc_command(
     stream.write_all(response.to_string().as_bytes()).await?;
     stream.write_all(b"\n").await?;
     Ok(())
+}
+
+async fn reload_daemon_runtime(state: &AppState) -> DaemonReloadResponse {
+    let subscriptions_report = {
+        let roko_config = state.roko_config.read().await.clone();
+        let registry =
+            roko_serve::dispatch::SubscriptionRegistry::load_from_project(&state.workdir, &roko_config);
+        state.subscriptions.replace_with(registry.all())
+    };
+
+    let templates_report = {
+        let mut templates = state.templates.write().await;
+        templates.scan()
+    };
+
+    DaemonReloadResponse {
+        ok: true,
+        command: "reload".to_string(),
+        subscriptions: subscriptions_report,
+        templates: templates_report.loaded,
+        loaded: subscriptions_report + templates_report.loaded,
+    }
+}
+
+async fn wait_for_reload_signal(state: Arc<AppState>) {
+    #[cfg(unix)]
+    {
+        let mut sighup = signal(SignalKind::hangup()).expect("install SIGHUP handler");
+        while sighup.recv().await.is_some() {
+            let response = reload_daemon_runtime(&state).await;
+            info!(
+                subscriptions = response.subscriptions,
+                templates = response.templates,
+                loaded = response.loaded,
+                "daemon reloaded after SIGHUP"
+            );
+        }
+        return;
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = state;
+    }
 }
 
 async fn wait_for_shutdown_signal() {
@@ -956,6 +983,7 @@ async fn graceful_shutdown_daemon(
     info: &DaemonInfo,
     shutdown_request: CancellationToken,
     http_shutdown: CancellationToken,
+    reload_signal_task: JoinHandle<()>,
     server: JoinHandle<Result<()>>,
     ipc_server: JoinHandle<()>,
 ) -> Result<()> {
@@ -982,6 +1010,8 @@ async fn graceful_shutdown_daemon(
 
     shutdown_request.cancel();
     state.cancel.cancel();
+    reload_signal_task.abort();
+    let _ = reload_signal_task.await;
 
     let active_agents = state.supervisor.count().await;
     if active_agents > 0 {
