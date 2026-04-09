@@ -1966,7 +1966,8 @@ impl PlanRunner {
                 eprintln!(
                     "[orchestrate] task worktree acquisition failed for {plan_id}/{task_id}: {e}"
                 );
-                self.record_task_failure(plan_id, task_id, &e, &started).await;
+                self.record_task_failure(plan_id, task_id, &e, &started, None)
+                    .await;
                 let _ = self.executor.apply_event(
                     plan_id,
                     &ExecutorEvent::Fatal(format!(
@@ -2006,7 +2007,7 @@ impl PlanRunner {
                         attempt + 1
                     );
                     if attempt == max_retries {
-                        self.record_task_failure(plan_id, task_id, &e, &started)
+                        self.record_task_failure(plan_id, task_id, &e, &started, None)
                             .await;
                     }
                 }
@@ -2043,7 +2044,8 @@ impl PlanRunner {
                     eprintln!(
                         "[orchestrate] task worktree acquisition failed for {plan_id}/{tid}: {e}"
                     );
-                    self.record_task_failure(plan_id, tid, &e, &started).await;
+                    self.record_task_failure(plan_id, tid, &e, &started, None)
+                        .await;
                 }
             }
         }
@@ -2178,7 +2180,8 @@ impl PlanRunner {
             } else {
                 eprintln!("[orchestrate] parallel task {tid} failed");
                 let err = anyhow!("agent returned non-success for task {tid}");
-                self.record_task_failure(plan_id, tid, &err, &started).await;
+                self.record_task_failure(plan_id, tid, &err, &started, Some(agent_result))
+                    .await;
                 any_fatal = true;
             }
         }
@@ -2599,12 +2602,26 @@ impl PlanRunner {
         task_id: &str,
         error: &anyhow::Error,
         started: &std::time::Instant,
+        result: Option<&AgentResult>,
     ) {
-        let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let wall_ms = result
+            .map(|r| r.usage.wall_ms)
+            .unwrap_or_else(|| u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
         let mut ep = Episode::new("Implementer", task_id).failed(error.to_string());
-        ep.usage = Usage {
-            wall_ms,
-            ..Usage::default()
+        ep.usage = match result {
+            Some(result) => Usage {
+                wall_ms,
+                cost_usd: f64::from(result.usage.cost_usd),
+                cost_usd_without_cache: f64::from(result.usage.cost_usd),
+                input_tokens: u64::from(result.usage.input_tokens),
+                output_tokens: u64::from(result.usage.output_tokens),
+                cache_read_tokens: u64::from(result.usage.cache_read_tokens),
+                cache_write_tokens: u64::from(result.usage.cache_create_tokens),
+            },
+            None => Usage {
+                wall_ms,
+                ..Usage::default()
+            },
         };
         ep.input_signal_hash = plan_id.to_string();
         let model = self.effective_model();
