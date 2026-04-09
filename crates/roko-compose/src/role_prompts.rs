@@ -8,6 +8,7 @@
 use crate::prompt::{PromptComposer, PromptSection};
 use crate::prompt::estimate_tokens;
 use crate::scorer::SectionScorer;
+use crate::PadState;
 use crate::system_prompt_builder::SystemPromptBuilder;
 use crate::templates::RolePromptTemplate;
 use crate::templates::common::CONTEXT_LAYOUT_STANZA;
@@ -118,7 +119,7 @@ impl TaskContext {
 }
 
 /// Typed specification for building a role-scoped system prompt.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RoleSystemPromptSpec {
     /// Role/persona that will run the task.
     pub role: AgentRole,
@@ -130,6 +131,8 @@ pub struct RoleSystemPromptSpec {
     pub extra_conventions: Option<String>,
     /// Optional extra anti-patterns appended after defaults.
     pub extra_anti_patterns: Vec<String>,
+    /// Optional affect state used to tune tone and focus.
+    pub affect_state: Option<PadState>,
     /// Whether to include cache markers between stability tiers.
     pub cache_markers: bool,
 }
@@ -144,6 +147,7 @@ impl RoleSystemPromptSpec {
             tool_allowlist_csv: tool_csv.into(),
             extra_conventions: None,
             extra_anti_patterns: Vec::new(),
+            affect_state: None,
             cache_markers: false,
         }
     }
@@ -159,6 +163,13 @@ impl RoleSystemPromptSpec {
     #[must_use]
     pub fn add_anti_pattern(mut self, rule: impl Into<String>) -> Self {
         self.extra_anti_patterns.push(rule.into());
+        self
+    }
+
+    /// Attach affect state for tone/focus guidance.
+    #[must_use]
+    pub const fn with_affect_state(mut self, affect_state: Option<PadState>) -> Self {
+        self.affect_state = affect_state;
         self
     }
 
@@ -200,7 +211,8 @@ impl RoleSystemPromptSpec {
         let mut builder = SystemPromptBuilder::new(role_identity_for(self.role))
             .with_conventions(self.conventions_text())
             .with_tools(tool_allowlist_instructions(&self.tool_allowlist_csv))
-            .with_anti_patterns(self.anti_patterns());
+            .with_anti_patterns(self.anti_patterns())
+            .with_affect_state(self.affect_state);
 
         let domain = self.task_context.domain_layer();
         if !domain.is_empty() {
@@ -225,7 +237,8 @@ impl RoleSystemPromptSpec {
         let mut builder = SystemPromptBuilder::new(role_identity_for(self.role))
             .with_conventions(self.conventions_text())
             .with_tools(tool_allowlist_instructions(&self.tool_allowlist_csv))
-            .with_anti_patterns(self.anti_patterns());
+            .with_anti_patterns(self.anti_patterns())
+            .with_affect_state(self.affect_state);
 
         let domain = self.task_context.domain_layer();
         if !domain.is_empty() {
@@ -403,6 +416,16 @@ mod tests {
         assert!(prompt.contains("## Relevant Context"));
         assert!(prompt.contains("Claude tool allowlist: Read,Edit,Bash"));
         assert!(prompt.contains("Prefer additive changes."));
+    }
+
+    #[test]
+    fn built_prompt_includes_affect_guidance() {
+        let ctx = TaskContext::new("Implement affect wiring");
+        let spec = RoleSystemPromptSpec::new(AgentRole::Conductor, ctx, "Read,Edit")
+            .with_affect_state(Some(PadState::new(0.0, 0.8, 0.0)));
+
+        let prompt = spec.build();
+        assert!(prompt.contains("You are under time pressure, focus on the most critical path."));
     }
 
     #[test]

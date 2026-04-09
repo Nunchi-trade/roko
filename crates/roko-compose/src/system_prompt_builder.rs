@@ -1,4 +1,4 @@
-//! Composable system prompt builder with 6 layers.
+//! Composable system prompt builder with 7 layers.
 //!
 //! Generates cache-aligned, role-specific system prompts from composable
 //! fragments. Each layer targets a different stability tier:
@@ -11,11 +11,12 @@
 //! | 4. Task context | Current task details | Task (volatile) |
 //! | 5. Tool instructions | Available tools and usage | System (stable) |
 //! | 6. Anti-patterns | What NOT to do | Session (semi-stable) |
+//! | 7. Affect guidance | Emotional tone and focus | Dynamic |
 //!
 //! The builder emits sections in this exact order, with optional cache
 //! alignment markers between stability tiers. Layers 1 + 2 + 5 form the
 //! prefix-cacheable "system" tier; layers 3 + 6 form the "session" tier;
-//! layer 4 is per-task.
+//! layer 4 is per-task; layer 7 is dynamic tone/focus guidance.
 //!
 //! # Design
 //!
@@ -27,8 +28,9 @@
 //! Anti-pattern #8: **no `std::fs`**. All content arrives via builder methods.
 
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
+use crate::PadState;
 
-/// A composable system prompt built from 6 layers.
+/// A composable system prompt built from 7 layers.
 ///
 /// Use the builder pattern:
 /// ```ignore
@@ -55,6 +57,8 @@ pub struct SystemPromptBuilder {
     tools: Option<String>,
     /// Layer 6: Anti-patterns — things the agent must NOT do.
     anti_patterns: Vec<String>,
+    /// Layer 7: Affect guidance — current emotional tone and focus.
+    affect_state: Option<PadState>,
     /// Whether to insert cache alignment markers between tiers.
     cache_markers: bool,
 }
@@ -74,6 +78,7 @@ impl SystemPromptBuilder {
             task: None,
             tools: None,
             anti_patterns: Vec::new(),
+            affect_state: None,
             cache_markers: false,
         }
     }
@@ -124,6 +129,13 @@ impl SystemPromptBuilder {
     #[must_use]
     pub fn add_anti_pattern(mut self, pattern: impl Into<String>) -> Self {
         self.anti_patterns.push(pattern.into());
+        self
+    }
+
+    /// Set layer 7: affect guidance (current emotional tone and focus).
+    #[must_use]
+    pub const fn with_affect_state(mut self, affect_state: Option<PadState>) -> Self {
+        self.affect_state = affect_state;
         self
     }
 
@@ -193,6 +205,11 @@ impl SystemPromptBuilder {
             parts.push(anti);
         }
 
+        // ── Layer 7: Affect Guidance (Dynamic tier) ──
+        if let Some(affect) = self.affect_guidance() {
+            parts.push(format!("## Affect Guidance\n\n{affect}"));
+        }
+
         // Cache break: end of Session tier.
         if self.cache_markers
             && (self.domain.is_some() || self.context.is_some() || !self.anti_patterns.is_empty())
@@ -218,7 +235,7 @@ impl SystemPromptBuilder {
     /// [`PromptAssembler`](crate::templates::assembly::PromptAssembler).
     #[must_use]
     pub fn build_sections(&self) -> Vec<PromptSection> {
-        let mut sections = Vec::with_capacity(7);
+        let mut sections = Vec::with_capacity(8);
 
         // Layer 1: Role Identity
         sections.push(
@@ -292,6 +309,16 @@ impl SystemPromptBuilder {
             );
         }
 
+        // Layer 7: Affect Guidance
+        if let Some(affect) = self.affect_guidance() {
+            sections.push(
+                PromptSection::new("affect_guidance", affect)
+                    .with_priority(SectionPriority::Normal)
+                    .with_cache_layer(CacheLayer::Dynamic)
+                    .with_placement(Placement::End),
+            );
+        }
+
         // Layer 4: Task Context
         if let Some(ref task) = self.task {
             if !task.is_empty() {
@@ -329,7 +356,21 @@ impl SystemPromptBuilder {
         if !self.anti_patterns.is_empty() {
             count += 1;
         }
+        if self.affect_guidance().is_some() {
+            count += 1;
+        }
         count
+    }
+
+    fn affect_guidance(&self) -> Option<&'static str> {
+        let affect = self.affect_state?;
+        if affect.arousal >= 0.35 {
+            Some("You are under time pressure, focus on the most critical path.")
+        } else if affect.arousal <= -0.35 {
+            Some("You have time to explore thoroughly.")
+        } else {
+            None
+        }
     }
 }
 
@@ -379,6 +420,7 @@ mod tests {
             .with_task("LAYER4_TASK")
             .with_tools("LAYER5_TOOLS")
             .add_anti_pattern("LAYER6_ANTI")
+            .with_affect_state(Some(PadState::new(0.0, 0.8, 0.0)))
             .build();
 
         let pos_role = prompt.find("LAYER1_ROLE").unwrap();
@@ -387,15 +429,17 @@ mod tests {
         let pos_domain = prompt.find("LAYER3_DOMAIN").unwrap();
         let pos_context = prompt.find("LAYER3B_CONTEXT").unwrap();
         let pos_anti = prompt.find("LAYER6_ANTI").unwrap();
+        let pos_affect = prompt.find("time pressure").unwrap();
         let pos_task = prompt.find("LAYER4_TASK").unwrap();
 
-        // Order: role(1) -> conv(2) -> tools(5) -> domain(3) -> context(3b) -> anti(6) -> task(4)
+        // Order: role(1) -> conv(2) -> tools(5) -> domain(3) -> context(3b) -> anti(6) -> affect(7) -> task(4)
         assert!(pos_role < pos_conv, "role before conventions");
         assert!(pos_conv < pos_tools, "conventions before tools");
         assert!(pos_tools < pos_domain, "tools before domain");
         assert!(pos_domain < pos_context, "domain before context");
         assert!(pos_context < pos_anti, "context before anti-patterns");
-        assert!(pos_anti < pos_task, "anti-patterns before task");
+        assert!(pos_anti < pos_affect, "anti-patterns before affect guidance");
+        assert!(pos_affect < pos_task, "affect guidance before task");
     }
 
     #[test]
@@ -459,9 +503,10 @@ mod tests {
             .with_task("Implement feature X")
             .with_tools("Use MCP tools")
             .add_anti_pattern("No unwrap()")
+            .with_affect_state(Some(PadState::new(0.0, 0.8, 0.0)))
             .build_sections();
 
-        assert_eq!(sections.len(), 7);
+        assert_eq!(sections.len(), 8);
 
         // Layer 1: role_identity
         assert_eq!(sections[0].name, "role_identity");
@@ -491,11 +536,17 @@ mod tests {
         assert_eq!(sections[5].cache_layer, CacheLayer::Session);
         assert_eq!(sections[5].placement, Placement::End);
 
-        // Layer 4: task_context
-        assert_eq!(sections[6].name, "task_context");
-        assert_eq!(sections[6].priority, SectionPriority::Critical);
-        assert_eq!(sections[6].cache_layer, CacheLayer::Task);
+        // Layer 7: affect_guidance
+        assert_eq!(sections[6].name, "affect_guidance");
+        assert_eq!(sections[6].priority, SectionPriority::Normal);
+        assert_eq!(sections[6].cache_layer, CacheLayer::Dynamic);
         assert_eq!(sections[6].placement, Placement::End);
+
+        // Layer 4: task_context
+        assert_eq!(sections[7].name, "task_context");
+        assert_eq!(sections[7].priority, SectionPriority::Critical);
+        assert_eq!(sections[7].cache_layer, CacheLayer::Task);
+        assert_eq!(sections[7].placement, Placement::End);
     }
 
     #[test]
@@ -523,8 +574,9 @@ mod tests {
                 .with_task("task")
                 .with_tools("tools")
                 .add_anti_pattern("anti")
+                .with_affect_state(Some(PadState::new(0.0, 0.8, 0.0)))
                 .layer_count(),
-            7
+            8
         );
     }
 
@@ -571,6 +623,25 @@ mod tests {
             .build();
 
         assert!(prompt.contains("- A\n- B"));
+    }
+
+    #[test]
+    fn affect_guidance_reflects_arousal() {
+        let high = SystemPromptBuilder::new("Role")
+            .with_affect_state(Some(PadState::new(0.0, 0.8, 0.0)))
+            .build();
+        assert!(high.contains("You are under time pressure, focus on the most critical path."));
+
+        let low = SystemPromptBuilder::new("Role")
+            .with_affect_state(Some(PadState::new(0.0, -0.8, 0.0)))
+            .build();
+        assert!(low.contains("You have time to explore thoroughly."));
+
+        let neutral = SystemPromptBuilder::new("Role")
+            .with_affect_state(Some(PadState::new(0.0, 0.0, 0.0)))
+            .build();
+        assert!(!neutral.contains("time pressure"));
+        assert!(!neutral.contains("explore thoroughly"));
     }
 
     #[test]
