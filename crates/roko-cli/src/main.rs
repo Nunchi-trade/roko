@@ -188,11 +188,14 @@ enum Command {
         #[arg(long)]
         workdir: Option<PathBuf>,
     },
-    /// Run one offline dream cycle immediately.
+    /// Run one offline dream cycle immediately, or show the latest report.
     Dream {
         /// Directory containing `.roko/` (default: cwd).
         #[arg(long)]
         workdir: Option<PathBuf>,
+        /// Show the last dream report without running a new cycle.
+        #[arg(long)]
+        report: bool,
     },
     /// Manage global and project config (wizard, show, path, edit, set, set-secret).
     Config {
@@ -759,7 +762,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             Ok(EXIT_SUCCESS)
         }
         Command::Replay { hash, workdir } => cmd_replay(workdir, hash).await,
-        Command::Dream { workdir } => cmd_dream(cli, workdir).await,
+        Command::Dream { workdir, .. } => cmd_dream(cli, workdir).await,
         Command::Config { cmd } => {
             dispatch_config(cmd)?;
             Ok(EXIT_SUCCESS)
@@ -2719,6 +2722,15 @@ async fn cmd_replay(workdir: Option<PathBuf>, hash: String) -> Result<i32> {
 
 async fn cmd_dream(cli: &Cli, workdir: Option<PathBuf>) -> Result<i32> {
     let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
+
+    if let Some(Command::Dream { report: true, .. }) = cli.command.as_ref() {
+        let report_dir = workdir.join(".roko").join("dreams");
+        let report = roko_serve::dreams::load_latest_dream_report(&report_dir)?
+            .ok_or_else(|| anyhow!("no dream report found in {}", report_dir.display()))?;
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(EXIT_SUCCESS);
+    }
+
     prepare_runtime_hooks(&workdir, cli.quiet);
 
     let core_config = roko_core::config::load_config(&workdir)?;

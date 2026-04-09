@@ -160,6 +160,20 @@ pub async fn run_dream_cycle_now(
     Ok(report)
 }
 
+/// Load the latest persisted dream report from the report directory.
+///
+/// Returns `Ok(None)` when no report exists yet.
+pub fn load_latest_dream_report(report_dir: &Path) -> Result<Option<DreamCycleReport>> {
+    let Some(path) = latest_dream_report_path(report_dir)? else {
+        return Ok(None);
+    };
+    let text = fs::read_to_string(&path)
+        .with_context(|| format!("read dream report {}", path.display()))?;
+    let report: DreamCycleReport = serde_json::from_str(&text)
+        .with_context(|| format!("parse dream report {}", path.display()))?;
+    Ok(Some(report))
+}
+
 async fn build_dream_cycle(
     state: &AppState,
     config: &DreamLoopConfig,
