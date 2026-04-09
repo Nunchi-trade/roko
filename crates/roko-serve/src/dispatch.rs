@@ -33,6 +33,7 @@ use roko_core::{ContentHash, Verdict};
 use roko_learn::cascade_router::CascadeRouter;
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage as EpisodeUsage};
+use roko_learn::prompt_experiment::ExperimentStore;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
@@ -176,7 +177,15 @@ impl TemplateAgentDispatcher {
 #[async_trait]
 impl AgentDispatcher for TemplateAgentDispatcher {
     async fn dispatch(&self, template: AgentTemplate, signal: Signal) -> Result<AgentResult> {
-        let system_prompt = build_template_system_prompt(&template, Some(&signal));
+        let experiment_variant = template
+            .experiment
+            .as_ref()
+            .and_then(|experiment| load_template_experiment_variant(&self.workdir, &experiment.name));
+        let system_prompt = build_template_system_prompt(
+            &template,
+            Some(&signal),
+            experiment_variant.as_ref().map(|(_, content)| content.as_str()),
+        );
         let allowed_tools = build_allowed_tools_csv(&template);
         let mcp_config = resolve_template_mcp_config(self.base_mcp_config.as_ref(), &self.workdir, &template)?;
         let agent = build_agent(
@@ -187,7 +196,16 @@ impl AgentDispatcher for TemplateAgentDispatcher {
             &self.workdir,
         )?;
         let ctx = dispatch_context(&template, &signal);
-        Ok(agent.run(&signal, &ctx).await)
+        let mut result = agent.run(&signal, &ctx).await;
+        if let Some((variant_id, _)) = experiment_variant {
+            result.output.tags.insert("experiment_variant".into(), variant_id.clone());
+            result
+                .output
+                .tags
+                .insert("experiment_variant_id".into(), variant_id);
+            result.output.id = result.output.content_hash();
+        }
+        Ok(result)
     }
 }
 
@@ -894,12 +912,29 @@ fn build_agent(
     Ok(Box::new(agent))
 }
 
-fn build_template_system_prompt(template: &AgentTemplate, signal: Option<&Signal>) -> String {
+fn build_template_system_prompt(
+    template: &AgentTemplate,
+    signal: Option<&Signal>,
+    experiment_variant: Option<&str>,
+) -> String {
     let role_prompt = match signal {
-        Some(signal) => TemplateRegistry::render_prompt_with_signal(template, &HashMap::new(), Some(signal)),
+        Some(signal) => TemplateRegistry::render_prompt_with_signal(
+            template,
+            &HashMap::new(),
+            Some(signal),
+        ),
         None => TemplateRegistry::render_prompt(template, &HashMap::new()),
     };
     let mut prompt = role_prompt;
+    if let Some(variant) = experiment_variant
+        && !variant.trim().is_empty()
+    {
+        if !prompt.is_empty() {
+            prompt.push_str("\n\n");
+        }
+        prompt.push_str("## Experiment Variant\n\n");
+        prompt.push_str(variant);
+    }
     if let Some(format_instructions) = output_format_instructions(&template.output_format) {
         if !format_instructions.is_empty() {
             if !prompt.is_empty() {
@@ -944,6 +979,15 @@ fn build_allowed_tools_csv(template: &AgentTemplate) -> String {
 
     names.dedup();
     names.join(",")
+}
+
+fn load_template_experiment_variant(
+    workdir: &Path,
+    experiment_name: &str,
+) -> Option<(String, String)> {
+    let path = workdir.join(".roko").join("learn").join("experiments.json");
+    let store = ExperimentStore::load_or_new(&path);
+    store.assign_variant(experiment_name)
 }
 
 fn default_allowed_tools_for_role(role_name: &str) -> Vec<String> {
@@ -1146,6 +1190,17 @@ async fn append_dispatch_episode(
     episode.turns = turns;
     episode.tokens_used = tokens_used;
     episode.external_actions = Vec::new();
+    if let Some(variant) = outcome.result.output.tag("experiment_variant") {
+        episode
+            .extra
+            .insert("experiment_variant".into(), Value::String(variant.to_string()));
+    }
+    if let Some(variant_id) = outcome.result.output.tag("experiment_variant_id") {
+        episode.extra.insert(
+            "experiment_variant_id".into(),
+            Value::String(variant_id.to_string()),
+        );
+    }
     if !outcome.success {
         episode.failure_reason = Some("agent dispatch or template gate failure".into());
     }
@@ -1404,9 +1459,10 @@ filter = { path = "src/**/*.rs" }
             mcp_servers: Vec::new(),
             allowed_tools: Vec::new(),
             denied_tools: Vec::new(),
+            experiment: None,
         };
 
-        let prompt = build_template_system_prompt(&template, None);
+        let prompt = build_template_system_prompt(&template, None, None);
         assert!(prompt.contains("You are the template role."));
         assert!(prompt.contains("Output valid JSON only"));
     }
@@ -1424,6 +1480,7 @@ filter = { path = "src/**/*.rs" }
             mcp_servers: Vec::new(),
             allowed_tools: vec!["read_file".into(), "grep".into(), "bash".into()],
             denied_tools: vec!["grep".into()],
+            experiment: None,
         };
 
         let tools_csv = build_allowed_tools_csv(&template);
@@ -1467,6 +1524,7 @@ filter = { path = "src/**/*.rs" }
             mcp_servers: vec!["filesystem".into()],
             allowed_tools: Vec::new(),
             denied_tools: Vec::new(),
+            experiment: None,
         };
 
         let generated =

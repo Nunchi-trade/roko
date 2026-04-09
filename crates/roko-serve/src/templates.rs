@@ -65,6 +65,16 @@ pub struct AgentTemplate {
     /// Tool denylist glob patterns.
     #[serde(default)]
     pub denied_tools: Vec<String>,
+    /// Optional prompt experiment hook for variant selection.
+    #[serde(default)]
+    pub experiment: Option<TemplateExperiment>,
+}
+
+/// Optional prompt experiment attached to a template.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TemplateExperiment {
+    /// Experiment name used to resolve a variant from the experiment store.
+    pub name: String,
 }
 
 impl AgentTemplate {
@@ -109,6 +119,14 @@ impl AgentTemplate {
         }
         if self.max_turns == 0 {
             errors.push(format!("template '{}' must allow at least one turn", self.name));
+        }
+        if let Some(experiment) = &self.experiment
+            && experiment.name.trim().is_empty()
+        {
+            errors.push(format!(
+                "template '{}' has an experiment section with an empty name",
+                self.name
+            ));
         }
 
         if !self.mcp_servers.is_empty() {
@@ -528,6 +546,7 @@ mcp_servers = ["github", "missing-server"]
             mcp_servers: Vec::new(),
             allowed_tools: Vec::new(),
             denied_tools: Vec::new(),
+            experiment: None,
         };
 
         let signal = roko_core::Signal::builder(roko_core::Kind::Task)
