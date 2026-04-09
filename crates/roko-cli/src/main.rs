@@ -443,6 +443,11 @@ enum ConfigCmd {
 }
 
 fn main() {
+    if let Err(e) = load_startup_env_files() {
+        eprintln!("error: {e:#}");
+        std::process::exit(EXIT_SYSTEM_ERROR);
+    }
+
     let cli = Cli::parse();
     let filter = tracing_subscriber::EnvFilter::try_new(
         env::var("ROKO_LOG").unwrap_or_else(|_| "info".to_string()),
@@ -2246,6 +2251,24 @@ fn dashboard_page_slugs() -> Vec<&'static str> {
     .into_iter()
     .map(PageId::slug)
     .collect()
+}
+
+fn load_startup_env_files() -> Result<()> {
+    if let Some(home) = env::var_os("HOME") {
+        let global_env = PathBuf::from(home).join(".roko").join(".env");
+        if global_env.is_file() {
+            dotenvy::from_path_override(&global_env)
+                .with_context(|| format!("load {}", global_env.display()))?;
+        }
+    }
+
+    let local_env = PathBuf::from(".env");
+    if local_env.is_file() {
+        dotenvy::from_path_override(&local_env)
+            .with_context(|| format!("load {}", local_env.display()))?;
+    }
+
+    Ok(())
 }
 
 // -----------------------------------------------------------------------
