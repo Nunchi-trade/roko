@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow};
 use chrono::{DateTime, Utc};
+use octocrab::{Octocrab, Page};
 use reqwest::Client;
 use roko_core::tool::ExternalAction;
 use roko_core::{Body, Kind, Provenance, Signal};
@@ -72,7 +73,7 @@ async fn collect_feedback_cycle(
             }
 
             let feedback = match action.service.as_str() {
-                "github" => collect_github_feedback(&client, &episode, &action).await?,
+                "github" => collect_github_feedback(&episode, &action).await?,
                 "slack" => collect_slack_feedback(&client, &episode, &action).await?,
                 _ => None,
             };
@@ -123,6 +124,60 @@ fn action_key(episode: &Episode, action: &ExternalAction) -> String {
         action.resource_id,
         action.performed_at.timestamp_nanos_opt().unwrap_or_default()
     )
+}
+
+fn github_client(token: &str) -> Result<Octocrab> {
+    Octocrab::builder()
+        .personal_token(token.to_string())
+        .build()
+        .context("build GitHub client")
+}
+
+fn value_as_strings(value: Option<&Value>) -> Vec<String> {
+    match value {
+        Some(Value::Array(items)) => items.iter().filter_map(stringish_value).collect(),
+        Some(Value::String(value)) => vec![value.clone()],
+        _ => Vec::new(),
+    }
+}
+
+fn stringish_value(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| value.get("name").and_then(Value::as_str).map(str::to_string))
+        .or_else(|| value.get("login").and_then(Value::as_str).map(str::to_string))
+        .or_else(|| value.get("content").and_then(Value::as_str).map(str::to_string))
+}
+
+fn reaction_content(value: &Value) -> Option<&str> {
+    value.get("content").and_then(Value::as_str)
+}
+
+fn reaction_sentiment(reactions: &[Value]) -> (u32, u32, f64) {
+    let positive = ["+1", "heart", "hooray", "rocket", "eyes", "laugh"];
+    let negative = ["-1", "confused"];
+    let pos = reactions
+        .iter()
+        .filter(|reaction| reaction_content(reaction).is_some_and(|name| positive.contains(&name)))
+        .count() as u32;
+    let neg = reactions
+        .iter()
+        .filter(|reaction| reaction_content(reaction).is_some_and(|name| negative.contains(&name)))
+        .count() as u32;
+    let total = pos + neg;
+    let sentiment = if total == 0 {
+        0.0
+    } else {
+        (pos as f64 - neg as f64) / total as f64
+    };
+    (pos, neg, sentiment)
+}
+
+fn issue_labels_changed(current_labels: &[String], initial_labels: &[String]) -> bool {
+    let current = current_labels.iter().collect::<HashSet<_>>();
+    let initial = initial_labels.iter().collect::<HashSet<_>>();
+    current != initial
 }
 
 #[derive(Debug, Clone)]
@@ -223,7 +278,6 @@ fn parse_github_resource(action: &ExternalAction) -> Result<GitHubResource> {
 }
 
 async fn collect_github_feedback(
-    client: &Client,
     episode: &Episode,
     action: &ExternalAction,
 ) -> Result<Option<FeedbackObservation>> {
@@ -235,37 +289,43 @@ async fn collect_github_feedback(
         }
     };
 
+    let github = github_client(&token)?;
     let resource = parse_github_resource(action)?;
     match action.action_type.as_str() {
-        "review_pr" | "merge_pr" | "create_pr" => {
-            let pr_url = format!(
-                "https://api.github.com/repos/{}/{}/pulls/{}",
+        "review_pr" => {
+            let pr_path = format!(
+                "/repos/{}/{}/pulls/{}",
                 resource.owner, resource.repo, resource.number
             );
-            let pr = github_get_json(client, &token, &pr_url).await?;
-            let merged_at = pr.get("merged_at").and_then(Value::as_str);
-            let state = pr
-                .get("state")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
+            let pr = github_get_json(&github, &pr_path).await?;
+            let state = pr.get("state").and_then(Value::as_str).unwrap_or("unknown");
+            let merged = pr.get("merged_at").and_then(Value::as_str).is_some();
 
-            if merged_at.is_none() && state == "open" {
-                return Ok(None);
-            }
-
-            let reviews_url = format!(
-                "https://api.github.com/repos/{}/{}/pulls/{}/reviews",
+            let reviews_path = format!(
+                "/repos/{}/{}/pulls/{}/reviews",
                 resource.owner, resource.repo, resource.number
             );
-            let reviews = github_get_json_array(client, &token, &reviews_url).await?;
+            let reviews = github_get_json_page(&github, &reviews_path).await?;
             let review_states: Vec<String> = reviews
                 .iter()
                 .filter_map(|review| review.get("state").and_then(Value::as_str).map(str::to_string))
                 .collect();
+            let dismissed = review_states.iter().any(|review_state| review_state == "DISMISSED");
 
-            let success = merged_at.is_some() || review_states.iter().any(|state| state == "APPROVED");
+            if state == "open" && !merged && !dismissed {
+                return Ok(None);
+            }
+
+            let sentiment = if merged {
+                1.0
+            } else if dismissed {
+                -0.5
+            } else {
+                0.0
+            };
+
             Ok(Some(FeedbackObservation {
-                success,
+                success: merged || state == "closed",
                 payload: json!({
                     "resource": {
                         "owner": resource.owner,
@@ -274,50 +334,69 @@ async fn collect_github_feedback(
                     },
                     "episode_id": episode.episode_id,
                     "pr_state": state,
-                    "merged": merged_at.is_some(),
+                    "merged": merged,
+                    "dismissed": dismissed,
+                    "sentiment": sentiment,
                     "review_states": review_states,
                     "review_count": reviews.len(),
                 }),
             }))
         }
         "comment_issue" | "comment_pr" => {
-            let issue_url = format!(
-                "https://api.github.com/repos/{}/{}/issues/{}",
-                resource.owner, resource.repo, resource.number
-            );
-            let issue = github_get_json(client, &token, &issue_url).await?;
-            let issue_state = issue
-                .get("state")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-
-            let comment_id = action.metadata.get("comment_id").and_then(Value::as_u64);
-            let reactions = if let Some(comment_id) = comment_id {
-                let reactions_url = format!(
-                    "https://api.github.com/repos/{}/{}/issues/comments/{comment_id}/reactions",
-                    resource.owner, resource.repo
-                );
-                github_get_json_array(client, &token, &reactions_url).await?
-            } else {
-                Vec::new()
+            let comment_id = match action.metadata.get("comment_id").and_then(Value::as_u64) {
+                Some(comment_id) => comment_id,
+                None => {
+                    warn!(resource = %action.resource_id, "github comment id missing; skipping feedback poll");
+                    return Ok(None);
+                }
             };
-            let reaction_names: Vec<String> = reactions
-                .iter()
-                .filter_map(|reaction| reaction.get("content").and_then(Value::as_str).map(str::to_string))
-                .collect();
 
-            let replies_url = format!(
-                "https://api.github.com/repos/{}/{}/issues/{}/comments",
+            let comment_path = format!(
+                "/repos/{}/{}/issues/comments/{}",
+                resource.owner, resource.repo, comment_id
+            );
+            let comment = github_get_json(&github, &comment_path).await?;
+            let comment_created_at = comment
+                .get("created_at")
+                .and_then(Value::as_str)
+                .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())
+                .map(|ts| ts.with_timezone(&Utc));
+
+            let reactions_path = format!(
+                "/repos/{}/{}/issues/comments/{comment_id}/reactions",
+                resource.owner, resource.repo
+            );
+            let reactions = github_get_json_page(&github, &reactions_path).await?;
+            let (positive_reactions, negative_reactions, sentiment) = reaction_sentiment(&reactions);
+
+            let replies_path = format!(
+                "/repos/{}/{}/issues/{}/comments",
                 resource.owner, resource.repo, resource.number
             );
-            let comments = github_get_json_array(client, &token, &replies_url).await?;
+            let comments = github_get_json_page(&github, &replies_path).await?;
+            let reply_count = comments
+                .iter()
+                .filter(|reply| {
+                    let reply_created_at = reply
+                        .get("created_at")
+                        .and_then(Value::as_str)
+                        .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())
+                        .map(|ts| ts.with_timezone(&Utc));
 
-            if issue_state == "open" && reaction_names.is_empty() && comments.len() <= 1 {
+                    match (comment_created_at.as_ref(), reply_created_at.as_ref()) {
+                        (Some(comment_created_at), Some(reply_created_at)) => reply_created_at > comment_created_at,
+                        _ => false,
+                    }
+                })
+                .count()
+                ;
+
+            if positive_reactions == 0 && negative_reactions == 0 && reply_count == 0 {
                 return Ok(None);
             }
 
             Ok(Some(FeedbackObservation {
-                success: issue_state == "closed" || !reaction_names.is_empty() || comments.len() > 1,
+                success: sentiment > 0.0 || reply_count > 0,
                 payload: json!({
                     "resource": {
                         "owner": resource.owner,
@@ -325,46 +404,42 @@ async fn collect_github_feedback(
                         "number": resource.number,
                     },
                     "episode_id": episode.episode_id,
-                    "issue_state": issue_state,
-                    "reaction_names": reaction_names,
-                    "comment_count": comments.len(),
                     "comment_id": comment_id,
+                    "reply_count": reply_count,
+                    "positive_reactions": positive_reactions,
+                    "negative_reactions": negative_reactions,
+                    "sentiment": sentiment,
                 }),
             }))
         }
         "create_issue" => {
-            let issue_url = format!(
-                "https://api.github.com/repos/{}/{}/issues/{}",
+            let issue_path = format!(
+                "/repos/{}/{}/issues/{}",
                 resource.owner, resource.repo, resource.number
             );
-            let issue = github_get_json(client, &token, &issue_url).await?;
-            let issue_state = issue
-                .get("state")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            let assignees = issue
-                .get("assignees")
-                .and_then(Value::as_array)
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(|item| item.get("login").and_then(Value::as_str).map(str::to_string))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            let labels = issue
-                .get("labels")
-                .and_then(Value::as_array)
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(|item| item.get("name").and_then(Value::as_str).map(str::to_string))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
+            let issue = github_get_json(&github, &issue_path).await?;
+            let issue_state = issue.get("state").and_then(Value::as_str).unwrap_or("unknown");
+            let assignees = value_as_strings(issue.get("assignees"));
+            let labels = value_as_strings(issue.get("labels"));
+            let initial_labels = value_as_strings(action.metadata.get("labels"));
+            let labels_changed = issue_labels_changed(&labels, &initial_labels);
+            let assigned = !assignees.is_empty();
+            let closed = issue_state == "closed";
+
+            if !closed && !labels_changed && !assigned {
+                return Ok(None);
+            }
+
+            let sentiment = if closed {
+                1.0
+            } else if labels_changed || assigned {
+                0.5
+            } else {
+                0.0
+            };
 
             Ok(Some(FeedbackObservation {
-                success: issue_state == "closed" || !assignees.is_empty() || !labels.is_empty(),
+                success: closed || labels_changed || assigned,
                 payload: json!({
                     "resource": {
                         "owner": resource.owner,
@@ -375,6 +450,9 @@ async fn collect_github_feedback(
                     "issue_state": issue_state,
                     "assignees": assignees,
                     "labels": labels,
+                    "labels_changed": labels_changed,
+                    "assigned": assigned,
+                    "sentiment": sentiment,
                 }),
             }))
         }
@@ -382,26 +460,20 @@ async fn collect_github_feedback(
     }
 }
 
-async fn github_get_json(client: &Client, token: &str, url: &str) -> Result<Value> {
-    let response = client
-        .get(url)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Accept", "application/vnd.github+json")
-        .send()
+async fn github_get_json(client: &Octocrab, route: &str) -> Result<Value> {
+    client
+        .get::<Value, _, _>(route, None::<&()>)
         .await
-        .with_context(|| format!("GET {url}"))?
-        .error_for_status()
-        .with_context(|| format!("GET {url} returned error"))?;
-
-    response
-        .json::<Value>()
-        .await
-        .with_context(|| format!("decode github response from {url}"))
+        .with_context(|| format!("GET {route}"))
 }
 
-async fn github_get_json_array(client: &Client, token: &str, url: &str) -> Result<Vec<Value>> {
-    let response = github_get_json(client, token, url).await?;
-    Ok(response.as_array().cloned().unwrap_or_default())
+async fn github_get_json_page(client: &Octocrab, route: &str) -> Result<Vec<Value>> {
+    let params = json!({ "per_page": 100 });
+    let page: Page<Value> = client
+        .get::<Page<Value>, _, _>(route, Some(&params))
+        .await
+        .with_context(|| format!("GET {route}"))?;
+    client.all_pages(page).await.with_context(|| format!("page through {route}"))
 }
 
 fn parse_slack_resource(action: &ExternalAction) -> Result<(String, String)> {
