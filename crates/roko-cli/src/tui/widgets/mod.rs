@@ -33,6 +33,7 @@ pub fn render_dashboard(
     active_page: PageId,
     scroll: u16,
     signal_selected: usize,
+    gate_failure_selected: usize,
 ) {
     let areas = Layout::default()
         .direction(Direction::Vertical)
@@ -59,6 +60,7 @@ pub fn render_dashboard(
         active_page,
         scroll,
         signal_selected,
+        gate_failure_selected,
     );
 
     render_footer(frame, areas[2], pages, active_page);
@@ -159,6 +161,7 @@ pub fn render_page(
     active_page: PageId,
     scroll: u16,
     signal_selected: usize,
+    gate_failure_selected: usize,
 ) {
     let Some(page) = pages.page(active_page) else {
         let placeholder = Paragraph::new("missing page")
@@ -183,7 +186,7 @@ pub fn render_page(
     }
 
     if active_page == PageId::GateResults {
-        render_gate_results_page(frame, area, data);
+        render_gate_results_page(frame, area, data, gate_failure_selected);
         return;
     }
 
@@ -234,7 +237,12 @@ fn render_agent_activity_page(frame: &mut Frame<'_>, area: Rect, data: &Dashboar
     render_model_cost_breakdown(frame, sections[2], &snapshot);
 }
 
-fn render_gate_results_page(frame: &mut Frame<'_>, area: Rect, data: &DashboardData) {
+fn render_gate_results_page(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    data: &DashboardData,
+    gate_failure_selected: usize,
+) {
     let block = Block::default().borders(Borders::ALL).title("Gate Results");
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -252,7 +260,12 @@ fn render_gate_results_page(frame: &mut Frame<'_>, area: Rect, data: &DashboardD
 
     render_gate_summary_table(frame, sections[0], &data.gate_results_page.gate_rows);
     render_gate_thresholds_table(frame, sections[1], &data.gate_results_page.threshold_rows);
-    render_gate_failures_list(frame, sections[2], &data.gate_results_page.failure_rows);
+    render_gate_failures_list(
+        frame,
+        sections[2],
+        &data.gate_results_page.failure_rows,
+        gate_failure_selected,
+    );
 }
 
 fn render_learning_page(frame: &mut Frame<'_>, area: Rect, data: &DashboardData) {
@@ -1370,6 +1383,7 @@ fn render_gate_failures_list(
     frame: &mut Frame<'_>,
     area: Rect,
     rows: &[GateFailureRow],
+    selected: usize,
 ) {
     let block = Block::default().borders(Borders::ALL).title("recent failures");
     let inner = block.inner(area);
@@ -1388,14 +1402,22 @@ fn render_gate_failures_list(
     }
 
     let max_excerpt = inner.width.saturating_sub(28) as usize;
+    let selected = selected.min(rows.len().saturating_sub(1));
     let items: Vec<ListItem<'_>> = rows
         .iter()
-        .map(|row| {
+        .enumerate()
+        .map(|(index, row)| {
+            let is_selected = index == selected;
+            let style = if is_selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
             ListItem::new(Line::from(vec![
-                Span::styled(
-                    truncate_text(&row.task_id, 10),
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                ),
+                Span::styled(truncate_text(&row.task_id, 10), Style::default().fg(Color::Cyan)),
                 Span::raw(" "),
                 Span::styled(
                     truncate_text(&row.gate_name, 12),
@@ -1404,6 +1426,7 @@ fn render_gate_failures_list(
                 Span::raw(" "),
                 Span::raw(truncate_text(&row.error_excerpt, max_excerpt)),
             ]))
+            .style(style)
         })
         .collect();
 

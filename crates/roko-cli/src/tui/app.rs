@@ -11,8 +11,12 @@ use crossterm::event::{DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEven
 use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
 use ratatui::backend::CrosstermBackend;
-use ratatui::prelude::*;
-use ratatui::Terminal;
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::{Frame, Terminal};
+use serde_json::Value;
 
 use super::dashboard::{DashboardData, DashboardScaffold};
 use super::event::{Event, EventHandler};
@@ -37,9 +41,19 @@ pub struct App {
     pub scroll_offset: HashMap<PageId, u16>,
     /// Selected signal row on the Signals page.
     pub signal_selection: usize,
+    /// Selected gate-failure row on the Gate Results page.
+    pub gate_failure_selection: usize,
+    /// Active overlay, if any.
+    overlay: Option<OverlayState>,
 }
 
 type TuiTerminal = Terminal<CrosstermBackend<Stdout>>;
+
+#[derive(Debug, Clone)]
+enum OverlayState {
+    Help,
+    Detail(DetailState),
+}
 
 /// Run the interactive dashboard event loop.
 pub async fn run(
@@ -84,6 +98,8 @@ impl App {
             last_refresh: Instant::now(),
             scroll_offset: HashMap::new(),
             signal_selection: 0,
+            gate_failure_selection: 0,
+            overlay: None,
         }
     }
 
@@ -144,21 +160,99 @@ impl App {
             self.current_page,
             self.scroll_for(self.current_page),
             self.signal_selection,
+            self.gate_failure_selection,
         );
+        if let Some(overlay) = &self.overlay {
+            self.render_overlay(frame, overlay);
+        }
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
+        if self.handle_overlay_key(key) {
+            return;
+        }
+
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => self.running = false,
             KeyCode::Char('r') => self.refresh_snapshot(),
-            KeyCode::Left | KeyCode::Char('h') | KeyCode::BackTab => self.select_previous_page(),
-            KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => self.select_next_page(),
+            KeyCode::Char('?') => self.toggle_help_overlay(),
+            KeyCode::Enter => self.toggle_detail_overlay(),
+            KeyCode::Tab | KeyCode::BackTab => self.select_next_page_by_key(key.code),
+            KeyCode::Char('1') => self.select_page_by_slot(0),
+            KeyCode::Char('2') => self.select_page_by_slot(1),
+            KeyCode::Char('3') => self.select_page_by_slot(2),
+            KeyCode::Char('4') => self.select_page_by_slot(3),
+            KeyCode::Char('5') => self.select_page_by_slot(4),
+            KeyCode::Char('6') => self.select_page_by_slot(5),
+            KeyCode::Left | KeyCode::Char('h') => self.select_previous_page(),
+            KeyCode::Right | KeyCode::Char('l') => self.select_next_page(),
             KeyCode::Up | KeyCode::Char('k') => self.adjust_vertical(-1),
             KeyCode::Down | KeyCode::Char('j') => self.adjust_vertical(1),
             KeyCode::PageUp => self.adjust_scroll(-8),
             KeyCode::PageDown => self.adjust_scroll(8),
             KeyCode::Home => self.set_scroll(0),
             _ => {}
+        }
+    }
+
+    fn handle_overlay_key(&mut self, key: KeyEvent) -> bool {
+        let Some(overlay) = self.overlay.clone() else {
+            return false;
+        };
+
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => {
+                self.running = false;
+                true
+            }
+            KeyCode::Char('r') => {
+                self.refresh_snapshot();
+                true
+            }
+            KeyCode::Char('?') => {
+                self.overlay = match overlay {
+                    OverlayState::Help => None,
+                    OverlayState::Detail(_) => Some(OverlayState::Help),
+                };
+                true
+            }
+            KeyCode::Enter => {
+                if matches!(overlay, OverlayState::Detail(_)) {
+                    self.overlay = None;
+                }
+                true
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if matches!(overlay, OverlayState::Detail(_)) {
+                    self.adjust_overlay_scroll(-1);
+                }
+                true
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if matches!(overlay, OverlayState::Detail(_)) {
+                    self.adjust_overlay_scroll(1);
+                }
+                true
+            }
+            KeyCode::PageUp => {
+                if matches!(overlay, OverlayState::Detail(_)) {
+                    self.adjust_overlay_scroll(-8);
+                }
+                true
+            }
+            KeyCode::PageDown => {
+                if matches!(overlay, OverlayState::Detail(_)) {
+                    self.adjust_overlay_scroll(8);
+                }
+                true
+            }
+            KeyCode::Home => {
+                if matches!(overlay, OverlayState::Detail(_)) {
+                    self.set_overlay_scroll(0);
+                }
+                true
+            }
+            _ => true,
         }
     }
 
@@ -174,11 +268,28 @@ impl App {
         let _ = self.scaffold.set_active_page(self.current_page);
     }
 
+    fn select_next_page_by_key(&mut self, key: KeyCode) {
+        match key {
+            KeyCode::Tab => self.select_next_page(),
+            KeyCode::BackTab => self.select_previous_page(),
+            _ => {}
+        }
+    }
+
+    fn select_page_by_slot(&mut self, slot: usize) {
+        let pages = self.pages().ids();
+        if let Some(page) = pages.get(slot).copied() {
+            self.current_page = page;
+            let _ = self.scaffold.set_active_page(self.current_page);
+        }
+    }
+
     fn refresh_snapshot(&mut self) {
         self.data = DashboardData::load_best_effort(&self.workdir);
         self.scaffold = DashboardScaffold::new_in(&self.workdir);
         self.last_refresh = Instant::now();
         self.clamp_signal_selection();
+        self.clamp_gate_failure_selection();
         if self.pages().scaffold(self.current_page).is_none() {
             self.current_page = self.scaffold.active_page();
         }
@@ -219,6 +330,19 @@ impl App {
             let current = self.signal_selection as i32;
             let next = (current + delta as i32).max(0).min((len - 1) as i32) as usize;
             self.signal_selection = next;
+            return;
+        }
+
+        if self.current_page == PageId::GateResults {
+            let len = self.data.gate_results_page.failure_rows.len();
+            if len == 0 {
+                self.gate_failure_selection = 0;
+                return;
+            }
+
+            let current = self.gate_failure_selection as i32;
+            let next = (current + delta as i32).max(0).min((len - 1) as i32) as usize;
+            self.gate_failure_selection = next;
         } else {
             self.adjust_scroll(delta);
         }
@@ -230,6 +354,141 @@ impl App {
             self.signal_selection = 0;
         } else if self.signal_selection >= len {
             self.signal_selection = len - 1;
+        }
+    }
+
+    fn clamp_gate_failure_selection(&mut self) {
+        let len = self.data.gate_results_page.failure_rows.len();
+        if len == 0 {
+            self.gate_failure_selection = 0;
+        } else if self.gate_failure_selection >= len {
+            self.gate_failure_selection = len - 1;
+        }
+    }
+
+    fn toggle_help_overlay(&mut self) {
+        self.overlay = match self.overlay {
+            Some(OverlayState::Help) => None,
+            Some(OverlayState::Detail(_)) => Some(OverlayState::Help),
+            None => Some(OverlayState::Help),
+        };
+    }
+
+    fn toggle_detail_overlay(&mut self) {
+        let next = match self.current_page {
+            PageId::Signals => self.signal_detail_overlay().map(OverlayState::Detail),
+            PageId::GateResults => self.gate_failure_detail_overlay().map(OverlayState::Detail),
+            _ => None,
+        };
+
+        if let Some(next) = next {
+            let next_title = match &next {
+                OverlayState::Detail(detail) => detail.title.clone(),
+                OverlayState::Help => String::from("help"),
+            };
+            let current = self.overlay.clone();
+            self.overlay = match current {
+                Some(OverlayState::Detail(current)) if current.title == next_title => None,
+                _ => Some(next),
+            };
+        }
+    }
+
+    fn adjust_overlay_scroll(&mut self, delta: i16) {
+        if let Some(OverlayState::Detail(detail)) = &mut self.overlay {
+            detail.adjust_scroll(delta);
+        }
+    }
+
+    fn set_overlay_scroll(&mut self, value: u16) {
+        if let Some(OverlayState::Detail(detail)) = &mut self.overlay {
+            detail.set_scroll(value);
+        }
+    }
+
+    fn signal_detail_overlay(&self) -> Option<DetailState> {
+        let signal = self.data.recent_signals.get(self.signal_selection)?;
+        let raw = load_signal_entry(&self.workdir, &signal.id)?;
+        let mut body = String::new();
+        let _ = std::fmt::Write::write_fmt(
+            &mut body,
+            format_args!(
+                "signal: {}\nkind: {}\ncreated: {}\nplan/task: {}\nlineage: {}\nparent: {}\n\nraw payload:\n{}\n",
+                signal.id,
+                signal.kind,
+                signal.created_at_ms,
+                signal
+                    .plan_id
+                    .as_deref()
+                    .or(signal.task_id.as_deref())
+                    .unwrap_or("-"),
+                if signal.lineage.is_empty() {
+                    String::from("-")
+                } else {
+                    signal.lineage.join(" -> ")
+                },
+                signal.parent_hash.as_deref().unwrap_or("-"),
+                pretty_json(&raw)
+            ),
+        );
+        Some(DetailState::new(format!("signal {}", signal.id), body))
+    }
+
+    fn gate_failure_detail_overlay(&self) -> Option<DetailState> {
+        let row = self.data.gate_results_page.failure_rows.get(self.gate_failure_selection)?;
+        let raw = load_gate_failure_entry(&self.workdir, row)?;
+        let mut body = String::new();
+        let _ = std::fmt::Write::write_fmt(
+            &mut body,
+            format_args!(
+                "gate: {}\ntask: {}\ncreated: {}\nexcerpt: {}\n\nraw payload:\n{}\n",
+                row.gate_name,
+                row.task_id,
+                row.created_at_ms,
+                row.error_excerpt,
+                pretty_json(&raw)
+            ),
+        );
+        Some(DetailState::new(format!("gate failure {}", row.gate_name), body))
+    }
+
+    fn render_overlay(&self, frame: &mut Frame<'_>, overlay: &OverlayState) {
+        let area = centered_rect(86, 84, frame.area());
+        frame.render_widget(Clear, area);
+
+        match overlay {
+            OverlayState::Help => {
+                let lines = help_lines();
+                let block = Block::default()
+                    .borders(Borders::ALL)
+                    .title("help")
+                    .border_style(Style::default().fg(Color::Cyan));
+                let inner = block.inner(area);
+                frame.render_widget(block, area);
+                let paragraph = Paragraph::new(lines)
+                    .alignment(Alignment::Left)
+                    .style(Style::default().fg(Color::White))
+                    .wrap(Wrap { trim: false });
+                frame.render_widget(paragraph, inner);
+            }
+            OverlayState::Detail(detail) => {
+                let block = Block::default()
+                    .borders(Borders::ALL)
+                    .title(detail.title.as_str())
+                    .border_style(Style::default().fg(Color::Yellow));
+                let inner = block.inner(area);
+                frame.render_widget(block, area);
+
+                let body = Paragraph::new(detail.body.as_str())
+                    .style(
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                    .wrap(Wrap { trim: false })
+                    .scroll((detail.scroll, 0));
+                frame.render_widget(body, inner);
+            }
         }
     }
 
@@ -263,9 +522,122 @@ fn render_page(frame: &mut Frame<'_>, app: &App) {
         app.current_page,
         app.scroll_for(app.current_page),
         app.signal_selection,
+        app.gate_failure_selection,
     );
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) {
     app.handle_key(key);
+}
+
+#[derive(Debug, Clone)]
+struct DetailState {
+    title: String,
+    body: String,
+    scroll: u16,
+}
+
+impl DetailState {
+    fn new(title: String, body: String) -> Self {
+        Self {
+            title,
+            body,
+            scroll: 0,
+        }
+    }
+
+    fn adjust_scroll(&mut self, delta: i16) {
+        let current = self.scroll as i32;
+        self.scroll = (current + delta as i32).max(0).min(u16::MAX as i32) as u16;
+    }
+
+    fn set_scroll(&mut self, value: u16) {
+        self.scroll = value;
+    }
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(area);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
+}
+
+fn help_lines() -> Vec<Line<'static>> {
+    vec![
+        Line::from(Span::styled(
+            "dashboard keybindings",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from("1-6      jump to dashboard pages 1 through 6"),
+        Line::from("Tab      next page"),
+        Line::from("Shift+Tab previous page"),
+        Line::from("q / Esc  quit"),
+        Line::from("Up/Down  scroll current page or selected list"),
+        Line::from("j / k    alternate scroll keys"),
+        Line::from("Enter    expand selected signal or gate failure"),
+        Line::from("r        refresh data from .roko/"),
+        Line::from("?        toggle this help overlay"),
+    ]
+}
+
+fn pretty_json(value: &Value) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+}
+
+fn load_signal_entry(workdir: &Path, signal_id: &str) -> Option<Value> {
+    let path = workdir.join(".roko").join("signals.jsonl");
+    super::dashboard::read_jsonl_values(&path)
+        .into_iter()
+        .rev()
+        .find(|entry| entry.get("id").and_then(Value::as_str) == Some(signal_id))
+}
+
+fn load_gate_failure_entry(workdir: &Path, row: &super::dashboard::GateFailureRow) -> Option<Value> {
+    let path = workdir.join(".roko").join("signals.jsonl");
+    super::dashboard::read_jsonl_values(&path)
+        .into_iter()
+        .rev()
+        .find(|entry| {
+            let kind = entry.get("kind").and_then(Value::as_str).unwrap_or_default();
+            is_gate_result_kind(kind)
+                && entry
+                    .pointer("/tags/gate")
+                    .and_then(Value::as_str)
+                    .or_else(|| entry.pointer("/body/data/gate").and_then(Value::as_str))
+                    .or_else(|| entry.pointer("/body/gate").and_then(Value::as_str))
+                    == Some(row.gate_name.as_str())
+                && entry
+                    .pointer("/tags/task_id")
+                    .and_then(Value::as_str)
+                    .or_else(|| entry.pointer("/body/data/task_id").and_then(Value::as_str))
+                    .or_else(|| entry.pointer("/body/task_id").and_then(Value::as_str))
+                    == Some(row.task_id.as_str())
+                && entry_timestamp_ms(entry) == Some(row.created_at_ms)
+        })
+}
+
+fn entry_timestamp_ms(entry: &Value) -> Option<i64> {
+    entry
+        .get("created_at_ms")
+        .and_then(Value::as_i64)
+        .or_else(|| entry.get("created_at_ms").and_then(Value::as_u64).map(|ts| ts as i64))
+}
+
+fn is_gate_result_kind(kind: &str) -> bool {
+    kind == "gate_verdict" || kind.starts_with("gate:") || kind.starts_with("gate_")
 }
