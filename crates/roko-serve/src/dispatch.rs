@@ -555,6 +555,25 @@ impl SubscriptionRegistry {
         self.subscriptions.read().clone()
     }
 
+    /// Replace the registry contents with a fresh subscription snapshot.
+    ///
+    /// Existing active dispatches keep their current internal IDs because we
+    /// only append new registry IDs for the replacement snapshot.
+    pub fn replace_with(&self, subscriptions: Vec<Subscription>) -> usize {
+        let mut snapshot = Vec::with_capacity(subscriptions.len());
+
+        for subscription in subscriptions {
+            let subscription_id = self.next_subscription_id.fetch_add(1, Ordering::AcqRel);
+            self.active_counts
+                .lock()
+                .insert(subscription_id, AtomicUsize::new(0));
+            snapshot.push(subscription.with_subscription_id(subscription_id));
+        }
+
+        *self.subscriptions.write() = snapshot;
+        self.subscriptions.read().len()
+    }
+
     /// Look up a subscription by its public ID.
     #[must_use]
     pub fn get_by_id(&self, id: &str) -> Option<Subscription> {

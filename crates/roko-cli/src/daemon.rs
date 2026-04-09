@@ -13,11 +13,14 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::task::JoinHandle;
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
+use tracing::warn;
 
 use crate::load_layered;
 use crate::serve_runtime::RokoCliRuntime;
@@ -231,11 +234,13 @@ pub async fn daemon_start(foreground: bool, port: u16) -> Result<()> {
     let _watchers = fswatcher::start_watchers(Arc::clone(&state));
     let _dispatch = dispatch::start_dispatch_loop(Arc::clone(&state));
     let _feedback = feedback::start_feedback_loop(Arc::clone(&state));
-    let ipc_server = tokio::spawn(run_ipc_server(
-        Arc::clone(&state),
-        daemon_socket_path(&workdir),
-        daemon_json_path(&workdir),
-    ));
+    let ipc_server = match start_ipc_server(Arc::clone(&state)).await {
+        Ok(handle) => handle,
+        Err(err) => {
+            state.shutdown().await;
+            return Err(err);
+        }
+    };
 
     let server = tokio::spawn(roko_serve::run_server_with_state(
         Arc::clone(&state),
@@ -257,19 +262,13 @@ pub async fn daemon_start(foreground: bool, port: u16) -> Result<()> {
                 }
             }
         }
-        result = ipc_server => {
-            match result {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(err)) => {
-                    state.shutdown().await;
-                    Err(err)
-                }
-                Err(join_err) => {
-                    state.shutdown().await;
-                    Err(join_err.into())
-                }
+        result = ipc_server => match result {
+            Ok(()) => Ok(()),
+            Err(join_err) => {
+                state.shutdown().await;
+                Err(join_err.into())
             }
-        }
+        },
         _ = wait_for_shutdown_signal() => {
             state.shutdown().await;
             Ok(())
@@ -383,54 +382,46 @@ fn pid_is_alive(_pid: u32) -> Result<bool> {
     Ok(false)
 }
 
-async fn run_ipc_server(
-    state: Arc<AppState>,
-    socket_path: PathBuf,
-    daemon_json_path: PathBuf,
-) -> Result<()> {
+async fn start_ipc_server(state: Arc<AppState>) -> Result<JoinHandle<()>> {
+    let socket_path = daemon_socket_path(&state.workdir);
     if let Some(parent) = socket_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .with_context(|| format!("create {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     if socket_path.exists() {
-        let _ = tokio::fs::remove_file(&socket_path).await;
+        fs::remove_file(&socket_path).with_context(|| format!("remove {}", socket_path.display()))?;
     }
 
     let listener = UnixListener::bind(&socket_path)
         .with_context(|| format!("bind {}", socket_path.display()))?;
 
-    loop {
-        tokio::select! {
-            _ = state.cancel.cancelled() => break,
-            accept = listener.accept() => {
-                let (stream, _) = match accept {
-                    Ok(pair) => pair,
-                    Err(err) => {
-                        if state.cancel.is_cancelled() {
-                            break;
-                        }
-                        return Err(err).context("accept daemon IPC connection");
+    Ok(tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(err) => {
+                    if state.cancel.is_cancelled() {
+                        break;
                     }
-                };
+                    warn!(error = %err, path = %socket_path.display(), "daemon IPC accept failed");
+                    break;
+                }
+            };
 
-                let state = Arc::clone(&state);
-                let daemon_json_path = daemon_json_path.clone();
-                tokio::spawn(async move {
-                    let _ = handle_ipc_connection(stream, state, daemon_json_path).await;
-                });
-            }
+            let state = Arc::clone(&state);
+            tokio::spawn(async move {
+                if let Err(err) = handle_ipc_command(stream, state).await {
+                    warn!(error = %err, "daemon IPC command failed");
+                }
+            });
         }
-    }
 
-    let _ = tokio::fs::remove_file(&socket_path).await;
-    Ok(())
+        let _ = tokio::fs::remove_file(&socket_path).await;
+    }))
 }
 
-async fn handle_ipc_connection(
+async fn handle_ipc_command(
     mut stream: UnixStream,
     state: Arc<AppState>,
-    daemon_json_path: PathBuf,
 ) -> Result<()> {
     let mut buf = vec![0u8; 1024];
     let n = stream
@@ -438,6 +429,59 @@ async fn handle_ipc_connection(
         .await
         .context("read daemon IPC request")?;
     let request = String::from_utf8_lossy(&buf[..n]).trim().to_ascii_lowercase();
+
+    if request == "status" {
+        let active_agents = state.supervisor.count().await;
+        let subscriptions = state.subscriptions.all().len();
+        let uptime_secs = state.started_at.elapsed().as_secs();
+        let response = json!({
+            "pid": std::process::id(),
+            "active_agents": active_agents,
+            "subscriptions": subscriptions,
+            "uptime_secs": uptime_secs,
+        });
+        stream.write_all(response.to_string().as_bytes()).await?;
+        stream.write_all(b"\n").await?;
+        return Ok(());
+    }
+
+    if request == "reload" {
+        let subscriptions_report = {
+            let roko_config = state.roko_config.read().await.clone();
+            let registry = roko_serve::dispatch::SubscriptionRegistry::load_from_project(
+                &state.workdir,
+                &roko_config,
+            );
+            state.subscriptions.replace_with(registry.all())
+        };
+
+        let templates_report = {
+            let mut templates = state.templates.write().await;
+            templates.scan()
+        };
+
+        let response = json!({
+            "ok": true,
+            "command": "reload",
+            "subscriptions": subscriptions_report,
+            "templates": templates_report.loaded,
+            "loaded": subscriptions_report + templates_report.loaded,
+        });
+        stream.write_all(response.to_string().as_bytes()).await?;
+        stream.write_all(b"\n").await?;
+        return Ok(());
+    }
+
+    if request == "stop" {
+        let state_for_shutdown = Arc::clone(&state);
+        tokio::spawn(async move {
+            state_for_shutdown.shutdown().await;
+        });
+        stream
+            .write_all(b"{\"ok\":true,\"command\":\"stop\"}\n")
+            .await?;
+        return Ok(());
+    }
 
     if request == "shutdown" {
         let state_for_shutdown = Arc::clone(&state);
@@ -448,27 +492,13 @@ async fn handle_ipc_connection(
         return Ok(());
     }
 
-    let response = match read_daemon_info_from_path(&daemon_json_path) {
-        Ok(Some(info)) => serde_json::to_string(&info)?,
-        Ok(None) => "{\"ok\":false,\"error\":\"daemon metadata unavailable\"}".to_string(),
-        Err(err) => serde_json::json!({
-            "ok": false,
-            "error": err.to_string(),
-        })
-        .to_string(),
-    };
-    stream.write_all(response.as_bytes()).await?;
+    let response = json!({
+        "ok": false,
+        "error": format!("unknown command: {request}"),
+    });
+    stream.write_all(response.to_string().as_bytes()).await?;
     stream.write_all(b"\n").await?;
     Ok(())
-}
-
-fn read_daemon_info_from_path(path: &Path) -> Result<Option<DaemonInfo>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    let info = serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
-    Ok(Some(info))
 }
 
 async fn wait_for_shutdown_signal() {
