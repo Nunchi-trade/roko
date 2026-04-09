@@ -9,7 +9,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::error::ApiError;
+use crate::error::{ApiError, validate_path_segment};
 use crate::events::ServerEvent;
 use crate::plan_types::{Plan, PlanTask};
 use crate::state::{AppState, OperationHandle, OperationStatus, PlanHandle};
@@ -147,19 +147,17 @@ async fn execute_plan(
     // Verify the plan exists.
     let _plan = find_plan(&state.workdir, &id).await?;
 
-    // Check for duplicate execution.
-    {
-        let active = state.active_plans.read().await;
-        if active.contains_key(&id) {
-            return Err(ApiError::conflict(format!(
-                "plan {id} is already executing"
-            )));
-        }
-    }
-
+    // Acquire write lock once to check-and-insert atomically (no TOCTOU race).
     let run_id = uuid::Uuid::new_v4().to_string();
     let bus = state.event_bus.clone();
     let plan_id = id.clone();
+
+    let mut active = state.active_plans.write().await;
+    if active.contains_key(&id) {
+        return Err(ApiError::conflict(format!(
+            "plan {id} is already executing"
+        )));
+    }
 
     // Spawn a placeholder execution task. Full PlanRunner wiring is a
     // separate task — for now we mark the operation as completed immediately.
@@ -185,7 +183,8 @@ async fn execute_plan(
         handle,
     };
 
-    state.active_plans.write().await.insert(id, plan_handle);
+    active.insert(id, plan_handle);
+    drop(active);
 
     Ok((
         axum::http::StatusCode::ACCEPTED,
@@ -261,6 +260,7 @@ async fn generate_plan(
 
 /// Locate and load a plan file by ID (checks `.json` then `.toml`).
 async fn find_plan(workdir: &std::path::Path, id: &str) -> Result<Plan, ApiError> {
+    validate_path_segment(id, "plan id")?;
     let plans_dir = workdir.join(".roko").join("plans");
     for ext in &["json", "toml"] {
         let path = plans_dir.join(format!("{id}.{ext}"));

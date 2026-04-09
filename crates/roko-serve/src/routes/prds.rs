@@ -9,7 +9,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::error::ApiError;
+use crate::error::{ApiError, validate_path_segment};
 use crate::events::ServerEvent;
 use crate::state::{AppState, OperationHandle, OperationStatus};
 
@@ -94,26 +94,22 @@ async fn post_idea(
     let ideas_path = prd_dir.join("ideas.md");
     let line = format!("- {}\n", body.text);
 
-    // Create the file if it doesn't exist, otherwise append.
-    if ideas_path.exists() {
-        tokio::fs::write(
-            &ideas_path,
-            format!(
-                "{}{}",
-                tokio::fs::read_to_string(&ideas_path)
-                    .await
-                    .unwrap_or_default(),
-                line
-            ),
-        )
+    if !ideas_path.exists() {
+        let header = "# Ideas\n\nQuick captures. Run `roko prd idea \"text\"` to append.\n\n";
+        tokio::fs::write(&ideas_path, header)
+            .await
+            .map_err(|e| ApiError::internal(format!("write ideas header: {e}")))?;
+    }
+
+    use tokio::io::AsyncWriteExt;
+    let mut file = tokio::fs::OpenOptions::new()
+        .append(true)
+        .open(&ideas_path)
+        .await
+        .map_err(|e| ApiError::internal(format!("open ideas for append: {e}")))?;
+    file.write_all(line.as_bytes())
         .await
         .map_err(|e| ApiError::internal(format!("append idea: {e}")))?;
-    } else {
-        let header = "# Ideas\n\nQuick captures. Run `roko prd idea \"text\"` to append.\n\n";
-        tokio::fs::write(&ideas_path, format!("{header}{line}"))
-            .await
-            .map_err(|e| ApiError::internal(format!("write ideas: {e}")))?;
-    }
 
     Ok((
         axum::http::StatusCode::CREATED,
@@ -161,6 +157,7 @@ async fn promote_prd(
     State(state): State<Arc<AppState>>,
     Path(slug): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
+    validate_path_segment(&slug, "slug")?;
     let prd_dir = state.workdir.join(".roko").join("prd");
     let src = prd_dir.join("drafts").join(format!("{slug}.md"));
     let dst = prd_dir.join("published").join(format!("{slug}.md"));
@@ -245,6 +242,7 @@ async fn read_prd_file(
     workdir: &std::path::Path,
     slug: &str,
 ) -> Result<(String, String), ApiError> {
+    validate_path_segment(slug, "slug")?;
     let prd_dir = workdir.join(".roko").join("prd");
 
     let published = prd_dir.join("published").join(format!("{slug}.md"));

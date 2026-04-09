@@ -83,3 +83,13 @@ impl ApiError {
         }
     }
 }
+
+/// Reject path segments that could escape their parent directory.
+pub fn validate_path_segment(segment: &str, label: &str) -> Result<(), ApiError> {
+    if segment.contains("..") || segment.contains('/') || segment.contains('\\') {
+        return Err(ApiError::bad_request(format!(
+            "invalid {label}: must not contain path separators or '..'"
+        )));
+    }
+    Ok(())
+}

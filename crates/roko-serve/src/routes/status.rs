@@ -161,7 +161,9 @@ async fn dashboard(State(state): State<Arc<AppState>>) -> Json<Value> {
 /// `GET /api/episodes` — read episodes JSONL as a JSON array.
 async fn episodes(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let path = state.layout.episodes_path();
-    read_jsonl_array(&path).await
+    let entries = read_jsonl_entries(&path).await?;
+    let capped: Vec<Value> = entries.into_iter().rev().take(MAX_JSONL_RESULTS).collect::<Vec<_>>().into_iter().rev().collect();
+    Ok(Json(Value::Array(capped)))
 }
 
 /// `GET /api/gates/summary` — aggregate gate verdicts from `.roko/signals.jsonl`.
@@ -222,6 +224,8 @@ async fn gate_history(
     })))
 }
 
+const MAX_JSONL_RESULTS: usize = 10_000;
+
 #[derive(Deserialize)]
 struct SignalQuery {
     limit: Option<usize>,
@@ -234,17 +238,15 @@ async fn signals(
 ) -> Result<Json<Value>, ApiError> {
     let path = state.workdir.join(".roko").join("signals.jsonl");
     let entries = read_jsonl_entries(&path).await?;
-    let limited = match q.limit {
-        Some(n) => entries
-            .into_iter()
-            .rev()
-            .take(n)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect(),
-        None => entries,
-    };
+    let cap = q.limit.unwrap_or(MAX_JSONL_RESULTS).min(MAX_JSONL_RESULTS);
+    let limited: Vec<Value> = entries
+        .into_iter()
+        .rev()
+        .take(cap)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     Ok(Json(Value::Array(limited)))
 }
 
