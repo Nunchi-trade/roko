@@ -69,6 +69,8 @@ pub struct TaskDef {
     pub verify: Vec<VerifyStep>,
     /// Per-task timeout in seconds.
     pub timeout_secs: u64,
+    /// Maximum retry attempts for this task.
+    pub max_retries: u32,
     /// Free-form acceptance criteria (legacy format, strings).
     pub acceptance: Vec<String>,
 }
@@ -107,6 +109,8 @@ struct TaskDefSerde {
     pub verify: Vec<VerifyStep>,
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
     #[serde(default)]
     pub acceptance: Vec<String>,
 }
@@ -131,6 +135,7 @@ impl From<TaskDefSerde> for TaskDef {
             context: raw.context,
             verify: raw.verify,
             timeout_secs: raw.timeout_secs,
+            max_retries: raw.max_retries,
             acceptance: raw.acceptance,
         };
         task.apply_role_tool_defaults();
@@ -157,6 +162,10 @@ fn default_tier() -> String {
 
 fn default_timeout_secs() -> u64 {
     600
+}
+
+fn default_max_retries() -> u32 {
+    3
 }
 
 impl TaskDef {
@@ -548,6 +557,7 @@ depends_on = ["T1"]
         assert_eq!(parsed.meta.plan, "test");
         assert_eq!(parsed.tasks.len(), 2);
         assert_eq!(parsed.tasks[1].depends_on, vec!["T1"]);
+        assert_eq!(parsed.tasks[0].max_retries, 3);
     }
 
     #[test]
@@ -586,6 +596,7 @@ role = "researcher"
 tier = "focused"
 model_hint = "claude-sonnet-4-6"
 max_loc = 50
+max_retries = 5
 write_files = ["src/main.rs"]
 allowed_tools = ["read_file", "grep"]
 mcp_servers = ["filesystem", "git"]
@@ -621,6 +632,7 @@ command = "cargo check -p roko-cli"
             task.mcp_servers,
             Some(vec!["filesystem".into(), "git".into()])
         );
+        assert_eq!(task.max_retries, 5);
         assert_eq!(
             task.denied_tools,
             Some(
@@ -660,6 +672,7 @@ command = "cargo check -p roko-cli"
             context: None,
             verify: vec![],
             timeout_secs: 600,
+            max_retries: 3,
             acceptance: vec![],
         };
         assert_eq!(task.effective_model("fallback", None), "claude-haiku-4-5");
@@ -797,6 +810,7 @@ depends_on = ["other-plan:T3"]
             context: None,
             verify: vec![],
             timeout_secs: 600,
+            max_retries: 3,
             acceptance: vec![],
         };
         let original = "Original task prompt";
@@ -828,6 +842,7 @@ depends_on = ["other-plan:T3"]
             context: None,
             verify: vec![],
             timeout_secs: 600,
+            max_retries: 3,
             acceptance: vec![],
         };
         let original = "Original prompt";
