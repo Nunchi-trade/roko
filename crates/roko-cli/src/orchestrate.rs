@@ -3134,7 +3134,7 @@ impl PlanRunner {
             plan_id = %plan_id,
             task_id = %task_id,
             duration_ms = wall_ms,
-            error = %error,
+            error = ?error,
             "task failed"
         );
     }
@@ -3319,7 +3319,31 @@ impl PlanRunner {
             Err((task_id, phase, command, error_output)) => {
                 let msg =
                     format!("verify failed for {plan_id}/{task_id} in phase {phase}: {command}");
-                eprintln!("[orchestrate] {msg}: {}", error_output.trim());
+                let task_output_path = self
+                    .workdir
+                    .join(".roko")
+                    .join("task-outputs")
+                    .join(format!("{task_id}.txt"));
+                let output_tail = std::fs::read_to_string(&task_output_path)
+                    .ok()
+                    .map(|text| tail_output_lines(&text, TASK_FAILURE_OUTPUT_TAIL_LINES));
+                let error = with_task_failure_context(
+                    anyhow!(
+                        "{msg}; stderr/stdout:\n{error_output}"
+                    ),
+                    &task_id,
+                    &phase,
+                    &command,
+                    output_tail.as_deref(),
+                );
+                tracing::error!(
+                    plan_id = %plan_id,
+                    task_id = %task_id,
+                    phase = %phase,
+                    gate = %command,
+                    error = ?error,
+                    "task verification failed"
+                );
                 self.event_log.append(
                     EventKind::ErrorOccurred,
                     serde_json::json!({
@@ -3327,11 +3351,11 @@ impl PlanRunner {
                         "task_id": task_id,
                         "phase": phase,
                         "command": command,
-                        "error": error_output,
+                        "error": format!("{error:#}"),
                     }),
                 );
                 if let Some(state) = self.executor.plan_state_mut(plan_id) {
-                    state.last_error = Some(msg);
+                    state.last_error = Some(format!("{error:#}"));
                 }
                 let _ = self
                     .executor
@@ -4248,8 +4272,23 @@ impl PlanRunner {
         self.emit_agent_turn_signal(&result.output);
 
         if !result.success {
-            return Err(anyhow!(
-                "agent returned failure for plan={plan_id} task={task}"
+            let task_phase = task_def
+                .as_ref()
+                .map(|task| task.status.as_str())
+                .unwrap_or("unknown");
+            let output_tail = result
+                .output
+                .body
+                .as_text()
+                .ok()
+                .map(|text| tail_output_lines(text, TASK_FAILURE_OUTPUT_TAIL_LINES));
+            let error = anyhow!("agent returned failure for plan={plan_id} task={task}");
+            return Err(with_task_failure_context(
+                error,
+                task,
+                task_phase,
+                "agent",
+                output_tail.as_deref(),
             ));
         }
 
@@ -4451,7 +4490,7 @@ impl PlanRunner {
 
         // ── Run per-task verification pipeline ──────────────────────
         if let Some(ref td) = task_def {
-            if let Err((task_id, _phase, command, _error_output)) =
+            if let Err((task_id, phase, command, error_output)) =
                 self.run_verify_steps(&td.id, &td.verify, &exec_dir).await
             {
                 let msg = td
@@ -4460,11 +4499,25 @@ impl PlanRunner {
                     .find(|s| s.command == command)
                     .and_then(|s| s.fail_msg.as_deref())
                     .unwrap_or("verification failed");
-                return Err(anyhow!(
-                    "verify failed for {}: {} — {}",
-                    task_id,
-                    command,
-                    msg
+                let task_phase = task_def
+                    .as_ref()
+                    .map(|task| task.status.as_str())
+                    .unwrap_or("unknown");
+                let output_tail = result
+                    .output
+                    .body
+                    .as_text()
+                    .ok()
+                    .map(|text| tail_output_lines(text, TASK_FAILURE_OUTPUT_TAIL_LINES));
+                let error = anyhow!(
+                    "verify failed for {task_id}: {command} — {msg}; stderr/stdout:\n{error_output}"
+                );
+                return Err(with_task_failure_context(
+                    error,
+                    &task_id,
+                    task_phase,
+                    &phase,
+                    output_tail.as_deref(),
                 ));
             }
             self.verify_declared_write_files(plan_id, &td.id, &td.files, &exec_dir)
@@ -5833,6 +5886,8 @@ fn load_prior_task_outputs(
 
 /// Maximum output size stored in task outputs and episode context (32 KB).
 const MAX_OUTPUT_BYTES: usize = 32_768;
+/// Number of output lines to include in task failure logs.
+const TASK_FAILURE_OUTPUT_TAIL_LINES: usize = 20;
 
 /// Truncate an agent output string, keeping the last N lines if it exceeds
 /// `MAX_OUTPUT_BYTES` and prepending a truncation header.
@@ -5850,6 +5905,43 @@ fn truncate_output(output: &str) -> String {
         MAX_OUTPUT_BYTES,
         &tail[start..]
     )
+}
+
+/// Return the last `line_count` lines from `output`, preserving order.
+fn tail_output_lines(output: &str, line_count: usize) -> String {
+    if output.is_empty() || line_count == 0 {
+        return String::new();
+    }
+
+    let mut lines: Vec<&str> = output.lines().rev().take(line_count).collect();
+    lines.reverse();
+    lines.join("\n")
+}
+
+/// Add task failure context to an error chain.
+fn with_task_failure_context(
+    error: anyhow::Error,
+    task_id: &str,
+    phase: &str,
+    gate: &str,
+    output_tail: Option<&str>,
+) -> anyhow::Error {
+    let error = error
+        .context(format!("task_id={task_id}"))
+        .context(format!("phase={phase}"))
+        .context(format!("gate={gate}"));
+
+    match output_tail {
+        Some(tail) if !tail.trim().is_empty() => error.context(format!(
+            "agent_output_tail_last_{}_lines:\n{}",
+            TASK_FAILURE_OUTPUT_TAIL_LINES,
+            tail
+        )),
+        _ => error.context(format!(
+            "agent_output_tail_last_{}_lines: <unavailable>",
+            TASK_FAILURE_OUTPUT_TAIL_LINES
+        )),
+    }
 }
 
 /// Persist a task's output summary so downstream tasks can reference it.
