@@ -8,6 +8,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Write as _};
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::plan::{PlanSummary, plans_dir};
+use crate::task_parser::TasksFile;
 use roko_core::metric::{Headlines, TaskMetric, compute_headlines};
 use roko_gate::adaptive_threshold::AdaptiveThresholds;
 use roko_learn::efficiency::AgentEfficiencyEvent;
@@ -191,6 +197,675 @@ pub struct DashboardSummary {
     pub page_count: usize,
     /// Number of widgets scaffolded across all pages.
     pub widget_count: usize,
+}
+
+/// Shared dashboard data loaded from `.roko/`.
+#[derive(Debug, Clone, Default)]
+pub struct DashboardData {
+    /// Plans from executor state.
+    pub plans: Vec<PlanSummary>,
+    /// Currently executing tasks.
+    pub active_tasks: Vec<TaskSummary>,
+    /// Agents tracked by the process supervisor.
+    pub agents: Vec<AgentSummary>,
+    /// Gate verdicts collected from signals.
+    pub gate_results: Vec<GateResultSummary>,
+    /// Efficiency aggregate from `.roko/learn/efficiency.jsonl`.
+    pub efficiency: EfficiencySummary,
+    /// Cascade router state from `.roko/learn/cascade-router.json`.
+    pub cascade_router: CascadeRouterState,
+    /// Experiments from `.roko/learn/experiments.json`.
+    pub experiments: Vec<ExperimentSummary>,
+    /// Most recent signals from `.roko/signals.jsonl`.
+    pub recent_signals: Vec<SignalSummary>,
+    /// Conductor alerts filtered from signals.
+    pub conductor_alerts: Vec<AlertSummary>,
+    /// Latest C-Factor snapshot, if present.
+    pub cfactor: Option<CFactor>,
+}
+
+impl DashboardData {
+    /// Load dashboard data from a workspace root, falling back to empty data on errors.
+    #[must_use]
+    pub fn load_best_effort(root: impl AsRef<Path>) -> Self {
+        let root = resolve_snapshot_root(root.as_ref());
+        let roko_dir = root.join(".roko");
+        let learn_dir = roko_dir.join("learn");
+        let state_path = roko_dir.join("state").join("executor.json");
+        let state = read_json_value(&state_path).unwrap_or(Value::Null);
+        let signals_path = roko_dir.join("signals.jsonl");
+
+        let plans = load_plan_summaries(&root, &state);
+        let active_tasks = load_active_tasks(&state);
+        let agents = load_agents(&state);
+        let gate_results = load_gate_results(&state, &signals_path);
+        let efficiency = load_efficiency_summary(&learn_dir.join(EFFICIENCY_FILE));
+        let cascade_router = load_json_opt::<CascadeRouterState>(&learn_dir.join(CASCADE_ROUTER_FILE))
+            .unwrap_or_default();
+        let experiments = load_experiment_summaries(&learn_dir.join(EXPERIMENTS_FILE));
+        let recent_signals = load_recent_signals(&signals_path, 100);
+        let conductor_alerts = recent_signals
+            .iter()
+            .filter(|signal| signal.kind.starts_with("conductor:alert:"))
+            .map(AlertSummary::from_signal)
+            .collect();
+        let cfactor = load_latest_jsonl_value::<CFactor>(&learn_dir.join("c-factor.jsonl"));
+
+        Self {
+            plans,
+            active_tasks,
+            agents,
+            gate_results,
+            efficiency,
+            cascade_router,
+            experiments,
+            recent_signals,
+            conductor_alerts,
+            cfactor,
+        }
+    }
+}
+
+/// Summary of a task that is currently active.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskSummary {
+    pub plan_id: String,
+    pub task_id: String,
+    pub status: String,
+    #[serde(default)]
+    pub iteration: u32,
+    #[serde(default)]
+    pub assigned_agents: Vec<String>,
+}
+
+/// Summary of an agent tracked by the process supervisor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSummary {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub plan_id: Option<String>,
+    pub status: String,
+}
+
+/// Summary of one gate verdict.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GateResultSummary {
+    pub plan_id: String,
+    pub gate_name: String,
+    pub passed: bool,
+    pub rung: u32,
+    pub duration_ms: u64,
+    pub summary: String,
+}
+
+/// Aggregate learning efficiency snapshot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EfficiencySummary {
+    pub event_count: usize,
+    pub total_cost_usd: f64,
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
+    pub passed_count: usize,
+    pub average_wall_time_ms: f64,
+}
+
+impl Default for EfficiencySummary {
+    fn default() -> Self {
+        Self {
+            event_count: 0,
+            total_cost_usd: 0.0,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            passed_count: 0,
+            average_wall_time_ms: 0.0,
+        }
+    }
+}
+
+/// Cascade router snapshot from `.roko/learn/cascade-router.json`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CascadeRouterState {
+    #[serde(default)]
+    pub model_slugs: Vec<String>,
+    #[serde(default)]
+    pub confidence_stats: HashMap<String, CascadeRouterModelStats>,
+}
+
+/// Per-model cascade-router stats.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CascadeRouterModelStats {
+    pub trials: u64,
+    pub successes: u64,
+}
+
+/// Prompt experiment summary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExperimentSummary {
+    pub experiment_id: String,
+    pub section_name: String,
+    pub status: String,
+    #[serde(default)]
+    pub winner_id: Option<String>,
+    pub active_variants: usize,
+    pub total_trials: u64,
+}
+
+/// Recent signal summary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignalSummary {
+    pub id: String,
+    pub kind: String,
+    pub created_at_ms: i64,
+    #[serde(default)]
+    pub plan_id: Option<String>,
+    #[serde(default)]
+    pub task_id: Option<String>,
+}
+
+/// Conductor alert summary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlertSummary {
+    pub id: String,
+    pub kind: String,
+    pub created_at_ms: i64,
+    pub severity: String,
+    pub message: String,
+}
+
+impl AlertSummary {
+    fn from_signal(signal: &SignalSummary) -> Self {
+        let severity = signal
+            .kind
+            .split(':')
+            .nth(2)
+            .unwrap_or("warning")
+            .to_string();
+        Self {
+            id: signal.id.clone(),
+            kind: signal.kind.clone(),
+            created_at_ms: signal.created_at_ms,
+            severity,
+            message: signal.kind.clone(),
+        }
+    }
+}
+
+/// Current C-Factor snapshot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CFactor {
+    pub overall: f64,
+    pub components: CFactorComponents,
+    pub computed_at: DateTime<Utc>,
+    pub episode_count: usize,
+}
+
+/// C-Factor components.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CFactorComponents {
+    pub gate_pass_rate: f64,
+    pub cost_efficiency: f64,
+    pub speed: f64,
+    pub first_try_rate: f64,
+    pub knowledge_growth: f64,
+}
+
+impl Default for CFactorComponents {
+    fn default() -> Self {
+        Self {
+            gate_pass_rate: 0.0,
+            cost_efficiency: 0.0,
+            speed: 0.0,
+            first_try_rate: 0.0,
+            knowledge_growth: 0.0,
+        }
+    }
+}
+
+impl Default for CFactor {
+    fn default() -> Self {
+        Self {
+            overall: 0.0,
+            components: CFactorComponents::default(),
+            computed_at: Utc::now(),
+            episode_count: 0,
+        }
+    }
+}
+
+impl SignalSummary {
+    fn from_value(value: &Value) -> Option<Self> {
+        Some(Self {
+            id: value.get("id")?.as_str()?.to_string(),
+            kind: value.get("kind")?.as_str()?.to_string(),
+            created_at_ms: entry_timestamp_ms(value)?,
+            plan_id: value
+                .pointer("/tags/plan_id")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+                .or_else(|| {
+                    value
+                        .pointer("/body/data/plan_id")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned)
+                }),
+            task_id: value
+                .pointer("/tags/task_id")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+                .or_else(|| {
+                    value
+                        .pointer("/body/data/task_id")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned)
+                }),
+        })
+    }
+}
+
+impl GateResultSummary {
+    fn from_signal(value: &Value, plan_id: &str) -> Option<Self> {
+        let gate_name = extract_gate_name(value)?;
+        let passed = extract_gate_passed(value)?;
+        let duration_ms = extract_gate_duration_ms(value).unwrap_or(0);
+        let rung = value
+            .pointer("/tags/rung")
+            .and_then(Value::as_u64)
+            .or_else(|| value.pointer("/body/data/rung").and_then(Value::as_u64))
+            .unwrap_or_default() as u32;
+        let summary = value
+            .pointer("/body/data/reason")
+            .and_then(Value::as_str)
+            .or_else(|| value.pointer("/body/reason").and_then(Value::as_str))
+            .unwrap_or("")
+            .to_string();
+
+        Some(Self {
+            plan_id: plan_id.to_string(),
+            gate_name,
+            passed,
+            rung,
+            duration_ms,
+            summary,
+        })
+    }
+}
+
+impl ExperimentSummary {
+    fn from_experiment(experiment: &roko_learn::prompt_experiment::PromptExperiment) -> Self {
+        let total_trials: u64 = experiment.stats.values().map(|stats| stats.trials).sum();
+        let active_variants = experiment.variants.iter().filter(|variant| variant.active).count();
+        Self {
+            experiment_id: experiment.experiment_id.clone(),
+            section_name: experiment.section_name.clone(),
+            status: format!("{:?}", experiment.status),
+            winner_id: experiment.winner_id.clone(),
+            active_variants,
+            total_trials,
+        }
+    }
+}
+
+fn load_plan_summaries(root: &Path, state: &Value) -> Vec<PlanSummary> {
+    let mut ids = std::collections::BTreeSet::new();
+    if let Some(plan_states) = state.get("plan_states").and_then(Value::as_object) {
+        ids.extend(plan_states.keys().cloned());
+    }
+    if ids.is_empty() {
+        if let Ok(entries) = std::fs::read_dir(plans_dir(root)) {
+            for entry in entries.flatten() {
+                if entry.path().is_dir() {
+                    ids.insert(entry.file_name().to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+
+    let mut summaries = Vec::new();
+    for id in ids {
+        let mut title = id.clone();
+        let mut task_count = 0usize;
+        let plan_dir = plans_dir(root).join(&id);
+        let tasks_path = plan_dir.join("tasks.toml");
+        if let Ok(tasks_file) = TasksFile::parse(&tasks_path) {
+            if !tasks_file.meta.plan.trim().is_empty() {
+                title = tasks_file.meta.plan.clone();
+            }
+            task_count = tasks_file.tasks.len();
+        }
+
+        let completed = state
+            .get("plan_states")
+            .and_then(Value::as_object)
+            .and_then(|plans| plans.get(&id))
+            .and_then(current_phase_label)
+            .map(|phase| {
+                matches!(
+                    phase.to_ascii_lowercase().as_str(),
+                    "complete" | "done" | "failed" | "skipped"
+                )
+            })
+            .unwrap_or(false);
+
+        summaries.push(PlanSummary {
+            id,
+            title,
+            task_count,
+            completed,
+        });
+    }
+
+    summaries.sort_by(|a, b| a.id.cmp(&b.id));
+    summaries
+}
+
+fn load_active_tasks(state: &Value) -> Vec<TaskSummary> {
+    let Some(plan_states) = state.get("plan_states").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+
+    let mut tasks = Vec::new();
+    for (plan_id, plan_state) in plan_states {
+        let status = current_phase_label(plan_state).unwrap_or_else(|| "unknown".to_string());
+        if matches!(
+            status.to_ascii_lowercase().as_str(),
+            "complete" | "done" | "failed" | "skipped"
+        ) {
+            continue;
+        }
+        let task_id = plan_state
+            .get("task_id")
+            .and_then(Value::as_str)
+            .or_else(|| plan_state.get("id").and_then(Value::as_str))
+            .unwrap_or(plan_id.as_str())
+            .to_string();
+        let iteration = plan_state
+            .get("iteration")
+            .and_then(Value::as_u64)
+            .unwrap_or(1) as u32;
+        let assigned_agents = plan_state
+            .get("assigned_agents")
+            .and_then(Value::as_array)
+            .map(|agents| {
+                agents
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        tasks.push(TaskSummary {
+            plan_id: plan_id.clone(),
+            task_id,
+            status,
+            iteration,
+            assigned_agents,
+        });
+    }
+
+    tasks.sort_by(|a, b| a.plan_id.cmp(&b.plan_id).then_with(|| a.task_id.cmp(&b.task_id)));
+    tasks
+}
+
+fn load_agents(state: &Value) -> Vec<AgentSummary> {
+    let Some(plan_states) = state.get("plan_states").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+
+    let mut agents = Vec::new();
+    for (plan_id, plan_state) in plan_states {
+        let status = current_phase_label(plan_state).unwrap_or_else(|| "unknown".to_string());
+        let assigned_agents = plan_state
+            .get("assigned_agents")
+            .and_then(Value::as_array)
+            .map(|agents| {
+                agents
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for agent in assigned_agents {
+            agents.push(AgentSummary {
+                id: agent.clone(),
+                label: agent,
+                plan_id: Some(plan_id.clone()),
+                status: status.clone(),
+            });
+        }
+    }
+
+    agents.sort_by(|a, b| a.id.cmp(&b.id).then_with(|| a.plan_id.cmp(&b.plan_id)));
+    agents
+}
+
+fn load_gate_results(state: &Value, signals_path: &Path) -> Vec<GateResultSummary> {
+    let mut gate_results = Vec::new();
+
+    if let Some(plan_states) = state.get("plan_states").and_then(Value::as_object) {
+        for (plan_id, plan_state) in plan_states {
+            let Some(results) = plan_state.get("gate_results").and_then(Value::as_array) else {
+                continue;
+            };
+            for result in results {
+                gate_results.push(GateResultSummary {
+                    plan_id: plan_id.clone(),
+                    gate_name: result
+                        .get("gate_name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    passed: result.get("passed").and_then(Value::as_bool).unwrap_or(false),
+                    rung: result.get("rung").and_then(Value::as_u64).unwrap_or_default() as u32,
+                    duration_ms: result
+                        .get("duration_ms")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default(),
+                    summary: result
+                        .get("summary")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                });
+            }
+        }
+    }
+
+    if gate_results.is_empty() {
+        gate_results.extend(
+            read_jsonl_values(signals_path)
+                .into_iter()
+                .filter(|entry| {
+                    entry
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .is_some_and(|kind| is_gate_result_kind(kind))
+                })
+                .filter_map(|entry| {
+            let plan_id = entry
+                .pointer("/tags/plan_id")
+                .and_then(Value::as_str)
+                .or_else(|| entry.pointer("/body/data/plan_id").and_then(Value::as_str))
+                .or_else(|| entry.pointer("/body/plan_id").and_then(Value::as_str))
+                .unwrap_or("unknown");
+                    GateResultSummary::from_signal(&entry, plan_id)
+                }),
+        );
+    }
+
+    gate_results.sort_by(|a, b| {
+        a.plan_id
+            .cmp(&b.plan_id)
+            .then_with(|| a.gate_name.cmp(&b.gate_name))
+            .then_with(|| a.rung.cmp(&b.rung))
+    });
+    gate_results
+}
+
+fn load_efficiency_summary(path: &Path) -> EfficiencySummary {
+    let events = read_efficiency_events_sync(path);
+    if events.is_empty() {
+        return EfficiencySummary::default();
+    }
+
+    let event_count = events.len();
+    let total_cost_usd = events.iter().map(|event| event.cost_usd).sum();
+    let total_input_tokens = events.iter().map(|event| event.input_tokens).sum();
+    let total_output_tokens = events.iter().map(|event| event.output_tokens).sum();
+    let passed_count = events.iter().filter(|event| event.gate_passed).count();
+    let average_wall_time_ms = events.iter().map(|event| event.wall_time_ms as f64).sum::<f64>()
+        / count_to_f64(event_count);
+
+    EfficiencySummary {
+        event_count,
+        total_cost_usd,
+        total_input_tokens,
+        total_output_tokens,
+        passed_count,
+        average_wall_time_ms,
+    }
+}
+
+fn load_experiment_summaries(path: &Path) -> Vec<ExperimentSummary> {
+    let store = ExperimentStore::load_or_new(path);
+    let mut experiments = store.iter().map(ExperimentSummary::from_experiment).collect::<Vec<_>>();
+    experiments.sort_by(|a, b| a.experiment_id.cmp(&b.experiment_id));
+    experiments
+}
+
+fn load_recent_signals(path: &Path, limit: usize) -> Vec<SignalSummary> {
+    let mut signals = read_jsonl_values(path)
+        .into_iter()
+        .filter_map(|entry| SignalSummary::from_value(&entry))
+        .collect::<Vec<_>>();
+    if signals.len() > limit {
+        signals = signals.split_off(signals.len() - limit);
+    }
+    signals
+}
+
+fn load_latest_jsonl_value<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
+    let text = std::fs::read_to_string(path).ok()?;
+    text.lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .and_then(|line| serde_json::from_str(line).ok())
+}
+
+fn read_json_value(path: &Path) -> Option<Value> {
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn read_jsonl_values(path: &Path) -> Vec<Value> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
+}
+
+fn read_efficiency_events_sync(path: &Path) -> Vec<AgentEfficiencyEvent> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
+}
+
+fn extract_gate_name(entry: &Value) -> Option<String> {
+    entry
+        .pointer("/tags/gate")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            entry
+                .pointer("/body/data/gate")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            entry
+                .pointer("/body/gate")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            entry
+                .get("kind")
+                .and_then(Value::as_str)
+                .and_then(|kind| kind.strip_prefix("gate:").or(kind.strip_prefix("gate_")))
+                .map(ToOwned::to_owned)
+        })
+}
+
+fn extract_gate_passed(entry: &Value) -> Option<bool> {
+    entry
+        .pointer("/tags/passed")
+        .and_then(Value::as_str)
+        .and_then(|s| match s {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        })
+        .or_else(|| {
+            entry
+                .pointer("/body/data/passed")
+                .and_then(Value::as_bool)
+        })
+        .or_else(|| entry.pointer("/body/passed").and_then(Value::as_bool))
+}
+
+fn extract_gate_duration_ms(entry: &Value) -> Option<u64> {
+    entry
+        .pointer("/body/data/duration_ms")
+        .and_then(Value::as_u64)
+        .or_else(|| entry.pointer("/body/duration_ms").and_then(Value::as_u64))
+        .or_else(|| entry.pointer("/tags/duration_ms").and_then(Value::as_u64))
+}
+
+fn entry_timestamp_ms(entry: &Value) -> Option<i64> {
+    entry
+        .get("created_at_ms")
+        .and_then(Value::as_i64)
+        .or_else(|| entry.get("created_at_ms").and_then(Value::as_u64).map(|ts| ts as i64))
+}
+
+fn current_phase_label(plan_state: &Value) -> Option<String> {
+    plan_state
+        .pointer("/current_phase/kind")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            plan_state
+                .get("current_phase")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            plan_state
+                .pointer("/phase/kind")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            plan_state
+                .get("phase")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+}
+
+fn is_gate_result_kind(kind: &str) -> bool {
+    kind == "gate_verdict" || kind.starts_with("gate:") || kind.starts_with("gate_")
 }
 
 impl fmt::Display for DashboardSummary {

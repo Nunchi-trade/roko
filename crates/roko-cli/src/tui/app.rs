@@ -13,13 +13,10 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::prelude::*;
 use ratatui::Terminal;
 
-use super::dashboard::DashboardScaffold;
+use super::dashboard::{DashboardData, DashboardScaffold};
 use super::event::{Event, EventHandler};
 use super::pages::{PageId, PageRegistry};
 use super::widgets;
-
-/// Shared dashboard data model used by the TUI shell.
-pub type DashboardData = DashboardScaffold;
 
 /// Interactive dashboard shell backed by the existing snapshot renderer.
 #[derive(Debug)]
@@ -29,6 +26,8 @@ pub struct App {
     pub current_page: PageId,
     /// Shared dashboard data model, refreshed on tick.
     pub data: DashboardData,
+    /// Static page scaffold used by the current renderer.
+    scaffold: DashboardScaffold,
     /// Whether the event loop should keep running.
     pub running: bool,
     /// Timestamp of the last data refresh.
@@ -44,12 +43,14 @@ impl App {
     #[must_use]
     pub fn new(root: impl AsRef<Path>) -> Self {
         let workdir = root.as_ref().to_path_buf();
-        let data = DashboardScaffold::new_in(&workdir);
-        let current_page = data.active_page();
+        let scaffold = DashboardScaffold::new_in(&workdir);
+        let current_page = scaffold.active_page();
+        let data = DashboardData::load_best_effort(&workdir);
         Self {
             workdir,
             current_page,
             data,
+            scaffold,
             running: true,
             last_refresh: Instant::now(),
             scroll_offset: HashMap::new(),
@@ -107,7 +108,7 @@ impl App {
         let pages = self.pages();
         widgets::render_dashboard(
             frame,
-            &self.data,
+            &self.scaffold,
             &pages,
             self.current_page,
             self.scroll_for(self.current_page),
@@ -132,18 +133,21 @@ impl App {
     fn select_next_page(&mut self) {
         let pages = self.pages();
         self.current_page = pages.next(self.current_page);
+        let _ = self.scaffold.set_active_page(self.current_page);
     }
 
     fn select_previous_page(&mut self) {
         let pages = self.pages();
         self.current_page = pages.previous(self.current_page);
+        let _ = self.scaffold.set_active_page(self.current_page);
     }
 
     fn refresh_snapshot(&mut self) {
-        self.data = DashboardScaffold::new_in(&self.workdir);
+        self.data = DashboardData::load_best_effort(&self.workdir);
+        self.scaffold = DashboardScaffold::new_in(&self.workdir);
         self.last_refresh = Instant::now();
         if self.pages().scaffold(self.current_page).is_none() {
-            self.current_page = self.data.active_page();
+            self.current_page = self.scaffold.active_page();
         }
     }
 
@@ -154,7 +158,7 @@ impl App {
     }
 
     fn pages(&self) -> PageRegistry {
-        PageRegistry::from_dashboard(&self.data)
+        PageRegistry::from_dashboard(&self.scaffold)
     }
 
     fn scroll_for(&self, page: PageId) -> u16 {

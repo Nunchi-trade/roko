@@ -51,4 +51,6 @@ pub use repl::{ReplCommand, ReplMode};
 pub use run::{RunReport, run_once};
 pub use secrets::SecretsCmd;
 pub use status::SessionStatus;
-pub use tui::{DashboardScaffold, DashboardSummary, PageId, PageScaffold, WidgetScaffold};
+pub use tui::{
+    DashboardData, DashboardScaffold, DashboardSummary, PageId, PageScaffold, WidgetScaffold,
+};
