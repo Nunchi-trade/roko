@@ -33,6 +33,7 @@ use roko_core::{
 };
 use roko_fs::FileSubstrate;
 use roko_fs::observability::FsObservabilitySinks;
+use roko_fs::RokoLayout;
 use roko_gate::{
     adaptive_threshold::AdaptiveThresholds, clippy_gate::ClippyGate, compile::CompileGate,
     payload::GatePayload, test_gate::TestGate,
@@ -2032,7 +2033,7 @@ impl PlanRunner {
         let concurrency_limit = self.executor.config().max_concurrent_tasks.max(1);
 
         // Create per-task worktrees and record exec dirs.
-        let shared_target = self.workdir.join("target");
+        let shared_target = RokoLayout::for_project(&self.workdir).cargo_target_dir();
         let mut task_dirs: Vec<(String, PathBuf)> = Vec::with_capacity(task_ids.len());
         let started = std::time::Instant::now();
         for tid in task_ids {
