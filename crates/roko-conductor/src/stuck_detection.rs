@@ -22,6 +22,7 @@
 //! assert_eq!(signal.unwrap().kind, StuckKind::OutputLoop);
 //! ```
 
+use roko_core::{Body, Kind, OperatingFrequency, Signal};
 use serde::{Deserialize, Serialize};
 
 // ---- StuckKind --------------------------------------------------------------
@@ -231,6 +232,46 @@ impl StuckDetector {
         signals
     }
 
+    /// Run the theta-frequency meta-cognition hook over recent activity.
+    ///
+    /// This wraps the stuck detector with a higher-level self-check that asks:
+    /// "Am I stuck? Am I thrashing? Should I escalate?"
+    #[must_use]
+    pub fn meta_cognition(&self, history: &[ActivityEntry]) -> MetaCognitionAssessment {
+        let stuck_signals = self.check_all(history);
+        let primary_signal = self.check_stuck(history);
+        let iterations_without_progress = trailing_no_progress_iterations(history);
+        let repeated_output_count = trailing_output_repetition_count(history);
+        let repeated_gate_failure_count = trailing_gate_failure_count(history);
+
+        let action = classify_meta_cognition_action(
+            primary_signal.as_ref(),
+            iterations_without_progress,
+            repeated_output_count,
+            repeated_gate_failure_count,
+            &self.thresholds,
+        );
+
+        let reason = meta_cognition_reason(
+            action,
+            primary_signal.as_ref(),
+            iterations_without_progress,
+            repeated_output_count,
+            repeated_gate_failure_count,
+        );
+
+        MetaCognitionAssessment {
+            frequency: OperatingFrequency::Theta,
+            action,
+            reason,
+            primary_signal,
+            stuck_signals,
+            iterations_without_progress,
+            repeated_output_count,
+            repeated_gate_failure_count,
+        }
+    }
+
     // ---- Individual heuristics ----
 
     /// Detect consecutive identical output hashes.
@@ -432,6 +473,191 @@ impl StuckDetector {
     }
 }
 
+/// Meta-cognition decision: keep going, adjust strategy, or escalate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetaCognitionAction {
+    /// No stuck pattern detected.
+    Continue,
+    /// Agent should change tactics before retrying.
+    AdjustStrategy,
+    /// Agent should escalate to a stronger model or broader context.
+    Escalate,
+}
+
+impl MetaCognitionAction {
+    /// Stable label for logging and signal tags.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Continue => "continue",
+            Self::AdjustStrategy => "adjust_strategy",
+            Self::Escalate => "escalate",
+        }
+    }
+}
+
+/// Theta-frequency assessment of the agent's current cognitive state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetaCognitionAssessment {
+    /// This hook always runs at theta frequency.
+    pub frequency: OperatingFrequency,
+    /// The recommended response.
+    pub action: MetaCognitionAction,
+    /// Human-readable explanation of the recommendation.
+    pub reason: String,
+    /// The primary stuck signal detected, if any.
+    pub primary_signal: Option<StuckSignal>,
+    /// All stuck signals detected in this pass.
+    pub stuck_signals: Vec<StuckSignal>,
+    /// Consecutive iterations with no file changes.
+    pub iterations_without_progress: usize,
+    /// Consecutive identical output hashes at the tail of the history.
+    pub repeated_output_count: usize,
+    /// Consecutive identical gate failures at the tail of the history.
+    pub repeated_gate_failure_count: usize,
+}
+
+impl MetaCognitionAssessment {
+    /// Convert the assessment into a structured signal when action is needed.
+    #[must_use]
+    pub fn to_signal(&self) -> Option<Signal> {
+        match self.action {
+            MetaCognitionAction::Continue => None,
+            _ => Some(
+                Signal::builder(Kind::Custom("roko.meta_cognition".into()))
+                    .body(
+                        Body::from_json(self)
+                            .expect("meta-cognition assessment should serialize to JSON"),
+                    )
+                    .tag("frequency", "theta")
+                    .tag("action", self.action.label())
+                    .tag("reason", self.reason.as_str())
+                    .build(),
+            ),
+        }
+    }
+}
+
+/// A light wrapper around the stuck detector for theta-frequency reflection.
+#[derive(Debug, Clone)]
+pub struct MetaCognitionHook {
+    detector: StuckDetector,
+    no_progress_iterations_threshold: usize,
+}
+
+impl Default for MetaCognitionHook {
+    fn default() -> Self {
+        Self {
+            detector: StuckDetector::default(),
+            no_progress_iterations_threshold: 3,
+        }
+    }
+}
+
+impl MetaCognitionHook {
+    /// Create a hook with the default stuck detector and no-progress threshold.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Override the number of consecutive no-progress iterations required to
+    /// trigger a strategy adjustment.
+    #[must_use]
+    pub fn with_no_progress_iterations_threshold(mut self, threshold: usize) -> Self {
+        assert!(threshold > 0, "no-progress threshold must be positive");
+        self.no_progress_iterations_threshold = threshold;
+        self
+    }
+
+    /// Borrow the underlying stuck detector.
+    #[must_use]
+    pub const fn detector(&self) -> &StuckDetector {
+        &self.detector
+    }
+
+    /// The hook always runs at theta frequency.
+    #[must_use]
+    pub const fn frequency(&self) -> OperatingFrequency {
+        OperatingFrequency::Theta
+    }
+
+    /// Reflect on recent activity and return a structured assessment.
+    #[must_use]
+    pub fn assess(&self, history: &[ActivityEntry]) -> MetaCognitionAssessment {
+        self.detector.meta_cognition(history)
+    }
+}
+
+fn classify_meta_cognition_action(
+    primary_signal: Option<&StuckSignal>,
+    iterations_without_progress: usize,
+    repeated_output_count: usize,
+    repeated_gate_failure_count: usize,
+    thresholds: &StuckThresholds,
+) -> MetaCognitionAction {
+    if matches!(
+        primary_signal.map(|signal| signal.kind),
+        Some(StuckKind::GateLoop | StuckKind::CompileLoop | StuckKind::ExcessiveRetries)
+    ) || repeated_gate_failure_count >= thresholds.gate_loop_count
+    {
+        return MetaCognitionAction::Escalate;
+    }
+
+    if iterations_without_progress >= 3
+        || repeated_output_count >= thresholds.output_loop_count
+        || matches!(primary_signal.map(|signal| signal.kind), Some(StuckKind::OutputLoop))
+        || matches!(primary_signal.map(|signal| signal.kind), Some(StuckKind::EmptyOutput))
+        || matches!(primary_signal.map(|signal| signal.kind), Some(StuckKind::NoProgress))
+    {
+        return MetaCognitionAction::AdjustStrategy;
+    }
+
+    MetaCognitionAction::Continue
+}
+
+fn meta_cognition_reason(
+    action: MetaCognitionAction,
+    primary_signal: Option<&StuckSignal>,
+    iterations_without_progress: usize,
+    repeated_output_count: usize,
+    repeated_gate_failure_count: usize,
+) -> String {
+    match action {
+        MetaCognitionAction::Continue => {
+            "no stuck pattern detected; continue current strategy".to_string()
+        }
+        MetaCognitionAction::AdjustStrategy => {
+            if repeated_output_count > 0 {
+                format!(
+                    "{repeated_output_count} consecutive identical outputs and {iterations_without_progress} iterations without progress; adjust strategy"
+                )
+            } else if iterations_without_progress > 0 {
+                format!(
+                    "{iterations_without_progress} iterations without progress; adjust strategy"
+                )
+            } else if let Some(signal) = primary_signal {
+                format!("{}; adjust strategy", signal.description)
+            } else {
+                "progress has stalled; adjust strategy".to_string()
+            }
+        }
+        MetaCognitionAction::Escalate => {
+            if repeated_gate_failure_count > 0 {
+                format!(
+                    "{repeated_gate_failure_count} repeated gate failures; escalate to a stronger model or broader context"
+                )
+            } else if let Some(signal) = primary_signal {
+                format!("{}; escalate to a stronger model or broader context", signal.description)
+            } else {
+                "gate failure pattern detected; escalate to a stronger model or broader context"
+                    .to_string()
+            }
+        }
+    }
+}
+
 // ---- Helpers ----------------------------------------------------------------
 
 /// Count consecutive entries from the end matching a predicate.
@@ -440,6 +666,48 @@ where
     F: Fn(&ActivityEntry) -> bool,
 {
     history.iter().rev().take_while(|e| pred(e)).count()
+}
+
+/// Count how many trailing iterations made no file changes.
+fn trailing_no_progress_iterations(history: &[ActivityEntry]) -> usize {
+    history
+        .iter()
+        .rev()
+        .take_while(|entry| entry.files_changed == 0)
+        .count()
+}
+
+/// Count how many trailing outputs repeated the same hash.
+fn trailing_output_repetition_count(history: &[ActivityEntry]) -> usize {
+    let Some(last_hash) = history.last().map(|entry| entry.output_hash.as_str()) else {
+        return 0;
+    };
+    if last_hash.is_empty() {
+        return 0;
+    }
+    count_consecutive_from_end(history, |entry| entry.output_hash == last_hash)
+}
+
+/// Count how many trailing gate failures repeated the same failure string.
+fn trailing_gate_failure_count(history: &[ActivityEntry]) -> usize {
+    let Some(last_result) = history
+        .iter()
+        .rev()
+        .find_map(|entry| entry.gate_result.as_deref())
+    else {
+        return 0;
+    };
+
+    if !last_result.starts_with("fail") {
+        return 0;
+    }
+
+    history
+        .iter()
+        .rev()
+        .filter_map(|entry| entry.gate_result.as_deref())
+        .take_while(|result| *result == last_result)
+        .count()
 }
 
 /// Compute confidence based on how far past the threshold we are.
@@ -489,6 +757,10 @@ mod tests {
 
     fn detector() -> StuckDetector {
         StuckDetector::default()
+    }
+
+    fn hook() -> MetaCognitionHook {
+        MetaCognitionHook::default()
     }
 
     // ---- Output loop ----
@@ -750,5 +1022,52 @@ mod tests {
         assert_eq!(s.kind, StuckKind::OutputLoop);
         assert!(s.duration_ms.is_some());
         assert_eq!(s.duration_ms, Some(15000));
+    }
+
+    #[test]
+    fn meta_cognition_is_theta_frequency() {
+        assert_eq!(hook().frequency(), OperatingFrequency::Theta);
+    }
+
+    #[test]
+    fn meta_cognition_adjusts_for_repeated_outputs() {
+        let history = vec![
+            ActivityEntry::new(1000, "same", 0, Some("pass".into()), 1),
+            ActivityEntry::new(2000, "same", 0, Some("pass".into()), 2),
+            ActivityEntry::new(3000, "same", 0, Some("pass".into()), 3),
+            ActivityEntry::new(4000, "same", 0, Some("pass".into()), 4),
+        ];
+
+        let assessment = hook().assess(&history);
+        assert_eq!(assessment.action, MetaCognitionAction::AdjustStrategy);
+        assert_eq!(assessment.repeated_output_count, 4);
+        assert!(assessment.to_signal().is_some());
+    }
+
+    #[test]
+    fn meta_cognition_escalates_for_gate_failure_patterns() {
+        let mut history = make_history(&["a", "b", "c"], 1000, 1000);
+        for entry in &mut history {
+            entry.gate_result = Some("fail:test:assertion".into());
+        }
+
+        let assessment = hook().assess(&history);
+        assert_eq!(assessment.action, MetaCognitionAction::Escalate);
+        assert_eq!(assessment.repeated_gate_failure_count, 3);
+        let signal = assessment.to_signal().expect("signal");
+        assert_eq!(signal.tag("frequency"), Some("theta"));
+        assert_eq!(signal.tag("action"), Some("escalate"));
+    }
+
+    #[test]
+    fn meta_cognition_continues_when_healthy() {
+        let history = vec![
+            ActivityEntry::new(1000, "a", 1, Some("pass".into()), 1),
+            ActivityEntry::new(2000, "b", 1, Some("pass".into()), 2),
+        ];
+
+        let assessment = hook().assess(&history);
+        assert_eq!(assessment.action, MetaCognitionAction::Continue);
+        assert!(assessment.to_signal().is_none());
     }
 }
