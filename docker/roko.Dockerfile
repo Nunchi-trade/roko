@@ -50,6 +50,16 @@ ENV PORT=3000
 ENV RUST_LOG=info
 
 RUN useradd --create-home --shell /bin/bash roko
+
+# Persist the daemon's `.roko/` tree across deploys.
+RUN mkdir -p /workspace/.roko/learn \
+    /workspace/.roko/state \
+    /workspace/.roko/neuro \
+    /workspace/.roko/dreams \
+    && chown -R roko:roko /workspace/.roko
+
+VOLUME ["/workspace/.roko"]
+
 USER roko
 WORKDIR /workspace
 
