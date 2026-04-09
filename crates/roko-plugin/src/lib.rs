@@ -5,11 +5,11 @@ use async_trait::async_trait;
 use roko_core::{Result, Signal};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
 
-/// Cloneable sender used by event sources to publish signals into Roko.
-pub type SignalSender = UnboundedSender<Signal>;
+/// Cloneable bounded sender used by event sources to publish signals into Roko.
+pub type SignalSender = Sender<Signal>;
 
 /// Outcome reported by a feedback collector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,7 +117,7 @@ mod tests {
             let signal = Signal::builder(Kind::Task)
                 .body(Body::text("hello"))
                 .build();
-            let _ = sender.send(signal);
+            sender.send(signal).await.expect("signal should be sent");
             cancel.cancelled().await;
             Ok(())
         }
@@ -156,7 +156,7 @@ mod tests {
         assert_eq!(source.name(), "dummy");
         assert_eq!(source.kind(), EventSourceKind::Custom("dummy".to_string()));
 
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
         let cancel = CancellationToken::new();
         let cancel_for_task = cancel.clone();
         let runner = tokio::spawn(async move { source.start(sender, cancel_for_task).await });
