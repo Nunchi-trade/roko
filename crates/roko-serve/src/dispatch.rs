@@ -52,6 +52,9 @@ pub trait AgentDispatcher: Send + Sync {
     async fn dispatch(&self, template: AgentTemplate, signal: Signal) -> Result<AgentResult>;
 }
 
+/// Public subscription filter type used by the subscription API.
+pub type SubscriptionFilter = SubscriptionFilterConfig;
+
 /// Extended episode metadata for webhook- and event-driven agents.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WebhookEpisodeMetadata {
@@ -232,8 +235,21 @@ impl AgentDispatcher for TemplateAgentDispatcher {
 /// A subscription from signal trigger to agent template.
 #[derive(Debug)]
 pub struct Subscription {
+    /// Unique ID for this subscription.
+    pub id: String,
+    /// Agent template name associated with this subscription.
+    pub template: String,
+    /// Signal kind glob used to match incoming signals.
+    pub trigger: String,
+    /// Additional filters applied after the trigger matches.
+    pub filter: SubscriptionFilter,
+    /// Maximum number of concurrent agents for this subscription.
+    pub concurrency_limit: usize,
+    /// Minimum seconds between dispatches.
+    pub cooldown_secs: u64,
+    /// Whether the subscription is enabled.
+    pub enabled: bool,
     subscription_id: usize,
-    config: SubscriptionConfig,
     dedup_ttl: Duration,
     state: Arc<SubscriptionState>,
 }
@@ -254,8 +270,14 @@ impl SubscriptionState {
 impl Clone for Subscription {
     fn clone(&self) -> Self {
         Self {
+            id: self.id.clone(),
+            template: self.template.clone(),
+            trigger: self.trigger.clone(),
+            filter: self.filter.clone(),
+            concurrency_limit: self.concurrency_limit,
+            cooldown_secs: self.cooldown_secs,
+            enabled: self.enabled,
             subscription_id: self.subscription_id,
-            config: self.config.clone(),
             dedup_ttl: self.dedup_ttl,
             state: Arc::clone(&self.state),
         }
@@ -278,8 +300,14 @@ impl Subscription {
     #[must_use]
     pub fn from_config(config: SubscriptionConfig) -> Self {
         Self {
+            id: String::new(),
+            template: config.template,
+            trigger: config.trigger,
+            filter: config.filter,
+            concurrency_limit: config.concurrency_limit,
+            cooldown_secs: config.cooldown_secs,
+            enabled: config.enabled,
             subscription_id: usize::MAX,
-            config,
             dedup_ttl: Duration::from_secs(60),
             state: Arc::new(SubscriptionState::new()),
         }
@@ -288,21 +316,21 @@ impl Subscription {
     /// Replace the filter criteria for this subscription.
     #[must_use]
     pub fn with_filter(mut self, filter: SubscriptionFilterConfig) -> Self {
-        self.config.filter = filter;
+        self.filter = filter;
         self
     }
 
     /// Set the maximum number of concurrent dispatches allowed.
     #[must_use]
     pub fn with_concurrency_limit(mut self, limit: usize) -> Self {
-        self.config.concurrency_limit = limit;
+        self.concurrency_limit = limit;
         self
     }
 
     /// Set the minimum delay between dispatches.
     #[must_use]
     pub fn with_cooldown(mut self, cooldown: Duration) -> Self {
-        self.config.cooldown_secs = cooldown.as_secs();
+        self.cooldown_secs = cooldown.as_secs();
         self
     }
 
@@ -316,12 +344,15 @@ impl Subscription {
     /// Disable the subscription.
     #[must_use]
     pub fn disabled(mut self) -> Self {
-        self.config.enabled = false;
+        self.enabled = false;
         self
     }
 
     fn with_subscription_id(mut self, subscription_id: usize) -> Self {
         self.subscription_id = subscription_id;
+        if self.id.is_empty() {
+            self.id = subscription_id.to_string();
+        }
         self
     }
 
@@ -334,25 +365,25 @@ impl Subscription {
     /// Agent template name associated with this subscription.
     #[must_use]
     pub fn template(&self) -> &str {
-        &self.config.template
+        &self.template
     }
 
     /// Trigger pattern used to match signal kinds.
     #[must_use]
     pub fn trigger(&self) -> &str {
-        &self.config.trigger
+        &self.trigger
     }
 
     /// Return the configured filter criteria.
     #[must_use]
     pub fn filter(&self) -> &SubscriptionFilterConfig {
-        &self.config.filter
+        &self.filter
     }
 
     /// Whether the subscription is enabled.
     #[must_use]
     pub const fn is_enabled(&self) -> bool {
-        self.config.enabled
+        self.enabled
     }
 
     /// Check whether this subscription should trigger for `signal`.
@@ -503,7 +534,7 @@ impl SubscriptionRegistry {
     /// Reserve a concurrency slot for `subscription` if it is below its limit.
     #[must_use]
     pub fn check_concurrency_limit(&self, subscription: &Subscription) -> bool {
-        if subscription.config.concurrency_limit == 0 {
+        if subscription.concurrency_limit == 0 {
             return false;
         }
 
@@ -514,7 +545,7 @@ impl SubscriptionRegistry {
 
         let mut current = active.load(Ordering::Acquire);
         loop {
-            if current >= subscription.config.concurrency_limit {
+            if current >= subscription.concurrency_limit {
                 return false;
             }
 
@@ -537,11 +568,11 @@ impl SubscriptionRegistry {
     /// Check and update the cooldown gate for `subscription`.
     #[must_use]
     pub fn check_cooldown(&self, subscription: &Subscription) -> bool {
-        if subscription.config.cooldown_secs == 0 {
+        if subscription.cooldown_secs == 0 {
             return true;
         }
 
-        let cooldown = Duration::from_secs(subscription.config.cooldown_secs);
+        let cooldown = Duration::from_secs(subscription.cooldown_secs);
         let now = Instant::now();
         let mut last_dispatches = self.last_dispatches.lock();
         let Some(previous) = last_dispatches.get(&subscription.subscription_id()) else {
