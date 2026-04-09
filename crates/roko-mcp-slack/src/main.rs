@@ -7,6 +7,7 @@ use reqwest::blocking::Client;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::env;
 use std::io;
 use roko_mcp_stdio::{serve_stdio, JsonRpcError, JsonRpcRequest};
@@ -31,6 +32,12 @@ struct SlackReplyArguments {
     channel: String,
     thread_ts: String,
     text: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SlackGetThreadArguments {
+    channel: String,
+    thread_ts: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,6 +99,17 @@ struct SlackListChannelsResponse {
 struct SlackResponseMetadata {
     #[serde(default)]
     next_cursor: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SlackThreadResponse {
+    ok: bool,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    messages: Vec<Value>,
+    #[serde(default)]
+    response_metadata: SlackResponseMetadata,
 }
 
 #[derive(Debug, Deserialize)]
@@ -171,6 +189,19 @@ fn handle_tools_list() -> Value {
                 }
             }),
             serde_json::json!({
+                "name": "slack_get_thread",
+                "description": "Get all messages in a Slack thread.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "channel": {"type": "string"},
+                        "thread_ts": {"type": "string"}
+                    },
+                    "required": ["channel", "thread_ts"],
+                    "additionalProperties": false
+                }
+            }),
+            serde_json::json!({
                 "name": "slack_react",
                 "description": "Add a reaction to a Slack message.",
                 "inputSchema": {
@@ -209,6 +240,7 @@ fn dispatch_tool_call(name: &str, arguments: Value) -> Result<Value, JsonRpcErro
     match name {
         "slack.post_message" => handle_slack_post_message(arguments),
         "slack_reply" => handle_slack_reply(arguments),
+        "slack_get_thread" => handle_slack_get_thread(arguments),
         "slack_react" => handle_slack_react(arguments),
         "slack.list_channels" => handle_slack_list_channels(arguments),
         _ => Err(JsonRpcError::invalid_params(format!(
@@ -279,6 +311,27 @@ fn handle_slack_reply(arguments: Value) -> Result<Value, JsonRpcError> {
                 "channel": channel,
                 "ts": ts,
                 "message": message
+            }).to_string()
+        }],
+        "isError": false
+    }))
+}
+
+fn handle_slack_get_thread(arguments: Value) -> Result<Value, JsonRpcError> {
+    let args: SlackGetThreadArguments = serde_json::from_value(arguments).map_err(|err| {
+        JsonRpcError::invalid_params(format!("invalid slack_get_thread args: {err}"))
+    })?;
+
+    let client = SlackClient::from_env()?;
+    let messages = client.get_thread(&args.channel, &args.thread_ts)?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": serde_json::json!({
+                "channel": args.channel,
+                "thread_ts": args.thread_ts,
+                "messages": messages
             }).to_string()
         }],
         "isError": false
@@ -461,6 +514,65 @@ impl SlackClient {
 
         Ok(parsed)
     }
+
+    fn get_thread(&self, channel: &str, thread_ts: &str) -> Result<Vec<Value>, JsonRpcError> {
+        let mut headers = HeaderMap::new();
+        let auth_value = format!("Bearer {}", self.token);
+        let auth_value = HeaderValue::from_str(&auth_value)
+            .map_err(|err| JsonRpcError::internal_error(format!("invalid slack auth header: {err}")))?;
+        headers.insert(AUTHORIZATION, auth_value);
+
+        let mut all_messages = Vec::new();
+        let mut seen_ts = HashSet::new();
+        let mut cursor: Option<String> = None;
+
+        loop {
+            let mut request = self
+                .client
+                .get("https://slack.com/api/conversations.replies")
+                .headers(headers.clone())
+                .query(&[
+                    ("channel", channel),
+                    ("ts", thread_ts),
+                    ("limit", "1000"),
+                ]);
+            if let Some(cursor) = cursor.as_deref() {
+                request = request.query(&[("cursor", cursor)]);
+            }
+
+            let response = request
+                .send()
+                .map_err(|err| JsonRpcError::internal_error(format!("slack request failed: {err}")))?;
+
+            let parsed: SlackThreadResponse = response
+                .json()
+                .map_err(|err| JsonRpcError::internal_error(format!("invalid slack response: {err}")))?;
+
+            if !parsed.ok {
+                let error = parsed.error.as_deref().unwrap_or("unknown");
+                return Err(JsonRpcError::internal_error(format!(
+                    "Slack API error: {error}"
+                )));
+            }
+
+            for message in parsed.messages {
+                let Some(ts) = message.get("ts").and_then(Value::as_str) else {
+                    all_messages.push(message);
+                    continue;
+                };
+                if seen_ts.insert(ts.to_string()) {
+                    all_messages.push(message);
+                }
+            }
+
+            cursor = parsed.response_metadata.next_cursor.filter(|cursor| !cursor.is_empty());
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        Ok(all_messages)
+    }
 }
 
 #[cfg(test)]
@@ -470,14 +582,16 @@ mod tests {
     #[test]
     fn tools_list_contains_post_message() {
         let tools = handle_tools_list()["tools"].as_array().expect("tools array");
-        assert_eq!(tools.len(), 4);
+        assert_eq!(tools.len(), 5);
         assert_eq!(tools[0]["name"], "slack.post_message");
         assert_eq!(tools[0]["inputSchema"]["required"], serde_json::json!(["channel", "text"]));
         assert_eq!(tools[1]["name"], "slack_reply");
         assert_eq!(tools[1]["inputSchema"]["required"], serde_json::json!(["channel", "thread_ts", "text"]));
-        assert_eq!(tools[2]["name"], "slack_react");
-        assert_eq!(tools[2]["inputSchema"]["required"], serde_json::json!(["channel", "ts", "emoji"]));
-        assert_eq!(tools[3]["name"], "slack.list_channels");
+        assert_eq!(tools[2]["name"], "slack_get_thread");
+        assert_eq!(tools[2]["inputSchema"]["required"], serde_json::json!(["channel", "thread_ts"]));
+        assert_eq!(tools[3]["name"], "slack_react");
+        assert_eq!(tools[3]["inputSchema"]["required"], serde_json::json!(["channel", "ts", "emoji"]));
+        assert_eq!(tools[4]["name"], "slack.list_channels");
     }
 
     #[test]
