@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::path::{Path, PathBuf};
 
 use roko_core::config::ServeConfig;
+use roko_core::config::schema::SubscriptionConfig;
 use roko_orchestrator::ExecutorConfig;
 
 /// The top-level `roko.toml` document.
@@ -25,6 +26,9 @@ pub struct Config {
     /// Prompt assembly settings.
     #[serde(default)]
     pub prompt: PromptConfig,
+    /// Per-repository configuration blocks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repos: Vec<RepoConfig>,
     /// Gates to run on the agent output, in declaration order.
     #[serde(default, rename = "gate")]
     pub gates: Vec<GateConfig>,
@@ -46,6 +50,7 @@ impl Default for Config {
             auto_plan: false,
             tools: ToolsConfig::default(),
             prompt: PromptConfig::default(),
+            repos: Vec::new(),
             gates: vec![GateConfig::default_shell_true()],
             executor: ExecutorConfig::default(),
             budget: BudgetConfig::default(),
@@ -413,6 +418,26 @@ pub struct PromptFile {
     pub hard_cap: Option<usize>,
 }
 
+/// Per-repository configuration inside `roko.toml`.
+///
+/// Repo-specific subscriptions are additive: they sit alongside the global
+/// subscription set and can narrow behavior for one checkout.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RepoConfig {
+    /// Human-readable repo name.
+    pub name: String,
+    /// Filesystem path to the repo root.
+    pub path: PathBuf,
+    /// Branch name tracked for this repo.
+    pub branch: String,
+    /// Template names active for this repo.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub templates: Vec<String>,
+    /// Repo-specific subscriptions to load in addition to the global set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subscriptions: Vec<SubscriptionConfig>,
+}
+
 /// One gate entry in `roko.toml`. Multiple gates run in declaration order.
 ///
 /// The `kind` field selects the gate type. Each variant has its own fields
@@ -541,6 +566,9 @@ pub struct ConfigLayer {
     /// API serving options overrides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serve: Option<ServeLayer>,
+    /// Per-repository configuration blocks.
+    #[serde(default, rename = "repos", skip_serializing_if = "Option::is_none")]
+    pub repos: Option<Vec<RepoConfig>>,
 }
 
 impl ConfigLayer {
@@ -596,6 +624,9 @@ impl ConfigLayer {
                 None => s,
             });
         }
+        if let Some(repos) = overlay.repos {
+            self.repos = Some(repos);
+        }
         self
     }
 
@@ -609,6 +640,7 @@ impl ConfigLayer {
             && self.gates.is_none()
             && self.executor.is_none()
             && self.serve.is_none()
+            && self.repos.is_none()
     }
 
     /// Resolve into a concrete [`Config`], filling missing fields with defaults.
@@ -698,6 +730,7 @@ impl ConfigLayer {
             auto_plan,
             tools,
             prompt,
+            repos: self.repos.unwrap_or_default(),
             gates,
             executor,
             budget: BudgetConfig::default(),
@@ -1324,6 +1357,7 @@ command = "cat"
         assert!(cfg.tools.global_denied.is_empty());
         assert_eq!(cfg.tools.mcp_timeout_secs, 30);
         assert_eq!(cfg.prompt.token_budget, 10_000);
+        assert!(cfg.repos.is_empty());
     }
 
     #[test]
@@ -1345,6 +1379,16 @@ mcp_timeout_secs = 45
 [prompt]
 token_budget = 20000
 role = "You are a senior Rust engineer."
+
+[[repos]]
+name = "roko"
+path = "/Users/will/dev/nunchi/roko/roko"
+branch = "main"
+templates = ["pr-reviewer", "test-writer", "ci-fixer"]
+
+[[repos.subscriptions]]
+template = "code-implementer"
+trigger = "github:issues:labeled:implement"
 
 [[gate]]
 kind = "shell"
@@ -1370,6 +1414,19 @@ build_system = "cargo"
         );
         assert_eq!(cfg.tools.mcp_timeout_secs, 45);
         assert_eq!(cfg.prompt.token_budget, 20_000);
+        assert_eq!(cfg.repos.len(), 1);
+        assert_eq!(cfg.repos[0].name, "roko");
+        assert_eq!(
+            cfg.repos[0].templates,
+            vec![
+                "pr-reviewer".to_string(),
+                "test-writer".to_string(),
+                "ci-fixer".to_string()
+            ]
+        );
+        assert_eq!(cfg.repos[0].subscriptions.len(), 1);
+        assert_eq!(cfg.repos[0].subscriptions[0].template, "code-implementer");
+        assert_eq!(cfg.repos[0].subscriptions[0].trigger, "github:issues:labeled:implement");
         assert_eq!(cfg.gates.len(), 2);
     }
 
@@ -1505,6 +1562,7 @@ auto_plan = true
         assert_eq!(parsed.tools.prefer_mcp, cfg.tools.prefer_mcp);
         assert_eq!(parsed.tools.global_denied, cfg.tools.global_denied);
         assert_eq!(parsed.tools.mcp_timeout_secs, cfg.tools.mcp_timeout_secs);
+        assert_eq!(parsed.repos.len(), cfg.repos.len());
         assert_eq!(parsed.gates.len(), cfg.gates.len());
         assert_eq!(parsed.serve.auth.enabled, cfg.serve.auth.enabled);
         assert_eq!(parsed.serve.auth.api_key, cfg.serve.auth.api_key);

@@ -116,6 +116,7 @@ pub fn run_init_wizard(target: Option<PathBuf>, inputs: &WizardInputs) -> Result
             role: Some(role),
             files: None,
         }),
+        repos: None,
         gates,
         executor: Some(default_executor_layer()),
         serve: Some(ServeLayer {
