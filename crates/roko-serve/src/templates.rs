@@ -345,6 +345,7 @@ impl TemplateRegistry {
         signal: Option<&Signal>,
     ) -> String {
         let mut values = params.clone();
+        let variant = values.remove("variant").unwrap_or_default();
         values.insert("timestamp".to_string(), Utc::now().to_rfc3339());
         values.insert(
             "env.GITHUB_TOKEN".to_string(),
@@ -362,7 +363,17 @@ impl TemplateRegistry {
             );
         }
 
-        let mut out = template.system_prompt.clone();
+        let mut out = match variant.as_str() {
+            "concise" => format!(
+                "{}\n\n[STYLE: Be concise. Max 5 inline comments.]",
+                template.system_prompt
+            ),
+            "thorough" => format!(
+                "{}\n\n[STYLE: Be thorough. Review every file.]",
+                template.system_prompt
+            ),
+            _ => template.system_prompt.clone(),
+        };
         for (key, value) in values {
             let marker = format!("{{{{{key}}}}}");
             out = out.replace(&marker, &value);
@@ -569,5 +580,43 @@ mcp_servers = ["github", "missing-server"]
         assert!(!rendered.contains("{{signal.payload.repository.full_name}}"));
         assert!(!rendered.contains("{{env.GITHUB_TOKEN}}"));
         assert!(!rendered.contains("{{timestamp}}"));
+    }
+
+    #[test]
+    fn render_prompt_applies_variant_style_suffixes() {
+        let template = AgentTemplate {
+            name: "demo".into(),
+            description: "Demo".into(),
+            model: "sonnet".into(),
+            role: "implementer".into(),
+            system_prompt: "You are a reviewer.".into(),
+            max_turns: 1,
+            output_format: TemplateOutputFormat::Markdown,
+            mcp_servers: Vec::new(),
+            allowed_tools: Vec::new(),
+            denied_tools: Vec::new(),
+            experiment: None,
+        };
+
+        let concise = TemplateRegistry::render_prompt(
+            &template,
+            &HashMap::from([(String::from("variant"), String::from("concise"))]),
+        );
+        assert_eq!(
+            concise,
+            "You are a reviewer.\n\n[STYLE: Be concise. Max 5 inline comments.]"
+        );
+
+        let thorough = TemplateRegistry::render_prompt(
+            &template,
+            &HashMap::from([(String::from("variant"), String::from("thorough"))]),
+        );
+        assert_eq!(
+            thorough,
+            "You are a reviewer.\n\n[STYLE: Be thorough. Review every file.]"
+        );
+
+        let default = TemplateRegistry::render_prompt(&template, &HashMap::new());
+        assert_eq!(default, "You are a reviewer.");
     }
 }
