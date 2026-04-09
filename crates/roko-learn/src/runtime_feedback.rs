@@ -22,7 +22,9 @@ use crate::costs_log::CostsLog;
 use crate::efficiency::AgentEfficiencyEvent;
 use crate::episode_logger::{Episode, EpisodeLogger, LoggerError};
 use crate::model_router::RoutingContext;
-use crate::pattern_discovery::{EpisodeView, PatternMiner};
+use crate::pattern_discovery::{
+    CrossEpisodeConsolidationReport, CrossEpisodeConsolidator, EpisodeView, PatternMiner,
+};
 use crate::playbook::PlaybookStore;
 use crate::playbook_rules::PlaybookRules;
 use crate::prompt_experiment::ExperimentStore;
@@ -418,6 +420,22 @@ impl LearningRuntime {
         &self.pattern_miner
     }
 
+    /// Run the offline cross-episode consolidation pass over the persisted log.
+    ///
+    /// This loads the current `.roko/episodes.jsonl` batch, vectorizes each
+    /// episode, and returns structural meta-patterns discovered through
+    /// HDC bundling plus k-medoids clustering.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the episode log cannot be read.
+    pub async fn discover_cross_episode_patterns(
+        &self,
+    ) -> Result<CrossEpisodeConsolidationReport, LearningRuntimeError> {
+        let episodes = EpisodeLogger::read_all(&self.paths.episodes_jsonl).await?;
+        Ok(CrossEpisodeConsolidator::default().discover(&episodes))
+    }
+
     /// Borrow cascade router.
     #[must_use]
     pub const fn cascade_router(&self) -> &CascadeRouter {
@@ -713,11 +731,7 @@ impl LearningRuntime {
     }
 
     /// Return the current task arousal with queue-wait motivation applied.
-    pub fn task_arousal_with_queue_wait(
-        &self,
-        task_id: impl AsRef<str>,
-        queued_hours: f64,
-    ) -> f64 {
+    pub fn task_arousal_with_queue_wait(&self, task_id: impl AsRef<str>, queued_hours: f64) -> f64 {
         let base = self.task_arousal(task_id);
         let bump = AffectEngine::queue_wait_arousal(queued_hours);
         (base + bump).clamp(-1.0, 1.0)

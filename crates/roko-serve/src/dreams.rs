@@ -3,8 +3,8 @@
 //! The loop watches for idle periods in daemon mode, then runs the existing
 //! `roko-dreams` batch processor when enough new episodes have accumulated.
 
-use std::fs;
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,12 +14,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use roko_agent::{Agent, AgentResult, ClaudeCliAgent, ExecAgent};
 use roko_core::{Context as RokoContext, Signal};
-use roko_dreams::cycle::{DreamCycleReport, DreamOutcome};
 use roko_dreams::DreamCycle;
-use roko_learn::{
-    episode_logger::EpisodeLogger,
-    playbook::PlaybookStore,
-};
+use roko_dreams::cycle::{DreamCycleReport, DreamOutcome};
+use roko_learn::{episode_logger::EpisodeLogger, playbook::PlaybookStore};
 use roko_neuro::KnowledgeStore;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant as TokioInstant, interval_at};
@@ -72,8 +69,8 @@ impl DreamAgentConfig {
             }
             DreamReviewAgent::Claude(agent)
         } else {
-            let mut agent = ExecAgent::new(&self.command, self.args.clone())
-                .with_timeout_ms(self.timeout_ms);
+            let mut agent =
+                ExecAgent::new(&self.command, self.args.clone()).with_timeout_ms(self.timeout_ms);
             for (key, value) in &self.env {
                 agent = agent.with_env_var(key, value);
             }
@@ -117,7 +114,10 @@ pub fn start_dream_loop(state: Arc<AppState>, config: DreamLoopConfig) -> JoinHa
 
         let idle_threshold = Duration::from_secs(config.idle_threshold_mins.saturating_mul(60));
         let mut idle_since: Option<TokioInstant> = None;
-        let mut interval = interval_at(TokioInstant::now() + DREAM_CHECK_INTERVAL, DREAM_CHECK_INTERVAL);
+        let mut interval = interval_at(
+            TokioInstant::now() + DREAM_CHECK_INTERVAL,
+            DREAM_CHECK_INTERVAL,
+        );
 
         loop {
             interval.tick().await;
@@ -138,8 +138,8 @@ pub fn start_dream_loop(state: Arc<AppState>, config: DreamLoopConfig) -> JoinHa
                 continue;
             }
 
-            if let Err(err) = maybe_run_dream_cycle(&state, &mut cycle, config.min_episodes_for_dream)
-                .await
+            if let Err(err) =
+                maybe_run_dream_cycle(&state, &mut cycle, config.min_episodes_for_dream).await
             {
                 warn!(error = %err, "dream cycle failed");
             }
@@ -176,10 +176,7 @@ pub fn load_latest_dream_report(report_dir: &Path) -> Result<Option<DreamCycleRe
     Ok(Some(report))
 }
 
-async fn build_dream_cycle(
-    state: &AppState,
-    config: &DreamLoopConfig,
-) -> Result<DreamCycle> {
+async fn build_dream_cycle(state: &AppState, config: &DreamLoopConfig) -> Result<DreamCycle> {
     let episodes = Arc::new(EpisodeLogger::new(state.layout.episodes_path()));
     let knowledge = Arc::new(KnowledgeStore::for_layout(&state.layout));
     let playbooks_root = state.layout.root().join("learn").join("playbooks");
@@ -226,9 +223,7 @@ fn latest_dream_report_path(report_dir: &Path) -> Result<Option<PathBuf>> {
             continue;
         };
 
-        let should_replace = latest
-            .as_ref()
-            .is_none_or(|(current, _)| dt > *current);
+        let should_replace = latest.as_ref().is_none_or(|(current, _)| dt > *current);
         if should_replace {
             latest = Some((dt, path));
         }
@@ -249,7 +244,11 @@ async fn maybe_run_dream_cycle(
     let last_dream_at = cycle.last_dream_at();
     let new_episode_count = episodes
         .iter()
-        .filter(|episode| last_dream_at.map(|cutoff| episode.timestamp > cutoff).unwrap_or(true))
+        .filter(|episode| {
+            last_dream_at
+                .map(|cutoff| episode.timestamp > cutoff)
+                .unwrap_or(true)
+        })
         .count();
 
     if new_episode_count < min_episodes_for_dream {
@@ -258,8 +257,7 @@ async fn maybe_run_dream_cycle(
 
     info!(
         new_episodes = new_episode_count,
-        min_episodes_for_dream,
-        "running dream cycle"
+        min_episodes_for_dream, "running dream cycle"
     );
     let report = cycle.run().await.context("run dream cycle")?;
     info!(

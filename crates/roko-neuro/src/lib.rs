@@ -96,9 +96,9 @@ pub struct KnowledgeEntry {
     pub hdc_vector: Option<Vec<u8>>,
 }
 
+pub mod context;
 /// Episode distillation into durable knowledge candidates.
 pub mod distiller;
-pub mod context;
 /// Helpers for asynchronously processing completed episodes.
 pub mod episode_completion;
 pub mod knowledge_store;

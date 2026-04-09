@@ -8,22 +8,25 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs::OpenOptions;
-use std::io::{BufWriter, Write};
 use std::hash::{Hash, Hasher};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use bardo_primitives::hdc::{HdcVector, text_fingerprint};
+use chrono::{DateTime, Utc};
 use roko_agent::{Agent, AgentResult, nl_to_format::NlToFormatConverter};
 use roko_core::{Body, Context as RokoContext, Kind, Signal};
 use roko_learn::{
     episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage},
     playbook::{Playbook, PlaybookStep, PlaybookStore},
 };
-use roko_neuro::{KnowledgeEntry, KnowledgeKind, KnowledgeStore, tier_progression::{TierProgression, TierProgressionReport}};
+use roko_neuro::{
+    KnowledgeEntry, KnowledgeKind, KnowledgeStore,
+    tier_progression::{TierProgression, TierProgressionReport},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -197,18 +200,18 @@ impl CounterfactualAxis {
 
     fn hypothesis(self, original_value: &str, replacement_value: &str) -> String {
         match self {
-            Self::Plan => format!(
-                "What if plan_id had been {replacement_value} instead of {original_value}?"
-            ),
+            Self::Plan => {
+                format!("What if plan_id had been {replacement_value} instead of {original_value}?")
+            }
             Self::TaskType => format!(
                 "What if task_type had been {replacement_value} instead of {original_value}?"
             ),
-            Self::Model => format!(
-                "What if model had been {replacement_value} instead of {original_value}?"
-            ),
-            Self::Outcome => format!(
-                "What if outcome had been {replacement_value} instead of {original_value}?"
-            ),
+            Self::Model => {
+                format!("What if model had been {replacement_value} instead of {original_value}?")
+            }
+            Self::Outcome => {
+                format!("What if outcome had been {replacement_value} instead of {original_value}?")
+            }
             Self::FailureReason => format!(
                 "What if the failure reason had been {replacement_value} instead of {original_value}?"
             ),
@@ -352,7 +355,10 @@ impl DreamCycle {
         let all_episodes = EpisodeLogger::read_all_lossy(self.episode_store.path())
             .await
             .with_context(|| {
-                format!("read episode log from {}", self.episode_store.path().display())
+                format!(
+                    "read episode log from {}",
+                    self.episode_store.path().display()
+                )
             })?;
         let total_episodes = all_episodes.len();
         let cutoff = self.last_dream_at;
@@ -447,10 +453,7 @@ impl DreamCycle {
         let path = dream_counterfactual_path(self.episode_store.path());
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "create dream counterfactual directory {}",
-                    parent.display()
-                )
+                format!("create dream counterfactual directory {}", parent.display())
             })?;
         }
 
@@ -506,7 +509,13 @@ async fn process_cluster(
         .body(Body::text(prompt))
         .build();
     let response = dispatcher.dispatch(&signal, &RokoContext::now()).await;
-    let review_text = response.output.body.as_text().unwrap_or("").trim().to_string();
+    let review_text = response
+        .output
+        .body
+        .as_text()
+        .unwrap_or("")
+        .trim()
+        .to_string();
     if !review_text.is_empty() {
         outcome.agent_review = Some(review_text.clone());
     }
@@ -561,9 +570,9 @@ async fn process_cluster(
     }
 
     if let Some(text) = outcome.agent_review.as_deref() {
-        outcome
-            .warnings
-            .push(format!("agent review returned a non-empty response: {text}"));
+        outcome.warnings.push(format!(
+            "agent review returned a non-empty response: {text}"
+        ));
     } else {
         outcome
             .warnings
@@ -640,16 +649,15 @@ fn build_counterfactuals(
             );
 
             if candidates.is_empty() {
-                candidates.push((axis.fallback_replacement(&original_value), "synthetic".to_string()));
+                candidates.push((
+                    axis.fallback_replacement(&original_value),
+                    "synthetic".to_string(),
+                ));
             }
 
             for (rank, (replacement_value, source)) in candidates.into_iter().enumerate() {
-                let counterfactual_vector = encode_counterfactual_vector(
-                    cluster,
-                    axis,
-                    &replacement_value,
-                    rank + 1,
-                );
+                let counterfactual_vector =
+                    encode_counterfactual_vector(cluster, axis, &replacement_value, rank + 1);
                 let similarity = base_vector.similarity(&counterfactual_vector);
                 let hypothesis = axis.hypothesis(&original_value, &replacement_value);
                 records.push(DreamCounterfactualRecord {
@@ -703,7 +711,10 @@ fn select_counterfactual_candidates(
         .collect();
 
     if selected.is_empty() && !original_value.trim().is_empty() {
-        selected.push((axis.fallback_replacement(original_value), "synthetic".to_string()));
+        selected.push((
+            axis.fallback_replacement(original_value),
+            "synthetic".to_string(),
+        ));
     }
 
     selected
@@ -754,14 +765,8 @@ fn encode_counterfactual_vector(
         CounterfactualAxis::FailureReason => replacement_value.to_string(),
         _ => failure_reason,
     };
-    encode_cluster_vector(
-        &plan_id,
-        &task_type,
-        &outcome,
-        &model,
-        &failure_reason,
-    )
-    .permute(axis.permutation() + rank * 17)
+    encode_cluster_vector(&plan_id, &task_type, &outcome, &model, &failure_reason)
+        .permute(axis.permutation() + rank * 17)
 }
 
 fn vector_signature(vector: &HdcVector) -> u64 {
@@ -957,7 +962,8 @@ impl DreamDistillationCandidate {
         }
 
         if self.source_episodes.is_empty() {
-            self.source_episodes.extend(fallback_sources.iter().cloned());
+            self.source_episodes
+                .extend(fallback_sources.iter().cloned());
         }
 
         self.source_episodes.sort();
@@ -991,7 +997,10 @@ impl DreamDistillationCandidate {
     }
 }
 
-fn parse_cluster_response(response: &str, fallback_sources: &[String]) -> Result<Vec<KnowledgeEntry>> {
+fn parse_cluster_response(
+    response: &str,
+    fallback_sources: &[String],
+) -> Result<Vec<KnowledgeEntry>> {
     let schema = dream_distillation_schema();
     let extractor = NlToFormatConverter::new();
     let extracted = extractor
@@ -1152,7 +1161,10 @@ fn build_regression_entry(cluster: &DreamCluster, created_at: DateTime<Utc>) -> 
     }
 }
 
-fn build_mistake_insight_entry(cluster: &DreamCluster, created_at: DateTime<Utc>) -> KnowledgeEntry {
+fn build_mistake_insight_entry(
+    cluster: &DreamCluster,
+    created_at: DateTime<Utc>,
+) -> KnowledgeEntry {
     let reason = summarize_failure_reason(cluster);
     let failing_gates = summarize_failure_gates(cluster);
     let mut content = format!(
@@ -1168,7 +1180,8 @@ fn build_mistake_insight_entry(cluster: &DreamCluster, created_at: DateTime<Utc>
             KnowledgeKind::Insight,
             &content,
             &cluster.episode_ids,
-            &[knowledge_kind_tag(KnowledgeKind::Insight).to_string(),
+            &[
+                knowledge_kind_tag(KnowledgeKind::Insight).to_string(),
                 "dream".to_string(),
                 "mistake".to_string(),
                 "failure".to_string(),
@@ -1540,7 +1553,11 @@ mod tests {
     async fn run_clusters_and_writes_report() {
         let tmp = TempDir::new().expect("tempdir");
         let episodes_path = tmp.path().join(".roko").join("episodes.jsonl");
-        let knowledge_path = tmp.path().join(".roko").join("neuro").join("knowledge.jsonl");
+        let knowledge_path = tmp
+            .path()
+            .join(".roko")
+            .join("neuro")
+            .join("knowledge.jsonl");
         let playbooks_root = tmp.path().join(".roko").join("playbooks");
         let logger = EpisodeLogger::new(&episodes_path);
         let knowledge_store = Arc::new(KnowledgeStore::new(&knowledge_path));
@@ -1594,13 +1611,13 @@ mod tests {
         let counterfactual_text = tokio::fs::read_to_string(&counterfactual_path)
             .await
             .expect("counterfactual log");
-        let first_line = counterfactual_text.lines().next().expect("counterfactual line");
+        let first_line = counterfactual_text
+            .lines()
+            .next()
+            .expect("counterfactual line");
         let counterfactual: Value =
             serde_json::from_str(first_line).expect("parse counterfactual json");
-        assert_eq!(
-            counterfactual["focus_axis"].as_str(),
-            Some("plan_id")
-        );
+        assert_eq!(counterfactual["focus_axis"].as_str(), Some("plan_id"));
         assert!(counterfactual["similarity"].as_f64().unwrap_or_default() > 0.0);
 
         let saved_playbooks = playbook_store.list().await.expect("list playbooks");

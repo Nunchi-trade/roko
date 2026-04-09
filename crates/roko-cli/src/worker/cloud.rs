@@ -14,9 +14,9 @@ use roko_core::obs::MetricRegistry;
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::PlanRunner;
 use crate::config::Config;
 use crate::serve::deploy::CloudExecutionConfig;
-use crate::PlanRunner;
 
 /// Cloud execution parameters for a single plan run.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -109,11 +109,9 @@ impl CloudExecutionParams {
             params.get("github_repo").cloned(),
         ) {
             (Some(owner), Some(repo)) => (owner, repo),
-            _ => parse_owner_repo(
-                params
-                    .get("repo_url")
-                    .ok_or_else(|| anyhow!("missing required params: github_owner/github_repo or repo_url"))?,
-            )?,
+            _ => parse_owner_repo(params.get("repo_url").ok_or_else(|| {
+                anyhow!("missing required params: github_owner/github_repo or repo_url")
+            })?)?,
         };
 
         Ok(Self {
@@ -132,18 +130,13 @@ impl CloudExecutionParams {
             pr_title: params.get("pr_title").cloned(),
             pr_body: params.get("pr_body").cloned(),
             plan_dir: params.get("plan_dir").cloned().map(PathBuf::from),
-            workspace_dir: params
-                .get("workspace_dir")
-                .cloned()
-                .map(PathBuf::from),
+            workspace_dir: params.get("workspace_dir").cloned().map(PathBuf::from),
             github_mcp_command: params.get("github_mcp_command").cloned(),
-            github_mcp_args: params
-                .get("github_mcp_args")
-                .map(|args| {
-                    args.split_whitespace()
-                        .map(str::to_string)
-                        .collect::<Vec<_>>()
-                }),
+            github_mcp_args: params.get("github_mcp_args").map(|args| {
+                args.split_whitespace()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            }),
         })
     }
 
@@ -156,7 +149,10 @@ impl CloudExecutionParams {
             repo: self.github_repo.clone(),
             github_token: self.github_token.clone(),
             plan_slug: self.plan_slug.clone(),
-            base_branch: self.base_branch.clone().unwrap_or_else(|| "main".to_string()),
+            base_branch: self
+                .base_branch
+                .clone()
+                .unwrap_or_else(|| "main".to_string()),
             pr_title: self
                 .pr_title
                 .clone()
@@ -368,7 +364,9 @@ pub async fn git_push(workspace: &Path, branch: &str, token: &str) -> Result<()>
         return Err(git_error("git remote get-url origin", &origin_output, None));
     }
 
-    let origin = String::from_utf8_lossy(&origin_output.stdout).trim().to_string();
+    let origin = String::from_utf8_lossy(&origin_output.stdout)
+        .trim()
+        .to_string();
     let push_url = rewrite_git_https_url(&origin, token);
     let output = tokio::process::Command::new("git")
         .args(["push", &push_url, branch])
@@ -396,11 +394,9 @@ pub async fn git_cleanup(workspace: &Path) -> Result<()> {
 
 /// Call the GitHub MCP `github.create_pr` tool.
 pub async fn github_create_pr(workspace: &Path, execution: &CloudExecution) -> Result<String> {
-    let transport = StdioTransport::spawn(
-        &execution.github_mcp_command,
-        &execution.github_mcp_args,
-    )
-    .map_err(|err| anyhow!("spawn GitHub MCP server: {err}"))?;
+    let transport =
+        StdioTransport::spawn(&execution.github_mcp_command, &execution.github_mcp_args)
+            .map_err(|err| anyhow!("spawn GitHub MCP server: {err}"))?;
     let client = McpClient::new(transport);
     client
         .initialize()
@@ -428,9 +424,12 @@ pub async fn github_create_pr(workspace: &Path, execution: &CloudExecution) -> R
         .find_map(|content| content.text.clone())
         .ok_or_else(|| anyhow!("github.create_pr returned no text content"))?;
 
-    tokio::fs::write(workspace.join(".roko").join("implementation-pr.json"), &text)
-        .await
-        .ok();
+    tokio::fs::write(
+        workspace.join(".roko").join("implementation-pr.json"),
+        &text,
+    )
+    .await
+    .ok();
 
     Ok(text)
 }
@@ -506,7 +505,11 @@ mod tests {
             github_mcp_args: Vec::new(),
         };
         assert_eq!(execution.branch_name(), "impl/p07-autofix");
-        assert!(execution.clone_url().contains("x-access-token:token@github.com/nunchi/roko.git"));
+        assert!(
+            execution
+                .clone_url()
+                .contains("x-access-token:token@github.com/nunchi/roko.git")
+        );
         assert_eq!(execution.repo_url(), "https://github.com/nunchi/roko.git");
     }
 

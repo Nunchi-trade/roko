@@ -216,17 +216,18 @@ fn github_signal_kind(event_type: &str, payload: &Value) -> Option<Kind> {
             .and_then(Value::as_str)
             .and_then(|action| match action {
                 "opened" => Some(Kind::Custom(signal_kinds::GITHUB_PR_OPENED.into())),
-                "closed" if payload
-                    .get("pull_request")
-                    .and_then(|pr| pr.get("merged"))
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
-                    && payload
+                "closed"
+                    if payload
                         .get("pull_request")
-                        .and_then(|pr| pr.get("head"))
-                        .and_then(|head| head.get("ref"))
-                        .and_then(Value::as_str)
-                        .is_some_and(|branch| branch.starts_with("plan/")) =>
+                        .and_then(|pr| pr.get("merged"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                        && payload
+                            .get("pull_request")
+                            .and_then(|pr| pr.get("head"))
+                            .and_then(|head| head.get("ref"))
+                            .and_then(Value::as_str)
+                            .is_some_and(|branch| branch.starts_with("plan/")) =>
                 {
                     Some(Kind::Custom(signal_kinds::PRD_PLAN_APPROVED.into()))
                 }

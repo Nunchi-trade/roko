@@ -392,7 +392,9 @@ fn render_signal_chunk(signal: &Signal) -> String {
     };
     let body = match &signal.body {
         Body::Text(text) => text.clone(),
-        Body::Json(value) => serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
+        Body::Json(value) => {
+            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+        }
         Body::Bytes(bytes) => format!("<{} bytes>", bytes.len()),
         Body::Empty => String::from("<empty>"),
     };
@@ -409,7 +411,11 @@ fn render_signal_chunk(signal: &Signal) -> String {
 
 fn episode_summary(episode: &Episode) -> String {
     let mut parts = Vec::new();
-    if let Some(reason) = episode.failure_reason.as_deref().filter(|s| !s.trim().is_empty()) {
+    if let Some(reason) = episode
+        .failure_reason
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
         parts.push(format!("Failure: {reason}"));
     }
     if !episode.gate_verdicts.is_empty() {
@@ -460,7 +466,11 @@ fn gate_pass_ratio(episode: &Episode) -> f64 {
     if episode.gate_verdicts.is_empty() {
         if episode.success { 0.75 } else { 0.35 }
     } else {
-        let passed = episode.gate_verdicts.iter().filter(|verdict| verdict.passed).count() as f64;
+        let passed = episode
+            .gate_verdicts
+            .iter()
+            .filter(|verdict| verdict.passed)
+            .count() as f64;
         (passed / episode.gate_verdicts.len() as f64).clamp(0.0, 1.0)
     }
 }
@@ -494,14 +504,22 @@ fn episode_search_text(episode: &Episode) -> String {
     if let Some(task_title) = extra_string(episode, "task_title") {
         parts.push(task_title);
     }
-    if let Some(task_tags) = episode.extra.get("task_tags").and_then(|value| value.as_array()) {
+    if let Some(task_tags) = episode
+        .extra
+        .get("task_tags")
+        .and_then(|value| value.as_array())
+    {
         for value in task_tags {
             if let Some(tag) = value.as_str() {
                 parts.push(tag.to_string());
             }
         }
     }
-    if let Some(files) = episode.extra.get("files").and_then(|value| value.as_array()) {
+    if let Some(files) = episode
+        .extra
+        .get("files")
+        .and_then(|value| value.as_array())
+    {
         for value in files {
             if let Some(file) = value.as_str() {
                 parts.push(file.to_string());
@@ -523,7 +541,11 @@ fn extra_string(episode: &Episode, key: &str) -> Option<String> {
 
 fn task_query_text(task: &TaskInput) -> String {
     let mut parts = Vec::new();
-    if let Some(desc) = task.description.as_deref().filter(|text| !text.trim().is_empty()) {
+    if let Some(desc) = task
+        .description
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
+    {
         parts.push(desc.to_string());
     }
     if !task.title.trim().is_empty() {
@@ -793,8 +815,10 @@ mod tests {
         ep.timestamp = completed_at;
         ep.agent_template = "implementer".into();
         ep.success = success;
-        ep.extra.insert("plan_id".into(), serde_json::json!(plan_id));
-        ep.extra.insert("task_title".into(), serde_json::json!(task_id));
+        ep.extra
+            .insert("plan_id".into(), serde_json::json!(plan_id));
+        ep.extra
+            .insert("task_title".into(), serde_json::json!(task_id));
         ep
     }
 
@@ -872,7 +896,9 @@ mod tests {
         let file_chunk = inline_file_chunk(task_text);
         let signal_chunk = signal_chunk_for_test(task_text);
 
-        assert!(score_chunk(task_text, &file_chunk, None) > score_chunk(task_text, &signal_chunk, None));
+        assert!(
+            score_chunk(task_text, &file_chunk, None) > score_chunk(task_text, &signal_chunk, None)
+        );
     }
 
     #[test]
@@ -881,7 +907,10 @@ mod tests {
         let knowledge_chunk = knowledge_chunk_for_test(task_text);
         let signal_chunk = signal_chunk_for_test(task_text);
 
-        assert!(score_chunk(task_text, &knowledge_chunk, None) > score_chunk(task_text, &signal_chunk, None));
+        assert!(
+            score_chunk(task_text, &knowledge_chunk, None)
+                > score_chunk(task_text, &signal_chunk, None)
+        );
     }
 
     #[test]
@@ -915,7 +944,8 @@ mod tests {
         };
 
         assert!(
-            score_chunk(task_text, &dream_chunk, None) > score_chunk(task_text, &regular_chunk, None)
+            score_chunk(task_text, &dream_chunk, None)
+                > score_chunk(task_text, &regular_chunk, None)
         );
     }
 
@@ -1015,7 +1045,8 @@ mod tests {
         .expect("write episodes");
 
         let signals_path = workdir.join(".roko/signals.jsonl");
-        std::fs::create_dir_all(signals_path.parent().expect("signals parent")).expect("signals dir");
+        std::fs::create_dir_all(signals_path.parent().expect("signals parent"))
+            .expect("signals dir");
         let signals: Vec<_> = (0..12)
             .map(|idx| signal("plan-1", "task:update", &format!("signal {idx}"), idx))
             .collect();
@@ -1035,10 +1066,11 @@ mod tests {
         let task_text = task_query_text(&task);
         let chunks = assembler.gather(workdir, &task, "plan-1", &signals_path);
 
-        assert!(chunks.iter().any(|chunk| matches!(
-            &chunk.source,
-            ContextSource::KnowledgeEntry { .. }
-        )));
+        assert!(
+            chunks
+                .iter()
+                .any(|chunk| matches!(&chunk.source, ContextSource::KnowledgeEntry { .. }))
+        );
         assert!(chunks.iter().any(|chunk| matches!(
             &chunk.source,
             ContextSource::Episode { plan_id, .. } if plan_id == "plan-1"
@@ -1054,9 +1086,12 @@ mod tests {
                 .count(),
             10
         );
-        assert!(chunks
-            .windows(2)
-            .all(|pair| score_chunk(&task_text, &pair[0], None) >= score_chunk(&task_text, &pair[1], None)));
+        assert!(
+            chunks
+                .windows(2)
+                .all(|pair| score_chunk(&task_text, &pair[0], None)
+                    >= score_chunk(&task_text, &pair[1], None))
+        );
     }
 
     #[test]
@@ -1131,7 +1166,8 @@ mod tests {
             max_loc: None,
         };
         let signals_path = workdir.join(".roko/signals.jsonl");
-        std::fs::create_dir_all(signals_path.parent().expect("signals parent")).expect("signals dir");
+        std::fs::create_dir_all(signals_path.parent().expect("signals parent"))
+            .expect("signals dir");
         std::fs::write(&signals_path, "").expect("write empty signals");
 
         let high_arousal = ContextAssembler::new(knowledge_store.clone(), episode_store.clone())
@@ -1202,11 +1238,16 @@ mod tests {
         let compressed = assembler.compress(chunks);
 
         assert_eq!(compressed.len(), 1);
-        assert_eq!(compressed[0].content, "top chunk top chunk top chunk top chunk");
-        assert!(compressed
-            .iter()
-            .map(|chunk| estimate_chunk_tokens(&chunk.content))
-            .sum::<usize>()
-            <= 12);
+        assert_eq!(
+            compressed[0].content,
+            "top chunk top chunk top chunk top chunk"
+        );
+        assert!(
+            compressed
+                .iter()
+                .map(|chunk| estimate_chunk_tokens(&chunk.content))
+                .sum::<usize>()
+                <= 12
+        );
     }
 }

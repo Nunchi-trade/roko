@@ -12,8 +12,8 @@ use serde_json::json;
 use tracing::{error, info};
 
 use crate::config::Config;
-use crate::worker::cloud::run_code_implementer_cloud;
 use crate::serve::templates::TemplateRegistry;
+use crate::worker::cloud::run_code_implementer_cloud;
 
 use super::WorkerState;
 

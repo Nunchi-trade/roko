@@ -5,10 +5,10 @@
 //! role-template identities from [`crate::templates`] and exposes a typed API
 //! suitable for both single-shot and orchestrated execution paths.
 
-use crate::prompt::{PromptComposer, PromptSection};
-use crate::prompt::estimate_tokens;
-use crate::scorer::SectionScorer;
 use crate::PadState;
+use crate::prompt::estimate_tokens;
+use crate::prompt::{PromptComposer, PromptSection};
+use crate::scorer::SectionScorer;
 use crate::system_prompt_builder::SystemPromptBuilder;
 use crate::templates::RolePromptTemplate;
 use crate::templates::common::CONTEXT_LAYOUT_STANZA;
@@ -405,7 +405,9 @@ mod tests {
         let ctx = TaskContext::new("Implement task wiring")
             .with_plan_id("042-golem-mortality")
             .with_workspace("roko-cli orchestration")
-            .with_context("## Relevant Context\n\n### Knowledge\n- [Heuristic] Keep the prompt compact.")
+            .with_context(
+                "## Relevant Context\n\n### Knowledge\n- [Heuristic] Keep the prompt compact.",
+            )
             .with_domain_notes("Focus on runtime prompt-path parity.");
         let spec = RoleSystemPromptSpec::new(AgentRole::Implementer, ctx, "Read,Edit,Bash")
             .with_extra_conventions("Prefer additive changes.");

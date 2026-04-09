@@ -6,7 +6,5 @@
 
 pub mod cycle;
 
-pub use roko_golem::{
-    DreamsEngine, GolemSubsystemId, GolemSubsystemSummary, ScaffoldEngine,
-};
 pub use cycle::{AgentDispatcher, DreamCycle, DreamCycleReport};
+pub use roko_golem::{DreamsEngine, GolemSubsystemId, GolemSubsystemSummary, ScaffoldEngine};

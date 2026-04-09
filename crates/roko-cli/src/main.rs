@@ -22,8 +22,8 @@ use roko_cli::{
     PageId, PipeMode, Plan, PlanSummary, ReplMode, RepoRegistry, SessionStatus, Source,
     WizardInputs, config_cmd, load_layered, run_init_wizard, run_once,
 };
-use roko_core::config::schema::RokoConfig;
 use roko_core::config::ServeDeployWebhookConfig;
+use roko_core::config::schema::RokoConfig;
 use roko_core::{ContentHash, Context, Kind, Query, Substrate};
 use roko_core::{Headlines, TaskMetric, compute_headlines};
 use roko_fs::{FileSubstrate, FsObservabilitySinks, RokoLayout};
@@ -2776,7 +2776,10 @@ async fn cmd_dream(cli: &Cli, workdir: Option<PathBuf>) -> Result<i32> {
         if let Some(processed_through) = report.processed_through {
             println!("processed through: {processed_through}");
         }
-        println!("report saved under: {}", workdir.join(".roko").join("dreams").display());
+        println!(
+            "report saved under: {}",
+            workdir.join(".roko").join("dreams").display()
+        );
     }
 
     Ok(EXIT_SUCCESS)

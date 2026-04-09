@@ -35,9 +35,7 @@ use crate::config::RepoRegistry;
 use crate::load_layered;
 use crate::serve_runtime::RokoCliRuntime;
 use roko_core::config::load_config;
-use roko_serve::{
-    self, deploy, dispatch, dreams, feedback, fswatcher, scheduler, state::AppState,
-};
+use roko_serve::{self, deploy, dispatch, dreams, feedback, fswatcher, scheduler, state::AppState};
 
 /// State of the headless daemon.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -954,8 +954,22 @@ mod tests {
         let episodes = vec![
             episode("ep-1", "gate_success", "Implementer", "compile", true, true),
             episode("ep-2", "gate_success", "Implementer", "compile", true, true),
-            episode("ep-3", "gate_success", "Implementer", "compile", true, false),
-            episode("ep-4", "gate_success", "Implementer", "compile", true, false),
+            episode(
+                "ep-3",
+                "gate_success",
+                "Implementer",
+                "compile",
+                true,
+                false,
+            ),
+            episode(
+                "ep-4",
+                "gate_success",
+                "Implementer",
+                "compile",
+                true,
+                false,
+            ),
         ];
 
         let mut report = TierProgressionReport {

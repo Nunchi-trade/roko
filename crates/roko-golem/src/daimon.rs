@@ -8,8 +8,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use roko_core::{Body, Kind, Provenance, Signal};
+use serde::{Deserialize, Serialize};
 
 use crate::{GolemSubsystemId, GolemSubsystemSummary, ScaffoldEngine};
 
@@ -186,19 +186,14 @@ impl AffectEngine {
         let signals_path = self.signals_path();
         let (state, dirty, previous_state) = {
             let mut dirty = false;
-            let state = self
-                .states
-                .entry(task_id.to_owned())
-                .or_insert_with(|| {
-                    dirty = true;
-                    AffectState::neutral(now)
-                });
+            let state = self.states.entry(task_id.to_owned()).or_insert_with(|| {
+                dirty = true;
+                AffectState::neutral(now)
+            });
             let previous_state = state.clone();
 
-            let elapsed_hours = now
-                .signed_duration_since(state.updated_at)
-                .num_seconds() as f64
-                / 3600.0;
+            let elapsed_hours =
+                now.signed_duration_since(state.updated_at).num_seconds() as f64 / 3600.0;
             if elapsed_hours > 0.0 {
                 decay_state(state, elapsed_hours, self.half_life_hours);
                 dirty = true;
@@ -274,7 +269,13 @@ impl AffectEngine {
     #[must_use]
     pub fn on_blocked(&mut self, task_id: impl Into<String>, blocker_count: usize) -> AffectState {
         let blockers = blocker_count.max(1).min(5) as f64;
-        self.adjust(task_id.into(), 0.0, blockers * 0.05, -(blockers * 0.08), -0.02 * blockers)
+        self.adjust(
+            task_id.into(),
+            0.0,
+            blockers * 0.05,
+            -(blockers * 0.08),
+            -0.02 * blockers,
+        )
     }
 
     /// Queue-wait motivation signal.
@@ -336,10 +337,8 @@ impl AffectEngine {
                 .or_insert_with(|| AffectState::neutral(now));
             let previous = state.clone();
 
-            let elapsed_hours = now
-                .signed_duration_since(state.updated_at)
-                .num_seconds() as f64
-                / 3600.0;
+            let elapsed_hours =
+                now.signed_duration_since(state.updated_at).num_seconds() as f64 / 3600.0;
             if elapsed_hours > 0.0 {
                 decay_state(state, elapsed_hours, self.half_life_hours);
             }
@@ -483,7 +482,6 @@ impl AffectEngine {
         std::fs::rename(&tmp, path)?;
         Ok(())
     }
-
 }
 
 fn decay_factor(delta_hours: f64, half_life_hours: f64) -> f64 {
@@ -730,9 +728,7 @@ impl ScaffoldEngine for DaimonEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        AffectBehaviorStrategy, AffectEngine, AffectOctant, AffectState,
-    };
+    use super::{AffectBehaviorStrategy, AffectEngine, AffectOctant, AffectState};
     use chrono::Utc;
     use roko_core::Signal;
     use std::path::{Path, PathBuf};

@@ -1490,14 +1490,14 @@ fn render_active_agents_table(
             Constraint::Length(10),
         ],
     )
-        .header(
-            Row::new(vec![
-                Cell::from("aff"),
-                Cell::from("agent ID"),
-                Cell::from("model"),
-                Cell::from("task"),
-                Cell::from("role"),
-                Cell::from("turns"),
+    .header(
+        Row::new(vec![
+            Cell::from("aff"),
+            Cell::from("agent ID"),
+            Cell::from("model"),
+            Cell::from("task"),
+            Cell::from("role"),
+            Cell::from("turns"),
             Cell::from("tokens used"),
             Cell::from("cost"),
             Cell::from("uptime"),

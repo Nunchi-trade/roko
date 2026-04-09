@@ -6,8 +6,8 @@
 //! — it returns [`ExecutorAction`]s. This module dispatches those actions to
 //! real agents, gates, and git, then feeds results back as events.
 
-use std::collections::{HashMap, HashSet};
 use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1097,7 +1097,8 @@ impl TaskTracker {
         let ready_ids = self.ready_task_ids(completed_plans);
         let ready_set: HashSet<String> = ready_ids.into_iter().collect();
 
-        self.ready_since_ms.retain(|task_id, _| ready_set.contains(task_id));
+        self.ready_since_ms
+            .retain(|task_id, _| ready_set.contains(task_id));
         for task_id in ready_set {
             self.ready_since_ms.entry(task_id).or_insert(now);
         }
@@ -3633,11 +3634,9 @@ impl PlanRunner {
                                     })
                                     .unwrap_or_else(|| task_id.to_string());
                                 let commit_message = format!("task: {task_title}");
-                                if let Err(e) = crate::worker::cloud::git_commit(
-                                    &exec_dir,
-                                    &commit_message,
-                                )
-                                .await
+                                if let Err(e) =
+                                    crate::worker::cloud::git_commit(&exec_dir, &commit_message)
+                                        .await
                                 {
                                     tracing::error!(
                                         "[orchestrate] cloud commit failed for {plan_id}/{task_id}: {e}"
@@ -3645,9 +3644,7 @@ impl PlanRunner {
                                     self.apply_event_and_emit(
                                         plan_id,
                                         task_id,
-                                        &ExecutorEvent::Fatal(format!(
-                                            "cloud commit failed: {e}"
-                                        )),
+                                        &ExecutorEvent::Fatal(format!("cloud commit failed: {e}")),
                                         "failed",
                                     );
                                     return;
@@ -3666,9 +3663,7 @@ impl PlanRunner {
                                     self.apply_event_and_emit(
                                         plan_id,
                                         task_id,
-                                        &ExecutorEvent::Fatal(format!(
-                                            "cloud push failed: {e}"
-                                        )),
+                                        &ExecutorEvent::Fatal(format!("cloud push failed: {e}")),
                                         "failed",
                                     );
                                     return;
@@ -6571,8 +6566,7 @@ impl PlanRunner {
             .unwrap_or(true);
         if use_cascade {
             let cascade_router = self.learning.cascade_router();
-            let routing_ctx =
-                cascade_routing_context(self, plan_id, task, role, task_def.as_ref());
+            let routing_ctx = cascade_routing_context(self, plan_id, task, role, task_def.as_ref());
             let selection = cascade_router.route(&routing_ctx);
             let observations = cascade_router.total_observations();
             if observations > roko_learn::model_router::COLD_START_THRESHOLD {
@@ -8326,10 +8320,8 @@ fn build_system_prompt_with_context_validated(
     if let Some(context) = context_layer.filter(|context| !context.trim().is_empty()) {
         task_context = task_context.with_context(context);
     }
-    Ok(
-        RoleSystemPromptSpec::new(role, task_context, tools_csv)
-            .build_with_context_window(context_window_tokens)?,
-    )
+    Ok(RoleSystemPromptSpec::new(role, task_context, tools_csv)
+        .build_with_context_window(context_window_tokens)?)
 }
 
 fn effective_context_window_tokens(config: &Config) -> usize {

@@ -27,8 +27,8 @@
 //!
 //! Anti-pattern #8: **no `std::fs`**. All content arrives via builder methods.
 
-use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
 use crate::PadState;
+use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
 
 /// A composable system prompt built from 7 layers.
 ///
@@ -438,7 +438,10 @@ mod tests {
         assert!(pos_tools < pos_domain, "tools before domain");
         assert!(pos_domain < pos_context, "domain before context");
         assert!(pos_context < pos_anti, "context before anti-patterns");
-        assert!(pos_anti < pos_affect, "anti-patterns before affect guidance");
+        assert!(
+            pos_anti < pos_affect,
+            "anti-patterns before affect guidance"
+        );
         assert!(pos_affect < pos_task, "affect guidance before task");
     }
 

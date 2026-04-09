@@ -1,4 +1,5 @@
-//! Pattern discovery — mines recurring action trigrams across episode logs.
+//! Pattern discovery — mines recurring action trigrams and cross-episode
+//! structural meta-patterns across episode logs.
 //!
 //! `PatternMiner` consumes an iterable stream of episode-like observations
 //! (types that implement the [`EpisodeView`] trait) and counts how often
@@ -37,7 +38,11 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+use bardo_primitives::HdcVector;
 use serde::{Deserialize, Serialize};
+
+use crate::episode_logger::Episode;
+use crate::hdc_clustering::{KMedoidsConfig, k_medoids};
 
 /// Read-only projection of an episode that is sufficient for trigram mining.
 ///
@@ -237,6 +242,385 @@ impl PatternMiner {
     pub fn distinct_trigrams(&self) -> usize {
         self.stats.len()
     }
+}
+
+/// A consolidated structural pattern discovered across multiple unrelated episodes.
+///
+/// The report intentionally ignores task-specific identifiers such as
+/// `task_id` so that structurally similar but otherwise unrelated episodes can
+/// cluster together.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CrossEpisodeMetaPattern {
+    /// Stable string id ("meta-pattern:<signature>").
+    pub id: String,
+    /// Index of the medoid episode within the source slice.
+    pub medoid_index: usize,
+    /// Indices of all member episodes in the source slice.
+    pub episode_indices: Vec<usize>,
+    /// Stable episode identifiers for the cluster members.
+    pub episode_ids: Vec<String>,
+    /// Human-readable summary of the cluster's shared structure.
+    pub description: String,
+    /// Deterministic 64-bit content hash of the bundled cluster vector.
+    pub signature: u64,
+    /// HDC bundle of all member episode vectors.
+    pub bundle_vector: HdcVector,
+    /// The medoid vector selected by k-medoids.
+    pub medoid_vector: HdcVector,
+    /// Mean similarity of cluster members to the bundled vector.
+    pub coherence: f32,
+}
+
+/// Summary of a cross-episode consolidation pass.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CrossEpisodeConsolidationReport {
+    /// Total number of episodes supplied to the pass.
+    pub total_episodes: usize,
+    /// Number of meta-patterns that survived the size and coherence filters.
+    pub meta_pattern_count: usize,
+    /// Number of assign/update iterations executed by k-medoids.
+    pub iterations: usize,
+    /// Whether k-medoids converged before hitting its iteration cap.
+    pub converged: bool,
+    /// Discovered cross-episode meta-patterns sorted by support descending.
+    pub meta_patterns: Vec<CrossEpisodeMetaPattern>,
+}
+
+/// Batch consolidator that discovers structural meta-patterns across episodes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CrossEpisodeConsolidator {
+    target_clusters: usize,
+    min_cluster_size: usize,
+    max_iterations: usize,
+    min_coherence: f32,
+}
+
+impl Default for CrossEpisodeConsolidator {
+    fn default() -> Self {
+        Self {
+            target_clusters: 4,
+            min_cluster_size: 2,
+            max_iterations: 50,
+            min_coherence: 0.55,
+        }
+    }
+}
+
+impl CrossEpisodeConsolidator {
+    /// Construct a consolidator with explicit clustering and filtering knobs.
+    ///
+    /// `target_clusters` and `min_cluster_size` are clamped to at least 1.
+    /// `min_coherence` is clamped to `[0.0, 1.0]`.
+    #[must_use]
+    pub const fn new(
+        target_clusters: usize,
+        min_cluster_size: usize,
+        max_iterations: usize,
+        min_coherence: f32,
+    ) -> Self {
+        let target_clusters = if target_clusters == 0 {
+            1
+        } else {
+            target_clusters
+        };
+        let min_cluster_size = if min_cluster_size == 0 {
+            1
+        } else {
+            min_cluster_size
+        };
+        let max_iterations = if max_iterations == 0 {
+            1
+        } else {
+            max_iterations
+        };
+        let min_coherence = if min_coherence > 1.0 {
+            1.0
+        } else if min_coherence > 0.0 {
+            min_coherence
+        } else {
+            0.0
+        };
+        Self {
+            target_clusters,
+            min_cluster_size,
+            max_iterations,
+            min_coherence,
+        }
+    }
+
+    /// Discover cross-episode meta-patterns from a completed batch.
+    #[must_use]
+    pub fn discover(&self, episodes: &[Episode]) -> CrossEpisodeConsolidationReport {
+        let vectors: Vec<HdcVector> = episodes.iter().map(episode_vector).collect();
+        if vectors.is_empty() {
+            return CrossEpisodeConsolidationReport::default();
+        }
+
+        let cluster_count = self.target_clusters.min(vectors.len()).max(1);
+        let result = k_medoids(
+            &vectors,
+            &KMedoidsConfig {
+                k: cluster_count,
+                max_iterations: self.max_iterations,
+            },
+        );
+
+        let mut meta_patterns = Vec::new();
+        for cluster in result.clusters {
+            if cluster.members.len() < self.min_cluster_size {
+                continue;
+            }
+
+            let bundle_refs: Vec<&HdcVector> = cluster
+                .members
+                .iter()
+                .map(|&index| &vectors[index])
+                .collect();
+            let bundle_vector = HdcVector::bundle(&bundle_refs);
+            let coherence = cluster_coherence(&bundle_vector, &cluster.members, &vectors);
+            if coherence + f32::EPSILON < self.min_coherence {
+                continue;
+            }
+
+            let member_episodes: Vec<&Episode> = cluster
+                .members
+                .iter()
+                .map(|&index| &episodes[index])
+                .collect();
+            let description = summarize_cluster(&member_episodes);
+            let episode_ids = member_episodes
+                .iter()
+                .map(|episode| episode_identity(episode))
+                .collect();
+            let signature = vector_signature(&bundle_vector);
+
+            meta_patterns.push(CrossEpisodeMetaPattern {
+                id: format!("meta-pattern:{signature:016x}"),
+                medoid_index: cluster.medoid_index,
+                episode_indices: cluster.members,
+                episode_ids,
+                description,
+                signature,
+                bundle_vector,
+                medoid_vector: cluster.medoid,
+                coherence,
+            });
+        }
+
+        meta_patterns.sort_by(|left, right| {
+            right
+                .episode_indices
+                .len()
+                .cmp(&left.episode_indices.len())
+                .then_with(|| left.signature.cmp(&right.signature))
+        });
+
+        CrossEpisodeConsolidationReport {
+            total_episodes: episodes.len(),
+            meta_pattern_count: meta_patterns.len(),
+            iterations: result.iterations,
+            converged: result.converged,
+            meta_patterns,
+        }
+    }
+}
+
+fn episode_vector(episode: &Episode) -> HdcVector {
+    let kind = field_vector("kind", normalized(&episode.kind));
+    let template = field_vector("agent_template", normalized(&episode.agent_template));
+    let model = field_vector("model", normalized(&episode.model));
+    let trigger = field_vector("trigger_kind", normalized(&episode.trigger_kind));
+    let role = field_vector("role", episode_extra_string(episode, "role"));
+    let task_category = field_vector(
+        "task_category",
+        episode_extra_string(episode, "task_category"),
+    );
+    let complexity_band = field_vector(
+        "complexity_band",
+        episode_extra_string(episode, "complexity_band"),
+    );
+    let outcome = field_vector(
+        "outcome",
+        if episode.success {
+            "success"
+        } else {
+            "failure"
+        },
+    );
+    let gate_signature = field_vector("gate_signature", gate_signature(episode));
+    let failure_reason = field_vector(
+        "failure_reason",
+        normalized(episode.failure_reason.as_deref().unwrap_or("")),
+    );
+
+    HdcVector::bundle(&[
+        &kind,
+        &template,
+        &template,
+        &model,
+        &model,
+        &trigger,
+        &role,
+        &task_category,
+        &complexity_band,
+        &outcome,
+        &gate_signature,
+        &failure_reason,
+    ])
+}
+
+fn field_vector(label: &str, value: impl Into<String>) -> HdcVector {
+    let value = value.into();
+    HdcVector::from_seed(format!("{label}={value}").as_bytes())
+}
+
+fn normalized(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        "∅".to_string()
+    } else {
+        trimmed.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+}
+
+fn episode_extra_string(episode: &Episode, key: &str) -> String {
+    episode
+        .extra
+        .get(key)
+        .and_then(|value| value.as_str())
+        .map(normalized)
+        .unwrap_or_else(|| "∅".to_string())
+}
+
+fn gate_signature(episode: &Episode) -> String {
+    if episode.gate_verdicts.is_empty() {
+        return "none".to_string();
+    }
+
+    episode
+        .gate_verdicts
+        .iter()
+        .map(|verdict| {
+            format!(
+                "{}:{}",
+                verdict.gate,
+                if verdict.passed { "pass" } else { "fail" }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+fn episode_identity(episode: &Episode) -> String {
+    let episode_id = normalized(&episode.episode_id);
+    if episode_id != "∅" {
+        return episode_id;
+    }
+
+    let id = normalized(&episode.id);
+    if id != "∅" {
+        return id;
+    }
+
+    format!(
+        "{}@{}",
+        normalized(&episode.agent_id),
+        episode.timestamp.timestamp_millis()
+    )
+}
+
+fn summarize_cluster(episodes: &[&Episode]) -> String {
+    let mut parts = Vec::new();
+    summarize_majority_field(&mut parts, "kind", episodes, |episode| {
+        normalized(&episode.kind)
+    });
+    summarize_majority_field(&mut parts, "agent_template", episodes, |episode| {
+        normalized(&episode.agent_template)
+    });
+    summarize_majority_field(&mut parts, "model", episodes, |episode| {
+        normalized(&episode.model)
+    });
+    summarize_majority_field(&mut parts, "trigger_kind", episodes, |episode| {
+        normalized(&episode.trigger_kind)
+    });
+    summarize_majority_field(&mut parts, "role", episodes, |episode| {
+        episode_extra_string(episode, "role")
+    });
+    summarize_majority_field(&mut parts, "task_category", episodes, |episode| {
+        episode_extra_string(episode, "task_category")
+    });
+    summarize_majority_field(&mut parts, "complexity_band", episodes, |episode| {
+        episode_extra_string(episode, "complexity_band")
+    });
+    summarize_majority_field(&mut parts, "outcome", episodes, |episode| {
+        if episode.success {
+            "success".to_string()
+        } else {
+            "failure".to_string()
+        }
+    });
+
+    if parts.is_empty() {
+        format!("{} episode cluster", episodes.len())
+    } else {
+        parts.join("; ")
+    }
+}
+
+fn summarize_majority_field<F>(
+    parts: &mut Vec<String>,
+    label: &str,
+    episodes: &[&Episode],
+    extract: F,
+) where
+    F: Fn(&Episode) -> String,
+{
+    if episodes.is_empty() {
+        return;
+    }
+
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for episode in episodes {
+        let value = extract(episode);
+        if value == "∅" {
+            continue;
+        }
+        *counts.entry(value).or_insert(0) += 1;
+    }
+
+    let Some((value, count)) = counts
+        .into_iter()
+        .max_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)))
+    else {
+        return;
+    };
+
+    if count * 2 > episodes.len() {
+        parts.push(format!("{label}={value} ({count}/{})", episodes.len()));
+    }
+}
+
+fn cluster_coherence(bundle_vector: &HdcVector, members: &[usize], vectors: &[HdcVector]) -> f32 {
+    if members.is_empty() {
+        return 0.0;
+    }
+
+    let total: f32 = members
+        .iter()
+        .map(|&index| vectors[index].similarity(bundle_vector))
+        .sum();
+    total / members.len() as f32
+}
+
+fn vector_signature(vector: &HdcVector) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    for byte in vector.to_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
 }
 
 /// Convert a u32 count to f32. f32 exactly represents integers up to `2^24`.
@@ -461,5 +845,133 @@ mod tests {
         let json = serde_json::to_string(&original).expect("serialize");
         let decoded: Pattern = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(original, decoded);
+    }
+
+    fn structural_episode(
+        agent_id: &str,
+        task_id: &str,
+        agent_template: &str,
+        model: &str,
+        trigger_kind: &str,
+        task_category: &str,
+        complexity_band: &str,
+        success: bool,
+        gate_names: &[&str],
+        failure_reason: Option<&str>,
+    ) -> Episode {
+        let mut episode = Episode::new(agent_id, task_id);
+        episode.agent_template = agent_template.to_string();
+        episode.model = model.to_string();
+        episode.trigger_kind = trigger_kind.to_string();
+        episode.success = success;
+        if let Some(reason) = failure_reason {
+            episode.failure_reason = Some(reason.to_string());
+        }
+        episode.extra.insert(
+            "task_category".to_string(),
+            serde_json::Value::String(task_category.to_string()),
+        );
+        episode.extra.insert(
+            "complexity_band".to_string(),
+            serde_json::Value::String(complexity_band.to_string()),
+        );
+        episode.gate_verdicts = gate_names
+            .iter()
+            .map(|gate| crate::episode_logger::GateVerdict::new(gate, success))
+            .collect();
+        episode
+    }
+
+    #[test]
+    fn cross_episode_consolidation_groups_structurally_similar_episodes() {
+        let mut episodes = Vec::new();
+
+        for i in 0..3 {
+            episodes.push(structural_episode(
+                "agent-a",
+                &format!("task-a-{i}"),
+                "code-implementer",
+                "claude-sonnet",
+                "plan_run",
+                "implementation",
+                "standard",
+                true,
+                &["compile", "test"],
+                None,
+            ));
+        }
+
+        for i in 0..3 {
+            episodes.push(structural_episode(
+                "agent-b",
+                &format!("task-b-{i}"),
+                "researcher",
+                "claude-haiku",
+                "review_queue",
+                "research",
+                "light",
+                false,
+                &["lint", "inspect"],
+                Some("rate_limit"),
+            ));
+        }
+
+        let consolidator = CrossEpisodeConsolidator::new(2, 2, 50, 0.55);
+        let report = consolidator.discover(&episodes);
+
+        assert_eq!(report.total_episodes, 6);
+        assert_eq!(report.meta_pattern_count, 2);
+        assert!(report.converged);
+        assert!(report.iterations > 0);
+
+        let implementation = report
+            .meta_patterns
+            .iter()
+            .find(|pattern| pattern.description.contains("code-implementer"))
+            .expect("implementation cluster");
+        let research = report
+            .meta_patterns
+            .iter()
+            .find(|pattern| pattern.description.contains("researcher"))
+            .expect("research cluster");
+
+        assert_eq!(implementation.episode_indices.len(), 3);
+        assert_eq!(research.episode_indices.len(), 3);
+        assert!(implementation.coherence >= 0.55);
+        assert!(research.coherence >= 0.55);
+        assert!(
+            implementation
+                .description
+                .contains("agent_template=code-implementer")
+        );
+        assert!(research.description.contains("agent_template=researcher"));
+        assert!(
+            implementation
+                .episode_ids
+                .iter()
+                .all(|id| id.starts_with("ep_"))
+        );
+    }
+
+    #[test]
+    fn cross_episode_consolidation_filters_singleton_clusters() {
+        let episodes = vec![structural_episode(
+            "agent-a",
+            "task-a",
+            "code-implementer",
+            "claude-sonnet",
+            "plan_run",
+            "implementation",
+            "standard",
+            true,
+            &["compile", "test"],
+            None,
+        )];
+
+        let consolidator = CrossEpisodeConsolidator::new(1, 2, 10, 0.0);
+        let report = consolidator.discover(&episodes);
+        assert_eq!(report.total_episodes, 1);
+        assert_eq!(report.meta_pattern_count, 0);
+        assert!(report.meta_patterns.is_empty());
     }
 }

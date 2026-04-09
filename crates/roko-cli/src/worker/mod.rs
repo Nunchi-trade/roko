@@ -7,8 +7,8 @@
 //! - `ROKO_DEPLOYMENT_ID`: Deployment identifier for callbacks
 //! - `PORT`: Listen port (Railway injects this)
 
-pub mod handler;
 pub mod cloud;
+pub mod handler;
 
 use std::sync::Arc;
 
