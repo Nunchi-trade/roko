@@ -164,6 +164,7 @@ impl WorktreeManager {
     /// requests that would exceed [`WorktreeConfig::max_live`].
     pub async fn create(&self, id: &str, branch: &str) -> Result<WorktreeHandle, WorktreeError> {
         validate_id(id)?;
+        let _ = self.clear_stale_locks();
 
         // Reserve the slot up-front so racing callers conflict cleanly.
         {
@@ -277,6 +278,7 @@ impl WorktreeManager {
     /// `git worktree remove --force` so uncommitted files are cleaned up
     /// along with the metadata.
     pub async fn remove(&self, id: &str) -> Result<(), WorktreeError> {
+        let _ = self.clear_stale_locks();
         let handle = {
             let mut guard = self.active.lock();
             guard
@@ -444,6 +446,7 @@ impl WorktreeManager {
     /// Run `git worktree prune` to clean up stale git worktree metadata
     /// that no longer corresponds to on-disk directories (§15.9).
     pub async fn prune(&self) -> Result<String, WorktreeError> {
+        let _ = self.clear_stale_locks();
         let output = Command::new("git")
             .current_dir(&self.config.repo_root)
             .args(["worktree", "prune"])
@@ -954,6 +957,31 @@ mod tests {
         let cleared = mgr.clear_stale_locks().unwrap();
         assert!(cleared.contains(&lock_path), "stale lock should be cleared");
         assert!(!lock_path.exists(), "lock file should be deleted");
+    }
+
+    #[tokio::test]
+    async fn create_clears_stale_main_repo_lock_before_git() {
+        let Some((tmp, mgr)) = make_manager() else {
+            return;
+        };
+
+        let repo_root = tmp.path().join("repo");
+        let lock_path = repo_root.join(".git").join("index.lock");
+        std::fs::write(&lock_path, "").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&lock_path)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_accessed(std::time::SystemTime::UNIX_EPOCH)
+                    .set_modified(std::time::SystemTime::UNIX_EPOCH),
+            )
+            .unwrap();
+
+        let handle = mgr.create("14-november", "feature/november").await.unwrap();
+        assert_eq!(handle.id, "14-november");
+        assert!(!lock_path.exists(), "stale main repo lock should be removed");
     }
 
     #[tokio::test]
