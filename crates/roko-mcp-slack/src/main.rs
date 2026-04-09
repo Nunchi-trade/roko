@@ -544,10 +544,7 @@ struct SlackLookupUserResult {
 impl SlackClient {
     fn from_env() -> Result<Self, JsonRpcError> {
         let token = env::var("SLACK_BOT_TOKEN")
-            .or_else(|_| env::var("SLACK_TOKEN"))
-            .map_err(|_| {
-                JsonRpcError::internal_error("SLACK_BOT_TOKEN or SLACK_TOKEN env var required")
-            })?;
+            .map_err(|_| JsonRpcError::internal_error("SLACK_BOT_TOKEN env var required"))?;
 
         Ok(Self {
             client: Client::new(),
