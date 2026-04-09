@@ -244,6 +244,14 @@ impl PlaybookStore {
         }
     }
 
+    /// Look up a playbook by task type.
+    ///
+    /// This is a thin alias for [`PlaybookStore::load`] used by the
+    /// orchestrator's pre-dispatch learning hook.
+    pub async fn lookup(&self, task_type: &str) -> io::Result<Option<Playbook>> {
+        self.load(task_type).await
+    }
+
     /// List all playbooks in the store. Returns an empty vector if the
     /// directory does not yet exist.
     ///

@@ -40,7 +40,7 @@ use roko_gate::{
     payload::GatePayload, test_gate::TestGate,
 };
 use roko_learn::skill_library::Skill;
-use roko_learn::playbook::PlaybookStore;
+use roko_learn::playbook::{Playbook, PlaybookStore};
 use roko_learn::costs_db::CostRecord;
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::episode_logger::{Episode, GateVerdict, Usage};
@@ -528,6 +528,36 @@ fn render_skill_context(skill: &Skill) -> String {
     }
     if !skill.required_tools.is_empty() {
         parts.push(format!("Tools: {}", skill.required_tools.join(", ")));
+    }
+
+    parts.join("\n\n")
+}
+
+fn render_playbook_context(playbook: &Playbook) -> String {
+    let mut parts = vec![
+        format!("Name: {}", playbook.name),
+        format!("Goal: {}", playbook.goal),
+        format!(
+            "Success rate: {:.0}%",
+            (playbook.success_rate().unwrap_or(0.0).clamp(0.0, 1.0) * 100.0).round()
+        ),
+    ];
+
+    if !playbook.steps.is_empty() {
+        let mut steps = String::from("Steps:\n");
+        for step in &playbook.steps {
+            steps.push_str(&format!(
+                "- {}. [{}] {}\n",
+                step.index, step.action_kind, step.description
+            ));
+            if !step.expected_signals.is_empty() {
+                steps.push_str(&format!(
+                    "  Signals: {}\n",
+                    step.expected_signals.join(", ")
+                ));
+            }
+        }
+        parts.push(steps.trim_end().to_string());
     }
 
     parts.join("\n\n")
@@ -4402,6 +4432,27 @@ impl PlanRunner {
                 )
             });
 
+        let playbook_context_section = match self.playbook.lookup(task).await {
+            Ok(Some(playbook)) => {
+                let playbook_text = render_playbook_context(&playbook);
+                let playbook_text_len = playbook_text.len();
+                Some((
+                    PromptSection::new("playbook", playbook_text)
+                        .with_priority(SectionPriority::Low)
+                        .with_placement(Placement::Middle)
+                        .with_hard_cap(1024),
+                    playbook_text_len,
+                ))
+            }
+            Ok(None) => None,
+            Err(err) => {
+                tracing::warn!(
+                    "[orchestrate] failed to lookup playbook for task {task}: {err}"
+                );
+                None
+            }
+        };
+
         // ── Provider health check ────────────────────────────────────
         let selected_model = if !self.learning.provider_health().is_healthy(&selected_model) {
             let fallback = self
@@ -4587,6 +4638,18 @@ impl PlanRunner {
             tracing::info!(
                 "[orchestrate] injected skill library context ({} chars)",
                 skill_text_len
+            );
+        }
+
+        if let Some((playbook_section, playbook_text_len)) = playbook_context_section {
+            sections.push(
+                playbook_section
+                    .into_signal()
+                    .map_err(|e| anyhow!("playbook section: {e}"))?,
+            );
+            tracing::info!(
+                "[orchestrate] injected playbook context ({} chars)",
+                playbook_text_len
             );
         }
 
