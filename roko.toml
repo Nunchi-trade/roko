@@ -68,3 +68,7 @@ kind = "compile"
 
 [[gate]]
 kind = "test"
+
+[webhooks.github]
+secret = "${GITHUB_WEBHOOK_SECRET}"
+enabled = true
