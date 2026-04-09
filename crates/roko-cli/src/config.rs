@@ -4,12 +4,13 @@
 //! sets a token budget for prompt composition, and lists the gates to run
 //! on the agent's output.
 
-use anyhow::{Context, Result, anyhow};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use anyhow::{anyhow, Context, Result};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-use roko_core::config::ServeConfig;
+use roko_core::config::schema::RokoConfig;
 use roko_core::config::schema::SubscriptionConfig;
+use roko_core::config::ServeConfig;
 use roko_orchestrator::ExecutorConfig;
 
 /// The top-level `roko.toml` document.
@@ -436,6 +437,113 @@ pub struct RepoConfig {
     /// Repo-specific subscriptions to load in addition to the global set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subscriptions: Vec<SubscriptionConfig>,
+}
+
+/// Loaded runtime data for a configured repository.
+#[derive(Clone, Debug)]
+pub struct RepoEntry {
+    /// Declarative repo config from `roko.toml`.
+    pub config: RepoConfig,
+    /// Canonical repository root.
+    pub root: PathBuf,
+    /// Optional repo-local `.roko/roko.toml` config.
+    pub roko_config: Option<RokoConfig>,
+    /// Path to the repo-local config when it exists.
+    pub roko_config_path: Option<PathBuf>,
+}
+
+/// Runtime registry of configured repositories.
+#[derive(Clone, Debug, Default)]
+pub struct RepoRegistry {
+    repos: Vec<RepoEntry>,
+}
+
+impl RepoRegistry {
+    /// Load and validate all configured repos.
+    pub fn load(config: &Config, workdir: &Path) -> Result<Self> {
+        let mut repos = Vec::with_capacity(config.repos.len());
+        let mut seen_names = std::collections::HashSet::new();
+
+        for repo in &config.repos {
+            if repo.name.trim().is_empty() {
+                return Err(anyhow!("configured repo name must not be empty"));
+            }
+            if !seen_names.insert(repo.name.clone()) {
+                return Err(anyhow!("duplicate configured repo name: {}", repo.name));
+            }
+
+            let root = Self::resolve_root(repo, workdir)?;
+            let (roko_config, roko_config_path) = Self::load_repo_config(&root, &repo.name)?;
+
+            repos.push(RepoEntry {
+                config: repo.clone(),
+                root,
+                roko_config,
+                roko_config_path,
+            });
+        }
+
+        Ok(Self { repos })
+    }
+
+    /// Return all loaded repo entries.
+    #[must_use]
+    pub fn repos(&self) -> &[RepoEntry] {
+        &self.repos
+    }
+
+    /// True when no repos are configured.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.repos.is_empty()
+    }
+
+    /// Find a repo by configured name.
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<&RepoEntry> {
+        self.repos.iter().find(|repo| repo.config.name == name)
+    }
+
+    fn resolve_root(repo: &RepoConfig, workdir: &Path) -> Result<PathBuf> {
+        let configured = if repo.path.is_absolute() {
+            repo.path.clone()
+        } else {
+            workdir.join(&repo.path)
+        };
+        let root = configured.canonicalize().with_context(|| {
+            format!("resolve repo '{}' path {}", repo.name, configured.display())
+        })?;
+        if !root.is_dir() {
+            return Err(anyhow!(
+                "configured repo '{}' path is not a directory: {}",
+                repo.name,
+                root.display()
+            ));
+        }
+        Ok(root)
+    }
+
+    fn load_repo_config(
+        root: &Path,
+        repo_name: &str,
+    ) -> Result<(Option<RokoConfig>, Option<PathBuf>)> {
+        let path = root.join(".roko").join("roko.toml");
+        if !path.is_file() {
+            return Ok((None, None));
+        }
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("read repo config {}", path.display()))?;
+        let config = RokoConfig::from_toml(&text)
+            .map_err(|err| anyhow!(err))
+            .with_context(|| {
+                format!(
+                    "parse repo config {} for repo {}",
+                    path.display(),
+                    repo_name
+                )
+            })?;
+        Ok((Some(config), Some(path)))
+    }
 }
 
 /// One gate entry in `roko.toml`. Multiple gates run in declaration order.
@@ -1074,6 +1182,8 @@ pub fn resolve_paths(workdir: &Path) -> ConfigPaths {
 pub struct ResolvedConfig {
     /// Merged, default-filled config.
     pub config: Config,
+    /// Loaded runtime repo registry.
+    pub repo_registry: RepoRegistry,
     /// Which source supplied each field.
     pub sources: ConfigSources,
     /// Paths consulted during resolution.
@@ -1124,8 +1234,10 @@ pub fn load_layered(workdir: &Path) -> Result<ResolvedConfig> {
         let layer = ConfigLayer::from_file(env_path)?;
         let sources = sources_from_layer(&layer, Source::Env, Source::Default);
         let config = layer.resolve();
+        let repo_registry = RepoRegistry::load(&config, workdir)?;
         return Ok(ResolvedConfig {
             config,
+            repo_registry,
             sources,
             paths,
         });
@@ -1144,9 +1256,11 @@ pub fn load_layered(workdir: &Path) -> Result<ResolvedConfig> {
     let sources = compute_sources(&global_layer, &project_layer);
     let merged = global_layer.merge(project_layer);
     let config = merged.resolve();
+    let repo_registry = RepoRegistry::load(&config, workdir)?;
 
     Ok(ResolvedConfig {
         config,
+        repo_registry,
         sources,
         paths,
     })
@@ -1232,7 +1346,13 @@ fn sources_from_layer(layer: &ConfigLayer, present: Source, fallback: Source) ->
     let agent = layer.agent.as_ref();
     let tools = layer.tools.as_ref();
     let prompt = layer.prompt.as_ref();
-    let pick = |is_set: bool| -> Source { if is_set { present } else { fallback } };
+    let pick = |is_set: bool| -> Source {
+        if is_set {
+            present
+        } else {
+            fallback
+        }
+    };
     ConfigSources {
         auto_plan: pick(layer.auto_plan.is_some()),
         agent_command: pick(agent.and_then(|a| a.command.as_ref()).is_some()),
@@ -1426,7 +1546,10 @@ build_system = "cargo"
         );
         assert_eq!(cfg.repos[0].subscriptions.len(), 1);
         assert_eq!(cfg.repos[0].subscriptions[0].template, "code-implementer");
-        assert_eq!(cfg.repos[0].subscriptions[0].trigger, "github:issues:labeled:implement");
+        assert_eq!(
+            cfg.repos[0].subscriptions[0].trigger,
+            "github:issues:labeled:implement"
+        );
         assert_eq!(cfg.gates.len(), 2);
     }
 
@@ -1566,6 +1689,57 @@ auto_plan = true
         assert_eq!(parsed.gates.len(), cfg.gates.len());
         assert_eq!(parsed.serve.auth.enabled, cfg.serve.auth.enabled);
         assert_eq!(parsed.serve.auth.api_key, cfg.serve.auth.api_key);
+    }
+
+    #[test]
+    fn repo_registry_loads_repo_local_config() {
+        use std::fs;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_root = tmp.path().join("repo-a");
+        fs::create_dir_all(repo_root.join(".roko")).unwrap();
+        fs::write(
+            repo_root.join(".roko").join("roko.toml"),
+            "schema_version = 2\n",
+        )
+        .unwrap();
+
+        let mut cfg = Config::default();
+        cfg.repos = vec![RepoConfig {
+            name: "repo-a".to_string(),
+            path: PathBuf::from("repo-a"),
+            branch: "main".to_string(),
+            templates: Vec::new(),
+            subscriptions: Vec::new(),
+        }];
+
+        let registry = RepoRegistry::load(&cfg, tmp.path()).unwrap();
+        assert_eq!(registry.repos().len(), 1);
+        let repo = registry.get("repo-a").unwrap();
+        assert!(repo.root.ends_with("repo-a"));
+        assert!(repo.roko_config.is_some());
+        assert!(repo
+            .roko_config_path
+            .as_ref()
+            .is_some_and(|path| path.ends_with(".roko/roko.toml")));
+    }
+
+    #[test]
+    fn repo_registry_errors_when_repo_path_is_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.repos = vec![RepoConfig {
+            name: "missing".to_string(),
+            path: PathBuf::from("missing"),
+            branch: "main".to_string(),
+            templates: Vec::new(),
+            subscriptions: Vec::new(),
+        }];
+
+        let err = RepoRegistry::load(&cfg, tmp.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("missing"));
+        assert!(msg.contains("resolve repo 'missing' path"));
     }
 
     #[test]

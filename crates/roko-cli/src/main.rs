@@ -16,8 +16,8 @@ use roko_cli::serve_runtime::RokoCliRuntime;
 use roko_cli::tui::App;
 use roko_cli::{
     Config, DaemonMode, DashboardScaffold, EditTarget, InjectKind, InjectRequest, OneshotMode,
-    PageId, PipeMode, Plan, PlanSummary, ReplMode, SessionStatus, Source, WizardInputs, config_cmd,
-    load_layered, run_init_wizard, run_once,
+    PageId, PipeMode, Plan, PlanSummary, ReplMode, RepoRegistry, SessionStatus, Source,
+    WizardInputs, config_cmd, load_layered, run_init_wizard, run_once,
 };
 use roko_core::{ContentHash, Context, Kind, Query, Substrate};
 use roko_core::{Headlines, TaskMetric, compute_headlines};
@@ -2490,8 +2490,8 @@ fn resolve_config(cli: &Cli) -> Result<Config> {
 
 /// Resolve config from a specific workdir, applying CLI overrides.
 fn resolve_config_for_workdir(cli: &Cli, workdir: &Path) -> Result<Config> {
-    let mut config = if let Some(p) = &cli.config {
-        Config::from_file(p)?
+    let (mut config, repo_base) = if let Some(p) = &cli.config {
+        (Config::from_file(p)?, p.parent().unwrap_or(workdir))
     } else {
         let resolved = load_layered(workdir)?;
         let fully_default = resolved.sources.agent_command == Source::Default
@@ -2501,8 +2501,12 @@ fn resolve_config_for_workdir(cli: &Cli, workdir: &Path) -> Result<Config> {
                 "no config found — using built-in `cat` agent. run `roko config init` to set up a model."
             );
         }
-        resolved.config
+        (resolved.config, workdir)
     };
+
+    // Validate and load any configured additional repos even when bypassing
+    // layered config resolution via `--config`.
+    let _repo_registry = RepoRegistry::load(&config, repo_base)?;
 
     // Apply CLI overrides.
     if let Some(role) = &cli.role {

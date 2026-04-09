@@ -45,7 +45,8 @@ pub use roko_serve as serve;
 
 pub use config::{
     AgentConfig, Config, ConfigLayer, ConfigPaths, ConfigSources, GateConfig, PromptConfig,
-    PromptFile, ResolvedConfig, ServeAuthLayer, ServeLayer, Source, ToolsConfig, load_layered,
+    PromptFile, RepoEntry, RepoRegistry, ResolvedConfig, ServeAuthLayer, ServeLayer, Source,
+    ToolsConfig, load_layered,
 };
 pub use config_cmd::{EditTarget, WizardInputs, run_init_wizard};
 pub use daemon::{DaemonConfig, DaemonMode, DaemonState, DaemonStatus};
