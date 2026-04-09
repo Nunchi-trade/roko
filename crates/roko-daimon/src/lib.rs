@@ -4,4 +4,6 @@
 //! `roko-golem` so the workspace can depend on a dedicated daimon package
 //! without duplicating the placeholder implementation.
 
-pub use roko_golem::{DaimonEngine, GolemSubsystemId, GolemSubsystemSummary, ScaffoldEngine};
+pub use roko_golem::{
+    AffectEngine, DaimonEngine, GolemSubsystemId, GolemSubsystemSummary, ScaffoldEngine,
+};

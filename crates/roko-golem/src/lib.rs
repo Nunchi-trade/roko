@@ -126,7 +126,7 @@ pub mod mortality;
 #[cfg(feature = "scaffold")]
 pub use chain_witness::ChainWitnessEngine;
 #[cfg(feature = "scaffold")]
-pub use daimon::{AffectOctant, AffectState, DaimonEngine};
+pub use daimon::{AffectEngine, AffectOctant, AffectState, DaimonEngine};
 #[cfg(feature = "scaffold")]
 pub use dreams::DreamsEngine;
 #[cfg(feature = "scaffold")]
