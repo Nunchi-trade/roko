@@ -45,7 +45,7 @@ use roko_learn::episode_logger::{Episode, GateVerdict, Usage};
 use roko_learn::runtime_feedback::{
     CompletedRunInput, LearningRuntime, LearningUpdate, read_efficiency_events,
 };
-use roko_learn::skill_library::SkillLibrary;
+use roko_learn::skill_library::{SkillExtractionRequest, SkillGateResult, SkillLibrary};
 use roko_orchestrator::worktree::{WorktreeConfig, WorktreeManager};
 use roko_orchestrator::{
     EventKind, EventLog, EventLogSnapshot, ExecutorAction, ExecutorEvent, ExecutorSnapshot,
@@ -605,6 +605,8 @@ struct TaskTracker {
     last_matched_rule_id: Option<String>,
     /// Prompt experiment variant assigned during the last dispatch.
     last_experiment_variant_id: Option<String>,
+    /// Pending skill extraction request for the most recent successful task.
+    last_skill_request: Option<SkillExtractionRequest>,
     /// Number of consecutive gate failures for this plan (for re-planning, §9).
     gate_failure_count: u32,
 }
@@ -625,6 +627,7 @@ impl TaskTracker {
             last_matched_skill_id: None,
             last_matched_rule_id: None,
             last_experiment_variant_id: None,
+            last_skill_request: None,
             gate_failure_count: 0,
         }
     }
@@ -2202,6 +2205,7 @@ impl PlanRunner {
                     Ok(()) => {
                         match self.run_post_merge_follow_up(&plan_id).await {
                             Ok(true) => {
+                                self.extract_pending_skill(&plan_id).await;
                                 self.apply_event_and_emit(
                                     &plan_id,
                                     "merge",
@@ -4808,6 +4812,35 @@ impl PlanRunner {
             }
             self.verify_declared_write_files(plan_id, &td.id, &td.files, &exec_dir)
                 .await?;
+
+            let mut task_files = Vec::new();
+            let mut seen_files = HashSet::new();
+            if let Ok(changed_files) = self.git_changed_files(&exec_dir).await {
+                for file in changed_files {
+                    if seen_files.insert(file.clone()) {
+                        task_files.push(file);
+                    }
+                }
+            }
+            for file in &td.files {
+                if seen_files.insert(file.clone()) {
+                    task_files.push(file.clone());
+                }
+            }
+
+            let symbols = extract_task_symbols(&task_text);
+            let prompt_hash = roko_core::ContentHash::of(role_instruction.as_bytes()).to_hex();
+            let request = SkillExtractionRequest::new(
+                task_files,
+                td.tier.clone(),
+                symbols,
+                selected_model.clone(),
+                prompt_hash,
+                Vec::new(),
+            );
+            if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+                tracker.last_skill_request = Some(request);
+            }
         }
 
         Ok(result)
@@ -4918,6 +4951,26 @@ impl PlanRunner {
 
         let all_passed = verdicts.iter().all(|v| v.passed);
 
+        if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+            if all_passed {
+                if let Some(mut request) = tracker.last_skill_request.clone() {
+                    request.gate_results = verdicts
+                        .iter()
+                        .map(|verdict| {
+                            SkillGateResult::new(
+                                verdict.gate.clone(),
+                                verdict.passed,
+                                f64::from(verdict.score),
+                            )
+                        })
+                        .collect();
+                    tracker.last_skill_request = Some(request);
+                }
+            } else {
+                tracker.last_skill_request = None;
+            }
+        }
+
         // Increment gate verdict metrics.
         for v in &verdicts {
             let verdict_str = if v.passed { "pass" } else { "fail" };
@@ -5021,6 +5074,29 @@ impl PlanRunner {
         }
 
         Ok(true)
+    }
+
+    /// Persist a successful task into the skill library after merge succeeds.
+    async fn extract_pending_skill(&mut self, plan_id: &str) {
+        let Some(request) = self
+            .task_trackers
+            .get(plan_id)
+            .and_then(|tracker| tracker.last_skill_request.clone())
+        else {
+            return;
+        };
+
+        if let Some(skill) = self.skill_library.extract_skill(request).await {
+            tracing::info!(
+                "[orchestrate] extracted skill {} from plan {}",
+                skill.name,
+                plan_id
+            );
+        }
+
+        if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+            tracker.last_skill_request = None;
+        }
     }
 
     async fn plan_exec_dir(&self, plan_id: &str) -> PathBuf {
@@ -6202,6 +6278,39 @@ fn tail_output_lines(output: &str, line_count: usize) -> String {
     let mut lines: Vec<&str> = output.lines().rev().take(line_count).collect();
     lines.reverse();
     lines.join("\n")
+}
+
+/// Pull likely Rust symbol names out of task text for skill extraction.
+fn extract_task_symbols(text: &str) -> Vec<String> {
+    let mut symbols = Vec::new();
+    let mut seen = HashSet::new();
+
+    for raw in text.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == ':')) {
+        if raw.is_empty() {
+            continue;
+        }
+
+        for candidate in raw.split("::") {
+            let candidate = candidate.trim_matches(|ch: char| {
+                !ch.is_ascii_alphanumeric() && ch != '_'
+            });
+            if candidate.len() < 3 {
+                continue;
+            }
+            let has_underscore = candidate.contains('_');
+            let has_upper = candidate.chars().any(|ch| ch.is_ascii_uppercase());
+            if !has_underscore && !has_upper {
+                continue;
+            }
+
+            let candidate = candidate.to_string();
+            if seen.insert(candidate.clone()) {
+                symbols.push(candidate);
+            }
+        }
+    }
+
+    symbols
 }
 
 /// Add task failure context to an error chain.

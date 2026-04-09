@@ -195,6 +195,66 @@ pub struct SkillQuery {
     pub files_hint: Vec<String>,
 }
 
+/// One gate result passed into skill extraction.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkillGateResult {
+    /// Gate name.
+    pub gate: String,
+    /// Whether the gate passed.
+    pub passed: bool,
+    /// Numeric gate score.
+    pub score: f64,
+}
+
+impl SkillGateResult {
+    /// Construct a new extraction gate result.
+    pub fn new(gate: impl Into<String>, passed: bool, score: f64) -> Self {
+        Self {
+            gate: gate.into(),
+            passed,
+            score,
+        }
+    }
+}
+
+/// Input payload for [`SkillLibrary::extract_skill`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkillExtractionRequest {
+    /// Files the task touched.
+    pub task_files: Vec<String>,
+    /// Complexity tier from `tasks.toml`.
+    pub task_tier: String,
+    /// Symbol names referenced by the task description.
+    pub symbols: Vec<String>,
+    /// Model used for the task.
+    pub model: String,
+    /// Hash of the rendered system prompt.
+    pub prompt_hash: String,
+    /// Gate results that passed the task.
+    pub gate_results: Vec<SkillGateResult>,
+}
+
+impl SkillExtractionRequest {
+    /// Construct a new request.
+    pub fn new(
+        task_files: Vec<String>,
+        task_tier: impl Into<String>,
+        symbols: Vec<String>,
+        model: impl Into<String>,
+        prompt_hash: impl Into<String>,
+        gate_results: Vec<SkillGateResult>,
+    ) -> Self {
+        Self {
+            task_files,
+            task_tier: task_tier.into(),
+            symbols,
+            model: model.into(),
+            prompt_hash: prompt_hash.into(),
+            gate_results,
+        }
+    }
+}
+
 /// Produces the `pattern` text from an [`Episode`](crate::episode_logger::Episode).
 ///
 /// The default [`TemplatePatternGenerator`] uses a simple string template;
@@ -386,6 +446,12 @@ impl SkillLibrary {
         &self.path
     }
 
+    /// Alias for [`SkillLibrary::select`] to match the public API used by the
+    /// orchestration layer docs.
+    pub fn query(&self, query: &SkillQuery, limit: usize) -> Vec<Skill> {
+        self.select(query, limit)
+    }
+
     // ── Voyager-style extraction & selection (§16.3.2-16.3.4) ──────
 
     /// Extract a skill from a successful episode that passed gates on the
@@ -407,7 +473,6 @@ impl SkillLibrary {
             return None;
         }
 
-        // Generate and bound pattern text
         let pattern = generator.generate(episode);
         if pattern.is_empty() {
             return None;
@@ -421,14 +486,123 @@ impl SkillLibrary {
         let tags = extra_strings(episode, "task_tags");
         let category = extra_str(episode, "task_category");
 
-        // Dedup: no existing skill with ≥70% tag overlap AND same category
         if self.is_duplicate(&tags, &category) {
             return None;
         }
 
         let skill = Self::build_skill_from_episode(episode, pattern, tags, category);
 
-        // Register (reject on name collision)
+        {
+            let mut guard = self.skills.write();
+            if guard.contains_key(&skill.name) {
+                return None;
+            }
+            guard.insert(skill.name.clone(), skill.clone());
+        }
+        self.persist().await.ok()?;
+        Some(skill)
+    }
+
+    /// Extract a skill from a successful task dispatch.
+    ///
+    /// The request carries the task's touched files, complexity tier,
+    /// referenced symbols, model, prompt hash, and gate results. The
+    /// extraction is intentionally compact: it persists one reusable skill
+    /// record and returns `None` if the request is incomplete or a near
+    /// duplicate already exists.
+    pub async fn extract_skill(&self, request: SkillExtractionRequest) -> Option<Skill> {
+        if request.task_files.is_empty() && request.symbols.is_empty() {
+            return None;
+        }
+        if request.task_tier.is_empty() || request.model.is_empty() || request.prompt_hash.is_empty()
+        {
+            return None;
+        }
+        if request.gate_results.is_empty() || request.gate_results.iter().any(|g| !g.passed) {
+            return None;
+        }
+
+        let task_files = dedup_strings(request.task_files);
+        let symbols = dedup_strings(request.symbols);
+        let tags = {
+            let mut tags = Vec::with_capacity(symbols.len() + 2);
+            tags.extend(symbols.iter().cloned());
+            tags.push(format!("model:{}", request.model));
+            tags.push(format!("prompt:{}", short_hash(&request.prompt_hash)));
+            tags
+        };
+        let category = request.task_tier.clone();
+
+        if self.is_duplicate(&tags, &category) {
+            return None;
+        }
+
+        let passed_scores: Vec<f64> = request
+            .gate_results
+            .iter()
+            .filter(|gate| gate.passed)
+            .map(|gate| gate.score.clamp(0.0, 1.0))
+            .collect();
+        let score = if passed_scores.is_empty() {
+            1.0
+        } else {
+            passed_scores.iter().sum::<f64>() / passed_scores.len() as f64
+        };
+
+        let gate_summary = request
+            .gate_results
+            .iter()
+            .map(|gate| {
+                format!(
+                    "{}:{}:{:.2}",
+                    gate.gate,
+                    if gate.passed { "pass" } else { "fail" },
+                    gate.score
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let pattern = format!(
+            "1. Touched files: {}\n\
+             2. Symbols: {}\n\
+             3. Model: {}\n\
+             4. Prompt hash: {}\n\
+             5. Gates: {}",
+            task_files.join(", "),
+            symbols.join(", "),
+            request.model,
+            request.prompt_hash,
+            gate_summary
+        );
+        let pattern = if pattern.len() > MAX_PATTERN_CHARS {
+            pattern[..MAX_PATTERN_CHARS].to_string()
+        } else {
+            pattern
+        };
+
+        let name = format!(
+            "skill_{}_{}",
+            sanitize_component(&request.task_tier),
+            short_hash(&request.prompt_hash)
+        );
+        let mut skill = Skill::new(
+            name,
+            format!("Successful {} task on {}", request.task_tier, request.model),
+            pattern.clone(),
+        );
+        skill.description = format!(
+            "Extracted from a successful {} task using {}.",
+            request.task_tier, request.model
+        );
+        skill.tags = tags;
+        skill.plan_id = String::new();
+        skill.files = task_files;
+        skill.pattern = pattern;
+        skill.score = score;
+        skill.first_seen = Some(Utc::now());
+        skill.task_category = category;
+
         {
             let mut guard = self.skills.write();
             if guard.contains_key(&skill.name) {
@@ -665,6 +839,33 @@ impl SkillLibrary {
         tokio::fs::rename(&tmp, &self.path).await?;
         Ok(())
     }
+}
+
+fn dedup_strings(values: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for value in values {
+        if seen.insert(value.clone()) {
+            out.push(value);
+        }
+    }
+    out
+}
+
+fn short_hash(hash: &str) -> String {
+    hash.chars().take(12).collect()
+}
+
+fn sanitize_component(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() { "unknown".to_string() } else { out }
 }
 
 #[cfg(test)]
