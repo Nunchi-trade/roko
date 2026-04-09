@@ -20,6 +20,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/metrics", get(metrics))
         .route("/dashboard", get(dashboard))
         .route("/gates/summary", get(gate_summary))
+        .route("/gates/{gate_name}/history", get(gate_history))
         .route("/episodes", get(episodes))
         .route("/signals", get(signals))
         .route("/operations/{id}", get(operation_status))
@@ -70,6 +71,53 @@ async fn gate_summary(State(state): State<Arc<AppState>>) -> Result<Json<Value>,
     let path = state.workdir.join(".roko").join("signals.jsonl");
     let entries = read_jsonl_entries(&path).await?;
     Ok(Json(summarize_gate_entries(&entries)))
+}
+
+/// `GET /api/gates/:gate_name/history` — time series of pass/fail results for one gate.
+async fn gate_history(
+    State(state): State<Arc<AppState>>,
+    Path(gate_name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let path = state.workdir.join(".roko").join("signals.jsonl");
+    let entries = read_jsonl_entries(&path).await?;
+    let mut history: Vec<Value> = entries
+        .into_iter()
+        .filter(|entry| extract_gate_name(entry).as_deref() == Some(gate_name.as_str()))
+        .filter_map(|entry| {
+            let passed = extract_gate_passed(&entry)?;
+            Some(json!({
+                "signal_id": entry.get("id").cloned().unwrap_or(Value::Null),
+                "created_at_ms": entry.get("created_at_ms").cloned().unwrap_or(Value::Null),
+                "gate": gate_name,
+                "passed": passed,
+                "duration_ms": extract_gate_duration_ms(&entry).unwrap_or(0),
+                "plan_id": entry.pointer("/tags/plan_id").cloned().or_else(|| entry.pointer("/body/data/plan_id").cloned()).unwrap_or(Value::Null),
+                "task_id": entry.pointer("/tags/task_id").cloned().or_else(|| entry.pointer("/body/data/task_id").cloned()).unwrap_or(Value::Null),
+                "rung": entry.pointer("/tags/rung").cloned().or_else(|| entry.pointer("/body/data/rung").cloned()).unwrap_or(Value::Null),
+            }))
+        })
+        .collect();
+
+    history.sort_by(|a, b| {
+        let a_ts = a
+            .get("created_at_ms")
+            .and_then(Value::as_i64)
+            .unwrap_or(i64::MIN);
+        let b_ts = b
+            .get("created_at_ms")
+            .and_then(Value::as_i64)
+            .unwrap_or(i64::MIN);
+        a_ts.cmp(&b_ts).then_with(|| {
+            let a_id = a.get("signal_id").and_then(Value::as_str).unwrap_or("");
+            let b_id = b.get("signal_id").and_then(Value::as_str).unwrap_or("");
+            a_id.cmp(b_id)
+        })
+    });
+
+    Ok(Json(json!({
+        "gate": gate_name,
+        "history": history,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -307,5 +355,48 @@ mod tests {
         assert_eq!(summary["test"]["total_runs"], 1);
         assert_eq!(summary["test"]["pass_rate"], 1.0);
         assert_eq!(summary["test"]["avg_duration_ms"], 200.0);
+    }
+
+    #[test]
+    fn gate_history_filters_and_orders_by_timestamp() {
+        let mut compile_late = gate_signal("compile", false, 300);
+        compile_late.created_at_ms = 20;
+        let mut compile_early = gate_signal("compile", true, 100);
+        compile_early.created_at_ms = 10;
+        let mut test = gate_signal("test", true, 200);
+        test.created_at_ms = 15;
+
+        let entries = vec![compile_late, compile_early, test];
+        let mut history: Vec<Value> = entries
+            .into_iter()
+            .filter(|entry| extract_gate_name(entry).as_deref() == Some("compile"))
+            .filter_map(|entry| {
+                let passed = extract_gate_passed(&entry)?;
+                Some(json!({
+                    "signal_id": entry.get("id").cloned().unwrap_or(Value::Null),
+                    "created_at_ms": entry.get("created_at_ms").cloned().unwrap_or(Value::Null),
+                    "gate": "compile",
+                    "passed": passed,
+                }))
+            })
+            .collect();
+
+        history.sort_by(|a, b| {
+            let a_ts = a
+                .get("created_at_ms")
+                .and_then(Value::as_i64)
+                .unwrap_or(i64::MIN);
+            let b_ts = b
+                .get("created_at_ms")
+                .and_then(Value::as_i64)
+                .unwrap_or(i64::MIN);
+            a_ts.cmp(&b_ts)
+        });
+
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0]["passed"], true);
+        assert_eq!(history[0]["created_at_ms"], 10);
+        assert_eq!(history[1]["passed"], false);
+        assert_eq!(history[1]["created_at_ms"], 20);
     }
 }
