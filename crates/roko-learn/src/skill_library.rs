@@ -255,6 +255,12 @@ impl SkillExtractionRequest {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DispatchSkillOutcome {
+    Success,
+    Failure,
+}
+
 /// Produces the `pattern` text from an [`Episode`](crate::episode_logger::Episode).
 ///
 /// The default [`TemplatePatternGenerator`] uses a simple string template;
@@ -511,90 +517,172 @@ impl SkillLibrary {
     /// record and returns `None` if the request is incomplete or a near
     /// duplicate already exists.
     pub async fn extract_skill(&self, request: SkillExtractionRequest) -> Option<Skill> {
+        self.record_dispatch_skill(request, DispatchSkillOutcome::Success)
+            .await
+    }
+
+    /// Record a failed task dispatch using the same structural inputs as
+    /// [`SkillLibrary::extract_skill`]. Failure records are stored as
+    /// low-score skills tagged with `outcome:failure` so they can be kept
+    /// for later analysis without affecting normal selection.
+    pub async fn record_failure(&self, request: SkillExtractionRequest) -> Option<Skill> {
+        self.record_dispatch_skill(request, DispatchSkillOutcome::Failure)
+            .await
+    }
+
+    async fn record_dispatch_skill(
+        &self,
+        request: SkillExtractionRequest,
+        outcome: DispatchSkillOutcome,
+    ) -> Option<Skill> {
         if request.task_files.is_empty() && request.symbols.is_empty() {
             return None;
         }
-        if request.task_tier.is_empty() || request.model.is_empty() || request.prompt_hash.is_empty()
+        if request.task_tier.is_empty()
+            || request.model.is_empty()
+            || request.prompt_hash.is_empty()
         {
             return None;
         }
-        if request.gate_results.is_empty() || request.gate_results.iter().any(|g| !g.passed) {
-            return None;
+
+        let SkillExtractionRequest {
+            task_files,
+            task_tier,
+            symbols,
+            model,
+            prompt_hash,
+            gate_results,
+        } = request;
+
+        let task_files = dedup_strings(task_files);
+        let symbols = dedup_strings(symbols);
+        let mut tags = Vec::with_capacity(symbols.len() + 3);
+        tags.extend(symbols.iter().cloned());
+        tags.push(format!("model:{}", model));
+        tags.push(format!("prompt:{}", short_hash(&prompt_hash)));
+        if matches!(outcome, DispatchSkillOutcome::Failure) {
+            tags.push("outcome:failure".into());
+        }
+        let category = task_tier.clone();
+
+        if matches!(outcome, DispatchSkillOutcome::Success) {
+            if gate_results.is_empty() || gate_results.iter().any(|g| !g.passed) {
+                return None;
+            }
+            if self.is_duplicate(&tags, &category) {
+                return None;
+            }
         }
 
-        let task_files = dedup_strings(request.task_files);
-        let symbols = dedup_strings(request.symbols);
-        let tags = {
-            let mut tags = Vec::with_capacity(symbols.len() + 2);
-            tags.extend(symbols.iter().cloned());
-            tags.push(format!("model:{}", request.model));
-            tags.push(format!("prompt:{}", short_hash(&request.prompt_hash)));
-            tags
-        };
-        let category = request.task_tier.clone();
+        let (name, summary, description, score, pattern) = match outcome {
+            DispatchSkillOutcome::Success => {
+                let passed_scores: Vec<f64> = gate_results
+                    .iter()
+                    .filter(|gate| gate.passed)
+                    .map(|gate| gate.score.clamp(0.0, 1.0))
+                    .collect();
+                let score = if passed_scores.is_empty() {
+                    1.0
+                } else {
+                    passed_scores.iter().sum::<f64>() / passed_scores.len() as f64
+                };
 
-        if self.is_duplicate(&tags, &category) {
-            return None;
-        }
+                let gate_summary = gate_results
+                    .iter()
+                    .map(|gate| {
+                        format!(
+                            "{}:{}:{:.2}",
+                            gate.gate,
+                            if gate.passed { "pass" } else { "fail" },
+                            gate.score
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
 
-        let passed_scores: Vec<f64> = request
-            .gate_results
-            .iter()
-            .filter(|gate| gate.passed)
-            .map(|gate| gate.score.clamp(0.0, 1.0))
-            .collect();
-        let score = if passed_scores.is_empty() {
-            1.0
-        } else {
-            passed_scores.iter().sum::<f64>() / passed_scores.len() as f64
-        };
+                let pattern = format!(
+                    "1. Touched files: {}\n\
+                     2. Symbols: {}\n\
+                     3. Model: {}\n\
+                     4. Prompt hash: {}\n\
+                     5. Gates: {}",
+                    task_files.join(", "),
+                    symbols.join(", "),
+                    model,
+                    prompt_hash,
+                    gate_summary
+                );
+                let pattern = if pattern.len() > MAX_PATTERN_CHARS {
+                    pattern[..MAX_PATTERN_CHARS].to_string()
+                } else {
+                    pattern
+                };
 
-        let gate_summary = request
-            .gate_results
-            .iter()
-            .map(|gate| {
-                format!(
-                    "{}:{}:{:.2}",
-                    gate.gate,
-                    if gate.passed { "pass" } else { "fail" },
-                    gate.score
+                (
+                    format!(
+                        "skill_{}_{}",
+                        sanitize_component(&task_tier),
+                        short_hash(&prompt_hash)
+                    ),
+                    format!("Successful {} task on {}", task_tier, model),
+                    format!("Extracted from a successful {} task using {}.", task_tier, model),
+                    score,
+                    pattern,
                 )
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
+            }
+            DispatchSkillOutcome::Failure => {
+                let gate_summary = if gate_results.is_empty() {
+                    "none".to_string()
+                } else {
+                    gate_results
+                        .iter()
+                        .map(|gate| {
+                            format!(
+                                "{}:{}:{:.2}",
+                                gate.gate,
+                                if gate.passed { "pass" } else { "fail" },
+                                gate.score
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
 
-        let pattern = format!(
-            "1. Touched files: {}\n\
-             2. Symbols: {}\n\
-             3. Model: {}\n\
-             4. Prompt hash: {}\n\
-             5. Gates: {}",
-            task_files.join(", "),
-            symbols.join(", "),
-            request.model,
-            request.prompt_hash,
-            gate_summary
-        );
-        let pattern = if pattern.len() > MAX_PATTERN_CHARS {
-            pattern[..MAX_PATTERN_CHARS].to_string()
-        } else {
-            pattern
+                let pattern = format!(
+                    "1. Outcome: failure\n\
+                     2. Touched files: {}\n\
+                     3. Symbols: {}\n\
+                     4. Model: {}\n\
+                     5. Prompt hash: {}\n\
+                     6. Gates: {}",
+                    task_files.join(", "),
+                    symbols.join(", "),
+                    model,
+                    prompt_hash,
+                    gate_summary
+                );
+                let pattern = if pattern.len() > MAX_PATTERN_CHARS {
+                    pattern[..MAX_PATTERN_CHARS].to_string()
+                } else {
+                    pattern
+                };
+
+                (
+                    format!(
+                        "failure_{}_{}",
+                        sanitize_component(&task_tier),
+                        short_hash(&prompt_hash)
+                    ),
+                    format!("Failed {} task on {}", task_tier, model),
+                    format!("Failure pattern from a {} task using {}.", task_tier, model),
+                    0.0,
+                    pattern,
+                )
+            }
         };
 
-        let name = format!(
-            "skill_{}_{}",
-            sanitize_component(&request.task_tier),
-            short_hash(&request.prompt_hash)
-        );
-        let mut skill = Skill::new(
-            name,
-            format!("Successful {} task on {}", request.task_tier, request.model),
-            pattern.clone(),
-        );
-        skill.description = format!(
-            "Extracted from a successful {} task using {}.",
-            request.task_tier, request.model
-        );
+        let mut skill = Skill::new(name, summary, pattern.clone());
+        skill.description = description;
         skill.tags = tags;
         skill.plan_id = String::new();
         skill.files = task_files;

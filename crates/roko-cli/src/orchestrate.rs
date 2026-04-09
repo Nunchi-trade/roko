@@ -2584,7 +2584,7 @@ impl PlanRunner {
                 tracing::error!(
                     "[orchestrate] task worktree acquisition failed for {plan_id}/{task_id}: {e}"
                 );
-                self.record_task_failure(plan_id, task_id, &e, &started, None)
+                self.record_task_failure(plan_id, task_id, None, None, &e, &started, None)
                     .await;
                 self.apply_event_and_emit(
                     plan_id,
@@ -2646,7 +2646,7 @@ impl PlanRunner {
                         attempt + 1
                     );
                     if attempt == max_retries {
-                        self.record_task_failure(plan_id, task_id, &e, &started, None)
+                        self.record_task_failure(plan_id, task_id, None, None, &e, &started, None)
                             .await;
                     }
                 }
@@ -2683,7 +2683,7 @@ impl PlanRunner {
                 tracing::error!(
                     "[orchestrate] task budget exhausted before dispatch for {plan_id}/{tid}: {e}"
                 );
-                self.record_task_failure(plan_id, tid, &e, &started, None)
+                self.record_task_failure(plan_id, tid, None, None, &e, &started, None)
                     .await;
                 continue;
             }
@@ -2693,7 +2693,7 @@ impl PlanRunner {
                     tracing::error!(
                         "[orchestrate] task worktree acquisition failed for {plan_id}/{tid}: {e}"
                     );
-                    self.record_task_failure(plan_id, tid, &e, &started, None)
+                    self.record_task_failure(plan_id, tid, None, None, &e, &started, None)
                         .await;
                 }
             }
@@ -2868,7 +2868,15 @@ impl PlanRunner {
             } else {
                 tracing::error!("[orchestrate] parallel task {tid} failed");
                 let err = anyhow!("agent returned non-success for task {tid}");
-                self.record_task_failure(plan_id, tid, &err, &started, Some(agent_result))
+                self.record_task_failure(
+                    plan_id,
+                    tid,
+                    None,
+                    None,
+                    &err,
+                    &started,
+                    Some(agent_result),
+                )
                     .await;
                 any_fatal = true;
             }
@@ -3350,6 +3358,8 @@ impl PlanRunner {
         &mut self,
         plan_id: &str,
         task_id: &str,
+        task_text: Option<&str>,
+        selected_model: Option<&str>,
         error: &anyhow::Error,
         started: &std::time::Instant,
         result: Option<&AgentResult>,
@@ -3377,6 +3387,17 @@ impl PlanRunner {
         let model = self.effective_model();
         let input = self.enrich_completed_run(ep, plan_id, task_id, "Implementer", &model, None, 1);
         self.record_and_check_learning(input, plan_id).await;
+        if let Some(request) = self
+            .build_failed_skill_request(plan_id, task_id, task_text, selected_model)
+            .await
+            && let Some(skill) = self.skill_library.record_failure(request).await
+        {
+            tracing::info!(
+                "[orchestrate] recorded failure pattern {} from plan {}",
+                skill.name,
+                plan_id
+            );
+        }
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
             tracker.failed.push(task_id.to_string());
         }
@@ -3406,6 +3427,77 @@ impl PlanRunner {
             error = ?error,
             "task failed"
         );
+    }
+
+    async fn build_failed_skill_request(
+        &self,
+        plan_id: &str,
+        task_id: &str,
+        task_text: Option<&str>,
+        selected_model: Option<&str>,
+    ) -> Option<SkillExtractionRequest> {
+        let tracker = self.task_trackers.get(plan_id)?;
+        let task_def = tracker.tasks_file.tasks.iter().find(|task| task.id == task_id)?;
+        let role = AgentRole::Implementer;
+        let task_allowed_tools_csv = claude_task_tool_allowlist_with(
+            role,
+            task_def.allowed_tools.as_deref(),
+            task_def.denied_tools.as_deref(),
+            self.tool_registry.as_deref(),
+        );
+        let model = selected_model.map(str::to_owned).unwrap_or_else(|| {
+            task_def.effective_model(
+                self.config
+                    .agent
+                    .model
+                    .as_deref()
+                    .unwrap_or("claude-sonnet-4-6"),
+                Some(&self.config.agent.tier_models),
+            )
+        });
+        let prompt_hash = roko_core::ContentHash::of(
+            build_system_prompt(role, plan_id, task_id, &task_allowed_tools_csv).as_bytes(),
+        )
+        .to_hex();
+        let task_text = task_text
+            .map(str::to_owned)
+            .unwrap_or_else(|| task_def.build_prompt(plan_id, &self.workdir));
+        let symbols = extract_task_symbols(&task_text);
+
+        let mut task_files = Vec::new();
+        let mut seen_files = HashSet::new();
+        if let Some(exec_dir) = self
+            .worktrees
+            .get(&format!("{plan_id}-{task_id}"))
+            .map(|handle| handle.path)
+            && let Ok(changed_files) = self.git_changed_files(&exec_dir).await
+        {
+            for file in changed_files {
+                if seen_files.insert(file.clone()) {
+                    task_files.push(file);
+                }
+            }
+        }
+        for file in &task_def.files {
+            if seen_files.insert(file.clone()) {
+                task_files.push(file.clone());
+            }
+        }
+
+        let gate_results = vec![SkillGateResult::new(
+            "task_failure",
+            false,
+            0.0,
+        )];
+
+        Some(SkillExtractionRequest::new(
+            task_files,
+            task_def.tier.clone(),
+            symbols,
+            model,
+            prompt_hash,
+            gate_results,
+        ))
     }
     ///
     /// Uses `TaskDef::build_fix_prompt` to produce a targeted prompt that includes
