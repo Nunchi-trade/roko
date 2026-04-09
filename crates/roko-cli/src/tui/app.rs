@@ -1,8 +1,9 @@
 //! Interactive TUI application shell.
 
+use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEvent};
@@ -17,16 +18,23 @@ use super::event::{Event, EventHandler};
 use super::pages::{PageId, PageRegistry};
 use super::widgets;
 
+/// Shared dashboard data model used by the TUI shell.
+pub type DashboardData = DashboardScaffold;
+
 /// Interactive dashboard shell backed by the existing snapshot renderer.
 #[derive(Debug)]
 pub struct App {
     workdir: PathBuf,
-    dashboard: DashboardScaffold,
-    pages: PageRegistry,
-    events: EventHandler,
-    active_page: PageId,
-    content_scroll: u16,
-    should_quit: bool,
+    /// Currently selected dashboard page.
+    pub current_page: PageId,
+    /// Shared dashboard data model, refreshed on tick.
+    pub data: DashboardData,
+    /// Whether the event loop should keep running.
+    pub running: bool,
+    /// Timestamp of the last data refresh.
+    pub last_refresh: Instant,
+    /// Per-page scroll position.
+    pub scroll_offset: HashMap<PageId, u16>,
 }
 
 type TuiTerminal = Terminal<CrosstermBackend<io::Stdout>>;
@@ -36,23 +44,28 @@ impl App {
     #[must_use]
     pub fn new(root: impl AsRef<Path>) -> Self {
         let workdir = root.as_ref().to_path_buf();
-        let dashboard = DashboardScaffold::new_in(&workdir);
-        let active_page = dashboard.active_page();
+        let data = DashboardScaffold::new_in(&workdir);
+        let current_page = data.active_page();
         Self {
-            pages: PageRegistry::from_dashboard(&dashboard),
             workdir,
-            dashboard,
-            events: EventHandler::new(Duration::from_millis(250)),
-            active_page,
-            content_scroll: 0,
-            should_quit: false,
+            current_page,
+            data,
+            running: true,
+            last_refresh: Instant::now(),
+            scroll_offset: HashMap::new(),
         }
     }
 
     /// Return the active page.
     #[must_use]
+    pub const fn current_page(&self) -> PageId {
+        self.current_page
+    }
+
+    /// Return the active page.
+    #[must_use]
     pub const fn active_page(&self) -> PageId {
-        self.active_page
+        self.current_page
     }
 
     /// Run the terminal UI until the user quits.
@@ -70,15 +83,16 @@ impl App {
     }
 
     fn main_loop(&mut self, terminal: &mut TuiTerminal) -> Result<()> {
+        let mut events = EventHandler::new(Duration::from_millis(250));
         terminal
             .draw(|frame| self.draw(frame))
             .context("initial TUI draw")?;
 
-        while !self.should_quit {
-            match self.events.next().context("poll TUI event")? {
+        while self.running {
+            match events.next().context("poll TUI event")? {
                 Event::Key(key) => self.handle_key(key),
                 Event::Resize(_, _) => {}
-                Event::Tick => self.refresh_snapshot(),
+                Event::Tick => self.refresh_snapshot_if_needed(),
             }
 
             terminal
@@ -90,56 +104,71 @@ impl App {
     }
 
     fn draw(&self, frame: &mut Frame<'_>) {
+        let pages = self.pages();
         widgets::render_dashboard(
             frame,
-            &self.dashboard,
-            &self.pages,
-            self.active_page,
-            self.content_scroll,
+            &self.data,
+            &pages,
+            self.current_page,
+            self.scroll_for(self.current_page),
         );
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
+            KeyCode::Char('q') | KeyCode::Esc => self.running = false,
             KeyCode::Char('r') => self.refresh_snapshot(),
             KeyCode::Left | KeyCode::Char('h') | KeyCode::BackTab => self.select_previous_page(),
             KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => self.select_next_page(),
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.content_scroll = self.content_scroll.saturating_sub(1);
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.content_scroll = self.content_scroll.saturating_add(1);
-            }
-            KeyCode::PageUp => {
-                self.content_scroll = self.content_scroll.saturating_sub(8);
-            }
-            KeyCode::PageDown => {
-                self.content_scroll = self.content_scroll.saturating_add(8);
-            }
-            KeyCode::Home => self.content_scroll = 0,
+            KeyCode::Up | KeyCode::Char('k') => self.adjust_scroll(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.adjust_scroll(1),
+            KeyCode::PageUp => self.adjust_scroll(-8),
+            KeyCode::PageDown => self.adjust_scroll(8),
+            KeyCode::Home => self.set_scroll(0),
             _ => {}
         }
     }
 
     fn select_next_page(&mut self) {
-        self.active_page = self.pages.next(self.active_page);
-        self.content_scroll = 0;
+        let pages = self.pages();
+        self.current_page = pages.next(self.current_page);
     }
 
     fn select_previous_page(&mut self) {
-        self.active_page = self.pages.previous(self.active_page);
-        self.content_scroll = 0;
+        let pages = self.pages();
+        self.current_page = pages.previous(self.current_page);
     }
 
     fn refresh_snapshot(&mut self) {
-        self.dashboard = DashboardScaffold::new_in(&self.workdir);
-        if self.pages.is_empty() {
-            self.pages = PageRegistry::from_dashboard(&self.dashboard);
+        self.data = DashboardScaffold::new_in(&self.workdir);
+        self.last_refresh = Instant::now();
+        if self.pages().scaffold(self.current_page).is_none() {
+            self.current_page = self.data.active_page();
         }
-        if self.pages.scaffold(self.active_page).is_none() {
-            self.active_page = self.dashboard.active_page();
+    }
+
+    fn refresh_snapshot_if_needed(&mut self) {
+        if self.last_refresh.elapsed() >= Duration::from_millis(250) {
+            self.refresh_snapshot();
         }
+    }
+
+    fn pages(&self) -> PageRegistry {
+        PageRegistry::from_dashboard(&self.data)
+    }
+
+    fn scroll_for(&self, page: PageId) -> u16 {
+        self.scroll_offset.get(&page).copied().unwrap_or(0)
+    }
+
+    fn set_scroll(&mut self, value: u16) {
+        self.scroll_offset.insert(self.current_page, value);
+    }
+
+    fn adjust_scroll(&mut self, delta: i16) {
+        let current = self.scroll_for(self.current_page) as i32;
+        let next = (current + delta as i32).max(0).min(u16::MAX as i32) as u16;
+        self.scroll_offset.insert(self.current_page, next);
     }
 
     fn enter_terminal() -> Result<TuiTerminal> {
