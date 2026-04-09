@@ -9,6 +9,7 @@ use roko_core::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use tokio::sync::mpsc::Sender;
@@ -132,6 +133,14 @@ struct ActiveCronSchedule {
     next_fire: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone)]
+struct PendingFileWatchSignal {
+    signal_kind: &'static str,
+    event_kind: &'static str,
+}
+
+const FILE_WATCH_DEBOUNCE_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+
 impl CronEventSource {
     fn compile_schedules(&self) -> Result<Vec<ActiveCronSchedule>> {
         self.schedules
@@ -240,7 +249,7 @@ impl EventSource for FileWatchEventSource {
             return Ok(());
         }
 
-        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut watcher = recommended_watcher(move |result| {
             let _ = event_tx.send(result);
         })
@@ -257,33 +266,7 @@ impl EventSource for FileWatchEventSource {
             })?;
         }
 
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => break,
-                maybe_event = event_rx.recv() => {
-                    let Some(result) = maybe_event else {
-                        break;
-                    };
-
-                    let event = result.map_err(|err| {
-                        RokoError::transport(format!("filesystem watcher error: {err}"))
-                    })?;
-
-                    let Some((signal_kind, event_kind)) = classify_file_watch_event(&event.kind) else {
-                        continue;
-                    };
-
-                    for path in event.paths {
-                        let signal = file_watch_signal(&path, signal_kind, event_kind);
-                        sender.send(signal).await.map_err(|_| {
-                            RokoError::cancelled("filesystem watcher receiver dropped")
-                        })?;
-                    }
-                }
-            }
-        }
-
-        Ok(())
+        drain_file_watch_events(event_rx, sender, cancel).await
     }
 }
 
@@ -313,6 +296,74 @@ fn classify_file_watch_event(kind: &EventKind) -> Option<(&'static str, &'static
         EventKind::Remove(_) => Some((FS_DELETED, "deleted")),
         _ => None,
     }
+}
+
+async fn drain_file_watch_events(
+    mut event_rx: tokio::sync::mpsc::UnboundedReceiver<
+        std::result::Result<notify::Event, notify::Error>,
+    >,
+    sender: SignalSender,
+    cancel: CancellationToken,
+) -> Result<()> {
+    let mut pending: HashMap<PathBuf, PendingFileWatchSignal> = HashMap::new();
+    let debounce_sleep = tokio::time::sleep(FILE_WATCH_DEBOUNCE_WINDOW);
+    tokio::pin!(debounce_sleep);
+    let mut debounce_active = false;
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            maybe_result = event_rx.recv() => {
+                let Some(result) = maybe_result else {
+                    break;
+                };
+
+                let event = result.map_err(|err| {
+                    RokoError::transport(format!("filesystem watcher error: {err}"))
+                })?;
+
+                let Some((signal_kind, event_kind)) = classify_file_watch_event(&event.kind) else {
+                    continue;
+                };
+
+                for path in event.paths {
+                    pending.insert(path, PendingFileWatchSignal { signal_kind, event_kind });
+                }
+
+                debounce_sleep
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + FILE_WATCH_DEBOUNCE_WINDOW);
+                debounce_active = true;
+            }
+            _ = &mut debounce_sleep, if debounce_active => {
+                debounce_active = false;
+                flush_pending_file_watch_signals(&mut pending, &sender).await?;
+            }
+        }
+    }
+
+    if !pending.is_empty() {
+        flush_pending_file_watch_signals(&mut pending, &sender).await?;
+    }
+
+    Ok(())
+}
+
+async fn flush_pending_file_watch_signals(
+    pending: &mut HashMap<PathBuf, PendingFileWatchSignal>,
+    sender: &SignalSender,
+) -> Result<()> {
+    let mut batched: Vec<_> = pending.drain().collect();
+    batched.sort_by(|(left, _), (right, _)| left.cmp(right));
+
+    for (path, signal) in batched {
+        let signal = file_watch_signal(&path, signal.signal_kind, signal.event_kind);
+        sender.send(signal).await.map_err(|_| {
+            RokoError::cancelled("filesystem watcher receiver dropped")
+        })?;
+    }
+
+    Ok(())
 }
 
 /// Periodically collects outcomes for previously emitted work.
@@ -396,6 +447,7 @@ mod tests {
     use std::fs;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+    use notify::{CreateKind, ModifyKind, RemoveKind};
     use roko_core::{Body, Kind, Signal};
     use serde_json::json;
     use tokio::time::{sleep, timeout};
@@ -540,11 +592,13 @@ mod tests {
         ));
         let file_path_string = file_path.to_string_lossy().into_owned();
 
-        fs::write(&file_path, b"alpha").expect("file should be created");
+        fs::File::create(&file_path).expect("file should be created");
         assert_eq!(
             wait_for_watch_event(&mut receiver, &file_path_string, FS_CREATED, "created").await,
             Some("created")
         );
+
+        sleep(Duration::from_millis(600)).await;
 
         fs::write(&file_path, b"beta").expect("file should be modified");
         assert_eq!(
@@ -552,6 +606,8 @@ mod tests {
                 .await,
             Some("modified")
         );
+
+        sleep(Duration::from_millis(600)).await;
 
         fs::remove_file(&file_path).expect("file should be deleted");
         assert_eq!(
@@ -566,6 +622,60 @@ mod tests {
             .expect("watcher should exit cleanly");
 
         fs::remove_dir_all(&tempdir).expect("tempdir should be removed");
+    }
+
+    #[tokio::test]
+    async fn file_watch_event_source_debounces_same_file_events_and_keeps_latest_kind() {
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        let runner = tokio::spawn({
+            let cancel = cancel.clone();
+            async move { drain_file_watch_events(event_rx, sender, cancel).await }
+        });
+
+        let path = PathBuf::from("/tmp/roko-plugin-debounce.txt");
+
+        event_tx
+            .send(Ok(
+                notify::Event::new(notify::EventKind::Create(CreateKind::Any)).add_path(path.clone()),
+            ))
+            .expect("create event should be accepted");
+        sleep(Duration::from_millis(100)).await;
+        event_tx
+            .send(Ok(
+                notify::Event::new(notify::EventKind::Modify(ModifyKind::Any)).add_path(path.clone()),
+            ))
+            .expect("modify event should be accepted");
+        sleep(Duration::from_millis(100)).await;
+        event_tx
+            .send(Ok(
+                notify::Event::new(notify::EventKind::Remove(RemoveKind::Any)).add_path(path.clone()),
+            ))
+            .expect("remove event should be accepted");
+        drop(event_tx);
+
+        let signal = timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .expect("signal should be emitted")
+            .expect("one signal should be emitted");
+        assert_eq!(signal.kind, Kind::Custom(FS_DELETED.to_string()));
+        let body: serde_json::Value = signal.body.as_json().expect("signal body should be json");
+        let path_string = path.to_string_lossy().into_owned();
+        assert_eq!(body.get("path").and_then(|value| value.as_str()), Some(path_string.as_str()));
+        assert_eq!(body.get("event_kind").and_then(|value| value.as_str()), Some("deleted"));
+        assert!(
+            timeout(Duration::from_millis(700), receiver.recv())
+                .await
+                .expect("receiver should close after flush")
+                .is_none(),
+            "debounce should collapse to a single signal"
+        );
+
+        runner
+            .await
+            .expect("task should complete")
+            .expect("debounce loop should exit cleanly");
     }
 
     #[tokio::test]
