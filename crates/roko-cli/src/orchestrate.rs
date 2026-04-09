@@ -6103,6 +6103,50 @@ impl PlanRunner {
         Ok(())
     }
 
+    /// Ensure any MCP servers declared by the task template are running.
+    ///
+    /// This is intentionally called before prompt assembly so the agent sees
+    /// the same tool surface that the template asked for.
+    async fn ensure_task_mcp_servers(
+        &mut self,
+        task_def: Option<&crate::task_parser::TaskDef>,
+    ) {
+        let Some(task_def) = task_def else {
+            return;
+        };
+        let Some(requested) = task_def.mcp_servers.as_ref() else {
+            return;
+        };
+        if requested.is_empty() {
+            return;
+        }
+
+        // Keep the existing startup path as the common case; only spawn here if
+        // the run has not already initialized MCP clients.
+        let should_spawn = {
+            let mcp_clients = self.mcp_clients.lock().await;
+            mcp_clients.is_empty()
+        };
+        if !should_spawn {
+            return;
+        }
+
+        let requested: HashSet<String> = requested.iter().cloned().collect();
+        if requested.is_empty() {
+            return;
+        }
+
+        let (clients, registry) =
+            Self::setup_mcp(&self.config, &self.workdir, Some(&requested)).await;
+        if !clients.is_empty() {
+            let mut mcp_clients = self.mcp_clients.lock().await;
+            mcp_clients.extend(clients);
+        }
+        if self.tool_registry.is_none() {
+            self.tool_registry = registry;
+        }
+    }
+
     /// Core agent dispatch with optional prompt, model, and system-prompt overrides.
     async fn dispatch_agent_with(
         &mut self,
@@ -6144,6 +6188,8 @@ impl PlanRunner {
         let task_def = tasks_file
             .as_ref()
             .and_then(|tf| tf.tasks.iter().find(|t| t.id == task).cloned());
+
+        self.ensure_task_mcp_servers(task_def.as_ref()).await;
 
         // ── Build prompt: surgical (from TaskDef) or generic ────────
         // Also collect attribution keys for context feedback after the agent runs.
