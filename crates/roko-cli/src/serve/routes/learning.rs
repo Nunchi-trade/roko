@@ -982,6 +982,10 @@ mod tests {
             was_warm_start: false,
             iteration: 1,
             gate_passed: true,
+            outcome: "success".into(),
+            gate_errors: Vec::new(),
+            model_used: "claude-sonnet-4-5".into(),
+            strategy_attempted: "none".into(),
             timestamp: timestamp.into(),
         }
     }

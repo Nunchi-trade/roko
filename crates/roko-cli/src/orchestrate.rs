@@ -4094,6 +4094,26 @@ impl PlanRunner {
                 }
             });
 
+        let gate_errors = self
+            .gate_failure_report(plan_id)
+            .split("\n\n---\n\n")
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+
+        self.emit_failure_efficiency_event(
+            plan_id,
+            &task_id,
+            "Implementer",
+            &task_model,
+            0,
+            gate_errors,
+            &strategy.to_string(),
+            failure_count,
+        )
+        .await;
+
         tracing::info!(
             plan_id = %plan_id,
             task_id = %task_id,
@@ -4766,9 +4786,22 @@ impl PlanRunner {
             },
         };
         ep.input_signal_hash = plan_id.to_string();
-        let model = self.effective_model();
+        let model = selected_model
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.effective_model());
         let input = self.enrich_completed_run(ep, plan_id, task_id, "Implementer", &model, None, 1);
         self.record_and_check_learning(input, plan_id).await;
+        self.emit_failure_efficiency_event(
+            plan_id,
+            task_id,
+            "Implementer",
+            &model,
+            wall_ms,
+            Vec::new(),
+            "retry_same",
+            1,
+        )
+        .await;
         self.record_crate_familiarity(plan_id, task_id, task_def.as_ref(), false);
         if let Some(request) = self
             .build_failed_skill_request(plan_id, task_id, task_text, selected_model)
@@ -7029,6 +7062,14 @@ impl PlanRunner {
             was_warm_start: false,
             iteration: 1,
             gate_passed: success,
+            outcome: if success {
+                "success".to_string()
+            } else {
+                "failure".to_string()
+            },
+            gate_errors: Vec::new(),
+            model_used: model.to_string(),
+            strategy_attempted: "none".to_string(),
             timestamp: chrono::Utc::now().to_rfc3339(),
         };
 
@@ -7047,6 +7088,65 @@ impl PlanRunner {
 
         if let Err(e) = self.learning.append_efficiency_event(&event).await {
             tracing::warn!("failed to persist efficiency event: {e}");
+        }
+    }
+
+    /// Construct and persist a failure efficiency event for a task that did not succeed.
+    async fn emit_failure_efficiency_event(
+        &mut self,
+        plan_id: &str,
+        task_id: &str,
+        role: &str,
+        model: &str,
+        wall_ms: u64,
+        gate_errors: Vec<String>,
+        strategy_attempted: &str,
+        iteration: u32,
+    ) {
+        let event = AgentEfficiencyEvent {
+            agent_id: format!("{plan_id}:{task_id}:failure"),
+            role: role.to_string(),
+            backend: "claude".to_string(),
+            model: model.to_string(),
+            plan_id: plan_id.to_string(),
+            task_id: task_id.to_string(),
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            cost_usd: 0.0,
+            cost_usd_without_cache: 0.0,
+            prompt_sections: Vec::new(),
+            total_prompt_tokens: 0,
+            system_prompt_tokens: 0,
+            tools_available: 0,
+            tools_used: 0,
+            tool_calls: Vec::new(),
+            wall_time_ms: wall_ms,
+            duration_ms: wall_ms,
+            time_to_first_token_ms: 0,
+            was_warm_start: false,
+            iteration,
+            gate_passed: false,
+            outcome: "failure".to_string(),
+            gate_errors,
+            model_used: model.to_string(),
+            strategy_attempted: strategy_attempted.to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        };
+
+        tracing::info!(
+            plan_id = %plan_id,
+            task_id = %task_id,
+            role = %role,
+            model = %model,
+            strategy = %strategy_attempted,
+            "failed-task efficiency event"
+        );
+
+        self.efficiency_events.push(event.clone());
+        if let Err(e) = self.learning.append_efficiency_event(&event).await {
+            tracing::warn!("failed to persist failure efficiency event: {e}");
         }
     }
 

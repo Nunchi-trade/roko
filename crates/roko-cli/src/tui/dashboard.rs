@@ -4213,6 +4213,10 @@ mod tests {
             was_warm_start: true,
             iteration: 1,
             gate_passed: true,
+            outcome: "success".to_string(),
+            gate_errors: Vec::new(),
+            model_used: model.to_string(),
+            strategy_attempted: "none".to_string(),
             timestamp: timestamp.to_string(),
         }
     }

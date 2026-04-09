@@ -155,6 +155,10 @@ mod tests {
             was_warm_start: false,
             iteration: 1,
             gate_passed: true,
+            outcome: "success".into(),
+            gate_errors: Vec::new(),
+            model_used: model.into(),
+            strategy_attempted: "none".into(),
             timestamp: "2026-04-09T00:00:00Z".into(),
         };
 

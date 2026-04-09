@@ -128,11 +128,29 @@ pub struct AgentEfficiencyEvent {
     pub iteration: u32,
     /// Whether the gate passed after this turn.
     pub gate_passed: bool,
+    /// Outcome label for the observation.
+    #[serde(default)]
+    pub outcome: String,
+    /// Gate error summaries recorded for failed tasks.
+    #[serde(default)]
+    pub gate_errors: Vec<String>,
+    /// Model used for the task attempt.
+    #[serde(default)]
+    pub model_used: String,
+    /// Replanning or retry strategy attempted after failure.
+    #[serde(default)]
+    pub strategy_attempted: String,
     /// ISO-8601 UTC timestamp.
     pub timestamp: String,
 }
 
 impl AgentEfficiencyEvent {
+    /// Build a default empty event payload.
+    #[must_use]
+    pub fn default_event() -> Self {
+        Self::default()
+    }
+
     /// Compute the cache hit rate for this event.
     #[allow(clippy::cast_precision_loss)]
     pub fn cache_hit_rate(&self) -> f64 {
@@ -158,6 +176,42 @@ impl AgentEfficiencyEvent {
     /// Total tokens consumed (input + output).
     pub const fn total_tokens(&self) -> u64 {
         self.input_tokens + self.output_tokens
+    }
+}
+
+impl Default for AgentEfficiencyEvent {
+    fn default() -> Self {
+        Self {
+            agent_id: String::new(),
+            role: String::new(),
+            backend: String::new(),
+            model: String::new(),
+            plan_id: String::new(),
+            task_id: String::new(),
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            cost_usd: 0.0,
+            cost_usd_without_cache: 0.0,
+            prompt_sections: Vec::new(),
+            total_prompt_tokens: 0,
+            system_prompt_tokens: 0,
+            tools_available: 0,
+            tools_used: 0,
+            tool_calls: Vec::new(),
+            wall_time_ms: 0,
+            duration_ms: 0,
+            time_to_first_token_ms: 0,
+            was_warm_start: false,
+            iteration: 0,
+            gate_passed: false,
+            outcome: String::new(),
+            gate_errors: Vec::new(),
+            model_used: String::new(),
+            strategy_attempted: String::new(),
+            timestamp: String::new(),
+        }
     }
 }
 
@@ -415,6 +469,22 @@ fn make_test_event(
         was_warm_start: warm,
         iteration: 1,
         gate_passed: passed,
+        outcome: if passed {
+            "success".into()
+        } else {
+            "failure".into()
+        },
+        gate_errors: if passed {
+            Vec::new()
+        } else {
+            vec!["test gate failed".into()]
+        },
+        model_used: "claude-sonnet-4-5".into(),
+        strategy_attempted: if passed {
+            "none".into()
+        } else {
+            "retry_same".into()
+        },
         timestamp: "2026-04-06T12:00:00Z".into(),
     }
 }
