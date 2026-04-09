@@ -13,11 +13,14 @@
 //!     └── <slug>.md
 //! ```
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, Result, anyhow};
 use crate::agent_exec::{AgentExecOpts, run_agent};
+use crate::task_parser::TasksFile;
+use anyhow::{Context as _, Result, anyhow};
 use roko_core::config::schema::RokoConfig;
 
 // ─── Directory layout ──────────────────────────────���───────────────
@@ -33,6 +36,78 @@ fn drafts_dir(workdir: &Path) -> PathBuf {
 }
 fn published_dir(workdir: &Path) -> PathBuf {
     prd_dir(workdir).join("published")
+}
+
+fn tasks_root(workdir: &Path) -> PathBuf {
+    workdir.join("plans")
+}
+
+fn collect_tasks_toml_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    if !root.exists() {
+        return files;
+    }
+
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.file_name().is_some_and(|name| name == "tasks.toml") {
+                    files.push(path);
+                }
+            }
+        }
+    }
+
+    files.sort();
+    files
+}
+
+fn hash_content(content: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    content.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn snapshot_tasks_files(root: &Path) -> HashMap<PathBuf, u64> {
+    let mut snapshot = HashMap::new();
+    for path in collect_tasks_toml_files(root) {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            snapshot.insert(path, hash_content(&content));
+        }
+    }
+    snapshot
+}
+
+fn warn_on_tasks_quality(path: &Path) {
+    let Ok(tasks_file) = TasksFile::parse(path) else {
+        return;
+    };
+    let warnings = tasks_file.quality_warnings();
+    if warnings.is_empty() {
+        return;
+    }
+
+    eprintln!("⚠️  Plan quality warnings for {}:", path.display());
+    for warning in warnings {
+        eprintln!("  - {warning}");
+    }
+}
+
+fn warn_on_new_or_updated_tasks(root: &Path, before: &HashMap<PathBuf, u64>) {
+    let after = snapshot_tasks_files(root);
+    let mut paths: Vec<PathBuf> = after.keys().cloned().collect();
+    paths.sort();
+    for path in paths {
+        let current = after.get(&path);
+        let previous = before.get(&path);
+        if current != previous {
+            warn_on_tasks_quality(&path);
+        }
+    }
 }
 
 /// Ensure the PRD directory structure exists.
@@ -365,6 +440,8 @@ pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path) -> Result<PathB
 
     let resolved = crate::load_layered(&workdir)?;
     let system = crate::plan_generate::PLAN_GENERATOR_SYSTEM_PROMPT;
+    let plans_root = tasks_root(&workdir);
+    let tasks_before = snapshot_tasks_files(&plans_root);
     let task_prompt = format!(
         "Read the PRD at {path} and generate implementation plan directories \
          under plans/. Each REQ-XXX requirement becomes one or more tasks. \
@@ -391,6 +468,8 @@ pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path) -> Result<PathB
             "plan generation agent failed with exit code {exit_code}"
         ));
     }
+
+    warn_on_new_or_updated_tasks(&plans_root, &tasks_before);
 
     Ok(workdir.join("plans"))
 }

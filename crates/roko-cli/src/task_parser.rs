@@ -181,6 +181,33 @@ pub enum TaskValidationIssue {
     NoStartNode,
 }
 
+/// Non-blocking quality warning detected in a `tasks.toml` file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskQualityWarning {
+    /// Task description is likely too broad for surgical execution.
+    LongDescription {
+        /// Task identifier being checked.
+        task_id: String,
+        /// Number of words in the description.
+        word_count: usize,
+    },
+    /// Task does not declare any files to read for context.
+    MissingReadFiles {
+        /// Task identifier being checked.
+        task_id: String,
+    },
+    /// Task does not declare any executable verification commands.
+    MissingVerify {
+        /// Task identifier being checked.
+        task_id: String,
+    },
+    /// Plan contains more tasks than we expect in one batch.
+    TooManyTasks {
+        /// Total task count in the plan.
+        task_count: usize,
+    },
+}
+
 impl std::fmt::Display for TaskValidationIssue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -197,6 +224,29 @@ impl std::fmt::Display for TaskValidationIssue {
                 write!(f, "circular dependency detected: {}", cycle.join(" -> "))
             }
             Self::NoStartNode => write!(f, "no task without dependencies found"),
+        }
+    }
+}
+
+impl std::fmt::Display for TaskQualityWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LongDescription {
+                task_id,
+                word_count,
+            } => write!(
+                f,
+                "{task_id}: description is {word_count} words (>500); likely too coarse for ≤50 LOC changes"
+            ),
+            Self::MissingReadFiles { task_id } => {
+                write!(f, "{task_id}: missing context.read_files; agent won't have file context")
+            }
+            Self::MissingVerify { task_id } => {
+                write!(f, "{task_id}: missing verify steps; no way to check completion")
+            }
+            Self::TooManyTasks { task_count } => {
+                write!(f, "plan has {task_count} tasks (>20); consider splitting it")
+            }
         }
     }
 }
@@ -548,6 +598,47 @@ impl TasksFile {
                 .map(|issue| issue.to_string()),
         );
         issues
+    }
+
+    /// Non-blocking quality heuristics for generated plans.
+    pub fn quality_warnings(&self) -> Vec<TaskQualityWarning> {
+        let mut warnings = Vec::new();
+
+        if self.tasks.len() > 20 {
+            warnings.push(TaskQualityWarning::TooManyTasks {
+                task_count: self.tasks.len(),
+            });
+        }
+
+        for task in &self.tasks {
+            if let Some(description) = task.description.as_deref() {
+                let word_count = description.split_whitespace().count();
+                if word_count > 500 {
+                    warnings.push(TaskQualityWarning::LongDescription {
+                        task_id: task.id.clone(),
+                        word_count,
+                    });
+                }
+            }
+
+            if task
+                .context
+                .as_ref()
+                .is_none_or(|c| c.read_files.is_empty())
+            {
+                warnings.push(TaskQualityWarning::MissingReadFiles {
+                    task_id: task.id.clone(),
+                });
+            }
+
+            if task.verify.is_empty() {
+                warnings.push(TaskQualityWarning::MissingVerify {
+                    task_id: task.id.clone(),
+                });
+            }
+        }
+
+        warnings
     }
 
     /// Validate the task graph structure required for execution.
@@ -1036,6 +1127,110 @@ depends_on = []
         assert!(issues.iter().any(|issue| matches!(
             issue,
             TaskValidationIssue::MissingRequiredField { field: "description", .. }
+        )));
+    }
+
+    #[test]
+    fn quality_warnings_report_missing_context_and_verify() {
+        let tasks: TasksFile = toml::from_str(
+            r#"
+[meta]
+plan = "test"
+total = 1
+
+[[task]]
+id = "T1"
+title = "first"
+description = "small task"
+depends_on = []
+"#,
+        )
+        .unwrap();
+
+        let warnings = tasks.quality_warnings();
+        assert!(warnings.iter().any(|warning| matches!(
+            warning,
+            TaskQualityWarning::MissingReadFiles { task_id } if task_id == "T1"
+        )));
+        assert!(warnings.iter().any(|warning| matches!(
+            warning,
+            TaskQualityWarning::MissingVerify { task_id } if task_id == "T1"
+        )));
+    }
+
+    #[test]
+    fn quality_warnings_report_long_description_and_task_count() {
+        let long_description = std::iter::repeat("word")
+            .take(501)
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let mut tasks = TasksFile {
+            meta: TaskMeta {
+                plan: "test".into(),
+                iteration: 0,
+                total: 21,
+                done: 0,
+                status: "ready".into(),
+                max_parallel: 1,
+                estimated_total_minutes: 0,
+            },
+            tasks: Vec::new(),
+        };
+
+        for idx in 0..21 {
+            tasks.tasks.push(TaskDef {
+                id: format!("T{}", idx + 1),
+                title: "task".into(),
+                description: if idx == 0 {
+                    Some(long_description.clone())
+                } else {
+                    Some("small task".into())
+                },
+                role: None,
+                status: "ready".into(),
+                tier: "focused".into(),
+                model_hint: None,
+                replan_strategy: None,
+                max_loc: None,
+                files: vec![],
+                allowed_tools: None,
+                denied_tools: None,
+                mcp_servers: None,
+                depends_on: vec![],
+                depends_on_plan: vec![],
+                split_into: None,
+                context: Some(TaskContext {
+                    read_files: vec![ReadFile {
+                        path: "src/lib.rs".into(),
+                        lines: Some("1-10".into()),
+                        why: "context".into(),
+                    }],
+                    symbols: vec![],
+                    anti_patterns: vec![],
+                    prior_failures: vec![],
+                }),
+                verify: vec![VerifyStep {
+                    phase: "compile".into(),
+                    command: "cargo check".into(),
+                    fail_msg: None,
+                    timeout_ms: 60_000,
+                }],
+                timeout_secs: 600,
+                max_retries: 3,
+                acceptance: vec![],
+            });
+        }
+
+        let warnings = tasks.quality_warnings();
+        assert!(warnings.iter().any(|warning| matches!(
+            warning,
+            TaskQualityWarning::TooManyTasks { task_count } if *task_count == 21
+        )));
+        assert!(warnings.iter().any(|warning| matches!(
+            warning,
+            TaskQualityWarning::LongDescription { task_id, word_count }
+                if task_id == "T1" && *word_count == 501
         )));
     }
 
