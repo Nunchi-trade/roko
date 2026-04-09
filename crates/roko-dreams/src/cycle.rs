@@ -356,6 +356,13 @@ async fn process_cluster(
         outcome.knowledge_entries.push(playbook_entry);
     }
 
+    if cluster.failure_count > 0 {
+        let mistake = build_mistake_insight_entry(cluster, started_at);
+        knowledge_store.add(mistake.clone())?;
+        outcome.knowledge_entries_written += 1;
+        outcome.knowledge_entries.push(mistake);
+    }
+
     if cluster.failure_count > 2 {
         let regression = build_regression_entry(cluster, started_at);
         knowledge_store.add(regression.clone())?;
@@ -792,6 +799,52 @@ fn build_regression_entry(cluster: &DreamCluster, created_at: DateTime<Utc>) -> 
     }
 }
 
+fn build_mistake_insight_entry(cluster: &DreamCluster, created_at: DateTime<Utc>) -> KnowledgeEntry {
+    let reason = summarize_failure_reason(cluster);
+    let failing_gates = summarize_failure_gates(cluster);
+    let mut content = format!(
+        "Failed episodes for plan {} and task type {} show a specific mistake: {}.",
+        cluster.key.plan_id, cluster.key.task_type, reason
+    );
+    if !failing_gates.is_empty() {
+        content.push_str(&format!(" The failing gates were {}.", failing_gates));
+    }
+
+    KnowledgeEntry {
+        id: derive_knowledge_id(
+            KnowledgeKind::Insight,
+            &content,
+            &cluster.episode_ids,
+            &[knowledge_kind_tag(KnowledgeKind::Insight).to_string(),
+                "dream".to_string(),
+                "mistake".to_string(),
+                "failure".to_string(),
+                format!("plan:{}", cluster.key.plan_id),
+                format!("task_type:{}", cluster.key.task_type),
+                format!("model:{}", cluster.key.model),
+            ],
+        ),
+        kind: KnowledgeKind::Insight,
+        source: Some("dream".to_string()),
+        content,
+        confidence: if cluster.failure_count > 0 { 0.85 } else { 0.0 },
+        source_episodes: cluster.episode_ids.clone(),
+        tags: vec![
+            knowledge_kind_tag(KnowledgeKind::Insight).to_string(),
+            "dream".to_string(),
+            "mistake".to_string(),
+            "failure".to_string(),
+            "root-cause".to_string(),
+            format!("plan:{}", cluster.key.plan_id),
+            format!("task_type:{}", cluster.key.task_type),
+            format!("model:{}", cluster.key.model),
+        ],
+        created_at,
+        half_life_days: KnowledgeKind::Insight.default_half_life_days(),
+        hdc_vector: None,
+    }
+}
+
 fn review_insights_from_heuristics(
     analysis: &TierProgressionReport,
     created_at: DateTime<Utc>,
@@ -1193,6 +1246,12 @@ mod tests {
                 .iter()
                 .any(|entry| entry.content.contains("Would I do this differently now?"))
         );
+        let all_entries = store.read_all().expect("read knowledge");
+        assert!(all_entries.iter().any(|entry| {
+            entry.kind == KnowledgeKind::Insight
+                && entry.tags.iter().any(|tag| tag == "mistake")
+                && entry.content.contains("missing rollback")
+        }));
     }
 
     #[test]
