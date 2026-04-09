@@ -6,7 +6,7 @@
 //! — it returns [`ExecutorAction`]s. This module dispatches those actions to
 //! real agents, gates, and git, then feeds results back as events.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -2670,10 +2670,25 @@ impl PlanRunner {
                 let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                 let output_text = result.output.body.as_text().unwrap_or_default().to_string();
 
-                let approved = parse_review_verdict(&output_text);
+                let mut approved = parse_review_verdict(&output_text);
+                let drift_report =
+                    self.task_trackers.get(plan_id).and_then(|tracker| {
+                        review_drift_report(&tracker.tasks_file, &output_text)
+                    });
+                if let Some(ref report) = drift_report {
+                    if report.drifted() {
+                        approved = false;
+                    }
+                }
                 eprintln!(
-                    "[orchestrate] Review {plan_id}: verdict={}",
-                    if approved { "approved" } else { "revise" }
+                    "[orchestrate] Review {plan_id}: verdict={} drift={}",
+                    if approved { "approved" } else { "revise" },
+                    drift_report
+                        .as_ref()
+                        .map(|r: &ReviewDriftReport| {
+                            format!("{:.1}% ({}/{})", r.coverage() * 100.0, r.matched, r.expected)
+                        })
+                        .unwrap_or_else(|| "n/a".into())
                 );
 
                 let mut ep = Episode::new("Auditor", "review").succeeded();
@@ -2698,7 +2713,20 @@ impl PlanRunner {
                 } else {
                     // Store feedback and reset tracker for reimplementation
                     if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
-                        tracker.review_feedback = Some(output_text);
+                        tracker.review_feedback = Some(match drift_report {
+                            Some(report) if report.drifted() => format!(
+                                "Spec drift detected while reviewing task output.\n\
+                                 Coverage: {:.1}% ({}/{})\n\
+                                 Missing anchors: {}\n\n\
+                                 Reviewer output:\n{}",
+                                report.coverage() * 100.0,
+                                report.matched,
+                                report.expected,
+                                report.missing.join(", "),
+                                output_text
+                            ),
+                            _ => output_text.clone(),
+                        });
                         tracker.reset_for_reimpl();
                     }
                     let event = ExecutorEvent::ReviewRejected;
@@ -3885,9 +3913,17 @@ impl PlanRunner {
 
         // Load plan.md content
         let plan_md_path = plan_dir.join("plan.md");
-        let plan_content = tokio::fs::read_to_string(&plan_md_path)
+        let mut plan_content = tokio::fs::read_to_string(&plan_md_path)
             .await
             .unwrap_or_default();
+
+        if let Some(tracker) = self.task_trackers.get(plan_id) {
+            let task_spec = task_spec_summary(&tracker.tasks_file);
+            if !task_spec.is_empty() {
+                plan_content.push_str("\n\n---\n\n## Task spec\n");
+                plan_content.push_str(&task_spec);
+            }
+        }
 
         // Load AGENTS.md if it exists
         let agents_md_path = self.workdir.join("AGENTS.md");
@@ -4346,6 +4382,178 @@ fn claude_tool_allowlist_with(
     }
 }
 
+/// Summary of how tightly a review output stays anchored to the task spec.
+#[derive(Debug, Clone, PartialEq)]
+struct ReviewDriftReport {
+    matched: usize,
+    expected: usize,
+    missing: Vec<String>,
+}
+
+impl ReviewDriftReport {
+    fn coverage(&self) -> f64 {
+        if self.expected == 0 {
+            1.0
+        } else {
+            self.matched as f64 / self.expected as f64
+        }
+    }
+
+    fn drifted(&self) -> bool {
+        self.expected > 0 && self.coverage() < 0.35
+    }
+}
+
+/// Render the task spec into a reviewable summary block.
+fn task_spec_summary(tasks_file: &TasksFile) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "[meta]\nplan = {}\niteration = {}\ntotal = {}\ndone = {}\nstatus = {}\nmax_parallel = {}\nestimated_total_minutes = {}\n",
+        tasks_file.meta.plan,
+        tasks_file.meta.iteration,
+        tasks_file.meta.total,
+        tasks_file.meta.done,
+        tasks_file.meta.status,
+        tasks_file.meta.max_parallel,
+        tasks_file.meta.estimated_total_minutes,
+    ));
+
+    for task in &tasks_file.tasks {
+        out.push_str(&format!("\n### {} - {}\n", task.id, task.title));
+        out.push_str(&format!("tier = {}\n", task.tier));
+        if !task.files.is_empty() {
+            out.push_str("files:\n");
+            for file in &task.files {
+                out.push_str(&format!("- {file}\n"));
+            }
+        }
+        if !task.depends_on.is_empty() {
+            out.push_str(&format!("depends_on = {}\n", task.depends_on.join(", ")));
+        }
+        if !task.depends_on_plan.is_empty() {
+            out.push_str(&format!(
+                "depends_on_plan = {}\n",
+                task.depends_on_plan.join(", ")
+            ));
+        }
+        if !task.acceptance.is_empty() {
+            out.push_str("acceptance:\n");
+            for item in &task.acceptance {
+                out.push_str(&format!("- {item}\n"));
+            }
+        }
+        if !task.verify.is_empty() {
+            out.push_str("verify:\n");
+            for step in &task.verify {
+                out.push_str(&format!(
+                    "- [{}] {}\n",
+                    step.phase,
+                    step.command
+                ));
+            }
+        }
+    }
+
+    out
+}
+
+fn significant_terms(text: &str) -> Vec<String> {
+    const STOP_WORDS: &[&str] = &[
+        "the", "and", "for", "with", "from", "into", "that", "this", "task", "plan", "should",
+        "must", "have", "has", "are", "was", "were", "will", "would", "could", "can", "done",
+        "make", "build", "update", "implement", "review", "please", "then", "than", "when",
+    ];
+
+    let mut seen = HashSet::new();
+    let mut terms = Vec::new();
+    for raw in text.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-' && c != '/') {
+        let term = raw.trim().to_lowercase();
+        if term.len() < 4 || STOP_WORDS.contains(&term.as_str()) {
+            continue;
+        }
+        if seen.insert(term.clone()) {
+            terms.push(term);
+        }
+    }
+    terms
+}
+
+fn review_drift_report(tasks_file: &TasksFile, output: &str) -> Option<ReviewDriftReport> {
+    let lower = output.to_lowercase();
+    let mut expected = Vec::new();
+    let mut seen = HashSet::new();
+
+    let mut push_expected = |value: String| {
+        let value = value.trim().to_lowercase();
+        if value.is_empty() {
+            return;
+        }
+        if seen.insert(value.clone()) {
+            expected.push(value);
+        }
+    };
+
+    for task in &tasks_file.tasks {
+        push_expected(task.id.clone());
+        push_expected(task.title.clone());
+
+        for term in significant_terms(&task.title) {
+            push_expected(term);
+        }
+
+        for file in &task.files {
+            push_expected(file.clone());
+            if let Some(name) = std::path::Path::new(file).file_name().and_then(|n| n.to_str()) {
+                push_expected(name.to_string());
+            }
+        }
+
+        for verify in &task.verify {
+            push_expected(verify.phase.clone());
+        }
+
+        for acceptance in &task.acceptance {
+            push_expected(acceptance.clone());
+            for term in significant_terms(acceptance) {
+                push_expected(term);
+            }
+        }
+
+        for anti_pattern in task
+            .context
+            .as_ref()
+            .map(|ctx| ctx.anti_patterns.iter())
+            .into_iter()
+            .flatten()
+        {
+            push_expected(anti_pattern.clone());
+            for term in significant_terms(anti_pattern) {
+                push_expected(term);
+            }
+        }
+    }
+
+    if expected.is_empty() {
+        return None;
+    }
+
+    let mut matched = 0usize;
+    let mut missing = Vec::new();
+    for anchor in &expected {
+        if lower.contains(anchor) {
+            matched += 1;
+        } else {
+            missing.push(anchor.clone());
+        }
+    }
+
+    Some(ReviewDriftReport {
+        matched,
+        expected: expected.len(),
+        missing,
+    })
+}
+
 /// Parse a review verdict from agent output text.
 ///
 /// Looks for `verdict = "approve"` / `verdict = "revise"` patterns,
@@ -4668,5 +4876,72 @@ depends_on = []
         assert!(!tracker.all_tasks_done());
         assert_eq!(tracker.impl_round, 1);
         assert!(tracker.completed.is_empty());
+    }
+
+    #[test]
+    fn review_drift_report_flags_unanchored_output() {
+        let tasks: TasksFile = toml::from_str(
+            r#"
+[meta]
+plan = "demo"
+total = 1
+
+[[task]]
+id = "T1"
+title = "Wire reviewing drift guard"
+tier = "focused"
+files = ["src/orchestrate.rs"]
+depends_on = []
+
+[task.context]
+anti_patterns = ["Do not skip the drift check"]
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-cli"
+"#,
+        )
+        .unwrap();
+
+        let report = review_drift_report(&tasks, "Looks good, approve.");
+        assert!(report.is_some());
+        let report = report.unwrap();
+        assert!(report.drifted());
+        assert!(report.coverage() < 0.35);
+    }
+
+    #[test]
+    fn review_drift_report_accepts_anchored_output() {
+        let tasks: TasksFile = toml::from_str(
+            r#"
+[meta]
+plan = "demo"
+total = 1
+
+[[task]]
+id = "T1"
+title = "Wire reviewing drift guard"
+tier = "focused"
+files = ["src/orchestrate.rs"]
+depends_on = []
+
+[task.context]
+anti_patterns = ["Do not skip the drift check"]
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-cli"
+"#,
+        )
+        .unwrap();
+
+        let report = review_drift_report(
+            &tasks,
+            "T1 review: src/orchestrate.rs implements the drift guard and cargo check stays green.",
+        );
+        assert!(report.is_some());
+        let report = report.unwrap();
+        assert!(!report.drifted());
+        assert!(report.coverage() >= 0.35);
     }
 }
