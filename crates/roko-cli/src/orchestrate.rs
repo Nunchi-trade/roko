@@ -2914,7 +2914,12 @@ impl PlanRunner {
         // Emit observability trace event for the successful agent dispatch.
         self.emit_agent_trace(plan_id, task_id, true, wall_ms);
 
-        eprintln!("[orchestrate] task {task_id} completed");
+        tracing::info!(
+            plan_id = %plan_id,
+            task_id = %task_id,
+            duration_ms = wall_ms,
+            "task completed"
+        );
         Ok(())
     }
 
@@ -3124,6 +3129,14 @@ impl PlanRunner {
             at_ms: now_unix_ms_i64(),
         };
         self.obs_sinks.trace_sink.append(trace_id, event);
+
+        tracing::error!(
+            plan_id = %plan_id,
+            task_id = %task_id,
+            duration_ms = wall_ms,
+            error = %error,
+            "task failed"
+        );
     }
     ///
     /// Uses `TaskDef::build_fix_prompt` to produce a targeted prompt that includes
@@ -5096,6 +5109,7 @@ impl PlanRunner {
             tools_used: 0,
             tool_calls: Vec::new(),
             wall_time_ms: wall_ms,
+            duration_ms: wall_ms,
             time_to_first_token_ms: 0,
             was_warm_start: false,
             iteration: 1,
@@ -5109,7 +5123,7 @@ impl PlanRunner {
             role = %role,
             model = %model,
             cost_usd = event.cost_usd,
-            wall_ms = wall_ms,
+            duration_ms = wall_ms,
             success = success,
             "agent efficiency event"
         );

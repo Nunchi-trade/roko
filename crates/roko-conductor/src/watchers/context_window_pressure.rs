@@ -150,6 +150,7 @@ mod tests {
             tools_used: 2,
             tool_calls: Vec::new(),
             wall_time_ms: 1_000,
+            duration_ms: 1_000,
             time_to_first_token_ms: 100,
             was_warm_start: false,
             iteration: 1,

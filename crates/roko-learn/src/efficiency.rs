@@ -115,6 +115,9 @@ pub struct AgentEfficiencyEvent {
     // ── Timing ──────────────────────────────────────────────────────
     /// Wall-clock milliseconds for the entire turn.
     pub wall_time_ms: u64,
+    /// Alias for wall-clock task duration in milliseconds.
+    #[serde(default)]
+    pub duration_ms: u64,
     /// Time to first token in milliseconds.
     pub time_to_first_token_ms: u64,
     /// Whether this agent was a warm-pool reuse or cold start.
@@ -407,6 +410,7 @@ fn make_test_event(
         tools_used,
         tool_calls: Vec::new(),
         wall_time_ms,
+        duration_ms: wall_time_ms,
         time_to_first_token_ms: 500,
         was_warm_start: warm,
         iteration: 1,
