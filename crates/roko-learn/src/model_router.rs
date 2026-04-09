@@ -383,11 +383,19 @@ impl LinUCBRouter {
     /// If `total_observations < COLD_START_THRESHOLD`, returns the static
     /// fallback model for the context's complexity band tier.
     pub fn select_model(&self, ctx: &RoutingContext) -> ModelSpec {
+        self.select_features(&ctx.to_features())
+    }
+
+    /// Select the best model for a raw 17-dim context vector.
+    ///
+    /// This is the lower-level entry point used by the cascade router when it
+    /// already has the encoded feature vector.
+    pub fn select_features(&self, x: &[f64]) -> ModelSpec {
         let state = self.state.lock();
 
         // Cold start: use static routing.
         if state.total_observations < COLD_START_THRESHOLD {
-            let tier = complexity_to_tier(ctx.complexity);
+            let tier = context_vec_to_tier(x);
             drop(state);
             let slug = self
                 .static_table
@@ -398,7 +406,6 @@ impl LinUCBRouter {
         }
 
         let alpha = alpha_for_observations(state.total_observations);
-        let x = ctx.to_features();
 
         let mut best_slug = state.arms[0].slug.clone();
         let mut best_score = f64::NEG_INFINITY;
@@ -601,6 +608,16 @@ const fn complexity_to_tier(band: TaskComplexityBand) -> ModelTier {
         // Standard and forward-compat
         _ => ModelTier::Standard,
     }
+}
+
+/// Map a raw context vector back to a model tier for cold-start routing.
+fn context_vec_to_tier(x: &[f64]) -> ModelTier {
+    let band = match x.get(8).copied().unwrap_or(0.5) {
+        v if v <= 0.25 => TaskComplexityBand::Fast,
+        v if v >= 0.75 => TaskComplexityBand::Complex,
+        _ => TaskComplexityBand::Standard,
+    };
+    complexity_to_tier(band)
 }
 
 fn slugs_match(lhs: &str, rhs: &str) -> bool {

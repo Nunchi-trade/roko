@@ -73,6 +73,17 @@ pub struct CascadeModel {
     pub stage: CascadeStage,
 }
 
+/// Selection result for raw-context routing.
+#[derive(Debug, Clone)]
+pub struct CascadeSelection {
+    /// Model chosen by the router.
+    pub model: ModelSpec,
+    /// Total observations accumulated by the router when this selection was made.
+    pub observations: u64,
+    /// Which cascade stage produced the recommendation.
+    pub stage: CascadeStage,
+}
+
 // ─── Confidence-stage stats ─────────────────────────────────────────────────
 
 /// Threshold for transitioning from Confidence to UCB stage.
@@ -231,6 +242,19 @@ impl CascadeRouter {
     #[must_use]
     pub fn total_observations(&self) -> u64 {
         self.linucb.total_observations()
+    }
+
+    /// Select a model from a raw context vector.
+    #[must_use]
+    pub fn select(&self, context_vec: Vec<f64>) -> CascadeSelection {
+        let observations = self.total_observations();
+        let stage = stage_for_observations(observations);
+        let model = self.linucb.select_features(&context_vec);
+        CascadeSelection {
+            model,
+            observations,
+            stage,
+        }
     }
 
     /// Return the index of `slug` in the router's model list.

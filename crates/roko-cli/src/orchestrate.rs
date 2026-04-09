@@ -694,57 +694,40 @@ fn role_hash_features(role: &str) -> [f64; 4] {
     ]
 }
 
-fn implementer_cascade_context_vec(
+fn cascade_context_vec(
     runner: &PlanRunner,
     plan_id: &str,
+    role: AgentRole,
     task_def: Option<&crate::task_parser::TaskDef>,
 ) -> Vec<f64> {
+    use roko_core::TaskCategory;
     use roko_core::TaskComplexityBand;
-    use roko_learn::model_router::CONTEXT_DIM;
+    use roko_learn::model_router::RoutingContext;
 
-    let mut context_vec = vec![0.0; CONTEXT_DIM];
-    let task_tier = task_def.map(|td| td.tier.as_str()).unwrap_or("focused");
-    let tier_idx = match task_tier {
-        "mechanical" => 0,
-        "focused" => 1,
-        "integrative" => 2,
-        "architectural" => 3,
-        _ => 1,
-    };
-    context_vec[tier_idx] = 1.0;
-
-    let complexity = match task_tier {
-        "mechanical" => TaskComplexityBand::Fast,
-        "architectural" => TaskComplexityBand::Complex,
+    let complexity = match task_def.map(|td| td.tier.as_str()).unwrap_or("focused") {
+        "mechanical" | "fast" => TaskComplexityBand::Fast,
+        "architectural" | "complex" | "premium" => TaskComplexityBand::Complex,
         _ => TaskComplexityBand::Standard,
     };
-    context_vec[4] = match complexity {
-        TaskComplexityBand::Fast => 0.0,
-        TaskComplexityBand::Complex => 1.0,
-        TaskComplexityBand::Standard => 0.5,
-        _ => 0.5,
-    };
-
     let iteration = runner
         .task_trackers
         .get(plan_id)
-        .map(|tracker| f64::from(tracker.impl_round.saturating_add(1)))
-        .unwrap_or(1.0);
-    context_vec[5] = (iteration / 10.0).min(1.0);
-    context_vec[6..10].copy_from_slice(&role_hash_features("Implementer"));
-    context_vec[10] = 0.5;
-    context_vec[11] = if runner
+        .map(|tracker| tracker.impl_round.saturating_add(1))
+        .unwrap_or(1);
+    let has_prior_failure = runner
         .task_trackers
         .get(plan_id)
-        .is_some_and(|tracker| tracker.gate_failure_count > 0)
-    {
-        1.0
-    } else {
-        0.0
-    };
-    context_vec[16] = 1.0;
+        .is_some_and(|tracker| tracker.last_gate_failure.is_some());
 
-    context_vec
+    RoutingContext {
+        task_category: TaskCategory::Implementation,
+        complexity,
+        iteration,
+        role,
+        crate_familiarity: 0.5,
+        has_prior_failure,
+    }
+    .to_features()
 }
 
 impl TaskTracker {
@@ -3147,7 +3130,7 @@ impl PlanRunner {
         reward: f64,
     ) {
         if let Some(model_idx) = self.learning.cascade_router().model_index_for_slug(model_slug) {
-            let context_vec = implementer_cascade_context_vec(self, plan_id, task_def);
+            let context_vec = cascade_context_vec(self, plan_id, AgentRole::Implementer, task_def);
             self.learning
                 .cascade_router()
                 .observe(context_vec, model_idx, reward);
@@ -4490,72 +4473,32 @@ impl PlanRunner {
         };
 
         // ── Adaptive model selection via CascadeRouter ───────────────
-        if let Some(td) = task_def.as_ref() {
-            if td.model_hint.is_some() {
+        let use_cascade = task_def.as_ref().map(|td| td.model_hint.is_none()).unwrap_or(true);
+        if use_cascade {
+            let cascade_router = self.learning.cascade_router();
+            let context_vec = cascade_context_vec(self, plan_id, role, task_def.as_ref());
+            let selection = cascade_router.select(context_vec);
+            if selection.observations > roko_learn::model_router::COLD_START_THRESHOLD {
                 tracing::info!(
-                    "[orchestrate] Task {} model_hint={} (skipping CascadeRouter)",
-                    td.id,
+                    "[orchestrate] CascadeRouter recommends model={} (stage={}, observations={})",
+                    selection.model.slug,
+                    selection.stage,
+                    selection.observations
+                );
+                selected_model = selection.model.slug;
+            } else {
+                tracing::info!(
+                    "[orchestrate] CascadeRouter cold-start observations={} (keeping static model={})",
+                    selection.observations,
                     selected_model
                 );
-            } else {
-                use roko_core::TaskComplexityBand;
-                use roko_learn::model_router::RoutingContext;
-
-                let cascade_router = self.learning.cascade_router();
-                let complexity = match td.tier.as_str() {
-                    "mechanical" | "fast" => TaskComplexityBand::Fast,
-                    "architectural" | "complex" | "premium" => TaskComplexityBand::Complex,
-                    _ => TaskComplexityBand::Standard,
-                };
-                let has_prior_failure = self
-                    .task_trackers
-                    .get(plan_id)
-                    .is_some_and(|t| t.last_gate_failure.is_some());
-                let routing_ctx = RoutingContext {
-                    task_category: roko_core::TaskCategory::Implementation,
-                    complexity,
-                    iteration: 0,
-                    role,
-                    crate_familiarity: 0.5,
-                    has_prior_failure,
-                };
-                let cascade = cascade_router.route(&routing_ctx);
-                // Use cascade recommendation only if it has enough observations.
-                // Otherwise stick with the statically selected model.
-                if cascade.stage != roko_learn::cascade_router::CascadeStage::Static {
-                    tracing::info!(
-                        "[orchestrate] CascadeRouter recommends model={} (stage={:?})",
-                        cascade.primary.slug,
-                        cascade.stage
-                    );
-                    selected_model = cascade.primary.slug;
-                }
             }
-        } else {
-            use roko_core::TaskComplexityBand;
-            use roko_learn::model_router::RoutingContext;
-
-            let cascade_router = self.learning.cascade_router();
-            let routing_ctx = RoutingContext {
-                task_category: roko_core::TaskCategory::Implementation,
-                complexity: TaskComplexityBand::Standard,
-                iteration: 0,
-                role,
-                crate_familiarity: 0.5,
-                has_prior_failure: self
-                    .task_trackers
-                    .get(plan_id)
-                    .is_some_and(|t| t.last_gate_failure.is_some()),
-            };
-            let cascade = cascade_router.route(&routing_ctx);
-            if cascade.stage != roko_learn::cascade_router::CascadeStage::Static {
-                tracing::info!(
-                    "[orchestrate] CascadeRouter recommends model={} (stage={:?})",
-                    cascade.primary.slug,
-                    cascade.stage
-                );
-                selected_model = cascade.primary.slug;
-            }
+        } else if let Some(td) = task_def.as_ref() {
+            tracing::info!(
+                "[orchestrate] Task {} model_hint={} (skipping CascadeRouter)",
+                td.id,
+                selected_model
+            );
         }
 
         // ── Dispatch-time skill hint from successful prior tasks ──────
