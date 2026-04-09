@@ -1070,6 +1070,29 @@ impl TaskTracker {
         self.impl_round += 1;
     }
 
+    /// Update a task's `model_hint` and persist the rewritten `tasks.toml`.
+    fn set_task_model_hint(
+        &mut self,
+        task_id: &str,
+        model_hint: Option<String>,
+    ) -> Result<()> {
+        let Some(task) = self.tasks_file.tasks.iter_mut().find(|task| task.id == task_id) else {
+            return Err(anyhow!(
+                "task {task_id} not found in plan {}",
+                self._plan_dir.display()
+            ));
+        };
+
+        task.model_hint = model_hint;
+
+        let tasks_path = self._plan_dir.join("tasks.toml");
+        let rendered = toml::to_string_pretty(&self.tasks_file)
+            .context("serialize tasks.toml after model escalation")?;
+        std::fs::write(&tasks_path, rendered)
+            .with_context(|| format!("write {}", tasks_path.display()))?;
+        Ok(())
+    }
+
     /// Return the most recently implemented task, if it still exists in the task file.
     fn last_impl_task(&self) -> Option<&crate::task_parser::TaskDef> {
         let task_id = self.last_impl_task_id.as_deref()?;
@@ -3854,11 +3877,23 @@ impl PlanRunner {
             .clone()
             .or_else(|| tracker.tasks_file.tasks.first().map(|task| task.id.clone()))
             .unwrap_or_else(|| "replan".to_string());
+        let task_def = tracker
+            .tasks_file
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .cloned();
         let terminal_count = tracker.terminal_task_count();
         let total_tasks = tracker.tasks_file.tasks.len();
         let plan_dir = tracker._plan_dir.clone();
         let current_model = self.effective_model();
-        let escalate_model = self.next_tier_model_slug(&current_model);
+        let task_model = task_def
+            .as_ref()
+            .map(|task| {
+                task.effective_model(&current_model, Some(&self.config.agent.tier_models))
+            })
+            .unwrap_or_else(|| current_model.clone());
+        let escalate_model = self.next_tier_model_slug(&task_model);
         let architectural_model = self
             .config
             .agent
@@ -3872,6 +3907,7 @@ impl PlanRunner {
         } else {
             match failure_count {
                 0 | 1 => ReplanStrategy::RetrySame,
+                2 if task_model.contains("opus") => ReplanStrategy::Decompose,
                 2 => ReplanStrategy::RetryWithEscalation,
                 3 => ReplanStrategy::Decompose,
                 _ => ReplanStrategy::Skip,
@@ -3926,6 +3962,15 @@ impl PlanRunner {
                 }
             }
             ReplanStrategy::RetryWithEscalation => {
+                if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+                    if let Err(e) =
+                        tracker.set_task_model_hint(&task_id, Some(escalate_model.clone()))
+                    {
+                        tracing::error!(
+                            "[orchestrate] failed to persist escalated model hint for {plan_id}:{task_id}: {e}"
+                        );
+                    }
+                }
                 let prompt = format!(
                     "{failure_summary}\n\n\
                      Retry the same task with the error context above using a stronger model. \
@@ -7790,6 +7835,47 @@ depends_on = []
         assert!(!tracker.all_tasks_done());
         assert_eq!(tracker.impl_round, 1);
         assert!(tracker.completed.is_empty());
+    }
+
+    #[test]
+    fn task_tracker_persists_escalated_model_hint() {
+        let dir = TempDir::new().unwrap();
+        let tasks_path = dir.path().join("tasks.toml");
+        std::fs::write(
+            &tasks_path,
+            r#"
+[meta]
+plan = "test"
+total = 1
+
+[[task]]
+id = "T1"
+title = "first"
+tier = "focused"
+model_hint = "claude-sonnet-4-5"
+depends_on = []
+"#,
+        )
+        .unwrap();
+
+        let tf = TasksFile::parse(&tasks_path).unwrap();
+        let mut tracker = TaskTracker::new(tf, dir.path().to_path_buf());
+
+        tracker
+            .set_task_model_hint("T1", Some("claude-opus-4".to_string()))
+            .unwrap();
+
+        let rendered = std::fs::read_to_string(&tasks_path).unwrap();
+        assert!(rendered.contains(r#"model_hint = "claude-opus-4""#));
+        assert_eq!(
+            tracker
+                .tasks_file
+                .tasks
+                .iter()
+                .find(|task| task.id == "T1")
+                .and_then(|task| task.model_hint.as_deref()),
+            Some("claude-opus-4")
+        );
     }
 
     #[test]
