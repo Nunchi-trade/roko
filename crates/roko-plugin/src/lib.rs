@@ -100,6 +100,54 @@ pub struct PluginManifest {
     pub feedback_collectors: Vec<Box<dyn FeedbackCollector>>,
 }
 
+/// Fluent builder for [`PluginManifest`].
+pub struct PluginBuilder {
+    name: String,
+    version: String,
+    event_sources: Vec<Box<dyn EventSource>>,
+    feedback_collectors: Vec<Box<dyn FeedbackCollector>>,
+}
+
+impl PluginBuilder {
+    /// Create a builder for a plugin with the package version as the default version.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            event_sources: Vec::new(),
+            feedback_collectors: Vec::new(),
+        }
+    }
+
+    /// Add an event source to the plugin.
+    pub fn event_source<T>(mut self, source: T) -> Self
+    where
+        T: EventSource,
+    {
+        self.event_sources.push(Box::new(source));
+        self
+    }
+
+    /// Add a feedback collector to the plugin.
+    pub fn feedback_collector<T>(mut self, collector: T) -> Self
+    where
+        T: FeedbackCollector,
+    {
+        self.feedback_collectors.push(Box::new(collector));
+        self
+    }
+
+    /// Build the final plugin manifest.
+    pub fn build(self) -> PluginManifest {
+        PluginManifest {
+            name: self.name,
+            version: self.version,
+            event_sources: self.event_sources,
+            feedback_collectors: self.feedback_collectors,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,5 +241,20 @@ mod tests {
         assert_eq!(feedback[0].outcome, FeedbackOutcome::Approved);
         assert_eq!(feedback[0].metadata, json!({ "reviewer": "alice" }));
         assert_eq!(feedback[0].timestamp, DateTime::<Utc>::UNIX_EPOCH);
+    }
+
+    #[test]
+    fn plugin_builder_supports_fluent_api() {
+        let manifest = PluginBuilder::new("my-plugin")
+            .event_source(DummyEventSource)
+            .feedback_collector(DummyFeedbackCollector)
+            .build();
+
+        assert_eq!(manifest.name, "my-plugin");
+        assert_eq!(manifest.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(manifest.event_sources.len(), 1);
+        assert_eq!(manifest.feedback_collectors.len(), 1);
+        assert_eq!(manifest.event_sources[0].name(), "dummy");
+        assert_eq!(manifest.feedback_collectors[0].name(), "dummy-feedback");
     }
 }
