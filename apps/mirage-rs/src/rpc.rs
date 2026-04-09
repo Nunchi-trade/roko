@@ -208,11 +208,14 @@ async fn finish_start_rpc_server(
         .route("/health", get(health_handler))
         .route("/events/{stream_id}", get(event_ws_handler))
         .route("/events/{stream_id}", delete(unsubscribe_event_handler))
-        .fallback_service(rpc_fallback)
         .with_state(local_state);
     if let Some(api) = api_router {
         app = app.nest("/api", api);
     }
+    // Fallback MUST be registered after /api nest — otherwise Axum's fallback
+    // catches /api/* requests before the nested router can match them, causing
+    // all REST endpoints to return the JSON-RPC "POST is required" error.
+    app = app.fallback_service(rpc_fallback);
     // Serve the dashboard UI from the static/ directory if present.
     // Checks: $MIRAGE_DASHBOARD_DIR, ./static/, and the binary's sibling static/.
     let dashboard_dir = std::env::var("MIRAGE_DASHBOARD_DIR").ok().or_else(|| {

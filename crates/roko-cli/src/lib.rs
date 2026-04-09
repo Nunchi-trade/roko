@@ -10,6 +10,8 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+extern crate self as roko_cli;
+
 pub mod agent_exec;
 pub mod clean;
 pub mod config;
@@ -29,11 +31,33 @@ pub mod repl;
 pub mod research;
 pub mod run;
 pub mod secrets;
-pub mod serve;
 pub mod status;
 pub mod task_parser;
 pub mod tui;
 pub mod worker;
+
+#[path = "../../roko-serve/src/deploy/mod.rs"]
+pub mod deploy;
+#[path = "../../roko-serve/src/error.rs"]
+pub mod error;
+#[path = "../../roko-serve/src/events.rs"]
+pub mod events;
+#[path = "../../roko-serve/src/routes/mod.rs"]
+pub mod routes;
+#[path = "../../roko-serve/src/state.rs"]
+pub mod state;
+#[path = "../../roko-serve/src/templates.rs"]
+pub mod templates;
+
+/// Backwards-compatible namespace for server-related modules.
+pub mod serve {
+    pub use crate::deploy;
+    pub use crate::error;
+    pub use crate::events;
+    pub use crate::routes;
+    pub use crate::state;
+    pub use crate::templates;
+}
 
 pub use config::{
     AgentConfig, Config, ConfigLayer, ConfigPaths, ConfigSources, GateConfig, PromptConfig,
