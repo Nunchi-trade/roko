@@ -446,6 +446,12 @@ enum NeuroCmd {
         #[arg(long)]
         workdir: Option<PathBuf>,
     },
+    /// Show aggregate statistics for the durable knowledge store.
+    Stats {
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1979,6 +1985,72 @@ async fn cmd_neuro(cli: &Cli, cmd: NeuroCmd) -> Result<i32> {
 
             Ok(EXIT_SUCCESS)
         }
+        NeuroCmd::Stats { workdir } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            let store = KnowledgeStore::for_workdir(&wd);
+            let stats = store.stats().with_context(|| {
+                format!(
+                    "read knowledge store stats from {}",
+                    store.path().display()
+                )
+            })?;
+
+            if cli.json {
+                let payload = serde_json::json!({
+                    "workdir": wd,
+                    "path": store.path(),
+                    "stats": stats,
+                });
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+                return Ok(EXIT_SUCCESS);
+            }
+
+            println!("Knowledge stats for {}:", store.path().display());
+            println!("  total entries: {}", stats.total_entries);
+            println!(
+                "  average confidence: {}",
+                stats
+                    .average_confidence
+                    .map(|confidence| format!("{confidence:.3}"))
+                    .unwrap_or_else(|| "n/a".to_owned())
+            );
+            println!("  entries by kind:");
+            if stats.kind_counts.is_empty() {
+                println!("    (empty)");
+            } else {
+                for (kind, count) in &stats.kind_counts {
+                    println!("    {kind:<16} {count}");
+                }
+            }
+
+            match stats.oldest_entry.as_ref() {
+                Some(entry) => {
+                    println!(
+                        "  oldest entry: {} [{}] confidence {:.3} created {}",
+                        entry.id,
+                        format!("{:?}", entry.kind).to_lowercase(),
+                        entry.confidence.clamp(0.0, 1.0),
+                        entry.created_at
+                    );
+                }
+                None => println!("  oldest entry: (none)"),
+            }
+
+            match stats.newest_entry.as_ref() {
+                Some(entry) => {
+                    println!(
+                        "  newest entry: {} [{}] confidence {:.3} created {}",
+                        entry.id,
+                        format!("{:?}", entry.kind).to_lowercase(),
+                        entry.confidence.clamp(0.0, 1.0),
+                        entry.created_at
+                    );
+                }
+                None => println!("  newest entry: (none)"),
+            }
+
+            Ok(EXIT_SUCCESS)
+        }
     }
 }
 
@@ -3016,6 +3088,17 @@ mod tests {
             cli.command,
             Some(Command::Neuro {
                 cmd: NeuroCmd::Query { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_parses_neuro_stats_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "neuro", "stats"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Neuro {
+                cmd: NeuroCmd::Stats { .. }
             })
         ));
     }

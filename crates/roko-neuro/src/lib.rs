@@ -75,6 +75,6 @@ pub mod episode_completion;
 
 pub use distiller::{DistillationBackend, Distiller};
 pub use episode_completion::spawn_episode_distillation;
-pub use knowledge_store::KnowledgeStore;
+pub use knowledge_store::{KnowledgeStats, KnowledgeStore};
 #[cfg(feature = "hdc")]
 pub use knowledge_store::{MemoryHit, MemoryIndex};

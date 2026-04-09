@@ -9,12 +9,14 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
+use serde::Serialize;
 
-use crate::KnowledgeEntry;
+use crate::{KnowledgeEntry, KnowledgeKind};
 
 /// Default garbage-collection threshold for knowledge entries.
 pub const DEFAULT_GC_MIN_CONFIDENCE: f64 = 0.05;
@@ -34,6 +36,21 @@ use bardo_primitives::hdc::HdcVector;
 pub struct KnowledgeStore {
     path: PathBuf,
     write_gate: Arc<Mutex<()>>,
+}
+
+/// Aggregate statistics for a durable knowledge store snapshot.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct KnowledgeStats {
+    /// Total number of retained knowledge entries.
+    pub total_entries: usize,
+    /// Number of entries per semantic kind.
+    pub kind_counts: BTreeMap<String, usize>,
+    /// Mean confidence across all entries.
+    pub average_confidence: Option<f64>,
+    /// Oldest entry in the store, if any.
+    pub oldest_entry: Option<KnowledgeEntry>,
+    /// Newest entry in the store, if any.
+    pub newest_entry: Option<KnowledgeEntry>,
 }
 
 impl KnowledgeStore {
@@ -152,6 +169,58 @@ impl KnowledgeStore {
             .take(limit)
             .map(|(_, entry)| entry)
             .collect())
+    }
+
+    /// Compute aggregate statistics over the current knowledge corpus.
+    ///
+    /// The snapshot is derived from the current on-disk entries and
+    /// ignores malformed JSONL lines, matching the store's tolerant read
+    /// behavior.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing file cannot be read.
+    pub fn stats(&self) -> Result<KnowledgeStats> {
+        let entries = self.read_all()?;
+        let total_entries = entries.len();
+        let mut kind_counts: BTreeMap<String, usize> = BTreeMap::new();
+        let mut confidence_sum = 0.0;
+        let mut oldest_entry: Option<&KnowledgeEntry> = None;
+        let mut newest_entry: Option<&KnowledgeEntry> = None;
+
+        for entry in &entries {
+            *kind_counts
+                .entry(knowledge_kind_label(entry.kind).to_owned())
+                .or_insert(0) += 1;
+            confidence_sum += entry.confidence;
+
+            if oldest_entry
+                .map(|current| entry.created_at < current.created_at)
+                .unwrap_or(true)
+            {
+                oldest_entry = Some(entry);
+            }
+            if newest_entry
+                .map(|current| entry.created_at > current.created_at)
+                .unwrap_or(true)
+            {
+                newest_entry = Some(entry);
+            }
+        }
+
+        let average_confidence = if total_entries > 0 {
+            Some(confidence_sum / total_entries as f64)
+        } else {
+            None
+        };
+
+        Ok(KnowledgeStats {
+            total_entries,
+            kind_counts,
+            average_confidence,
+            oldest_entry: oldest_entry.cloned(),
+            newest_entry: newest_entry.cloned(),
+        })
     }
 
     /// Decay confidence for old entries using their configured half-life.
@@ -446,6 +515,16 @@ fn compare_scores(
         .then_with(|| right.1.created_at.cmp(&left.1.created_at))
 }
 
+fn knowledge_kind_label(kind: KnowledgeKind) -> &'static str {
+    match kind {
+        KnowledgeKind::Fact => "fact",
+        KnowledgeKind::Procedure => "procedure",
+        KnowledgeKind::Heuristic => "heuristic",
+        KnowledgeKind::Constraint => "constraint",
+        KnowledgeKind::AntiKnowledge => "anti_knowledge",
+    }
+}
+
 #[cfg(feature = "hdc")]
 fn hdc_similarity(entry: &KnowledgeEntry, topic: &str) -> f64 {
     let Some(vector) = entry.hdc_vector.as_deref() else {
@@ -545,6 +624,61 @@ mod tests {
         let all = store.read_all().expect("read");
         assert_eq!(all.len(), 1);
         assert!((all[0].confidence - 0.5).abs() < 0.05);
+    }
+
+    #[test]
+    fn stats_aggregate_by_kind_and_age() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let now = Utc::now();
+
+        store
+            .add(KnowledgeEntry {
+                id: "oldest".to_owned(),
+                kind: KnowledgeKind::Fact,
+                content: "first".to_owned(),
+                confidence: 0.8,
+                source_episodes: Vec::new(),
+                tags: Vec::new(),
+                created_at: now - Duration::days(3),
+                half_life_days: 30.0,
+                hdc_vector: None,
+            })
+            .expect("add oldest");
+        store
+            .add(KnowledgeEntry {
+                id: "middle".to_owned(),
+                kind: KnowledgeKind::Procedure,
+                content: "second".to_owned(),
+                confidence: 0.6,
+                source_episodes: Vec::new(),
+                tags: Vec::new(),
+                created_at: now - Duration::days(1),
+                half_life_days: 30.0,
+                hdc_vector: None,
+            })
+            .expect("add middle");
+        store
+            .add(KnowledgeEntry {
+                id: "newest".to_owned(),
+                kind: KnowledgeKind::Fact,
+                content: "third".to_owned(),
+                confidence: 1.0,
+                source_episodes: Vec::new(),
+                tags: Vec::new(),
+                created_at: now,
+                half_life_days: 30.0,
+                hdc_vector: None,
+            })
+            .expect("add newest");
+
+        let stats = store.stats().expect("stats");
+        assert_eq!(stats.total_entries, 3);
+        assert_eq!(stats.kind_counts.get("fact"), Some(&2));
+        assert_eq!(stats.kind_counts.get("procedure"), Some(&1));
+        assert!((stats.average_confidence.expect("average") - 0.8).abs() < f64::EPSILON);
+        assert_eq!(stats.oldest_entry.as_ref().map(|entry| entry.id.as_str()), Some("oldest"));
+        assert_eq!(stats.newest_entry.as_ref().map(|entry| entry.id.as_str()), Some("newest"));
     }
 
     #[cfg(feature = "hdc")]
