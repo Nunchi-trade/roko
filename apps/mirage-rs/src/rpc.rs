@@ -214,10 +214,21 @@ async fn finish_start_rpc_server(
     if let Some(api) = api_router {
         app = app.nest("/api", api);
     }
-    // Fallback MUST be registered after /api nest — otherwise Axum's fallback
-    // catches /api/* requests before the nested router can match them, causing
-    // all REST endpoints to return the JSON-RPC "POST is required" error.
-    app = app.fallback_service(rpc_fallback);
+    // The JSON-RPC fallback must only handle POST — otherwise it catches GET
+    // requests to /api/* before the nested router can match them, causing all
+    // REST endpoints to return the JSON-RPC "POST is required" error.
+    let rpc_post_only = tower::service_fn(move |request: Request<Body>| {
+        let mut rpc = rpc_fallback.clone();
+        async move {
+            if request.method() != axum::http::Method::POST {
+                let mut response = Response::new(Body::from("Not Found"));
+                *response.status_mut() = StatusCode::NOT_FOUND;
+                return Ok::<Response<Body>, Infallible>(response);
+            }
+            rpc.call(request).await
+        }
+    });
+    app = app.fallback_service(rpc_post_only);
     // Serve the dashboard UI from the static/ directory if present.
     // Checks: $MIRAGE_DASHBOARD_DIR, ./static/, and the binary's sibling static/.
     let dashboard_dir = std::env::var("MIRAGE_DASHBOARD_DIR").ok().or_else(|| {
