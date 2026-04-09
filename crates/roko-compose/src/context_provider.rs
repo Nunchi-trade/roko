@@ -244,7 +244,8 @@ pub struct ResolvedContext {
 impl ResolvedContext {
     /// Convert resolved sections into `PromptSection`s for the composer.
     /// Sections are sorted by cache layer (for prefix-cache alignment),
-    /// then by placement, then by priority (highest first).
+    /// then their placements are reshaped with an attention U-curve so the
+    /// highest-value chunks land at the start and end of the final prompt.
     #[must_use]
     pub fn into_prompt_sections(mut self) -> Vec<PromptSection> {
         // Sort: cache layer ascending (stable layers first), then placement, then priority desc
@@ -255,6 +256,9 @@ impl ResolvedContext {
                 .then(placement_ord(a.section.placement).cmp(&placement_ord(b.section.placement)))
                 .then((b.section.priority as u8).cmp(&(a.section.priority as u8)))
         });
+
+        apply_attention_curve_placements(&mut self.sections);
+
         self.sections.into_iter().map(|cs| cs.section).collect()
     }
 
@@ -270,6 +274,45 @@ const fn placement_ord(p: Placement) -> u8 {
         Placement::Start => 0,
         Placement::Middle => 1,
         Placement::End => 2,
+    }
+}
+
+fn apply_attention_curve_placements(sections: &mut [ContextSection]) {
+    if sections.len() <= 1 {
+        return;
+    }
+
+    let mut ranked_indices: Vec<usize> = (0..sections.len()).collect();
+    ranked_indices.sort_by(|&a, &b| attention_rank_cmp(&sections[a], &sections[b]));
+
+    let edge_slots = ranked_indices.len().div_ceil(2);
+    for (rank, idx) in ranked_indices.into_iter().enumerate() {
+        sections[idx].section.placement = if rank < edge_slots {
+            if rank % 2 == 0 {
+                Placement::Start
+            } else {
+                Placement::End
+            }
+        } else {
+            Placement::Middle
+        };
+    }
+}
+
+fn attention_rank_cmp(a: &ContextSection, b: &ContextSection) -> std::cmp::Ordering {
+    (b.section.priority as u8)
+        .cmp(&(a.section.priority as u8))
+        .then(cache_layer_rank(b.section.cache_layer).cmp(&cache_layer_rank(a.section.cache_layer)))
+        .then(a.estimated_tokens().cmp(&b.estimated_tokens()))
+        .then_with(|| a.section.name.cmp(&b.section.name))
+}
+
+const fn cache_layer_rank(layer: CacheLayer) -> u8 {
+    match layer {
+        CacheLayer::System => 0,
+        CacheLayer::Session => 1,
+        CacheLayer::Task => 2,
+        CacheLayer::Dynamic => 3,
     }
 }
 
@@ -1314,5 +1357,70 @@ mod tests {
         assert_eq!(prompt_sections[0].name, "system");
         assert_eq!(prompt_sections[1].name, "session");
         assert_eq!(prompt_sections[2].name, "task");
+    }
+
+    #[test]
+    fn resolved_context_attention_curve_positions_high_value_at_edges() {
+        let resolved = ResolvedContext {
+            sections: vec![
+                ContextSection {
+                    section: PromptSection::new("critical", "critical context")
+                        .with_priority(SectionPriority::Critical)
+                        .with_cache_layer(CacheLayer::Task)
+                        .with_placement(Placement::Middle),
+                    source: ContextSource::Verification,
+                },
+                ContextSection {
+                    section: PromptSection::new("high", "high value")
+                        .with_priority(SectionPriority::High)
+                        .with_cache_layer(CacheLayer::Dynamic)
+                        .with_placement(Placement::Middle),
+                    source: ContextSource::PriorTaskOutput {
+                        task_id: "T1".into(),
+                    },
+                },
+                ContextSection {
+                    section: PromptSection::new("normal", "normal value")
+                        .with_priority(SectionPriority::Normal)
+                        .with_cache_layer(CacheLayer::Session)
+                        .with_placement(Placement::Middle),
+                    source: ContextSource::PlanBrief,
+                },
+                ContextSection {
+                    section: PromptSection::new("low", "low value")
+                        .with_priority(SectionPriority::Low)
+                        .with_cache_layer(CacheLayer::System)
+                        .with_placement(Placement::Middle),
+                    source: ContextSource::ResearchMemo,
+                },
+            ],
+            tier: ContextTier::Full,
+            total_tokens_estimate: 12,
+            budget_tokens: 24_000,
+        };
+
+        let prompt_sections = resolved.into_prompt_sections();
+
+        let critical = prompt_sections
+            .iter()
+            .find(|s| s.name == "critical")
+            .expect("critical section present");
+        let high = prompt_sections
+            .iter()
+            .find(|s| s.name == "high")
+            .expect("high section present");
+        let normal = prompt_sections
+            .iter()
+            .find(|s| s.name == "normal")
+            .expect("normal section present");
+        let low = prompt_sections
+            .iter()
+            .find(|s| s.name == "low")
+            .expect("low section present");
+
+        assert_eq!(critical.placement, Placement::Start);
+        assert_eq!(high.placement, Placement::End);
+        assert_eq!(normal.placement, Placement::Middle);
+        assert_eq!(low.placement, Placement::Middle);
     }
 }
