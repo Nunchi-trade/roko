@@ -167,6 +167,8 @@ pub mod ws;
 pub struct ApiState {
     /// Chain context holding the knowledge store and pheromone field.
     pub chain: Arc<RwLock<ChainContext>>,
+    /// Mirage fork state — needed for current block number in heartbeat/liveness checks.
+    pub mirage_state: Arc<RwLock<crate::fork::MirageState>>,
     /// HDC projection cache for query endpoints.
     pub projection_cache: ProjectionCache,
     /// Server start time for uptime computation.
