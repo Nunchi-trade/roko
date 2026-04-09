@@ -5125,6 +5125,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "roko-mcp-scripts"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "glob",
+ "roko-mcp-stdio",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber 0.3.23",
+]
+
+[[package]]
 name = "roko-mcp-slack"
 version = "0.1.0"
 dependencies = [
