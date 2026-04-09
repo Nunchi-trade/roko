@@ -8,7 +8,7 @@
 //! The implementation is deterministic and uses the existing episode and
 //! pattern primitives already present in the workspace.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -170,6 +170,46 @@ impl TierProgression {
             heuristics,
             playbook,
         }
+    }
+
+    /// Replay heuristics against the supplied episodes and revise confidence.
+    pub fn replay_heuristics(&self, report: &mut TierProgressionReport, episodes: &[Episode]) {
+        let mut episode_success_by_id: HashMap<String, bool> = HashMap::new();
+        for episode in episodes {
+            episode_success_by_id
+                .entry(episode_source_id(episode).to_string())
+                .or_insert(episode.success);
+        }
+
+        for heuristic in &mut report.heuristics {
+            let Some(expected_success) = heuristic_expected_success(heuristic) else {
+                continue;
+            };
+
+            let mut supporting = 0usize;
+            let mut contradicting = 0usize;
+            for source_episode_id in &heuristic.source_episodes {
+                if let Some(success) = episode_success_by_id.get(source_episode_id) {
+                    if *success == expected_success {
+                        supporting += 1;
+                    } else {
+                        contradicting += 1;
+                    }
+                }
+            }
+
+            let total = supporting + contradicting;
+            if total == 0 {
+                continue;
+            }
+
+            let validation = supporting as f64 / total as f64;
+            let adjustment = (validation - 0.5) * 0.2;
+            heuristic.confidence = (heuristic.confidence + adjustment).clamp(0.0, 1.0);
+        }
+
+        report.heuristics.sort_by(compare_heuristics);
+        report.playbook = self.compile_playbook(&report.heuristics, report.insights.len());
     }
 
     /// Extract D1 insights from raw episodes.
@@ -533,6 +573,34 @@ fn heuristic_then_clause(insight: &InsightRecord) -> String {
     }
 }
 
+fn heuristic_expected_success(heuristic: &HeuristicRule) -> Option<bool> {
+    let then_clause = heuristic.then_clause.trim().to_ascii_lowercase();
+    if then_clause.is_empty() {
+        return None;
+    }
+
+    if then_clause.contains("reuse this path as the default play")
+        || then_clause.contains("expected follow-up")
+        || then_clause.contains("prioritize gate")
+        || then_clause.contains("passed")
+    {
+        return Some(true);
+    }
+
+    if then_clause.starts_with("add ")
+        || then_clause.starts_with("avoid ")
+        || then_clause.starts_with("escalate ")
+        || then_clause.starts_with("retry ")
+        || then_clause.starts_with("switch ")
+        || then_clause.contains("verification")
+        || then_clause.contains("failed")
+    {
+        return Some(false);
+    }
+
+    None
+}
+
 fn heuristic_id(insight: &InsightRecord) -> String {
     let mut payload = String::new();
     payload.push_str(&insight.id);
@@ -879,5 +947,68 @@ mod tests {
         assert!(markdown.contains("```json"));
         assert!(markdown.contains("confidence"));
         assert!(markdown.contains("source episodes"));
+    }
+
+    #[test]
+    fn replay_heuristics_strengthens_validated_rules_and_weakens_contradicted_rules() {
+        let episodes = vec![
+            episode("ep-1", "gate_success", "Implementer", "compile", true, true),
+            episode("ep-2", "gate_success", "Implementer", "compile", true, true),
+            episode("ep-3", "gate_success", "Implementer", "compile", true, false),
+            episode("ep-4", "gate_success", "Implementer", "compile", true, false),
+        ];
+
+        let mut report = TierProgressionReport {
+            insights: Vec::new(),
+            heuristics: vec![
+                HeuristicRule {
+                    id: "heuristic-success".to_string(),
+                    insight_id: "insight-success".to_string(),
+                    title: "If trigger gate success then reuse path".to_string(),
+                    when_clause: "trigger gate success and agent implementer".to_string(),
+                    then_clause: "reuse this path as the default play".to_string(),
+                    confidence: 0.5,
+                    confirmations: 2,
+                    first_seen_ms: 1,
+                    last_seen_ms: 2,
+                    source_episodes: vec!["ep-1".to_string(), "ep-2".to_string()],
+                },
+                HeuristicRule {
+                    id: "heuristic-failure".to_string(),
+                    insight_id: "insight-failure".to_string(),
+                    title: "If trigger gate failure then add verification".to_string(),
+                    when_clause: "trigger gate failure and agent implementer".to_string(),
+                    then_clause: "add a verification step before proceeding".to_string(),
+                    confidence: 0.8,
+                    confirmations: 2,
+                    first_seen_ms: 3,
+                    last_seen_ms: 4,
+                    source_episodes: vec!["ep-3".to_string(), "ep-4".to_string()],
+                },
+            ],
+            playbook: PlaybookCompilation {
+                markdown: String::new(),
+                rules: Vec::new(),
+            },
+        };
+
+        let progression = TierProgression::default();
+        progression.replay_heuristics(&mut report, &episodes);
+
+        let strengthened = report
+            .heuristics
+            .iter()
+            .find(|heuristic| heuristic.id == "heuristic-success")
+            .expect("strengthened heuristic");
+        let weakened = report
+            .heuristics
+            .iter()
+            .find(|heuristic| heuristic.id == "heuristic-failure")
+            .expect("weakened heuristic");
+
+        assert!(strengthened.confidence > 0.5);
+        assert!(weakened.confidence < 0.8);
+        assert_eq!(report.playbook.rules.len(), 2);
+        assert!(report.playbook.markdown.contains("confidence"));
     }
 }

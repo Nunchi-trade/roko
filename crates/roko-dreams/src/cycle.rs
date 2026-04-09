@@ -217,7 +217,9 @@ impl DreamCycle {
         });
 
         let processed_through = batch.iter().map(|episode| episode.timestamp).max();
-        let analysis = TierProgression::default().analyze(&batch);
+        let progression = TierProgression::default();
+        let mut analysis = progression.analyze(&batch);
+        progression.replay_heuristics(&mut analysis, &batch);
         let review_entries = review_insights_from_heuristics(&analysis, started_at);
         let mut clusters = cluster_episodes(batch);
         let mut written_knowledge_ids = BTreeSet::new();
