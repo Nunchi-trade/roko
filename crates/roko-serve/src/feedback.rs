@@ -230,7 +230,7 @@ async fn persist_feedback_result(
     action: &ExternalAction,
     observation: FeedbackObservation,
 ) -> Result<()> {
-    let feedback_kind = Kind::Custom(format!("feedback.{}.{}", action.service, action.action_type));
+    let feedback_kind = feedback_signal_kind(&action.service, &action.action_type);
     let signal = Signal::builder(feedback_kind)
         .body(Body::from_json(&json!({
             "episode_id": episode.episode_id,
@@ -282,6 +282,10 @@ async fn persist_feedback_result(
     }
 
     Ok(())
+}
+
+fn feedback_signal_kind(service: &str, action_type: &str) -> Kind {
+    Kind::Custom(format!("feedback:{service}:{action_type}"))
 }
 
 fn record_positive_cascade_feedback(workdir: &Path, episode: &Episode) -> Result<()> {
@@ -918,5 +922,11 @@ mod tests {
             reloaded.confidence_snapshot().get("claude-sonnet-4-5"),
             Some(&(1, 1))
         );
+    }
+
+    #[test]
+    fn feedback_signal_kind_uses_colon_separated_namespace() {
+        let kind = feedback_signal_kind("github", "review_pr");
+        assert_eq!(kind.as_str(), "feedback:github:review_pr");
     }
 }
