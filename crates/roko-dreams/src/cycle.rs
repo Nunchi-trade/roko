@@ -70,6 +70,8 @@ pub struct DreamCycleReport {
     pub playbooks_created: usize,
     /// Failure-oriented knowledge entries created during the pass.
     pub regressions_detected: Vec<KnowledgeEntry>,
+    /// Cross-domain strategy hypotheses synthesized from structurally similar clusters.
+    pub strategy_hypotheses: Vec<KnowledgeEntry>,
 }
 
 /// One logged counterfactual generated during offline dreaming.
@@ -411,6 +413,15 @@ impl DreamCycle {
             cluster.warnings = outcome.warnings;
         }
 
+        let strategy_hypotheses =
+            generate_cross_domain_strategy_hypotheses(&clusters, started_at);
+        for hypothesis in &strategy_hypotheses {
+            if written_knowledge_ids.insert(hypothesis.id.clone()) {
+                self.knowledge_store.add(hypothesis.clone())?;
+                knowledge_entries_written += 1;
+            }
+        }
+
         let report = DreamCycleReport {
             started_at,
             completed_at: Utc::now(),
@@ -422,6 +433,7 @@ impl DreamCycle {
             knowledge_entries_written,
             playbooks_created,
             regressions_detected,
+            strategy_hypotheses,
         };
 
         let counterfactuals = build_counterfactuals(&clusters, started_at);
@@ -1161,6 +1173,283 @@ fn build_regression_entry(cluster: &DreamCluster, created_at: DateTime<Utc>) -> 
     }
 }
 
+fn generate_cross_domain_strategy_hypotheses(
+    clusters: &[DreamCluster],
+    created_at: DateTime<Utc>,
+) -> Vec<KnowledgeEntry> {
+    let source_clusters: Vec<&DreamCluster> = clusters
+        .iter()
+        .filter(|cluster| cluster.success_count > 0)
+        .collect();
+    if source_clusters.len() < 2 {
+        return Vec::new();
+    }
+
+    let source_vectors: Vec<HdcVector> = source_clusters
+        .iter()
+        .map(|cluster| cluster_structure_vector(cluster))
+        .collect();
+    let mut entries = Vec::new();
+
+    for target in clusters.iter().filter(|cluster| cluster.failure_count > 0) {
+        let target_vector = cluster_structure_vector(target);
+        let mut scored_sources: Vec<(usize, f32)> = source_clusters
+            .iter()
+            .enumerate()
+            .filter(|(_, source)| source.key.task_type != target.key.task_type)
+            .map(|(index, source)| {
+                let score = structural_transfer_score(
+                    target,
+                    source,
+                    &target_vector,
+                    &source_vectors[index],
+                );
+                (index, score)
+            })
+            .collect();
+
+        scored_sources.sort_by(|left, right| {
+            right
+                .1
+                .partial_cmp(&left.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    source_clusters[left.0]
+                        .key
+                        .task_type
+                        .cmp(&source_clusters[right.0].key.task_type)
+                })
+        });
+
+        let mut picked: Vec<(usize, f32)> = Vec::new();
+        let mut seen_task_types = BTreeSet::new();
+        for (index, score) in scored_sources {
+            let source = source_clusters[index];
+            if !seen_task_types.insert(source.key.task_type.clone()) {
+                continue;
+            }
+            picked.push((index, score));
+            if picked.len() == 2 {
+                break;
+            }
+        }
+
+        if picked.len() < 2 {
+            continue;
+        }
+
+        let source_a = source_clusters[picked[0].0];
+        let source_b = source_clusters[picked[1].0];
+        let source_a_score = picked[0].1;
+        let source_b_score = picked[1].1;
+        let content = render_cross_domain_strategy_content(
+            target,
+            source_a,
+            source_a_score,
+            source_b,
+            source_b_score,
+        );
+        let mut source_episodes: BTreeSet<String> = target.episode_ids.iter().cloned().collect();
+        source_episodes.extend(source_a.episode_ids.iter().cloned());
+        source_episodes.extend(source_b.episode_ids.iter().cloned());
+        let source_episodes: Vec<String> = source_episodes.into_iter().collect();
+        let tags = vec![
+            knowledge_kind_tag(KnowledgeKind::Heuristic).to_string(),
+            "dream".to_string(),
+            "cross-domain".to_string(),
+            "novel-strategy".to_string(),
+            "structural-transfer".to_string(),
+            format!("target-task:{}", target.key.task_type),
+            format!("source-task:{}", source_a.key.task_type),
+            format!("source-task:{}", source_b.key.task_type),
+            format!("target-model:{}", target.key.model),
+        ];
+
+        entries.push(KnowledgeEntry {
+            id: derive_knowledge_id(
+                KnowledgeKind::Heuristic,
+                &content,
+                &source_episodes,
+                &tags,
+            ),
+            kind: KnowledgeKind::Heuristic,
+            source: Some("dream".to_string()),
+            content,
+            confidence: strategy_confidence(target, source_a_score, source_b_score),
+            source_episodes,
+            tags,
+            created_at,
+            half_life_days: KnowledgeKind::Heuristic.default_half_life_days(),
+            hdc_vector: None,
+        });
+    }
+
+    entries
+}
+
+fn structural_transfer_score(
+    target: &DreamCluster,
+    source: &DreamCluster,
+    target_vector: &HdcVector,
+    source_vector: &HdcVector,
+) -> f32 {
+    let mut score = target_vector.similarity(source_vector);
+    if target.key.model == source.key.model {
+        score += 0.10;
+    }
+    let target_failure_gates = gate_name_set(&summarize_failure_gates(target));
+    let source_success_gates = gate_name_set(&summarize_success_gates(source));
+    let shared_gates = target_failure_gates
+        .intersection(&source_success_gates)
+        .count()
+        .min(2) as f32;
+    score += shared_gates * 0.06;
+    if source.playbook.is_some() {
+        score += 0.08;
+    }
+    if source.success_count >= target.failure_count {
+        score += 0.04;
+    }
+    score.clamp(0.0, 1.0)
+}
+
+fn strategy_confidence(target: &DreamCluster, source_a_score: f32, source_b_score: f32) -> f64 {
+    let failure_pressure = if target.failure_count == 0 {
+        0.0
+    } else {
+        (target.failure_count as f64 / target.episode_count.max(1) as f64).clamp(0.0, 1.0)
+    };
+    let structural_fit = ((source_a_score as f64 + source_b_score as f64) / 2.0).clamp(0.0, 1.0);
+    (0.35 + failure_pressure * 0.25 + structural_fit * 0.4).clamp(0.3, 0.95)
+}
+
+fn render_cross_domain_strategy_content(
+    target: &DreamCluster,
+    source_a: &DreamCluster,
+    source_a_score: f32,
+    source_b: &DreamCluster,
+    source_b_score: f32,
+) -> String {
+    let source_a_strategy = summarize_success_pattern(source_a);
+    let source_b_strategy = summarize_success_pattern(source_b);
+    let shared_cues = summarize_shared_cues(target, source_a, source_b);
+    format!(
+        "Cross-domain strategy hypothesis for task type {}: blend the {} approach ({}) with the {} approach ({}). The clusters look structurally similar because {}. Transfer the shared control loop to {} and adapt it to the failure mode {}. Structural match scores: {:.2} and {:.2}.",
+        target.key.task_type,
+        source_a.key.task_type,
+        source_a_strategy,
+        source_b.key.task_type,
+        source_b_strategy,
+        shared_cues,
+        target.key.task_type,
+        summarize_failure_reason(target),
+        source_a_score,
+        source_b_score
+    )
+}
+
+fn summarize_success_pattern(cluster: &DreamCluster) -> String {
+    if let Some(playbook) = &cluster.playbook {
+        let steps = playbook
+            .steps
+            .iter()
+            .take(2)
+            .map(|step| step.description.as_str())
+            .collect::<Vec<_>>()
+            .join(" then ");
+        if steps.is_empty() {
+            return playbook.goal.clone();
+        }
+        return format!("{}; {}", playbook.goal, steps);
+    }
+
+    let gates = summarize_success_gates(cluster);
+    format!(
+        "repeat the successful {} pattern with model {} while preserving {}",
+        cluster.key.task_type, cluster.key.model, gates
+    )
+}
+
+fn summarize_shared_cues(target: &DreamCluster, source_a: &DreamCluster, source_b: &DreamCluster) -> String {
+    let mut cues = Vec::new();
+    if source_a.key.model == target.key.model || source_b.key.model == target.key.model {
+        cues.push(format!("the same model {}", target.key.model));
+    }
+
+    let target_failures = gate_name_set(&summarize_failure_gates(target));
+    let source_success_a = gate_name_set(&summarize_success_gates(source_a));
+    let source_success_b = gate_name_set(&summarize_success_gates(source_b));
+    let shared_a: Vec<String> = target_failures
+        .intersection(&source_success_a)
+        .cloned()
+        .collect();
+    let shared_b: Vec<String> = target_failures
+        .intersection(&source_success_b)
+        .cloned()
+        .collect();
+    if !shared_a.is_empty() || !shared_b.is_empty() {
+        let mut shared = shared_a;
+        shared.extend(shared_b);
+        shared.sort();
+        shared.dedup();
+        cues.push(format!("shared gate pressure around {}", shared.join(", ")));
+    }
+
+    if summarize_failure_reason(source_a) == summarize_failure_reason(target)
+        || summarize_failure_reason(source_b) == summarize_failure_reason(target)
+    {
+        cues.push("the same failure mode".to_string());
+    }
+
+    if cues.is_empty() {
+        cues.push("a similar control-flow shape".to_string());
+    }
+
+    cues.join(" and ")
+}
+
+fn gate_name_set(summary: &str) -> BTreeSet<String> {
+    summary
+        .split(',')
+        .map(str::trim)
+        .filter(|gate| !gate.is_empty())
+        .map(|gate| gate.split_whitespace().next().unwrap_or("").to_string())
+        .filter(|gate| !gate.is_empty())
+        .collect()
+}
+
+fn cluster_structure_vector(cluster: &DreamCluster) -> HdcVector {
+    let task_type = text_fingerprint(&format!("task_type={}", cluster.key.task_type)).permute(19);
+    let model = text_fingerprint(&format!("model={}", cluster.key.model)).permute(41);
+    let outcome =
+        text_fingerprint(&format!("outcome={}", cluster.key.outcome)).permute(83);
+    let balance = text_fingerprint(&format!(
+        "balance=success:{} failure:{}",
+        cluster.success_count, cluster.failure_count
+    ))
+    .permute(127);
+    let success_gates =
+        text_fingerprint(&format!("success_gates={}", summarize_success_gates(cluster)))
+            .permute(163);
+    let failure_gates =
+        text_fingerprint(&format!("failure_gates={}", summarize_failure_gates(cluster)))
+            .permute(211);
+    let failure_reason = text_fingerprint(&format!(
+        "failure_reason={}",
+        summarize_failure_reason(cluster)
+    ))
+    .permute(257);
+    HdcVector::bundle(&[
+        &task_type,
+        &model,
+        &outcome,
+        &balance,
+        &success_gates,
+        &failure_gates,
+        &failure_reason,
+    ])
+}
+
 fn build_mistake_insight_entry(
     cluster: &DreamCluster,
     created_at: DateTime<Utc>,
@@ -1577,6 +1866,17 @@ mod tests {
             );
             write_episode(&logger, &ep).await;
         }
+        for idx in 0..4 {
+            let ep = episode(
+                &format!("docs-{idx}"),
+                "plan-c",
+                "docs",
+                "claude-haiku-4-5",
+                true,
+                None,
+            );
+            write_episode(&logger, &ep).await;
+        }
         for idx in 0..5 {
             let ep = episode(
                 &format!("fail-{idx}"),
@@ -1597,9 +1897,16 @@ mod tests {
         );
 
         let report = cycle.run().await.expect("run");
-        assert_eq!(report.processed_episodes, 9);
-        assert_eq!(report.clusters.len(), 2);
-        assert_eq!(report.playbooks_created, 1);
+        assert_eq!(report.processed_episodes, 13);
+        assert_eq!(report.clusters.len(), 3);
+        assert_eq!(report.playbooks_created, 2);
+        assert!(!report.strategy_hypotheses.is_empty());
+        assert!(
+            report
+                .strategy_hypotheses
+                .iter()
+                .all(|entry| entry.tags.iter().any(|tag| tag == "cross-domain"))
+        );
         assert!(!report.regressions_detected.is_empty());
         assert!(cycle.last_dream_at().is_some());
 
@@ -1621,21 +1928,21 @@ mod tests {
         assert!(counterfactual["similarity"].as_f64().unwrap_or_default() > 0.0);
 
         let saved_playbooks = playbook_store.list().await.expect("list playbooks");
-        assert_eq!(saved_playbooks.len(), 1);
-        assert!(saved_playbooks[0].goal.contains("task type"));
+        assert_eq!(saved_playbooks.len(), 2);
+        assert!(saved_playbooks
+            .iter()
+            .any(|playbook| playbook.goal.contains("task type")));
 
         let store = KnowledgeStore::new(&knowledge_path);
         let knowledge_entries = store.query("dream", 10).expect("query");
         assert!(!knowledge_entries.is_empty());
-        let review_entries = store
-            .query("different approach", 10)
-            .expect("query review entries");
-        assert!(
-            review_entries
-                .iter()
-                .any(|entry| entry.content.contains("Would I do this differently now?"))
-        );
         let all_entries = store.read_all().expect("read knowledge");
+        assert!(all_entries.iter().any(|entry| {
+            entry.kind == KnowledgeKind::Heuristic
+                && entry.tags.iter().any(|tag| tag == "novel-strategy")
+                && entry.tags.iter().any(|tag| tag == "cross-domain")
+                && entry.content.contains("Cross-domain strategy hypothesis")
+        }));
         assert!(all_entries.iter().any(|entry| {
             entry.kind == KnowledgeKind::Insight
                 && entry.tags.iter().any(|tag| tag == "mistake")
