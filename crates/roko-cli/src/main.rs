@@ -170,7 +170,7 @@ enum Command {
         #[arg(long)]
         workdir: Option<PathBuf>,
     },
-    /// Manage global and project config (wizard, show, path, edit, set).
+    /// Manage global and project config (wizard, show, path, edit, set, set-secret).
     Config {
         #[command(subcommand)]
         cmd: ConfigCmd,
@@ -439,6 +439,13 @@ enum ConfigCmd {
         /// Directory to resolve project config from (default: cwd).
         #[arg(long)]
         workdir: Option<PathBuf>,
+    },
+    /// Store a secret in `~/.roko/.env` as `NAME=VALUE`.
+    SetSecret {
+        /// Secret name.
+        name: String,
+        /// Secret value.
+        value: String,
     },
     /// Check `${VAR}` references in config and validate referenced secrets.
     CheckSecrets {
@@ -1108,6 +1115,7 @@ fn dispatch_config(cmd: ConfigCmd) -> Result<()> {
             };
             config_cmd::cmd_set(&wd, target, &key, &value)
         }
+        ConfigCmd::SetSecret { name, value } => config_cmd::cmd_set_secret(&name, &value),
         ConfigCmd::CheckSecrets { workdir } => {
             let wd = workdir.unwrap_or_else(|| PathBuf::from("."));
             config_cmd::cmd_check_secrets(&wd)
@@ -2527,6 +2535,17 @@ mod tests {
             cli.command,
             Some(Command::Config {
                 cmd: ConfigCmd::CheckSecrets { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_parses_set_secret_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "config", "set-secret", "TOKEN", "value"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Config {
+                cmd: ConfigCmd::SetSecret { .. }
             })
         ));
     }

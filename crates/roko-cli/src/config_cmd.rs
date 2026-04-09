@@ -13,9 +13,10 @@ use crate::config::{
 use anyhow::{Context as _, Result, anyhow};
 use roko_orchestrator::ExecutorConfig;
 use std::collections::BTreeSet;
+use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Non-interactive inputs for `config init` (used by CI / tests).
 #[derive(Clone, Debug, Default)]
@@ -267,6 +268,117 @@ pub fn cmd_check_secrets(workdir: &Path) -> Result<()> {
         message.push_str(&format!("\ninvalid: {}", invalid.join(", ")));
     }
     Err(anyhow!(message))
+}
+
+/// Set a secret in `~/.roko/.env`, updating an existing key if present.
+pub fn cmd_set_secret(name: &str, value: &str) -> Result<()> {
+    let home = std::env::var_os("HOME").ok_or_else(|| anyhow!("HOME is not set"))?;
+    let path = PathBuf::from(home).join(".roko").join(".env");
+    write_secret_env_file(&path, name, value)?;
+    println!("set {name} in {}", path.display());
+    Ok(())
+}
+
+fn write_secret_env_file(path: &Path, name: &str, value: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+
+    let existing = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
+    };
+    let rendered = upsert_env_assignment(&existing, name, value);
+    write_atomic_restricted(path, &rendered)?;
+    Ok(())
+}
+
+fn upsert_env_assignment(existing: &str, name: &str, value: &str) -> String {
+    let mut lines = Vec::new();
+    let mut replaced = false;
+    let replacement = format!("{name}={value}");
+
+    for line in existing.lines() {
+        if env_assignment_name(line).as_deref() == Some(name) {
+            lines.push(replacement.clone());
+            replaced = true;
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+
+    if !replaced {
+        lines.push(replacement);
+    }
+
+    lines.join("\n")
+}
+
+fn env_assignment_name(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
+    let trimmed = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+    let (name, _) = trimmed.split_once('=')?;
+    let name = name.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+fn write_atomic_restricted(path: &Path, text: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| anyhow!("path {} has no file name", path.display()))?;
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before UNIX_EPOCH")?
+        .as_nanos();
+    let tmp_path = parent.join(format!(
+        ".{}.{}.tmp",
+        file_name.to_string_lossy(),
+        unique
+    ));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp_path)
+            .with_context(|| format!("create {}", tmp_path.display()))?;
+        file.write_all(text.as_bytes())
+            .with_context(|| format!("write {}", tmp_path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("sync {}", tmp_path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp_path)
+            .with_context(|| format!("create {}", tmp_path.display()))?;
+        file.write_all(text.as_bytes())
+            .with_context(|| format!("write {}", tmp_path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("sync {}", tmp_path.display()))?;
+    }
+
+    fs::rename(&tmp_path, path).with_context(|| format!("replace {}", path.display()))?;
+    Ok(())
 }
 
 /// Open `$EDITOR` on the global or project config file (creating it if needed).
@@ -891,5 +1003,30 @@ mod tests {
             Some(SecretValidationTarget::Slack)
         ));
         assert!(secret_validation_target("ANTHROPIC_API_KEY").is_none());
+    }
+
+    #[test]
+    fn upsert_env_assignment_appends_new_key() {
+        let rendered = upsert_env_assignment("EXISTING=1\n# comment", "NEW_SECRET", "value");
+        assert_eq!(rendered, "EXISTING=1\n# comment\nNEW_SECRET=value");
+    }
+
+    #[test]
+    fn upsert_env_assignment_updates_existing_key() {
+        let rendered = upsert_env_assignment("NAME=old\nOTHER=keep", "NAME", "fresh");
+        assert_eq!(rendered, "NAME=fresh\nOTHER=keep");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_secret_env_file_creates_restricted_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".roko").join(".env");
+        write_secret_env_file(&path, "TOKEN", "abc123").unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "TOKEN=abc123");
     }
 }
