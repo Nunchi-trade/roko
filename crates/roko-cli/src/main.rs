@@ -9,6 +9,10 @@
 
 #![allow(clippy::too_many_lines)]
 
+#[path = "../../roko-serve/src/lib.rs"]
+mod roko_serve;
+pub use roko_serve::{deploy, error, events, routes, state, templates};
+
 use anyhow::{Context as _, Result, anyhow};
 use clap::{Parser, Subcommand, ValueEnum};
 use roko_agent::process::{cleanup_orphaned_agents, reap_orphaned_children};
@@ -639,7 +643,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             workdir,
         } => {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
-            roko_cli::serve::run_server(wd, bind, port).await?;
+            roko_serve::run_server(wd, bind, port).await?;
             Ok(EXIT_SUCCESS)
         }
         Command::Worker { port } => {
