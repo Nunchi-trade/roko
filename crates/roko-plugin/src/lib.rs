@@ -43,7 +43,7 @@ pub struct FeedbackSignal {
 }
 
 /// Kinds of event sources supported by the plugin SDK.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum EventSourceKind {
     /// HTTP webhook source.
@@ -53,7 +53,7 @@ pub enum EventSourceKind {
     /// Filesystem watcher source.
     FileWatch,
     /// Custom source type provided by a plugin.
-    Custom,
+    Custom(String),
 }
 
 /// An asynchronous source of signals.
@@ -110,7 +110,7 @@ mod tests {
         }
 
         fn kind(&self) -> EventSourceKind {
-            EventSourceKind::Custom
+            EventSourceKind::Custom("dummy".to_string())
         }
 
         async fn start(&self, sender: SignalSender, cancel: CancellationToken) -> Result<()> {
@@ -154,7 +154,7 @@ mod tests {
     async fn event_source_is_object_safe() {
         let source: Box<dyn EventSource> = Box::new(DummyEventSource);
         assert_eq!(source.name(), "dummy");
-        assert_eq!(source.kind(), EventSourceKind::Custom);
+        assert_eq!(source.kind(), EventSourceKind::Custom("dummy".to_string()));
 
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
