@@ -12,6 +12,94 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
+/// Built-in plan generation template presets.
+///
+/// The PRD frontmatter selects one of these presets. Each preset controls the
+/// generator's default model tier, gate strictness guidance, and total task
+/// budget. Unknown or missing template names fall back to [`Default`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlanTemplateKind {
+    /// Current behavior: balanced defaults.
+    Default,
+    /// Smaller, tighter plans with fewer tasks.
+    Compact,
+    /// More conservative plans with stricter gates.
+    Strict,
+}
+
+impl PlanTemplateKind {
+    /// Resolve a template name from PRD frontmatter.
+    #[must_use]
+    pub(crate) fn resolve(name: Option<&str>) -> Self {
+        let Some(name) = name else {
+            return Self::Default;
+        };
+        if name.eq_ignore_ascii_case("compact") || name.eq_ignore_ascii_case("small") {
+            Self::Compact
+        } else if name.eq_ignore_ascii_case("strict") {
+            Self::Strict
+        } else {
+            Self::Default
+        }
+    }
+
+    /// Template label used in prompts.
+    #[must_use]
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Compact => "compact",
+            Self::Strict => "strict",
+        }
+    }
+
+    /// Default model tier for the template.
+    #[must_use]
+    pub(crate) const fn default_model_tier(self) -> &'static str {
+        match self {
+            Self::Default => "focused",
+            Self::Compact => "mechanical",
+            Self::Strict => "integrative",
+        }
+    }
+
+    /// Gate strictness guidance for the template.
+    #[must_use]
+    pub(crate) const fn gate_strictness(self) -> &'static str {
+        match self {
+            Self::Default => "standard",
+            Self::Compact => "standard",
+            Self::Strict => "strict",
+        }
+    }
+
+    /// Maximum total task count the generator should target.
+    #[must_use]
+    pub(crate) const fn max_task_count(self) -> usize {
+        match self {
+            Self::Default => 20,
+            Self::Compact => 12,
+            Self::Strict => 8,
+        }
+    }
+}
+
+/// Render the selected plan template as prompt guidance.
+#[must_use]
+pub(crate) fn render_plan_template_guidance(template: PlanTemplateKind) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "## Plan template");
+    let _ = writeln!(out, "- name: {}", template.label());
+    let _ = writeln!(out, "- default model tier: {}", template.default_model_tier());
+    let _ = writeln!(out, "- gate strictness: {}", template.gate_strictness());
+    let _ = writeln!(out, "- max task count: {}", template.max_task_count());
+    let _ = writeln!(
+        out,
+        "- Keep the plan within this budget unless the PRD explicitly requires more tasks."
+    );
+    out
+}
+
 /// Task tier determines minimum model and maximum scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskTier {
@@ -180,6 +268,38 @@ pub fn build_generation_prompt(workdir: &Path, source: &str, source_type: &str) 
         "## Source type: {source_type}\n\n## Source content:\n\n{source}"
     );
     prompt
+}
+
+#[cfg(test)]
+mod template_tests {
+    use super::*;
+
+    #[test]
+    fn resolves_missing_template_to_default() {
+        let template = PlanTemplateKind::resolve(None);
+        assert_eq!(template.label(), "default");
+        assert_eq!(template.default_model_tier(), "focused");
+        assert_eq!(template.gate_strictness(), "standard");
+        assert_eq!(template.max_task_count(), 20);
+    }
+
+    #[test]
+    fn resolves_strict_template() {
+        let template = PlanTemplateKind::resolve(Some("strict"));
+        assert_eq!(template.label(), "strict");
+        assert_eq!(template.default_model_tier(), "integrative");
+        assert_eq!(template.gate_strictness(), "strict");
+        assert_eq!(template.max_task_count(), 8);
+    }
+
+    #[test]
+    fn template_guidance_includes_selected_settings() {
+        let guidance = render_plan_template_guidance(PlanTemplateKind::Compact);
+        assert!(guidance.contains("name: compact"));
+        assert!(guidance.contains("default model tier: mechanical"));
+        assert!(guidance.contains("gate strictness: standard"));
+        assert!(guidance.contains("max task count: 12"));
+    }
 }
 
 /// Build a prompt for regenerating an existing plan in place (§11).

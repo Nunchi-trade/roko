@@ -326,6 +326,8 @@ pub struct PrdMeta {
     pub coverage: f64,
     /// Free-form metadata tags.
     pub tags: Vec<String>,
+    /// Optional plan generation template preset.
+    pub plan_template: Option<String>,
 }
 
 impl PrdMeta {
@@ -354,6 +356,14 @@ impl PrdMeta {
                 meta.updated = val.trim().to_string();
             } else if let Some(val) = line.strip_prefix("coverage:") {
                 meta.coverage = val.trim().parse().unwrap_or(0.0);
+            } else if let Some(val) = line
+                .strip_prefix("plan_template:")
+                .or_else(|| line.strip_prefix("plan_template ="))
+            {
+                let value = val.trim().trim_matches('"').trim_matches('\'');
+                if !value.is_empty() {
+                    meta.plan_template = Some(value.to_string());
+                }
             }
         }
         Some(meta)
@@ -632,6 +642,11 @@ pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path, dry_run: bool) 
     let result = async {
         let content = std::fs::read_to_string(prd_path)
             .with_context(|| format!("read {}", prd_path.display()))?;
+        let prd_meta = PrdMeta::parse(&content).unwrap_or_default();
+        let template_kind =
+            crate::plan_generate::PlanTemplateKind::resolve(prd_meta.plan_template.as_deref());
+        let template_guidance =
+            crate::plan_generate::render_plan_template_guidance(template_kind);
         println!("📋 Generating plans from PRD: {slug}");
 
         let dry_run_workdir = if dry_run {
@@ -654,8 +669,11 @@ pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path, dry_run: bool) 
              Search the codebase first to understand what already exists. \
              Create plan.md and tasks.toml files directly, including per-task mcp_servers \
              when a task needs a specific MCP server.\n\n\
+             {template_guidance}\n\
              PRD content:\n{content}",
-            path = prd_path.display()
+            path = prd_path.display(),
+            template_guidance = template_guidance,
+            content = content,
         );
 
         let exit_code = run_agent(AgentExecOpts {
@@ -690,6 +708,13 @@ pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path, dry_run: bool) 
         }
 
         let (task_count, estimated_complexity) = generated_plan_stats(&changed)?;
+        if task_count > template_kind.max_task_count() {
+            eprintln!(
+                "⚠️  Generated {task_count} tasks, which exceeds the `{}` template budget of {}",
+                template_kind.label(),
+                template_kind.max_task_count()
+            );
+        }
         Ok((workdir.join("plans"), task_count, estimated_complexity))
     }
     .await;
@@ -846,13 +871,14 @@ mod tests {
 
     #[test]
     fn parse_frontmatter() {
-        let content = "---\nid: prd-test\ntitle: Test PRD\nstatus: draft\nversion: 2\ncoverage: 0.5\n---\n\n# Test\n";
+        let content = "---\nid: prd-test\ntitle: Test PRD\nstatus: draft\nversion: 2\ncoverage: 0.5\nplan_template = \"strict\"\n---\n\n# Test\n";
         let meta = PrdMeta::parse(content).unwrap();
         assert_eq!(meta.id, "prd-test");
         assert_eq!(meta.title, "Test PRD");
         assert_eq!(meta.status, "draft");
         assert_eq!(meta.version, 2);
         assert!((meta.coverage - 0.5).abs() < f64::EPSILON);
+        assert_eq!(meta.plan_template.as_deref(), Some("strict"));
     }
 
     #[test]

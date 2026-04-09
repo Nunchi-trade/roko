@@ -142,6 +142,7 @@ crates: [<crate-names>]
 plans_generated: []
 coverage: 0
 tags: [<keywords>]
+plan_template: <optional-template-name>
 ---
 ```
 
