@@ -452,10 +452,27 @@ impl SkillLibrary {
         &self.path
     }
 
-    /// Alias for [`SkillLibrary::select`] to match the public API used by the
-    /// orchestration layer docs.
-    pub fn query(&self, query: &SkillQuery, limit: usize) -> Vec<Skill> {
-        self.select(query, limit)
+    /// Query for dispatch-time skill suggestions using task metadata.
+    ///
+    /// The inputs map to [`SkillQuery`] as follows:
+    /// - `task_files` -> file hints
+    /// - `task_tier` -> category filter
+    /// - `symbols` -> tags
+    ///
+    /// Returns the top matching skills so callers can pick the most suitable
+    /// one for prompt injection.
+    pub fn query(
+        &self,
+        task_files: &[String],
+        task_tier: &str,
+        symbols: &[String],
+    ) -> Vec<Skill> {
+        let query = SkillQuery {
+            tags: symbols.to_vec(),
+            category: (!task_tier.is_empty()).then(|| task_tier.to_string()),
+            files_hint: task_files.to_vec(),
+        };
+        self.select(&query, usize::MAX)
     }
 
     // ── Voyager-style extraction & selection (§16.3.2-16.3.4) ──────
@@ -1417,6 +1434,36 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(library.select(&query, 2).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn query_maps_task_metadata_to_selection() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("skills.json");
+        let library = SkillLibrary::new(&path).await.unwrap();
+
+        let mut matched = Skill::new("matched", "sum", "tmpl");
+        matched.tags = vec!["resolve_symbols".into()];
+        matched.task_category = "implementation".into();
+        matched.files = vec!["src/lib.rs".into()];
+        matched.score = 0.9;
+        library.register(&matched).await.unwrap();
+
+        let mut other = Skill::new("other", "sum", "tmpl");
+        other.tags = vec!["unrelated".into()];
+        other.task_category = "docs".into();
+        other.files = vec!["README.md".into()];
+        other.score = 0.9;
+        library.register(&other).await.unwrap();
+
+        let results = library.query(
+            &["src/lib.rs".into()],
+            "implementation",
+            &["resolve_symbols".into()],
+        );
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "matched");
     }
 
     #[tokio::test]

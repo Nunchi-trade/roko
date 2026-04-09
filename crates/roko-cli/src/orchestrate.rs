@@ -39,6 +39,7 @@ use roko_gate::{
     adaptive_threshold::AdaptiveThresholds, clippy_gate::ClippyGate, compile::CompileGate,
     payload::GatePayload, test_gate::TestGate,
 };
+use roko_learn::skill_library::Skill;
 use roko_learn::costs_db::CostRecord;
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::episode_logger::{Episode, GateVerdict, Usage};
@@ -495,6 +496,35 @@ fn build_context_window_pressure_signal(text: &str) -> Option<Signal> {
             .tag("tokens_used", event.total_prompt_tokens.to_string())
             .build(),
     )
+}
+
+fn render_skill_context(skill: &Skill) -> String {
+    let mut parts = vec![
+        format!("Name: {}", skill.name),
+        format!(
+            "Success rate: {:.0}%",
+            (skill.success_rate.clamp(0.0, 1.0) * 100.0).round()
+        ),
+        format!("Summary: {}", skill.summary),
+    ];
+
+    if !skill.description.is_empty() {
+        parts.push(format!("Description: {}", skill.description));
+    }
+    if !skill.files.is_empty() {
+        parts.push(format!("Files: {}", skill.files.join(", ")));
+    }
+    if !skill.pattern.is_empty() {
+        parts.push(format!("Pattern:\n{}", skill.pattern));
+    }
+    if !skill.prompt_template.is_empty() {
+        parts.push(format!("Template:\n{}", skill.prompt_template));
+    }
+    if !skill.required_tools.is_empty() {
+        parts.push(format!("Tools: {}", skill.required_tools.join(", ")));
+    }
+
+    parts.join("\n\n")
 }
 
 fn latest_efficiency_event(text: &str) -> Option<AgentEfficiencyEvent> {
@@ -4303,6 +4333,37 @@ impl PlanRunner {
             }
         }
 
+        // ── Dispatch-time skill hint from successful prior tasks ──────
+        let task_files_for_skill_query = task_def
+            .as_ref()
+            .map(|td| td.files.clone())
+            .unwrap_or_default();
+        let task_tier_for_skill_query = task_def
+            .as_ref()
+            .map(|td| td.tier.as_str())
+            .unwrap_or("");
+        let symbols_for_skill_query = extract_task_symbols(&task_text);
+        let skill_context_section = self
+            .skill_library
+            .query(
+                &task_files_for_skill_query,
+                task_tier_for_skill_query,
+                &symbols_for_skill_query,
+            )
+            .into_iter()
+            .find(|skill| skill.success_rate > 0.5)
+            .map(|skill| {
+                let skill_text = render_skill_context(&skill);
+                let skill_text_len = skill_text.len();
+                (
+                    PromptSection::new("skill-library", skill_text)
+                        .with_priority(SectionPriority::Low)
+                        .with_placement(Placement::Middle)
+                        .with_hard_cap(1024),
+                    skill_text_len,
+                )
+            });
+
         // ── Provider health check ────────────────────────────────────
         let selected_model = if !self.learning.provider_health().is_healthy(&selected_model) {
             let fallback = self
@@ -4476,6 +4537,18 @@ impl PlanRunner {
             sections.push(
                 cs.into_signal()
                     .map_err(|e| anyhow!("context section: {e}"))?,
+            );
+        }
+
+        if let Some((skill_section, skill_text_len)) = skill_context_section {
+            sections.push(
+                skill_section
+                    .into_signal()
+                    .map_err(|e| anyhow!("skill-library section: {e}"))?,
+            );
+            tracing::info!(
+                "[orchestrate] injected skill library context ({} chars)",
+                skill_text_len
             );
         }
 
