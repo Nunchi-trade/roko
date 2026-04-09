@@ -759,6 +759,8 @@ pub struct PlanRunner {
     workdir: PathBuf,
     /// CLI config for agent/gate settings.
     config: Config,
+    /// CLI override to disable all re-planning.
+    no_replan: bool,
     /// The executor state machine.
     executor: ParallelExecutor,
     /// Append-only event log for crash recovery.
@@ -1425,6 +1427,7 @@ impl PlanRunner {
         workdir: &Path,
         config: Config,
         metrics: Arc<MetricRegistry>,
+        no_replan: bool,
     ) -> Result<Self> {
         if !plans_dir.exists() {
             return Err(anyhow!(
@@ -1547,6 +1550,7 @@ impl PlanRunner {
         Ok(Self {
             workdir: workdir.to_path_buf(),
             config,
+            no_replan,
             executor,
             event_log: EventLog::default(),
             agent_calls: 0,
@@ -1609,6 +1613,7 @@ impl PlanRunner {
         workdir: &Path,
         config: Config,
         metrics: Arc<MetricRegistry>,
+        no_replan: bool,
     ) -> Result<Self> {
         let snapshot =
             ExecutorSnapshot::from_json(snapshot_json).map_err(|e| anyhow!("bad snapshot: {e}"))?;
@@ -1637,6 +1642,7 @@ impl PlanRunner {
         Ok(Self {
             workdir: workdir.to_path_buf(),
             config,
+            no_replan,
             executor,
             event_log: EventLog::default(),
             agent_calls: 0,
@@ -1700,6 +1706,7 @@ impl PlanRunner {
         workdir: &Path,
         config: Config,
         metrics: Arc<MetricRegistry>,
+        no_replan: bool,
     ) -> Result<Self> {
         let exec_snap = ExecutorSnapshot::from_json(executor_json)
             .map_err(|e| anyhow!("bad executor snapshot: {e}"))?;
@@ -1731,6 +1738,7 @@ impl PlanRunner {
         Ok(Self {
             workdir: workdir.to_path_buf(),
             config,
+            no_replan,
             executor,
             event_log,
             agent_calls: 0,
@@ -2746,11 +2754,21 @@ impl PlanRunner {
                             };
                             self.obs_sinks.trace_sink.append(trace_id, event);
                         }
+                        let failure_reason = self
+                            .task_trackers
+                            .get(&plan_id)
+                            .and_then(|tracker| tracker.last_gate_failure.clone())
+                            .unwrap_or_else(|| "gate failure".to_string());
                         let event = if passed {
                             if let Some(tracker) = self.task_trackers.get_mut(&plan_id) {
                                 tracker.gate_failure_count = 0;
                             }
                             ExecutorEvent::GatePassed
+                        } else if self.no_replan {
+                            if let Some(tracker) = self.task_trackers.get_mut(&plan_id) {
+                                tracker.gate_failure_count += 1;
+                            }
+                            ExecutorEvent::Fatal(failure_reason)
                         } else {
                             if let Some(tracker) = self.task_trackers.get_mut(&plan_id) {
                                 tracker.gate_failure_count += 1;
@@ -2767,7 +2785,7 @@ impl PlanRunner {
                         // Failure-driven re-planning (§9): retry after every
                         // consecutive gate failure, escalating the strategy as
                         // the failure count grows.
-                        if !passed {
+                        if !passed && !self.no_replan {
                             let failure_count = self
                                 .task_trackers
                                 .get(&plan_id)

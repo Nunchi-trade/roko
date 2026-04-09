@@ -4,7 +4,8 @@
 //! subcommands (`init`, `run`, `status`, `replay`, `config`, `inject`,
 //! `plan`) plus top-level flags for mode selection (`--headless`,
 //! `--role`, `--model`, `--effort`, `--json`, `--log-format`, `--quiet`,
-//! `--resume`, `--repo`, and a positional `[prompt]` for one-shot mode).
+//! `--resume`, `--repo`, `--no-replan`, and a positional `[prompt]` for
+//! one-shot mode).
 
 #![allow(clippy::too_many_lines)]
 
@@ -128,6 +129,10 @@ struct Cli {
     /// Suppress non-essential output.
     #[arg(long, global = true)]
     quiet: bool,
+
+    /// Disable all re-planning; gate failures become terminal failures.
+    #[arg(long, global = true)]
+    no_replan: bool,
 
     /// Run as a headless daemon (background service).
     #[arg(long, global = true)]
@@ -1262,14 +1267,33 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                     let log_json = std::fs::read_to_string(&events_path)
                         .map_err(|e| anyhow!("read event log {}: {e}", events_path.display()))?;
                     roko_cli::PlanRunner::from_snapshots(
-                        &exec_json, &log_json, &wd, config, metrics,
+                        &exec_json,
+                        &log_json,
+                        &wd,
+                        config,
+                        metrics,
+                        cli.no_replan,
                     )
                     .await?
                 } else {
-                    roko_cli::PlanRunner::from_snapshot(&exec_json, &wd, config, metrics).await?
+                    roko_cli::PlanRunner::from_snapshot(
+                        &exec_json,
+                        &wd,
+                        config,
+                        metrics,
+                        cli.no_replan,
+                    )
+                    .await?
                 }
             } else {
-                roko_cli::PlanRunner::from_plans_dir(&plans_dir, &wd, config, metrics).await?
+                roko_cli::PlanRunner::from_plans_dir(
+                    &plans_dir,
+                    &wd,
+                    config,
+                    metrics,
+                    cli.no_replan,
+                )
+                .await?
             };
             runner.set_claude_resume_session(cli.resume.clone());
 
@@ -2445,6 +2469,12 @@ mod tests {
     fn cli_parses_resume_flag() {
         let cli = Cli::try_parse_from(["roko", "--resume", "sess-42"]).unwrap();
         assert_eq!(cli.resume.as_deref(), Some("sess-42"));
+    }
+
+    #[test]
+    fn cli_parses_no_replan_flag() {
+        let cli = Cli::try_parse_from(["roko", "--no-replan"]).unwrap();
+        assert!(cli.no_replan);
     }
 
     #[test]
