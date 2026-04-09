@@ -6,6 +6,7 @@
 
 pub mod deploy;
 pub mod dispatch;
+pub mod dreams;
 pub mod error;
 pub mod event_bus;
 pub mod events;

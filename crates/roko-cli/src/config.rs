@@ -21,6 +21,9 @@ pub struct Config {
     /// Automatically generate a plan when a PRD is promoted.
     #[serde(default)]
     pub auto_plan: bool,
+    /// Automatic dream-cycle settings for daemon mode.
+    #[serde(default)]
+    pub dreams: DreamsConfig,
     /// Tool registry preferences.
     #[serde(default)]
     pub tools: ToolsConfig,
@@ -58,6 +61,7 @@ impl Default for Config {
         Self {
             agent: AgentConfig::default(),
             auto_plan: false,
+            dreams: DreamsConfig::default(),
             tools: ToolsConfig::default(),
             prompt: PromptConfig::default(),
             repos: Vec::new(),
@@ -203,6 +207,44 @@ impl Default for ToolsConfig {
 impl ToolsConfig {
     const fn default_mcp_timeout_secs() -> u64 {
         30
+    }
+}
+
+/// Automatic dream-cycle settings for daemon mode.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DreamsConfig {
+    /// Enable the automatic dream cycle.
+    #[serde(default = "DreamsConfig::default_auto_dream")]
+    pub auto_dream: bool,
+    /// Idle duration threshold, in minutes, before a dream can run.
+    #[serde(default = "DreamsConfig::default_idle_threshold_mins")]
+    pub idle_threshold_mins: u64,
+    /// Minimum number of new episodes required before dreaming.
+    #[serde(default = "DreamsConfig::default_min_episodes_for_dream")]
+    pub min_episodes_for_dream: usize,
+}
+
+impl DreamsConfig {
+    const fn default_auto_dream() -> bool {
+        true
+    }
+
+    const fn default_idle_threshold_mins() -> u64 {
+        15
+    }
+
+    const fn default_min_episodes_for_dream() -> usize {
+        5
+    }
+}
+
+impl Default for DreamsConfig {
+    fn default() -> Self {
+        Self {
+            auto_dream: Self::default_auto_dream(),
+            idle_threshold_mins: Self::default_idle_threshold_mins(),
+            min_episodes_for_dream: Self::default_min_episodes_for_dream(),
+        }
     }
 }
 
@@ -450,6 +492,49 @@ pub struct PromptFile {
     /// Per-file hard cap in tokens — truncates oversized files before inclusion.
     #[serde(default)]
     pub hard_cap: Option<usize>,
+}
+
+/// Partial `DreamsConfig` — every field optional.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct DreamsLayer {
+    /// Enable the automatic dream cycle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_dream: Option<bool>,
+    /// Idle threshold in minutes before dreaming.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_threshold_mins: Option<u64>,
+    /// Minimum number of new episodes required before dreaming.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_episodes_for_dream: Option<usize>,
+}
+
+impl DreamsLayer {
+    /// Merge another layer on top — `overlay` wins.
+    #[must_use]
+    pub fn merge(self, overlay: Self) -> Self {
+        Self {
+            auto_dream: overlay.auto_dream.or(self.auto_dream),
+            idle_threshold_mins: overlay.idle_threshold_mins.or(self.idle_threshold_mins),
+            min_episodes_for_dream: overlay
+                .min_episodes_for_dream
+                .or(self.min_episodes_for_dream),
+        }
+    }
+
+    /// Resolve into a concrete [`DreamsConfig`] value.
+    #[must_use]
+    pub fn resolve(self) -> DreamsConfig {
+        let defaults = DreamsConfig::default();
+        DreamsConfig {
+            auto_dream: self.auto_dream.unwrap_or(defaults.auto_dream),
+            idle_threshold_mins: self
+                .idle_threshold_mins
+                .unwrap_or(defaults.idle_threshold_mins),
+            min_episodes_for_dream: self
+                .min_episodes_for_dream
+                .unwrap_or(defaults.min_episodes_for_dream),
+        }
+    }
 }
 
 /// Per-repository configuration inside `roko.toml`.
@@ -706,6 +791,9 @@ pub struct ConfigLayer {
     /// Automatically generate a plan when a PRD is promoted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_plan: Option<bool>,
+    /// Automatic dream-cycle overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dreams: Option<DreamsLayer>,
     /// Tool registry preference overrides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<ToolsLayer>,
@@ -752,6 +840,12 @@ impl ConfigLayer {
         if let Some(auto_plan) = overlay.auto_plan {
             self.auto_plan = Some(auto_plan);
         }
+        if let Some(dreams) = overlay.dreams {
+            self.dreams = Some(match self.dreams {
+                Some(base) => base.merge(dreams),
+                None => dreams,
+            });
+        }
         if let Some(t) = overlay.tools {
             self.tools = Some(match self.tools {
                 Some(base) => base.merge(t),
@@ -790,6 +884,7 @@ impl ConfigLayer {
     pub const fn is_empty(&self) -> bool {
         self.agent.is_none()
             && self.auto_plan.is_none()
+            && self.dreams.is_none()
             && self.tools.is_none()
             && self.prompt.is_none()
             && self.gates.is_none()
@@ -833,6 +928,10 @@ impl ConfigLayer {
             None => ToolsConfig::default(),
         };
         let auto_plan = self.auto_plan.unwrap_or(false);
+        let dreams = match self.dreams {
+            Some(dreams) => dreams.resolve(),
+            None => DreamsConfig::default(),
+        };
         let prompt = match self.prompt {
             Some(p) => {
                 let defaults = PromptConfig::default();
@@ -887,6 +986,7 @@ impl ConfigLayer {
         Config {
             agent,
             auto_plan,
+            dreams,
             tools,
             prompt,
             repos: self.repos.unwrap_or_default(),
@@ -1349,6 +1449,12 @@ pub struct ConfigSources {
     pub prompt_token_budget: Source,
     /// Where `prompt.role` came from.
     pub prompt_role: Source,
+    /// Where `dreams.auto_dream` came from.
+    pub dreams_auto_dream: Source,
+    /// Where `dreams.idle_threshold_mins` came from.
+    pub dreams_idle_threshold_mins: Source,
+    /// Where `dreams.min_episodes_for_dream` came from.
+    pub dreams_min_episodes_for_dream: Source,
     /// Where `gates` came from.
     pub gates: Source,
 }
@@ -1406,6 +1512,8 @@ fn compute_sources(global: &ConfigLayer, project: &ConfigLayer) -> ConfigSources
     let p_tools = project.tools.as_ref();
     let g_prompt = global.prompt.as_ref();
     let p_prompt = project.prompt.as_ref();
+    let g_dreams = global.dreams.as_ref();
+    let p_dreams = project.dreams.as_ref();
 
     let pick = |in_project: bool, in_global: bool| -> Source {
         if in_project {
@@ -1467,6 +1575,18 @@ fn compute_sources(global: &ConfigLayer, project: &ConfigLayer) -> ConfigSources
             p_prompt.and_then(|p| p.role.as_ref()).is_some(),
             g_prompt.and_then(|p| p.role.as_ref()).is_some(),
         ),
+        dreams_auto_dream: pick(
+            p_dreams.and_then(|d| d.auto_dream).is_some(),
+            g_dreams.and_then(|d| d.auto_dream).is_some(),
+        ),
+        dreams_idle_threshold_mins: pick(
+            p_dreams.and_then(|d| d.idle_threshold_mins).is_some(),
+            g_dreams.and_then(|d| d.idle_threshold_mins).is_some(),
+        ),
+        dreams_min_episodes_for_dream: pick(
+            p_dreams.and_then(|d| d.min_episodes_for_dream).is_some(),
+            g_dreams.and_then(|d| d.min_episodes_for_dream).is_some(),
+        ),
         gates: pick(project.gates.is_some(), global.gates.is_some()),
     }
 }
@@ -1476,6 +1596,7 @@ fn sources_from_layer(layer: &ConfigLayer, present: Source, fallback: Source) ->
     let agent = layer.agent.as_ref();
     let tools = layer.tools.as_ref();
     let prompt = layer.prompt.as_ref();
+    let dreams = layer.dreams.as_ref();
     let pick = |is_set: bool| -> Source { if is_set { present } else { fallback } };
     ConfigSources {
         auto_plan: pick(layer.auto_plan.is_some()),
@@ -1491,6 +1612,11 @@ fn sources_from_layer(layer: &ConfigLayer, present: Source, fallback: Source) ->
         tools_mcp_timeout_secs: pick(tools.and_then(|t| t.mcp_timeout_secs).is_some()),
         prompt_token_budget: pick(prompt.and_then(|p| p.token_budget).is_some()),
         prompt_role: pick(prompt.and_then(|p| p.role.as_ref()).is_some()),
+        dreams_auto_dream: pick(dreams.and_then(|d| d.auto_dream).is_some()),
+        dreams_idle_threshold_mins: pick(dreams.and_then(|d| d.idle_threshold_mins).is_some()),
+        dreams_min_episodes_for_dream: pick(
+            dreams.and_then(|d| d.min_episodes_for_dream).is_some(),
+        ),
         gates: pick(layer.gates.is_some()),
     }
 }
@@ -1615,6 +1741,11 @@ timeout_ms = 30000
 [budget]
 warn_at_percent = 90
 
+[dreams]
+auto_dream = false
+idle_threshold_mins = 30
+min_episodes_for_dream = 8
+
 [tools]
 prefer_mcp = true
 global_denied = ["write_file", "edit_file"]
@@ -1651,6 +1782,9 @@ build_system = "cargo"
         );
         assert_eq!(cfg.agent.timeout_ms, 30_000);
         assert_eq!(cfg.budget.warn_at_percent, 90);
+        assert!(!cfg.dreams.auto_dream);
+        assert_eq!(cfg.dreams.idle_threshold_mins, 30);
+        assert_eq!(cfg.dreams.min_episodes_for_dream, 8);
         assert!(cfg.tools.prefer_mcp);
         assert_eq!(
             cfg.tools.global_denied,
@@ -1844,6 +1978,15 @@ auto_plan = true
         let parsed = Config::parse_toml(&text).unwrap();
         assert_eq!(parsed.agent.command, cfg.agent.command);
         assert_eq!(parsed.auto_plan, cfg.auto_plan);
+        assert_eq!(parsed.dreams.auto_dream, cfg.dreams.auto_dream);
+        assert_eq!(
+            parsed.dreams.idle_threshold_mins,
+            cfg.dreams.idle_threshold_mins
+        );
+        assert_eq!(
+            parsed.dreams.min_episodes_for_dream,
+            cfg.dreams.min_episodes_for_dream
+        );
         assert_eq!(parsed.tools.prefer_mcp, cfg.tools.prefer_mcp);
         assert_eq!(parsed.tools.global_denied, cfg.tools.global_denied);
         assert_eq!(parsed.tools.mcp_timeout_secs, cfg.tools.mcp_timeout_secs);
@@ -1965,9 +2108,30 @@ token_budget = 8000
         assert!(cfg.tools.global_denied.is_empty());
         assert_eq!(cfg.tools.mcp_timeout_secs, 30);
         assert_eq!(cfg.prompt.token_budget, 10_000);
+        assert!(cfg.dreams.auto_dream);
+        assert_eq!(cfg.dreams.idle_threshold_mins, 15);
+        assert_eq!(cfg.dreams.min_episodes_for_dream, 5);
         assert!(cfg.gates.is_empty());
         assert!(!cfg.serve.auth.enabled);
         assert!(cfg.serve.auth.api_key.is_empty());
+    }
+
+    #[test]
+    fn layer_resolve_uses_dreams_override() {
+        let layer = ConfigLayer::parse_toml(
+            r#"
+[dreams]
+auto_dream = false
+idle_threshold_mins = 22
+min_episodes_for_dream = 9
+"#,
+        )
+        .unwrap();
+
+        let cfg = layer.resolve();
+        assert!(!cfg.dreams.auto_dream);
+        assert_eq!(cfg.dreams.idle_threshold_mins, 22);
+        assert_eq!(cfg.dreams.min_episodes_for_dream, 9);
     }
 
     #[test]
@@ -2000,6 +2164,9 @@ token_budget = 8000
         assert_eq!(sources.prompt_token_budget, Source::Project);
         assert_eq!(sources.prompt_role, Source::Default);
         assert_eq!(sources.agent_args, Source::Default);
+        assert_eq!(sources.dreams_auto_dream, Source::Default);
+        assert_eq!(sources.dreams_idle_threshold_mins, Source::Default);
+        assert_eq!(sources.dreams_min_episodes_for_dream, Source::Default);
     }
 
     #[test]
@@ -2062,6 +2229,8 @@ program = "echo"
         assert!(rendered.contains("[serve.deploy]"));
         assert!(rendered.contains("[prd]"));
         assert!(rendered.contains("auto_plan = false"));
+        assert!(rendered.contains("[dreams]"));
+        assert!(rendered.contains("auto_dream = true"));
     }
 
     #[test]

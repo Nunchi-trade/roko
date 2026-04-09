@@ -5426,6 +5426,7 @@ dependencies = [
  "roko-compose",
  "roko-conductor",
  "roko-core",
+ "roko-dreams",
  "roko-fs",
  "roko-gate",
  "roko-golem",

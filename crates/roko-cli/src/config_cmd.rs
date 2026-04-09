@@ -6,9 +6,9 @@
 //! working global config with one interactive pass.
 
 use crate::config::{
-    AgentLayer, ConfigLayer, ConfigPaths, DetectedCli, ExecutorLayer, GateConfig, PromptLayer,
-    ResolvedConfig, ServeAuthLayer, ServeDeployLayer, ServeDeployWebhookLayer, ServeLayer, Source,
-    ToolsLayer, detect_clis, global_config_path, load_layered, resolve_paths,
+    AgentLayer, ConfigLayer, ConfigPaths, DetectedCli, DreamsLayer, ExecutorLayer, GateConfig,
+    PromptLayer, ResolvedConfig, ServeAuthLayer, ServeDeployLayer, ServeDeployWebhookLayer,
+    ServeLayer, Source, ToolsLayer, detect_clis, global_config_path, load_layered, resolve_paths,
 };
 use anyhow::{Context as _, Result, anyhow};
 use roko_orchestrator::ExecutorConfig;
@@ -106,6 +106,7 @@ pub fn run_init_wizard(target: Option<PathBuf>, inputs: &WizardInputs) -> Result
             mcp_config: None,
         }),
         auto_plan: None,
+        dreams: None,
         tools: Some(ToolsLayer {
             prefer_mcp: Some(false),
             global_denied: Some(Vec::new()),
@@ -519,6 +520,21 @@ fn print_resolved(r: &ResolvedConfig) {
         r.sources.prompt_role.tag()
     );
     println!(
+        "  dreams.auto_dream  = {} {}",
+        r.config.dreams.auto_dream,
+        r.sources.dreams_auto_dream.tag()
+    );
+    println!(
+        "  dreams.idle_threshold_mins = {} {}",
+        r.config.dreams.idle_threshold_mins,
+        r.sources.dreams_idle_threshold_mins.tag()
+    );
+    println!(
+        "  dreams.min_episodes_for_dream = {} {}",
+        r.config.dreams.min_episodes_for_dream,
+        r.sources.dreams_min_episodes_for_dream.tag()
+    );
+    println!(
         "  gates              = {} entries {}",
         r.config.gates.len(),
         r.sources.gates.tag()
@@ -537,7 +553,10 @@ fn print_resolved(r: &ResolvedConfig) {
         && r.sources.auto_plan == Source::Default
         && r.sources.prompt_token_budget == Source::Default
         && r.sources.prompt_role == Source::Default
-        && r.sources.tools_prefer_mcp == Source::Default;
+        && r.sources.tools_prefer_mcp == Source::Default
+        && r.sources.dreams_auto_dream == Source::Default
+        && r.sources.dreams_idle_threshold_mins == Source::Default
+        && r.sources.dreams_min_episodes_for_dream == Source::Default;
     if fully_default {
         println!("\nhint: no config files found — run `roko config init` to set one up.");
     }
@@ -589,6 +608,25 @@ fn apply_key_value(layer: &mut ConfigLayer, key: &str, value: &str) -> Result<()
         "prompt.role" => {
             let prompt = layer.prompt.get_or_insert_with(PromptLayer::default);
             prompt.role = Some(value.into());
+        }
+        "dreams.auto_dream" => {
+            let auto_dream = value.parse::<bool>().context("parse auto_dream as bool")?;
+            let dreams = layer.dreams.get_or_insert_with(DreamsLayer::default);
+            dreams.auto_dream = Some(auto_dream);
+        }
+        "dreams.idle_threshold_mins" => {
+            let mins = value
+                .parse::<u64>()
+                .context("parse idle_threshold_mins as u64")?;
+            let dreams = layer.dreams.get_or_insert_with(DreamsLayer::default);
+            dreams.idle_threshold_mins = Some(mins);
+        }
+        "dreams.min_episodes_for_dream" => {
+            let min_episodes = value
+                .parse::<usize>()
+                .context("parse min_episodes_for_dream as usize")?;
+            let dreams = layer.dreams.get_or_insert_with(DreamsLayer::default);
+            dreams.min_episodes_for_dream = Some(min_episodes);
         }
         "tools.prefer_mcp" => {
             let prefer_mcp = value.parse::<bool>().context("parse prefer_mcp as bool")?;

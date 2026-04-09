@@ -35,7 +35,9 @@ use crate::config::RepoRegistry;
 use crate::load_layered;
 use crate::serve_runtime::RokoCliRuntime;
 use roko_core::config::load_config;
-use roko_serve::{self, deploy, dispatch, feedback, fswatcher, scheduler, state::AppState};
+use roko_serve::{
+    self, deploy, dispatch, dreams, feedback, fswatcher, scheduler, state::AppState,
+};
 
 /// State of the headless daemon.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -222,6 +224,8 @@ pub async fn daemon_start(foreground: bool, port: u16) -> Result<()> {
 
     let core_config = load_config(&workdir)?;
     let cli_config = load_layered(&workdir)?.config;
+    let dream_settings = cli_config.dreams.clone();
+    let agent_settings = cli_config.agent.clone();
     let repo_registry = RepoRegistry::load(&cli_config, &workdir).unwrap_or_default();
     let runtime = RokoCliRuntime::new(cli_config, repo_registry).into_arc();
     let deploy_backend = Arc::from(deploy::create_backend("manual", None, None, None)?);
@@ -231,6 +235,22 @@ pub async fn daemon_start(foreground: bool, port: u16) -> Result<()> {
         core_config,
         deploy_backend,
     ));
+
+    let dream_config = dreams::DreamLoopConfig {
+        auto_dream: dream_settings.auto_dream,
+        idle_threshold_mins: dream_settings.idle_threshold_mins,
+        min_episodes_for_dream: dream_settings.min_episodes_for_dream,
+        agent: dreams::DreamAgentConfig {
+            command: agent_settings.command,
+            args: agent_settings.args,
+            model: agent_settings.model,
+            bare_mode: agent_settings.bare_mode,
+            effort: agent_settings.effort,
+            fallback_model: agent_settings.fallback_model,
+            timeout_ms: agent_settings.timeout_ms,
+            env: agent_settings.env,
+        },
+    };
 
     let info = DaemonInfo {
         pid: std::process::id(),
@@ -245,6 +265,7 @@ pub async fn daemon_start(foreground: bool, port: u16) -> Result<()> {
     let _watchers = fswatcher::start_watchers(Arc::clone(&state));
     let _dispatch = dispatch::start_dispatch_loop(Arc::clone(&state));
     let _feedback = feedback::start_feedback_loop(Arc::clone(&state));
+    let _dreams = dreams::start_dream_loop(Arc::clone(&state), dream_config);
     let shutdown_request = CancellationToken::new();
     let http_shutdown = CancellationToken::new();
     let ipc_server = match start_ipc_server(Arc::clone(&state), shutdown_request.clone()).await {

@@ -186,6 +186,11 @@ impl DreamCycle {
         self.last_dream_at
     }
 
+    /// Override the last completed dream timestamp used to filter batches.
+    pub fn set_last_dream_at(&mut self, last_dream_at: Option<DateTime<Utc>>) {
+        self.last_dream_at = last_dream_at;
+    }
+
     /// Run a full offline learning pass.
     ///
     /// # Errors
