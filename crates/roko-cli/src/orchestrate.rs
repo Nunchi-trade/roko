@@ -1162,18 +1162,11 @@ impl PlanRunner {
     fn emit_execution_event(
         &self,
         plan_id: &str,
-        task_id: &str,
-        phase: PhaseKind,
-        status: &str,
+        event: crate::serve::events::ExecutionEvent,
     ) {
         self.emit_server_event(crate::serve::events::ServerEvent::Execution {
-            event: crate::serve::events::ExecutionEvent {
-                plan_id: plan_id.to_string(),
-                task_id: task_id.to_string(),
-                phase: Self::phase_label(phase).to_string(),
-                status: status.to_string(),
-                timestamp: chrono::Utc::now().to_rfc3339(),
-            },
+            plan_id: plan_id.to_string(),
+            event,
         });
     }
 
@@ -1184,8 +1177,31 @@ impl PlanRunner {
         event: &ExecutorEvent,
         status: &str,
     ) {
+        let old_phase = self
+            .executor
+            .plan_state(plan_id)
+            .map(|state| Self::phase_label(state.current_phase.kind()).to_string())
+            .unwrap_or_else(|| "unknown".to_string());
         if let Ok(new_phase) = self.executor.apply_event(plan_id, event) {
-            self.emit_execution_event(plan_id, task_id, new_phase.kind(), status);
+            let new_phase_label = Self::phase_label(new_phase.kind()).to_string();
+            let exec_event = if old_phase == "queued" {
+                crate::serve::events::ExecutionEvent::TaskStarted {
+                    task_id: task_id.to_string(),
+                    phase: new_phase_label,
+                }
+            } else if status == "completed" {
+                crate::serve::events::ExecutionEvent::TaskCompleted {
+                    task_id: task_id.to_string(),
+                    outcome: "completed".to_string(),
+                }
+            } else {
+                crate::serve::events::ExecutionEvent::TaskPhaseChanged {
+                    task_id: task_id.to_string(),
+                    old_phase,
+                    new_phase: new_phase_label,
+                }
+            };
+            self.emit_execution_event(plan_id, exec_event);
         }
     }
 
@@ -1315,6 +1331,13 @@ impl PlanRunner {
             self.event_log
                 .append(EventKind::InterventionFired, payload.clone());
             self.emit_conductor_signal(Kind::Custom("conductor.circuit_breaker".into()), payload);
+            self.emit_execution_event(
+                plan_id,
+                crate::serve::events::ExecutionEvent::WatcherAlert {
+                    watcher: "circuit-breaker".to_string(),
+                    message: "failure budget exhausted".to_string(),
+                },
+            );
             return ConductorDecision::Continue;
         }
 
@@ -1331,9 +1354,23 @@ impl PlanRunner {
             ConductorDecision::Continue => {}
             ConductorDecision::Restart { watcher, reason } => {
                 tracing::info!("[conductor] {plan_id}: RESTART ({watcher}) — {reason}");
+                self.emit_execution_event(
+                    plan_id,
+                    crate::serve::events::ExecutionEvent::WatcherAlert {
+                        watcher: watcher.clone(),
+                        message: reason.to_string(),
+                    },
+                );
             }
             ConductorDecision::Fail { watcher, reason } => {
                 tracing::error!("[conductor] {plan_id}: FAIL ({watcher}) — {reason}");
+                self.emit_execution_event(
+                    plan_id,
+                    crate::serve::events::ExecutionEvent::WatcherAlert {
+                        watcher: watcher.clone(),
+                        message: reason.to_string(),
+                    },
+                );
             }
             _ => {}
         }
@@ -1595,6 +1632,10 @@ impl PlanRunner {
                 && self.executor.can_dispatch(plan_id)
             {
                 self.apply_event_and_emit(plan_id, "plan", &ExecutorEvent::Start, "transitioned");
+                self.emit_execution_event(
+                    plan_id,
+                    crate::serve::events::ExecutionEvent::PlanStarted,
+                );
                 self.emit_server_event(crate::serve::events::ServerEvent::PlanStarted {
                     plan_id: plan_id.clone(),
                 });
@@ -1686,6 +1727,22 @@ impl PlanRunner {
                 plan_id: p.plan_id.clone(),
                 success: p.succeeded,
             });
+            self.emit_execution_event(
+                &p.plan_id,
+                crate::serve::events::ExecutionEvent::PlanCompleted {
+                    outcome: if p.succeeded {
+                        "succeeded".to_string()
+                    } else {
+                        "failed".to_string()
+                    },
+                    stats: serde_json::json!({
+                        "plan_id": &p.plan_id,
+                        "succeeded": p.succeeded,
+                        "agent_calls": p.agent_calls,
+                        "gate_results": &p.gate_results,
+                    }),
+                },
+            );
         }
 
         // Increment plan completion metrics and log cost summaries.
@@ -1956,9 +2013,16 @@ impl PlanRunner {
                         });
                         self.emit_execution_event(
                             &plan_id,
-                            &format!("rung-{rung}"),
-                            PhaseKind::Gating,
-                            if passed { "passed" } else { "failed" },
+                            crate::serve::events::ExecutionEvent::GateResult {
+                                task_id: format!("rung-{rung}"),
+                                gate: format!("rung-{rung}"),
+                                passed,
+                                message: if passed {
+                                    format!("rung-{rung} passed")
+                                } else {
+                                    format!("rung-{rung} failed")
+                                },
+                            },
                         );
 
                         // Store gate failure context for AutoFix phase
@@ -2033,6 +2097,13 @@ impl PlanRunner {
                                 .map(|t| t.gate_failure_count)
                                 .unwrap_or(0);
                             if failure_count >= 3 && self.executor.config().auto_replan {
+                                self.emit_execution_event(
+                                    &plan_id,
+                                    crate::serve::events::ExecutionEvent::ReplanTriggered {
+                                        task_id: format!("rung-{rung}"),
+                                        strategy: "failure_threshold_strategist".to_string(),
+                                    },
+                                );
                                 self.attempt_replan(&plan_id).await;
                             }
                         }
@@ -2200,7 +2271,16 @@ impl PlanRunner {
                     EventKind::PhaseTransition,
                     serde_json::json!({"plan_id": &plan_id, "event": "CompletePlan"}),
                 );
-                self.emit_execution_event(&plan_id, "plan", PhaseKind::Complete, "transitioned");
+                self.emit_execution_event(
+                    &plan_id,
+                    crate::serve::events::ExecutionEvent::PlanCompleted {
+                        outcome: "succeeded".to_string(),
+                        stats: serde_json::json!({
+                            "plan_id": &plan_id,
+                            "phase": "complete",
+                        }),
+                    },
+                );
             }
             ExecutorAction::Reorder {
                 plan_id,
@@ -3026,7 +3106,17 @@ impl PlanRunner {
             tracker.mark_completed(task_id);
         }
 
-        self.emit_execution_event(plan_id, task_id, PhaseKind::Implementing, "completed");
+        self.emit_execution_event(
+            plan_id,
+            crate::serve::events::ExecutionEvent::TaskCompleted {
+                task_id: task_id.to_string(),
+                outcome: if result.success {
+                    "succeeded".to_string()
+                } else {
+                    "failed".to_string()
+                },
+            },
+        );
 
         // Emit observability trace event for the successful agent dispatch.
         self.emit_agent_trace(plan_id, task_id, true, wall_ms);
@@ -3411,9 +3501,11 @@ impl PlanRunner {
                 if self.executor.apply_event(plan_id, &event).is_ok() {
                     self.emit_execution_event(
                         plan_id,
-                        "regen-verify",
-                        PhaseKind::Verifying,
-                        "transitioned",
+                        crate::serve::events::ExecutionEvent::TaskPhaseChanged {
+                            task_id: "regen-verify".to_string(),
+                            old_phase: "auto-fixing".to_string(),
+                            new_phase: "verifying".to_string(),
+                        },
                     );
                     self.finish_verify_round(plan_id).await;
                 }

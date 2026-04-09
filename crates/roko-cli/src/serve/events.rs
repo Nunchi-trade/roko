@@ -7,17 +7,72 @@ use serde::{Deserialize, Serialize};
 /// Progress emitted by the execution loop as plans move through phases,
 /// complete tasks, and finish gate checks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecutionEvent {
-    /// Plan identifier.
-    pub plan_id: String,
-    /// Task identifier, if applicable.
-    pub task_id: String,
-    /// Phase the execution is in or transitioning to.
-    pub phase: String,
-    /// Progress status, such as `transitioned`, `completed`, `passed`, or `failed`.
-    pub status: String,
-    /// ISO-8601 UTC timestamp.
-    pub timestamp: String,
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ExecutionEvent {
+    /// A plan has begun execution.
+    PlanStarted,
+
+    /// A task has entered its first active phase.
+    TaskStarted {
+        /// Task identifier.
+        task_id: String,
+        /// Phase the task is starting in.
+        phase: String,
+    },
+
+    /// A task transitioned between phases.
+    TaskPhaseChanged {
+        /// Task identifier.
+        task_id: String,
+        /// Previous phase name.
+        old_phase: String,
+        /// New phase name.
+        new_phase: String,
+    },
+
+    /// A gate completed for a task.
+    GateResult {
+        /// Task identifier.
+        task_id: String,
+        /// Gate name.
+        gate: String,
+        /// Whether the gate passed.
+        passed: bool,
+        /// Human-readable message or failure summary.
+        message: String,
+    },
+
+    /// A task has completed.
+    TaskCompleted {
+        /// Task identifier.
+        task_id: String,
+        /// Outcome summary.
+        outcome: String,
+    },
+
+    /// A plan has completed.
+    PlanCompleted {
+        /// Plan outcome summary.
+        outcome: String,
+        /// Execution statistics for the plan.
+        stats: serde_json::Value,
+    },
+
+    /// A re-plan was triggered for a task.
+    ReplanTriggered {
+        /// Task identifier that caused the re-plan.
+        task_id: String,
+        /// Re-plan strategy or reason.
+        strategy: String,
+    },
+
+    /// A watcher emitted an alert.
+    WatcherAlert {
+        /// Watcher name.
+        watcher: String,
+        /// Alert message.
+        message: String,
+    },
 }
 
 /// A tagged union of all events the HTTP server can emit.
@@ -47,7 +102,9 @@ pub enum ServerEvent {
 
     /// Execution progress update streamed from the orchestrator.
     Execution {
-        #[serde(flatten)]
+        /// Plan identifier for the execution payload.
+        plan_id: String,
+        /// Nested execution event.
         event: ExecutionEvent,
     },
 
@@ -119,4 +176,26 @@ pub enum ServerEvent {
 
     /// An error occurred.
     Error { message: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn execution_event_serializes_with_type_tag() {
+        let event = ExecutionEvent::GateResult {
+            task_id: "task-1".into(),
+            gate: "compile".into(),
+            passed: false,
+            message: "compile failed".into(),
+        };
+
+        let json = serde_json::to_value(event).expect("serialize execution event");
+        assert_eq!(json["type"], "gate_result");
+        assert_eq!(json["task_id"], "task-1");
+        assert_eq!(json["gate"], "compile");
+        assert_eq!(json["passed"], false);
+        assert_eq!(json["message"], "compile failed");
+    }
 }

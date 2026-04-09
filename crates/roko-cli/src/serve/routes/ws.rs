@@ -117,7 +117,21 @@ fn matches_filter(event: &crate::serve::events::ServerEvent, filter: &[String]) 
     let Ok(val) = serde_json::to_value(event) else {
         return true;
     };
-    let event_type = val.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    let mut event_types = Vec::new();
+    if let Some(event_type) = val.get("type").and_then(|t| t.as_str()) {
+        event_types.push(event_type);
+    }
+    if event_types.contains(&"execution") {
+        if let Some(exec_type) = val
+            .get("event")
+            .and_then(|event| event.get("type"))
+            .and_then(|t| t.as_str())
+        {
+            event_types.push(exec_type);
+        }
+    }
 
-    filter.iter().any(|f| event_type.contains(f.as_str()))
+    filter
+        .iter()
+        .any(|f| event_types.iter().any(|event_type| event_type.contains(f.as_str())))
 }
