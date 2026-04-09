@@ -1,7 +1,8 @@
 //! Webhook ingress endpoints.
 //!
 //! GitHub and Slack webhooks are verified, converted into typed
-//! [`roko_core::Signal`]s, and published onto the shared event bus.
+//! [`roko_core::Signal`]s, persisted through `.roko/signals.jsonl`, and
+//! published onto the shared event bus.
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -33,7 +34,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 }
 
 /// `POST /webhooks/github` — verify the GitHub signature, convert the payload
-/// into a `Signal`, and publish it to the server event bus.
+/// into a `Signal`, persist it, and publish it to the server event bus.
 async fn github_webhook(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -75,16 +76,14 @@ async fn github_webhook(
         .provenance(Provenance::external("github:webhook"))
         .build();
 
-    state
-        .event_bus
-        .publish(ServerEvent::WebhookReceived { signal });
+    persist_webhook_signal(&state, signal).await?;
 
     Ok(StatusCode::OK)
 }
 
 /// `POST /webhooks/slack` — verify the Slack signature, handle URL
-/// verification challenges, convert supported events into a `Signal`, and
-/// publish them to the server event bus.
+/// verification challenges, convert supported events into a `Signal`, persist
+/// them, and publish them to the server event bus.
 async fn slack_webhook(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -140,15 +139,13 @@ async fn slack_webhook(
         .provenance(Provenance::external("slack:webhook"))
         .build();
 
-    state
-        .event_bus
-        .publish(ServerEvent::WebhookReceived { signal });
+    persist_webhook_signal(&state, signal).await?;
 
     Ok(StatusCode::OK.into_response())
 }
 
 /// `POST /webhooks/generic` — accept arbitrary JSON, convert it into a
-/// `Signal`, and publish it to the server event bus. This endpoint skips
+/// `Signal`, persist it, and publish it to the server event bus. This endpoint skips
 /// signature verification and is intended for internal use behind auth.
 async fn generic_webhook(
     State(state): State<Arc<AppState>>,
@@ -158,9 +155,7 @@ async fn generic_webhook(
         .map_err(|e| ApiError::bad_request(format!("invalid generic webhook json: {e}")))?;
 
     let signal = generic_webhook_signal(payload);
-    state
-        .event_bus
-        .publish(ServerEvent::WebhookReceived { signal });
+    persist_webhook_signal(&state, signal).await?;
 
     Ok(StatusCode::OK)
 }
@@ -170,6 +165,20 @@ fn generic_webhook_signal(payload: Value) -> Signal {
         .body(Body::Json(payload))
         .provenance(Provenance::external("webhook:generic"))
         .build()
+}
+
+async fn persist_webhook_signal(state: &AppState, signal: Signal) -> Result<(), ApiError> {
+    state
+        .signal_store
+        .put(signal.clone())
+        .await
+        .map_err(|e| ApiError::internal(format!("persist webhook signal: {e}")))?;
+
+    state
+        .event_bus
+        .publish(ServerEvent::WebhookReceived { signal });
+
+    Ok(())
 }
 
 fn github_signal_kind(event_type: &str, payload: &Value) -> Option<Kind> {

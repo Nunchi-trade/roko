@@ -11,16 +11,18 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{OnceCell, RwLock};
 use tokio::task::JoinHandle;
 
 use bardo_runtime::cancel::CancelToken;
 use bardo_runtime::process::ProcessSupervisor;
 use roko_core::config::schema::RokoConfig;
+use roko_core::{Signal, Substrate};
 
 use crate::deploy::{DeployBackend, Deployment};
 use crate::event_bus::EventBus;
 use roko_core::obs::metrics::MetricRegistry;
+use roko_fs::FileSubstrate;
 use roko_fs::layout::RokoLayout;
 use roko_cli::dispatch::SubscriptionRegistry;
 
@@ -107,6 +109,8 @@ pub struct AppState {
     pub workdir: PathBuf,
     /// `.roko/` directory layout helper.
     pub layout: RokoLayout,
+    /// Lazily initialized `.roko/signals.jsonl` writer.
+    pub signal_store: SignalStore,
     /// Cancellation token for graceful shutdown.
     pub cancel: CancelToken,
     /// Monotonic timestamp when the server state was created.
@@ -148,6 +152,7 @@ impl AppState {
         deploy_backend: Arc<dyn DeployBackend>,
     ) -> Self {
         let layout = RokoLayout::for_project(&workdir);
+        let signal_root = layout.root().to_path_buf();
         let cancel = CancelToken::new();
         let supervisor = Arc::new(ProcessSupervisor::new(cancel.child()));
         let templates_dir = workdir.join(".roko").join("templates");
@@ -161,6 +166,7 @@ impl AppState {
         Self {
             workdir,
             layout,
+            signal_store: SignalStore::new(signal_root),
             cancel,
             started_at: Instant::now(),
             metrics: Arc::new(MetricRegistry::new()),
@@ -185,5 +191,41 @@ impl AppState {
         self.cancel.cancel();
         self.supervisor.shutdown_all().await;
         self.event_bus.publish(ServerEvent::ServerShutdown);
+    }
+}
+
+/// Shared `.roko/signals.jsonl` persistence path.
+pub struct SignalStore {
+    root: PathBuf,
+    substrate: OnceCell<Arc<FileSubstrate>>,
+}
+
+impl SignalStore {
+    /// Create a new store rooted at the `.roko/` directory.
+    #[must_use]
+    pub fn new(root: PathBuf) -> Self {
+        Self {
+            root,
+            substrate: OnceCell::new(),
+        }
+    }
+
+    async fn substrate(&self) -> anyhow::Result<Arc<FileSubstrate>> {
+        let substrate = self
+            .substrate
+            .get_or_try_init(|| async {
+                FileSubstrate::open(self.root.clone())
+                    .await
+                    .map(Arc::new)
+            })
+            .await?;
+        Ok(Arc::clone(substrate))
+    }
+
+    /// Persist a signal through the normal file-backed substrate path.
+    pub async fn put(&self, signal: Signal) -> anyhow::Result<()> {
+        let substrate = self.substrate().await?;
+        substrate.put(signal).await?;
+        Ok(())
     }
 }
