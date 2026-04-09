@@ -8,18 +8,23 @@ pub fn scaffold_pages() -> Vec<PageScaffold> {
     vec![
         PageScaffold::new(
             PageId::AgentStatus,
-            "Agent Status",
-            "Live per-agent runtime status and cost counters.",
+            "Agent Activity",
+            "Live active-agent roster, model mix, and session cost breakdown.",
             vec![
                 WidgetScaffold::new(
                     "agent_table",
-                    "Agent Table",
-                    "Role, backend, state, tokens, and cost.",
+                    "Active Agents",
+                    "Agent ID, model, task, role, turns, tokens, cost, and uptime.",
                 ),
                 WidgetScaffold::new(
-                    "agent_timeline",
-                    "Agent Timeline",
-                    "Recent transitions for each active agent.",
+                    "model_distribution",
+                    "Model Distribution",
+                    "Horizontal haiku, sonnet, and opus usage counts.",
+                ),
+                WidgetScaffold::new(
+                    "cost_breakdown",
+                    "Cost Breakdown",
+                    "Per-model token costs plus total session spend.",
                 ),
             ],
         ),

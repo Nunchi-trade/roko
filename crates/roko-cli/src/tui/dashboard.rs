@@ -215,6 +215,8 @@ pub struct DashboardData {
     pub gate_results: Vec<GateResultSummary>,
     /// Efficiency aggregate from `.roko/learn/efficiency.jsonl`.
     pub efficiency: EfficiencySummary,
+    /// Raw efficiency events from `.roko/learn/efficiency.jsonl`.
+    pub efficiency_events: Vec<AgentEfficiencyEvent>,
     /// Cascade router state from `.roko/learn/cascade-router.json`.
     pub cascade_router: CascadeRouterState,
     /// Experiments from `.roko/learn/experiments.json`.
@@ -244,6 +246,7 @@ impl DashboardData {
         let active_tasks = load_active_tasks(&state);
         let agents = load_agents(&state);
         let gate_results = load_gate_results(&state, &signals_path);
+        let efficiency_events = read_efficiency_events_sync(&learn_dir.join(EFFICIENCY_FILE));
         let efficiency = load_efficiency_summary(&learn_dir.join(EFFICIENCY_FILE));
         let cascade_router = load_json_opt::<CascadeRouterState>(&learn_dir.join(CASCADE_ROUTER_FILE))
             .unwrap_or_default();
@@ -268,6 +271,7 @@ impl DashboardData {
             agents,
             gate_results,
             efficiency,
+            efficiency_events,
             cascade_router,
             experiments,
             recent_signals,
@@ -312,6 +316,46 @@ pub struct AgentSummary {
     #[serde(default)]
     pub plan_id: Option<String>,
     pub status: String,
+}
+
+/// Aggregated agent-activity row used by the dashboard page.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AgentActivityRow {
+    pub agent_id: String,
+    pub model: String,
+    pub task: String,
+    pub role: String,
+    pub turns: usize,
+    pub tokens_used: u64,
+    pub cost_usd: f64,
+    pub uptime_ms: u64,
+}
+
+/// Model usage count for the bar chart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ModelUsageRow {
+    pub label: &'static str,
+    pub count: u64,
+}
+
+/// Per-model cost row for the breakdown table.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ModelCostRow {
+    pub model: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub input_rate: f64,
+    pub output_rate: f64,
+    pub cost_usd: f64,
+}
+
+/// Aggregated agent activity snapshot.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct AgentActivitySnapshot {
+    pub active_agents: Vec<AgentActivityRow>,
+    pub model_usage: Vec<ModelUsageRow>,
+    pub cost_rows: Vec<ModelCostRow>,
+    pub total_session_cost: f64,
 }
 
 /// Summary of one gate verdict.
@@ -455,6 +499,207 @@ impl AlertSummary {
             message: signal.kind.clone(),
         }
     }
+}
+
+/// Build the agent activity snapshot from active agents and efficiency events.
+pub(crate) fn build_agent_activity_snapshot(
+    active_agents: &[AgentSummary],
+    efficiency_events: &[AgentEfficiencyEvent],
+) -> Option<AgentActivitySnapshot> {
+    let agents = if active_agents.is_empty() {
+        synthesize_agents_from_events(efficiency_events)
+    } else {
+        active_agents.to_vec()
+    };
+
+    if agents.is_empty() && efficiency_events.is_empty() {
+        return None;
+    }
+
+    let mut rows_by_agent: HashMap<String, AgentActivityAggregate> = HashMap::new();
+    for agent in &agents {
+        rows_by_agent
+            .entry(agent.id.clone())
+            .or_insert_with(AgentActivityAggregate::default);
+    }
+
+    for event in efficiency_events {
+        let entry = rows_by_agent
+            .entry(event.agent_id.clone())
+            .or_insert_with(AgentActivityAggregate::default);
+        entry.turns += 1;
+        entry.tokens_used += event.input_tokens + event.output_tokens;
+        entry.cost_usd += event.cost_usd;
+        entry.update_from_event(event);
+    }
+
+    let now = Utc::now();
+    let mut active_rows = agents
+        .iter()
+        .map(|agent| {
+            let aggregate = rows_by_agent
+                .entry(agent.id.clone())
+                .or_insert_with(AgentActivityAggregate::default);
+            aggregate.render_row(agent, now)
+        })
+        .collect::<Vec<_>>();
+    active_rows.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+
+    let mut model_usage: BTreeMap<&'static str, u64> = BTreeMap::new();
+    let mut cost_groups: BTreeMap<String, ModelCostAggregate> = BTreeMap::new();
+    for event in efficiency_events {
+        let (tier, input_rate, output_rate) = model_pricing(&event.model);
+        *model_usage.entry(tier).or_default() += 1;
+        let aggregate = cost_groups
+            .entry(event.model.clone())
+            .or_insert_with(|| ModelCostAggregate {
+                model: event.model.clone(),
+                input_rate,
+                output_rate,
+                ..ModelCostAggregate::default()
+            });
+        aggregate.input_tokens += event.input_tokens;
+        aggregate.output_tokens += event.output_tokens;
+    }
+
+    let mut cost_rows = cost_groups
+        .into_values()
+        .map(|group| group.into_row())
+        .collect::<Vec<_>>();
+    cost_rows.sort_by(|a, b| {
+        b.cost_usd
+            .partial_cmp(&a.cost_usd)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.model.cmp(&b.model))
+    });
+
+    let model_usage = ["haiku", "sonnet", "opus"]
+        .into_iter()
+        .map(|label| ModelUsageRow {
+            label,
+            count: model_usage.get(label).copied().unwrap_or_default(),
+        })
+        .collect::<Vec<_>>();
+
+    let total_session_cost = cost_rows.iter().map(|row| row.cost_usd).sum();
+
+    Some(AgentActivitySnapshot {
+        active_agents: active_rows,
+        model_usage,
+        cost_rows,
+        total_session_cost,
+    })
+}
+
+fn synthesize_agents_from_events(efficiency_events: &[AgentEfficiencyEvent]) -> Vec<AgentSummary> {
+    let mut agents = BTreeMap::<String, AgentSummary>::new();
+    for event in efficiency_events {
+        agents.entry(event.agent_id.clone()).or_insert_with(|| AgentSummary {
+            id: event.agent_id.clone(),
+            label: event.agent_id.clone(),
+            plan_id: Some(event.plan_id.clone()),
+            status: String::from("active"),
+        });
+    }
+    agents.into_values().collect()
+}
+
+fn model_pricing(model: &str) -> (&'static str, f64, f64) {
+    let lower = model.to_ascii_lowercase();
+    if lower.contains("haiku") {
+        ("haiku", 0.000_000_25, 0.000_001_25)
+    } else if lower.contains("opus") {
+        ("opus", 0.000_015, 0.000_075)
+    } else {
+        ("sonnet", 0.000_003, 0.000_015)
+    }
+}
+
+#[derive(Debug, Default)]
+struct AgentActivityAggregate {
+    model: String,
+    task: String,
+    role: String,
+    turns: usize,
+    tokens_used: u64,
+    cost_usd: f64,
+    first_seen_at: Option<DateTime<Utc>>,
+    latest_event_at: Option<DateTime<Utc>>,
+}
+
+impl AgentActivityAggregate {
+    fn update_from_event(&mut self, event: &AgentEfficiencyEvent) {
+        let Some(timestamp) = parse_efficiency_timestamp(&event.timestamp) else {
+            return;
+        };
+        if self.first_seen_at.map_or(true, |first| timestamp < first) {
+            self.first_seen_at = Some(timestamp);
+        }
+        if self.latest_event_at.map_or(true, |latest| timestamp > latest) {
+            self.latest_event_at = Some(timestamp);
+            self.model = event.model.clone();
+            self.task = event.task_id.clone();
+            self.role = event.role.clone();
+        }
+    }
+
+    fn render_row(&self, agent: &AgentSummary, now: DateTime<Utc>) -> AgentActivityRow {
+        let uptime_ms = self
+            .first_seen_at
+            .and_then(|first| now.signed_duration_since(first).num_milliseconds().try_into().ok())
+            .unwrap_or_default();
+        AgentActivityRow {
+            agent_id: agent.id.clone(),
+            model: if self.model.is_empty() {
+                String::from("-")
+            } else {
+                self.model.clone()
+            },
+            task: if self.task.is_empty() {
+                agent.plan_id.clone().unwrap_or_else(|| String::from("-"))
+            } else {
+                self.task.clone()
+            },
+            role: if self.role.is_empty() {
+                agent.status.clone()
+            } else {
+                self.role.clone()
+            },
+            turns: self.turns,
+            tokens_used: self.tokens_used,
+            cost_usd: self.cost_usd,
+            uptime_ms,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct ModelCostAggregate {
+    model: String,
+    input_tokens: u64,
+    output_tokens: u64,
+    input_rate: f64,
+    output_rate: f64,
+}
+
+impl ModelCostAggregate {
+    fn into_row(self) -> ModelCostRow {
+        ModelCostRow {
+            cost_usd: self.input_tokens as f64 * self.input_rate
+                + self.output_tokens as f64 * self.output_rate,
+            model: self.model,
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            input_rate: self.input_rate,
+            output_rate: self.output_rate,
+        }
+    }
+}
+
+fn parse_efficiency_timestamp(timestamp: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(timestamp)
+        .ok()
+        .map(|parsed| parsed.with_timezone(&Utc))
 }
 
 /// Current C-Factor snapshot.
@@ -1846,55 +2091,70 @@ impl DashboardSnapshot {
     // ── Operations pages ────────────────────────────────────────────
 
     fn render_agent_status_page(&self, page: &PageScaffold) -> Option<String> {
-        if self.episodes.is_empty() {
-            return None;
-        }
-        let mut out = page_header(page);
-
-        // Aggregate per-agent stats from episodes.
-        let mut agents: BTreeMap<String, AgentStats> = BTreeMap::new();
-        for ep in &self.episodes {
-            let entry = agents.entry(ep.agent_id.clone()).or_default();
-            entry.turns += 1;
-            entry.total_cost += ep.usage.cost_usd;
-            entry.total_input_tokens += ep.usage.input_tokens;
-            entry.total_output_tokens += ep.usage.output_tokens;
-            if ep.success {
-                entry.successes += 1;
+        let mut active_agents = Vec::new();
+        let mut seen_agents = HashSet::new();
+        for episode in &self.episodes {
+            if seen_agents.insert(episode.agent_id.clone()) {
+                active_agents.push(AgentSummary {
+                    id: episode.agent_id.clone(),
+                    label: episode.agent_id.clone(),
+                    plan_id: None,
+                    status: String::from("active"),
+                });
             }
         }
+        let snapshot = build_agent_activity_snapshot(
+            &active_agents,
+            &self.efficiency_events,
+        )?;
 
+        let mut out = page_header(page);
+        let _ = writeln!(out, "active agents:");
         let _ = writeln!(
             out,
-            "  {:>24}  {:>6}  {:>9}  {:>10}  {:>12}  {:>12}",
-            "agent", "turns", "pass rate", "cost", "in tokens", "out tokens"
+            "  {:>20}  {:>14}  {:>16}  {:>12}  {:>5}  {:>12}  {:>10}  {:>10}",
+            "agent id", "model", "task", "role", "turns", "tokens used", "cost", "uptime"
         );
-        for (agent_id, stats) in &agents {
-            let rate = count_to_f64(stats.successes) / count_to_f64(stats.turns);
+        for row in &snapshot.active_agents {
             let _ = writeln!(
                 out,
-                "  {:>24}  {:>6}  {:>9}  {:>10}  {:>12}  {:>12}",
-                agent_id,
-                stats.turns,
-                format_pct(rate),
-                format_usd(stats.total_cost),
-                stats.total_input_tokens,
-                stats.total_output_tokens
+                "  {:>20}  {:>14}  {:>16}  {:>12}  {:>5}  {:>12}  {:>10}  {:>10}",
+                truncate_str(&row.agent_id, 20),
+                truncate_str(&row.model, 14),
+                truncate_str(&row.task, 16),
+                truncate_str(&row.role, 12),
+                row.turns,
+                row.tokens_used,
+                format_usd(row.cost_usd),
+                format_duration_ms(row.uptime_ms)
             );
         }
 
-        // Also show efficiency event model breakdown if available.
-        if !self.efficiency_events.is_empty() {
-            let _ = writeln!(out);
-            let mut models: BTreeMap<String, usize> = BTreeMap::new();
-            for ev in &self.efficiency_events {
-                *models.entry(ev.model.clone()).or_default() += 1;
-            }
-            let _ = writeln!(out, "model usage:");
-            for (model, count) in &models {
-                let _ = writeln!(out, "  {model}: {count} turns");
-            }
+        let _ = writeln!(out);
+        let _ = writeln!(out, "model distribution:");
+        let _ = writeln!(out, "  {:>10}  {:>8}", "model", "count");
+        for row in &snapshot.model_usage {
+            let _ = writeln!(out, "  {:>10}  {:>8}", row.label, row.count);
         }
+
+        let _ = writeln!(out);
+        let _ = writeln!(out, "cost breakdown:");
+        let _ = writeln!(
+            out,
+            "  {:>20}  {:>12}  {:>12}  {:>12}",
+            "model", "input tokens", "output tokens", "cost"
+        );
+        for row in &snapshot.cost_rows {
+            let _ = writeln!(
+                out,
+                "  {:>20}  {:>12}  {:>12}  {:>12}",
+                truncate_str(&row.model, 20),
+                row.input_tokens,
+                row.output_tokens,
+                format_usd(row.cost_usd)
+            );
+        }
+        let _ = writeln!(out, "  total session cost: {}", format_usd(snapshot.total_session_cost));
 
         Some(out)
     }
@@ -2025,15 +2285,6 @@ impl DashboardSnapshot {
 }
 
 /// Per-agent aggregated stats.
-#[derive(Debug, Default)]
-struct AgentStats {
-    turns: usize,
-    successes: usize,
-    total_cost: f64,
-    total_input_tokens: u64,
-    total_output_tokens: u64,
-}
-
 /// Render standard page header.
 fn page_header(page: &PageScaffold) -> String {
     let mut out = String::new();
@@ -2201,6 +2452,45 @@ mod tests {
         metric.cache_hit_rate = cache_hit_rate;
         metric.cost_usd = cost_usd;
         metric
+    }
+
+    fn sample_efficiency_event(
+        agent: &str,
+        task: &str,
+        role: &str,
+        model: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+        cost_usd: f64,
+        timestamp: &str,
+    ) -> AgentEfficiencyEvent {
+        AgentEfficiencyEvent {
+            agent_id: agent.to_string(),
+            role: role.to_string(),
+            backend: String::from("claude"),
+            model: model.to_string(),
+            plan_id: String::from("plan-a"),
+            task_id: task.to_string(),
+            input_tokens,
+            output_tokens,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            cost_usd,
+            cost_usd_without_cache: cost_usd,
+            prompt_sections: Vec::new(),
+            total_prompt_tokens: input_tokens,
+            system_prompt_tokens: 0,
+            tools_available: 0,
+            tools_used: 0,
+            tool_calls: Vec::new(),
+            wall_time_ms: 1_000,
+            duration_ms: 1_000,
+            time_to_first_token_ms: 0,
+            was_warm_start: true,
+            iteration: 1,
+            gate_passed: true,
+            timestamp: timestamp.to_string(),
+        }
     }
 
     #[test]
@@ -2459,6 +2749,8 @@ mod tests {
         let tmpdir = tempdir().expect("tempdir");
         let memory_dir = tmpdir.path().join(MEMORY_DIR);
         let episodes_path = memory_dir.join(EPISODES_FILE);
+        let learn_dir = tmpdir.path().join(LEARN_DIR);
+        let efficiency_path = learn_dir.join(EFFICIENCY_FILE);
 
         let episodes = vec![
             serde_json::to_string(&sample_episode("agent-a", "task-1", true, 0.5, 500))
@@ -2469,14 +2761,56 @@ mod tests {
                 .expect("json"),
         ];
         write_jsonl(&episodes_path, &episodes);
+        write_jsonl(
+            &efficiency_path,
+            &[
+                serde_json::to_string(&sample_efficiency_event(
+                    "agent-a",
+                    "task-1",
+                    "Implementer",
+                    "claude-haiku-4-5",
+                    120,
+                    40,
+                    0.10,
+                    "2026-04-08T10:00:00Z",
+                ))
+                .expect("event json"),
+                serde_json::to_string(&sample_efficiency_event(
+                    "agent-a",
+                    "task-2",
+                    "Implementer",
+                    "claude-sonnet-4-5",
+                    300,
+                    90,
+                    0.30,
+                    "2026-04-08T10:05:00Z",
+                ))
+                .expect("event json"),
+                serde_json::to_string(&sample_efficiency_event(
+                    "agent-b",
+                    "task-3",
+                    "Reviewer",
+                    "claude-opus-4-6",
+                    500,
+                    100,
+                    1.25,
+                    "2026-04-08T10:10:00Z",
+                ))
+                .expect("event json"),
+            ],
+        );
 
         let dashboard = DashboardScaffold::new_in(tmpdir.path());
         let rendered = dashboard
             .render_page_text(PageId::AgentStatus)
             .expect("agent status page should render");
-        assert!(rendered.contains("Agent Status"));
+        assert!(rendered.contains("Agent Activity"));
         assert!(rendered.contains("agent-a"));
         assert!(rendered.contains("agent-b"));
+        assert!(rendered.contains("active agents:"));
+        assert!(rendered.contains("model distribution:"));
+        assert!(rendered.contains("cost breakdown:"));
+        assert!(rendered.contains("total session cost:"));
     }
 
     #[test]

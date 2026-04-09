@@ -8,15 +8,16 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Cell, Gauge, List, ListItem, Paragraph, Row, Sparkline, Table, Tabs, Wrap,
+    BarChart, Block, Borders, Cell, Gauge, List, ListItem, Paragraph, Row, Sparkline, Table,
+    Tabs, Wrap,
 };
 use ratatui::Frame;
 use serde_json::Value;
 use roko_learn::efficiency::AgentEfficiencyEvent;
 
 use super::dashboard::{
-    CFactor, DashboardData, DashboardScaffold, PlanExecutionSnapshot, read_json_value,
-    read_jsonl_values,
+    AgentActivitySnapshot, CFactor, DashboardData, DashboardScaffold, PlanExecutionSnapshot,
+    build_agent_activity_snapshot, read_json_value, read_jsonl_values,
 };
 use super::pages::{PageId, PageRegistry};
 
@@ -162,6 +163,11 @@ pub fn render_page(
         return;
     }
 
+    if active_page == PageId::AgentStatus {
+        render_agent_activity_page(frame, area, data);
+        return;
+    }
+
     let rendered = page.render(dashboard);
     let content = Paragraph::new(rendered)
         .block(
@@ -172,6 +178,207 @@ pub fn render_page(
         .wrap(Wrap { trim: false })
         .scroll((scroll, 0));
     frame.render_widget(content, area);
+}
+
+fn render_agent_activity_page(frame: &mut Frame<'_>, area: Rect, data: &DashboardData) {
+    let block = Block::default().borders(Borders::ALL).title("Agent Activity");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let Some(snapshot) = build_agent_activity_snapshot(&data.agents, &data.efficiency_events) else {
+        let empty = Paragraph::new("no active agents or efficiency history")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        frame.render_widget(empty, inner);
+        return;
+    };
+
+    let sections = Layout::vertical([
+        Constraint::Percentage(44),
+        Constraint::Percentage(20),
+        Constraint::Percentage(36),
+    ])
+    .split(inner);
+
+    render_active_agents_table(frame, sections[0], &snapshot.active_agents);
+    render_model_distribution_chart(frame, sections[1], &snapshot);
+    render_model_cost_breakdown(frame, sections[2], &snapshot);
+}
+
+fn render_active_agents_table(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    rows: &[super::dashboard::AgentActivityRow],
+) {
+    let block = Block::default().borders(Borders::ALL).title("active agents");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    if rows.is_empty() {
+        let empty = Paragraph::new("no active agents")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    let table_rows: Vec<Row<'_>> = rows
+        .iter()
+        .map(|row| {
+            Row::new(vec![
+                Cell::from(truncate_text(&row.agent_id, 20)),
+                Cell::from(truncate_text(&row.model, 14)),
+                Cell::from(truncate_text(&row.task, 16)),
+                Cell::from(truncate_text(&row.role, 12)),
+                Cell::from(row.turns.to_string()),
+                Cell::from(row.tokens_used.to_string()),
+                Cell::from(format!("${:.4}", row.cost_usd)),
+                Cell::from(format_elapsed_ms(row.uptime_ms)),
+            ])
+        })
+        .collect();
+
+    let table = Table::new(
+        table_rows,
+        [
+            Constraint::Length(20),
+            Constraint::Length(14),
+            Constraint::Length(16),
+            Constraint::Length(12),
+            Constraint::Length(5),
+            Constraint::Length(12),
+            Constraint::Length(10),
+            Constraint::Length(10),
+        ],
+    )
+    .header(
+        Row::new(vec![
+            Cell::from("agent ID"),
+            Cell::from("model"),
+            Cell::from("task"),
+            Cell::from("role"),
+            Cell::from("turns"),
+            Cell::from("tokens used"),
+            Cell::from("cost"),
+            Cell::from("uptime"),
+        ])
+        .style(
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::BOLD),
+        ),
+    )
+    .column_spacing(1);
+
+    frame.render_widget(table, inner);
+}
+
+fn render_model_distribution_chart(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    snapshot: &AgentActivitySnapshot,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("model distribution");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let data = [
+        ("haiku", snapshot.model_usage[0].count),
+        ("sonnet", snapshot.model_usage[1].count),
+        ("opus", snapshot.model_usage[2].count),
+    ];
+    let chart = BarChart::default()
+        .data(&data)
+        .direction(Direction::Horizontal)
+        .bar_width(1)
+        .bar_gap(1)
+        .max(snapshot.model_usage.iter().map(|row| row.count).max().unwrap_or(1))
+        .bar_style(Style::default().fg(Color::Cyan))
+        .value_style(Style::default().fg(Color::White))
+        .label_style(Style::default().fg(Color::Gray))
+        .bar_set(ratatui::symbols::bar::NINE_LEVELS);
+
+    frame.render_widget(chart, inner);
+}
+
+fn render_model_cost_breakdown(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    snapshot: &AgentActivitySnapshot,
+) {
+    let outer = Block::default().borders(Borders::ALL).title("cost breakdown");
+    let inner = outer.inner(area);
+    frame.render_widget(outer, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let sections = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner);
+
+    if snapshot.cost_rows.is_empty() {
+        let empty = Paragraph::new("no cost history")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        frame.render_widget(empty, sections[0]);
+        return;
+    }
+
+    let rows: Vec<Row<'_>> = snapshot
+        .cost_rows
+        .iter()
+        .map(|row| {
+            Row::new(vec![
+                Cell::from(truncate_text(&row.model, 24)),
+                Cell::from(row.input_tokens.to_string()),
+                Cell::from(row.output_tokens.to_string()),
+                Cell::from(format!("${:.4}", row.cost_usd)),
+            ])
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Min(18),
+            Constraint::Length(12),
+            Constraint::Length(12),
+            Constraint::Length(12),
+        ],
+    )
+    .header(
+        Row::new(vec![
+            Cell::from("model"),
+            Cell::from("input tokens"),
+            Cell::from("output tokens"),
+            Cell::from("cost"),
+        ])
+        .style(
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::BOLD),
+        ),
+    )
+    .column_spacing(1);
+    frame.render_widget(table, sections[0]);
+
+    let footer = Paragraph::new(format!(
+        "total session cost: ${:.4}",
+        snapshot.total_session_cost
+    ))
+    .alignment(Alignment::Right)
+    .style(Style::default().fg(Color::Yellow));
+    frame.render_widget(footer, sections[1]);
 }
 
 fn render_overview_page(frame: &mut Frame<'_>, area: Rect, data: &DashboardData) {

@@ -44,7 +44,7 @@ impl PageId {
             Self::Parameters => "Parameters",
             Self::Experiments => "Experiments",
             Self::Optimizer => "Optimizer",
-            Self::AgentStatus => "Agent Status",
+            Self::AgentStatus => "Agent Activity",
             Self::PlanView => "Plan View",
             Self::LogView => "Log View",
             Self::ConfigView => "Config View",

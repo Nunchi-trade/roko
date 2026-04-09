@@ -2180,7 +2180,7 @@ fn parse_dashboard_page(input: &str) -> Option<PageId> {
         "parameters" => PageId::Parameters,
         "experiments" => PageId::Experiments,
         "optimizer" => PageId::Optimizer,
-        "agent-status" | "agentstatus" => PageId::AgentStatus,
+        "agent-status" | "agentstatus" | "agent-activity" | "agentactivity" => PageId::AgentStatus,
         "plan-view" | "planview" => PageId::PlanView,
         "log-view" | "logview" => PageId::LogView,
         "config-view" | "configview" => PageId::ConfigView,
@@ -2443,6 +2443,10 @@ mod tests {
         assert_eq!(parse_dashboard_page("health"), Some(PageId::Health));
         assert_eq!(
             parse_dashboard_page("agent status"),
+            Some(PageId::AgentStatus)
+        );
+        assert_eq!(
+            parse_dashboard_page("agent activity"),
             Some(PageId::AgentStatus)
         );
         assert_eq!(parse_dashboard_page("plan_view"), Some(PageId::PlanView));
