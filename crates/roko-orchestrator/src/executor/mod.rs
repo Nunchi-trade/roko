@@ -670,6 +670,8 @@ mod tests {
         // GatePassed -> Verifying
         ex.apply_event("plan-42", &ExecutorEvent::GatePassed)
             .unwrap();
+        let actions = ex.tick();
+        assert!(matches!(&actions[0], ExecutorAction::RunVerify { .. }));
 
         // VerifyPassed -> Reviewing
         ex.apply_event("plan-42", &ExecutorEvent::VerifyPassed)

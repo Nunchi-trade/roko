@@ -39,6 +39,12 @@ pub enum ExecutorAction {
         rung: u32,
     },
 
+    /// Run task-level verification commands declared in `tasks.toml`.
+    RunVerify {
+        /// The plan whose worktree to verify.
+        plan_id: String,
+    },
+
     /// Merge a plan's worktree branch into the batch branch.
     MergeBranch {
         /// The plan to merge.
@@ -92,6 +98,7 @@ impl std::fmt::Display for ExecutorAction {
                 write!(f, "spawn({plan_id}, {role}, {task})")
             }
             Self::RunGate { plan_id, rung } => write!(f, "gate({plan_id}, rung={rung})"),
+            Self::RunVerify { plan_id } => write!(f, "verify({plan_id})"),
             Self::MergeBranch { plan_id } => write!(f, "merge({plan_id})"),
             Self::FailPlan { plan_id, reason } => {
                 write!(f, "fail({plan_id}: {reason})")
@@ -161,6 +168,9 @@ mod tests {
             ExecutorAction::RunGate {
                 plan_id: "c".into(),
                 rung: 0,
+            },
+            ExecutorAction::RunVerify {
+                plan_id: "cv".into(),
             },
             ExecutorAction::MergeBranch {
                 plan_id: "d".into(),

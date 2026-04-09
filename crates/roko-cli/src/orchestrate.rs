@@ -1544,6 +1544,40 @@ impl PlanRunner {
                     _ => {}
                 }
             }
+            ExecutorAction::RunVerify { plan_id } => {
+                eprintln!("[orchestrate] RunVerify plan={plan_id}");
+                match self.run_plan_verify_steps(&plan_id).await {
+                    Ok(()) => {
+                        if let Some(state) = self.executor.plan_state_mut(&plan_id) {
+                            state.last_error = None;
+                        }
+                        let _ = self.executor.apply_event(&plan_id, &ExecutorEvent::VerifyPassed);
+                    }
+                    Err((task_id, phase, command, error_output)) => {
+                        let msg = format!(
+                            "verify failed for {plan_id}/{task_id} in phase {phase}: {command}"
+                        );
+                        eprintln!(
+                            "[orchestrate] {msg}: {}",
+                            error_output.trim()
+                        );
+                        self.event_log.append(
+                            EventKind::ErrorOccurred,
+                            serde_json::json!({
+                                "plan_id": plan_id,
+                                "task_id": task_id,
+                                "phase": phase,
+                                "command": command,
+                                "error": error_output,
+                            }),
+                        );
+                        if let Some(state) = self.executor.plan_state_mut(&plan_id) {
+                            state.last_error = Some(msg);
+                        }
+                        let _ = self.executor.apply_event(&plan_id, &ExecutorEvent::VerifyFailed);
+                    }
+                }
+            }
             ExecutorAction::MergeBranch { plan_id } => {
                 eprintln!("[orchestrate] MergeBranch plan={plan_id}");
                 self.event_log.append(
@@ -3786,6 +3820,44 @@ impl PlanRunner {
                 ]
             }
         }
+    }
+
+    /// Run task-level verification commands declared in `tasks.toml` for a plan.
+    async fn run_plan_verify_steps(
+        &self,
+        plan_id: &str,
+    ) -> Result<(), (String, String, String, String)> {
+        let Some(tracker) = self.task_trackers.get(plan_id) else {
+            return Ok(());
+        };
+
+        let steps_to_run: Vec<(String, Vec<crate::task_parser::VerifyStep>)> = tracker
+            .tasks_file
+            .tasks
+            .iter()
+            .filter(|task| tracker.completed.contains(&task.id))
+            .filter(|task| !task.verify.is_empty())
+            .map(|task| (task.id.clone(), task.verify.clone()))
+            .collect();
+
+        if steps_to_run.is_empty() {
+            eprintln!("[orchestrate] {plan_id}: no task verify steps declared");
+            return Ok(());
+        }
+
+        let exec_dir = self.plan_exec_dir(plan_id).await;
+        eprintln!(
+            "[orchestrate] Running plan verify for {plan_id} across {} task(s)",
+            steps_to_run.len()
+        );
+
+        for (task_id, verify_steps) in steps_to_run {
+            if let Err(err) = self.run_verify_steps(&task_id, &verify_steps, &exec_dir).await {
+                return Err(err);
+            }
+        }
+
+        Ok(())
     }
 
     /// Remove stale git worktree locks before creating or using worktrees.

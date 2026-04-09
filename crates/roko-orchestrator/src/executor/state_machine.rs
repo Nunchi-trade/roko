@@ -247,9 +247,8 @@ impl PlanStateMachine {
                 role: AgentRole::AutoFixer,
                 task: "fix".into(),
             }),
-            PhaseKind::Verifying => Some(ExecutorAction::RunGate {
+            PhaseKind::Verifying => Some(ExecutorAction::RunVerify {
                 plan_id: plan_state.plan_id.clone(),
-                rung: 0,
             }),
             PhaseKind::Reviewing => Some(ExecutorAction::SpawnAgent {
                 plan_id: plan_state.plan_id.clone(),
@@ -521,6 +520,13 @@ mod tests {
         let ps = at_phase(PlanPhase::Gating);
         let action = PlanStateMachine::next_action(&ps);
         assert!(matches!(action, Some(ExecutorAction::RunGate { .. })));
+    }
+
+    #[test]
+    fn next_action_verifying_runs_verify() {
+        let ps = at_phase(PlanPhase::Verifying);
+        let action = PlanStateMachine::next_action(&ps);
+        assert!(matches!(action, Some(ExecutorAction::RunVerify { .. })));
     }
 
     #[test]
