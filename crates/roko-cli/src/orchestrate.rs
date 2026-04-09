@@ -50,7 +50,6 @@ use roko_learn::runtime_feedback::{
 };
 use roko_learn::skill_library::Skill;
 use roko_learn::skill_library::{SkillExtractionRequest, SkillGateResult, SkillLibrary};
-use roko_neuro::KnowledgeStore;
 use roko_orchestrator::worktree::{WorktreeConfig, WorktreeManager};
 use roko_orchestrator::{
     EventKind, EventLog, EventLogSnapshot, ExecutorAction, ExecutorEvent, ExecutorSnapshot,
@@ -65,7 +64,7 @@ use tokio_util::sync::CancellationToken as TokioCancellationToken;
 use tracing::{Instrument, info_span, instrument};
 
 use crate::config::Config;
-use crate::task_parser::{TaskDef, TaskValidationIssue, TasksFile};
+use crate::task_parser::{TaskValidationIssue, TasksFile};
 use crate::worker::cloud::CloudExecution;
 
 /// Default number of actions between auto-saves.
@@ -6653,8 +6652,7 @@ impl PlanRunner {
         let role_instruction = if let Some(system_prompt) = system_prompt_override {
             system_prompt
         } else {
-            let relevant_context =
-                build_relevant_context_layer(&self.workdir, plan_id, task_def.as_ref());
+            let relevant_context = build_relevant_context_layer(&context_sections);
             let context_window_tokens = effective_context_window_tokens(&self.config);
             build_system_prompt_with_context_validated(
                 role,
@@ -8219,285 +8217,19 @@ fn effective_context_window_tokens(config: &Config) -> usize {
     config.prompt.token_budget
 }
 
-fn build_relevant_context_layer(
-    workdir: &Path,
-    plan_id: &str,
-    task_def: Option<&TaskDef>,
-) -> Option<String> {
-    let task_def = task_def?;
-    let mut sections = Vec::new();
-
-    if let Some(knowledge) = build_relevant_knowledge_block(workdir, task_def) {
-        sections.push(knowledge);
-    }
-    if let Some(experience) = build_recent_experience_block(workdir, plan_id, task_def) {
-        sections.push(experience);
-    }
-    if let Some(files) = build_related_files_block(workdir, task_def) {
-        sections.push(files);
-    }
-
-    if sections.is_empty() {
-        None
-    } else {
-        Some(format!("## Relevant Context\n\n{}", sections.join("\n\n")))
-    }
-}
-
-fn build_relevant_knowledge_block(workdir: &Path, task_def: &TaskDef) -> Option<String> {
-    let task_description = context_query_text(task_def);
-    if task_description.is_empty() {
-        return None;
-    }
-
-    let knowledge_store = KnowledgeStore::for_workdir(workdir);
-    let entries = match knowledge_store.query(&task_description, 5) {
-        Ok(entries) => entries,
-        Err(error) => {
-            tracing::warn!(
-                workdir = %workdir.display(),
-                task_description = %task_description,
-                error = %error,
-                "failed to query relevant knowledge"
-            );
-            return None;
-        }
-    };
-
-    if entries.is_empty() {
-        return None;
-    }
-
-    let bullets = entries
-        .into_iter()
-        .map(|entry| {
-            let kind = format!("{:?}", entry.kind);
-            let content = entry.content.trim();
-            if content.is_empty() {
-                return None;
-            }
-            Some(format!(
-                "- [{kind}] {content} (confidence: {:.2})",
-                entry.confidence.clamp(0.0, 1.0)
-            ))
-        })
-        .flatten()
-        .collect::<Vec<_>>();
-
-    if bullets.is_empty() {
-        None
-    } else {
-        Some(format!("### Knowledge\n{}", bullets.join("\n")))
-    }
-}
-
-fn build_recent_experience_block(
-    workdir: &Path,
-    plan_id: &str,
-    task_def: &TaskDef,
-) -> Option<String> {
-    let episodes_path = workdir.join(".roko").join("episodes.jsonl");
-    let episodes = read_jsonl_episodes(&episodes_path);
-    if episodes.is_empty() {
-        return None;
-    }
-
-    let mut matches: Vec<&Episode> = episodes
+fn build_relevant_context_layer(context_sections: &[PromptSection]) -> Option<String> {
+    let content = context_sections
         .iter()
-        .rev()
-        .filter(|episode| episode_matches_plan(episode, plan_id, task_def))
-        .take(3)
-        .collect();
+        .map(|section| section.content.trim())
+        .filter(|section| !section.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
 
-    if matches.is_empty() {
-        matches = episodes.iter().rev().take(3).collect();
-    }
-
-    let bullets = matches
-        .into_iter()
-        .map(|episode| format_recent_experience_bullet(episode))
-        .collect::<Vec<_>>();
-
-    if bullets.is_empty() {
+    if content.is_empty() {
         None
     } else {
-        Some(format!("### Recent Experience\n{}", bullets.join("\n")))
+        Some(format!("## Relevant Context\n\n{content}"))
     }
-}
-
-fn build_related_files_block(workdir: &Path, task_def: &TaskDef) -> Option<String> {
-    use std::collections::HashSet;
-
-    let mut seen = HashSet::new();
-    let mut bullets = Vec::new();
-
-    for file in &task_def.files {
-        if seen.insert(file.clone())
-            && let Some(bullet) = format_related_file_bullet(workdir, file, None)
-        {
-            bullets.push(bullet);
-        }
-    }
-
-    if let Some(ctx) = task_def.context.as_ref() {
-        for rf in &ctx.read_files {
-            if seen.insert(rf.path.clone())
-                && let Some(bullet) =
-                    format_related_file_bullet(workdir, &rf.path, Some(rf.why.as_str()))
-            {
-                bullets.push(bullet);
-            }
-        }
-    }
-
-    if bullets.is_empty() {
-        None
-    } else {
-        Some(format!("### Related Files\n{}", bullets.join("\n")))
-    }
-}
-
-fn format_recent_experience_bullet(episode: &Episode) -> String {
-    let task = if episode.task_id.is_empty() {
-        "unknown task".to_string()
-    } else {
-        format!("Task \"{}\"", episode.task_id)
-    };
-    let status = if episode.success {
-        "completed successfully"
-    } else {
-        "failed"
-    };
-    let insight = recent_episode_insight(episode);
-    format!("- {task} {status}: {insight}")
-}
-
-fn recent_episode_insight(episode: &Episode) -> String {
-    if !episode.success {
-        if let Some(reason) = episode.failure_reason.as_deref().filter(|s| !s.trim().is_empty()) {
-            return reason.to_string();
-        }
-        return "no failure reason recorded".to_string();
-    }
-
-    let passed_gates = episode
-        .gate_verdicts
-        .iter()
-        .filter(|verdict| verdict.passed)
-        .map(|verdict| verdict.gate.as_str())
-        .collect::<Vec<_>>();
-    if !passed_gates.is_empty() {
-        return format!("gates passed: {}", passed_gates.join(", "));
-    }
-
-    if let Some(reason) = episode.failure_reason.as_deref().filter(|s| !s.trim().is_empty()) {
-        return reason.to_string();
-    }
-
-    "kept the change focused and verified the result".to_string()
-}
-
-fn format_related_file_bullet(workdir: &Path, relative_path: &str, why: Option<&str>) -> Option<String> {
-    let full_path = workdir.join(relative_path);
-    let content = std::fs::read_to_string(&full_path).ok()?;
-    let line_count = content.lines().count();
-    let summary = related_file_summary(&content)
-        .or_else(|| why.map(|text| text.trim().to_string()).filter(|text| !text.is_empty()))
-        .unwrap_or_else(|| "related to the current task".to_string());
-
-    Some(format!("- {relative_path} ({line_count} lines): {summary}"))
-}
-
-fn related_file_summary(content: &str) -> Option<String> {
-    let mut symbols = Vec::new();
-    for line in content.lines() {
-        let trimmed = line.trim_start();
-        if let Some(name) = decl_name(trimmed, "pub struct")
-            .or_else(|| decl_name(trimmed, "struct"))
-            .or_else(|| decl_name(trimmed, "pub enum"))
-            .or_else(|| decl_name(trimmed, "enum"))
-            .or_else(|| decl_name(trimmed, "pub fn"))
-            .or_else(|| decl_name(trimmed, "fn"))
-        {
-            if !symbols.contains(&name) {
-                symbols.push(name);
-            }
-            if symbols.len() == 3 {
-                break;
-            }
-        }
-    }
-
-    if symbols.is_empty() {
-        None
-    } else {
-        Some(format!("defines {}", symbols.join(", ")))
-    }
-}
-
-fn decl_name(line: &str, prefix: &str) -> Option<String> {
-    let line = line.trim_start();
-    let idx = line.find(prefix)?;
-    let rest = line[idx + prefix.len()..].trim_start();
-    let name = rest
-        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
-        .next()?;
-    if name.is_empty() {
-        None
-    } else {
-        Some(name.to_string())
-    }
-}
-
-fn context_query_text(task_def: &TaskDef) -> String {
-    let mut parts = Vec::new();
-    if let Some(desc) = task_def.description.as_deref().filter(|text| !text.trim().is_empty()) {
-        parts.push(desc.to_string());
-    }
-    if !task_def.title.trim().is_empty() {
-        parts.push(task_def.title.clone());
-    }
-    if !task_def.files.is_empty() {
-        parts.push(task_def.files.join(" "));
-    }
-    parts.join(" ")
-}
-
-fn read_jsonl_episodes(path: &Path) -> Vec<Episode> {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    text.lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() {
-                None
-            } else {
-                serde_json::from_str::<Episode>(line).ok()
-            }
-        })
-        .collect()
-}
-
-fn episode_matches_plan(episode: &Episode, plan_id: &str, task_def: &TaskDef) -> bool {
-    if episode.input_signal_hash == plan_id {
-        return true;
-    }
-    if episode
-        .extra
-        .get("plan_id")
-        .and_then(|value| value.as_str())
-        == Some(plan_id)
-    {
-        return true;
-    }
-
-    episode.task_id == task_def.id
-        || episode
-            .extra
-            .get("task_id")
-            .and_then(|value| value.as_str())
-            == Some(task_def.id.as_str())
 }
 
 impl PlanRunner {
