@@ -21,6 +21,29 @@ use crate::{ContextSource, TaskInput};
 #[cfg(feature = "hdc")]
 use bardo_primitives::hdc::text_fingerprint;
 
+/// Normalized PAD state used to bias retrieval when Daimon is available.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PadState {
+    /// Pleasure dimension. Lower values favor cautionary / anti-knowledge.
+    pub pleasure: f64,
+    /// Arousal dimension. Higher values favor recent and action-oriented knowledge.
+    pub arousal: f64,
+    /// Dominance dimension. Reserved for future modulation.
+    pub dominance: f64,
+}
+
+impl PadState {
+    /// Construct a normalized PAD state.
+    #[must_use]
+    pub const fn new(pleasure: f64, arousal: f64, dominance: f64) -> Self {
+        Self {
+            pleasure,
+            arousal,
+            dominance,
+        }
+    }
+}
+
 /// A single gathered context candidate.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ContextChunk {
@@ -43,6 +66,7 @@ pub struct ContextChunk {
 pub struct ContextAssembler {
     knowledge_store: Arc<KnowledgeStore>,
     episode_store: Arc<EpisodeStore>,
+    affect_state: Option<PadState>,
     /// Future-stage budget cap for gathered context.
     max_context_tokens: usize,
 }
@@ -54,8 +78,16 @@ impl ContextAssembler {
         Self {
             knowledge_store,
             episode_store,
+            affect_state: None,
             max_context_tokens: 4_000,
         }
+    }
+
+    /// Attach an optional PAD state used to bias knowledge retrieval.
+    #[must_use]
+    pub const fn with_affect_state(mut self, affect_state: Option<PadState>) -> Self {
+        self.affect_state = affect_state;
+        self
     }
 
     /// Override the gathered-context token budget.
@@ -90,8 +122,8 @@ impl ContextAssembler {
     /// Rank gathered chunks by descending score.
     fn rank(&self, task_text: &str, chunks: &mut Vec<ContextChunk>) {
         chunks.sort_by(|left, right| {
-            let right_score = score_chunk(task_text, right);
-            let left_score = score_chunk(task_text, left);
+            let right_score = score_chunk(task_text, right, self.affect_state.as_ref());
+            let left_score = score_chunk(task_text, left, self.affect_state.as_ref());
             right_score
                 .partial_cmp(&left_score)
                 .unwrap_or(Ordering::Equal)
@@ -110,12 +142,13 @@ impl ContextAssembler {
         });
 
         for chunk in chunks.iter_mut() {
-            chunk.relevance = score_chunk(task_text, chunk);
+            chunk.relevance = score_chunk(task_text, chunk, self.affect_state.as_ref());
         }
     }
 
     fn gather_knowledge(&self, task_text: &str) -> Vec<ContextChunk> {
-        let Ok(entries) = self.knowledge_store.query(task_text, 10) else {
+        let query_limit = if self.affect_state.is_some() { 20 } else { 10 };
+        let Ok(entries) = self.knowledge_store.query(task_text, query_limit) else {
             return Vec::new();
         };
 
@@ -509,21 +542,99 @@ fn signal_recency_score(created_at_ms: i64) -> f64 {
     1.0 / (1.0 + age_days)
 }
 
-fn score_chunk(task_text: &str, chunk: &ContextChunk) -> f64 {
+fn score_chunk(task_text: &str, chunk: &ContextChunk, affect_state: Option<&PadState>) -> f64 {
     let similarity = semantic_similarity(task_text, &chunk.content);
     let source_priority = source_priority(&chunk.source);
     let recency = chunk.recency.unwrap_or(0.5);
     let confidence = chunk.confidence.unwrap_or(0.5);
+    let affect_bias = affect_bias(chunk, recency, affect_state);
 
     if let Some(track_record) = chunk.track_record {
         let uncertainty = (1.0 - confidence).clamp(0.1, 1.0);
         let active_score = track_record * similarity / uncertainty;
         if active_score > 0.0 {
-            return active_score;
+            return active_score + affect_bias;
         }
     }
 
-    similarity * 0.3 + recency * 0.2 + confidence * 0.3 + source_priority * 0.2
+    similarity * 0.3 + recency * 0.2 + confidence * 0.3 + source_priority * 0.2 + affect_bias
+}
+
+fn affect_bias(chunk: &ContextChunk, recency: f64, affect_state: Option<&PadState>) -> f64 {
+    let Some(affect) = affect_state else {
+        return 0.0;
+    };
+
+    let arousal = affect.arousal.clamp(0.0, 1.0);
+    let low_pleasure = (1.0 - affect.pleasure.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+    let action = action_orientation(chunk);
+    let caution = caution_orientation(chunk);
+
+    let arousal_bias = arousal * (0.30 * recency + 0.35 * action);
+    let pleasure_bias = low_pleasure * (1.00 * caution - 0.30 * action);
+
+    arousal_bias + pleasure_bias
+}
+
+fn action_orientation(chunk: &ContextChunk) -> f64 {
+    match &chunk.source {
+        ContextSource::KnowledgeEntry { kind, .. } => {
+            let kind = kind.to_ascii_lowercase();
+            let kind_score = match kind.as_str() {
+                "procedure" => 1.0,
+                "playbook" => 0.9,
+                "heuristic" => 0.7,
+                "insight" => 0.5,
+                "fact" => 0.35,
+                "constraint" => 0.25,
+                "antiknowledge" | "anti_knowledge" => 0.1,
+                _ => 0.25,
+            };
+            let content = chunk.content.to_ascii_lowercase();
+            let content_score = if content.contains("step")
+                || content.contains("run ")
+                || content.contains("use ")
+                || content.contains("implement ")
+                || content.contains("command")
+            {
+                0.2
+            } else {
+                0.0
+            };
+            ((kind_score + content_score) as f64).clamp(0.0, 1.0)
+        }
+        _ => 0.0,
+    }
+}
+
+fn caution_orientation(chunk: &ContextChunk) -> f64 {
+    match &chunk.source {
+        ContextSource::KnowledgeEntry { kind, .. } => {
+            let kind = kind.to_ascii_lowercase();
+            let kind_score = match kind.as_str() {
+                "antiknowledge" | "anti_knowledge" => 1.0,
+                "constraint" => 0.9,
+                "heuristic" => 0.5,
+                "fact" | "insight" => 0.25,
+                _ => 0.15,
+            };
+            let content = chunk.content.to_ascii_lowercase();
+            let content_score = if content.contains("avoid")
+                || content.contains("never")
+                || content.contains("do not")
+                || content.contains("don't")
+                || content.contains("caution")
+                || content.contains("risk")
+                || content.contains("failure")
+            {
+                0.25
+            } else {
+                0.0
+            };
+            ((kind_score + content_score) as f64).clamp(0.0, 1.0)
+        }
+        _ => 0.0,
+    }
 }
 
 fn tokenize(text: &str) -> Vec<String> {
@@ -683,7 +794,7 @@ mod tests {
         let file_chunk = inline_file_chunk(task_text);
         let signal_chunk = signal_chunk_for_test(task_text);
 
-        assert!(score_chunk(task_text, &file_chunk) > score_chunk(task_text, &signal_chunk));
+        assert!(score_chunk(task_text, &file_chunk, None) > score_chunk(task_text, &signal_chunk, None));
     }
 
     #[test]
@@ -692,7 +803,60 @@ mod tests {
         let knowledge_chunk = knowledge_chunk_for_test(task_text);
         let signal_chunk = signal_chunk_for_test(task_text);
 
-        assert!(score_chunk(task_text, &knowledge_chunk) > score_chunk(task_text, &signal_chunk));
+        assert!(score_chunk(task_text, &knowledge_chunk, None) > score_chunk(task_text, &signal_chunk, None));
+    }
+
+    #[test]
+    fn affect_bias_prefers_recent_action_oriented_knowledge() {
+        let task_text = "deploy migration rollback";
+        let recent_action = ContextChunk {
+            content: "### Knowledge Procedure\nConfidence: 0.95\nTags: deploy, rollback\n```\nUse the migration rollback command immediately after validation.\n```"
+                .into(),
+            source: ContextSource::KnowledgeEntry {
+                entry_id: "proc".into(),
+                kind: "Procedure".into(),
+            },
+            relevance: 0.3,
+            track_record: Some(0.9),
+            confidence: Some(0.95),
+            recency: Some(0.95),
+        };
+        let older_caution = ContextChunk {
+            content: "### Knowledge AntiKnowledge\nConfidence: 0.90\nTags: deploy, rollback\n```\nNever skip the rollback plan before deploying.\n```"
+                .into(),
+            source: ContextSource::KnowledgeEntry {
+                entry_id: "anti".into(),
+                kind: "AntiKnowledge".into(),
+            },
+            relevance: 0.8,
+            track_record: Some(0.8),
+            confidence: Some(0.9),
+            recency: Some(0.2),
+        };
+        let neutral = ContextChunk {
+            content: "### Knowledge Fact\nConfidence: 0.80\nTags: deploy\n```\nDeployments are scheduled on weekdays.\n```"
+                .into(),
+            source: ContextSource::KnowledgeEntry {
+                entry_id: "fact".into(),
+                kind: "Fact".into(),
+            },
+            relevance: 0.7,
+            track_record: Some(0.7),
+            confidence: Some(0.8),
+            recency: Some(0.7),
+        };
+
+        let high_arousal = PadState::new(0.8, 1.0, 0.5);
+        let low_pleasure = PadState::new(0.0, 0.3, 0.5);
+
+        assert!(
+            score_chunk(task_text, &recent_action, Some(&high_arousal))
+                > score_chunk(task_text, &neutral, Some(&high_arousal))
+        );
+        assert!(
+            score_chunk(task_text, &older_caution, Some(&low_pleasure))
+                > score_chunk(task_text, &neutral, Some(&low_pleasure))
+        );
     }
 
     #[test]
@@ -775,6 +939,105 @@ mod tests {
         );
         assert!(chunks
             .windows(2)
-            .all(|pair| score_chunk(&task_text, &pair[0]) >= score_chunk(&task_text, &pair[1])));
+            .all(|pair| score_chunk(&task_text, &pair[0], None) >= score_chunk(&task_text, &pair[1], None)));
+    }
+
+    #[test]
+    fn gather_with_affect_prioritizes_cautionary_and_actionable_knowledge() {
+        let dir = TempDir::new().expect("tempdir");
+        let workdir = dir.path();
+        std::fs::create_dir_all(workdir.join(".roko/neuro")).expect("neuro dir");
+
+        let knowledge_store = Arc::new(KnowledgeStore::new(
+            workdir.join(".roko/neuro/knowledge.jsonl"),
+        ));
+        let now = Utc::now();
+        knowledge_store
+            .add(KnowledgeEntry {
+                id: "recent-proc".into(),
+                kind: KnowledgeKind::Procedure,
+                content: "Use the rollback command after each migration".into(),
+                confidence: 0.9,
+                source_episodes: vec!["ep-a".into()],
+                tags: vec!["rollback".into(), "migration".into()],
+                created_at: now,
+                half_life_days: 30.0,
+                hdc_vector: None,
+            })
+            .expect("add procedure");
+        knowledge_store
+            .add(KnowledgeEntry {
+                id: "older-anti".into(),
+                kind: KnowledgeKind::AntiKnowledge,
+                content: "Never deploy without a rollback plan".into(),
+                confidence: 0.9,
+                source_episodes: vec!["ep-b".into()],
+                tags: vec!["rollback".into(), "deploy".into()],
+                created_at: now - chrono::Duration::days(10),
+                half_life_days: 30.0,
+                hdc_vector: None,
+            })
+            .expect("add anti-knowledge");
+        knowledge_store
+            .add(KnowledgeEntry {
+                id: "neutral-fact".into(),
+                kind: KnowledgeKind::Fact,
+                content: "Deployments happen on weekdays".into(),
+                confidence: 0.9,
+                source_episodes: vec!["ep-c".into()],
+                tags: vec!["deploy".into()],
+                created_at: now - chrono::Duration::days(3),
+                half_life_days: 30.0,
+                hdc_vector: None,
+            })
+            .expect("add fact");
+
+        let episode_store = Arc::new(EpisodeStore::new(workdir.join(".roko/episodes.jsonl")));
+        std::fs::write(episode_store.path(), "").expect("write empty episodes");
+
+        let task = TaskInput {
+            id: "T1".into(),
+            title: "Deploy migration rollback".into(),
+            description: Some("Choose the safest recovery path".into()),
+            tier: "focused".into(),
+            files: vec![],
+            read_files: vec![],
+            symbols: vec![],
+            anti_patterns: vec![],
+            prior_failures: vec![],
+            verify_commands: vec![],
+            acceptance: vec![],
+            depends_on: vec![],
+            max_loc: None,
+        };
+        let signals_path = workdir.join(".roko/signals.jsonl");
+        std::fs::create_dir_all(signals_path.parent().expect("signals parent")).expect("signals dir");
+        std::fs::write(&signals_path, "").expect("write empty signals");
+
+        let high_arousal = ContextAssembler::new(knowledge_store.clone(), episode_store.clone())
+            .with_affect_state(Some(PadState::new(0.7, 1.0, 0.5)));
+        let low_pleasure = ContextAssembler::new(knowledge_store, episode_store)
+            .with_affect_state(Some(PadState::new(0.0, 0.2, 0.5)));
+
+        let high_chunks = high_arousal.gather(workdir, &task, "plan-1", &signals_path);
+        let low_chunks = low_pleasure.gather(workdir, &task, "plan-1", &signals_path);
+
+        let high_first = high_chunks
+            .first()
+            .and_then(|chunk| match &chunk.source {
+                ContextSource::KnowledgeEntry { kind, .. } => Some(kind.as_str()),
+                _ => None,
+            })
+            .expect("knowledge chunk");
+        let low_first = low_chunks
+            .first()
+            .and_then(|chunk| match &chunk.source {
+                ContextSource::KnowledgeEntry { kind, .. } => Some(kind.as_str()),
+                _ => None,
+            })
+            .expect("knowledge chunk");
+
+        assert_eq!(high_first, "Procedure");
+        assert_eq!(low_first, "AntiKnowledge");
     }
 }

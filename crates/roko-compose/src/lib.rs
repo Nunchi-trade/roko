@@ -32,7 +32,7 @@ pub mod templates;
 
 pub use agents_md::AgentsMd;
 pub use budget::{AdjustedBudget, Complexity, adjusted_budget_for};
-pub use context_assembler::{ContextAssembler, ContextChunk};
+pub use context_assembler::{ContextAssembler, ContextChunk, PadState};
 pub use context_provider::{
     ContextBudgets, ContextProvider, ContextSection, ContextSource, ContextTier, PlanArtifacts,
     PriorTaskOutput, ReadFileSpec, ResolvedContext, SiblingTask, TaskInput, VerifySpec,
