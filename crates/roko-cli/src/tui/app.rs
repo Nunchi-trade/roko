@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::io;
 use std::io::Stdout;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -53,6 +54,17 @@ type TuiTerminal = Terminal<CrosstermBackend<Stdout>>;
 enum OverlayState {
     Help,
     Detail(DetailState),
+}
+
+struct PanicHookRestoreGuard(
+    Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync + 'static>,
+);
+
+impl Drop for PanicHookRestoreGuard {
+    fn drop(&mut self) {
+        let hook = Arc::clone(&self.0);
+        std::panic::set_hook(Box::new(move |panic_info| hook(panic_info)));
+    }
 }
 
 /// Run the interactive dashboard event loop.
@@ -117,9 +129,19 @@ impl App {
 
     /// Run the terminal UI until the user quits.
     pub fn run(mut self) -> Result<()> {
+        let previous_hook: Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync + 'static> =
+            Arc::from(std::panic::take_hook());
+        let panic_hook = Arc::clone(&previous_hook);
+        let _restore_hook = PanicHookRestoreGuard(previous_hook);
+
+        std::panic::set_hook(Box::new(move |panic_info| {
+            let _ = Self::cleanup_terminal();
+            panic_hook(panic_info);
+        }));
+
         let mut terminal = Self::enter_terminal()?;
         let result = self.main_loop(&mut terminal);
-        let cleanup = Self::leave_terminal(&mut terminal);
+        let cleanup = Self::leave_terminal();
 
         match (result, cleanup) {
             (Ok(()), Ok(())) => Ok(()),
@@ -500,14 +522,14 @@ impl App {
         Terminal::new(CrosstermBackend::new(stdout)).context("create terminal")
     }
 
-    fn leave_terminal(terminal: &mut TuiTerminal) -> Result<()> {
+    fn leave_terminal() -> Result<()> {
+        Self::cleanup_terminal()
+    }
+
+    fn cleanup_terminal() -> Result<()> {
         disable_raw_mode().context("disable raw mode")?;
-        execute!(
-            terminal.backend_mut(),
-            LeaveAlternateScreen,
-            DisableMouseCapture
-        )
-        .context("leave alternate screen")?;
+        execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)
+            .context("leave alternate screen")?;
         Ok(())
     }
 }
