@@ -75,6 +75,15 @@ pub struct AgentTemplate {
 pub struct TemplateExperiment {
     /// Experiment name used to resolve a variant from the experiment store.
     pub name: String,
+    /// Prompt variants assigned by the experiment store.
+    #[serde(default)]
+    pub variants: Vec<String>,
+    /// Metric key recorded for the experiment.
+    #[serde(default)]
+    pub metric: String,
+    /// Human-readable description of how the metric is measured.
+    #[serde(default)]
+    pub measured_by: String,
 }
 
 impl AgentTemplate {
@@ -127,6 +136,36 @@ impl AgentTemplate {
                 "template '{}' has an experiment section with an empty name",
                 self.name
             ));
+        }
+        if let Some(experiment) = &self.experiment {
+            if experiment.variants.len() < 2 {
+                errors.push(format!(
+                    "template '{}' experiment '{}' must define at least two variants",
+                    self.name, experiment.name
+                ));
+            }
+            if experiment
+                .variants
+                .iter()
+                .any(|variant| variant.trim().is_empty())
+            {
+                errors.push(format!(
+                    "template '{}' experiment '{}' has an empty variant name",
+                    self.name, experiment.name
+                ));
+            }
+            if experiment.metric.trim().is_empty() {
+                errors.push(format!(
+                    "template '{}' experiment '{}' must define a metric",
+                    self.name, experiment.name
+                ));
+            }
+            if experiment.measured_by.trim().is_empty() {
+                errors.push(format!(
+                    "template '{}' experiment '{}' must define how the metric is measured",
+                    self.name, experiment.name
+                ));
+            }
         }
 
         if !self.mcp_servers.is_empty() {
@@ -501,6 +540,22 @@ max_turns = 8
 "#,
         );
         write_template(
+            &workdir.join(".roko").join("templates").join("reviewer-exp.toml"),
+            r#"
+name = "reviewer-exp"
+description = "Review work with an experiment"
+role = "reviewer"
+system_prompt = "You are a reviewer."
+max_turns = 8
+
+[experiment]
+name = "review-depth"
+variants = ["concise", "thorough"]
+metric = "review_resolution_rate"
+measured_by = "% of review comments resolved (feedback)"
+"#,
+        );
+        write_template(
             &workdir.join(".roko").join("templates").join("broken.toml"),
             r#"
 name = "broken"
@@ -516,7 +571,7 @@ mcp_servers = ["github", "missing-server"]
         let mut registry = TemplateRegistry::new(workdir.to_path_buf());
         let report = registry.scan();
 
-        assert_eq!(report.loaded, 2);
+        assert_eq!(report.loaded, 3);
         assert!(report
             .validation_errors
             .iter()
@@ -535,6 +590,7 @@ mcp_servers = ["github", "missing-server"]
             .any(|error| error.contains("missing-server")));
         assert!(registry.get("planner").is_some());
         assert!(registry.get("reviewer").is_some());
+        assert!(registry.get("reviewer-exp").is_some());
         assert!(registry.get("broken").is_none());
     }
 
