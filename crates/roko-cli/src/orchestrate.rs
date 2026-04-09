@@ -1098,6 +1098,16 @@ impl TaskTracker {
         let task_id = self.last_impl_task_id.as_deref()?;
         self.tasks_file.tasks.iter().find(|task| task.id == task_id)
     }
+
+    /// Return the completed task definitions still present in the tracker.
+    fn completed_task_defs(&self) -> Vec<crate::task_parser::TaskDef> {
+        self.tasks_file
+            .tasks
+            .iter()
+            .filter(|task| self.completed.iter().any(|task_id| task_id == &task.id))
+            .cloned()
+            .collect()
+    }
 }
 
 fn merge_completed_tasks(tracker: &mut TaskTracker, completed_tasks: &[String]) {
@@ -1118,6 +1128,171 @@ fn merge_completed_tasks(tracker: &mut TaskTracker, completed_tasks: &[String]) 
         })
     {
         tracker.current_group_index += 1;
+    }
+}
+
+fn normalize_task_title(title: &str) -> String {
+    title
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn task_title_similarity(a: &str, b: &str) -> f64 {
+    let normalized_a = normalize_task_title(a);
+    let normalized_b = normalize_task_title(b);
+    if normalized_a == normalized_b {
+        return 1.0;
+    }
+    if normalized_a.contains(&normalized_b) || normalized_b.contains(&normalized_a) {
+        return 0.95;
+    }
+
+    let terms_a = significant_terms(a);
+    let terms_b = significant_terms(b);
+    if terms_a.is_empty() || terms_b.is_empty() {
+        return 0.0;
+    }
+
+    let set_a: HashSet<&str> = terms_a.iter().map(String::as_str).collect();
+    let set_b: HashSet<&str> = terms_b.iter().map(String::as_str).collect();
+    let common = set_a.intersection(&set_b).count() as f64;
+    let len_sum = (set_a.len() + set_b.len()) as f64;
+    let dice = if len_sum == 0.0 {
+        0.0
+    } else {
+        (2.0 * common) / len_sum
+    };
+    let containment = common / set_a.len().min(set_b.len()) as f64;
+    dice.max(containment)
+}
+
+fn best_completed_task_match<'a>(
+    title: &str,
+    completed_tasks: &'a [crate::task_parser::TaskDef],
+) -> Option<(&'a str, f64)> {
+    let mut best: Option<(&str, f64)> = None;
+    for task in completed_tasks {
+        let score = task_title_similarity(title, &task.title);
+        if score < 0.6 {
+            continue;
+        }
+        match best {
+            Some((_, best_score)) if score <= best_score => {}
+            _ => best = Some((task.id.as_str(), score)),
+        }
+    }
+    best
+}
+
+fn find_prd_path(workdir: &Path, slug: &str) -> Option<PathBuf> {
+    let published = workdir
+        .join(".roko")
+        .join("prd")
+        .join("published")
+        .join(format!("{slug}.md"));
+    if published.exists() {
+        return Some(published);
+    }
+
+    let draft = workdir
+        .join(".roko")
+        .join("prd")
+        .join("drafts")
+        .join(format!("{slug}.md"));
+    if draft.exists() {
+        return Some(draft);
+    }
+
+    None
+}
+
+fn merge_regenerated_plan(
+    plan_id: &str,
+    old_tasks: &TasksFile,
+    regenerated_tasks: TasksFile,
+    completed_tasks: &[crate::task_parser::TaskDef],
+) -> TasksFile {
+    let mut merged_tasks = Vec::new();
+    let mut preserved_completed_ids = HashSet::new();
+    for task in &old_tasks.tasks {
+        if completed_tasks.iter().any(|completed| completed.id == task.id) {
+            let mut preserved = task.clone();
+            preserved.status = "done".to_string();
+            preserved_completed_ids.insert(preserved.id.clone());
+            merged_tasks.push(preserved);
+        }
+    }
+
+    let mut skipped_task_replacements: HashMap<String, String> = HashMap::new();
+    let mut seen_new_ids: HashSet<String> = HashSet::new();
+    for mut task in regenerated_tasks.tasks {
+        if preserved_completed_ids.contains(&task.id) {
+            continue;
+        }
+        if !seen_new_ids.insert(task.id.clone()) {
+            tracing::warn!(
+                "[orchestrate] regeneration for {plan_id} emitted duplicate task id {}",
+                task.id
+            );
+            continue;
+        }
+
+        if let Some((completed_id, score)) = best_completed_task_match(&task.title, completed_tasks)
+        {
+            tracing::info!(
+                "[orchestrate] regeneration for {plan_id} skipped task {} because it matches completed task {} (score={score:.2})",
+                task.id,
+                completed_id
+            );
+            skipped_task_replacements.insert(task.id.clone(), completed_id.to_string());
+            continue;
+        }
+
+        task.status = "ready".to_string();
+        merged_tasks.push(task);
+    }
+
+    for task in &mut merged_tasks {
+        let mut deduped_deps = Vec::with_capacity(task.depends_on.len());
+        for dep in &task.depends_on {
+            let rewritten = skipped_task_replacements
+                .get(dep)
+                .cloned()
+                .unwrap_or_else(|| dep.clone());
+            if !deduped_deps.contains(&rewritten) {
+                deduped_deps.push(rewritten);
+            }
+        }
+        task.depends_on = deduped_deps;
+    }
+
+    let mut meta = regenerated_tasks.meta;
+    if meta.plan.trim().is_empty() {
+        meta.plan = old_tasks.meta.plan.clone();
+    }
+    if meta.plan.trim().is_empty() {
+        meta.plan = plan_id.to_string();
+    }
+    meta.iteration = old_tasks.meta.iteration.saturating_add(1);
+    meta.total = merged_tasks.len() as u32;
+    meta.done = merged_tasks
+        .iter()
+        .filter(|task| task.status.eq_ignore_ascii_case("done"))
+        .count() as u32;
+    meta.status = if meta.total > 0 && meta.done == meta.total {
+        "done".to_string()
+    } else {
+        "ready".to_string()
+    };
+
+    TasksFile {
+        meta,
+        tasks: merged_tasks,
     }
 }
 
@@ -4299,25 +4474,68 @@ impl PlanRunner {
         failure_summary: &str,
         model: &str,
     ) {
-        let Some(plan_dir) = self
-            .task_trackers
-            .get(plan_id)
-            .map(|tracker| tracker._plan_dir.clone())
-        else {
+        let Some(tracker_snapshot) = self.task_trackers.get(plan_id) else {
             tracing::warn!("[orchestrate] regenerate requested for unknown plan {plan_id}");
             return;
         };
 
+        let plan_dir = tracker_snapshot._plan_dir.clone();
+        let old_tasks = tracker_snapshot.tasks_file.clone();
+        let completed_tasks = tracker_snapshot.completed_task_defs();
+        let completed_task_ids = tracker_snapshot.completed.clone();
+        let plan_slug_candidates = [
+            old_tasks.meta.plan.trim().to_string(),
+            plan_id.to_string(),
+            plan_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_string(),
+        ];
+        let Some(prd_path) = plan_slug_candidates
+            .iter()
+            .find_map(|slug| (!slug.trim().is_empty()).then(|| find_prd_path(&self.workdir, slug)))
+            .flatten()
+        else {
+            tracing::error!(
+                "[orchestrate] plan regeneration failed for {plan_id}: could not find matching PRD"
+            );
+            return;
+        };
+
+        let prd_slug = prd_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or(plan_id);
+        let prd_content = match std::fs::read_to_string(&prd_path) {
+            Ok(content) => content,
+            Err(e) => {
+                tracing::error!(
+                    "[orchestrate] failed to read PRD for {plan_id} at {}: {e}",
+                    prd_path.display()
+                );
+                return;
+            }
+        };
+
         let tasks_path = plan_dir.join("tasks.toml");
-        let system_prompt = crate::plan_generate::build_regeneration_prompt(
+        let existing_tasks = std::fs::read_to_string(&tasks_path).unwrap_or_default();
+        let system_prompt = crate::plan_generate::build_generation_prompt(
             &self.workdir,
-            &std::fs::read_to_string(&tasks_path).unwrap_or_default(),
+            &prd_content,
+            "prd",
         );
         let prompt = format!(
             "{failure_summary}\n\n\
+             Regenerate the implementation plan from the PRD at {}.\
+             This is the same work as `roko prd plan {prd_slug}`.\
+             Preserve these completed task IDs when you rebuild the plan: {completed_task_ids:?}\n\n\
              Regenerate the plan at plans/{plan_id}/tasks.toml so it can continue \
-             from the failed task '{task_id}'. Preserve completed tasks where possible, \
-             keep the task count focused, and rewrite the file in place."
+             from the failed task '{task_id}'. Keep only genuinely new tasks, skip \
+             any task whose title matches a completed task, and rewrite the file in place.\n\n\
+             ## PRD source\n\
+             {prd_content}",
+            prd_path.display()
         );
 
         match self
@@ -4333,6 +4551,54 @@ impl PlanRunner {
             .await
         {
             Ok(_) => {
+                let regenerated_tasks = match crate::task_parser::TasksFile::parse(&tasks_path) {
+                    Ok(tasks) => tasks,
+                    Err(e) => {
+                        tracing::error!(
+                            "[orchestrate] failed to parse regenerated tasks for {plan_id}: {e}"
+                        );
+                        if let Err(write_err) = std::fs::write(&tasks_path, existing_tasks) {
+                            tracing::error!(
+                                "[orchestrate] failed to restore original tasks for {plan_id}: {write_err}"
+                            );
+                        }
+                        return;
+                    }
+                };
+
+                let merged_tasks = merge_regenerated_plan(
+                    plan_id,
+                    &old_tasks,
+                    regenerated_tasks,
+                    &completed_tasks,
+                );
+                let rendered = match toml::to_string_pretty(&merged_tasks) {
+                    Ok(text) => text,
+                    Err(e) => {
+                        tracing::error!(
+                            "[orchestrate] failed to serialize merged regenerated plan for {plan_id}: {e}"
+                        );
+                        if let Err(write_err) = std::fs::write(&tasks_path, existing_tasks) {
+                            tracing::error!(
+                                "[orchestrate] failed to restore original tasks for {plan_id}: {write_err}"
+                            );
+                        }
+                        return;
+                    }
+                };
+
+                if let Err(e) = std::fs::write(&tasks_path, rendered) {
+                    tracing::error!(
+                        "[orchestrate] failed to write merged regenerated tasks for {plan_id}: {e}"
+                    );
+                    if let Err(write_err) = std::fs::write(&tasks_path, existing_tasks) {
+                        tracing::error!(
+                            "[orchestrate] failed to restore original tasks for {plan_id}: {write_err}"
+                        );
+                    }
+                    return;
+                }
+
                 tracing::info!("[orchestrate] plan regeneration completed for {plan_id}");
                 if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
                     if let Err(e) = tracker.reload_tasks_file() {
@@ -8041,5 +8307,110 @@ files = ["crates/roko-cli/src/orchestrate.rs"]
 
         let reloaded = CrateFamiliarityTracker::load(&path);
         assert!((reloaded.score_for_task(Some(&task)) - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn regenerate_plan_preserves_completed_tasks_and_rewrites_dependencies() {
+        let old_tasks: TasksFile = toml::from_str(
+            r#"
+[meta]
+plan = "demo"
+iteration = 2
+total = 2
+done = 1
+status = "ready"
+max_parallel = 2
+
+[[task]]
+id = "T1"
+title = "Implement plan regeneration"
+status = "done"
+tier = "focused"
+depends_on = []
+files = ["src/a.rs"]
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-cli"
+
+[[task]]
+id = "T2"
+title = "Wire dashboard"
+status = "ready"
+tier = "focused"
+depends_on = ["T1"]
+files = ["src/b.rs"]
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-cli"
+"#,
+        )
+        .unwrap();
+        let regenerated_tasks: TasksFile = toml::from_str(
+            r#"
+[meta]
+plan = "demo"
+iteration = 1
+total = 3
+done = 0
+status = "ready"
+max_parallel = 2
+
+[[task]]
+id = "N1"
+title = "Implement plan regen"
+status = "ready"
+tier = "focused"
+depends_on = []
+files = ["src/a.rs"]
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-cli"
+
+[[task]]
+id = "N2"
+title = "Wire dashboard"
+status = "ready"
+tier = "focused"
+depends_on = ["N1"]
+files = ["src/b.rs"]
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-cli"
+
+[[task]]
+id = "N3"
+title = "Add metrics"
+status = "ready"
+tier = "focused"
+depends_on = ["N2"]
+files = ["src/c.rs"]
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-cli"
+"#,
+        )
+        .unwrap();
+        let completed = vec![old_tasks.tasks[0].clone()];
+
+        let merged = merge_regenerated_plan("demo", &old_tasks, regenerated_tasks, &completed);
+
+        assert_eq!(merged.meta.plan, "demo");
+        assert_eq!(merged.meta.iteration, 3);
+        assert_eq!(merged.meta.total, 3);
+        assert_eq!(merged.meta.done, 1);
+        assert_eq!(merged.meta.status, "ready");
+        assert_eq!(merged.tasks.len(), 3);
+        assert_eq!(merged.tasks[0].id, "T1");
+        assert_eq!(merged.tasks[0].status, "done");
+        assert_eq!(merged.tasks[1].id, "N2");
+        assert_eq!(merged.tasks[1].depends_on, vec!["T1"]);
+        assert_eq!(merged.tasks[2].id, "N3");
+        assert_eq!(merged.tasks[2].depends_on, vec!["N2"]);
+        assert!(merged.tasks.iter().all(|task| task.id != "N1"));
     }
 }
