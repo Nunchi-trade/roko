@@ -2,7 +2,7 @@
 //!
 //! See [`roko_cli`] for the lib-side description. The binary exposes
 //! subcommands (`init`, `run`, `status`, `replay`, `config`, `inject`,
-//! `plan`, `subscription`, `event-sources`) plus top-level flags for mode selection (`--headless`,
+//! `plan`, `research`, `neuro`, `subscription`, `event-sources`) plus top-level flags for mode selection (`--headless`,
 //! `--role`, `--model`, `--effort`, `--json`, `--log-format`, `--quiet`,
 //! `--resume`, `--repo`, `--no-replan`, and a positional `[prompt]` for
 //! one-shot mode).
@@ -26,6 +26,7 @@ use roko_learn::efficiency::compute_role_profiles;
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
 use roko_learn::prompt_experiment::ExperimentStore;
 use roko_learn::runtime_feedback::read_efficiency_events;
+use roko_neuro::KnowledgeStore;
 use std::collections::BTreeMap;
 use std::env;
 use std::fmt::Write as _;
@@ -208,6 +209,11 @@ enum Command {
     Research {
         #[command(subcommand)]
         cmd: ResearchCmd,
+    },
+    /// Search durable knowledge and memory entries.
+    Neuro {
+        #[command(subcommand)]
+        cmd: NeuroCmd,
     },
     /// Manage event subscriptions.
     Subscription {
@@ -428,6 +434,18 @@ enum ResearchCmd {
     Analyze,
     /// List all research artifacts.
     List,
+}
+
+#[derive(Debug, Subcommand)]
+enum NeuroCmd {
+    /// Query the durable knowledge store for a topic.
+    Query {
+        /// Topic to search for.
+        topic: Vec<String>,
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -707,6 +725,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             let _ = roko_cli::index::rebuild_all(&std::env::current_dir().unwrap_or_default());
             result
         }
+        Command::Neuro { cmd } => cmd_neuro(cli, cmd).await,
         Command::Subscription { cmd } => {
             let result = cmd_subscription(cli, cmd).await;
             let _ = roko_cli::index::rebuild_all(&std::env::current_dir().unwrap_or_default());
@@ -1904,6 +1923,65 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
     }
 }
 
+async fn cmd_neuro(cli: &Cli, cmd: NeuroCmd) -> Result<i32> {
+    match cmd {
+        NeuroCmd::Query { topic, workdir } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            let topic = topic.join(" ");
+            let topic = topic.trim().to_string();
+            if topic.is_empty() {
+                anyhow::bail!("provide a topic to query");
+            }
+
+            let store = KnowledgeStore::for_workdir(&wd);
+            let entries = store.query(&topic, 10).with_context(|| {
+                format!(
+                    "query knowledge store at {} for topic '{topic}'",
+                    store.path().display()
+                )
+            })?;
+
+            if cli.json {
+                let payload = serde_json::json!({
+                    "workdir": wd,
+                    "topic": topic,
+                    "count": entries.len(),
+                    "entries": entries,
+                });
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+                return Ok(EXIT_SUCCESS);
+            }
+
+            println!(
+                "Knowledge matches for '{topic}' in {}:",
+                store.path().display()
+            );
+            if entries.is_empty() {
+                println!("  (no matches)");
+                return Ok(EXIT_SUCCESS);
+            }
+
+            for (idx, entry) in entries.iter().enumerate() {
+                println!(
+                    "{}. [{}] confidence {:.2} {}",
+                    idx + 1,
+                    format!("{:?}", entry.kind).to_lowercase(),
+                    entry.confidence.clamp(0.0, 1.0),
+                    entry.content.trim()
+                );
+                if !entry.tags.is_empty() {
+                    println!("   tags: {}", entry.tags.join(", "));
+                }
+                if !entry.source_episodes.is_empty() {
+                    println!("   sources: {}", entry.source_episodes.join(", "));
+                }
+            }
+
+            Ok(EXIT_SUCCESS)
+        }
+    }
+}
+
 async fn cmd_subscription(cli: &Cli, cmd: SubscriptionCmd) -> Result<i32> {
     let workdir = resolve_workdir(cli);
     match cmd {
@@ -2929,6 +3007,17 @@ mod tests {
     fn cli_parses_replay_subcommand() {
         let cli = Cli::try_parse_from(["roko", "replay", "abcd1234"]).unwrap();
         assert!(matches!(cli.command, Some(Command::Replay { .. })));
+    }
+
+    #[test]
+    fn cli_parses_neuro_query_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "neuro", "query", "rust async"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Neuro {
+                cmd: NeuroCmd::Query { .. }
+            })
+        ));
     }
 
     #[test]
