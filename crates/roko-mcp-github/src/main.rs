@@ -104,6 +104,13 @@ struct ListPrsArguments {
     per_page: Option<u32>,
 }
 
+#[derive(Debug, Deserialize)]
+struct GetPrArguments {
+    owner: String,
+    repo: String,
+    number: u64,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum PullRequestState {
@@ -140,6 +147,102 @@ struct GithubUser {
 #[derive(Debug, Deserialize)]
 struct GithubLabel {
     name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubRepositoryRef {
+    full_name: String,
+    html_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubBranchRef {
+    label: String,
+    #[serde(rename = "ref")]
+    ref_name: String,
+    sha: String,
+    #[serde(default)]
+    user: Option<GithubUser>,
+    #[serde(default)]
+    repo: Option<GithubRepositoryRef>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubPullRequestDetails {
+    url: String,
+    html_url: Option<String>,
+    diff_url: Option<String>,
+    patch_url: Option<String>,
+    issue_url: Option<String>,
+    number: u64,
+    state: String,
+    title: String,
+    body: Option<String>,
+    #[serde(default)]
+    locked: bool,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    merged: bool,
+    merged_at: Option<String>,
+    merge_commit_sha: Option<String>,
+    created_at: Option<String>,
+    updated_at: Option<String>,
+    closed_at: Option<String>,
+    additions: u64,
+    deletions: u64,
+    changed_files: u64,
+    commits: u64,
+    comments: u64,
+    review_comments: u64,
+    #[serde(default)]
+    maintainer_can_modify: bool,
+    mergeable: Option<bool>,
+    mergeable_state: Option<String>,
+    #[serde(default)]
+    user: Option<GithubUser>,
+    #[serde(default)]
+    labels: Vec<GithubLabel>,
+    #[serde(default)]
+    assignees: Vec<GithubUser>,
+    #[serde(default)]
+    requested_reviewers: Vec<GithubUser>,
+    head: GithubBranchRef,
+    base: GithubBranchRef,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubPullRequestReview {
+    id: u64,
+    state: GithubReviewState,
+    body: Option<String>,
+    submitted_at: Option<String>,
+    commit_id: Option<String>,
+    html_url: Option<String>,
+    #[serde(default)]
+    user: Option<GithubUser>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum GithubReviewState {
+    Approved,
+    ChangesRequested,
+    Commented,
+    Dismissed,
+    Pending,
+}
+
+impl GithubReviewState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Approved => "APPROVED",
+            Self::ChangesRequested => "CHANGES_REQUESTED",
+            Self::Commented => "COMMENTED",
+            Self::Dismissed => "DISMISSED",
+            Self::Pending => "PENDING",
+        }
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -190,14 +293,13 @@ fn handle_tools_list() -> Value {
             ),
             github_tool(
                 "github.get_pr",
-                "Get a pull request, optionally including its diff.",
+                "Get a pull request with diff stats and review summary.",
                 serde_json::json!({
                     "type": "object",
                     "properties": {
                         "owner": {"type": "string"},
                         "repo": {"type": "string"},
-                        "number": {"type": "integer", "minimum": 1},
-                        "include_diff": {"type": "boolean"}
+                        "number": {"type": "integer", "minimum": 1}
                     },
                     "required": ["owner", "repo", "number"],
                     "additionalProperties": false
@@ -554,8 +656,18 @@ fn handle_list_prs(arguments: Value) -> Result<Value, JsonRpcError> {
 }
 
 fn handle_get_pr(arguments: Value) -> Result<Value, JsonRpcError> {
-    let _ = arguments;
-    unsupported_tool("github.get_pr")
+    let args: GetPrArguments = serde_json::from_value(arguments)
+        .map_err(|err| JsonRpcError::invalid_params(format!("invalid github.get_pr args: {err}")))?;
+    let client = github_client()?;
+    let pr = get_pull_request(&client, &args.owner, &args.repo, args.number)?;
+    let reviews = list_pull_request_reviews(&client, &args.owner, &args.repo, args.number)?;
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": summarize_pull_request(&pr, &reviews).to_string()
+        }],
+        "isError": false
+    }))
 }
 
 fn handle_create_pr(arguments: Value) -> Result<Value, JsonRpcError> {
@@ -716,6 +828,169 @@ fn list_pull_requests(
 
     serde_json::from_str(&body)
         .map_err(|err| JsonRpcError::internal_error(format!("parse GitHub pull requests: {err}")))
+}
+
+fn get_pull_request(
+    client: &Client,
+    owner: &str,
+    repo: &str,
+    number: u64,
+) -> Result<GithubPullRequestDetails, JsonRpcError> {
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls/{number}");
+    let mut request = client.get(url);
+    if let Some(token) = github_token() {
+        request = request.bearer_auth(token);
+    }
+
+    let response = request
+        .send()
+        .map_err(|err| JsonRpcError::internal_error(format!("call GitHub API: {err}")))?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|err| JsonRpcError::internal_error(format!("read GitHub response: {err}")))?;
+    if !status.is_success() {
+        return Err(JsonRpcError::internal_error(format!(
+            "GitHub API returned {status}: {}",
+            body.trim()
+        )));
+    }
+
+    serde_json::from_str(&body)
+        .map_err(|err| JsonRpcError::internal_error(format!("parse GitHub pull request: {err}")))
+}
+
+fn list_pull_request_reviews(
+    client: &Client,
+    owner: &str,
+    repo: &str,
+    number: u64,
+) -> Result<Vec<GithubPullRequestReview>, JsonRpcError> {
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls/{number}/reviews");
+    let mut request = client.get(url);
+    if let Some(token) = github_token() {
+        request = request.bearer_auth(token);
+    }
+
+    let response = request
+        .query(&[("per_page", "100")])
+        .send()
+        .map_err(|err| JsonRpcError::internal_error(format!("call GitHub API: {err}")))?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|err| JsonRpcError::internal_error(format!("read GitHub response: {err}")))?;
+    if !status.is_success() {
+        return Err(JsonRpcError::internal_error(format!(
+            "GitHub API returned {status}: {}",
+            body.trim()
+        )));
+    }
+
+    serde_json::from_str(&body)
+        .map_err(|err| JsonRpcError::internal_error(format!("parse GitHub pull request reviews: {err}")))
+}
+
+fn summarize_pull_request(
+    pr: &GithubPullRequestDetails,
+    reviews: &[GithubPullRequestReview],
+) -> Value {
+    let latest_review_state = reviews
+        .iter()
+        .filter_map(|review| {
+            review
+                .submitted_at
+                .as_ref()
+                .map(|submitted_at| (submitted_at.as_str(), review.state.as_str()))
+        })
+        .max_by_key(|(submitted_at, _)| *submitted_at)
+        .map(|(_, state)| state);
+
+    let mut review_counts = serde_json::Map::new();
+    for state in [
+        GithubReviewState::Approved,
+        GithubReviewState::ChangesRequested,
+        GithubReviewState::Commented,
+        GithubReviewState::Dismissed,
+        GithubReviewState::Pending,
+    ] {
+        let count = reviews.iter().filter(|review| review.state == state).count();
+        review_counts.insert(state.as_str().to_string(), Value::from(count as u64));
+    }
+
+    serde_json::json!({
+        "pull_request": {
+            "number": pr.number,
+            "title": pr.title.clone(),
+            "body": pr.body.clone(),
+            "state": pr.state.clone(),
+            "draft": pr.draft,
+            "locked": pr.locked,
+            "merged": pr.merged,
+            "merged_at": pr.merged_at.clone(),
+            "merge_commit_sha": pr.merge_commit_sha.clone(),
+            "created_at": pr.created_at.clone(),
+            "updated_at": pr.updated_at.clone(),
+            "closed_at": pr.closed_at.clone(),
+            "url": pr.url.clone(),
+            "html_url": pr.html_url.clone(),
+            "diff_url": pr.diff_url.clone(),
+            "patch_url": pr.patch_url.clone(),
+            "issue_url": pr.issue_url.clone(),
+            "author": pr.user.as_ref().map(|user| user.login.clone()),
+            "labels": pr.labels.iter().map(|label| label.name.clone()).collect::<Vec<_>>(),
+            "assignees": pr.assignees.iter().map(|user| user.login.clone()).collect::<Vec<_>>(),
+            "requested_reviewers": pr.requested_reviewers.iter().map(|user| user.login.clone()).collect::<Vec<_>>(),
+            "head": {
+                "label": pr.head.label.clone(),
+                "ref": pr.head.ref_name.clone(),
+                "sha": pr.head.sha.clone(),
+                "repo": pr.head.repo.as_ref().map(|repo| serde_json::json!({
+                    "full_name": repo.full_name.clone(),
+                    "html_url": repo.html_url.clone()
+                })),
+                "author": pr.head.user.as_ref().map(|user| user.login.clone())
+            },
+            "base": {
+                "label": pr.base.label.clone(),
+                "ref": pr.base.ref_name.clone(),
+                "sha": pr.base.sha.clone(),
+                "repo": pr.base.repo.as_ref().map(|repo| serde_json::json!({
+                    "full_name": repo.full_name.clone(),
+                    "html_url": repo.html_url.clone()
+                })),
+                "author": pr.base.user.as_ref().map(|user| user.login.clone())
+            },
+            "diff_stats": {
+                "additions": pr.additions,
+                "deletions": pr.deletions,
+                "changed_files": pr.changed_files,
+                "commits": pr.commits,
+                "comments": pr.comments,
+                "review_comments": pr.review_comments
+            },
+            "mergeability": {
+                "mergeable": pr.mergeable,
+                "mergeable_state": pr.mergeable_state,
+                "maintainer_can_modify": pr.maintainer_can_modify
+            },
+            "review_state": {
+                "latest": latest_review_state,
+                "counts": review_counts,
+                "reviews": reviews.iter().map(|review| serde_json::json!({
+                    "id": review.id,
+                    "state": review.state.as_str(),
+                    "body": review.body,
+                    "submitted_at": review.submitted_at,
+                    "commit_id": review.commit_id,
+                    "html_url": review.html_url,
+                    "author": review.user.as_ref().map(|user| user.login.clone())
+                })).collect::<Vec<_>>()
+            }
+        }
+    })
 }
 
 fn summarize_pull_requests(prs: &[GithubPullRequest]) -> Value {
@@ -897,26 +1172,126 @@ mod tests {
             .iter()
             .find(|tool| tool["name"] == "github.get_pr")
             .expect("github.get_pr tool");
-        assert_eq!(get_pr["description"], "Get a pull request, optionally including its diff.");
+        assert_eq!(get_pr["description"], "Get a pull request with diff stats and review summary.");
         assert_eq!(get_pr["inputSchema"]["required"], json!(["owner", "repo", "number"]));
+        assert!(get_pr["inputSchema"]["properties"].get("include_diff").is_none());
     }
 
     #[test]
-    fn tools_call_dispatches_known_tool_names() {
+    fn summarize_pull_request_includes_diff_stats_and_review_state() {
+        let pr = GithubPullRequestDetails {
+            url: "https://api.github.com/repos/octo/hello-world/pulls/17".to_string(),
+            html_url: Some("https://github.com/octo/hello-world/pull/17".to_string()),
+            diff_url: Some("https://github.com/octo/hello-world/pull/17.diff".to_string()),
+            patch_url: Some("https://github.com/octo/hello-world/pull/17.patch".to_string()),
+            issue_url: Some("https://api.github.com/repos/octo/hello-world/issues/17".to_string()),
+            number: 17,
+            state: "open".to_string(),
+            title: "Fix login flow".to_string(),
+            body: Some("This fixes the login redirect.".to_string()),
+            locked: false,
+            draft: false,
+            merged: false,
+            merged_at: None,
+            merge_commit_sha: None,
+            created_at: Some("2026-04-08T10:00:00Z".to_string()),
+            updated_at: Some("2026-04-08T12:00:00Z".to_string()),
+            closed_at: None,
+            additions: 12,
+            deletions: 3,
+            changed_files: 2,
+            commits: 4,
+            comments: 1,
+            review_comments: 5,
+            maintainer_can_modify: true,
+            mergeable: Some(true),
+            mergeable_state: Some("clean".to_string()),
+            user: Some(GithubUser {
+                login: "octocat".to_string(),
+            }),
+            labels: vec![GithubLabel {
+                name: "bug".to_string(),
+            }],
+            assignees: vec![GithubUser {
+                login: "maintainer".to_string(),
+            }],
+            requested_reviewers: vec![GithubUser {
+                login: "reviewer".to_string(),
+            }],
+            head: GithubBranchRef {
+                label: "octo:feature/login-fix".to_string(),
+                ref_name: "feature/login-fix".to_string(),
+                sha: "abc123".to_string(),
+                user: Some(GithubUser {
+                    login: "octo".to_string(),
+                }),
+                repo: Some(GithubRepositoryRef {
+                    full_name: "octo/hello-world".to_string(),
+                    html_url: Some("https://github.com/octo/hello-world".to_string()),
+                }),
+            },
+            base: GithubBranchRef {
+                label: "octo:main".to_string(),
+                ref_name: "main".to_string(),
+                sha: "def456".to_string(),
+                user: Some(GithubUser {
+                    login: "octo".to_string(),
+                }),
+                repo: Some(GithubRepositoryRef {
+                    full_name: "octo/hello-world".to_string(),
+                    html_url: Some("https://github.com/octo/hello-world".to_string()),
+                }),
+            },
+        };
+        let reviews = vec![
+            GithubPullRequestReview {
+                id: 1,
+                state: GithubReviewState::Approved,
+                body: Some("Looks good".to_string()),
+                submitted_at: Some("2026-04-08T11:00:00Z".to_string()),
+                commit_id: Some("abc123".to_string()),
+                html_url: Some("https://github.com/octo/hello-world/pull/17#review-1".to_string()),
+                user: Some(GithubUser {
+                    login: "reviewer".to_string(),
+                }),
+            },
+            GithubPullRequestReview {
+                id: 2,
+                state: GithubReviewState::Commented,
+                body: Some("One note".to_string()),
+                submitted_at: Some("2026-04-08T13:00:00Z".to_string()),
+                commit_id: Some("abc123".to_string()),
+                html_url: Some("https://github.com/octo/hello-world/pull/17#review-2".to_string()),
+                user: Some(GithubUser {
+                    login: "reviewer".to_string(),
+                }),
+            },
+        ];
+
+        let summary = summarize_pull_request(&pr, &reviews);
+
+        assert_eq!(summary["pull_request"]["number"], 17);
+        assert_eq!(summary["pull_request"]["diff_stats"]["additions"], 12);
+        assert_eq!(summary["pull_request"]["diff_stats"]["changed_files"], 2);
+        assert_eq!(summary["pull_request"]["review_state"]["latest"], "COMMENTED");
+        assert_eq!(summary["pull_request"]["review_state"]["counts"]["APPROVED"], 1);
+        assert_eq!(summary["pull_request"]["review_state"]["counts"]["COMMENTED"], 1);
+        assert_eq!(summary["pull_request"]["head"]["repo"]["full_name"], "octo/hello-world");
+    }
+
+    #[test]
+    fn tools_call_rejects_missing_get_pr_args() {
         let err = handle_tools_call(json!({
             "name": "github.get_pr",
             "arguments": {
                 "owner": "octo",
-                "repo": "hello-world",
-                "number": 1
+                "repo": "hello-world"
             }
         }))
-        .expect_err("tool is not wired yet");
+        .expect_err("missing number should fail");
 
-        assert!(
-            err.message.contains("github.get_pr"),
-            "expected error to mention dispatched tool name"
-        );
+        assert_eq!(err.code, JsonRpcError::INVALID_REQUEST);
+        assert!(err.message.contains("github.get_pr"));
     }
 
     #[test]
