@@ -1,7 +1,7 @@
 //! `roko` binary entrypoint.
 //!
 //! See [`roko_cli`] for the lib-side description. The binary exposes
-//! subcommands (`init`, `run`, `status`, `replay`, `config`, `inject`,
+//! subcommands (`init`, `run`, `status`, `replay`, `dream`, `config`, `inject`,
 //! `plan`, `research`, `neuro`, `subscription`, `event-sources`) plus top-level flags for mode selection (`--headless`,
 //! `--role`, `--model`, `--effort`, `--json`, `--log-format`, `--quiet`,
 //! `--resume`, `--repo`, `--no-replan`, and a positional `[prompt]` for
@@ -32,11 +32,13 @@ use roko_learn::episode_logger::{Episode, EpisodeLogger};
 use roko_learn::prompt_experiment::ExperimentStore;
 use roko_learn::runtime_feedback::read_efficiency_events;
 use roko_neuro::{DEFAULT_GC_MIN_CONFIDENCE, KnowledgeStore};
+use roko_serve::{deploy, dreams, state::AppState};
 use std::collections::BTreeMap;
 use std::env;
 use std::fmt::Write as _;
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tracing::{info, warn};
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
 use tracing_subscriber::registry::LookupSpan;
@@ -182,6 +184,12 @@ enum Command {
     Replay {
         /// Signal hash (64 hex chars) to walk.
         hash: String,
+        /// Directory containing `.roko/` (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Run one offline dream cycle immediately.
+    Dream {
         /// Directory containing `.roko/` (default: cwd).
         #[arg(long)]
         workdir: Option<PathBuf>,
@@ -751,6 +759,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             Ok(EXIT_SUCCESS)
         }
         Command::Replay { hash, workdir } => cmd_replay(workdir, hash).await,
+        Command::Dream { workdir } => cmd_dream(cli, workdir).await,
         Command::Config { cmd } => {
             dispatch_config(cmd)?;
             Ok(EXIT_SUCCESS)
@@ -2705,6 +2714,59 @@ async fn cmd_replay(workdir: Option<PathBuf>, hash: String) -> Result<i32> {
         println!("signal {hash} not found in substrate");
         return Ok(EXIT_AGENT_FAILURE);
     }
+    Ok(EXIT_SUCCESS)
+}
+
+async fn cmd_dream(cli: &Cli, workdir: Option<PathBuf>) -> Result<i32> {
+    let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
+    prepare_runtime_hooks(&workdir, cli.quiet);
+
+    let core_config = roko_core::config::load_config(&workdir)?;
+    let cli_config = resolve_config_for_workdir(cli, &workdir)?;
+    let repo_registry = RepoRegistry::load(&cli_config, &workdir).unwrap_or_default();
+    let runtime = RokoCliRuntime::new(cli_config.clone(), repo_registry).into_arc();
+    let deploy_backend = Arc::from(deploy::create_backend("manual", None, None, None)?);
+    let state = Arc::new(AppState::new(
+        workdir.clone(),
+        runtime,
+        core_config,
+        deploy_backend,
+    ));
+
+    let dream_config = dreams::DreamLoopConfig {
+        auto_dream: false,
+        idle_threshold_mins: cli_config.dreams.idle_threshold_mins,
+        min_episodes_for_dream: cli_config.dreams.min_episodes_for_dream,
+        agent: dreams::DreamAgentConfig {
+            command: cli_config.agent.command.clone(),
+            args: cli_config.agent.args.clone(),
+            model: cli_config.agent.model.clone(),
+            bare_mode: cli_config.agent.bare_mode,
+            effort: cli_config.agent.effort.clone(),
+            fallback_model: cli_config.agent.fallback_model.clone(),
+            timeout_ms: cli_config.agent.timeout_ms,
+            env: cli_config.agent.env.clone(),
+        },
+    };
+
+    let report = roko_serve::dreams::run_dream_cycle_now(state, dream_config).await?;
+
+    if cli.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else if !cli.quiet {
+        println!(
+            "dream cycle completed: {} episodes, {} clusters, {} knowledge entries, {} playbooks",
+            report.processed_episodes,
+            report.clusters.len(),
+            report.knowledge_entries_written,
+            report.playbooks_created
+        );
+        if let Some(processed_through) = report.processed_through {
+            println!("processed through: {processed_through}");
+        }
+        println!("report saved under: {}", workdir.join(".roko").join("dreams").display());
+    }
+
     Ok(EXIT_SUCCESS)
 }
 

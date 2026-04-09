@@ -146,6 +146,20 @@ pub fn start_dream_loop(state: Arc<AppState>, config: DreamLoopConfig) -> JoinHa
     })
 }
 
+/// Run one dream cycle immediately using the existing stores and agent config.
+///
+/// This mirrors the daemon bootstrap path, but executes the batch once instead
+/// of waiting for the idle scheduler.
+pub async fn run_dream_cycle_now(
+    state: Arc<AppState>,
+    config: DreamLoopConfig,
+) -> Result<DreamCycleReport> {
+    let mut cycle = build_dream_cycle(&state, &config).await?;
+    restore_last_dream_at(&state, &mut cycle)?;
+    let report = cycle.run().await.context("run dream cycle")?;
+    Ok(report)
+}
+
 async fn build_dream_cycle(
     state: &AppState,
     config: &DreamLoopConfig,
