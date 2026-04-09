@@ -390,6 +390,32 @@ pub fn daemon_install() -> Result<()> {
     Ok(())
 }
 
+/// Uninstall the daemon LaunchAgent.
+pub fn daemon_uninstall() -> Result<()> {
+    let plist_path = launchd::plist_path();
+
+    let status = Command::new("launchctl")
+        .arg("unload")
+        .arg(&plist_path)
+        .status()
+        .with_context(|| format!("run launchctl unload {}", plist_path.display()))?;
+
+    if !status.success() {
+        return Err(anyhow!(
+            "launchctl unload {} failed with {}",
+            plist_path.display(),
+            status
+        ));
+    }
+
+    if plist_path.exists() {
+        fs::remove_file(&plist_path)
+            .with_context(|| format!("remove {}", plist_path.display()))?;
+    }
+
+    Ok(())
+}
+
 /// Print daemon status for the current working directory.
 pub async fn daemon_status() -> Result<()> {
     let workdir = std::env::current_dir().context("resolve current working directory")?;
