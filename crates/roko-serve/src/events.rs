@@ -3,6 +3,7 @@
 //! connected SSE / WebSocket clients.
 
 use serde::{Deserialize, Serialize};
+use roko_core::Signal;
 
 /// Progress emitted by the execution loop as plans move through phases,
 /// complete tasks, and finish gate checks.
@@ -176,6 +177,9 @@ pub enum ServerEvent {
 
     /// An error occurred.
     Error { message: String },
+
+    /// A webhook signal was accepted and published for downstream processing.
+    WebhookReceived { signal: Signal },
 }
 
 #[cfg(test)]

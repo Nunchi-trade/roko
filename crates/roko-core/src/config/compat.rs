@@ -10,8 +10,8 @@ use serde::Deserialize;
 
 use super::schema::{
     AgentConfig, AgentRoleToggles, BudgetConfig, CURRENT_SCHEMA_VERSION, ConductorConfig,
-    DeployConfig, GatesConfig, LearningConfig, PrdConfig, ProjectConfig, RokoConfig,
-    RoleOverride, RoutingConfig, ServeConfig, ServerConfig, TuiConfig,
+    DeployConfig, GatesConfig, GithubWebhookConfig, LearningConfig, PrdConfig, ProjectConfig,
+    RokoConfig, RoleOverride, RoutingConfig, ServeConfig, ServerConfig, TuiConfig, WebhooksConfig,
 };
 
 /// Subset of Mori's `ConfigState` that we recognize.
@@ -107,6 +107,9 @@ fn convert(m: &MoriConfig) -> RokoConfig {
         learning: convert_learning(m),
         tui: TuiConfig::default(),
         serve: ServeConfig::default(),
+        webhooks: WebhooksConfig {
+            github: GithubWebhookConfig::default(),
+        },
         server: ServerConfig::default(),
         deploy: DeployConfig::default(),
     }

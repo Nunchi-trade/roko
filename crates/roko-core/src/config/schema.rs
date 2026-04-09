@@ -75,6 +75,10 @@ pub struct RokoConfig {
     #[serde(default)]
     pub serve: ServeConfig,
 
+    /// Webhook ingress configuration.
+    #[serde(default)]
+    pub webhooks: WebhooksConfig,
+
     /// HTTP server / gateway settings.
     #[serde(default)]
     pub server: ServerConfig,
@@ -102,6 +106,7 @@ impl Default for RokoConfig {
             learning: LearningConfig::default(),
             tui: TuiConfig::default(),
             serve: ServeConfig::default(),
+            webhooks: WebhooksConfig::default(),
             server: ServerConfig::default(),
             deploy: DeployConfig::default(),
         }
@@ -257,6 +262,12 @@ impl RokoConfig {
         let _ = writeln!(out, "port = {}", cfg.server.port);
     }
 
+    fn write_example_webhooks(out: &mut String, _cfg: &Self) {
+        let _ = writeln!(out, "\n# -- Webhooks --");
+        let _ = writeln!(out, "[webhooks.github]");
+        let _ = writeln!(out, "secret = \"change-me\"");
+    }
+
     fn write_example_deploy(out: &mut String, cfg: &Self) {
         let _ = writeln!(out, "\n# -- Cloud deployment (Railway, etc.) --");
         let _ = writeln!(out, "[deploy]");
@@ -365,6 +376,7 @@ impl RokoConfig {
         Self::write_example_conductor(&mut out, &cfg);
         Self::write_example_learning(&mut out, &cfg);
         Self::write_example_tui_and_server(&mut out, &cfg);
+        Self::write_example_webhooks(&mut out, &cfg);
         Self::write_example_deploy(&mut out, &cfg);
 
         out
@@ -846,6 +858,38 @@ impl Default for ServeConfig {
     fn default() -> Self {
         Self {
             auth: ServeAuthConfig::default(),
+        }
+    }
+}
+
+/// Webhook ingress configuration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebhooksConfig {
+    /// GitHub webhook configuration.
+    #[serde(default)]
+    pub github: GithubWebhookConfig,
+}
+
+impl Default for WebhooksConfig {
+    fn default() -> Self {
+        Self {
+            github: GithubWebhookConfig::default(),
+        }
+    }
+}
+
+/// GitHub webhook configuration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubWebhookConfig {
+    /// Shared secret used to verify `X-Hub-Signature-256`.
+    #[serde(default)]
+    pub secret: String,
+}
+
+impl Default for GithubWebhookConfig {
+    fn default() -> Self {
+        Self {
+            secret: String::new(),
         }
     }
 }

@@ -13,6 +13,7 @@ mod plans;
 mod prds;
 mod research;
 mod run;
+mod webhooks;
 mod status;
 mod templates;
 mod ws;
@@ -54,6 +55,7 @@ pub fn build_router(
     };
 
     Router::new()
+        .merge(webhooks::routes())
         .nest("/api", api)
         .merge(ws::routes())
         .layer(TraceLayer::new_for_http())
