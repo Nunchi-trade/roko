@@ -81,4 +81,19 @@ pub trait CliRuntime: Send + Sync + 'static {
 
     /// Return a dashboard scaffold rendering.
     fn dashboard_scaffold(&self, workdir: &std::path::Path) -> DashboardInfo;
+
+    /// Resolve the working directory for a repo identified by its full name
+    /// (e.g. from a webhook `repository.full_name`). Returns `None` when the
+    /// repo is not configured.
+    fn resolve_repo_workdir(&self, repo_full_name: &str) -> Option<PathBuf> {
+        let _ = repo_full_name;
+        None
+    }
+
+    /// Return the merged `RokoConfig` for a named repo, applying per-repo
+    /// overrides on top of the global config. Returns `None` when the repo
+    /// is not configured.
+    fn repo_roko_config(&self, _repo_name: &str) -> Option<roko_core::config::schema::RokoConfig> {
+        None
+    }
 }

@@ -80,6 +80,21 @@ impl RokoLayout {
         Self::new(project_root.as_ref().join(".roko"))
     }
 
+    /// Construct a layout for a named repo under the project's `.roko/repos/{name}/`.
+    ///
+    /// Repo-specific signals, episodes, state, etc. are stored in their own
+    /// subdirectory so they don't intermingle with the global data.
+    #[must_use]
+    pub fn for_repo(project_root: impl AsRef<Path>, repo_name: &str) -> Self {
+        Self::new(
+            project_root
+                .as_ref()
+                .join(".roko")
+                .join("repos")
+                .join(repo_name),
+        )
+    }
+
     // ── root accessors ────────────────────────────────────────────────────
 
     /// The `.roko/` root directory.

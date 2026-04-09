@@ -4,9 +4,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use roko_core::config::schema::RokoConfig;
 use roko_serve::runtime::{CliRuntime, DashboardInfo, RunResult, SessionStatusInfo};
 
-use crate::config::Config;
+use crate::config::{Config, RepoRegistry};
 use crate::run::run_once;
 use crate::status::SessionStatus;
 use crate::tui::DashboardScaffold;
@@ -14,12 +15,16 @@ use crate::tui::DashboardScaffold;
 /// Concrete runtime that delegates to the real CLI functions.
 pub struct RokoCliRuntime {
     config: Config,
+    repo_registry: RepoRegistry,
 }
 
 impl RokoCliRuntime {
     #[must_use]
-    pub fn new(config: Config) -> Self {
-        Self { config }
+    pub fn new(config: Config, repo_registry: RepoRegistry) -> Self {
+        Self {
+            config,
+            repo_registry,
+        }
     }
 
     pub fn into_arc(self) -> Arc<dyn CliRuntime> {
@@ -53,5 +58,17 @@ impl CliRuntime for RokoCliRuntime {
         DashboardInfo {
             rendered: format!("{scaffold:?}"),
         }
+    }
+
+    fn resolve_repo_workdir(&self, repo_full_name: &str) -> Option<PathBuf> {
+        self.repo_registry
+            .find_by_full_name(repo_full_name)
+            .map(|entry| entry.root.clone())
+    }
+
+    fn repo_roko_config(&self, repo_name: &str) -> Option<RokoConfig> {
+        self.repo_registry
+            .get(repo_name)
+            .and_then(|entry| entry.roko_config.clone())
     }
 }

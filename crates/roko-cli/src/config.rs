@@ -504,6 +504,22 @@ impl RepoRegistry {
         self.repos.iter().find(|repo| repo.config.name == name)
     }
 
+    /// Find the repo whose name matches a repository full-name from a webhook
+    /// signal payload (e.g. `"owner/repo"`). Falls back to matching the bare
+    /// repo name portion.
+    #[must_use]
+    pub fn find_by_full_name(&self, full_name: &str) -> Option<&RepoEntry> {
+        // Exact name match first.
+        if let Some(entry) = self.get(full_name) {
+            return Some(entry);
+        }
+        // Match bare name (e.g. "my-repo" in "owner/my-repo").
+        let bare = full_name.rsplit('/').next().unwrap_or(full_name);
+        self.repos
+            .iter()
+            .find(|entry| entry.config.name == bare)
+    }
+
     fn resolve_root(repo: &RepoConfig, workdir: &Path) -> Result<PathBuf> {
         let configured = if repo.path.is_absolute() {
             repo.path.clone()

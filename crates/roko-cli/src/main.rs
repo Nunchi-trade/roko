@@ -731,7 +731,8 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
         } => {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             let config = resolve_config_for_workdir(cli, &wd)?;
-            let runtime = RokoCliRuntime::new(config).into_arc();
+            let repo_registry = RepoRegistry::load(&config, &wd).unwrap_or_default();
+            let runtime = RokoCliRuntime::new(config, repo_registry).into_arc();
             roko_serve::run_server(wd, runtime, bind, port).await?;
             Ok(EXIT_SUCCESS)
         }

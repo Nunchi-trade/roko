@@ -31,6 +31,7 @@ use tracing::{info, warn};
 /// macOS LaunchAgents plist helpers for daemon installation.
 pub mod launchd;
 
+use crate::config::RepoRegistry;
 use crate::load_layered;
 use crate::serve_runtime::RokoCliRuntime;
 use roko_core::config::load_config;
@@ -221,7 +222,8 @@ pub async fn daemon_start(foreground: bool, port: u16) -> Result<()> {
 
     let core_config = load_config(&workdir)?;
     let cli_config = load_layered(&workdir)?.config;
-    let runtime = RokoCliRuntime::new(cli_config).into_arc();
+    let repo_registry = RepoRegistry::load(&cli_config, &workdir).unwrap_or_default();
+    let runtime = RokoCliRuntime::new(cli_config, repo_registry).into_arc();
     let deploy_backend = Arc::from(deploy::create_backend("manual", None, None, None)?);
     let state = Arc::new(AppState::new(
         workdir.clone(),
