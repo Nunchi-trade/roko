@@ -5,7 +5,7 @@
 //! directory on startup and supports CRUD operations plus simple
 //! `{{key}}` interpolation.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -13,6 +13,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+use roko_agent::mcp::find_mcp_config;
 use roko_core::{Body, Signal};
 
 /// The expected output shape for an agent template.
@@ -68,7 +69,11 @@ pub struct AgentTemplate {
 
 impl AgentTemplate {
     /// Validate the template for common startup-time issues.
-    pub fn validate(&self, source_name: Option<&str>) -> std::result::Result<(), Vec<String>> {
+    pub fn validate(
+        &self,
+        source_name: Option<&str>,
+        configured_mcp_servers: Option<&HashSet<String>>,
+    ) -> std::result::Result<(), Vec<String>> {
         let mut errors = Vec::new();
 
         if self.name.trim().is_empty() {
@@ -85,14 +90,53 @@ impl AgentTemplate {
         if self.description.trim().is_empty() {
             errors.push(format!("template '{}' must have a description", self.name));
         }
+        if !is_valid_model_name(&self.model) {
+            errors.push(format!(
+                "template '{}' has invalid model '{}'",
+                self.name, self.model
+            ));
+        }
         if self.role.trim().is_empty() {
             errors.push(format!("template '{}' must have a role", self.name));
+        } else if !is_valid_template_role(&self.role) {
+            errors.push(format!(
+                "template '{}' has invalid role '{}'",
+                self.name, self.role
+            ));
         }
         if self.system_prompt.trim().is_empty() {
             errors.push(format!("template '{}' must have a system_prompt", self.name));
         }
         if self.max_turns == 0 {
             errors.push(format!("template '{}' must allow at least one turn", self.name));
+        }
+
+        if !self.mcp_servers.is_empty() {
+            match configured_mcp_servers {
+                Some(configured) => {
+                    let mut missing: Vec<String> = self
+                        .mcp_servers
+                        .iter()
+                        .filter(|name| !configured.contains(name.as_str()))
+                        .cloned()
+                        .collect();
+                    missing.sort();
+                    missing.dedup();
+                    if !missing.is_empty() {
+                        errors.push(format!(
+                            "template '{}' references MCP servers not configured: {}",
+                            self.name,
+                            missing.join(", ")
+                        ));
+                    }
+                }
+                None => {
+                    errors.push(format!(
+                        "template '{}' requires MCP servers {:?}, but no MCP config was found",
+                        self.name, self.mcp_servers
+                    ));
+                }
+            }
         }
 
         if errors.is_empty() {
@@ -134,7 +178,12 @@ impl TemplateRegistry {
         ]
     }
 
-    fn load_dir(&mut self, dir: &Path, report: &mut TemplateLoadReport) -> Result<()> {
+    fn load_dir(
+        &mut self,
+        dir: &Path,
+        report: &mut TemplateLoadReport,
+        configured_mcp_servers: Option<&HashSet<String>>,
+    ) -> Result<()> {
         if !dir.exists() {
             return Ok(());
         }
@@ -179,7 +228,7 @@ impl TemplateRegistry {
             };
 
             let stem = path.file_stem().and_then(|stem| stem.to_str());
-            if let Err(errors) = template.validate(stem) {
+            if let Err(errors) = template.validate(stem, configured_mcp_servers) {
                 for error in errors {
                     report
                         .validation_errors
@@ -198,9 +247,12 @@ impl TemplateRegistry {
     pub fn scan(&mut self) -> TemplateLoadReport {
         self.templates.clear();
         let mut report = TemplateLoadReport::default();
+        let configured_mcp_servers = load_configured_mcp_servers(&self.workdir, &mut report);
 
         for dir in self.template_dirs() {
-            if let Err(err) = self.load_dir(&dir, &mut report) {
+            if let Err(err) =
+                self.load_dir(&dir, &mut report, configured_mcp_servers.as_ref())
+            {
                 report
                     .validation_errors
                     .push(format!("{}: {err}", dir.display()));
@@ -320,6 +372,46 @@ fn signal_json_string(signal: &Signal, path: &[&str]) -> Option<String> {
     }
 }
 
+fn load_configured_mcp_servers(
+    workdir: &Path,
+    report: &mut TemplateLoadReport,
+) -> Option<HashSet<String>> {
+    match find_mcp_config(workdir) {
+        Some(Ok((_path, config))) => Some(config.servers.into_iter().map(|server| server.name).collect()),
+        Some(Err(err)) => {
+            report.validation_errors.push(err.to_string());
+            None
+        }
+        None => None,
+    }
+}
+
+fn is_valid_model_name(model: &str) -> bool {
+    let model = model.trim();
+    !model.is_empty()
+        && model
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':'))
+}
+
+fn is_valid_template_role(role: &str) -> bool {
+    const VALID_TEMPLATE_ROLES: [&str; 7] = [
+        "implementer",
+        "operator",
+        "planner",
+        "researcher",
+        "reviewer",
+        "scribe",
+        "verifier",
+    ];
+
+    let role = role.trim();
+    !role.is_empty()
+        && VALID_TEMPLATE_ROLES
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(role))
+}
+
 fn default_model() -> String {
     "sonnet".into()
 }
@@ -344,6 +436,20 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let workdir = tempdir.path();
 
+        let mcp_config = roko_agent::mcp::McpConfig {
+            servers: vec![roko_agent::mcp::McpServerConfig {
+                name: "github".to_string(),
+                command: "npx".to_string(),
+                args: vec![],
+                env: HashMap::new(),
+            }],
+        };
+        std::fs::write(
+            workdir.join(".mcp.json"),
+            serde_json::to_string(&mcp_config).unwrap(),
+        )
+        .unwrap();
+
         write_template(
             &workdir.join("templates").join("planner.toml"),
             r#"
@@ -352,6 +458,7 @@ description = "Plan work"
 role = "planner"
 system_prompt = "You are a planner."
 max_turns = 12
+mcp_servers = ["github"]
 "#,
         );
         write_template(
@@ -369,9 +476,11 @@ max_turns = 8
             r#"
 name = "broken"
 description = ""
+model = "bad model"
 role = ""
 system_prompt = ""
 max_turns = 0
+mcp_servers = ["github", "missing-server"]
 "#,
         );
 
@@ -383,6 +492,18 @@ max_turns = 0
             .validation_errors
             .iter()
             .any(|error| error.contains("broken.toml")));
+        assert!(report
+            .validation_errors
+            .iter()
+            .any(|error| error.contains("invalid model")));
+        assert!(report
+            .validation_errors
+            .iter()
+            .any(|error| error.contains("invalid role")));
+        assert!(report
+            .validation_errors
+            .iter()
+            .any(|error| error.contains("missing-server")));
         assert!(registry.get("planner").is_some());
         assert!(registry.get("reviewer").is_some());
         assert!(registry.get("broken").is_none());
