@@ -888,11 +888,10 @@ pub struct PlanRunner {
     metrics: Arc<MetricRegistry>,
     /// Format-selection bandit for adaptive tool-call format per model/role.
     format_bandit: ProfileBandit,
-    /// MCP server clients spawned at plan-run startup.
-    /// MCP server clients (kept alive for lifecycle management).
-    #[allow(dead_code)]
-    mcp_clients:
-        tokio::sync::Mutex<Vec<roko_agent::mcp::McpClient<roko_agent::mcp::StdioTransport>>>,
+    /// MCP server names discovered for this run.
+    mcp_server_names: Vec<String>,
+    /// MCP server clients plus lease counts.
+    mcp_state: tokio::sync::Mutex<McpServerState>,
     /// Dynamic tool registry combining static tools with MCP-discovered tools.
     tool_registry: Option<Arc<roko_agent::mcp::DynamicToolRegistry>>,
     /// Filesystem-backed observability sinks (traces + metrics).
@@ -934,6 +933,15 @@ struct TaskTracker {
     last_skill_request: Option<SkillExtractionRequest>,
     /// Number of consecutive gate failures for this plan (for re-planning, §9).
     gate_failure_count: u32,
+}
+
+/// Shared MCP server runtime state for a plan run.
+#[derive(Default)]
+struct McpServerState {
+    /// Live client handles keyed by server name.
+    clients: HashMap<String, Arc<roko_agent::mcp::McpClient<roko_agent::mcp::StdioTransport>>>,
+    /// Active leases keyed by server name.
+    ref_counts: HashMap<String, usize>,
 }
 
 fn role_hash_features(role: &str) -> [f64; 4] {
@@ -1385,15 +1393,16 @@ fn merge_regenerated_plan(
 impl PlanRunner {
     /// Spawn MCP server processes and build a DynamicToolRegistry from their tools.
     ///
-    /// Returns `(clients, registry)` where `registry` is `None` if no MCP config
-    /// was found or no servers are configured.
+    /// Returns `(clients, registry, server_names)` where `registry` is `None`
+    /// if no MCP config was found or no servers are configured.
     async fn setup_mcp(
         config: &Config,
         workdir: &Path,
         selected_servers: Option<&HashSet<String>>,
     ) -> (
-        Vec<roko_agent::mcp::McpClient<roko_agent::mcp::StdioTransport>>,
+        HashMap<String, Arc<roko_agent::mcp::McpClient<roko_agent::mcp::StdioTransport>>>,
         Option<Arc<roko_agent::mcp::DynamicToolRegistry>>,
+        Vec<String>,
     ) {
         use roko_agent::mcp::{McpClient, StdioTransport, find_mcp_config, mcp_to_tool_def};
         use roko_std::tool::StaticToolRegistry;
@@ -1419,17 +1428,19 @@ impl PlanRunner {
 
         let mcp_config = match mcp_config {
             Some(cfg) if !cfg.servers.is_empty() => cfg,
-            _ => return (Vec::new(), None),
+            _ => return (HashMap::new(), None, Vec::new()),
         };
 
         let selected_servers = selected_servers.filter(|names| !names.is_empty());
-        let mut clients = Vec::new();
+        let mut clients = HashMap::new();
         let mut all_server_tools = Vec::new();
+        let mut server_names = Vec::new();
 
         for server in &mcp_config.servers {
             if selected_servers.is_some_and(|names| !names.contains(&server.name)) {
                 continue;
             }
+            server_names.push(server.name.clone());
             match StdioTransport::spawn(&server.command, &server.args) {
                 Ok(transport) => {
                     let client = McpClient::new(transport);
@@ -1460,7 +1471,7 @@ impl PlanRunner {
                                 .map(|t| mcp_to_tool_def(t, &server.name))
                                 .collect();
                             all_server_tools.push((server.name.clone(), defs));
-                            clients.push(client);
+                            clients.insert(server.name.clone(), Arc::new(client));
                         }
                         Err(e) => {
                             tracing::warn!("MCP server '{}' list_tools failed: {e}", server.name);
@@ -1474,7 +1485,7 @@ impl PlanRunner {
         }
 
         if all_server_tools.is_empty() {
-            return (clients, None);
+            return (clients, None, server_names);
         }
 
         // Dedup across servers and build the dynamic registry.
@@ -1497,7 +1508,7 @@ impl PlanRunner {
             registry.add_mcp_tools(&server_name, tools);
         }
 
-        (clients, Some(Arc::new(registry)))
+        (clients, Some(Arc::new(registry)), server_names)
     }
 
     /// Discover plans from a directory and build the executor.
@@ -1646,7 +1657,7 @@ impl PlanRunner {
         } else {
             Some(requested_mcp_servers)
         };
-        let (mcp_clients, tool_registry) =
+        let (mcp_clients, tool_registry, mcp_server_names) =
             Self::setup_mcp(&config, workdir, selected_mcp_servers.as_ref()).await;
         let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
         obs_sinks
@@ -1694,7 +1705,11 @@ impl PlanRunner {
             task_costs: HashMap::new(),
             metrics,
             format_bandit: ProfileBandit::with_static_profiles(),
-            mcp_clients: tokio::sync::Mutex::new(mcp_clients),
+            mcp_server_names,
+            mcp_state: tokio::sync::Mutex::new(McpServerState {
+                clients: mcp_clients,
+                ref_counts: HashMap::new(),
+            }),
             tool_registry,
             obs_sinks,
             health_probes,
@@ -1740,7 +1755,8 @@ impl PlanRunner {
         )
         .await
         .context("init playbook store")?;
-        let (mcp_clients, tool_registry) = Self::setup_mcp(&config, workdir, None).await;
+        let (mcp_clients, tool_registry, mcp_server_names) =
+            Self::setup_mcp(&config, workdir, None).await;
         let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
         obs_sinks
             .initialize()
@@ -1787,7 +1803,11 @@ impl PlanRunner {
             task_costs: HashMap::new(),
             metrics,
             format_bandit: ProfileBandit::with_static_profiles(),
-            mcp_clients: tokio::sync::Mutex::new(mcp_clients),
+            mcp_server_names,
+            mcp_state: tokio::sync::Mutex::new(McpServerState {
+                clients: mcp_clients,
+                ref_counts: HashMap::new(),
+            }),
             tool_registry,
             obs_sinks,
             health_probes,
@@ -1837,7 +1857,8 @@ impl PlanRunner {
         )
         .await
         .context("init playbook store")?;
-        let (mcp_clients, tool_registry) = Self::setup_mcp(&config, workdir, None).await;
+        let (mcp_clients, tool_registry, mcp_server_names) =
+            Self::setup_mcp(&config, workdir, None).await;
         let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
         obs_sinks
             .initialize()
@@ -1884,7 +1905,11 @@ impl PlanRunner {
             task_costs: HashMap::new(),
             metrics,
             format_bandit: ProfileBandit::with_static_profiles(),
-            mcp_clients: tokio::sync::Mutex::new(mcp_clients),
+            mcp_server_names,
+            mcp_state: tokio::sync::Mutex::new(McpServerState {
+                clients: mcp_clients,
+                ref_counts: HashMap::new(),
+            }),
             tool_registry,
             obs_sinks,
             health_probes,
@@ -2012,8 +2037,9 @@ impl PlanRunner {
         if let Err(e) = self.learning.save_cascade_router() {
             tracing::error!("[orchestrate] save cascade router: {e}");
         }
-        let mut mcp_clients = self.mcp_clients.lock().await;
-        mcp_clients.clear();
+        let mut mcp_state = self.mcp_state.lock().await;
+        mcp_state.clients.clear();
+        mcp_state.ref_counts.clear();
     }
 
     /// The root cancellation token — callers can cancel to trigger shutdown.
@@ -6103,47 +6129,77 @@ impl PlanRunner {
         Ok(())
     }
 
-    /// Ensure any MCP servers declared by the task template are running.
+    /// Acquire the MCP servers needed for the current task.
     ///
-    /// This is intentionally called before prompt assembly so the agent sees
-    /// the same tool surface that the template asked for.
-    async fn ensure_task_mcp_servers(
+    /// Returns the leased server names so the caller can release them after the
+    /// agent completes.
+    async fn acquire_task_mcp_servers(
         &mut self,
         task_def: Option<&crate::task_parser::TaskDef>,
-    ) {
-        let Some(task_def) = task_def else {
-            return;
-        };
-        let Some(requested) = task_def.mcp_servers.as_ref() else {
-            return;
+    ) -> Vec<String> {
+        let requested: Vec<String> = match task_def.and_then(|task| task.mcp_servers.as_ref()) {
+            Some(servers) if !servers.is_empty() => servers.clone(),
+            _ => self.mcp_server_names.clone(),
         };
         if requested.is_empty() {
-            return;
+            return Vec::new();
         }
 
-        // Keep the existing startup path as the common case; only spawn here if
-        // the run has not already initialized MCP clients.
-        let should_spawn = {
-            let mcp_clients = self.mcp_clients.lock().await;
-            mcp_clients.is_empty()
+        let missing: HashSet<String> = {
+            let state = self.mcp_state.lock().await;
+            requested
+                .iter()
+                .filter(|name| !state.clients.contains_key(*name))
+                .cloned()
+                .collect()
         };
-        if !should_spawn {
+
+        if !missing.is_empty() {
+            let (clients, registry, discovered_names) =
+                Self::setup_mcp(&self.config, &self.workdir, Some(&missing)).await;
+            if self.tool_registry.is_none() {
+                self.tool_registry = registry;
+            }
+
+            let mut state = self.mcp_state.lock().await;
+            for (name, client) in clients {
+                state.clients.insert(name, client);
+            }
+            for name in discovered_names {
+                if !self.mcp_server_names.contains(&name) {
+                    self.mcp_server_names.push(name);
+                }
+            }
+        }
+
+        let mut state = self.mcp_state.lock().await;
+        for name in &requested {
+            *state.ref_counts.entry(name.clone()).or_insert(0) += 1;
+        }
+        requested
+    }
+
+    /// Release MCP servers after the current task completes.
+    async fn release_task_mcp_servers(&self, servers: &[String]) {
+        if servers.is_empty() {
             return;
         }
 
-        let requested: HashSet<String> = requested.iter().cloned().collect();
-        if requested.is_empty() {
-            return;
-        }
+        let mut state = self.mcp_state.lock().await;
+        for name in servers {
+            let should_remove = if let Some(count) = state.ref_counts.get_mut(name) {
+                if *count > 0 {
+                    *count -= 1;
+                }
+                *count == 0
+            } else {
+                false
+            };
 
-        let (clients, registry) =
-            Self::setup_mcp(&self.config, &self.workdir, Some(&requested)).await;
-        if !clients.is_empty() {
-            let mut mcp_clients = self.mcp_clients.lock().await;
-            mcp_clients.extend(clients);
-        }
-        if self.tool_registry.is_none() {
-            self.tool_registry = registry;
+            if should_remove {
+                state.ref_counts.remove(name);
+                state.clients.remove(name);
+            }
         }
     }
 
@@ -6189,7 +6245,7 @@ impl PlanRunner {
             .as_ref()
             .and_then(|tf| tf.tasks.iter().find(|t| t.id == task).cloned());
 
-        self.ensure_task_mcp_servers(task_def.as_ref()).await;
+        let mcp_lease = self.acquire_task_mcp_servers(task_def.as_ref()).await;
 
         // ── Build prompt: surgical (from TaskDef) or generic ────────
         // Also collect attribution keys for context feedback after the agent runs.
@@ -6774,6 +6830,7 @@ impl PlanRunner {
                 .ok()
                 .map(|text| tail_output_lines(text, TASK_FAILURE_OUTPUT_TAIL_LINES));
             let error = anyhow!("agent returned failure for plan={plan_id} task={task}");
+            self.release_task_mcp_servers(&mcp_lease).await;
             return Err(with_task_failure_context(
                 error,
                 task,
@@ -6783,176 +6840,184 @@ impl PlanRunner {
             ));
         }
 
-        // ── Cost recording ────────────────────────────────────────────
-        if task_cost > self.config.budget.max_task_usd {
-            return Err(anyhow!(
-                "task {task} cost ${task_cost:.2} exceeds max_task_usd ${:.2}",
-                self.config.budget.max_task_usd
-            ));
-        }
-        *self.plan_costs.entry(plan_id.to_string()).or_insert(0.0) += task_cost;
-        let plan_spent = self.plan_costs.get(plan_id).copied().unwrap_or(0.0);
-        self.warn_plan_budget_pressure(plan_id, plan_spent);
-
-        // ── Session budget check (§8) ───────────────────────────────
-        let max_session_usd = self.config.budget.max_session_usd;
-        let session_total: f64 = self.plan_costs.values().sum();
-        if max_session_usd > 0.0 && session_total > max_session_usd {
-            return Err(anyhow!(
-                "session budget exceeded: ${session_total:.2} > max_session_usd ${max_session_usd:.2}"
-            ));
-        }
-
-        self.learning.costs_db().insert(CostRecord {
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            model: selected_model.clone(),
-            provider: self.config.agent.command.clone(),
-            role: format!("{role:?}"),
-            plan_id: plan_id.to_string(),
-            task_id: task.to_string(),
-            complexity_band: task_def
-                .as_ref()
-                .map(|td| td.tier.clone())
-                .unwrap_or_default(),
-            input_tokens: u64::from(result.usage.input_tokens),
-            output_tokens: u64::from(result.usage.output_tokens),
-            cached_tokens: u64::from(result.usage.cache_read_tokens),
-            cost_usd: task_cost,
-            duration_ms: result.usage.wall_ms,
-            success: result.success,
-            session_id: self.claude_resume_session.clone().unwrap_or_default(),
-        });
-
-        // ── Metric instrumentation ──────────────────────────────────────
-        #[allow(clippy::cast_precision_loss)]
-        {
-            let status = if result.success {
-                "succeeded"
-            } else {
-                "failed"
-            };
-            let role_str = format!("{role:?}");
-            self.metrics
-                .register_counter(
-                    "roko_tasks_total",
-                    "",
-                    LabelSet::from_pairs(&[("status", status), ("role", &role_str)]),
-                )
-                .inc();
-            self.metrics
-                .register_histogram(
-                    "roko_agent_duration_seconds",
-                    "",
-                    LabelSet::from_pairs(&[("role", &role_str)]),
-                    roko_core::obs::LLM_LATENCY_BUCKETS.to_vec(),
-                )
-                .observe(result.usage.wall_ms as f64 / 1000.0);
-            let total_tokens =
-                u64::from(result.usage.input_tokens) + u64::from(result.usage.output_tokens);
-            self.metrics
-                .register_counter(
-                    "roko_llm_tokens_total",
-                    "",
-                    LabelSet::from_pairs(&[("role", &role_str)]),
-                )
-                .inc_by(total_tokens);
-            // Cost metric — scale to millionths to use integer counter.
-            #[allow(clippy::cast_sign_loss)]
-            let cost_micro = (task_cost * 1_000_000.0) as u64;
-            self.metrics
-                .register_counter(
-                    "roko_llm_cost_usd_total",
-                    "",
-                    LabelSet::from_pairs(&[("role", &role_str), ("model", &selected_model)]),
-                )
-                .inc_by(cost_micro);
-        }
-
-        // ── Conductor signal: agent output (§7) ──────────────────────
-        let timeout_secs = task_def
-            .as_ref()
-            .map(|td| td.timeout_secs)
-            .unwrap_or(self.executor.config().task_timeout_secs);
-        self.emit_conductor_signal(
-            Kind::Custom("conductor.agent_output".into()),
-            serde_json::json!({
-                "plan_id": plan_id,
-                "task": task,
-                "role": format!("{role:?}"),
-                "model": &selected_model,
-                "cost_usd": task_cost,
-                "duration_ms": result.usage.wall_ms,
-                "timeout_secs": timeout_secs,
-                "tokens": u64::from(result.usage.input_tokens) + u64::from(result.usage.output_tokens),
-                "success": result.success,
-            }),
-        );
-
-        // ── Run per-task verification pipeline ──────────────────────
-        if let Some(ref td) = task_def {
-            if let Err((task_id, phase, command, error_output)) =
-                self.run_verify_steps(&td.id, &td.verify, &exec_dir).await
-            {
-                let msg = td
-                    .verify
-                    .iter()
-                    .find(|s| s.command == command)
-                    .and_then(|s| s.fail_msg.as_deref())
-                    .unwrap_or("verification failed");
-                let task_phase = task_def
-                    .as_ref()
-                    .map(|task| task.status.as_str())
-                    .unwrap_or("unknown");
-                let output_tail = result
-                    .output
-                    .body
-                    .as_text()
-                    .ok()
-                    .map(|text| tail_output_lines(text, TASK_FAILURE_OUTPUT_TAIL_LINES));
-                self.observe_cascade_router(plan_id, task_def.as_ref(), &selected_model, 0.0);
-                let error = anyhow!(
-                    "verify failed for {task_id}: {command} — {msg}; stderr/stdout:\n{error_output}"
-                );
-                return Err(with_task_failure_context(
-                    error,
-                    &task_id,
-                    task_phase,
-                    &phase,
-                    output_tail.as_deref(),
+        let post_result = async {
+            // ── Cost recording ────────────────────────────────────────────
+            if task_cost > self.config.budget.max_task_usd {
+                return Err(anyhow!(
+                    "task {task} cost ${task_cost:.2} exceeds max_task_usd ${:.2}",
+                    self.config.budget.max_task_usd
                 ));
             }
-            self.verify_declared_write_files(plan_id, &td.id, &td.files, &exec_dir)
-                .await?;
+            *self.plan_costs.entry(plan_id.to_string()).or_insert(0.0) += task_cost;
+            let plan_spent = self.plan_costs.get(plan_id).copied().unwrap_or(0.0);
+            self.warn_plan_budget_pressure(plan_id, plan_spent);
 
-            let mut task_files = Vec::new();
-            let mut seen_files = HashSet::new();
-            if let Ok(changed_files) = self.git_changed_files(&exec_dir).await {
-                for file in changed_files {
-                    if seen_files.insert(file.clone()) {
-                        task_files.push(file);
+            // ── Session budget check (§8) ───────────────────────────────
+            let max_session_usd = self.config.budget.max_session_usd;
+            let session_total: f64 = self.plan_costs.values().sum();
+            if max_session_usd > 0.0 && session_total > max_session_usd {
+                return Err(anyhow!(
+                    "session budget exceeded: ${session_total:.2} > max_session_usd ${max_session_usd:.2}"
+                ));
+            }
+
+            self.learning.costs_db().insert(CostRecord {
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                model: selected_model.clone(),
+                provider: self.config.agent.command.clone(),
+                role: format!("{role:?}"),
+                plan_id: plan_id.to_string(),
+                task_id: task.to_string(),
+                complexity_band: task_def
+                    .as_ref()
+                    .map(|td| td.tier.clone())
+                    .unwrap_or_default(),
+                input_tokens: u64::from(result.usage.input_tokens),
+                output_tokens: u64::from(result.usage.output_tokens),
+                cached_tokens: u64::from(result.usage.cache_read_tokens),
+                cost_usd: task_cost,
+                duration_ms: result.usage.wall_ms,
+                success: result.success,
+                session_id: self.claude_resume_session.clone().unwrap_or_default(),
+            });
+
+            // ── Metric instrumentation ──────────────────────────────────────
+            #[allow(clippy::cast_precision_loss)]
+            {
+                let status = if result.success {
+                    "succeeded"
+                } else {
+                    "failed"
+                };
+                let role_str = format!("{role:?}");
+                self.metrics
+                    .register_counter(
+                        "roko_tasks_total",
+                        "",
+                        LabelSet::from_pairs(&[("status", status), ("role", &role_str)]),
+                    )
+                    .inc();
+                self.metrics
+                    .register_histogram(
+                        "roko_agent_duration_seconds",
+                        "",
+                        LabelSet::from_pairs(&[("role", &role_str)]),
+                        roko_core::obs::LLM_LATENCY_BUCKETS.to_vec(),
+                    )
+                    .observe(result.usage.wall_ms as f64 / 1000.0);
+                let total_tokens =
+                    u64::from(result.usage.input_tokens) + u64::from(result.usage.output_tokens);
+                self.metrics
+                    .register_counter(
+                        "roko_llm_tokens_total",
+                        "",
+                        LabelSet::from_pairs(&[("role", &role_str)]),
+                    )
+                    .inc_by(total_tokens);
+                // Cost metric — scale to millionths to use integer counter.
+                #[allow(clippy::cast_sign_loss)]
+                let cost_micro = (task_cost * 1_000_000.0) as u64;
+                self.metrics
+                    .register_counter(
+                        "roko_llm_cost_usd_total",
+                        "",
+                        LabelSet::from_pairs(&[("role", &role_str), ("model", &selected_model)]),
+                    )
+                    .inc_by(cost_micro);
+            }
+
+            // ── Conductor signal: agent output (§7) ──────────────────────
+            let timeout_secs = task_def
+                .as_ref()
+                .map(|td| td.timeout_secs)
+                .unwrap_or(self.executor.config().task_timeout_secs);
+            self.emit_conductor_signal(
+                Kind::Custom("conductor.agent_output".into()),
+                serde_json::json!({
+                    "plan_id": plan_id,
+                    "task": task,
+                    "role": format!("{role:?}"),
+                    "model": &selected_model,
+                    "cost_usd": task_cost,
+                    "duration_ms": result.usage.wall_ms,
+                    "timeout_secs": timeout_secs,
+                    "tokens": u64::from(result.usage.input_tokens) + u64::from(result.usage.output_tokens),
+                    "success": result.success,
+                }),
+            );
+
+            // ── Run per-task verification pipeline ──────────────────────
+            if let Some(ref td) = task_def {
+                if let Err((task_id, phase, command, error_output)) =
+                    self.run_verify_steps(&td.id, &td.verify, &exec_dir).await
+                {
+                    let msg = td
+                        .verify
+                        .iter()
+                        .find(|s| s.command == command)
+                        .and_then(|s| s.fail_msg.as_deref())
+                        .unwrap_or("verification failed");
+                    let task_phase = task_def
+                        .as_ref()
+                        .map(|task| task.status.as_str())
+                        .unwrap_or("unknown");
+                    let output_tail = result
+                        .output
+                        .body
+                        .as_text()
+                        .ok()
+                        .map(|text| tail_output_lines(text, TASK_FAILURE_OUTPUT_TAIL_LINES));
+                    self.observe_cascade_router(plan_id, task_def.as_ref(), &selected_model, 0.0);
+                    let error = anyhow!(
+                        "verify failed for {task_id}: {command} — {msg}; stderr/stdout:\n{error_output}"
+                    );
+                    return Err(with_task_failure_context(
+                        error,
+                        &task_id,
+                        task_phase,
+                        &phase,
+                        output_tail.as_deref(),
+                    ));
+                }
+                self.verify_declared_write_files(plan_id, &td.id, &td.files, &exec_dir)
+                    .await?;
+
+                let mut task_files = Vec::new();
+                let mut seen_files = HashSet::new();
+                if let Ok(changed_files) = self.git_changed_files(&exec_dir).await {
+                    for file in changed_files {
+                        if seen_files.insert(file.clone()) {
+                            task_files.push(file);
+                        }
                     }
                 }
-            }
-            for file in &td.files {
-                if seen_files.insert(file.clone()) {
-                    task_files.push(file.clone());
+                for file in &td.files {
+                    if seen_files.insert(file.clone()) {
+                        task_files.push(file.clone());
+                    }
+                }
+
+                let symbols = extract_task_symbols(&task_text);
+                let prompt_hash = roko_core::ContentHash::of(role_instruction.as_bytes()).to_hex();
+                let request = SkillExtractionRequest::new(
+                    task_files,
+                    td.tier.clone(),
+                    symbols,
+                    selected_model.clone(),
+                    prompt_hash,
+                    Vec::new(),
+                );
+                if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+                    tracker.last_skill_request = Some(request);
                 }
             }
 
-            let symbols = extract_task_symbols(&task_text);
-            let prompt_hash = roko_core::ContentHash::of(role_instruction.as_bytes()).to_hex();
-            let request = SkillExtractionRequest::new(
-                task_files,
-                td.tier.clone(),
-                symbols,
-                selected_model.clone(),
-                prompt_hash,
-                Vec::new(),
-            );
-            if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
-                tracker.last_skill_request = Some(request);
-            }
+            Ok::<(), anyhow::Error>(())
         }
+        .await;
+
+        self.release_task_mcp_servers(&mcp_lease).await;
+        post_result?;
 
         Ok(result)
     }
