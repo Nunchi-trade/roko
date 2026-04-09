@@ -370,6 +370,20 @@ async fn proxy_task(
     Ok(Json(resp_body))
 }
 
+/// Infer the backing template name for a deployment, if it follows the worker naming convention.
+async fn template_name_for_deployment(
+    deployment_id: &str,
+    state: &AppState,
+) -> Option<String> {
+    let deps = state.deployments.read().await;
+    let deployment = deps.get(deployment_id)?;
+    deployment
+        .name
+        .strip_prefix("roko-worker-")
+        .map(|name| name.to_string())
+        .or_else(|| Some(deployment.name.clone()))
+}
+
 /// `POST /api/deployments/:id/callback` — receive results from a worker callback.
 async fn receive_callback(
     State(state): State<Arc<AppState>>,
@@ -382,6 +396,19 @@ async fn receive_callback(
         .unwrap_or(false);
 
     info!(%id, %success, "received worker callback");
+
+    if let Some(template_name) = template_name_for_deployment(&id, &state).await {
+        state
+            .template_runs
+            .write()
+            .await
+            .entry(template_name)
+            .or_default()
+            .push(crate::serve::state::TemplateRunRecord {
+                timestamp: chrono::Utc::now(),
+                success,
+            });
+    }
 
     state.event_bus.emit(ServerEvent::WorkerTaskCompleted {
         deployment_id: id,

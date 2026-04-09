@@ -84,6 +84,15 @@ pub enum OperationStatus {
     },
 }
 
+/// A recorded template run outcome used by the metrics summary endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TemplateRunRecord {
+    /// When the run completed.
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    /// Whether the run succeeded.
+    pub success: bool,
+}
+
 // ---------------------------------------------------------------------------
 // AppState
 // ---------------------------------------------------------------------------
@@ -120,6 +129,8 @@ pub struct AppState {
     pub deploy_backend: Arc<dyn DeployBackend>,
     /// Active cloud deployments.
     pub deployments: RwLock<HashMap<String, Deployment>>,
+    /// Recent template run outcomes keyed by template name.
+    pub template_runs: RwLock<HashMap<String, Vec<TemplateRunRecord>>>,
 }
 
 impl AppState {
@@ -156,6 +167,7 @@ impl AppState {
             templates: RwLock::new(template_registry),
             deploy_backend,
             deployments: RwLock::new(HashMap::new()),
+            template_runs: RwLock::new(HashMap::new()),
         }
     }
 

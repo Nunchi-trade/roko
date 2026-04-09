@@ -143,9 +143,21 @@ async fn deploy_template(
 
     let handle = tokio::spawn({
         let op_id = op_id.clone();
+        let template_name = name.clone();
+        let state = Arc::clone(&state);
         async move {
             match crate::run::run_once(&workdir, &config, &prompt).await {
                 Ok(report) => {
+                    state
+                        .template_runs
+                        .write()
+                        .await
+                        .entry(template_name.clone())
+                        .or_default()
+                        .push(crate::serve::state::TemplateRunRecord {
+                            timestamp: chrono::Utc::now(),
+                            success: report.overall_success(),
+                        });
                     bus.emit(ServerEvent::OperationCompleted {
                         op_id,
                         kind: "template_deploy".into(),
@@ -153,6 +165,16 @@ async fn deploy_template(
                     });
                 }
                 Err(e) => {
+                    state
+                        .template_runs
+                        .write()
+                        .await
+                        .entry(template_name.clone())
+                        .or_default()
+                        .push(crate::serve::state::TemplateRunRecord {
+                            timestamp: chrono::Utc::now(),
+                            success: false,
+                        });
                     bus.emit(ServerEvent::Error {
                         message: format!("template deploy failed: {e}"),
                     });
