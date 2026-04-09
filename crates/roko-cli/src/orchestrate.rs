@@ -4265,7 +4265,7 @@ impl PlanRunner {
                     msg
                 ));
             }
-            self.verify_declared_write_files(&td.id, &td.files, &exec_dir)
+            self.verify_declared_write_files(plan_id, &td.id, &td.files, &exec_dir)
                 .await?;
         }
 
@@ -4953,7 +4953,8 @@ impl PlanRunner {
 
     /// Enforce the task's declared write-file scope after successful execution.
     async fn verify_declared_write_files(
-        &self,
+        &mut self,
+        plan_id: &str,
         task_id: &str,
         allowed_files: &[String],
         exec_dir: &Path,
@@ -4966,21 +4967,38 @@ impl PlanRunner {
         let changed = self.git_changed_files(exec_dir).await?;
 
         let mut unexpected = Vec::new();
-        for path in changed {
+        for path in &changed {
             let permitted = allowed.iter().any(|declared| {
-                path == *declared
+                path == declared
                     || path.starts_with(&format!("{declared}/"))
                     || path.starts_with(&format!("{declared}\\"))
             });
             if !permitted {
-                unexpected.push(path);
+                unexpected.push(path.clone());
             }
         }
 
         if !unexpected.is_empty() {
+            let unexpected_list = unexpected.join(", ");
+            let drift_ratio = if changed.is_empty() {
+                0.0
+            } else {
+                unexpected.len() as f64 / changed.len() as f64
+            };
+            self.emit_conductor_signal(
+                Kind::Metric,
+                serde_json::json!({
+                    "plan_id": plan_id,
+                    "task_id": task_id,
+                    "write_files": allowed_files,
+                    "changed_files": changed,
+                    "unexpected_files": unexpected,
+                    "drift_ratio": drift_ratio,
+                }),
+            );
             return Err(anyhow!(
                 "task {task_id} modified files outside write_files scope: {}",
-                unexpected.join(", ")
+                unexpected_list
             ));
         }
 
