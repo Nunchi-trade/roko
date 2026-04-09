@@ -20,7 +20,7 @@ use roko_core::task::{TaskCategory, TaskComplexityBand};
 use super::dashboard::{
     AgentActivitySnapshot, CFactor, CascadeRouterState, DashboardData, DashboardScaffold,
     GateFailureRow, GateSummaryRow, GateThresholdRow, GateTrend, PlanExecutionSnapshot,
-    build_agent_activity_snapshot, read_json_value, read_jsonl_values,
+    SignalSummary, build_agent_activity_snapshot, read_json_value, read_jsonl_values,
 };
 use super::pages::{PageId, PageRegistry};
 
@@ -32,6 +32,7 @@ pub fn render_dashboard(
     pages: &PageRegistry,
     active_page: PageId,
     scroll: u16,
+    signal_selected: usize,
 ) {
     let areas = Layout::default()
         .direction(Direction::Vertical)
@@ -49,7 +50,16 @@ pub fn render_dashboard(
         .constraints([Constraint::Length(34), Constraint::Min(0)])
         .split(areas[1]);
     render_sidebar(frame, body[0], pages, active_page);
-    render_page(frame, body[1], dashboard, data, pages, active_page, scroll);
+    render_page(
+        frame,
+        body[1],
+        dashboard,
+        data,
+        pages,
+        active_page,
+        scroll,
+        signal_selected,
+    );
 
     render_footer(frame, areas[2], pages, active_page);
 }
@@ -148,6 +158,7 @@ pub fn render_page(
     pages: &PageRegistry,
     active_page: PageId,
     scroll: u16,
+    signal_selected: usize,
 ) {
     let Some(page) = pages.page(active_page) else {
         let placeholder = Paragraph::new("missing page")
@@ -178,6 +189,11 @@ pub fn render_page(
 
     if active_page == PageId::Learning {
         render_learning_page(frame, area, data);
+        return;
+    }
+
+    if active_page == PageId::Signals {
+        render_signals_page(frame, area, data, signal_selected);
         return;
     }
 
@@ -256,6 +272,42 @@ fn render_learning_page(frame: &mut Frame<'_>, area: Rect, data: &DashboardData)
     render_cascade_router_table(frame, top[0], &data.cascade_router);
     render_active_experiments_table(frame, top[1], &data.experiment_store);
     render_learning_trends(frame, sections[1], &data.efficiency_events);
+}
+
+fn render_signals_page(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    data: &DashboardData,
+    signal_selected: usize,
+) {
+    let block = Block::default().borders(Borders::ALL).title("Signals");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let signals = prepare_signals(&data.recent_signals);
+    if signals.is_empty() {
+        let empty = Paragraph::new("no signals found in .roko/signals.jsonl")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    let sections = Layout::vertical([
+        Constraint::Percentage(46),
+        Constraint::Length(8),
+        Constraint::Min(0),
+    ])
+    .split(inner);
+    let selected = signal_selected.min(signals.len().saturating_sub(1));
+
+    render_signals_table(frame, sections[0], &signals, selected);
+    render_signal_kind_chart(frame, sections[1], &signals);
+    render_signal_tree(frame, sections[2], &signals, selected);
 }
 
 fn render_cascade_router_table(
@@ -457,6 +509,256 @@ fn render_learning_sparkline(
         .data(data)
         .style(Style::default().fg(color));
     frame.render_widget(spark, inner);
+}
+
+fn prepare_signals(signals: &[SignalSummary]) -> Vec<SignalSummary> {
+    let mut rows = signals.to_vec();
+    rows.sort_by(|a, b| {
+        b.created_at_ms
+            .cmp(&a.created_at_ms)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    rows
+}
+
+fn signal_relative_age(created_at_ms: i64) -> String {
+    let created_at_ms = u64::try_from(created_at_ms).unwrap_or_default();
+    let now = u64::try_from(Utc::now().timestamp_millis()).unwrap_or(u64::MAX);
+    format_elapsed_ms(now.saturating_sub(created_at_ms))
+}
+
+fn signal_kind_prefix(kind: &str) -> String {
+    kind.split(':').next().unwrap_or(kind).to_string()
+}
+
+fn signal_kind_distribution(signals: &[SignalSummary]) -> Vec<(String, u64)> {
+    let mut counts = BTreeMap::<String, u64>::new();
+    for signal in signals {
+        *counts.entry(signal_kind_prefix(&signal.kind)).or_default() += 1;
+    }
+
+    let mut rows = counts.into_iter().collect::<Vec<_>>();
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    rows
+}
+
+#[derive(Debug, Clone)]
+struct SignalTreeEntry<'a> {
+    hash: String,
+    signal: Option<&'a SignalSummary>,
+}
+
+fn signal_parent_chain<'a>(
+    signals: &'a [SignalSummary],
+    selected: &'a SignalSummary,
+) -> Vec<SignalTreeEntry<'a>> {
+    let by_id = signals
+        .iter()
+        .map(|signal| (signal.id.as_str(), signal))
+        .collect::<HashMap<_, _>>();
+
+    let mut chain = Vec::new();
+    chain.push(SignalTreeEntry {
+        hash: selected.id.clone(),
+        signal: Some(selected),
+    });
+
+    let ancestors: Vec<String> = if selected.lineage.is_empty() {
+        selected.parent_hash.iter().cloned().collect()
+    } else {
+        selected.lineage.iter().rev().cloned().collect()
+    };
+
+    for hash in ancestors {
+        chain.push(SignalTreeEntry {
+            hash: hash.clone(),
+            signal: by_id.get(hash.as_str()).copied(),
+        });
+    }
+
+    chain
+}
+
+fn visible_signal_window(selected: usize, len: usize, visible: usize) -> (usize, usize) {
+    if len <= visible {
+        return (0, len);
+    }
+
+    let visible = visible.max(1).min(len);
+    let mut start = selected.saturating_sub(visible / 2);
+    if start + visible > len {
+        start = len - visible;
+    }
+    (start, start + visible)
+}
+
+fn render_signals_table(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    signals: &[SignalSummary],
+    selected: usize,
+) {
+    let block = Block::default().borders(Borders::ALL).title("recent signals");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let visible_rows = inner.height.saturating_sub(2) as usize;
+    let (start, end) = visible_signal_window(selected, signals.len(), visible_rows);
+
+    let rows: Vec<Row<'_>> = signals[start..end]
+        .iter()
+        .enumerate()
+        .map(|(offset, signal)| {
+            let index = start + offset;
+            let is_selected = index == selected;
+            let style = if is_selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            Row::new(vec![
+                Cell::from(signal_relative_age(signal.created_at_ms)),
+                Cell::from(truncate_text(&signal.kind, 18)),
+                Cell::from(truncate_text(
+                    signal
+                        .plan_id
+                        .as_deref()
+                        .or(signal.task_id.as_deref())
+                        .unwrap_or("-"),
+                    18,
+                )),
+                Cell::from(truncate_text(&signal.payload_preview, 60)),
+            ])
+            .style(style)
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(8),
+            Constraint::Length(18),
+            Constraint::Length(18),
+            Constraint::Min(20),
+        ],
+    )
+    .header(
+        Row::new(vec![
+            Cell::from("time"),
+            Cell::from("kind"),
+            Cell::from("plan/task"),
+            Cell::from("payload preview"),
+        ])
+        .style(
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::BOLD),
+        ),
+    )
+    .column_spacing(1);
+
+    frame.render_widget(table, inner);
+}
+
+fn render_signal_kind_chart(frame: &mut Frame<'_>, area: Rect, signals: &[SignalSummary]) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("kind distribution");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let rows = signal_kind_distribution(signals);
+    if rows.is_empty() {
+        let empty = Paragraph::new("no signal kinds")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    let chart_data = rows
+        .iter()
+        .map(|(kind, count)| (kind.as_str(), *count))
+        .collect::<Vec<_>>();
+    let chart = BarChart::default()
+        .data(&chart_data)
+        .direction(Direction::Horizontal)
+        .bar_width(1)
+        .bar_gap(1)
+        .max(rows.iter().map(|(_, count)| *count).max().unwrap_or(1))
+        .bar_style(Style::default().fg(Color::Cyan))
+        .value_style(Style::default().fg(Color::White))
+        .label_style(Style::default().fg(Color::Gray))
+        .bar_set(ratatui::symbols::bar::NINE_LEVELS);
+
+    frame.render_widget(chart, inner);
+}
+
+fn render_signal_tree(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    signals: &[SignalSummary],
+    selected: usize,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("signal DAG explorer");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let selected = selected.min(signals.len().saturating_sub(1));
+    let Some(selected_signal) = signals.get(selected) else {
+        let empty = Paragraph::new("no selected signal")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        frame.render_widget(empty, inner);
+        return;
+    };
+
+    let chain = signal_parent_chain(signals, selected_signal);
+    let mut lines = Vec::with_capacity(chain.len());
+    for (depth, entry) in chain.iter().enumerate() {
+        let indent = "  ".repeat(depth);
+        let line = if let Some(signal) = entry.signal {
+            format!(
+                "{indent}- {} [{}] {}",
+                truncate_text(&signal.kind, 24),
+                truncate_text(&signal.id, 16),
+                signal_relative_age(signal.created_at_ms)
+            )
+        } else {
+            format!("{indent}- {}", truncate_text(&entry.hash, 32))
+        };
+        lines.push(Line::from(line));
+    }
+
+    if lines.is_empty() {
+        let empty = Paragraph::new("no parent chain")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    let paragraph = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((0, 0));
+    frame.render_widget(paragraph, inner);
 }
 
 fn build_cascade_router_rows(router: &CascadeRouterState) -> Vec<LearningCascadeRow> {

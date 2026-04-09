@@ -35,6 +35,8 @@ pub struct App {
     pub last_refresh: Instant,
     /// Per-page scroll position.
     pub scroll_offset: HashMap<PageId, u16>,
+    /// Selected signal row on the Signals page.
+    pub signal_selection: usize,
 }
 
 type TuiTerminal = Terminal<CrosstermBackend<Stdout>>;
@@ -81,6 +83,7 @@ impl App {
             running: true,
             last_refresh: Instant::now(),
             scroll_offset: HashMap::new(),
+            signal_selection: 0,
         }
     }
 
@@ -140,6 +143,7 @@ impl App {
             &pages,
             self.current_page,
             self.scroll_for(self.current_page),
+            self.signal_selection,
         );
     }
 
@@ -149,8 +153,8 @@ impl App {
             KeyCode::Char('r') => self.refresh_snapshot(),
             KeyCode::Left | KeyCode::Char('h') | KeyCode::BackTab => self.select_previous_page(),
             KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => self.select_next_page(),
-            KeyCode::Up | KeyCode::Char('k') => self.adjust_scroll(-1),
-            KeyCode::Down | KeyCode::Char('j') => self.adjust_scroll(1),
+            KeyCode::Up | KeyCode::Char('k') => self.adjust_vertical(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.adjust_vertical(1),
             KeyCode::PageUp => self.adjust_scroll(-8),
             KeyCode::PageDown => self.adjust_scroll(8),
             KeyCode::Home => self.set_scroll(0),
@@ -174,6 +178,7 @@ impl App {
         self.data = DashboardData::load_best_effort(&self.workdir);
         self.scaffold = DashboardScaffold::new_in(&self.workdir);
         self.last_refresh = Instant::now();
+        self.clamp_signal_selection();
         if self.pages().scaffold(self.current_page).is_none() {
             self.current_page = self.scaffold.active_page();
         }
@@ -201,6 +206,31 @@ impl App {
         let current = self.scroll_for(self.current_page) as i32;
         let next = (current + delta as i32).max(0).min(u16::MAX as i32) as u16;
         self.scroll_offset.insert(self.current_page, next);
+    }
+
+    fn adjust_vertical(&mut self, delta: i16) {
+        if self.current_page == PageId::Signals {
+            let len = self.data.recent_signals.len();
+            if len == 0 {
+                self.signal_selection = 0;
+                return;
+            }
+
+            let current = self.signal_selection as i32;
+            let next = (current + delta as i32).max(0).min((len - 1) as i32) as usize;
+            self.signal_selection = next;
+        } else {
+            self.adjust_scroll(delta);
+        }
+    }
+
+    fn clamp_signal_selection(&mut self) {
+        let len = self.data.recent_signals.len();
+        if len == 0 {
+            self.signal_selection = 0;
+        } else if self.signal_selection >= len {
+            self.signal_selection = len - 1;
+        }
     }
 
     fn enter_terminal() -> Result<TuiTerminal> {
@@ -232,6 +262,7 @@ fn render_page(frame: &mut Frame<'_>, app: &App) {
         &pages,
         app.current_page,
         app.scroll_for(app.current_page),
+        app.signal_selection,
     );
 }
 

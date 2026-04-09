@@ -59,6 +59,28 @@ pub fn scaffold_pages() -> Vec<PageScaffold> {
             ],
         ),
         PageScaffold::new(
+            PageId::Signals,
+            "Signals",
+            "Recent signals, kind distribution, and parent-chain explorer.",
+            vec![
+                WidgetScaffold::new(
+                    "recent_signals",
+                    "Recent Signals",
+                    "Timestamp, kind, plan/task ID, and payload preview.",
+                ),
+                WidgetScaffold::new(
+                    "kind_distribution",
+                    "Kind Distribution",
+                    "Bar chart of signal kind prefixes over the last 100 signals.",
+                ),
+                WidgetScaffold::new(
+                    "signal_tree",
+                    "Signal DAG Explorer",
+                    "Indented parent-hash chain for the selected signal.",
+                ),
+            ],
+        ),
+        PageScaffold::new(
             PageId::ConfigView,
             "Config View",
             "Effective config with override/source annotations.",

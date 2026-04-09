@@ -155,6 +155,7 @@ impl DashboardScaffold {
             PageId::AgentStatus => self.snapshot.render_agent_status_page(scaffold),
             PageId::PlanView => self.snapshot.render_plan_view_page(scaffold),
             PageId::LogView => self.snapshot.render_log_view_page(scaffold),
+            PageId::Signals => self.snapshot.render_signals_page(scaffold),
             PageId::ConfigView => self.snapshot.render_config_view_page(scaffold),
         };
         rendered.or_else(|| Some(scaffold.render_text()))
@@ -551,6 +552,12 @@ pub struct SignalSummary {
     pub plan_id: Option<String>,
     #[serde(default)]
     pub task_id: Option<String>,
+    #[serde(default)]
+    pub parent_hash: Option<String>,
+    #[serde(default)]
+    pub lineage: Vec<String>,
+    #[serde(default)]
+    pub payload_preview: String,
 }
 
 /// Conductor alert summary.
@@ -850,6 +857,9 @@ impl SignalSummary {
                         .and_then(Value::as_str)
                         .map(ToOwned::to_owned)
                 }),
+            parent_hash: signal_parent_hash(value),
+            lineage: signal_lineage(value),
+            payload_preview: signal_payload_preview(value),
         })
     }
 }
@@ -1819,6 +1829,77 @@ fn entry_timestamp_ms(entry: &Value) -> Option<i64> {
         .or_else(|| entry.get("created_at_ms").and_then(Value::as_u64).map(|ts| ts as i64))
 }
 
+fn signal_parent_hash(value: &Value) -> Option<String> {
+    value
+        .pointer("/parent_hash")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            value
+                .pointer("/body/data/parent_hash")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            value
+                .pointer("/body/parent_hash")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            value
+                .pointer("/lineage")
+                .and_then(Value::as_array)
+                .and_then(|lineage| lineage.last())
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+}
+
+fn signal_lineage(value: &Value) -> Vec<String> {
+    value
+        .pointer("/lineage")
+        .and_then(Value::as_array)
+        .map(|lineage| {
+            lineage
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .or_else(|| {
+            value
+                .pointer("/body/data/lineage")
+                .and_then(Value::as_array)
+                .map(|lineage| {
+                    lineage
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(ToOwned::to_owned)
+                        .collect::<Vec<_>>()
+                })
+        })
+        .unwrap_or_default()
+}
+
+fn signal_payload_preview(value: &Value) -> String {
+    let payload = value
+        .pointer("/body/data")
+        .or_else(|| value.get("body"))
+        .or_else(|| value.get("payload"));
+
+    let Some(payload) = payload else {
+        return String::new();
+    };
+
+    let raw = match payload {
+        Value::String(text) => text.clone(),
+        other => serde_json::to_string(other).unwrap_or_default(),
+    };
+    let compact = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    truncate_str(compact.trim(), 60)
+}
+
 fn current_phase_label(plan_state: &Value) -> Option<String> {
     plan_state
         .pointer("/current_phase/kind")
@@ -1880,6 +1961,8 @@ pub struct DashboardSnapshot {
     adaptive_thresholds: Option<AdaptiveThresholds>,
     /// Gate-results page data derived from signals and thresholds.
     gate_results_page: GateResultsPageData,
+    /// Most recent signals from `.roko/signals.jsonl`.
+    recent_signals: Vec<SignalSummary>,
     /// Cascade router snapshot from `.roko/learn/cascade-router.json` (raw JSON).
     cascade_snapshot: Option<CascadeSnapshotData>,
     /// Raw episodes kept for per-agent analysis.
@@ -1926,6 +2009,7 @@ impl DashboardSnapshot {
         let gate_signals = load_gate_signal_summaries(&signals_path);
         let gate_results_page =
             build_gate_results_page_data(&gate_signals, adaptive_thresholds.as_ref());
+        let recent_signals = load_recent_signals(&signals_path, 100);
         let cascade_snapshot =
             load_json_opt::<CascadeSnapshotData>(&learn_dir.join(CASCADE_ROUTER_FILE));
 
@@ -1937,6 +2021,7 @@ impl DashboardSnapshot {
             experiments,
             adaptive_thresholds,
             gate_results_page,
+            recent_signals,
             cascade_snapshot,
         ))
     }
@@ -1950,6 +2035,7 @@ impl DashboardSnapshot {
             None,
             None,
             GateResultsPageData::default(),
+            Vec::new(),
             None,
         )
     }
@@ -1963,6 +2049,7 @@ impl DashboardSnapshot {
         experiments: Option<ExperimentStore>,
         adaptive_thresholds: Option<AdaptiveThresholds>,
         gate_results_page: GateResultsPageData,
+        recent_signals: Vec<SignalSummary>,
         cascade_snapshot: Option<CascadeSnapshotData>,
     ) -> Self {
         let episode_count = episodes.len();
@@ -2032,6 +2119,7 @@ impl DashboardSnapshot {
             experiments,
             adaptive_thresholds,
             gate_results_page,
+            recent_signals,
             cascade_snapshot,
             episodes: episodes.to_vec(),
         }
@@ -2754,6 +2842,87 @@ impl DashboardSnapshot {
         Some(out)
     }
 
+    fn render_signals_page(&self, page: &PageScaffold) -> Option<String> {
+        if self.recent_signals.is_empty() {
+            return None;
+        }
+
+        let mut signals = self.recent_signals.clone();
+        signals.sort_by(|a, b| {
+            b.created_at_ms
+                .cmp(&a.created_at_ms)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+
+        let mut out = page_header(page);
+        let _ = writeln!(out, "source: {}/signals.jsonl", self.root.join(".roko").display());
+        let _ = writeln!(out, "window: last {} signals", signals.len());
+
+        let _ = writeln!(out);
+        let _ = writeln!(out, "recent signals:");
+        let _ = writeln!(
+            out,
+            "  {:>8}  {:>18}  {:>18}  {:>60}",
+            "time", "kind", "plan/task", "payload preview"
+        );
+        for signal in signals.iter().take(20) {
+            let time = signal_relative_age(signal.created_at_ms);
+            let plan_task = signal
+                .plan_id
+                .as_deref()
+                .or(signal.task_id.as_deref())
+                .unwrap_or("-");
+            let _ = writeln!(
+                out,
+                "  {:>8}  {:>18}  {:>18}  {:>60}",
+                truncate_str(&time, 8),
+                truncate_str(&signal.kind, 18),
+                truncate_str(plan_task, 18),
+                truncate_str(&signal.payload_preview, 60)
+            );
+        }
+
+        let _ = writeln!(out);
+        let _ = writeln!(out, "signal kind distribution:");
+        let distribution = signal_kind_distribution(&signals);
+        if distribution.is_empty() {
+            let _ = writeln!(out, "  (none)");
+        } else {
+            for (kind, count) in distribution {
+                let _ = writeln!(out, "  {:>18}  {:>6}", kind, count);
+            }
+        }
+
+        let _ = writeln!(out);
+        let _ = writeln!(out, "signal DAG explorer:");
+        if let Some(selected) = signals.first() {
+            let _ = writeln!(
+                out,
+                "  selected: {} ({})",
+                truncate_str(&selected.kind, 24),
+                truncate_str(&selected.id, 16)
+            );
+            for (depth, node) in signal_parent_chain(&signals, selected).into_iter().enumerate() {
+                let indent = "  ".repeat(depth + 1);
+                let label = match node.signal {
+                    Some(signal) => format!(
+                        "{} [{}] {}",
+                        truncate_str(&signal.kind, 24),
+                        truncate_str(&signal.id, 16),
+                        signal_relative_age(signal.created_at_ms)
+                    ),
+                    None => truncate_str(&node.hash, 48),
+                };
+                let _ = writeln!(
+                    out,
+                    "{indent}- {label}"
+                );
+            }
+        }
+
+        Some(out)
+    }
+
     fn render_config_view_page(&self, page: &PageScaffold) -> Option<String> {
         let config_path = self.root.join("roko.toml");
         let text = std::fs::read_to_string(&config_path).ok()?;
@@ -3238,6 +3407,62 @@ fn truncate_str(s: &str, max: usize) -> String {
     }
 }
 
+fn signal_relative_age(created_at_ms: i64) -> String {
+    let created_at_ms = u64::try_from(created_at_ms).unwrap_or_default();
+    let age_ms = now_ms().saturating_sub(created_at_ms);
+    format_elapsed_ms(age_ms)
+}
+
+fn signal_kind_prefix(kind: &str) -> String {
+    kind.split(':').next().unwrap_or(kind).to_string()
+}
+
+fn signal_kind_distribution(signals: &[SignalSummary]) -> Vec<(String, u64)> {
+    let mut counts = BTreeMap::<String, u64>::new();
+    for signal in signals {
+        *counts.entry(signal_kind_prefix(&signal.kind)).or_default() += 1;
+    }
+
+    let mut rows = counts.into_iter().collect::<Vec<_>>();
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    rows
+}
+
+#[derive(Debug)]
+struct SignalTreeEntry<'a> {
+    hash: String,
+    signal: Option<&'a SignalSummary>,
+}
+
+fn signal_parent_chain<'a>(
+    signals: &'a [SignalSummary],
+    selected: &'a SignalSummary,
+) -> Vec<SignalTreeEntry<'a>> {
+    let by_id = signals
+        .iter()
+        .map(|signal| (signal.id.as_str(), signal))
+        .collect::<HashMap<_, _>>();
+
+    let mut chain = Vec::new();
+    chain.push(SignalTreeEntry {
+        hash: selected.id.clone(),
+        signal: Some(selected),
+    });
+
+    let ancestors: Vec<String> = if selected.lineage.is_empty() {
+        selected.parent_hash.iter().cloned().collect()
+    } else {
+        selected.lineage.iter().rev().cloned().collect()
+    };
+
+    for hash in ancestors {
+        let signal = by_id.get(hash.as_str()).copied();
+        chain.push(SignalTreeEntry { hash, signal });
+    }
+
+    chain
+}
+
 fn load_snapshot_best_effort(root: &Path) -> DashboardSnapshot {
     load_snapshot_blocking(root).unwrap_or_else(|_| DashboardSnapshot::empty(root.to_path_buf()))
 }
@@ -3430,7 +3655,7 @@ mod tests {
     fn scaffold_has_expected_page_count() {
         let dashboard = DashboardScaffold::new();
         let summary = dashboard.summary();
-        assert_eq!(summary.page_count, 11);
+        assert_eq!(summary.page_count, 12);
         assert!(summary.widget_count >= 20);
         assert_eq!(summary.active_page, PageId::Health);
     }
@@ -3446,7 +3671,7 @@ mod tests {
     fn overview_render_contains_active_page_and_counts() {
         let dashboard = DashboardScaffold::new();
         let rendered = dashboard.render_overview_text();
-        assert!(rendered.contains("dashboard scaffold: 11 pages"));
+        assert!(rendered.contains("dashboard scaffold: 12 pages"));
         assert!(rendered.contains("active=health"));
         assert!(rendered.contains("active page:"));
         assert!(rendered.contains("* Health [health] efficiency"));
@@ -3462,6 +3687,63 @@ mod tests {
         assert!(rendered.contains("Plan View (plan-view)"));
         assert!(rendered.contains("widgets (2):"));
         assert!(rendered.contains("DAG [dag]"));
+    }
+
+    #[test]
+    fn signals_page_renders_recent_signals_and_tree() {
+        let tmpdir = tempdir().expect("tempdir");
+        let roko_dir = tmpdir.path().join(".roko");
+        let memory_dir = roko_dir.join("memory");
+        fs::create_dir_all(&memory_dir).expect("memory dir");
+        fs::write(memory_dir.join(EPISODES_FILE), "").expect("empty episodes");
+
+        let signals = vec![
+            serde_json::json!({
+                "id": "sig-1",
+                "kind": "gate:compile",
+                "created_at_ms": 1_700_000_000_000i64,
+                "lineage": [],
+                "tags": {
+                    "plan_id": "plan-a",
+                    "task_id": "task-a"
+                },
+                "body": {
+                    "format": "json",
+                    "data": {
+                        "message": "compile ok",
+                        "detail": "payload"
+                    }
+                }
+            }),
+            serde_json::json!({
+                "id": "sig-2",
+                "kind": "conductor:alert:warning",
+                "created_at_ms": 1_700_000_001_000i64,
+                "lineage": ["sig-1"],
+                "body": {
+                    "format": "text",
+                    "data": "selected payload text that should preview nicely"
+                }
+            }),
+        ];
+        write_jsonl(
+            &roko_dir.join("signals.jsonl"),
+            &signals
+                .into_iter()
+                .map(|signal| serde_json::to_string(&signal).expect("signal json"))
+                .collect::<Vec<_>>(),
+        );
+
+        let dashboard = DashboardScaffold::new_in(tmpdir.path());
+        let rendered = dashboard
+            .render_page_text(PageId::Signals)
+            .expect("signals page should render");
+        assert!(rendered.contains("Signals (signals)"));
+        assert!(rendered.contains("recent signals:"));
+        assert!(rendered.contains("kind distribution:"));
+        assert!(rendered.contains("signal DAG explorer:"));
+        assert!(rendered.contains("sig-2"));
+        assert!(rendered.contains("sig-1"));
     }
 
     #[test]

@@ -2184,6 +2184,7 @@ fn parse_dashboard_page(input: &str) -> Option<PageId> {
         "agent-status" | "agentstatus" | "agent-activity" | "agentactivity" => PageId::AgentStatus,
         "plan-view" | "planview" => PageId::PlanView,
         "log-view" | "logview" => PageId::LogView,
+        "signals" => PageId::Signals,
         "config-view" | "configview" => PageId::ConfigView,
         _ => return None,
     })
@@ -2201,6 +2202,7 @@ fn dashboard_page_slugs() -> Vec<&'static str> {
         PageId::AgentStatus,
         PageId::PlanView,
         PageId::LogView,
+        PageId::Signals,
         PageId::ConfigView,
     ]
     .into_iter()

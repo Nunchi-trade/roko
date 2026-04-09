@@ -33,6 +33,8 @@ pub enum PageId {
     PlanView,
     /// Log filtering/search view.
     LogView,
+    /// Signals DAG explorer.
+    Signals,
     /// Effective config view.
     ConfigView,
 }
@@ -53,6 +55,7 @@ impl PageId {
             Self::AgentStatus => "Agent Activity",
             Self::PlanView => "Plan View",
             Self::LogView => "Log View",
+            Self::Signals => "Signals",
             Self::ConfigView => "Config View",
         }
     }
@@ -72,6 +75,7 @@ impl PageId {
             Self::AgentStatus => "agent-status",
             Self::PlanView => "plan-view",
             Self::LogView => "log-view",
+            Self::Signals => "signals",
             Self::ConfigView => "config-view",
         }
     }
@@ -88,7 +92,11 @@ impl PageId {
             | Self::Parameters
             | Self::Experiments
             | Self::Optimizer => "efficiency",
-            Self::AgentStatus | Self::PlanView | Self::LogView | Self::ConfigView => "operations",
+            Self::AgentStatus
+            | Self::PlanView
+            | Self::LogView
+            | Self::Signals
+            | Self::ConfigView => "operations",
         }
     }
 }
