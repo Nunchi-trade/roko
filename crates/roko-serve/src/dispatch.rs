@@ -349,6 +349,19 @@ impl Subscription {
         self
     }
 
+    /// Convert this runtime subscription back into its persisted config form.
+    #[must_use]
+    pub fn to_config(&self) -> SubscriptionConfig {
+        SubscriptionConfig {
+            template: self.template.clone(),
+            trigger: self.trigger.clone(),
+            filter: self.filter.clone(),
+            concurrency_limit: self.concurrency_limit,
+            cooldown_secs: self.cooldown_secs,
+            enabled: self.enabled,
+        }
+    }
+
     fn with_subscription_id(mut self, subscription_id: usize) -> Self {
         self.subscription_id = subscription_id;
         if self.id.is_empty() {
@@ -453,7 +466,12 @@ impl SubscriptionRegistry {
             .subscriptions
             .iter()
             .cloned()
-            .map(Subscription::from_config)
+            .enumerate()
+            .map(|(index, config)| {
+                let mut subscription = Subscription::from_config(config);
+                subscription.id = format!("config-{index}");
+                subscription
+            })
             .collect();
 
         let subs_dir = workdir.as_ref().join(".roko").join("subscriptions");
@@ -519,6 +537,44 @@ impl SubscriptionRegistry {
         self.subscriptions
             .write()
             .push(subscription.with_subscription_id(subscription_id));
+    }
+
+    /// Return a snapshot of all subscriptions in the registry.
+    #[must_use]
+    pub fn all(&self) -> Vec<Subscription> {
+        self.subscriptions.read().clone()
+    }
+
+    /// Look up a subscription by its public ID.
+    #[must_use]
+    pub fn get_by_id(&self, id: &str) -> Option<Subscription> {
+        self.subscriptions
+            .read()
+            .iter()
+            .find(|subscription| subscription.id == id)
+            .cloned()
+    }
+
+    /// Replace a subscription by public ID and preserve its internal registry ID.
+    #[must_use]
+    pub fn update_by_id(&self, id: &str, subscription: Subscription) -> Option<Subscription> {
+        let mut subscriptions = self.subscriptions.write();
+        let existing = subscriptions.iter_mut().find(|candidate| candidate.id == id)?;
+        let subscription_id = existing.subscription_id();
+        *existing = subscription.with_subscription_id(subscription_id);
+        Some(existing.clone())
+    }
+
+    /// Remove a subscription by public ID.
+    pub fn remove_by_id(&self, id: &str) -> Option<Subscription> {
+        let mut subscriptions = self.subscriptions.write();
+        let index = subscriptions.iter().position(|subscription| subscription.id == id)?;
+        let removed = subscriptions.remove(index);
+        self.active_counts.lock().remove(&removed.subscription_id());
+        self.last_dispatches
+            .lock()
+            .remove(&removed.subscription_id());
+        Some(removed)
     }
 
     /// Return subscriptions whose trigger and filters match `signal`.
@@ -600,20 +656,42 @@ struct SubscriptionFile {
 
 fn load_subscription_file(path: &Path) -> anyhow::Result<Vec<Subscription>> {
     let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let base_id = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("subscription")
+        .to_string();
 
     if let Ok(config) = toml::from_str::<SubscriptionConfig>(&text) {
-        return Ok(vec![Subscription::from_config(config)]);
+        let mut subscription = Subscription::from_config(config);
+        subscription.id = base_id;
+        return Ok(vec![subscription]);
     }
 
     let file: SubscriptionFile =
         toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
     let mut subscriptions = Vec::new();
-    subscriptions.extend(file.subscription.into_iter().map(Subscription::from_config));
-    subscriptions.extend(
-        file.subscriptions
-            .into_iter()
-            .map(Subscription::from_config),
-    );
+    let mut sequence = 0usize;
+    for config in file.subscription {
+        let mut subscription = Subscription::from_config(config);
+        subscription.id = if sequence == 0 {
+            base_id.clone()
+        } else {
+            format!("{base_id}-{sequence}")
+        };
+        subscriptions.push(subscription);
+        sequence += 1;
+    }
+    for config in file.subscriptions {
+        let mut subscription = Subscription::from_config(config);
+        subscription.id = if sequence == 0 {
+            base_id.clone()
+        } else {
+            format!("{base_id}-{sequence}")
+        };
+        subscriptions.push(subscription);
+        sequence += 1;
+    }
 
     if subscriptions.is_empty() {
         anyhow::bail!("no subscriptions found");

@@ -12,6 +12,7 @@ mod middleware;
 mod plans;
 mod prds;
 mod research;
+mod subscriptions;
 mod run;
 mod status;
 mod templates;
@@ -39,6 +40,7 @@ pub fn build_router(
         .merge(prds::routes())
         .merge(run::routes())
         .merge(research::routes())
+        .merge(subscriptions::routes())
         .merge(templates::routes())
         .merge(agents::routes())
         .merge(learning::routes())
