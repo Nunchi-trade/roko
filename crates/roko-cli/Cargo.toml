@@ -56,6 +56,7 @@ sysinfo = { workspace = true }
 ratatui = "0.29"
 crossterm = "0.28"
 dotenvy = "0.15"
+dirs = "6"
 
 [dev-dependencies]
 tempfile = { workspace = true }

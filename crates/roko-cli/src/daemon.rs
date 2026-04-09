@@ -28,6 +28,9 @@ use tokio_util::sync::CancellationToken;
 use tokio::signal::unix::{signal, SignalKind};
 use tracing::{info, warn};
 
+/// macOS LaunchAgents plist helpers for daemon installation.
+pub mod launchd;
+
 use crate::load_layered;
 use crate::serve_runtime::RokoCliRuntime;
 use roko_core::config::load_config;
