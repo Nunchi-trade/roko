@@ -1666,27 +1666,76 @@ impl PlanRunner {
 
     // ── Phase handlers ─────────────────────────────────────────────────
 
-    /// Enriching phase: ensure TaskTracker is loaded, log plan info, advance.
+    /// Enriching phase: build the strategist enrichment prompt, dispatch the agent,
+    /// and advance only after enrichment completes successfully.
     async fn handle_enriching(&mut self, plan_id: &str) {
         // Ensure tracker is loaded
         self.ensure_task_tracker(plan_id);
 
-        if let Some(tracker) = self.task_trackers.get(plan_id) {
-            let groups = tracker.tasks_file.parallel_groups();
-            eprintln!(
-                "[orchestrate] Enriching {plan_id}: {} tasks, {} parallel groups",
-                tracker.tasks_file.tasks.len(),
-                groups.len(),
-            );
-        } else {
-            eprintln!(
-                "[orchestrate] Enriching {plan_id}: no tasks.toml, proceeding with generic flow"
-            );
-        }
+        let started = std::time::Instant::now();
+        let enrichment_user_prompt = format!(
+            "Enrich plan {plan_id}: analyze the supplied plan context, read_files, and task constraints. \
+            Return execution-ready notes that preserve task dependencies, blockers, and role constraints."
+        );
+        let enrichment_system_prompt = self.build_enrichment_system_prompt(plan_id);
+        let role = AgentRole::Strategist;
 
-        let event = ExecutorEvent::EnrichmentDone;
-        self.log_transition(plan_id, &event);
-        let _ = self.executor.apply_event(plan_id, &event);
+        match self
+            .dispatch_agent_with(
+                plan_id,
+                role,
+                "enrich",
+                Some(enrichment_user_prompt),
+                None,
+                None,
+                Some(enrichment_system_prompt),
+            )
+            .await
+        {
+            Ok(result) => {
+                *self.per_plan_agents.entry(plan_id.to_string()).or_default() += 1;
+                self.agent_calls += 1;
+
+                let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                let mut ep = Episode::new("Strategist", "enrich").succeeded();
+                ep.usage = Usage {
+                    wall_ms,
+                    cost_usd: f64::from(result.usage.cost_usd),
+                    input_tokens: u64::from(result.usage.input_tokens),
+                    output_tokens: u64::from(result.usage.output_tokens),
+                    ..Usage::default()
+                };
+                ep.input_signal_hash = plan_id.to_string();
+                ep.output_signal_hash = result.output.id.to_string();
+                let model = self.effective_model();
+                let input = self.enrich_completed_run(ep, plan_id, "enrich", "Strategist", &model, None, 1);
+                self.record_and_check_learning(input, plan_id).await;
+
+                if let Some(tracker) = self.task_trackers.get(plan_id) {
+                    let groups = tracker.tasks_file.parallel_groups();
+                    eprintln!(
+                        "[orchestrate] Enriching {plan_id}: {} tasks, {} parallel groups",
+                        tracker.tasks_file.tasks.len(),
+                        groups.len(),
+                    );
+                } else {
+                    eprintln!(
+                        "[orchestrate] Enriching {plan_id}: no tasks.toml, using generic strategist enrichment"
+                    );
+                }
+
+                let event = ExecutorEvent::EnrichmentDone;
+                self.log_transition(plan_id, &event);
+                let _ = self.executor.apply_event(plan_id, &event);
+            }
+            Err(e) => {
+                eprintln!("[orchestrate] Enrichment failed for {plan_id}: {e}");
+                let _ = self.executor.apply_event(
+                    plan_id,
+                    &ExecutorEvent::Fatal(format!("enrichment failed: {e}")),
+                );
+            }
+        }
     }
 
     /// Implementing phase: dispatch ready tasks, parallelising when multiple are
@@ -1826,6 +1875,7 @@ impl PlanRunner {
                     None,
                     None,
                     Some(exec_dir.clone()),
+                    None,
                 )
                 .await
             {
@@ -2339,6 +2389,7 @@ impl PlanRunner {
                 Some(prompt),
                 None,
                 None,
+                None,
             )
             .await
         {
@@ -2468,6 +2519,7 @@ impl PlanRunner {
                 fix_prompt,
                 fix_model,
                 None,
+                None,
             )
             .await
         {
@@ -2573,6 +2625,7 @@ impl PlanRunner {
                 Some(review_prompt),
                 None,
                 None,
+                None,
             )
             .await
         {
@@ -2642,6 +2695,7 @@ impl PlanRunner {
                 AgentRole::Scribe,
                 "docs",
                 Some(doc_prompt),
+                None,
                 None,
                 None,
             )
@@ -2862,11 +2916,11 @@ impl PlanRunner {
         role: AgentRole,
         task: &str,
     ) -> Result<AgentResult> {
-        self.dispatch_agent_with(plan_id, role, task, None, None, None)
+        self.dispatch_agent_with(plan_id, role, task, None, None, None, None)
             .await
     }
 
-    /// Core agent dispatch with optional prompt and model overrides.
+    /// Core agent dispatch with optional prompt, model, and system-prompt overrides.
     async fn dispatch_agent_with(
         &mut self,
         plan_id: &str,
@@ -2875,6 +2929,7 @@ impl PlanRunner {
         prompt_override: Option<String>,
         model_override: Option<String>,
         exec_dir_override: Option<PathBuf>,
+        system_prompt_override: Option<String>,
     ) -> Result<AgentResult> {
         let ctx = Context::now();
         let exec_dir = match exec_dir_override {
@@ -3140,7 +3195,8 @@ impl PlanRunner {
             "[orchestrate] format_bandit: model={selected_model} role={role:?} tools={tool_count} → {selected_format:?}",
         );
 
-        let role_instruction = build_system_prompt(role, plan_id, task, &claude_tools_csv);
+        let role_instruction = system_prompt_override
+            .unwrap_or_else(|| build_system_prompt(role, plan_id, task, &claude_tools_csv));
         let role_section = PromptSection::new("role", &role_instruction)
             .with_priority(SectionPriority::Critical)
             .with_placement(Placement::Start)
@@ -4132,6 +4188,69 @@ fn build_system_prompt(role: AgentRole, plan_id: &str, task: &str, tools_csv: &s
         tools_csv,
     )
     .build()
+}
+
+impl PlanRunner {
+    /// Build the strategist system prompt for the Enriching phase.
+    ///
+    /// This assembles the same 6-layer system prompt as other agent dispatches,
+    /// but injects the plan's task context and inline read_files content so the
+    /// strategist sees the full enrichment surface before dispatch.
+    fn build_enrichment_system_prompt(&self, plan_id: &str) -> String {
+        let plan_dir = self.workdir.join("plans").join(plan_id);
+        let tasks_file = self
+            .task_trackers
+            .get(plan_id)
+            .map(|tracker| &tracker.tasks_file);
+
+        let mut context_summary = String::new();
+        if let Some(tasks_file) = tasks_file {
+            context_summary.push_str(&format!(
+                "Plan {plan_id} enrichment context\n\n\
+                 Use this task inventory and inline file context to prepare execution-ready notes.\n"
+            ));
+            for task in &tasks_file.tasks {
+                context_summary.push_str(&format!(
+                    "\n## Task {} - {}\n\
+                     Status: {}\n\
+                     Tier: {}\n",
+                    task.id, task.title, task.status, task.tier
+                ));
+                if !task.files.is_empty() {
+                    context_summary.push_str("Files to modify:\n");
+                    for file in &task.files {
+                        context_summary.push_str(&format!("- {file}\n"));
+                    }
+                }
+                context_summary.push_str(&task.build_prompt(plan_id, &self.workdir));
+                context_summary.push('\n');
+            }
+        } else {
+            context_summary.push_str(&format!(
+                "Plan {plan_id} has no tasks.toml. Enrich the plan from the available plan.md and repository context."
+            ));
+        }
+
+        let tools_csv = claude_tool_allowlist_with(AgentRole::Strategist, self.tool_registry.as_deref());
+        RoleSystemPromptSpec::new(
+            AgentRole::Strategist,
+            TaskContext::new(format!("Enrich plan {plan_id} before agent dispatch"))
+                .with_plan_id(plan_id)
+                .with_workspace(plan_dir.display().to_string())
+                .with_domain_notes(context_summary),
+            tools_csv,
+        )
+        .with_extra_conventions(
+            "Treat enrichment as a pre-dispatch analysis step. Preserve task context, read_files, and dependency ordering so later agent turns receive accurate context.",
+        )
+        .add_anti_pattern(
+            "Do not invent file contents, dependencies, or task requirements that are not present in the plan context.",
+        )
+        .add_anti_pattern(
+            "Do not skip read_files: if a task declares context files, they must be reflected in the enrichment summary.",
+        )
+        .build()
+    }
 }
 
 fn claude_tool_allowlist(role: AgentRole) -> String {
