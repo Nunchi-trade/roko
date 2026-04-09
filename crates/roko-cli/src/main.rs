@@ -440,6 +440,12 @@ enum ConfigCmd {
         #[arg(long)]
         workdir: Option<PathBuf>,
     },
+    /// Check `${VAR}` references in config and validate referenced secrets.
+    CheckSecrets {
+        /// Directory to resolve project config from (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
 }
 
 fn main() {
@@ -1101,6 +1107,10 @@ fn dispatch_config(cmd: ConfigCmd) -> Result<()> {
                 EditTarget::Global
             };
             config_cmd::cmd_set(&wd, target, &key, &value)
+        }
+        ConfigCmd::CheckSecrets { workdir } => {
+            let wd = workdir.unwrap_or_else(|| PathBuf::from("."));
+            config_cmd::cmd_check_secrets(&wd)
         }
     }
 }
@@ -2506,6 +2516,17 @@ mod tests {
             cli.command,
             Some(Command::Config {
                 cmd: ConfigCmd::Show { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_parses_check_secrets_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "config", "check-secrets"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Config {
+                cmd: ConfigCmd::CheckSecrets { .. }
             })
         ));
     }

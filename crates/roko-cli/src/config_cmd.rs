@@ -6,13 +6,16 @@
 //! working global config with one interactive pass.
 
 use crate::config::{
-    AgentLayer, ConfigLayer, DetectedCli, ExecutorLayer, GateConfig, PromptLayer, ResolvedConfig,
-    ServeAuthLayer, ServeLayer, Source, ToolsLayer, detect_clis, global_config_path, load_layered,
+    AgentLayer, ConfigLayer, ConfigPaths, DetectedCli, ExecutorLayer, GateConfig, PromptLayer,
+    ResolvedConfig, ServeAuthLayer, ServeLayer, Source, ToolsLayer, detect_clis,
+    global_config_path, load_layered, resolve_paths,
 };
 use anyhow::{Context as _, Result, anyhow};
 use roko_orchestrator::ExecutorConfig;
+use std::collections::BTreeSet;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Non-interactive inputs for `config init` (used by CI / tests).
 #[derive(Clone, Debug, Default)]
@@ -189,6 +192,81 @@ pub fn cmd_path(workdir: &Path) -> Result<()> {
         println!("env    : {} (via ROKO_CONFIG)", env.display());
     }
     Ok(())
+}
+
+/// Scan the active config file for `${VAR}` references and validate them.
+///
+/// All referenced env vars must exist and non-empty. `GITHUB_TOKEN` is
+/// additionally validated against the GitHub API, and `SLACK_BOT_TOKEN`
+/// against Slack's `auth.test` API.
+pub fn cmd_check_secrets(workdir: &Path) -> Result<()> {
+    let paths = resolve_paths(workdir);
+    let config_path = secret_check_config_path(&paths)?;
+    let text = std::fs::read_to_string(&config_path)
+        .with_context(|| format!("read config {}", config_path.display()))?;
+    let tokens = collect_env_tokens(&text)?;
+
+    if tokens.is_empty() {
+        println!(
+            "no `${{VAR}}` tokens found in {}",
+            config_path.display()
+        );
+        return Ok(());
+    }
+
+    println!(
+        "checking {} referenced secret token(s) in {}",
+        tokens.len(),
+        config_path.display()
+    );
+
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("roko-cli/0.1")
+        .timeout(Duration::from_secs(10))
+        .build()
+        .context("build HTTP client")?;
+
+    let mut missing = Vec::new();
+    let mut invalid = Vec::new();
+
+    for token in tokens {
+        print!("  {token}: ");
+        match std::env::var(&token) {
+            Ok(value) if !value.is_empty() => {
+                if let Some(target) = secret_validation_target(&token) {
+                    match validate_secret_token(&client, target, &value) {
+                        Ok(()) => {
+                            println!("valid ({})", target.label());
+                        }
+                        Err(err) => {
+                            println!("invalid ({err})");
+                            invalid.push(format!("{token}: {err}"));
+                        }
+                    }
+                } else {
+                    println!("present");
+                }
+            }
+            _ => {
+                println!("missing");
+                missing.push(token);
+            }
+        }
+    }
+
+    if missing.is_empty() && invalid.is_empty() {
+        println!("all referenced secret tokens are set and valid");
+        return Ok(());
+    }
+
+    let mut message = String::from("secret check failed");
+    if !missing.is_empty() {
+        message.push_str(&format!("\nmissing: {}", missing.join(", ")));
+    }
+    if !invalid.is_empty() {
+        message.push_str(&format!("\ninvalid: {}", invalid.join(", ")));
+    }
+    Err(anyhow!(message))
 }
 
 /// Open `$EDITOR` on the global or project config file (creating it if needed).
@@ -435,6 +513,128 @@ fn apply_key_value(layer: &mut ConfigLayer, key: &str, value: &str) -> Result<()
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SecretValidationTarget {
+    GitHub,
+    Slack,
+}
+
+impl SecretValidationTarget {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::GitHub => "GitHub API",
+            Self::Slack => "Slack API",
+        }
+    }
+}
+
+fn secret_check_config_path(paths: &ConfigPaths) -> Result<PathBuf> {
+    if let Some(path) = &paths.env_override {
+        return Ok(path.clone());
+    }
+    if let Some(path) = &paths.project {
+        return Ok(path.clone());
+    }
+    if paths.global.is_file() {
+        return Ok(paths.global.clone());
+    }
+    Err(anyhow!("no config file found to check"))
+}
+
+fn collect_env_tokens(text: &str) -> Result<BTreeSet<String>> {
+    let value: toml::Value = toml::from_str(text).context("parse config toml")?;
+    let mut tokens = BTreeSet::new();
+    collect_env_tokens_from_value(&value, &mut tokens);
+    Ok(tokens)
+}
+
+fn collect_env_tokens_from_value(value: &toml::Value, tokens: &mut BTreeSet<String>) {
+    match value {
+        toml::Value::String(s) => collect_env_tokens_from_string(s, tokens),
+        toml::Value::Array(items) => {
+            for item in items {
+                collect_env_tokens_from_value(item, tokens);
+            }
+        }
+        toml::Value::Table(entries) => {
+            for item in entries.values() {
+                collect_env_tokens_from_value(item, tokens);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_env_tokens_from_string(input: &str, tokens: &mut BTreeSet<String>) {
+    let mut rest = input;
+    while let Some(start) = rest.find("${") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find('}') else {
+            break;
+        };
+        let candidate = &after[..end];
+        if !candidate.is_empty()
+            && candidate
+                .chars()
+                .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        {
+            tokens.insert(candidate.to_string());
+        }
+        rest = &after[end + 1..];
+    }
+}
+
+fn secret_validation_target(var: &str) -> Option<SecretValidationTarget> {
+    match var {
+        "GITHUB_TOKEN" | "GH_TOKEN" => Some(SecretValidationTarget::GitHub),
+        "SLACK_BOT_TOKEN" | "SLACK_TOKEN" => Some(SecretValidationTarget::Slack),
+        _ => None,
+    }
+}
+
+fn validate_secret_token(
+    client: &reqwest::blocking::Client,
+    target: SecretValidationTarget,
+    token: &str,
+) -> Result<()> {
+    match target {
+        SecretValidationTarget::GitHub => validate_github_token(client, token),
+        SecretValidationTarget::Slack => validate_slack_token(client, token),
+    }
+}
+
+fn validate_github_token(client: &reqwest::blocking::Client, token: &str) -> Result<()> {
+    let response = client
+        .get("https://api.github.com/user")
+        .bearer_auth(token)
+        .send()
+        .context("call GitHub API")?;
+    if response.status().is_success() {
+        return Ok(());
+    }
+    Err(anyhow!("GitHub API returned {}", response.status()))
+}
+
+fn validate_slack_token(client: &reqwest::blocking::Client, token: &str) -> Result<()> {
+    let response = client
+        .post("https://slack.com/api/auth.test")
+        .bearer_auth(token)
+        .send()
+        .context("call Slack API")?;
+    let status = response.status();
+    let body: serde_json::Value = response
+        .json()
+        .context("parse Slack API response")?;
+    if body.get("ok").and_then(|value| value.as_bool()) == Some(true) {
+        return Ok(());
+    }
+    let error = body
+        .get("error")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown error");
+    Err(anyhow!("Slack API returned {status} ({error})"))
+}
+
 fn resolve_agent_command(preset: Option<String>, detected: &[DetectedCli]) -> Result<String> {
     if let Some(cmd) = preset {
         return Ok(cmd);
@@ -657,5 +857,39 @@ mod tests {
         let auth = layer.serve.unwrap().auth.unwrap();
         assert_eq!(auth.enabled, Some(true));
         assert_eq!(auth.api_key, Some("secret".to_string()));
+    }
+
+    #[test]
+    fn collect_env_tokens_dedupes_nested_strings() {
+        let text = r#"
+            [agent]
+            command = "runner-${GITHUB_TOKEN}"
+            args = ["--flag=${SLACK_BOT_TOKEN}", "plain", "again-${GITHUB_TOKEN}"]
+
+            [prompt]
+            role = "use ${ANTHROPIC_API_KEY}"
+        "#;
+        let tokens = collect_env_tokens(text).unwrap();
+        assert_eq!(
+            tokens.into_iter().collect::<Vec<_>>(),
+            vec![
+                "ANTHROPIC_API_KEY".to_string(),
+                "GITHUB_TOKEN".to_string(),
+                "SLACK_BOT_TOKEN".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn secret_validation_target_recognizes_known_tokens() {
+        assert!(matches!(
+            secret_validation_target("GITHUB_TOKEN"),
+            Some(SecretValidationTarget::GitHub)
+        ));
+        assert!(matches!(
+            secret_validation_target("SLACK_BOT_TOKEN"),
+            Some(SecretValidationTarget::Slack)
+        ));
+        assert!(secret_validation_target("ANTHROPIC_API_KEY").is_none());
     }
 }
