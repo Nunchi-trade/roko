@@ -19,6 +19,13 @@ struct JsonRpcRequest {
     id: Value,
 }
 
+#[derive(Debug, Deserialize)]
+struct ToolsCallParams {
+    name: String,
+    #[serde(default = "empty_json_object")]
+    arguments: Value,
+}
+
 #[derive(Debug, Serialize, PartialEq)]
 struct JsonRpcResponse {
     jsonrpc: &'static str,
@@ -65,17 +72,23 @@ impl JsonRpcError {
             data: None,
         }
     }
+
+    fn invalid_params(message: impl Into<String>) -> Self {
+        Self::invalid_request(message)
+    }
 }
 
 fn main() -> anyhow::Result<()> {
-    serve_stdio(io::stdin().lock(), io::stdout().lock(), |request| {
-        let _ = &request.params;
-        match request.method.as_str() {
-            "initialize" => Ok(handle_initialize()),
-            "tools/list" => Ok(handle_tools_list()),
-            _ => Err(JsonRpcError::method_not_found(&request.method)),
-        }
-    })
+    serve_stdio(io::stdin().lock(), io::stdout().lock(), handle_request)
+}
+
+fn handle_request(request: JsonRpcRequest) -> Result<Value, JsonRpcError> {
+    match request.method.as_str() {
+        "initialize" => Ok(handle_initialize()),
+        "tools/list" => Ok(handle_tools_list()),
+        "tools/call" => handle_tools_call(request.params),
+        _ => Err(JsonRpcError::method_not_found(&request.method)),
+    }
 }
 
 fn handle_initialize() -> Value {
@@ -421,6 +434,142 @@ fn handle_tools_list() -> Value {
     })
 }
 
+fn handle_tools_call(params: Value) -> Result<Value, JsonRpcError> {
+    let params: ToolsCallParams = serde_json::from_value(params)
+        .map_err(|err| JsonRpcError::invalid_params(format!("invalid tools/call params: {err}")))?;
+    dispatch_tool_call(&params.name, params.arguments)
+}
+
+fn dispatch_tool_call(name: &str, arguments: Value) -> Result<Value, JsonRpcError> {
+    match name {
+        "github.list_prs" => handle_list_prs(arguments),
+        "github.get_pr" => handle_get_pr(arguments),
+        "github.create_pr" => handle_create_pr(arguments),
+        "github.comment_pr" => handle_comment_pr(arguments),
+        "github.review_pr" => handle_review_pr(arguments),
+        "github.merge_pr" => handle_merge_pr(arguments),
+        "github.list_issues" => handle_list_issues(arguments),
+        "github.create_issue" => handle_create_issue(arguments),
+        "github.comment_issue" => handle_comment_issue(arguments),
+        "github.close_issue" => handle_close_issue(arguments),
+        "github.add_labels" => handle_add_labels(arguments),
+        "github.create_label" => handle_create_label(arguments),
+        "github.get_file" => handle_get_file(arguments),
+        "github.search_code" => handle_search_code(arguments),
+        "github.list_commits" => handle_list_commits(arguments),
+        "github.create_branch" => handle_create_branch(arguments),
+        "github.get_branch" => handle_get_branch(arguments),
+        "github.compare_branches" => handle_compare_branches(arguments),
+        "github.get_actions_status" => handle_get_actions_status(arguments),
+        _ => Err(JsonRpcError::invalid_params(format!("unknown tool: {name}"))),
+    }
+}
+
+fn empty_json_object() -> Value {
+    Value::Object(Default::default())
+}
+
+fn unsupported_tool(name: &str) -> Result<Value, JsonRpcError> {
+    Err(JsonRpcError::invalid_params(format!(
+        "tool handler `{name}` is not implemented yet"
+    )))
+}
+
+fn handle_list_prs(arguments: Value) -> Result<Value, JsonRpcError> {
+    let _ = arguments;
+    unsupported_tool("github.list_prs")
+}
+
+fn handle_get_pr(arguments: Value) -> Result<Value, JsonRpcError> {
+    let _ = arguments;
+    unsupported_tool("github.get_pr")
+}
+
+fn handle_create_pr(arguments: Value) -> Result<Value, JsonRpcError> {
+    let _ = arguments;
+    unsupported_tool("github.create_pr")
+}
+
+fn handle_comment_pr(arguments: Value) -> Result<Value, JsonRpcError> {
+    let _ = arguments;
+    unsupported_tool("github.comment_pr")
+}
+
+fn handle_review_pr(arguments: Value) -> Result<Value, JsonRpcError> {
+    let _ = arguments;
+    unsupported_tool("github.review_pr")
+}
+
+fn handle_merge_pr(arguments: Value) -> Result<Value, JsonRpcError> {
+    let _ = arguments;
+    unsupported_tool("github.merge_pr")
+}
+
+fn handle_list_issues(arguments: Value) -> Result<Value, JsonRpcError> {
+    let _ = arguments;
+    unsupported_tool("github.list_issues")
+}
+
+fn handle_create_issue(arguments: Value) -> Result<Value, JsonRpcError> {
+    let _ = arguments;
+    unsupported_tool("github.create_issue")
+}
+
+fn handle_comment_issue(arguments: Value) -> Result<Value, JsonRpcError> {
+    let _ = arguments;
+    unsupported_tool("github.comment_issue")
+}
+
+fn handle_close_issue(arguments: Value) -> Result<Value, JsonRpcError> {
+    let _ = arguments;
+    unsupported_tool("github.close_issue")
+}
+
+fn handle_add_labels(arguments: Value) -> Result<Value, JsonRpcError> {
+    let _ = arguments;
+    unsupported_tool("github.add_labels")
+}
+
+fn handle_create_label(arguments: Value) -> Result<Value, JsonRpcError> {
+    let _ = arguments;
+    unsupported_tool("github.create_label")
+}
+
+fn handle_get_file(arguments: Value) -> Result<Value, JsonRpcError> {
+    let _ = arguments;
+    unsupported_tool("github.get_file")
+}
+
+fn handle_search_code(arguments: Value) -> Result<Value, JsonRpcError> {
+    let _ = arguments;
+    unsupported_tool("github.search_code")
+}
+
+fn handle_list_commits(arguments: Value) -> Result<Value, JsonRpcError> {
+    let _ = arguments;
+    unsupported_tool("github.list_commits")
+}
+
+fn handle_create_branch(arguments: Value) -> Result<Value, JsonRpcError> {
+    let _ = arguments;
+    unsupported_tool("github.create_branch")
+}
+
+fn handle_get_branch(arguments: Value) -> Result<Value, JsonRpcError> {
+    let _ = arguments;
+    unsupported_tool("github.get_branch")
+}
+
+fn handle_compare_branches(arguments: Value) -> Result<Value, JsonRpcError> {
+    let _ = arguments;
+    unsupported_tool("github.compare_branches")
+}
+
+fn handle_get_actions_status(arguments: Value) -> Result<Value, JsonRpcError> {
+    let _ = arguments;
+    unsupported_tool("github.get_actions_status")
+}
+
 fn github_tool(name: &str, description: &str, input_schema: Value) -> Value {
     serde_json::json!({
         "name": name,
@@ -597,5 +746,35 @@ mod tests {
             .expect("github.get_pr tool");
         assert_eq!(get_pr["description"], "Get a pull request, optionally including its diff.");
         assert_eq!(get_pr["inputSchema"]["required"], json!(["owner", "repo", "number"]));
+    }
+
+    #[test]
+    fn tools_call_dispatches_known_tool_names() {
+        let err = handle_tools_call(json!({
+            "name": "github.get_pr",
+            "arguments": {
+                "owner": "octo",
+                "repo": "hello-world",
+                "number": 1
+            }
+        }))
+        .expect_err("tool is not wired yet");
+
+        assert!(
+            err.message.contains("github.get_pr"),
+            "expected error to mention dispatched tool name"
+        );
+    }
+
+    #[test]
+    fn tools_call_rejects_unknown_tool_names() {
+        let err = handle_tools_call(json!({
+            "name": "github.not_real",
+            "arguments": {}
+        }))
+        .expect_err("unknown tool should fail");
+
+        assert_eq!(err.code, JsonRpcError::INVALID_REQUEST);
+        assert!(err.message.contains("unknown tool"));
     }
 }
