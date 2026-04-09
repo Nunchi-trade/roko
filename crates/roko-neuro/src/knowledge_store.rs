@@ -245,6 +245,140 @@ impl KnowledgeStore {
         })?;
         Ok(())
     }
+
+    #[cfg(feature = "hdc")]
+    /// Build an in-memory HDC index over the current knowledge store.
+    ///
+    /// The index fingerprints each entry's content once and keeps the
+    /// resulting vectors resident for fast similarity search.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read.
+    pub fn memory_index(&self) -> Result<MemoryIndex> {
+        Ok(MemoryIndex::from_entries(self.read_all()?))
+    }
+}
+
+#[cfg(feature = "hdc")]
+/// A precomputed HDC index over durable knowledge entries.
+///
+/// The index fingerprints each entry's content with
+/// [`bardo_primitives::hdc::HdcVector::from_seed`] and stores the
+/// resulting vectors alongside the source entries. Searches fingerprint
+/// the query string once and rank entries by HDC similarity, which keeps
+/// semantic lookup fast when the corpus is already indexed.
+#[derive(Debug, Clone)]
+pub struct MemoryIndex {
+    entries: Vec<IndexedKnowledgeEntry>,
+}
+
+#[cfg(feature = "hdc")]
+#[derive(Debug, Clone)]
+struct IndexedKnowledgeEntry {
+    entry: KnowledgeEntry,
+    fingerprint: HdcVector,
+}
+
+#[cfg(feature = "hdc")]
+/// One HDC search result from a [`MemoryIndex`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemoryHit {
+    /// The matched knowledge entry.
+    pub entry: KnowledgeEntry,
+    /// Similarity against the query fingerprint in the range `0.0..=1.0`.
+    pub similarity: f64,
+}
+
+#[cfg(feature = "hdc")]
+impl MemoryIndex {
+    /// Build an index from a collection of knowledge entries.
+    ///
+    /// Each entry is fingerprinted from its content. Empty content still
+    /// receives a deterministic vector, so the index remains total.
+    #[must_use]
+    pub fn from_entries(entries: Vec<KnowledgeEntry>) -> Self {
+        let entries = entries
+            .into_iter()
+            .map(|entry| {
+                let fingerprint = fingerprint_entry(&entry);
+                IndexedKnowledgeEntry { entry, fingerprint }
+            })
+            .collect();
+        Self { entries }
+    }
+
+    /// Number of indexed entries.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the index contains no entries.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Search the index for the `limit` most similar entries to `query`.
+    ///
+    /// The query is fingerprinted once, then compared against each
+    /// precomputed entry vector. Results are sorted from highest to
+    /// lowest similarity.
+    #[must_use]
+    pub fn search(&self, query: &str, limit: usize) -> Vec<MemoryHit> {
+        if limit == 0 || self.entries.is_empty() {
+            return Vec::new();
+        }
+
+        let query_fingerprint = HdcVector::from_seed(query.as_bytes());
+        let mut scored: Vec<MemoryHit> = self
+            .entries
+            .iter()
+            .map(|indexed| MemoryHit {
+                entry: indexed.entry.clone(),
+                similarity: query_fingerprint.similarity(&indexed.fingerprint) as f64,
+            })
+            .collect();
+
+        scored.sort_by(compare_hits);
+        scored.truncate(limit);
+        scored
+    }
+
+    /// Return the indexed entries with their precomputed fingerprints.
+    ///
+    /// This is mainly useful for testing and for consumers that want to
+    /// inspect or reuse the durable entries directly.
+    #[must_use]
+    pub fn entries(&self) -> Vec<KnowledgeEntry> {
+        self.entries
+            .iter()
+            .map(|indexed| indexed.entry.clone())
+            .collect()
+    }
+}
+
+#[cfg(feature = "hdc")]
+fn fingerprint_entry(entry: &KnowledgeEntry) -> HdcVector {
+    HdcVector::from_seed(entry.content.as_bytes())
+}
+
+#[cfg(feature = "hdc")]
+fn compare_hits(left: &MemoryHit, right: &MemoryHit) -> std::cmp::Ordering {
+    right
+        .similarity
+        .partial_cmp(&left.similarity)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| {
+            right
+                .entry
+                .confidence
+                .partial_cmp(&left.entry.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .then_with(|| right.entry.created_at.cmp(&left.entry.created_at))
+        .then_with(|| left.entry.id.cmp(&right.entry.id))
 }
 
 fn normalize(text: &str) -> String {
@@ -329,8 +463,8 @@ fn hdc_similarity(entry: &KnowledgeEntry, topic: &str) -> f64 {
 mod tests {
     use super::*;
     use chrono::Duration;
-    use tempfile::TempDir;
     use crate::KnowledgeKind;
+    use tempfile::TempDir;
 
     fn entry(id: &str, content: &str, tags: &[&str], confidence: f64, created_at: DateTime<Utc>) -> KnowledgeEntry {
         KnowledgeEntry {
@@ -411,5 +545,68 @@ mod tests {
         let all = store.read_all().expect("read");
         assert_eq!(all.len(), 1);
         assert!((all[0].confidence - 0.5).abs() < 0.05);
+    }
+
+    #[cfg(feature = "hdc")]
+    #[test]
+    fn memory_index_search_prefers_matching_content() {
+        let now = Utc::now();
+        let index = MemoryIndex::from_entries(vec![
+            entry(
+                "k1",
+                "rust async memory retrieval",
+                &["rust", "memory"],
+                1.0,
+                now,
+            ),
+            entry(
+                "k2",
+                "postgres maintenance routine",
+                &["db"],
+                0.9,
+                now,
+            ),
+        ]);
+
+        assert_eq!(index.len(), 2);
+        assert!(!index.is_empty());
+
+        let hits = index.search("rust async memory retrieval", 1);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].entry.id, "k1");
+        assert!(hits[0].similarity >= 0.99);
+    }
+
+    #[cfg(feature = "hdc")]
+    #[test]
+    fn knowledge_store_builds_memory_index() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let now = Utc::now();
+
+        store
+            .add(entry(
+                "k1",
+                "semantic retrieval over durable knowledge",
+                &["memory"],
+                1.0,
+                now,
+            ))
+            .expect("add first");
+        store
+            .add(entry(
+                "k2",
+                "completely unrelated topic",
+                &["misc"],
+                0.8,
+                now,
+            ))
+            .expect("add second");
+
+        let index = store.memory_index().expect("index");
+        assert_eq!(index.entries().len(), 2);
+        let hits = index.search("semantic retrieval over durable knowledge", 1);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].entry.id, "k1");
     }
 }

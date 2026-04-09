@@ -73,3 +73,5 @@ pub mod distiller;
 
 pub use distiller::{DistillationBackend, Distiller};
 pub use knowledge_store::KnowledgeStore;
+#[cfg(feature = "hdc")]
+pub use knowledge_store::{MemoryHit, MemoryIndex};
