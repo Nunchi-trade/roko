@@ -5372,6 +5372,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "bardo-primitives",
  "bardo-runtime",
  "base64",
  "chrono",

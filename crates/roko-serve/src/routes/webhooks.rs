@@ -71,10 +71,10 @@ async fn github_webhook(
     let kind = github_signal_kind(event_type, &payload)
         .ok_or_else(|| ApiError::bad_request(format!("unsupported github event: {event_type}")))?;
 
-    let signal = Signal::builder(kind)
+    let signal = attach_hdc_fingerprint(Signal::builder(kind)
         .body(Body::Json(payload))
         .provenance(Provenance::external("github:webhook"))
-        .build();
+        .build());
 
     persist_webhook_signal(&state, signal).await?;
 
@@ -138,10 +138,10 @@ async fn slack_webhook(
     let kind = slack_signal_kind(event_type)
         .ok_or_else(|| ApiError::bad_request(format!("unsupported slack event: {event_type}")))?;
 
-    let signal = Signal::builder(kind)
+    let signal = attach_hdc_fingerprint(Signal::builder(kind)
         .body(Body::Json(payload))
         .provenance(Provenance::external("slack:webhook"))
-        .build();
+        .build());
 
     persist_webhook_signal(&state, signal).await?;
 
@@ -158,7 +158,7 @@ async fn generic_webhook(
     let payload: Value = serde_json::from_slice(&body)
         .map_err(|e| ApiError::bad_request(format!("invalid generic webhook json: {e}")))?;
 
-    let signal = generic_webhook_signal(payload);
+    let signal = attach_hdc_fingerprint(generic_webhook_signal(payload));
     persist_webhook_signal(&state, signal).await?;
 
     Ok(StatusCode::OK)
@@ -169,6 +169,24 @@ fn generic_webhook_signal(payload: Value) -> Signal {
         .body(Body::Json(payload))
         .provenance(Provenance::external("webhook:generic"))
         .build()
+}
+
+#[cfg(feature = "hdc")]
+fn attach_hdc_fingerprint(mut signal: Signal) -> Signal {
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use base64::Engine as _;
+
+    let fingerprint = bardo_primitives::hdc::fingerprint(&signal.body);
+    signal
+        .tags
+        .insert("hdc_fingerprint".into(), BASE64.encode(fingerprint.to_bytes()));
+    signal.id = signal.content_hash();
+    signal
+}
+
+#[cfg(not(feature = "hdc"))]
+fn attach_hdc_fingerprint(signal: Signal) -> Signal {
+    signal
 }
 
 async fn persist_webhook_signal(state: &AppState, signal: Signal) -> Result<(), ApiError> {

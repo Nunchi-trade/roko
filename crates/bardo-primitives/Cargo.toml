@@ -18,6 +18,7 @@ rkyv = ["dep:rkyv"]
 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 rkyv = { version = "0.8", optional = true }
 
