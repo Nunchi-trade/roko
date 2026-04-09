@@ -187,6 +187,25 @@ impl AffectEngine {
         self.adjust(task_id.into(), 0.0, blockers * 0.05, -(blockers * 0.08))
     }
 
+    /// Queue-wait motivation signal.
+    ///
+    /// Returns a positive arousal bump for work that has sat in a queue
+    /// without being executed. The bump starts after 24 hours and grows by
+    /// `+0.1` per day beyond that. Once work is older than 7 days, the
+    /// signal saturates at a very high arousal level to mean "do this or
+    /// drop it".
+    #[must_use]
+    pub fn queue_wait_arousal(wait_hours: f64) -> f64 {
+        if !wait_hours.is_finite() || wait_hours <= 24.0 {
+            return 0.0;
+        }
+        if wait_hours > 24.0 * 7.0 {
+            return 1.0;
+        }
+
+        ((wait_hours - 24.0) / 24.0 * 0.1).clamp(0.0, 1.0)
+    }
+
     /// Apply explicit decay to every tracked state.
     pub fn decay(&mut self, delta_hours: f64) {
         let factor = decay_factor(delta_hours, self.half_life_hours);
@@ -599,5 +618,25 @@ mod tests {
         assert_eq!(state.pleasure, 0.0);
         assert_eq!(state.arousal, 0.0);
         assert_eq!(state.dominance, 0.0);
+    }
+
+    #[test]
+    fn queue_wait_arousal_stays_idle_for_fresh_work() {
+        assert_eq!(AffectEngine::queue_wait_arousal(12.0), 0.0);
+        assert_eq!(AffectEngine::queue_wait_arousal(24.0), 0.0);
+    }
+
+    #[test]
+    fn queue_wait_arousal_grows_after_one_day() {
+        let bump = AffectEngine::queue_wait_arousal(48.0);
+        assert!((bump - 0.1).abs() < 1e-9);
+
+        let bigger_bump = AffectEngine::queue_wait_arousal(72.0);
+        assert!(bigger_bump > bump);
+    }
+
+    #[test]
+    fn queue_wait_arousal_saturates_for_very_stale_work() {
+        assert_eq!(AffectEngine::queue_wait_arousal(24.0 * 8.0), 1.0);
     }
 }

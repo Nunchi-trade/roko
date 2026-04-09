@@ -11,7 +11,7 @@ use std::cmp::Ordering;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow};
 use bardo_runtime::cancel::CancelToken;
@@ -927,6 +927,8 @@ struct TaskTracker {
     failed: Vec<String>,
     skipped: Vec<String>,
     current_group_index: usize,
+    /// When each ready task first entered the queue, in Unix ms.
+    ready_since_ms: HashMap<String, u64>,
     _plan_dir: PathBuf,
     last_gate_failure: Option<String>,
     /// Which gate phase failed (e.g. "compile", "test", "clippy").
@@ -1024,6 +1026,7 @@ impl TaskTracker {
             failed: Vec::new(),
             skipped,
             current_group_index: 0,
+            ready_since_ms: HashMap::new(),
             _plan_dir: plan_dir,
             last_gate_failure: None,
             last_gate_failure_phase: None,
@@ -1047,6 +1050,21 @@ impl TaskTracker {
         self.ready_tasks(completed_plans).into_iter().next()
     }
 
+    /// Return the task IDs that are currently ready to execute.
+    fn ready_task_ids(&self, completed_plans: &[String]) -> Vec<String> {
+        self.tasks_file
+            .tasks
+            .iter()
+            .filter(|t| {
+                !self.completed.contains(&t.id)
+                    && !self.failed.contains(&t.id)
+                    && !self.skipped.contains(&t.id)
+                    && t.is_ready_with_plan_deps(&self.completed, completed_plans)
+            })
+            .map(|t| t.id.clone())
+            .collect()
+    }
+
     /// Return ALL ready tasks (deps satisfied, not completed, not failed).
     fn ready_tasks(&self, completed_plans: &[String]) -> Vec<&crate::task_parser::TaskDef> {
         self.tasks_file
@@ -1059,6 +1077,25 @@ impl TaskTracker {
                     && t.is_ready_with_plan_deps(&self.completed, completed_plans)
             })
             .collect()
+    }
+
+    /// Refresh ready-since timestamps for tasks that are currently queued.
+    fn sync_ready_queue(&mut self, completed_plans: &[String]) {
+        let now = now_ms();
+        let ready_ids = self.ready_task_ids(completed_plans);
+        let ready_set: HashSet<String> = ready_ids.into_iter().collect();
+
+        self.ready_since_ms.retain(|task_id, _| ready_set.contains(task_id));
+        for task_id in ready_set {
+            self.ready_since_ms.entry(task_id).or_insert(now);
+        }
+    }
+
+    /// Return how long a ready task has been waiting in the queue.
+    fn queue_wait_hours(&self, task_id: &str) -> Option<f64> {
+        let started_ms = self.ready_since_ms.get(task_id)?;
+        let elapsed_ms = now_ms().saturating_sub(*started_ms);
+        Some(elapsed_ms as f64 / 3_600_000.0)
     }
 
     /// Whether any unfinished task is currently blocked only by cross-plan deps.
@@ -1090,6 +1127,7 @@ impl TaskTracker {
         }
         self.failed.retain(|id| id != task_id);
         self.skipped.retain(|id| id != task_id);
+        self.ready_since_ms.remove(task_id);
         self.advance_group_index();
     }
 
@@ -1099,6 +1137,7 @@ impl TaskTracker {
             self.skipped.push(task_id.to_string());
         }
         self.failed.retain(|id| id != task_id);
+        self.ready_since_ms.remove(task_id);
         self.advance_group_index();
     }
 
@@ -1125,6 +1164,7 @@ impl TaskTracker {
             .collect();
         self.completed.retain(|task_id| task_ids.contains(task_id));
         self.current_group_index = 0;
+        self.ready_since_ms.clear();
         self.impl_round += 1;
         self.advance_group_index();
         Ok(())
@@ -1171,6 +1211,7 @@ impl TaskTracker {
         self.failed.clear();
         self.skipped.clear();
         self.current_group_index = 0;
+        self.ready_since_ms.clear();
         self.impl_round += 1;
     }
 
@@ -1239,6 +1280,13 @@ where
     });
 
     scored.into_iter().map(|(_, _, task_id)| task_id).collect()
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or_default()
 }
 
 fn merge_completed_tasks(tracker: &mut TaskTracker, completed_tasks: &[String]) {
@@ -2386,6 +2434,7 @@ impl PlanRunner {
                     "skipped": tracker.skipped,
                     "current_group_index": tracker.current_group_index,
                     "impl_round": tracker.impl_round,
+                    "ready_since_ms": tracker.ready_since_ms,
                 })
             })
             .collect();
@@ -2444,6 +2493,17 @@ impl PlanRunner {
                 .unwrap_or_default();
             let current_group_index = entry["current_group_index"].as_u64().unwrap_or(0) as usize;
             let impl_round = entry["impl_round"].as_u64().unwrap_or(0) as u32;
+            let ready_since_ms = entry
+                .get("ready_since_ms")
+                .and_then(|value| value.as_object())
+                .map(|map| {
+                    map.iter()
+                        .filter_map(|(task_id, started_ms)| {
+                            started_ms.as_u64().map(|ms| (task_id.clone(), ms))
+                        })
+                        .collect::<HashMap<String, u64>>()
+                })
+                .unwrap_or_default();
 
             let mut tracker = TaskTracker::new(tf, plan_dir);
             tracker.completed = completed;
@@ -2451,6 +2511,7 @@ impl PlanRunner {
             tracker.skipped = skipped;
             tracker.current_group_index = current_group_index;
             tracker.impl_round = impl_round;
+            tracker.ready_since_ms = ready_since_ms;
             if let Some(extra_completed) = completed_from_snapshot.get(&plan_id) {
                 merge_completed_tasks(&mut tracker, extra_completed);
             }
@@ -3342,6 +3403,12 @@ impl PlanRunner {
         let completed_plans = self.executor.completed_plans();
 
         // Collect ALL ready tasks (deps satisfied, not completed/failed).
+        {
+            let Some(tracker) = self.task_trackers.get_mut(plan_id) else {
+                return; // unreachable: checked above
+            };
+            tracker.sync_ready_queue(&completed_plans);
+        }
         let ready: Vec<String> = {
             let Some(tracker) = self.task_trackers.get(plan_id) else {
                 return; // unreachable: checked above
@@ -3362,7 +3429,15 @@ impl PlanRunner {
                 })
                 .unwrap_or_default()
         };
-        let ready = prioritize_ready_tasks(ready, |task_id| self.learning.task_arousal(task_id));
+        let ready = prioritize_ready_tasks(ready, |task_id| {
+            let queue_wait_hours = self
+                .task_trackers
+                .get(plan_id)
+                .and_then(|tracker| tracker.queue_wait_hours(task_id))
+                .unwrap_or(0.0);
+            self.learning
+                .task_arousal_with_queue_wait(task_id, queue_wait_hours)
+        });
 
         if ready.is_empty() {
             // No ready tasks — check if all done or blocked

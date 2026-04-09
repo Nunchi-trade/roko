@@ -688,6 +688,17 @@ impl LearningRuntime {
     pub fn task_arousal(&self, task_id: impl AsRef<str>) -> f64 {
         self.affect_engine.lock().get_state(task_id).arousal
     }
+
+    /// Return the current task arousal with queue-wait motivation applied.
+    pub fn task_arousal_with_queue_wait(
+        &self,
+        task_id: impl AsRef<str>,
+        queued_hours: f64,
+    ) -> f64 {
+        let base = self.task_arousal(task_id);
+        let bump = AffectEngine::queue_wait_arousal(queued_hours);
+        (base + bump).clamp(-1.0, 1.0)
+    }
 }
 
 /// Read optional string value from `episode.extra`.
