@@ -2,7 +2,26 @@
 //!
 //! Placeholder API only; affect or motivation modeling is not yet implemented.
 
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
 use crate::{GolemSubsystemId, GolemSubsystemSummary, ScaffoldEngine};
+
+/// Normalized PAD affect state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AffectState {
+    /// Pleasure dimension in `[-1.0, 1.0]`.
+    /// Success pushes this positive; failure pushes it negative.
+    pub pleasure: f64,
+    /// Arousal dimension in `[-1.0, 1.0]`.
+    /// Time pressure and urgency push this positive; idle pushes it negative.
+    pub arousal: f64,
+    /// Dominance dimension in `[-1.0, 1.0]`.
+    /// Agency and control push this positive; blocked or stuck pushes it negative.
+    pub dominance: f64,
+    /// Last time this affect state was updated.
+    pub updated_at: DateTime<Utc>,
+}
 
 /// Placeholder daimon engine.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

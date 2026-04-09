@@ -5228,6 +5228,10 @@ dependencies = [
 [[package]]
 name = "roko-golem"
 version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+]
 
 [[package]]
 name = "roko-index"

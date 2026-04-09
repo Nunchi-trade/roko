@@ -10,6 +10,10 @@ description = "Scaffold crate for future Golem subsystems (mortality, daimon, dr
 [lints]
 workspace = true
 
+[dependencies]
+chrono = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+
 [features]
 default = []
 scaffold = []
