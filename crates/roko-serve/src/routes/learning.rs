@@ -800,6 +800,7 @@ struct RungThresholdSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roko_core::OperatingFrequency;
     use std::sync::Arc;
 
     use axum::extract::State;
@@ -985,6 +986,7 @@ mod tests {
             outcome: "success".into(),
             gate_errors: Vec::new(),
             model_used: "claude-sonnet-4-5".into(),
+            frequency: OperatingFrequency::Theta,
             strategy_attempted: "none".into(),
             timestamp: timestamp.into(),
         }

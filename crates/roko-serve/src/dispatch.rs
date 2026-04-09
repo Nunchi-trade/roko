@@ -31,6 +31,7 @@ use roko_core::tool::ToolRegistry;
 use roko_core::tool::role_allowlist::role_allowlist;
 use roko_core::{Body, Context as RokoContext, Kind, Provenance, Signal};
 use roko_core::{ContentHash, Verdict};
+use roko_core::OperatingFrequency;
 use roko_learn::cascade_router::CascadeRouter;
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage as EpisodeUsage};
@@ -172,6 +173,7 @@ impl EfficiencyTracker {
             },
             gate_errors: Vec::new(),
             model_used: template_name.to_string(),
+            frequency: OperatingFrequency::Theta,
             strategy_attempted: String::new(),
             timestamp: Utc::now().to_rfc3339(),
         };

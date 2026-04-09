@@ -21,6 +21,8 @@ use crate::plan::{PlanSummary, plans_dir};
 use crate::task_parser::{TaskDef, TasksFile};
 use roko_core::metric::{Headlines, TaskMetric, compute_headlines};
 use roko_core::task::{TaskCategory, TaskComplexityBand};
+#[cfg(test)]
+use roko_core::OperatingFrequency;
 use roko_gate::adaptive_threshold::AdaptiveThresholds;
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
@@ -4289,6 +4291,7 @@ mod tests {
             outcome: "success".to_string(),
             gate_errors: Vec::new(),
             model_used: model.to_string(),
+            frequency: OperatingFrequency::Theta,
             strategy_attempted: "none".to_string(),
             timestamp: timestamp.to_string(),
         }

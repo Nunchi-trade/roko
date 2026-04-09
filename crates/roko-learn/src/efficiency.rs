@@ -19,6 +19,7 @@
 
 use std::collections::HashMap;
 
+use roko_core::OperatingFrequency;
 use serde::{Deserialize, Serialize};
 
 // ─── PromptSectionMeta ──────────────────────────────────────────────────────
@@ -137,6 +138,9 @@ pub struct AgentEfficiencyEvent {
     /// Model used for the task attempt.
     #[serde(default)]
     pub model_used: String,
+    /// Operating frequency for the turn.
+    #[serde(default = "default_operating_frequency")]
+    pub frequency: OperatingFrequency,
     /// Replanning or retry strategy attempted after failure.
     #[serde(default)]
     pub strategy_attempted: String,
@@ -179,6 +183,10 @@ impl AgentEfficiencyEvent {
     }
 }
 
+fn default_operating_frequency() -> OperatingFrequency {
+    OperatingFrequency::Theta
+}
+
 impl Default for AgentEfficiencyEvent {
     fn default() -> Self {
         Self {
@@ -209,6 +217,7 @@ impl Default for AgentEfficiencyEvent {
             outcome: String::new(),
             gate_errors: Vec::new(),
             model_used: String::new(),
+            frequency: default_operating_frequency(),
             strategy_attempted: String::new(),
             timestamp: String::new(),
         }
@@ -366,6 +375,23 @@ pub struct RoleCostProfile {
     pub pass_rate: f64,
 }
 
+/// Aggregate cost profile for a single operating frequency.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FrequencyCostProfile {
+    /// Operating frequency this profile covers.
+    pub frequency: OperatingFrequency,
+    /// Number of efficiency events contributing.
+    pub observations: u64,
+    /// Average cost in USD per turn.
+    pub avg_cost_usd: f64,
+    /// Total cost in USD across all turns.
+    pub total_cost_usd: f64,
+    /// Overall gate pass rate for this frequency.
+    pub pass_rate: f64,
+    /// Total cost / gate passes — true cost of one success.
+    pub cost_per_pass: f64,
+}
+
 /// Compute a [`RoleCostProfile`] for each distinct role in the given events.
 #[allow(clippy::cast_precision_loss)]
 pub fn compute_role_profiles(events: &[AgentEfficiencyEvent]) -> Vec<RoleCostProfile> {
@@ -428,6 +454,48 @@ pub fn compute_role_profiles(events: &[AgentEfficiencyEvent]) -> Vec<RoleCostPro
     profiles
 }
 
+/// Compute a [`FrequencyCostProfile`] for each distinct operating frequency.
+#[allow(clippy::cast_precision_loss)]
+pub fn compute_frequency_profiles(events: &[AgentEfficiencyEvent]) -> Vec<FrequencyCostProfile> {
+    let mut groups: HashMap<OperatingFrequency, Vec<&AgentEfficiencyEvent>> = HashMap::new();
+    for e in events {
+        groups.entry(e.frequency).or_default().push(e);
+    }
+
+    let mut profiles: Vec<FrequencyCostProfile> = groups
+        .into_iter()
+        .map(|(frequency, evts)| {
+            let n = evts.len() as f64;
+            let n_u64 = evts.len() as u64;
+            let total_cost = evts.iter().map(|e| e.cost_usd).sum::<f64>();
+            let avg_cost_usd = if n == 0.0 { 0.0 } else { total_cost / n };
+            let pass_count = evts.iter().filter(|e| e.gate_passed).count();
+            let pass_rate = if n == 0.0 {
+                0.0
+            } else {
+                pass_count as f64 / n
+            };
+            let cost_per_pass = if pass_count > 0 {
+                total_cost / pass_count as f64
+            } else {
+                0.0
+            };
+
+            FrequencyCostProfile {
+                frequency,
+                observations: n_u64,
+                avg_cost_usd,
+                total_cost_usd: total_cost,
+                pass_rate,
+                cost_per_pass,
+            }
+        })
+        .collect();
+
+    profiles.sort_by_key(|profile| profile.frequency);
+    profiles
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 /// Create a minimal test fixture [`AgentEfficiencyEvent`].
@@ -480,6 +548,7 @@ fn make_test_event(
             vec!["test gate failed".into()]
         },
         model_used: "claude-sonnet-4-5".into(),
+        frequency: OperatingFrequency::Theta,
         strategy_attempted: if passed {
             "none".into()
         } else {
@@ -679,6 +748,23 @@ mod tests {
 
         let profiles = compute_role_profiles(&events);
         assert!((profiles[0].cost_per_pass).abs() < 1e-9);
+    }
+
+    #[test]
+    fn efficiency_frequency_profile_groups_by_frequency() {
+        let mut gamma = make_test_event("Impl", 1.0, 100, 20, 0, 1000, 5, 2, false, false);
+        gamma.frequency = OperatingFrequency::Gamma;
+        let mut delta = make_test_event("Reviewer", 3.0, 150, 40, 0, 1500, 5, 3, false, true);
+        delta.frequency = OperatingFrequency::Delta;
+
+        let profiles = compute_frequency_profiles(&[gamma, delta]);
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(profiles[0].frequency, OperatingFrequency::Gamma);
+        assert_eq!(profiles[0].observations, 1);
+        assert_eq!(profiles[0].pass_rate, 0.0);
+        assert_eq!(profiles[1].frequency, OperatingFrequency::Delta);
+        assert_eq!(profiles[1].observations, 1);
+        assert_eq!(profiles[1].pass_rate, 1.0);
     }
 
     #[test]

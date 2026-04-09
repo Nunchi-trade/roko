@@ -4209,6 +4209,9 @@ impl PlanRunner {
             .get(plan_id)
             .and_then(|t| t.tasks_file.tasks.iter().find(|td| td.id == task_id))
             .cloned();
+        let frequency = task_def
+            .as_ref()
+            .map_or(OperatingFrequency::Theta, |td| td.operating_frequency());
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let mut cascade_router_observed = false;
 
@@ -4346,6 +4349,7 @@ impl PlanRunner {
             task_id,
             "Implementer",
             &model,
+            frequency,
             result,
             wall_ms,
             true,
@@ -4566,6 +4570,9 @@ impl PlanRunner {
             .iter()
             .find(|task| task.id == task_id)
             .cloned();
+        let frequency = task_def
+            .as_ref()
+            .map_or(OperatingFrequency::Theta, |task| task.operating_frequency());
         let terminal_count = tracker.terminal_task_count();
         let total_tasks = tracker.tasks_file.tasks.len();
         let plan_dir = tracker._plan_dir.clone();
@@ -4613,6 +4620,7 @@ impl PlanRunner {
             &task_id,
             "Implementer",
             &task_model,
+            frequency,
             0,
             gate_errors,
             &strategy.to_string(),
@@ -5591,6 +5599,9 @@ impl PlanRunner {
             .get(plan_id)
             .and_then(|t| t.tasks_file.tasks.iter().find(|td| td.id == task_id))
             .cloned();
+        let frequency = task_def
+            .as_ref()
+            .map_or(OperatingFrequency::Theta, |td| td.operating_frequency());
         if let Some(model) = selected_model {
             self.observe_cascade_router(plan_id, task_id, task_def.as_ref(), model, 0.0);
         }
@@ -5634,6 +5645,7 @@ impl PlanRunner {
             task_id,
             "Implementer",
             &model,
+            frequency,
             wall_ms,
             Vec::new(),
             "retry_same",
@@ -7966,6 +7978,7 @@ impl PlanRunner {
         task_id: &str,
         role: &str,
         model: &str,
+        frequency: OperatingFrequency,
         result: &AgentResult,
         wall_ms: u64,
         success: bool,
@@ -8002,6 +8015,7 @@ impl PlanRunner {
             },
             gate_errors: Vec::new(),
             model_used: model.to_string(),
+            frequency,
             strategy_attempted: "none".to_string(),
             timestamp: chrono::Utc::now().to_rfc3339(),
         };
@@ -8031,6 +8045,7 @@ impl PlanRunner {
         task_id: &str,
         role: &str,
         model: &str,
+        frequency: OperatingFrequency,
         wall_ms: u64,
         gate_errors: Vec<String>,
         strategy_attempted: &str,
@@ -8064,6 +8079,7 @@ impl PlanRunner {
             outcome: "failure".to_string(),
             gate_errors,
             model_used: model.to_string(),
+            frequency,
             strategy_attempted: strategy_attempted.to_string(),
             timestamp: chrono::Utc::now().to_rfc3339(),
         };

@@ -127,6 +127,7 @@ fn context_window_tokens(model: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roko_core::OperatingFrequency;
     use roko_learn::efficiency::AgentEfficiencyEvent;
 
     fn efficiency_event_signal(model: &str, prompt_tokens: u64) -> Signal {
@@ -158,6 +159,7 @@ mod tests {
             outcome: "success".into(),
             gate_errors: Vec::new(),
             model_used: model.into(),
+            frequency: OperatingFrequency::Theta,
             strategy_attempted: "none".into(),
             timestamp: "2026-04-09T00:00:00Z".into(),
         };
