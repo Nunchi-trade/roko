@@ -704,7 +704,7 @@ impl PlanRunner {
         Option<Arc<roko_agent::mcp::DynamicToolRegistry>>,
     ) {
         use roko_agent::mcp::{McpClient, StdioTransport, find_mcp_config, mcp_to_tool_def};
-        use roko_core::tool::VecToolRegistry;
+        use roko_std::tool::StaticToolRegistry;
 
         // Resolve MCP config: explicit path in config, or walk-up discovery.
         let mcp_config = if let Some(ref explicit) = config.agent.mcp_config {
@@ -788,7 +788,7 @@ impl PlanRunner {
 
         // Dedup across servers and build the dynamic registry.
         let deduped = roko_agent::mcp::dedup_tools(all_server_tools);
-        let base = VecToolRegistry::new();
+        let base = StaticToolRegistry::new();
         let mut registry = roko_agent::mcp::DynamicToolRegistry::new(&base);
         // Group deduped tools by their server prefix (everything before `__`).
         let mut by_server: HashMap<String, Vec<roko_core::tool::ToolDef>> = HashMap::new();
