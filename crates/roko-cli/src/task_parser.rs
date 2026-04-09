@@ -53,6 +53,12 @@ pub struct TaskDef {
     /// Files this task modifies.
     #[serde(default, alias = "write_files")]
     pub files: Vec<String>,
+    /// Tool names this task is allowed to use.
+    #[serde(default)]
+    pub allowed_tools: Option<Vec<String>>,
+    /// Tool names this task is forbidden to use.
+    #[serde(default)]
+    pub denied_tools: Option<Vec<String>>,
     /// Task IDs this task depends on.
     #[serde(default)]
     pub depends_on: Vec<String>,
@@ -444,6 +450,8 @@ tier = "focused"
 model_hint = "claude-sonnet-4-6"
 max_loc = 50
 write_files = ["src/main.rs"]
+allowed_tools = ["read_file", "grep"]
+denied_tools = ["write_file"]
 depends_on = []
 
 [task.context]
@@ -468,6 +476,11 @@ command = "cargo check -p roko-cli"
         assert_eq!(task.model_hint.as_deref(), Some("claude-sonnet-4-6"));
         assert_eq!(task.max_loc, Some(50));
         assert_eq!(task.files, vec!["src/main.rs"]);
+        assert_eq!(
+            task.allowed_tools,
+            Some(vec!["read_file".into(), "grep".into()])
+        );
+        assert_eq!(task.denied_tools, Some(vec!["write_file".into()]));
         assert_eq!(task.timeout_secs, 600);
         assert!(task.context.is_some());
         let ctx = task.context.as_ref().unwrap();
@@ -487,6 +500,8 @@ command = "cargo check -p roko-cli"
             model_hint: None,
             max_loc: None,
             files: vec![],
+            allowed_tools: None,
+            denied_tools: None,
             depends_on: vec![],
             depends_on_plan: vec![],
             context: None,
@@ -619,6 +634,8 @@ depends_on = ["other-plan:T3"]
             model_hint: None,
             max_loc: None,
             files: vec![],
+            allowed_tools: None,
+            denied_tools: None,
             depends_on: vec![],
             depends_on_plan: vec![],
             context: None,
@@ -645,6 +662,8 @@ depends_on = ["other-plan:T3"]
             model_hint: None,
             max_loc: None,
             files: vec![],
+            allowed_tools: None,
+            denied_tools: None,
             depends_on: vec![],
             depends_on_plan: vec![],
             context: None,
