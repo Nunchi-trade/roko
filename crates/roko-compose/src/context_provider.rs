@@ -372,6 +372,21 @@ impl ContextBudgets {
             ContextTier::Full => self.full,
         }
     }
+
+    /// Get the budget for a given operating frequency.
+    ///
+    /// This wires the 3-speed policy directly into context assembly:
+    /// - `Gamma` is reactive and gets no assembled context.
+    /// - `Theta` uses the standard deliberative budget.
+    /// - `Delta` is reflective and keeps all assembled context.
+    #[must_use]
+    pub const fn for_frequency(&self, frequency: OperatingFrequency) -> usize {
+        match frequency {
+            OperatingFrequency::Gamma => 0,
+            OperatingFrequency::Theta => self.focused,
+            OperatingFrequency::Delta => usize::MAX,
+        }
+    }
 }
 
 // ─── Task input ────────────────────────────────────────────────────────────
@@ -570,12 +585,13 @@ impl ContextProvider {
         self
     }
 
-    /// Resolve context for a task at the given tier.
+    /// Resolve context for a task at the given operating frequency.
     ///
     /// This is the main entry point — called from `dispatch_agent` in
     /// orchestrate.rs between task parsing and prompt composition.
     pub fn resolve(
         &self,
+        frequency: OperatingFrequency,
         task: &TaskInput,
         model_slug: &str,
         plan_artifacts: &PlanArtifacts,
@@ -583,7 +599,16 @@ impl ContextProvider {
         prior_outputs: &[PriorTaskOutput],
     ) -> ResolvedContext {
         let tier = ContextTier::from_task_and_model(&task.tier, model_slug);
-        let budget = self.budgets.for_tier(tier);
+        let budget = self.budgets.for_frequency(frequency);
+
+        if budget == 0 {
+            return ResolvedContext {
+                sections: Vec::new(),
+                tier,
+                total_tokens_estimate: 0,
+                budget_tokens: budget,
+            };
+        }
 
         let mut sections = Vec::new();
 
@@ -1246,6 +1271,9 @@ mod tests {
         assert_eq!(budgets.surgical, 4_000);
         assert_eq!(budgets.focused, 12_000);
         assert_eq!(budgets.full, 24_000);
+        assert_eq!(budgets.for_frequency(OperatingFrequency::Gamma), 0);
+        assert_eq!(budgets.for_frequency(OperatingFrequency::Theta), 12_000);
+        assert_eq!(budgets.for_frequency(OperatingFrequency::Delta), usize::MAX);
     }
 
     #[test]

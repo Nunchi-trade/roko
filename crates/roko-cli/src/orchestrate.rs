@@ -6686,6 +6686,7 @@ impl PlanRunner {
             let prior_outputs = load_prior_task_outputs(&self.workdir, &td.depends_on);
 
             let resolved = context_provider.resolve(
+                frequency,
                 &task_input,
                 &selected_model,
                 &plan_artifacts,
