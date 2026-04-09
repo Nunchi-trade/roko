@@ -5054,6 +5054,7 @@ dependencies = [
  "roko-gate",
  "roko-learn",
  "roko-orchestrator",
+ "roko-plugin",
  "roko-serve",
  "roko-std",
  "serde",

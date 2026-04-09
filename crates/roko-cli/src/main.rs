@@ -2,7 +2,7 @@
 //!
 //! See [`roko_cli`] for the lib-side description. The binary exposes
 //! subcommands (`init`, `run`, `status`, `replay`, `config`, `inject`,
-//! `plan`, `subscription`) plus top-level flags for mode selection (`--headless`,
+//! `plan`, `subscription`, `event-sources`) plus top-level flags for mode selection (`--headless`,
 //! `--role`, `--model`, `--effort`, `--json`, `--log-format`, `--quiet`,
 //! `--resume`, `--repo`, `--no-replan`, and a positional `[prompt]` for
 //! one-shot mode).
@@ -214,6 +214,11 @@ enum Command {
         #[command(subcommand)]
         cmd: SubscriptionCmd,
     },
+    /// Inspect configured event sources.
+    EventSources {
+        #[command(subcommand)]
+        cmd: EventSourcesCmd,
+    },
     /// Launch the dashboard TUI, with text fallback for non-interactive use.
     Dashboard {
         /// Specific dashboard page slug to render.
@@ -420,6 +425,16 @@ enum SubscriptionCmd {
     Disable {
         /// Subscription ID.
         id: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum EventSourcesCmd {
+    /// List configured cron schedules and file watchers.
+    List {
+        /// Directory containing `roko.toml` (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
     },
 }
 
@@ -665,6 +680,11 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             let _ = roko_cli::index::rebuild_all(&std::env::current_dir().unwrap_or_default());
             result
         }
+        Command::EventSources { cmd } => {
+            let result = cmd_event_sources(cli, cmd).await;
+            let _ = roko_cli::index::rebuild_all(&std::env::current_dir().unwrap_or_default());
+            result
+        }
         Command::Dashboard {
             page,
             list_pages,
@@ -754,6 +774,16 @@ async fn cmd_pipe(cli: &Cli) -> Result<i32> {
 
     // Dispatch the piped text as a one-shot prompt.
     cmd_oneshot(cli, &input.text).await
+}
+
+async fn cmd_event_sources(cli: &Cli, cmd: EventSourcesCmd) -> Result<i32> {
+    match cmd {
+        EventSourcesCmd::List { workdir } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            roko_cli::event_sources::cmd_list(&wd, cli.json)?;
+            Ok(EXIT_SUCCESS)
+        }
+    }
 }
 
 fn cmd_headless(cli: &Cli) -> i32 {

@@ -17,6 +17,7 @@ pub mod clean;
 pub mod config;
 pub mod config_cmd;
 pub mod daemon;
+pub mod event_sources;
 pub mod episode;
 pub mod index;
 pub mod inject;

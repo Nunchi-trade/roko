@@ -137,6 +137,19 @@ pub struct CronEventSource {
     schedules: Vec<CronSchedule>,
 }
 
+/// Snapshot of a configured cron schedule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CronScheduleStatus {
+    /// Human-readable schedule name.
+    pub name: String,
+    /// Standard cron expression.
+    pub expression: String,
+    /// Signal kind emitted when the schedule fires.
+    pub signal_kind: String,
+    /// Next scheduled fire time in UTC, if any.
+    pub next_fire: Option<DateTime<Utc>>,
+}
+
 /// One cron schedule parsed from configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct CronSchedule {
@@ -191,6 +204,21 @@ impl CronEventSource {
         Self {
             schedules: config.cron.into_iter().map(CronSchedule::from).collect(),
         }
+    }
+
+    /// Return a snapshot of the configured schedules and their next fire times.
+    #[must_use]
+    pub fn schedules(&self) -> Result<Vec<CronScheduleStatus>> {
+        Ok(self
+            .compile_schedules()?
+            .into_iter()
+            .map(|schedule| CronScheduleStatus {
+                name: schedule.schedule.name,
+                expression: schedule.schedule.expression,
+                signal_kind: schedule.schedule.signal_kind,
+                next_fire: schedule.next_fire,
+            })
+            .collect())
     }
 
     fn compile_schedules(&self) -> Result<Vec<ActiveCronSchedule>> {
