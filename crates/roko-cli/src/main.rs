@@ -255,6 +255,33 @@ enum Command {
 }
 
 #[derive(Debug, Subcommand)]
+enum DaemonCmd {
+    Start {
+        #[arg(long)]
+        foreground: bool,
+        #[arg(long, default_value = "9090")]
+        port: u16,
+    },
+    Stop,
+    Status,
+    Logs {
+        #[arg(long, short = 'f')]
+        follow: bool,
+        #[arg(long, short = 'n', default_value = "50")]
+        lines: usize,
+    },
+    Reload,
+    // SIGHUP equivalent — re-scan subscriptions/templates without restart
+    Restart {
+        #[arg(long, default_value = "9090")]
+        port: u16,
+    },
+    Install,
+    // macOS launchd plist generation
+    Uninstall, // remove launchd plist
+}
+
+#[derive(Debug, Subcommand)]
 enum PlanCmd {
     /// List all plans in the workspace.
     List {
