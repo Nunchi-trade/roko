@@ -32,8 +32,8 @@ use roko_core::tool::TraceId;
 use roko_core::tool::trace::{FailureKind, FailureTrace, TraceStep};
 use roko_core::tool::{FormatBandit, ProfileBandit, ToolTraceEvent, TraceSink};
 use roko_core::{
-    AgentRole, Body, Budget, Composer, Context, Gate, Kind, PhaseKind, Provenance, Signal,
-    Substrate, Verdict,
+    AgentRole, Body, Budget, Composer, Context, Gate, Kind, OperatingFrequency, PhaseKind,
+    Provenance, Signal, Substrate, Verdict,
 };
 use roko_fs::FileSubstrate;
 use roko_fs::RokoLayout;
@@ -81,6 +81,14 @@ fn install_episode_distillation_hook(learning: &mut LearningRuntime, workdir: &P
     learning.set_episode_completion_hook(move |episode| {
         roko_neuro::spawn_episode_distillation(distillation_workdir.clone(), episode);
     });
+}
+
+fn frequency_label(frequency: OperatingFrequency) -> &'static str {
+    match frequency {
+        OperatingFrequency::Gamma => "gamma",
+        OperatingFrequency::Theta => "theta",
+        OperatingFrequency::Delta => "delta",
+    }
 }
 
 // ─── ContextAttributionTracker ────────────────────────────────────────────
@@ -6560,36 +6568,27 @@ impl PlanRunner {
         };
 
         // ── Adaptive model selection via CascadeRouter ───────────────
-        let use_cascade = task_def
-            .as_ref()
-            .map(|td| td.model_hint.is_none())
-            .unwrap_or(true);
-        if use_cascade {
+        if let Some(td) = task_def.as_ref() {
+            let frequency = td.operating_frequency();
             let cascade_router = self.learning.cascade_router();
-            let routing_ctx = cascade_routing_context(self, plan_id, task, role, task_def.as_ref());
-            let selection = cascade_router.route(&routing_ctx);
-            let observations = cascade_router.total_observations();
-            if observations > roko_learn::model_router::COLD_START_THRESHOLD {
-                tracing::info!(
-                    "[orchestrate] CascadeRouter recommends model={} (stage={}, observations={})",
-                    selection.primary.slug,
-                    selection.stage,
-                    observations
-                );
-                selected_model = selection.primary.slug;
-            } else {
-                tracing::info!(
-                    "[orchestrate] CascadeRouter cold-start observations={} (keeping static model={})",
-                    observations,
-                    selected_model
-                );
+            let routing_ctx = cascade_routing_context(self, plan_id, task, role, Some(td));
+
+            match cascade_router.select_for_frequency(frequency, Some(&routing_ctx)) {
+                Some(model) => {
+                    tracing::info!(
+                        "[orchestrate] frequency={} model={} (selected via cascade)",
+                        frequency_label(frequency),
+                        model.slug
+                    );
+                    selected_model = model.slug;
+                }
+                None => {
+                    tracing::info!(
+                        "[orchestrate] frequency={} (reactive; bypassing model selection)",
+                        frequency_label(frequency)
+                    );
+                }
             }
-        } else if let Some(td) = task_def.as_ref() {
-            tracing::info!(
-                "[orchestrate] Task {} model_hint={} (skipping CascadeRouter)",
-                td.id,
-                selected_model
-            );
         }
 
         // ── Dispatch-time skill hint from successful prior tasks ──────

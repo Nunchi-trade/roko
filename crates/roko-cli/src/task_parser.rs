@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context as _, Result};
+use roko_core::OperatingFrequency;
 use roko_orchestrator::ReplanStrategy;
 use roko_std::RESEARCHER_TOOL_PROFILE;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -306,6 +307,22 @@ fn default_max_retries() -> u32 {
 }
 
 impl TaskDef {
+    /// Map the task's declared tier to an operating frequency.
+    ///
+    /// The tier names already encode the intended cadence:
+    /// - `mechanical` → `Gamma`
+    /// - `focused` / `integrative` → `Theta`
+    /// - `architectural` → `Delta`
+    #[must_use]
+    pub fn operating_frequency(&self) -> OperatingFrequency {
+        match self.tier.as_str() {
+            "mechanical" => OperatingFrequency::Gamma,
+            "architectural" => OperatingFrequency::Delta,
+            "focused" | "integrative" => OperatingFrequency::Theta,
+            _ => OperatingFrequency::Theta,
+        }
+    }
+
     /// Get the model to use for this task, falling back through:
     /// 1. model_hint from task definition
     /// 2. tier_models from config (if provided)
@@ -1082,6 +1099,58 @@ command = "cargo check -p roko-cli"
             ..task
         };
         assert_eq!(t3.effective_model("fallback", None), "custom-model");
+    }
+
+    #[test]
+    fn operating_frequency_by_tier() {
+        let task = TaskDef {
+            id: "T1".into(),
+            title: "test".into(),
+            description: Some("test task".into()),
+            role: None,
+            status: "ready".into(),
+            tier: "mechanical".into(),
+            model_hint: None,
+            replan_strategy: None,
+            max_loc: None,
+            files: vec![],
+            allowed_tools: None,
+            denied_tools: None,
+            mcp_servers: None,
+            depends_on: vec![],
+            depends_on_plan: vec![],
+            split_into: None,
+            context: None,
+            verify: vec![],
+            timeout_secs: 600,
+            max_retries: 3,
+            acceptance: vec![],
+        };
+        assert_eq!(task.operating_frequency(), OperatingFrequency::Gamma);
+        assert_eq!(
+            TaskDef {
+                tier: "focused".into(),
+                ..task.clone()
+            }
+            .operating_frequency(),
+            OperatingFrequency::Theta
+        );
+        assert_eq!(
+            TaskDef {
+                tier: "integrative".into(),
+                ..task.clone()
+            }
+            .operating_frequency(),
+            OperatingFrequency::Theta
+        );
+        assert_eq!(
+            TaskDef {
+                tier: "architectural".into(),
+                ..task
+            }
+            .operating_frequency(),
+            OperatingFrequency::Delta
+        );
     }
 
     #[test]

@@ -21,6 +21,7 @@
 
 use parking_lot::Mutex;
 use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
+use roko_core::OperatingFrequency;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -194,6 +195,15 @@ fn low_confidence_tier_bonus(tier: ModelTier) -> f64 {
     }
 }
 
+fn model_tier_rank(tier: ModelTier) -> u8 {
+    match tier {
+        ModelTier::Premium => 2,
+        ModelTier::Standard => 1,
+        ModelTier::Fast => 0,
+        _ => 1,
+    }
+}
+
 // ─── CascadeRouter ──────────────────────────────────────────────────────────
 
 /// Three-stage cascade router: Static -> Confidence -> UCB.
@@ -266,6 +276,49 @@ impl CascadeRouter {
             observations,
             stage,
         }
+    }
+
+    /// Select a model for a given operating frequency.
+    ///
+    /// - `Gamma` returns `None` because reactive work is pure logic and should
+    ///   not dispatch an LLM turn.
+    /// - `Theta` uses the existing cascade router selection.
+    /// - `Delta` always uses the strongest available model in the router.
+    #[must_use]
+    pub fn select_for_frequency(
+        &self,
+        frequency: OperatingFrequency,
+        ctx: Option<&RoutingContext>,
+    ) -> Option<ModelSpec> {
+        match frequency {
+            OperatingFrequency::Gamma => None,
+            OperatingFrequency::Theta => ctx.map(|ctx| self.route(ctx).primary),
+            OperatingFrequency::Delta => Some(self.strongest_model()),
+        }
+    }
+
+    /// Return the strongest model currently available to the router.
+    ///
+    /// Preference order is premium > standard > fast. Within the same tier,
+    /// the first slug wins so the choice stays stable.
+    #[must_use]
+    pub fn strongest_model(&self) -> ModelSpec {
+        let mut best_slug = self
+            .model_slugs
+            .first()
+            .cloned()
+            .expect("CascadeRouter: need at least one model");
+        let mut best_rank = model_tier_rank(slug_to_tier(&best_slug));
+
+        for slug in self.model_slugs.iter().skip(1) {
+            let rank = model_tier_rank(slug_to_tier(slug));
+            if rank > best_rank {
+                best_rank = rank;
+                best_slug.clone_from(slug);
+            }
+        }
+
+        ModelSpec::from_slug(best_slug)
     }
 
     /// Return the index of `slug` in the router's model list.
@@ -713,7 +766,37 @@ mod tests {
         assert_eq!(CascadeStage::Ucb.label(), "ucb");
     }
 
-    // ── Test 9: observation count is consistent ─────────────────────────
+    // ── Test 9: frequency routing follows the frequency policy ─────────
+
+    #[test]
+    fn frequency_routing_uses_expected_policy() {
+        let cascade = CascadeRouter::new(test_slugs());
+        let ctx = default_ctx();
+
+        assert_eq!(cascade.select_for_frequency(OperatingFrequency::Gamma, Some(&ctx)), None);
+
+        let theta = cascade
+            .select_for_frequency(OperatingFrequency::Theta, Some(&ctx))
+            .expect("theta should route");
+        assert_eq!(theta.slug, "claude-sonnet-4-5");
+
+        let delta = cascade
+            .select_for_frequency(OperatingFrequency::Delta, Some(&ctx))
+            .expect("delta should route");
+        assert_eq!(delta.slug, "claude-opus-4");
+    }
+
+    #[test]
+    fn strongest_model_falls_back_to_best_available_slug() {
+        let cascade = CascadeRouter::new(vec![
+            "claude-haiku-3-5".to_string(),
+            "claude-sonnet-4-5".to_string(),
+        ]);
+
+        assert_eq!(cascade.strongest_model().slug, "claude-sonnet-4-5");
+    }
+
+    // ── Test 11: observation count is consistent ────────────────────────
 
     #[test]
     fn observation_count_tracks_correctly() {
@@ -729,7 +812,7 @@ mod tests {
         assert_eq!(cascade.total_observations(), 3);
     }
 
-    // ── Test 10: confidence snapshot tracks trials ──────────────────────
+    // ── Test 12: confidence snapshot tracks trials ──────────────────────
 
     #[test]
     fn confidence_snapshot_accurate() {
