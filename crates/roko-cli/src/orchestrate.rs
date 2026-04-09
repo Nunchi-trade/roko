@@ -15,6 +15,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, anyhow};
 use bardo_runtime::cancel::CancelToken;
 use bardo_runtime::process::ProcessSupervisor;
+use roko_agent::mcp::{McpConfig, McpServerConfig};
 use roko_agent::translate::{ClaudeTranslator, RenderedTools, Translator};
 use roko_agent::{Agent, AgentResult, ClaudeCliAgent, ExecAgent};
 use roko_compose::{
@@ -940,6 +941,8 @@ struct TaskTracker {
 struct McpServerState {
     /// Live client handles keyed by server name.
     clients: HashMap<String, Arc<roko_agent::mcp::McpClient<roko_agent::mcp::StdioTransport>>>,
+    /// Live server configs keyed by server name.
+    server_configs: HashMap<String, McpServerConfig>,
     /// Active leases keyed by server name.
     ref_counts: HashMap<String, usize>,
 }
@@ -1403,6 +1406,7 @@ impl PlanRunner {
         HashMap<String, Arc<roko_agent::mcp::McpClient<roko_agent::mcp::StdioTransport>>>,
         Option<Arc<roko_agent::mcp::DynamicToolRegistry>>,
         Vec<String>,
+        HashMap<String, McpServerConfig>,
     ) {
         use roko_agent::mcp::{McpClient, StdioTransport, find_mcp_config, mcp_to_tool_def};
         use roko_std::tool::StaticToolRegistry;
@@ -1428,19 +1432,19 @@ impl PlanRunner {
 
         let mcp_config = match mcp_config {
             Some(cfg) if !cfg.servers.is_empty() => cfg,
-            _ => return (HashMap::new(), None, Vec::new()),
+            _ => return (HashMap::new(), None, Vec::new(), HashMap::new()),
         };
 
         let selected_servers = selected_servers.filter(|names| !names.is_empty());
         let mut clients = HashMap::new();
         let mut all_server_tools = Vec::new();
         let mut server_names = Vec::new();
+        let mut running_server_configs = HashMap::new();
 
         for server in &mcp_config.servers {
             if selected_servers.is_some_and(|names| !names.contains(&server.name)) {
                 continue;
             }
-            server_names.push(server.name.clone());
             match StdioTransport::spawn(&server.command, &server.args) {
                 Ok(transport) => {
                     let client = McpClient::new(transport);
@@ -1461,6 +1465,7 @@ impl PlanRunner {
                     // List available tools
                     match client.list_tools().await {
                         Ok(tools) => {
+                            server_names.push(server.name.clone());
                             tracing::info!(
                                 "MCP server '{}': discovered {} tools",
                                 server.name,
@@ -1472,6 +1477,7 @@ impl PlanRunner {
                                 .collect();
                             all_server_tools.push((server.name.clone(), defs));
                             clients.insert(server.name.clone(), Arc::new(client));
+                            running_server_configs.insert(server.name.clone(), server.clone());
                         }
                         Err(e) => {
                             tracing::warn!("MCP server '{}' list_tools failed: {e}", server.name);
@@ -1485,7 +1491,7 @@ impl PlanRunner {
         }
 
         if all_server_tools.is_empty() {
-            return (clients, None, server_names);
+            return (clients, None, server_names, running_server_configs);
         }
 
         // Dedup across servers and build the dynamic registry.
@@ -1508,7 +1514,61 @@ impl PlanRunner {
             registry.add_mcp_tools(&server_name, tools);
         }
 
-        (clients, Some(Arc::new(registry)), server_names)
+        (
+            clients,
+            Some(Arc::new(registry)),
+            server_names,
+            running_server_configs,
+        )
+    }
+
+    /// Resolve the MCP config path for Claude.
+    ///
+    /// If runtime MCP servers are active, writes `.roko/mcp-config.json`
+    /// from the live server list and returns that generated file. Otherwise
+    /// falls back to any explicit config configured in `roko.toml`.
+    async fn resolve_mcp_config_path(&self) -> Option<PathBuf> {
+        let mut servers = {
+            let state = self.mcp_state.lock().await;
+            state.server_configs.values().cloned().collect::<Vec<_>>()
+        };
+
+        if servers.is_empty() {
+            return self.config.agent.mcp_config.clone();
+        }
+
+        servers.sort_by(|a, b| a.name.cmp(&b.name));
+        let config = McpConfig { servers };
+        let dir = self.workdir.join(".roko");
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            tracing::warn!(
+                "failed to create MCP config directory {}: {e}",
+                dir.display()
+            );
+            return self.config.agent.mcp_config.clone();
+        }
+
+        let path = dir.join("mcp-config.json");
+        let tmp_path = path.with_extension("json.tmp");
+        let json = match serde_json::to_string_pretty(&config) {
+            Ok(json) => json,
+            Err(e) => {
+                tracing::warn!("failed to serialize runtime MCP config: {e}");
+                return self.config.agent.mcp_config.clone();
+            }
+        };
+
+        if let Err(e) = std::fs::write(&tmp_path, json) {
+            tracing::warn!("failed to write runtime MCP config {}: {e}", tmp_path.display());
+            return self.config.agent.mcp_config.clone();
+        }
+        if let Err(e) = std::fs::rename(&tmp_path, &path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            tracing::warn!("failed to publish runtime MCP config {}: {e}", path.display());
+            return self.config.agent.mcp_config.clone();
+        }
+
+        Some(path)
     }
 
     /// Discover plans from a directory and build the executor.
@@ -1657,7 +1717,7 @@ impl PlanRunner {
         } else {
             Some(requested_mcp_servers)
         };
-        let (mcp_clients, tool_registry, mcp_server_names) =
+        let (mcp_clients, tool_registry, mcp_server_names, mcp_server_configs) =
             Self::setup_mcp(&config, workdir, selected_mcp_servers.as_ref()).await;
         let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
         obs_sinks
@@ -1708,6 +1768,7 @@ impl PlanRunner {
             mcp_server_names,
             mcp_state: tokio::sync::Mutex::new(McpServerState {
                 clients: mcp_clients,
+                server_configs: mcp_server_configs,
                 ref_counts: HashMap::new(),
             }),
             tool_registry,
@@ -1755,7 +1816,7 @@ impl PlanRunner {
         )
         .await
         .context("init playbook store")?;
-        let (mcp_clients, tool_registry, mcp_server_names) =
+        let (mcp_clients, tool_registry, mcp_server_names, mcp_server_configs) =
             Self::setup_mcp(&config, workdir, None).await;
         let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
         obs_sinks
@@ -1806,6 +1867,7 @@ impl PlanRunner {
             mcp_server_names,
             mcp_state: tokio::sync::Mutex::new(McpServerState {
                 clients: mcp_clients,
+                server_configs: mcp_server_configs,
                 ref_counts: HashMap::new(),
             }),
             tool_registry,
@@ -1857,7 +1919,7 @@ impl PlanRunner {
         )
         .await
         .context("init playbook store")?;
-        let (mcp_clients, tool_registry, mcp_server_names) =
+        let (mcp_clients, tool_registry, mcp_server_names, mcp_server_configs) =
             Self::setup_mcp(&config, workdir, None).await;
         let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
         obs_sinks
@@ -1908,6 +1970,7 @@ impl PlanRunner {
             mcp_server_names,
             mcp_state: tokio::sync::Mutex::new(McpServerState {
                 clients: mcp_clients,
+                server_configs: mcp_server_configs,
                 ref_counts: HashMap::new(),
             }),
             tool_registry,
@@ -3506,6 +3569,7 @@ impl PlanRunner {
         let role = AgentRole::Implementer;
         let claude_tools_csv = claude_tool_allowlist(role);
         let skip_perms = role == AgentRole::Implementer || role == AgentRole::AutoFixer;
+        let mcp_config_path = self.resolve_mcp_config_path().await;
 
         for (tid, dir) in &task_dirs {
             let task_def = tasks_file
@@ -3574,7 +3638,7 @@ impl PlanRunner {
                     effort: self.config.agent.effort.clone(),
                     system_prompt,
                     allowed_tools_csv: task_allowed_tools_csv.clone(),
-                    mcp_config: self.config.agent.mcp_config.clone(),
+                    mcp_config: mcp_config_path.clone(),
                     fallback_model: self.config.agent.fallback_model.clone(),
                     env_vars,
                     read_args: task_def
@@ -6155,7 +6219,7 @@ impl PlanRunner {
         };
 
         if !missing.is_empty() {
-            let (clients, registry, discovered_names) =
+            let (clients, registry, discovered_names, discovered_configs) =
                 Self::setup_mcp(&self.config, &self.workdir, Some(&missing)).await;
             if self.tool_registry.is_none() {
                 self.tool_registry = registry;
@@ -6164,6 +6228,9 @@ impl PlanRunner {
             let mut state = self.mcp_state.lock().await;
             for (name, client) in clients {
                 state.clients.insert(name, client);
+            }
+            for (name, config) in discovered_configs {
+                state.server_configs.insert(name, config);
             }
             for name in discovered_names {
                 if !self.mcp_server_names.contains(&name) {
