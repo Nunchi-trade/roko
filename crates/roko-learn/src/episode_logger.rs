@@ -160,6 +160,9 @@ impl Usage {
 /// after new fields are added.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Episode {
+    /// Logical episode kind (for example `"agent_turn"`, `"gate"`, `"replan"`).
+    #[serde(default)]
+    pub kind: String,
     /// Stable episode identifier (hash-derived).
     #[serde(default)]
     pub id: String,
@@ -211,6 +214,7 @@ impl Episode {
         let timestamp = Utc::now();
         let id = derive_id(&agent_id, &task_id, timestamp);
         Self {
+            kind: String::new(),
             id,
             timestamp,
             agent_id,

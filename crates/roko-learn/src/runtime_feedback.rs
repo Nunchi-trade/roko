@@ -448,6 +448,12 @@ impl LearningRuntime {
         Ok(())
     }
 
+    /// Append one raw episode record without triggering any learning updates.
+    pub async fn append_episode(&self, episode: &Episode) -> Result<(), LearningRuntimeError> {
+        self.episode_logger.append(episode).await?;
+        Ok(())
+    }
+
     /// Persist one completed run and update all available learning subsystems.
     ///
     /// The function is intentionally tolerant of missing optional fields:

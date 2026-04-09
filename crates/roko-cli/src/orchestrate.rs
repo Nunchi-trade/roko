@@ -4055,6 +4055,73 @@ impl PlanRunner {
         prompt
     }
 
+    /// Append a re-plan episode to the learning log.
+    async fn record_replan_episode(
+        &mut self,
+        plan_id: &str,
+        original_task_id: &str,
+        original_task: Option<&crate::task_parser::TaskDef>,
+        strategy: ReplanStrategy,
+        attempt_number: u32,
+        resulting_subtasks: &[crate::task_parser::TaskDef],
+        success: bool,
+        failure_reason: Option<String>,
+    ) {
+        let mut ep = Episode::new("Strategist", original_task_id);
+        ep.kind = "replan".to_string();
+        ep.success = success;
+        ep.failure_reason = failure_reason;
+        ep.input_signal_hash = plan_id.to_string();
+        ep.output_signal_hash = format!("{plan_id}:{original_task_id}:replan:{strategy}");
+        ep.extra
+            .insert("strategy".to_string(), serde_json::json!(strategy));
+        ep.extra.insert(
+            "attempt_number".to_string(),
+            serde_json::json!(attempt_number),
+        );
+        ep.extra
+            .insert("original_task_id".to_string(), serde_json::json!(original_task_id));
+        if let Some(task) = original_task {
+            ep.extra.insert(
+                "original_task".to_string(),
+                serde_json::json!({
+                    "id": &task.id,
+                    "title": &task.title,
+                    "status": &task.status,
+                    "tier": &task.tier,
+                    "role": &task.role,
+                    "depends_on": &task.depends_on,
+                    "files": &task.files,
+                    "replan_strategy": task.replan_strategy,
+                }),
+            );
+        }
+        ep.extra.insert(
+            "resulting_subtasks".to_string(),
+            serde_json::json!(
+                resulting_subtasks
+                    .iter()
+                    .map(|task| {
+                        serde_json::json!({
+                            "id": &task.id,
+                            "title": &task.title,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            ),
+        );
+
+        if let Err(e) = self.learning.append_episode(&ep).await {
+            tracing::error!(
+                plan_id = %plan_id,
+                task_id = %original_task_id,
+                strategy = %strategy,
+                error = %e,
+                "failed to append re-plan episode"
+            );
+        }
+    }
+
     /// Attempt to re-plan after gate failures (§9).
     async fn attempt_replan(&mut self, plan_id: &str) {
         let Some(tracker) = self.task_trackers.get(plan_id) else {
@@ -4165,17 +4232,39 @@ impl PlanRunner {
                         None,
                         None,
                         None,
-                    )
-                    .await
+                )
+                .await
                 {
                     Ok(_) => {
                         tracing::info!("[orchestrate] replan retry-same completed for {plan_id}");
+                        self.record_replan_episode(
+                            plan_id,
+                            &task_id,
+                            task_def.as_ref(),
+                            ReplanStrategy::RetrySame,
+                            failure_count,
+                            &[],
+                            true,
+                            None,
+                        )
+                        .await;
                         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
                             tracker.gate_failure_count = 0;
                         }
                     }
                     Err(e) => {
                         tracing::error!("[orchestrate] retry-same replan failed for {plan_id}: {e}");
+                        self.record_replan_episode(
+                            plan_id,
+                            &task_id,
+                            task_def.as_ref(),
+                            ReplanStrategy::RetrySame,
+                            failure_count,
+                            &[],
+                            false,
+                            Some(e.to_string()),
+                        )
+                        .await;
                     }
                 }
             }
@@ -4203,13 +4292,24 @@ impl PlanRunner {
                         Some(escalate_model),
                         None,
                         None,
-                    )
-                    .await
+                )
+                .await
                 {
                     Ok(_) => {
                         tracing::info!(
                             "[orchestrate] replan with escalation completed for {plan_id}"
                         );
+                        self.record_replan_episode(
+                            plan_id,
+                            &task_id,
+                            task_def.as_ref(),
+                            ReplanStrategy::RetryWithEscalation,
+                            failure_count,
+                            &[],
+                            true,
+                            None,
+                        )
+                        .await;
                         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
                             tracker.gate_failure_count = 0;
                         }
@@ -4218,6 +4318,17 @@ impl PlanRunner {
                         tracing::error!(
                             "[orchestrate] escalated replan failed for {plan_id}: {e}"
                         );
+                        self.record_replan_episode(
+                            plan_id,
+                            &task_id,
+                            task_def.as_ref(),
+                            ReplanStrategy::RetryWithEscalation,
+                            failure_count,
+                            &[],
+                            false,
+                            Some(e.to_string()),
+                        )
+                        .await;
                     }
                 }
             }
@@ -4229,6 +4340,17 @@ impl PlanRunner {
                     .map(|tracker| tracker.tasks_file.clone())
                 else {
                     tracing::warn!("[orchestrate] decomposition requested for unknown plan {plan_id}");
+                    self.record_replan_episode(
+                        plan_id,
+                        &task_id,
+                        task_def.as_ref(),
+                        ReplanStrategy::Decompose,
+                        failure_count,
+                        &[],
+                        false,
+                        Some("decomposition requested for unknown plan".to_string()),
+                    )
+                    .await;
                     return;
                 };
                 let Some(original_task) = tasks_snapshot
@@ -4240,6 +4362,19 @@ impl PlanRunner {
                     tracing::warn!(
                         "[orchestrate] decomposition requested for missing task {task_id} in {plan_id}"
                     );
+                    self.record_replan_episode(
+                        plan_id,
+                        &task_id,
+                        task_def.as_ref(),
+                        ReplanStrategy::Decompose,
+                        failure_count,
+                        &[],
+                        false,
+                        Some(format!(
+                            "decomposition requested for missing task {task_id} in {plan_id}"
+                        )),
+                    )
+                    .await;
                     return;
                 };
                 let gate_report = self.gate_failure_report(plan_id);
@@ -4260,8 +4395,8 @@ impl PlanRunner {
                         Some(architectural_model),
                         None,
                         Some(system_prompt),
-                    )
-                    .await
+                )
+                .await
                 {
                     Ok(result) => {
                         let response_text = match result.output.body.as_text() {
@@ -4270,6 +4405,17 @@ impl PlanRunner {
                                 tracing::error!(
                                     "[orchestrate] decomposition agent returned non-text output for {plan_id}: {e}"
                                 );
+                                self.record_replan_episode(
+                                    plan_id,
+                                    &task_id,
+                                    Some(&original_task),
+                                    ReplanStrategy::Decompose,
+                                    failure_count,
+                                    &[],
+                                    false,
+                                    Some(e.to_string()),
+                                )
+                                .await;
                                 return;
                             }
                         };
@@ -4282,6 +4428,17 @@ impl PlanRunner {
                                 tracing::error!(
                                     "[orchestrate] failed to parse decomposition output for {plan_id}: {e}"
                                 );
+                                self.record_replan_episode(
+                                    plan_id,
+                                    &task_id,
+                                    Some(&original_task),
+                                    ReplanStrategy::Decompose,
+                                    failure_count,
+                                    &[],
+                                    false,
+                                    Some(e.to_string()),
+                                )
+                                .await;
                                 return;
                             }
                         };
@@ -4291,6 +4448,20 @@ impl PlanRunner {
                                 "[orchestrate] decomposition output for {plan_id} produced {} tasks, expected 2-3",
                                 parsed.tasks.len()
                             );
+                            self.record_replan_episode(
+                                plan_id,
+                                &task_id,
+                                Some(&original_task),
+                                ReplanStrategy::Decompose,
+                                failure_count,
+                                &[],
+                                false,
+                                Some(format!(
+                                    "decomposition produced {} tasks, expected 2-3",
+                                    parsed.tasks.len()
+                                )),
+                            )
+                            .await;
                             return;
                         }
 
@@ -4307,6 +4478,20 @@ impl PlanRunner {
                                     "[orchestrate] decomposition output reused existing task id {} for {plan_id}",
                                     task.id
                                 );
+                                self.record_replan_episode(
+                                    plan_id,
+                                    &task_id,
+                                    Some(&original_task),
+                                    ReplanStrategy::Decompose,
+                                    failure_count,
+                                    &[],
+                                    false,
+                                    Some(format!(
+                                        "decomposition reused existing task id {}",
+                                        task.id
+                                    )),
+                                )
+                                .await;
                                 return;
                             }
                             if !new_ids.insert(task.id.clone()) {
@@ -4314,6 +4499,20 @@ impl PlanRunner {
                                     "[orchestrate] decomposition output duplicated task id {} for {plan_id}",
                                     task.id
                                 );
+                                self.record_replan_episode(
+                                    plan_id,
+                                    &task_id,
+                                    Some(&original_task),
+                                    ReplanStrategy::Decompose,
+                                    failure_count,
+                                    &[],
+                                    false,
+                                    Some(format!(
+                                        "decomposition duplicated task id {}",
+                                        task.id
+                                    )),
+                                )
+                                .await;
                                 return;
                             }
                             if task.depends_on.iter().any(|dep| dep == &task_id) {
@@ -4321,11 +4520,26 @@ impl PlanRunner {
                                     "[orchestrate] decomposition task {} still depends on failed task {task_id}",
                                     task.id
                                 );
+                                self.record_replan_episode(
+                                    plan_id,
+                                    &task_id,
+                                    Some(&original_task),
+                                    ReplanStrategy::Decompose,
+                                    failure_count,
+                                    &[],
+                                    false,
+                                    Some(format!(
+                                        "decomposition task {} still depends on failed task {task_id}",
+                                        task.id
+                                    )),
+                                )
+                                .await;
                                 return;
                             }
                             task.status = "ready".to_string();
                             task.split_into = None;
                         }
+                        let resulting_subtasks = new_tasks.clone();
 
                         let terminal_ids: Vec<String> = new_tasks
                             .iter()
@@ -4340,6 +4554,17 @@ impl PlanRunner {
                             tracing::error!(
                                 "[orchestrate] decomposition output for {plan_id} produced no terminal subtasks"
                             );
+                            self.record_replan_episode(
+                                plan_id,
+                                &task_id,
+                                Some(&original_task),
+                                ReplanStrategy::Decompose,
+                                failure_count,
+                                &resulting_subtasks,
+                                false,
+                                Some("decomposition produced no terminal subtasks".to_string()),
+                            )
+                            .await;
                             return;
                         }
 
@@ -4352,6 +4577,17 @@ impl PlanRunner {
                             tracing::error!(
                                 "[orchestrate] original task {task_id} disappeared before decomposition rewrite"
                             );
+                            self.record_replan_episode(
+                                plan_id,
+                                &task_id,
+                                Some(&original_task),
+                                ReplanStrategy::Decompose,
+                                failure_count,
+                                &resulting_subtasks,
+                                false,
+                                Some("original task disappeared before decomposition rewrite".to_string()),
+                            )
+                            .await;
                             return;
                         };
 
@@ -4403,6 +4639,17 @@ impl PlanRunner {
                                 tracing::error!(
                                     "[orchestrate] failed to serialize decomposed tasks for {plan_id}: {e}"
                                 );
+                                self.record_replan_episode(
+                                    plan_id,
+                                    &task_id,
+                                    Some(&original_task),
+                                    ReplanStrategy::Decompose,
+                                    failure_count,
+                                    &resulting_subtasks,
+                                    false,
+                                    Some(e.to_string()),
+                                )
+                                .await;
                                 return;
                             }
                         };
@@ -4411,6 +4658,17 @@ impl PlanRunner {
                             tracing::error!(
                                 "[orchestrate] failed to write decomposed tasks for {plan_id}: {e}"
                             );
+                            self.record_replan_episode(
+                                plan_id,
+                                &task_id,
+                                Some(&original_task),
+                                ReplanStrategy::Decompose,
+                                failure_count,
+                                &resulting_subtasks,
+                                false,
+                                Some(e.to_string()),
+                            )
+                            .await;
                             return;
                         }
 
@@ -4435,9 +4693,31 @@ impl PlanRunner {
                             tracker.last_gate_failure_phase = None;
                             tracker.last_impl_task_id = None;
                         }
+                        self.record_replan_episode(
+                            plan_id,
+                            &task_id,
+                            Some(&original_task),
+                            ReplanStrategy::Decompose,
+                            failure_count,
+                            &resulting_subtasks,
+                            true,
+                            None,
+                        )
+                        .await;
                     }
                     Err(e) => {
                         tracing::error!("[orchestrate] decomposition replan failed for {plan_id}: {e}");
+                        self.record_replan_episode(
+                            plan_id,
+                            &task_id,
+                            Some(&original_task),
+                            ReplanStrategy::Decompose,
+                            failure_count,
+                            &[],
+                            false,
+                            Some(e.to_string()),
+                        )
+                        .await;
                     }
                 }
             }
@@ -4464,6 +4744,7 @@ impl PlanRunner {
                 );
 
                 let mut ep = Episode::new("Strategist", &task_id).failed(skip_reason);
+                ep.kind = "replan".to_string();
                 ep.input_signal_hash = plan_id.to_string();
                 ep.output_signal_hash = format!("{plan_id}:{task_id}:skipped");
                 ep.extra.insert(
@@ -4479,6 +4760,29 @@ impl PlanRunner {
                 ep.extra.insert(
                     "failure_context".to_string(),
                     serde_json::json!(failure_context),
+                );
+                if let Some(task) = task_def.as_ref() {
+                    ep.extra.insert(
+                        "original_task".to_string(),
+                        serde_json::json!({
+                            "id": &task.id,
+                            "title": &task.title,
+                            "status": &task.status,
+                            "tier": &task.tier,
+                            "role": &task.role,
+                            "depends_on": &task.depends_on,
+                            "files": &task.files,
+                            "replan_strategy": task.replan_strategy,
+                        }),
+                    );
+                }
+                ep.extra.insert(
+                    "attempt_number".to_string(),
+                    serde_json::json!(failure_count),
+                );
+                ep.extra.insert(
+                    "resulting_subtasks".to_string(),
+                    serde_json::Value::Array(Vec::new()),
                 );
                 let input = self.enrich_completed_run(
                     ep,
@@ -4526,6 +4830,12 @@ impl PlanRunner {
         let old_tasks = tracker_snapshot.tasks_file.clone();
         let completed_tasks = tracker_snapshot.completed_task_defs();
         let completed_task_ids = tracker_snapshot.completed.clone();
+        let replan_attempt_number = tracker_snapshot.gate_failure_count;
+        let original_task = old_tasks
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .cloned();
         let plan_slug_candidates = [
             old_tasks.meta.plan.trim().to_string(),
             plan_id.to_string(),
@@ -4543,6 +4853,17 @@ impl PlanRunner {
             tracing::error!(
                 "[orchestrate] plan regeneration failed for {plan_id}: could not find matching PRD"
             );
+            self.record_replan_episode(
+                plan_id,
+                task_id,
+                original_task.as_ref(),
+                ReplanStrategy::RegeneratePlan,
+                replan_attempt_number,
+                &[],
+                false,
+                Some("could not find matching PRD".to_string()),
+            )
+            .await;
             return;
         };
 
@@ -4557,6 +4878,17 @@ impl PlanRunner {
                     "[orchestrate] failed to read PRD for {plan_id} at {}: {e}",
                     prd_path.display()
                 );
+                self.record_replan_episode(
+                    plan_id,
+                    task_id,
+                    original_task.as_ref(),
+                    ReplanStrategy::RegeneratePlan,
+                    replan_attempt_number,
+                    &[],
+                    false,
+                    Some(e.to_string()),
+                )
+                .await;
                 return;
             }
         };
@@ -4590,8 +4922,8 @@ impl PlanRunner {
                 Some(model.to_string()),
                 None,
                 Some(system_prompt),
-            )
-            .await
+        )
+        .await
         {
             Ok(_) => {
                 let regenerated_tasks = match crate::task_parser::TasksFile::parse(&tasks_path) {
@@ -4600,6 +4932,17 @@ impl PlanRunner {
                         tracing::error!(
                             "[orchestrate] failed to parse regenerated tasks for {plan_id}: {e}"
                         );
+                        self.record_replan_episode(
+                            plan_id,
+                            task_id,
+                            original_task.as_ref(),
+                            ReplanStrategy::RegeneratePlan,
+                            replan_attempt_number,
+                            &[],
+                            false,
+                            Some(e.to_string()),
+                        )
+                        .await;
                         if let Err(write_err) = std::fs::write(&tasks_path, existing_tasks) {
                             tracing::error!(
                                 "[orchestrate] failed to restore original tasks for {plan_id}: {write_err}"
@@ -4608,6 +4951,7 @@ impl PlanRunner {
                         return;
                     }
                 };
+                let regenerated_subtasks = regenerated_tasks.tasks.clone();
 
                 let merged_tasks = merge_regenerated_plan(
                     plan_id,
@@ -4621,6 +4965,17 @@ impl PlanRunner {
                         tracing::error!(
                             "[orchestrate] failed to serialize merged regenerated plan for {plan_id}: {e}"
                         );
+                        self.record_replan_episode(
+                            plan_id,
+                            task_id,
+                            original_task.as_ref(),
+                            ReplanStrategy::RegeneratePlan,
+                            replan_attempt_number,
+                            &regenerated_subtasks,
+                            false,
+                            Some(e.to_string()),
+                        )
+                        .await;
                         if let Err(write_err) = std::fs::write(&tasks_path, existing_tasks) {
                             tracing::error!(
                                 "[orchestrate] failed to restore original tasks for {plan_id}: {write_err}"
@@ -4634,6 +4989,17 @@ impl PlanRunner {
                     tracing::error!(
                         "[orchestrate] failed to write merged regenerated tasks for {plan_id}: {e}"
                     );
+                    self.record_replan_episode(
+                        plan_id,
+                        task_id,
+                        original_task.as_ref(),
+                        ReplanStrategy::RegeneratePlan,
+                        replan_attempt_number,
+                        &regenerated_subtasks,
+                        false,
+                        Some(e.to_string()),
+                    )
+                    .await;
                     if let Err(write_err) = std::fs::write(&tasks_path, existing_tasks) {
                         tracing::error!(
                             "[orchestrate] failed to restore original tasks for {plan_id}: {write_err}"
@@ -4643,6 +5009,17 @@ impl PlanRunner {
                 }
 
                 tracing::info!("[orchestrate] plan regeneration completed for {plan_id}");
+                self.record_replan_episode(
+                    plan_id,
+                    task_id,
+                    original_task.as_ref(),
+                    ReplanStrategy::RegeneratePlan,
+                    replan_attempt_number,
+                    &regenerated_subtasks,
+                    true,
+                    None,
+                )
+                .await;
                 if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
                     if let Err(e) = tracker.reload_tasks_file() {
                         tracing::error!(
@@ -4657,6 +5034,17 @@ impl PlanRunner {
             }
             Err(e) => {
                 tracing::error!("[orchestrate] plan regeneration failed for {plan_id}: {e}");
+                self.record_replan_episode(
+                    plan_id,
+                    task_id,
+                    original_task.as_ref(),
+                    ReplanStrategy::RegeneratePlan,
+                    replan_attempt_number,
+                    &[],
+                    false,
+                    Some(e.to_string()),
+                )
+                .await;
             }
         }
     }
