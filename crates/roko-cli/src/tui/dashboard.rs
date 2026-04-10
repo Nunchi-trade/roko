@@ -23,6 +23,7 @@ use roko_core::metric::{Headlines, TaskMetric, compute_headlines};
 use roko_core::task::{TaskCategory, TaskComplexityBand};
 use roko_core::OperatingFrequency;
 use roko_gate::adaptive_threshold::AdaptiveThresholds;
+pub use roko_learn::cfactor::{CFactor, CFactorComponents};
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
 use roko_learn::prompt_experiment::{
@@ -1255,48 +1256,6 @@ fn parse_efficiency_timestamp(timestamp: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(timestamp)
         .ok()
         .map(|parsed| parsed.with_timezone(&Utc))
-}
-
-/// Current C-Factor snapshot.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CFactor {
-    pub overall: f64,
-    pub components: CFactorComponents,
-    pub computed_at: DateTime<Utc>,
-    pub episode_count: usize,
-}
-
-/// C-Factor components.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CFactorComponents {
-    pub gate_pass_rate: f64,
-    pub cost_efficiency: f64,
-    pub speed: f64,
-    pub first_try_rate: f64,
-    pub knowledge_growth: f64,
-}
-
-impl Default for CFactorComponents {
-    fn default() -> Self {
-        Self {
-            gate_pass_rate: 0.0,
-            cost_efficiency: 0.0,
-            speed: 0.0,
-            first_try_rate: 0.0,
-            knowledge_growth: 0.0,
-        }
-    }
-}
-
-impl Default for CFactor {
-    fn default() -> Self {
-        Self {
-            overall: 0.0,
-            components: CFactorComponents::default(),
-            computed_at: Utc::now(),
-            episode_count: 0,
-        }
-    }
 }
 
 impl SignalSummary {
