@@ -43,6 +43,9 @@ pub struct CFactorComponents {
     /// Speed at which shared insights accumulate confirmation chains.
     #[serde(default)]
     pub knowledge_integration_rate: f64,
+    /// How strongly agent templates specialize by task category.
+    #[serde(default)]
+    pub task_diversity_coverage: f64,
     /// Evenness of agent participation inside a plan, normalized to `[0..1]`.
     pub turn_taking_equality: f64,
     /// Normalized reference rate for completed dependency outputs.
@@ -81,6 +84,7 @@ impl Default for CFactorComponents {
             first_try_rate: 0.0,
             knowledge_growth: 0.0,
             knowledge_integration_rate: 0.0,
+            task_diversity_coverage: 0.0,
             turn_taking_equality: 0.0,
             social_sensitivity: 0.0,
         }
@@ -123,6 +127,8 @@ struct TaskAggregate {
 ///   metadata
 /// - `knowledge_integration_rate` from confirmation chains emitted by Neuro
 ///   distillation
+/// - `task_diversity_coverage` from the association between agent template and
+///   task category (specialization vs overlap)
 /// - `turn_taking_equality` from the Gini coefficient of per-plan agent
 ///   contribution counts
 /// - `social_sensitivity` from the fraction of `prior_output` context
@@ -202,6 +208,7 @@ pub fn compute_cfactor(
 
     let gate_pass_rate = ratio(passed_tasks, total_tasks);
     let first_try_rate = ratio(first_try_tasks, total_tasks);
+    let task_diversity_coverage = compute_task_diversity_coverage(&filtered);
 
     let (avg_cost_per_successful_task, avg_duration_per_successful_task) =
         if successful_tasks.is_empty() {
@@ -275,13 +282,14 @@ pub fn compute_cfactor(
     let turn_taking_equality = compute_turn_taking_equality(&filtered);
     let social_sensitivity = social_sensitivity.clamp(0.0, 1.0);
 
-    let overall = (gate_pass_rate * 0.26
-        + cost_efficiency * 0.17
-        + speed * 0.11
-        + information_flow_rate * 0.09
-        + first_try_rate * 0.20
-        + knowledge_growth * 0.09
-        + knowledge_integration_rate * 0.08)
+    let overall = (gate_pass_rate * 0.23
+        + cost_efficiency * 0.15
+        + speed * 0.10
+        + information_flow_rate * 0.08
+        + first_try_rate * 0.18
+        + knowledge_growth * 0.08
+        + knowledge_integration_rate * 0.07
+        + task_diversity_coverage * 0.11)
         * 0.9
         + turn_taking_equality * 0.05
         + social_sensitivity * 0.05;
@@ -296,6 +304,7 @@ pub fn compute_cfactor(
             first_try_rate,
             knowledge_growth,
             knowledge_integration_rate,
+            task_diversity_coverage,
             turn_taking_equality,
             social_sensitivity,
         },
@@ -443,6 +452,70 @@ fn turn_taking_equality_for_counts(counts: Vec<u64>) -> f64 {
     (1.0 - gini).clamp(0.0, 1.0)
 }
 
+fn compute_task_diversity_coverage(episodes: &[&Episode]) -> f64 {
+    let mut joint_counts: HashMap<(String, String), u64> = HashMap::new();
+    let mut template_counts: HashMap<String, u64> = HashMap::new();
+    let mut category_counts: HashMap<String, u64> = HashMap::new();
+    let mut total = 0u64;
+
+    for episode in episodes {
+        let Some(template) = episode_agent_template(episode) else {
+            continue;
+        };
+        let Some(category) = episode_task_category(episode) else {
+            continue;
+        };
+
+        *joint_counts
+            .entry((template.clone(), category.clone()))
+            .or_default() += 1;
+        *template_counts.entry(template).or_default() += 1;
+        *category_counts.entry(category).or_default() += 1;
+        total += 1;
+    }
+
+    if total == 0 {
+        return 0.0;
+    }
+
+    let template_entropy = entropy_from_counts(template_counts.values().copied().collect());
+    let category_entropy = entropy_from_counts(category_counts.values().copied().collect());
+    let normalization = template_entropy.max(category_entropy);
+    if normalization <= 0.0 {
+        return 0.0;
+    }
+
+    let total_f = total as f64;
+    let mut mutual_information = 0.0;
+    for ((template, category), joint_count) in joint_counts {
+        let joint_prob = joint_count as f64 / total_f;
+        let template_prob = template_counts[&template] as f64 / total_f;
+        let category_prob = category_counts[&category] as f64 / total_f;
+        let ratio = joint_prob / (template_prob * category_prob);
+        mutual_information += joint_prob * ratio.log2();
+    }
+
+    (mutual_information / normalization).clamp(0.0, 1.0)
+}
+
+fn entropy_from_counts(counts: Vec<u64>) -> f64 {
+    let total: u64 = counts.iter().copied().sum();
+    if total == 0 {
+        return 0.0;
+    }
+
+    let total_f = total as f64;
+    let mut entropy = 0.0;
+    for count in counts {
+        if count == 0 {
+            continue;
+        }
+        let probability = count as f64 / total_f;
+        entropy -= probability * probability.log2();
+    }
+    entropy
+}
+
 fn gini_coefficient(counts: &[u64]) -> f64 {
     if counts.len() < 2 {
         return 0.0;
@@ -497,6 +570,30 @@ fn episode_agent_key(episode: &Episode) -> String {
     }
 
     episode.id.clone()
+}
+
+fn episode_agent_template(episode: &Episode) -> Option<String> {
+    let template = episode.agent_template.trim();
+    if !template.is_empty() {
+        return Some(template.to_string());
+    }
+
+    let agent_id = episode.agent_id.trim();
+    if !agent_id.is_empty() {
+        return Some(agent_id.to_string());
+    }
+
+    None
+}
+
+fn episode_task_category(episode: &Episode) -> Option<String> {
+    episode
+        .extra
+        .get("task_category")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn task_key(episode: &Episode) -> String {
@@ -711,6 +808,32 @@ mod tests {
 
         let cfactor = compute_cfactor(&episodes, Duration::from_secs(7 * 24 * 60 * 60), 0.0, 0.0);
         assert!((cfactor.components.turn_taking_equality - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn computes_task_diversity_coverage_from_template_category_alignment() {
+        let mut episodes = Vec::new();
+
+        for suffix in ["a", "b"] {
+            let mut implementation = episode_at(&format!("task-impl-{suffix}"), 5, 10.0, 1_000, true);
+            implementation.agent_template = "code-implementer".to_string();
+            implementation.extra.insert(
+                "task_category".to_string(),
+                Value::String("implementation".to_string()),
+            );
+            episodes.push(implementation);
+
+            let mut docs = episode_at(&format!("task-docs-{suffix}"), 4, 10.0, 1_000, true);
+            docs.agent_template = "docs-specialist".to_string();
+            docs.extra.insert(
+                "task_category".to_string(),
+                Value::String("docs".to_string()),
+            );
+            episodes.push(docs);
+        }
+
+        let cfactor = compute_cfactor(&episodes, Duration::from_secs(7 * 24 * 60 * 60), 0.0, 0.0);
+        assert!((cfactor.components.task_diversity_coverage - 1.0).abs() < 1e-9);
     }
 
     #[test]

@@ -3927,6 +3927,7 @@ mod tests {
             first_try_rate: 0.64,
             knowledge_growth: 0.18,
             knowledge_integration_rate: 0.57,
+            task_diversity_coverage: 0.73,
             turn_taking_equality: 0.74,
             social_sensitivity: 0.68,
         };
