@@ -13,7 +13,6 @@ description = "Daimon subsystem for affect and motivation modeling."
 workspace = true
 
 [dependencies]
-roko-golem = { path = "../roko-golem", features = ["scaffold"] }
 roko-core = { path = "../roko-core" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

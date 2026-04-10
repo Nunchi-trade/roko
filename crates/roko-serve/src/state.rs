@@ -19,7 +19,7 @@ use bardo_runtime::cancel::CancelToken;
 use bardo_runtime::process::ProcessSupervisor;
 use roko_core::config::schema::RokoConfig;
 use roko_core::{Signal, Substrate};
-use roko_golem::AffectEngine;
+use roko_daimon::DaimonState;
 
 use crate::deploy::{DeployBackend, Deployment};
 use crate::dispatch::SubscriptionRegistry;
@@ -127,7 +127,7 @@ pub struct AppState {
     /// Process lifecycle manager.
     pub supervisor: Arc<ProcessSupervisor>,
     /// Affect engine used to stamp PAD vectors onto persisted episodes.
-    pub affect_engine: Mutex<AffectEngine>,
+    pub affect_engine: Mutex<DaimonState>,
     /// Event bus for streaming server events to clients.
     pub event_bus: EventBus<ServerEvent>,
     /// Event subscriptions loaded at startup.
@@ -178,7 +178,7 @@ impl AppState {
             started_at: Instant::now(),
             metrics: Arc::new(MetricRegistry::new()),
             supervisor,
-            affect_engine: Mutex::new(AffectEngine::load_or_new(&affect_path)),
+            affect_engine: Mutex::new(DaimonState::load_or_new(&affect_path)),
             event_bus: EventBus::new(1024),
             subscriptions,
             runtime,

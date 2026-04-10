@@ -32,6 +32,7 @@ use roko_core::tool::ToolRegistry;
 use roko_core::tool::role_allowlist::role_allowlist;
 use roko_core::{Body, Context as RokoContext, Kind, Provenance, Signal};
 use roko_core::{ContentHash, Verdict};
+use roko_daimon::{AffectEngine as _, AffectEvent};
 use roko_learn::cascade_router::CascadeRouter;
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage as EpisodeUsage};
@@ -1664,26 +1665,33 @@ fn apply_affect_signature(state: &AppState, episode: &mut Episode) {
     };
 
     let mut engine = state.affect_engine.lock();
-    for verdict in &episode.gate_verdicts {
-        if verdict.passed {
-            let _ = engine.on_gate_pass(task_key.clone());
-        } else {
-            let _ = engine.on_gate_fail(task_key.clone());
-        }
+    for (rung, verdict) in episode.gate_verdicts.iter().enumerate() {
+        let _ = engine.appraise(AffectEvent::GateResult {
+            plan_id: String::new(),
+            task_id: task_key.clone(),
+            passed: verdict.passed,
+            rung: rung as u32,
+        });
     }
     if episode.success {
-        let _ = engine.on_task_success(task_key.clone());
+        let _ = engine.appraise(AffectEvent::TaskOutcome {
+            task_id: task_key.clone(),
+            succeeded: true,
+        });
     } else {
-        let _ = engine.on_task_failure(task_key.clone());
+        let _ = engine.appraise(AffectEvent::TaskOutcome {
+            task_id: task_key.clone(),
+            succeeded: false,
+        });
     }
 
-    let state = engine.get_state(task_key);
+    let state = engine.query();
     episode.extra.insert(
         "pad".into(),
         serde_json::json!({
-            "pleasure": state.pleasure,
-            "arousal": state.arousal,
-            "dominance": state.dominance,
+            "pleasure": state.pad.pleasure,
+            "arousal": state.pad.arousal,
+            "dominance": state.pad.dominance,
         }),
     );
 }

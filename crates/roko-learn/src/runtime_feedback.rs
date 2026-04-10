@@ -38,7 +38,7 @@ use crate::regression::{RegressionReport, RegressionThresholds, detect_regressio
 use crate::skill_library::{SkillLibrary, SkillLibraryError, TemplatePatternGenerator};
 use roko_core::agent::AgentRole;
 use roko_core::task::{TaskCategory, TaskComplexityBand};
-use roko_golem::AffectEngine;
+use roko_daimon::{AffectEngine as _, AffectEvent, DaimonState, queue_wait_arousal};
 
 type EpisodeCompletionHook = Arc<dyn Fn(Episode) + Send + Sync>;
 
@@ -250,7 +250,7 @@ pub enum LearningRuntimeError {
 pub struct LearningRuntime {
     paths: LearningPaths,
     episode_logger: EpisodeLogger,
-    affect_engine: parking_lot::Mutex<AffectEngine>,
+    affect_engine: parking_lot::Mutex<DaimonState>,
     costs_log: CostsLog,
     costs_db: CostsDb,
     provider_health: ProviderHealthTracker,
@@ -308,7 +308,7 @@ impl LearningRuntime {
         Ok(Self {
             paths,
             episode_logger,
-            affect_engine: parking_lot::Mutex::new(AffectEngine::load_or_new(&affect_path)),
+            affect_engine: parking_lot::Mutex::new(DaimonState::load_or_new(&affect_path)),
             costs_log,
             costs_db,
             provider_health: ProviderHealthTracker::new(),
@@ -361,7 +361,7 @@ impl LearningRuntime {
         Ok(Self {
             paths,
             episode_logger,
-            affect_engine: parking_lot::Mutex::new(AffectEngine::load_or_new(&affect_path)),
+            affect_engine: parking_lot::Mutex::new(DaimonState::load_or_new(&affect_path)),
             costs_log,
             costs_db,
             provider_health: ProviderHealthTracker::new(),
@@ -675,26 +675,33 @@ impl LearningRuntime {
         };
 
         let mut engine = self.affect_engine.lock();
-        for verdict in &episode.gate_verdicts {
-            if verdict.passed {
-                let _ = engine.on_gate_pass(task_key.clone());
-            } else {
-                let _ = engine.on_gate_fail(task_key.clone());
-            }
+        for (rung, verdict) in episode.gate_verdicts.iter().enumerate() {
+            let _ = engine.appraise(AffectEvent::GateResult {
+                plan_id: String::new(),
+                task_id: task_key.clone(),
+                passed: verdict.passed,
+                rung: rung as u32,
+            });
         }
         if episode.success {
-            let _ = engine.on_task_success(task_key.clone());
+            let _ = engine.appraise(AffectEvent::TaskOutcome {
+                task_id: task_key.clone(),
+                succeeded: true,
+            });
         } else {
-            let _ = engine.on_task_failure(task_key.clone());
+            let _ = engine.appraise(AffectEvent::TaskOutcome {
+                task_id: task_key.clone(),
+                succeeded: false,
+            });
         }
 
-        let state = engine.get_state(task_key);
+        let state = engine.query();
         episode.extra.insert(
             "pad".to_string(),
             serde_json::json!({
-                "pleasure": state.pleasure,
-                "arousal": state.arousal,
-                "dominance": state.dominance,
+                "pleasure": state.pad.pleasure,
+                "arousal": state.pad.arousal,
+                "dominance": state.pad.dominance,
             }),
         );
         episode.extra.insert(
@@ -750,18 +757,20 @@ impl LearningRuntime {
 
     /// Return the current arousal value tracked for a task key.
     pub fn task_arousal(&self, task_id: impl AsRef<str>) -> f64 {
-        self.affect_engine.lock().get_state(task_id).arousal
+        let _ = task_id.as_ref();
+        self.affect_engine.lock().query().pad.arousal
     }
 
     /// Return the current task confidence tracked for a task key.
     pub fn task_confidence(&self, task_id: impl AsRef<str>) -> f64 {
-        self.affect_engine.lock().get_state(task_id).confidence
+        let _ = task_id.as_ref();
+        self.affect_engine.lock().query().confidence
     }
 
     /// Return the current task arousal with queue-wait motivation applied.
     pub fn task_arousal_with_queue_wait(&self, task_id: impl AsRef<str>, queued_hours: f64) -> f64 {
         let base = self.task_arousal(task_id);
-        let bump = AffectEngine::queue_wait_arousal(queued_hours);
+        let bump = queue_wait_arousal(queued_hours);
         (base + bump).clamp(-1.0, 1.0)
     }
 

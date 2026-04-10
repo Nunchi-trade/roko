@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use roko_agent::{Agent, AgentResult, ClaudeCliAgent, ExecAgent};
 use roko_core::{Context as RokoContext, Signal};
+use roko_daimon::{AffectEngine as _, AffectEvent, DaimonState};
 use roko_dreams::DreamCycle;
 use roko_dreams::cycle::{DreamCycleReport, DreamOutcome};
 use roko_learn::{episode_logger::EpisodeLogger, playbook::PlaybookStore};
@@ -281,7 +282,7 @@ fn apply_dream_affect_feedback(state: &AppState, report: &DreamCycleReport) {
 }
 
 fn apply_dream_affect_feedback_to_engine(
-    engine: &mut roko_golem::AffectEngine,
+    engine: &mut DaimonState,
     report: &DreamCycleReport,
 ) {
     let mut failing_task_types: BTreeMap<String, usize> = BTreeMap::new();
@@ -295,7 +296,10 @@ fn apply_dream_affect_feedback_to_engine(
     }
 
     for (task_type, failure_count) in failing_task_types {
-        let _ = engine.on_dream_failure(task_type, failure_count);
+        let _ = engine.appraise(AffectEvent::DreamFailure {
+            task_type,
+            failure_count,
+        });
     }
 }
 
@@ -328,12 +332,12 @@ mod tests {
     use super::*;
 
     use chrono::Duration as ChronoDuration;
+    use roko_daimon::DaimonState;
     use roko_dreams::cycle::{DreamClusterKey, DreamClusterReport, DreamOutcome};
-    use roko_golem::AffectEngine;
 
     #[test]
     fn dream_failures_reduce_confidence_by_task_type() {
-        let mut engine = AffectEngine::new();
+        let mut engine = DaimonState::new();
         let report = DreamCycleReport {
             started_at: Utc::now() - ChronoDuration::minutes(10),
             completed_at: Utc::now(),
@@ -370,7 +374,7 @@ mod tests {
 
         apply_dream_affect_feedback_to_engine(&mut engine, &report);
 
-        let state = engine.get_state("implementation");
+        let state = engine.query();
         assert!(state.confidence < 0.5);
         assert!(state.confidence > 0.25);
     }

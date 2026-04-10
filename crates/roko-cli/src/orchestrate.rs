@@ -42,6 +42,7 @@ use roko_gate::{
     adaptive_threshold::AdaptiveThresholds, clippy_gate::ClippyGate, compile::CompileGate,
     payload::GatePayload, test_gate::TestGate,
 };
+use roko_daimon::{AffectEngine as _, AffectEvent, DaimonState, DispatchParams};
 use roko_learn::costs_db::CostRecord;
 use roko_learn::efficiency::{AgentEfficiencyEvent, FleetCFactor, compute_fleet_cfactor};
 use roko_learn::episode_logger::{Episode, GateVerdict, Usage};
@@ -77,6 +78,10 @@ const WATCHER_INTERVAL_SECS: u64 = 30;
 const WATCHER_SIGNAL_TAIL: usize = 200;
 const EFFICIENCY_SIGNAL_TAIL: usize = 256;
 const GHOST_TURN_SIGNAL_KIND: &str = "conductor.ghost_turn";
+
+fn daimon_state_path(workdir: &Path) -> PathBuf {
+    workdir.join(".roko").join("daimon").join("affect.json")
+}
 
 fn install_episode_distillation_hook(learning: &mut LearningRuntime, workdir: &Path) {
     let distillation_workdir = workdir.to_path_buf();
@@ -881,6 +886,8 @@ pub struct PlanRunner {
     per_plan_gates: HashMap<String, Vec<(String, bool)>>,
     /// Episode logger for recording agent turns to `.roko/episodes.jsonl`.
     learning: LearningRuntime,
+    /// Daimon affect state used to modulate future dispatches.
+    daimon: DaimonState,
     /// Skill library for reusable prompt patterns and successful task recipes.
     skill_library: SkillLibrary,
     /// Playbook store for reusable successful task sequences.
@@ -1821,6 +1828,7 @@ impl PlanRunner {
             .await
             .map_err(|e| anyhow!("init learning runtime: {e}"))?;
         install_episode_distillation_hook(&mut learning, workdir);
+        let daimon = DaimonState::load_or_new(daimon_state_path(workdir));
         let skill_library =
             load_or_create_skill_library(&workdir.join(".roko").join("learn").join("skills.json"))
                 .await
@@ -1866,6 +1874,7 @@ impl PlanRunner {
             per_plan_agents: HashMap::new(),
             per_plan_gates: HashMap::new(),
             learning,
+            daimon,
             skill_library,
             supervisor: ProcessSupervisor::new(cancel.clone()),
             cancel,
@@ -1936,6 +1945,7 @@ impl PlanRunner {
             .await
             .map_err(|e| anyhow!("init learning runtime: {e}"))?;
         install_episode_distillation_hook(&mut learning, workdir);
+        let daimon = DaimonState::load_or_new(daimon_state_path(workdir));
         let skill_library =
             load_or_create_skill_library(&workdir.join(".roko").join("learn").join("skills.json"))
                 .await
@@ -1975,6 +1985,7 @@ impl PlanRunner {
             per_plan_agents: HashMap::new(),
             per_plan_gates: HashMap::new(),
             learning,
+            daimon,
             skill_library,
             supervisor: ProcessSupervisor::new(cancel.clone()),
             cancel,
@@ -2049,6 +2060,7 @@ impl PlanRunner {
             .await
             .map_err(|e| anyhow!("init learning runtime: {e}"))?;
         install_episode_distillation_hook(&mut learning, workdir);
+        let daimon = DaimonState::load_or_new(daimon_state_path(workdir));
         let skill_library =
             load_or_create_skill_library(&workdir.join(".roko").join("learn").join("skills.json"))
                 .await
@@ -2088,6 +2100,7 @@ impl PlanRunner {
             per_plan_agents: HashMap::new(),
             per_plan_gates: HashMap::new(),
             learning,
+            daimon,
             skill_library,
             supervisor: ProcessSupervisor::new(cancel.clone()),
             cancel,
@@ -2462,6 +2475,14 @@ impl PlanRunner {
             .map_err(|e| anyhow!("write tracker tmp: {e}"))?;
         std::fs::rename(&tracker_tmp, &tracker_path)
             .map_err(|e| anyhow!("rename tracker snapshot: {e}"))?;
+
+        let daimon_path = daimon_state_path(&self.workdir);
+        if let Err(e) = self.daimon.persist(&daimon_path) {
+            tracing::warn!(
+                "[orchestrate] failed to persist daimon state to {}: {e}",
+                daimon_path.display()
+            );
+        }
 
         Ok(())
     }
@@ -3085,6 +3106,13 @@ impl PlanRunner {
                                 },
                             },
                         );
+
+                        let _ = self.daimon.appraise(AffectEvent::GateResult {
+                            plan_id: plan_id.clone(),
+                            task_id: format!("rung-{rung}"),
+                            passed,
+                            rung,
+                        });
 
                         // Store gate failure context for AutoFix phase
                         if !passed {
@@ -6756,6 +6784,13 @@ impl PlanRunner {
             selected_model
         };
 
+        let mut dispatch_params = DispatchParams::new(selected_model.clone(), frequency.turn_limit());
+        dispatch_params.effort = self.config.agent.effort.clone();
+        self.daimon.modulate(&mut dispatch_params);
+        let selected_model = dispatch_params.model;
+        let dispatch_turn_limit = dispatch_params.turn_limit;
+        let dispatch_effort = dispatch_params.effort.clone();
+
         // ── Build context via tiered ContextProvider ───────────────
         let context_sections = if let Some(ref td) = task_def {
             let context_provider = ContextProvider::new(self.workdir.clone())
@@ -7007,8 +7042,8 @@ impl PlanRunner {
                 ClaudeCliAgent::new(&self.config.agent.command, &exec_dir, &selected_model)
                     .with_timeout_ms(self.effective_task_timeout_ms(task_def.as_ref()))
                     .with_bare_mode(self.config.agent.bare_mode)
-                    .with_effort(self.config.agent.effort.clone())
-                    .with_max_turns(frequency.turn_limit())
+                    .with_effort(dispatch_effort)
+                    .with_max_turns(dispatch_turn_limit)
                     .with_system_prompt(role_instruction.clone())
                     .with_extra_args(task_read_args)
                     .with_tools(task_allowed_tools_csv)

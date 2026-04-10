@@ -13,7 +13,7 @@ description = "Dreams subsystem for Roko."
 workspace = true
 
 [dependencies]
-roko-golem = { path = "../roko-golem" }
+roko-golem = { path = "../roko-golem", features = ["scaffold"] }
 roko-core = { path = "../roko-core" }
 roko-neuro = { path = "../roko-neuro" }
 roko-learn = { path = "../roko-learn" }
