@@ -2129,12 +2129,7 @@ fn render_summary_bar(frame: &mut Frame<'_>, area: Rect, data: &DashboardData) {
     frame.render_widget(paragraph, area);
 }
 
-fn render_cfactor_breakdown(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    data: &DashboardData,
-    trend: &str,
-) {
+fn render_cfactor_breakdown(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, trend: &str) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title("C-Factor breakdown");
@@ -2172,6 +2167,10 @@ fn render_cfactor_breakdown(
             format_pct(snapshot.components.cost_efficiency)
         )),
         Line::from(format!("speed: {}", format_pct(snapshot.components.speed))),
+        Line::from(format!(
+            "information flow rate: {}",
+            format_pct(snapshot.components.information_flow_rate)
+        )),
         Line::from(format!(
             "first-try rate: {}",
             format_pct(snapshot.components.first_try_rate)
@@ -2421,7 +2420,10 @@ fn cfactor_series(data: &DashboardData) -> Vec<u64> {
 }
 
 fn cfactor_trend(data: &DashboardData) -> &'static str {
-    cfactor_trend_arrow(&data.cfactor_history, std::time::Duration::from_secs(7 * 24 * 60 * 60))
+    cfactor_trend_arrow(
+        &data.cfactor_history,
+        std::time::Duration::from_secs(7 * 24 * 60 * 60),
+    )
 }
 
 fn gate_passed_from_value(value: &Value) -> bool {

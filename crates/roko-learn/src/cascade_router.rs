@@ -20,8 +20,8 @@
 //! [`parking_lot::Mutex`] for confidence-stage statistics.
 
 use parking_lot::Mutex;
-use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
 use roko_core::OperatingFrequency;
+use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -298,8 +298,12 @@ impl CascadeRouter {
     ) -> Option<ModelSpec> {
         match frequency {
             OperatingFrequency::Gamma => None,
-            OperatingFrequency::Theta => ctx.map(|ctx| self.route_with_cfactor(ctx, cfactor).primary),
-            OperatingFrequency::Delta => Some(self.bias_model_for_cfactor(self.strongest_model(), cfactor)),
+            OperatingFrequency::Theta => {
+                ctx.map(|ctx| self.route_with_cfactor(ctx, cfactor).primary)
+            }
+            OperatingFrequency::Delta => {
+                Some(self.bias_model_for_cfactor(self.strongest_model(), cfactor))
+            }
         }
     }
 
@@ -363,7 +367,11 @@ impl CascadeRouter {
     }
 
     /// Route a context through the cascade, optionally biasing by C-Factor.
-    pub fn route_with_cfactor(&self, ctx: &RoutingContext, cfactor: Option<&CFactor>) -> CascadeModel {
+    pub fn route_with_cfactor(
+        &self,
+        ctx: &RoutingContext,
+        cfactor: Option<&CFactor>,
+    ) -> CascadeModel {
         match self.current_stage() {
             CascadeStage::Static => self.route_static(ctx, cfactor),
             CascadeStage::Confidence => self.route_confidence(ctx, cfactor),

@@ -19,9 +19,9 @@ use serde_json::Value;
 
 use crate::plan::{PlanSummary, plans_dir};
 use crate::task_parser::{TaskDef, TasksFile};
+use roko_core::OperatingFrequency;
 use roko_core::metric::{Headlines, TaskMetric, compute_headlines};
 use roko_core::task::{TaskCategory, TaskComplexityBand};
-use roko_core::OperatingFrequency;
 use roko_gate::adaptive_threshold::AdaptiveThresholds;
 pub use roko_learn::cfactor::{CFactor, CFactorComponents};
 use roko_learn::efficiency::AgentEfficiencyEvent;

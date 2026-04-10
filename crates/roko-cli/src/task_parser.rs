@@ -1240,7 +1240,10 @@ command = "cargo check -p roko-cli"
             max_retries: 3,
             acceptance: vec![],
         };
-        assert_eq!(deliberative.operating_frequency(), OperatingFrequency::Theta);
+        assert_eq!(
+            deliberative.operating_frequency(),
+            OperatingFrequency::Theta
+        );
     }
 
     #[test]

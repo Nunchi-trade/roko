@@ -1074,7 +1074,8 @@ impl DashboardSnapshot {
         let layout = RokoLayout::for_project(workdir);
         let episodes = EpisodeLogger::read_all_lossy(layout.episodes_path()).await?;
         let task_metrics = load_task_metrics(layout.memory_dir().join("task-metrics.jsonl")).await;
-        let cfactor_history = load_cfactor_history(workdir.join(".roko").join("learn").join("c-factor.jsonl")).await;
+        let cfactor_history =
+            load_cfactor_history(workdir.join(".roko").join("learn").join("c-factor.jsonl")).await;
         let cfactor = cfactor_history.last().cloned();
         let headlines = compute_headlines(&task_metrics);
         Ok(Self {
@@ -1097,7 +1098,8 @@ impl DashboardSnapshot {
     fn render_health_page_text(&self) -> String {
         let summary = self.health_summary();
         let cfactor = self.cfactor.as_ref().cloned().unwrap_or_default();
-        let trend = cfactor_trend_arrow(&self.cfactor_history, Duration::from_secs(7 * 24 * 60 * 60));
+        let trend =
+            cfactor_trend_arrow(&self.cfactor_history, Duration::from_secs(7 * 24 * 60 * 60));
         render_data_page(
             "Health",
             PageId::Health.slug(),
@@ -1129,6 +1131,10 @@ impl DashboardSnapshot {
                     format_percent(cfactor.components.cost_efficiency)
                 ),
                 format!("speed: {}", format_percent(cfactor.components.speed)),
+                format!(
+                    "information flow rate: {}",
+                    format_percent(cfactor.components.information_flow_rate)
+                ),
                 format!(
                     "first-try rate: {}",
                     format_percent(cfactor.components.first_try_rate)
@@ -2749,10 +2755,11 @@ async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>, cfactor: bool) -> Resul
             cfactor.overall, cfactor_trend, cfactor.episode_count, cfactor.computed_at
         );
         println!(
-            "  gate={:.3} cost={:.3} speed={:.3} first_try={:.3} knowledge={:.3}",
+            "  gate={:.3} cost={:.3} speed={:.3} flow={:.3} first_try={:.3} knowledge={:.3}",
             cfactor.components.gate_pass_rate,
             cfactor.components.cost_efficiency,
             cfactor.components.speed,
+            cfactor.components.information_flow_rate,
             cfactor.components.first_try_rate,
             cfactor.components.knowledge_growth
         );
@@ -3901,6 +3908,7 @@ mod tests {
             gate_pass_rate: 0.82,
             cost_efficiency: 0.76,
             speed: 0.71,
+            information_flow_rate: 0.89,
             first_try_rate: 0.64,
             knowledge_growth: 0.18,
         };
@@ -3937,6 +3945,7 @@ mod tests {
         assert!(health.contains("cache hit rate: 25.0%"));
         assert!(health.contains("current c-factor: 0.67 ↑"));
         assert!(health.contains("gate pass rate: 82.0%"));
+        assert!(health.contains("information flow rate: 89.0%"));
         assert!(health.contains("knowledge growth: 18.0%"));
 
         let trends = dashboard_output(

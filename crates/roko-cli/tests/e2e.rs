@@ -150,7 +150,11 @@ fn status_cfactor_reports_trend_and_components() {
         "headline": false,
         "extra": {}
     });
-    fs::write(memory_dir.join("episodes.jsonl"), episode.to_string() + "\n").unwrap();
+    fs::write(
+        memory_dir.join("episodes.jsonl"),
+        episode.to_string() + "\n",
+    )
+    .unwrap();
 
     let earlier = serde_json::json!({
         "overall": 0.25,
@@ -197,8 +201,14 @@ fn status_cfactor_reports_trend_and_components() {
         stdout.contains("c-factor:"),
         "status output missing c-factor summary: {stdout}"
     );
-    assert!(stdout.contains("trend="), "status output missing trend: {stdout}");
-    assert!(stdout.contains("gate="), "status output missing components: {stdout}");
+    assert!(
+        stdout.contains("trend="),
+        "status output missing trend: {stdout}"
+    );
+    assert!(
+        stdout.contains("gate="),
+        "status output missing components: {stdout}"
+    );
     assert!(
         stdout.contains('↑'),
         "status output missing upward trend arrow: {stdout}"

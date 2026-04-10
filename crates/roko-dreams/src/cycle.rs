@@ -37,8 +37,7 @@ const DREAMS_REGRESSION_MIN_RECORDS: usize = 5;
 const DREAMS_PERFORMANCE_STALL_MIN_PLANS: usize = 5;
 const DREAMS_PERFORMANCE_SUCCESS_IMPROVEMENT: f64 = 0.01;
 const DREAMS_PERFORMANCE_COST_IMPROVEMENT: f64 = 0.01;
-const DREAMS_PERFORMANCE_STALLED_NOTE: &str =
-    "performance stalled — consider: changing decomposition strategy, adjusting model tier, reviewing failing patterns";
+const DREAMS_PERFORMANCE_STALLED_NOTE: &str = "performance stalled — consider: changing decomposition strategy, adjusting model tier, reviewing failing patterns";
 const SIGNALS_LOG_FILE: &str = "signals.jsonl";
 
 /// Agent hook used by the dream cycle to review a consolidation batch.
@@ -447,8 +446,7 @@ impl DreamCycle {
             cluster.warnings = outcome.warnings;
         }
 
-        let strategy_hypotheses =
-            generate_cross_domain_strategy_hypotheses(&clusters, started_at);
+        let strategy_hypotheses = generate_cross_domain_strategy_hypotheses(&clusters, started_at);
         for hypothesis in &strategy_hypotheses {
             if written_knowledge_ids.insert(hypothesis.id.clone()) {
                 self.knowledge_store.add(hypothesis.clone())?;
@@ -533,10 +531,7 @@ impl DreamCycle {
             .provenance(roko_core::Provenance::trusted("dreams"))
             .tag("historical_records", historical_records.to_string())
             .tag("recent_records", recent_records.to_string())
-            .tag(
-                "historical_success_rate",
-                format!("{historical_rate:.4}"),
-            )
+            .tag("historical_success_rate", format!("{historical_rate:.4}"))
             .tag("recent_success_rate", format!("{recent_rate:.4}"))
             .tag("drop_fraction", format!("{drop_fraction:.4}"))
             .build();
@@ -547,7 +542,8 @@ impl DreamCycle {
             .open(&path)
             .with_context(|| format!("open dream signal log {}", path.display()))?;
         let mut writer = BufWriter::new(file);
-        serde_json::to_writer(&mut writer, &signal).context("serialize dreams regression signal")?;
+        serde_json::to_writer(&mut writer, &signal)
+            .context("serialize dreams regression signal")?;
         writer
             .write_all(b"\n")
             .context("write dreams regression newline")?;
@@ -555,7 +551,10 @@ impl DreamCycle {
         Ok(())
     }
 
-    fn emit_cfactor_regression(&self, started_at: DateTime<Utc>) -> Result<Option<CFactorRegression>> {
+    fn emit_cfactor_regression(
+        &self,
+        started_at: DateTime<Utc>,
+    ) -> Result<Option<CFactorRegression>> {
         let Some(path) = self.cfactor_history_path() else {
             return Ok(None);
         };
@@ -563,11 +562,9 @@ impl DreamCycle {
             Ok(history) => history,
             Err(_) => return Ok(None),
         };
-        let Some(regression) = detect_cfactor_regression(
-            &history,
-            Duration::from_secs(7 * 24 * 60 * 60),
-            0.20,
-        ) else {
+        let Some(regression) =
+            detect_cfactor_regression(&history, Duration::from_secs(7 * 24 * 60 * 60), 0.20)
+        else {
             return Ok(None);
         };
 
@@ -581,10 +578,7 @@ impl DreamCycle {
         }
 
         let signal = Signal::builder(Kind::Custom("cfactor:regression".to_string()))
-            .body(
-                Body::from_json(&regression)
-                    .context("serialize cfactor regression payload")?,
-            )
+            .body(Body::from_json(&regression).context("serialize cfactor regression payload")?)
             .provenance(roko_core::Provenance::trusted("dreams"))
             .tag("current", format!("{:.4}", regression.current))
             .tag(
@@ -605,7 +599,8 @@ impl DreamCycle {
             .open(&path)
             .with_context(|| format!("open dream signal log {}", path.display()))?;
         let mut writer = BufWriter::new(file);
-        serde_json::to_writer(&mut writer, &signal).context("serialize cfactor regression signal")?;
+        serde_json::to_writer(&mut writer, &signal)
+            .context("serialize cfactor regression signal")?;
         writer
             .write_all(b"\n")
             .context("write cfactor regression newline")?;
@@ -687,7 +682,9 @@ fn read_cfactor_history(path: &Path) -> Result<Vec<CFactor>> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error).with_context(|| format!("read C-Factor history {}", path.display())),
+        Err(error) => {
+            return Err(error).with_context(|| format!("read C-Factor history {}", path.display()));
+        }
     };
 
     let mut history = Vec::new();
@@ -755,12 +752,14 @@ fn summarize_plan_performance(episodes: &[Episode]) -> Vec<PlanPerformanceSummar
     let mut plans: Vec<PlanPerformanceSummary> = by_plan
         .into_iter()
         .filter_map(|(plan_id, accumulator)| {
-            accumulator.first_seen_at.map(|first_seen_at| PlanPerformanceSummary {
-                plan_id,
-                first_seen_at,
-                success_rate: accumulator.success_rate(),
-                cost_per_success_usd: accumulator.cost_per_success_usd(),
-            })
+            accumulator
+                .first_seen_at
+                .map(|first_seen_at| PlanPerformanceSummary {
+                    plan_id,
+                    first_seen_at,
+                    success_rate: accumulator.success_rate(),
+                    cost_per_success_usd: accumulator.cost_per_success_usd(),
+                })
         })
         .collect();
     plans.sort_by(|left, right| {
@@ -781,8 +780,8 @@ fn performance_stall_notes(episodes: &[Episode]) -> Vec<String> {
     for window in plans.windows(2) {
         let previous = &window[0];
         let current = &window[1];
-        let improved_success = current.success_rate
-            > previous.success_rate + DREAMS_PERFORMANCE_SUCCESS_IMPROVEMENT;
+        let improved_success =
+            current.success_rate > previous.success_rate + DREAMS_PERFORMANCE_SUCCESS_IMPROVEMENT;
         let improved_cost = current.cost_per_success_usd
             < previous.cost_per_success_usd * (1.0 - DREAMS_PERFORMANCE_COST_IMPROVEMENT);
         if improved_success || improved_cost {
@@ -1578,12 +1577,7 @@ fn generate_cross_domain_strategy_hypotheses(
         ];
 
         entries.push(KnowledgeEntry {
-            id: derive_knowledge_id(
-                KnowledgeKind::Heuristic,
-                &content,
-                &source_episodes,
-                &tags,
-            ),
+            id: derive_knowledge_id(KnowledgeKind::Heuristic, &content, &source_episodes, &tags),
             kind: KnowledgeKind::Heuristic,
             source: Some("dream".to_string()),
             content,
@@ -1682,7 +1676,11 @@ fn summarize_success_pattern(cluster: &DreamCluster) -> String {
     )
 }
 
-fn summarize_shared_cues(target: &DreamCluster, source_a: &DreamCluster, source_b: &DreamCluster) -> String {
+fn summarize_shared_cues(
+    target: &DreamCluster,
+    source_a: &DreamCluster,
+    source_b: &DreamCluster,
+) -> String {
     let mut cues = Vec::new();
     if source_a.key.model == target.key.model || source_b.key.model == target.key.model {
         cues.push(format!("the same model {}", target.key.model));
@@ -1733,19 +1731,22 @@ fn gate_name_set(summary: &str) -> BTreeSet<String> {
 fn cluster_structure_vector(cluster: &DreamCluster) -> HdcVector {
     let task_type = text_fingerprint(&format!("task_type={}", cluster.key.task_type)).permute(19);
     let model = text_fingerprint(&format!("model={}", cluster.key.model)).permute(41);
-    let outcome =
-        text_fingerprint(&format!("outcome={}", cluster.key.outcome)).permute(83);
+    let outcome = text_fingerprint(&format!("outcome={}", cluster.key.outcome)).permute(83);
     let balance = text_fingerprint(&format!(
         "balance=success:{} failure:{}",
         cluster.success_count, cluster.failure_count
     ))
     .permute(127);
-    let success_gates =
-        text_fingerprint(&format!("success_gates={}", summarize_success_gates(cluster)))
-            .permute(163);
-    let failure_gates =
-        text_fingerprint(&format!("failure_gates={}", summarize_failure_gates(cluster)))
-            .permute(211);
+    let success_gates = text_fingerprint(&format!(
+        "success_gates={}",
+        summarize_success_gates(cluster)
+    ))
+    .permute(163);
+    let failure_gates = text_fingerprint(&format!(
+        "failure_gates={}",
+        summarize_failure_gates(cluster)
+    ))
+    .permute(211);
     let failure_reason = text_fingerprint(&format!(
         "failure_reason={}",
         summarize_failure_reason(cluster)
@@ -2278,9 +2279,11 @@ mod tests {
 
         let saved_playbooks = playbook_store.list().await.expect("list playbooks");
         assert_eq!(saved_playbooks.len(), 2);
-        assert!(saved_playbooks
-            .iter()
-            .any(|playbook| playbook.goal.contains("task type")));
+        assert!(
+            saved_playbooks
+                .iter()
+                .any(|playbook| playbook.goal.contains("task type"))
+        );
 
         let store = KnowledgeStore::new(&knowledge_path);
         let knowledge_entries = store.query("dream", 10).expect("query");
@@ -2405,7 +2408,11 @@ mod tests {
                 "docs",
                 "claude-haiku-4-5",
                 idx != 4,
-                if idx == 4 { Some("single failure") } else { None },
+                if idx == 4 {
+                    Some("single failure")
+                } else {
+                    None
+                },
                 recent + chrono::Duration::minutes(i64::from(idx)),
             );
             write_episode(&logger, &ep).await;
@@ -2424,14 +2431,22 @@ mod tests {
 
         let signal_log = tmp.path().join(".roko").join("signals.jsonl");
         let signals = read_signals(&signal_log);
-        assert!(signals.iter().all(|signal| signal.kind.as_str() != "dreams:regression"));
+        assert!(
+            signals
+                .iter()
+                .all(|signal| signal.kind.as_str() != "dreams:regression")
+        );
     }
 
     #[tokio::test]
     async fn cfactor_regression_signal_emitted_when_recent_average_drops() {
         let tmp = TempDir::new().expect("tempdir");
         let episodes_path = tmp.path().join(".roko").join("episodes.jsonl");
-        let learn_path = tmp.path().join(".roko").join("learn").join("c-factor.jsonl");
+        let learn_path = tmp
+            .path()
+            .join(".roko")
+            .join("learn")
+            .join("c-factor.jsonl");
         let knowledge_path = tmp
             .path()
             .join(".roko")
@@ -2506,7 +2521,11 @@ mod tests {
     async fn cfactor_regression_signal_not_emitted_at_exact_threshold() {
         let tmp = TempDir::new().expect("tempdir");
         let episodes_path = tmp.path().join(".roko").join("episodes.jsonl");
-        let learn_path = tmp.path().join(".roko").join("learn").join("c-factor.jsonl");
+        let learn_path = tmp
+            .path()
+            .join(".roko")
+            .join("learn")
+            .join("c-factor.jsonl");
         let knowledge_path = tmp
             .path()
             .join(".roko")
@@ -2553,9 +2572,11 @@ mod tests {
 
         let signal_log = tmp.path().join(".roko").join("signals.jsonl");
         let signals = read_signals(&signal_log);
-        assert!(signals
-            .iter()
-            .all(|signal| signal.kind.as_str() != "cfactor:regression"));
+        assert!(
+            signals
+                .iter()
+                .all(|signal| signal.kind.as_str() != "cfactor:regression")
+        );
     }
 
     #[tokio::test]
@@ -2597,10 +2618,12 @@ mod tests {
         );
 
         let report = cycle.run().await.expect("run");
-        assert!(report
-            .performance_notes
-            .iter()
-            .any(|note| note == DREAMS_PERFORMANCE_STALLED_NOTE));
+        assert!(
+            report
+                .performance_notes
+                .iter()
+                .any(|note| note == DREAMS_PERFORMANCE_STALLED_NOTE)
+        );
     }
 
     #[test]

@@ -172,7 +172,10 @@ impl OperatingFrequencyScheduler {
     /// Override the base theta interval.
     #[must_use]
     pub fn with_theta_interval(mut self, theta_interval: Duration) -> Self {
-        assert!(theta_interval > Duration::ZERO, "theta interval must be positive");
+        assert!(
+            theta_interval > Duration::ZERO,
+            "theta interval must be positive"
+        );
         self.theta_interval = theta_interval;
         self
     }
@@ -180,7 +183,10 @@ impl OperatingFrequencyScheduler {
     /// Override the delta consolidation interval.
     #[must_use]
     pub fn with_delta_interval(mut self, delta_interval: Duration) -> Self {
-        assert!(delta_interval > Duration::ZERO, "delta interval must be positive");
+        assert!(
+            delta_interval > Duration::ZERO,
+            "delta interval must be positive"
+        );
         self.delta_interval = delta_interval;
         self
     }
@@ -297,9 +303,10 @@ fn task_text_matches(task: &Task, needles: &[&str]) -> bool {
 
 fn task_tag_matches(task: &Task, needle: &str) -> bool {
     let normalized_needle = normalize_token(needle);
-    task.tags
-        .as_deref()
-        .is_some_and(|tags| tags.iter().any(|tag| normalize_token(tag) == normalized_needle))
+    task.tags.as_deref().is_some_and(|tags| {
+        tags.iter()
+            .any(|tag| normalize_token(tag) == normalized_needle)
+    })
 }
 
 fn task_haystack(task: &Task) -> String {
@@ -319,7 +326,11 @@ fn task_haystack(task: &Task) -> String {
 }
 
 fn normalize_token(value: &str) -> String {
-    value.trim().to_ascii_lowercase().replace('-', "_").replace(' ', "_")
+    value
+        .trim()
+        .to_ascii_lowercase()
+        .replace('-', "_")
+        .replace(' ', "_")
 }
 
 fn scale_duration(duration: Duration, factor: f64) -> Duration {
@@ -347,9 +358,11 @@ impl From<InferenceTier> for OperatingFrequency {
 mod tests {
     use std::time::Duration;
 
-    use super::{OperatingFrequency, OperatingFrequencyScheduleContext, OperatingFrequencyScheduler};
-    use bardo_primitives::tier::InferenceTier;
+    use super::{
+        OperatingFrequency, OperatingFrequencyScheduleContext, OperatingFrequencyScheduler,
+    };
     use crate::{Task, TaskCategory, TaskContextWeight, TaskQualityProfile, TaskReasoningLevel};
+    use bardo_primitives::tier::InferenceTier;
 
     struct TestAffect {
         confidence: f64,
@@ -373,16 +386,34 @@ mod tests {
 
     #[test]
     fn maps_to_inference_tiers() {
-        assert_eq!(OperatingFrequency::Gamma.inference_tier(), InferenceTier::T0);
-        assert_eq!(OperatingFrequency::Theta.inference_tier(), InferenceTier::T1);
-        assert_eq!(OperatingFrequency::Delta.inference_tier(), InferenceTier::T2);
+        assert_eq!(
+            OperatingFrequency::Gamma.inference_tier(),
+            InferenceTier::T0
+        );
+        assert_eq!(
+            OperatingFrequency::Theta.inference_tier(),
+            InferenceTier::T1
+        );
+        assert_eq!(
+            OperatingFrequency::Delta.inference_tier(),
+            InferenceTier::T2
+        );
     }
 
     #[test]
     fn round_trips_from_inference_tiers() {
-        assert_eq!(OperatingFrequency::from(InferenceTier::T0), OperatingFrequency::Gamma);
-        assert_eq!(OperatingFrequency::from(InferenceTier::T1), OperatingFrequency::Theta);
-        assert_eq!(OperatingFrequency::from(InferenceTier::T2), OperatingFrequency::Delta);
+        assert_eq!(
+            OperatingFrequency::from(InferenceTier::T0),
+            OperatingFrequency::Gamma
+        );
+        assert_eq!(
+            OperatingFrequency::from(InferenceTier::T1),
+            OperatingFrequency::Theta
+        );
+        assert_eq!(
+            OperatingFrequency::from(InferenceTier::T2),
+            OperatingFrequency::Delta
+        );
     }
 
     #[test]
@@ -396,7 +427,10 @@ mod tests {
             dominance: 0.4,
         };
 
-        assert_eq!(OperatingFrequency::select(&task, &affect), OperatingFrequency::Gamma);
+        assert_eq!(
+            OperatingFrequency::select(&task, &affect),
+            OperatingFrequency::Gamma
+        );
     }
 
     #[test]
@@ -410,7 +444,10 @@ mod tests {
             dominance: 0.3,
         };
 
-        assert_eq!(OperatingFrequency::select(&task, &affect), OperatingFrequency::Delta);
+        assert_eq!(
+            OperatingFrequency::select(&task, &affect),
+            OperatingFrequency::Delta
+        );
     }
 
     #[test]
@@ -423,7 +460,10 @@ mod tests {
             dominance: -0.3,
         };
 
-        assert_eq!(OperatingFrequency::select(&task, &affect), OperatingFrequency::Delta);
+        assert_eq!(
+            OperatingFrequency::select(&task, &affect),
+            OperatingFrequency::Delta
+        );
     }
 
     #[test]
@@ -435,7 +475,10 @@ mod tests {
             dominance: 0.1,
         };
 
-        assert_eq!(OperatingFrequency::select(&task, &affect), OperatingFrequency::Theta);
+        assert_eq!(
+            OperatingFrequency::select(&task, &affect),
+            OperatingFrequency::Theta
+        );
     }
 
     #[test]

@@ -1238,10 +1238,22 @@ mod tests {
             ContextTier::from(OperatingFrequency::Theta),
             ContextTier::Focused
         );
-        assert_eq!(ContextTier::from(OperatingFrequency::Delta), ContextTier::Full);
-        assert_eq!(OperatingFrequency::from(ContextTier::Surgical), OperatingFrequency::Gamma);
-        assert_eq!(OperatingFrequency::from(ContextTier::Focused), OperatingFrequency::Theta);
-        assert_eq!(OperatingFrequency::from(ContextTier::Full), OperatingFrequency::Delta);
+        assert_eq!(
+            ContextTier::from(OperatingFrequency::Delta),
+            ContextTier::Full
+        );
+        assert_eq!(
+            OperatingFrequency::from(ContextTier::Surgical),
+            OperatingFrequency::Gamma
+        );
+        assert_eq!(
+            OperatingFrequency::from(ContextTier::Focused),
+            OperatingFrequency::Theta
+        );
+        assert_eq!(
+            OperatingFrequency::from(ContextTier::Full),
+            OperatingFrequency::Delta
+        );
     }
 
     #[test]

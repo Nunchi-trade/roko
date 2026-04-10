@@ -470,11 +470,7 @@ pub fn compute_frequency_profiles(events: &[AgentEfficiencyEvent]) -> Vec<Freque
             let total_cost = evts.iter().map(|e| e.cost_usd).sum::<f64>();
             let avg_cost_usd = if n == 0.0 { 0.0 } else { total_cost / n };
             let pass_count = evts.iter().filter(|e| e.gate_passed).count();
-            let pass_rate = if n == 0.0 {
-                0.0
-            } else {
-                pass_count as f64 / n
-            };
+            let pass_rate = if n == 0.0 { 0.0 } else { pass_count as f64 / n };
             let cost_per_pass = if pass_count > 0 {
                 total_cost / pass_count as f64
             } else {

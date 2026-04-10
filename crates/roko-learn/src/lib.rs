@@ -18,9 +18,9 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod bandits;
-pub mod cfactor;
 pub mod baseline;
 pub mod cascade_router;
+pub mod cfactor;
 pub mod context_pack_cache;
 pub mod costs_db;
 pub mod costs_log;

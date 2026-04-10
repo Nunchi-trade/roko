@@ -607,9 +607,18 @@ fn classify_meta_cognition_action(
 
     if iterations_without_progress >= 3
         || repeated_output_count >= thresholds.output_loop_count
-        || matches!(primary_signal.map(|signal| signal.kind), Some(StuckKind::OutputLoop))
-        || matches!(primary_signal.map(|signal| signal.kind), Some(StuckKind::EmptyOutput))
-        || matches!(primary_signal.map(|signal| signal.kind), Some(StuckKind::NoProgress))
+        || matches!(
+            primary_signal.map(|signal| signal.kind),
+            Some(StuckKind::OutputLoop)
+        )
+        || matches!(
+            primary_signal.map(|signal| signal.kind),
+            Some(StuckKind::EmptyOutput)
+        )
+        || matches!(
+            primary_signal.map(|signal| signal.kind),
+            Some(StuckKind::NoProgress)
+        )
     {
         return MetaCognitionAction::AdjustStrategy;
     }
@@ -649,7 +658,10 @@ fn meta_cognition_reason(
                     "{repeated_gate_failure_count} repeated gate failures; escalate to a stronger model or broader context"
                 )
             } else if let Some(signal) = primary_signal {
-                format!("{}; escalate to a stronger model or broader context", signal.description)
+                format!(
+                    "{}; escalate to a stronger model or broader context",
+                    signal.description
+                )
             } else {
                 "gate failure pattern detected; escalate to a stronger model or broader context"
                     .to_string()
