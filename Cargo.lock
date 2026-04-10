@@ -5090,6 +5090,7 @@ dependencies = [
  "roko-conductor",
  "roko-core",
  "roko-daimon",
+ "roko-dreams",
  "roko-fs",
  "roko-gate",
  "roko-learn",
@@ -5213,6 +5214,7 @@ dependencies = [
  "roko-neuro",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

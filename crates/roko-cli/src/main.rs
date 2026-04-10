@@ -27,19 +27,18 @@ use roko_core::config::schema::RokoConfig;
 use roko_core::{ContentHash, Context, Kind, Query, Substrate};
 use roko_core::{Headlines, TaskMetric, compute_headlines};
 use roko_fs::{FileSubstrate, FsObservabilitySinks, RokoLayout};
+use roko_dreams::{DreamAgentConfig, DreamEngine, DreamLoopConfig, DreamRunner};
 use roko_learn::cfactor::{CFactor, trend_arrow as cfactor_trend_arrow};
 use roko_learn::efficiency::compute_role_profiles;
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
 use roko_learn::prompt_experiment::ExperimentStore;
 use roko_learn::runtime_feedback::{read_efficiency_events, refresh_cfactor_snapshot};
 use roko_neuro::{DEFAULT_GC_MIN_CONFIDENCE, KnowledgeStore};
-use roko_serve::{deploy, dreams, state::AppState};
 use std::collections::BTreeMap;
 use std::env;
 use std::fmt::Write as _;
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
@@ -193,14 +192,10 @@ enum Command {
         #[arg(long)]
         workdir: Option<PathBuf>,
     },
-    /// Run one offline dream cycle immediately, or show the latest report.
+    /// Manage dream replay, report, and scheduling.
     Dream {
-        /// Directory containing `.roko/` (default: cwd).
-        #[arg(long)]
-        workdir: Option<PathBuf>,
-        /// Show the last dream report without running a new cycle.
-        #[arg(long)]
-        report: bool,
+        #[command(subcommand)]
+        cmd: DreamCmd,
     },
     /// Manage global and project config (wizard, show, path, edit, set, set-secret).
     Config {
@@ -320,6 +315,28 @@ enum DaemonCmd {
     Install,
     // macOS launchd plist generation
     Uninstall, // remove launchd plist
+}
+
+#[derive(Debug, Subcommand)]
+enum DreamCmd {
+    /// Run a dream consolidation cycle immediately.
+    Run {
+        /// Directory containing `.roko/` (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Show the latest dream report without running a new cycle.
+    Report {
+        /// Directory containing `.roko/` (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Show when the next dream should fire.
+    Schedule {
+        /// Directory containing `.roko/` (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -767,7 +784,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             Ok(EXIT_SUCCESS)
         }
         Command::Replay { hash, workdir } => cmd_replay(workdir, hash).await,
-        Command::Dream { workdir, .. } => cmd_dream(cli, workdir).await,
+        Command::Dream { cmd } => cmd_dream(cli, cmd).await,
         Command::Config { cmd } => {
             dispatch_config(cmd)?;
             Ok(EXIT_SUCCESS)
@@ -2848,73 +2865,110 @@ async fn cmd_replay(workdir: Option<PathBuf>, hash: String) -> Result<i32> {
     Ok(EXIT_SUCCESS)
 }
 
-async fn cmd_dream(cli: &Cli, workdir: Option<PathBuf>) -> Result<i32> {
-    let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
+async fn cmd_dream(cli: &Cli, cmd: DreamCmd) -> Result<i32> {
+    match cmd {
+        DreamCmd::Run { workdir } => {
+            let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            prepare_runtime_hooks(&workdir, cli.quiet);
 
-    if let Some(Command::Dream { report: true, .. }) = cli.command.as_ref() {
-        let report_dir = workdir.join(".roko").join("dreams");
-        let report = roko_serve::dreams::load_latest_dream_report(&report_dir)?
-            .ok_or_else(|| anyhow!("no dream report found in {}", report_dir.display()))?;
-        println!("{}", serde_json::to_string_pretty(&report)?);
-        return Ok(EXIT_SUCCESS);
-    }
+            let mut runner = build_dream_runner(cli, &workdir)?;
+            let report = runner.consolidate()?;
+            let cfactor_snapshot = refresh_cfactor_snapshot(workdir.join(".roko").join("learn"))
+                .await
+                .map_err(|e| anyhow!("refresh c-factor snapshot: {e}"))?;
 
-    prepare_runtime_hooks(&workdir, cli.quiet);
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else if !cli.quiet {
+                println!(
+                    "dream cycle completed: {} episodes, {} clusters, {} knowledge entries, {} playbooks",
+                    report.processed_episodes,
+                    report.clusters.len(),
+                    report.knowledge_entries_written,
+                    report.playbooks_created
+                );
+                if let Some(processed_through) = report.processed_through {
+                    println!("processed through: {processed_through}");
+                }
+                println!(
+                    "report saved under: {}",
+                    workdir.join(".roko").join("dreams").display()
+                );
+                println!("c-factor: {:.3}", cfactor_snapshot.overall);
+            }
 
-    let core_config = roko_core::config::load_config(&workdir)?;
-    let cli_config = resolve_config_for_workdir(cli, &workdir)?;
-    let repo_registry = RepoRegistry::load(&cli_config, &workdir).unwrap_or_default();
-    let runtime = RokoCliRuntime::new(cli_config.clone(), repo_registry).into_arc();
-    let deploy_backend = Arc::from(deploy::create_backend("manual", None, None, None)?);
-    let state = Arc::new(AppState::new(
-        workdir.clone(),
-        runtime,
-        core_config,
-        deploy_backend,
-    ));
-
-    let dream_config = dreams::DreamLoopConfig {
-        auto_dream: false,
-        idle_threshold_mins: cli_config.dreams.idle_threshold_mins,
-        min_episodes_for_dream: cli_config.dreams.min_episodes_for_dream,
-        agent: dreams::DreamAgentConfig {
-            command: cli_config.agent.command.clone(),
-            args: cli_config.agent.args.clone(),
-            model: cli_config.agent.model.clone(),
-            bare_mode: cli_config.agent.bare_mode,
-            effort: cli_config.agent.effort.clone(),
-            fallback_model: cli_config.agent.fallback_model.clone(),
-            timeout_ms: cli_config.agent.timeout_ms,
-            env: cli_config.agent.env.clone(),
-        },
-    };
-
-    let report = roko_serve::dreams::run_dream_cycle_now(state, dream_config).await?;
-    let cfactor_snapshot = refresh_cfactor_snapshot(workdir.join(".roko").join("learn"))
-        .await
-        .map_err(|e| anyhow!("refresh c-factor snapshot: {e}"))?;
-
-    if cli.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else if !cli.quiet {
-        println!(
-            "dream cycle completed: {} episodes, {} clusters, {} knowledge entries, {} playbooks",
-            report.processed_episodes,
-            report.clusters.len(),
-            report.knowledge_entries_written,
-            report.playbooks_created
-        );
-        if let Some(processed_through) = report.processed_through {
-            println!("processed through: {processed_through}");
+            Ok(EXIT_SUCCESS)
         }
-        println!(
-            "report saved under: {}",
-            workdir.join(".roko").join("dreams").display()
-        );
-        println!("c-factor: {:.3}", cfactor_snapshot.overall);
+        DreamCmd::Report { workdir } => {
+            let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            let runner = build_dream_runner(cli, &workdir)?;
+            let report = runner
+                .latest_report()?
+                .ok_or_else(|| {
+                    anyhow!(
+                        "no dream report found in {}",
+                        workdir.join(".roko").join("dreams").display()
+                    )
+                })?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "dream report: {} episodes, {} clusters, {} knowledge entries, {} playbooks",
+                    report.processed_episodes,
+                    report.clusters.len(),
+                    report.knowledge_entries_written,
+                    report.playbooks_created
+                );
+                println!("started: {}", report.started_at);
+                println!("completed: {}", report.completed_at);
+                if let Some(processed_through) = report.processed_through {
+                    println!("processed through: {processed_through}");
+                }
+            }
+            Ok(EXIT_SUCCESS)
+        }
+        DreamCmd::Schedule { workdir } => {
+            let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            let runner = build_dream_runner(cli, &workdir)?;
+            let schedule = runner.schedule_next();
+            if cli.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "next_fire_seconds": schedule.map(|duration| duration.as_secs())
+                    })
+                );
+            } else if let Some(duration) = schedule {
+                println!("next dream in {:?}", duration);
+            } else {
+                println!("no dream scheduled");
+            }
+            Ok(EXIT_SUCCESS)
+        }
     }
+}
 
-    Ok(EXIT_SUCCESS)
+fn build_dream_runner(cli: &Cli, workdir: &Path) -> Result<DreamRunner> {
+    let cli_config = resolve_config_for_workdir(cli, workdir)?;
+    Ok(DreamRunner::new(
+        workdir.to_path_buf(),
+        DreamLoopConfig {
+            auto_dream: cli_config.dreams.auto_dream,
+            idle_threshold_mins: cli_config.dreams.idle_threshold_mins,
+            min_episodes_for_dream: cli_config.dreams.min_episodes_for_dream,
+            agent: DreamAgentConfig {
+                command: cli_config.agent.command.clone(),
+                args: cli_config.agent.args.clone(),
+                model: cli_config.agent.model.clone(),
+                bare_mode: cli_config.agent.bare_mode,
+                effort: cli_config.agent.effort.clone(),
+                fallback_model: cli_config.agent.fallback_model.clone(),
+                timeout_ms: cli_config.agent.timeout_ms,
+                env: cli_config.agent.env.clone(),
+            },
+        },
+    ))
 }
 
 async fn cmd_deploy(cli: &Cli, cmd: DeployCmd) -> Result<i32> {
