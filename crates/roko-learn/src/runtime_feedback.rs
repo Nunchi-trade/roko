@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
+use serde::Deserialize;
 use thiserror::Error;
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -764,8 +766,7 @@ impl LearningRuntime {
 
     /// Compute the current C-Factor snapshot and append it to the history log.
     async fn append_cfactor_snapshot(&self) -> Result<(), LearningRuntimeError> {
-        let episodes = EpisodeLogger::read_all_lossy(&self.paths.episodes_jsonl).await?;
-        let snapshot = compute_cfactor(&episodes, Duration::from_secs(7 * 24 * 60 * 60));
+        let snapshot = compute_cfactor_snapshot(&self.paths.root).await?;
         append_cfactor_snapshot(&self.paths.cfactor_jsonl, &snapshot).await?;
         Ok(())
     }
@@ -955,11 +956,95 @@ pub async fn read_efficiency_events(
 pub async fn refresh_cfactor_snapshot(
     learn_root: impl AsRef<Path>,
 ) -> Result<CFactor, LearningRuntimeError> {
-    let paths = LearningPaths::under(learn_root.as_ref().to_path_buf());
-    let episodes = EpisodeLogger::read_all_lossy(&paths.episodes_jsonl).await?;
-    let snapshot = compute_cfactor(&episodes, Duration::from_secs(7 * 24 * 60 * 60));
+    let learn_root = learn_root.as_ref();
+    let paths = LearningPaths::under(learn_root.to_path_buf());
+    let snapshot = compute_cfactor_snapshot(learn_root).await?;
     append_cfactor_snapshot(&paths.cfactor_jsonl, &snapshot).await?;
     Ok(snapshot)
+}
+
+#[derive(Debug, Deserialize)]
+struct ContextAttributionRecord {
+    #[serde(default = "default_now")]
+    ts: DateTime<Utc>,
+    #[serde(default)]
+    source_type: String,
+    #[serde(default)]
+    referenced: bool,
+}
+
+async fn compute_cfactor_snapshot(learn_root: &Path) -> Result<CFactor, LearningRuntimeError> {
+    let paths = LearningPaths::under(learn_root.to_path_buf());
+    let episodes = EpisodeLogger::read_all_lossy(&paths.episodes_jsonl).await?;
+    let attribution_path = learn_root
+        .parent()
+        .unwrap_or(learn_root)
+        .join("context-attribution.jsonl");
+    let attribution_records = read_context_attribution_records(&attribution_path).await?;
+    let social_sensitivity = social_sensitivity_from_attribution(
+        &attribution_records,
+        Duration::from_secs(7 * 24 * 60 * 60),
+    );
+    Ok(compute_cfactor(
+        &episodes,
+        Duration::from_secs(7 * 24 * 60 * 60),
+        social_sensitivity,
+    ))
+}
+
+async fn read_context_attribution_records(
+    path: &Path,
+) -> Result<Vec<ContextAttributionRecord>, LearningRuntimeError> {
+    let file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(LearningRuntimeError::Io(err)),
+    };
+
+    let mut lines = BufReader::new(file).lines();
+    let mut out = Vec::new();
+    while let Some(line) = lines.next_line().await? {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(record) = serde_json::from_str::<ContextAttributionRecord>(trimmed) {
+            out.push(record);
+        }
+    }
+    Ok(out)
+}
+
+fn social_sensitivity_from_attribution(
+    records: &[ContextAttributionRecord],
+    window: Duration,
+) -> f64 {
+    let cutoff = match chrono::Duration::from_std(window) {
+        Ok(delta) => Utc::now() - delta,
+        Err(_) => DateTime::<Utc>::MIN_UTC,
+    };
+
+    let mut referenced = 0usize;
+    let mut total = 0usize;
+    for record in records.iter().filter(|record| record.ts >= cutoff) {
+        if record.source_type != "prior_output" {
+            continue;
+        }
+        total += 1;
+        if record.referenced {
+            referenced += 1;
+        }
+    }
+
+    if total == 0 {
+        0.0
+    } else {
+        referenced as f64 / total as f64
+    }
+}
+
+fn default_now() -> DateTime<Utc> {
+    Utc::now()
 }
 
 #[cfg(test)]
@@ -1074,6 +1159,31 @@ mod tests {
         assert_eq!(snapshots.len(), 2);
         assert_eq!(snapshots[0].episode_count, 1);
         assert_eq!(snapshots[1].episode_count, 2);
+    }
+
+    #[test]
+    fn social_sensitivity_uses_prior_output_attributions() {
+        let now = Utc::now();
+        let records = vec![
+            ContextAttributionRecord {
+                ts: now,
+                source_type: "prior_output".to_string(),
+                referenced: true,
+            },
+            ContextAttributionRecord {
+                ts: now,
+                source_type: "prior_output".to_string(),
+                referenced: false,
+            },
+            ContextAttributionRecord {
+                ts: now,
+                source_type: "file".to_string(),
+                referenced: true,
+            },
+        ];
+
+        let score = social_sensitivity_from_attribution(&records, Duration::from_secs(60));
+        assert!((score - 0.5).abs() < 1e-9);
     }
 
     #[tokio::test]

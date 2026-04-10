@@ -2183,6 +2183,10 @@ fn render_cfactor_breakdown(frame: &mut Frame<'_>, area: Rect, data: &DashboardD
             "turn-taking equality: {}",
             format_pct(snapshot.components.turn_taking_equality)
         )),
+        Line::from(format!(
+            "social sensitivity: {}",
+            format_pct(snapshot.components.social_sensitivity)
+        )),
     ];
 
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });

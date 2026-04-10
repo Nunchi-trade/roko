@@ -1147,6 +1147,10 @@ impl DashboardSnapshot {
                     "turn-taking equality: {}",
                     format_percent(cfactor.components.turn_taking_equality)
                 ),
+                format!(
+                    "social sensitivity: {}",
+                    format_percent(cfactor.components.social_sensitivity)
+                ),
             ],
         )
     }
@@ -2759,14 +2763,15 @@ async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>, cfactor: bool) -> Resul
             cfactor.overall, cfactor_trend, cfactor.episode_count, cfactor.computed_at
         );
         println!(
-            "  gate={:.3} cost={:.3} speed={:.3} flow={:.3} first_try={:.3} knowledge={:.3} turn={:.3}",
+            "  gate={:.3} cost={:.3} speed={:.3} flow={:.3} first_try={:.3} knowledge={:.3} turn={:.3} social={:.3}",
             cfactor.components.gate_pass_rate,
             cfactor.components.cost_efficiency,
             cfactor.components.speed,
             cfactor.components.information_flow_rate,
             cfactor.components.first_try_rate,
             cfactor.components.knowledge_growth,
-            cfactor.components.turn_taking_equality
+            cfactor.components.turn_taking_equality,
+            cfactor.components.social_sensitivity
         );
     }
 
@@ -3917,6 +3922,7 @@ mod tests {
             first_try_rate: 0.64,
             knowledge_growth: 0.18,
             turn_taking_equality: 0.74,
+            social_sensitivity: 0.68,
         };
         cf3.computed_at = chrono::Utc::now();
 
