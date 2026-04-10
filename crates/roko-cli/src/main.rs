@@ -1647,6 +1647,7 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                         "succeeded": report.all_succeeded(),
                         "total_agent_calls": report.total_agent_calls,
                         "total_gate_runs": report.total_gate_runs,
+                        "fleet_cfactor": report.fleet_cfactor,
                         "plans": report.plans.iter().map(|p| serde_json::json!({
                             "plan_id": p.plan_id,
                             "succeeded": p.succeeded,
@@ -1676,6 +1677,23 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                         "FAILED"
                     }
                 );
+                if let Some(fleet) = &report.fleet_cfactor {
+                    println!(
+                        "fleet c-factor: {:.3} | plans={} | agents={} | turns={}",
+                        fleet.overall,
+                        fleet.plan_count,
+                        fleet.agent_count,
+                        fleet.observation_count
+                    );
+                    println!(
+                        "  multi_agent={:.3} pass={:.3} cost={:.3} speed={:.3} turn={:.3}",
+                        fleet.components.multi_agent_coverage,
+                        fleet.components.pass_rate,
+                        fleet.components.cost_efficiency,
+                        fleet.components.speed,
+                        fleet.components.turn_taking_equality
+                    );
+                }
                 println!("Snapshot saved to {}", snap_path.display());
             }
 

@@ -43,7 +43,7 @@ use roko_gate::{
     payload::GatePayload, test_gate::TestGate,
 };
 use roko_learn::costs_db::CostRecord;
-use roko_learn::efficiency::AgentEfficiencyEvent;
+use roko_learn::efficiency::{AgentEfficiencyEvent, FleetCFactor, compute_fleet_cfactor};
 use roko_learn::episode_logger::{Episode, GateVerdict, Usage};
 use roko_learn::playbook::{Playbook, PlaybookStore};
 use roko_learn::runtime_feedback::{
@@ -490,6 +490,8 @@ pub struct OrchestrationReport {
     pub total_agent_calls: usize,
     /// Total gate runs across all plans.
     pub total_gate_runs: usize,
+    /// Fleet-level C-Factor for the current `roko plan run` session.
+    pub fleet_cfactor: Option<FleetCFactor>,
 }
 
 impl OrchestrationReport {
@@ -2834,6 +2836,12 @@ impl PlanRunner {
             .values()
             .map(|tracker| tracker.failed.len())
             .sum();
+        let fleet_cfactor = compute_fleet_cfactor(&self.efficiency_events);
+        let fleet_cfactor = if fleet_cfactor.plan_count > 0 {
+            Some(fleet_cfactor)
+        } else {
+            None
+        };
 
         tracing::info!(
             total_cost_usd = total_cost_usd,
@@ -2854,6 +2862,7 @@ impl PlanRunner {
             total_agent_calls: self.agent_calls,
             total_gate_runs: self.gate_runs,
             plans,
+            fleet_cfactor,
         })
     }
 
@@ -8984,6 +8993,7 @@ mod tests {
             ],
             total_agent_calls: 3,
             total_gate_runs: 2,
+            fleet_cfactor: None,
         };
         assert!(report.all_succeeded());
     }
@@ -9007,6 +9017,7 @@ mod tests {
             ],
             total_agent_calls: 2,
             total_gate_runs: 1,
+            fleet_cfactor: None,
         };
         assert!(!report.all_succeeded());
     }

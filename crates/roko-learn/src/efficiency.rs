@@ -17,10 +17,12 @@
 //! event. Downstream consumers (bandits, dashboards, regression detector)
 //! read from the accumulated event stream.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use roko_core::OperatingFrequency;
 use serde::{Deserialize, Serialize};
+
+const BASELINE_PLAN_COUNT: usize = 10;
 
 // ─── PromptSectionMeta ──────────────────────────────────────────────────────
 
@@ -392,6 +394,64 @@ pub struct FrequencyCostProfile {
     pub cost_per_pass: f64,
 }
 
+/// Composite C-Factor snapshot for a single `roko plan run` session.
+///
+/// This aggregates efficiency telemetry across all agents participating in the
+/// run, grouped by plan. It is the fleet-level counterpart to the episode-based
+/// C-Factor in [`crate::cfactor`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetCFactor {
+    /// 0.0-1.0 composite score for the session.
+    pub overall: f64,
+    /// Component breakdown for the score.
+    pub components: FleetCFactorComponents,
+    /// Number of distinct plans represented in the session.
+    pub plan_count: usize,
+    /// Number of distinct agents represented in the session.
+    pub agent_count: usize,
+    /// Number of efficiency events contributing to the snapshot.
+    pub observation_count: usize,
+}
+
+/// Individual fleet C-Factor components.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetCFactorComponents {
+    /// Fraction of plans that used more than one agent.
+    pub multi_agent_coverage: f64,
+    /// Fraction of plan groups that passed at least one gate.
+    pub pass_rate: f64,
+    /// Inverse of cost per successful plan, normalized against the run's baseline.
+    pub cost_efficiency: f64,
+    /// Inverse of duration per successful plan, normalized against the run's baseline.
+    pub speed: f64,
+    /// Evenness of agent participation inside plan groups, normalized to `[0..1]`.
+    pub turn_taking_equality: f64,
+}
+
+impl Default for FleetCFactorComponents {
+    fn default() -> Self {
+        Self {
+            multi_agent_coverage: 0.0,
+            pass_rate: 0.0,
+            cost_efficiency: 0.0,
+            speed: 0.0,
+            turn_taking_equality: 0.0,
+        }
+    }
+}
+
+impl Default for FleetCFactor {
+    fn default() -> Self {
+        Self {
+            overall: 0.0,
+            components: FleetCFactorComponents::default(),
+            plan_count: 0,
+            agent_count: 0,
+            observation_count: 0,
+        }
+    }
+}
+
 /// Compute a [`RoleCostProfile`] for each distinct role in the given events.
 #[allow(clippy::cast_precision_loss)]
 pub fn compute_role_profiles(events: &[AgentEfficiencyEvent]) -> Vec<RoleCostProfile> {
@@ -490,6 +550,185 @@ pub fn compute_frequency_profiles(events: &[AgentEfficiencyEvent]) -> Vec<Freque
 
     profiles.sort_by_key(|profile| profile.frequency);
     profiles
+}
+
+/// Compute a fleet-level C-Factor for a single plan-run session.
+///
+/// The snapshot groups efficiency events by `plan_id`, then scores the session
+/// using pass rate, baseline-relative cost and speed, multi-agent coverage, and
+/// turn-taking equality across agents.
+#[allow(clippy::cast_precision_loss)]
+pub fn compute_fleet_cfactor(events: &[AgentEfficiencyEvent]) -> FleetCFactor {
+    if events.is_empty() {
+        return FleetCFactor::default();
+    }
+
+    let mut groups: HashMap<String, FleetPlanAggregate> = HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+    let mut agent_ids: HashSet<String> = HashSet::new();
+
+    for event in events {
+        let plan_id = event.plan_id.trim();
+        if plan_id.is_empty() {
+            continue;
+        }
+
+        agent_ids.insert(event.agent_id.clone());
+        let entry = groups.entry(plan_id.to_string()).or_insert_with(|| {
+            order.push(plan_id.to_string());
+            FleetPlanAggregate::default()
+        });
+        entry.observe(event);
+    }
+
+    let plans: Vec<(String, FleetPlanAggregate)> = order
+        .into_iter()
+        .filter_map(|plan_id| groups.remove_entry(&plan_id))
+        .collect();
+    if plans.is_empty() {
+        return FleetCFactor::default();
+    }
+
+    let plan_count = plans.len();
+    let multi_agent_plan_count = plans
+        .iter()
+        .filter(|(_, plan)| plan.distinct_agents.len() > 1)
+        .count();
+    let passed_plan_count = plans.iter().filter(|(_, plan)| plan.passed_gate).count();
+    let successful_plans: Vec<&FleetPlanAggregate> = plans
+        .iter()
+        .filter_map(|(_, plan)| plan.passed_gate.then_some(plan))
+        .collect();
+
+    let pass_rate = passed_plan_count as f64 / plan_count as f64;
+    let multi_agent_coverage = multi_agent_plan_count as f64 / plan_count as f64;
+    let turn_taking_equality = {
+        let mut total = 0.0;
+        let mut counted = 0.0;
+        for (_, plan) in &plans {
+            if plan.distinct_agents.len() < 2 {
+                continue;
+            }
+            let equality = turn_taking_equality_for_counts(
+                plan.agent_turn_counts.values().copied().collect(),
+            );
+            total += equality;
+            counted += 1.0;
+        }
+        if counted == 0.0 {
+            0.0
+        } else {
+            (total / counted).clamp(0.0, 1.0)
+        }
+    };
+
+    let (avg_cost_per_successful_plan, avg_duration_per_successful_plan) =
+        if successful_plans.is_empty() {
+            (0.0, 0.0)
+        } else {
+            let count = successful_plans.len() as f64;
+            let total_cost: f64 = successful_plans.iter().map(|plan| plan.cost_usd).sum();
+            let total_duration: f64 = successful_plans.iter().map(|plan| plan.duration_ms).sum();
+            (total_cost / count, total_duration / count)
+        };
+
+    let baseline_plan_count = plans.len().min(BASELINE_PLAN_COUNT);
+    let (baseline_cost, baseline_duration) = if baseline_plan_count == 0 {
+        (0.0, 0.0)
+    } else {
+        let baseline_plans: Vec<&(String, FleetPlanAggregate)> =
+            plans.iter().take(baseline_plan_count).collect();
+        let total_cost: f64 = baseline_plans.iter().map(|(_, plan)| plan.cost_usd).sum();
+        let total_duration: f64 = baseline_plans.iter().map(|(_, plan)| plan.duration_ms).sum();
+        (
+            total_cost / baseline_plan_count as f64,
+            total_duration / baseline_plan_count as f64,
+        )
+    };
+
+    let cost_efficiency = if baseline_cost > 0.0 && avg_cost_per_successful_plan > 0.0 {
+        baseline_cost / avg_cost_per_successful_plan
+    } else {
+        0.0
+    };
+
+    let speed = if baseline_duration > 0.0 && avg_duration_per_successful_plan > 0.0 {
+        baseline_duration / avg_duration_per_successful_plan
+    } else {
+        0.0
+    };
+
+    let overall = (pass_rate * 0.30
+        + cost_efficiency * 0.20
+        + speed * 0.15
+        + multi_agent_coverage * 0.15
+        + turn_taking_equality * 0.20)
+        .clamp(0.0, 1.0);
+
+    FleetCFactor {
+        overall,
+        components: FleetCFactorComponents {
+            multi_agent_coverage,
+            pass_rate,
+            cost_efficiency,
+            speed,
+            turn_taking_equality,
+        },
+        plan_count,
+        agent_count: agent_ids.len(),
+        observation_count: events.len(),
+    }
+}
+
+#[derive(Debug, Default)]
+struct FleetPlanAggregate {
+    cost_usd: f64,
+    duration_ms: f64,
+    passed_gate: bool,
+    distinct_agents: HashSet<String>,
+    agent_turn_counts: HashMap<String, u64>,
+}
+
+impl FleetPlanAggregate {
+    fn observe(&mut self, event: &AgentEfficiencyEvent) {
+        self.cost_usd += event.cost_usd;
+        self.duration_ms += event.wall_time_ms as f64;
+        self.passed_gate |= event.gate_passed;
+        self.distinct_agents.insert(event.agent_id.clone());
+        *self.agent_turn_counts.entry(event.agent_id.clone()).or_default() += 1;
+    }
+}
+
+fn turn_taking_equality_for_counts(counts: Vec<u64>) -> f64 {
+    if counts.len() < 2 {
+        return 0.0;
+    }
+
+    let gini = gini_coefficient(&counts);
+    (1.0 - gini).clamp(0.0, 1.0)
+}
+
+fn gini_coefficient(counts: &[u64]) -> f64 {
+    if counts.len() < 2 {
+        return 0.0;
+    }
+
+    let mut values: Vec<f64> = counts.iter().map(|&count| count as f64).collect();
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let total: f64 = values.iter().sum();
+    if total <= 0.0 {
+        return 0.0;
+    }
+
+    let weighted_sum: f64 = values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| (index as f64 + 1.0) * value)
+        .sum();
+    let n = values.len() as f64;
+    let gini = (2.0 * weighted_sum) / (n * total) - (n + 1.0) / n;
+    gini.clamp(0.0, 1.0)
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -761,6 +1000,27 @@ mod tests {
         assert_eq!(profiles[1].frequency, OperatingFrequency::Delta);
         assert_eq!(profiles[1].observations, 1);
         assert_eq!(profiles[1].pass_rate, 1.0);
+    }
+
+    #[test]
+    fn efficiency_fleet_cfactor_groups_by_plan_and_agents() {
+        let mut a1 = make_test_event("Implementer", 0.40, 900, 100, 0, 4000, 8, 4, false, true);
+        a1.plan_id = "plan-a".into();
+        a1.agent_id = "agent-a".into();
+        let mut a2 = make_test_event("Reviewer", 0.20, 600, 80, 0, 3000, 8, 2, false, true);
+        a2.plan_id = "plan-a".into();
+        a2.agent_id = "agent-b".into();
+        let mut b1 = make_test_event("Implementer", 0.10, 400, 50, 0, 1500, 8, 2, false, false);
+        b1.plan_id = "plan-b".into();
+        b1.agent_id = "agent-c".into();
+
+        let fleet = compute_fleet_cfactor(&[a1, a2, b1]);
+        assert_eq!(fleet.plan_count, 2);
+        assert_eq!(fleet.agent_count, 3);
+        assert_eq!(fleet.observation_count, 3);
+        assert!(fleet.components.multi_agent_coverage > 0.0);
+        assert!(fleet.components.turn_taking_equality > 0.0);
+        assert!(fleet.overall >= 0.0);
     }
 
     #[test]
