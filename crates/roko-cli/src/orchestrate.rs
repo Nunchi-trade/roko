@@ -48,6 +48,7 @@ use roko_learn::episode_logger::{Episode, GateVerdict, Usage};
 use roko_learn::playbook::{Playbook, PlaybookStore};
 use roko_learn::runtime_feedback::{
     CompletedRunInput, LearningRuntime, LearningUpdate, read_efficiency_events,
+    refresh_cfactor_snapshot,
 };
 use roko_learn::skill_library::Skill;
 use roko_learn::skill_library::{SkillExtractionRequest, SkillGateResult, SkillLibrary};
@@ -2900,6 +2901,11 @@ impl PlanRunner {
 
         watcher_cancel.cancel();
         let _ = watcher_task.await;
+
+        if let Err(e) = refresh_cfactor_snapshot(self.learning.paths().root.clone()).await {
+            tracing::warn!(error = %e, "failed to refresh c-factor snapshot after plan run");
+        }
+
         result
     }
 

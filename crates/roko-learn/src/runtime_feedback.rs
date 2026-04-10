@@ -14,7 +14,7 @@ use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::cfactor::compute_cfactor;
+use crate::cfactor::{CFactor, compute_cfactor};
 use roko_core::metric::TaskMetric;
 
 use crate::cascade_router::CascadeRouter;
@@ -928,6 +928,20 @@ pub async fn read_efficiency_events(
         }
     }
     Ok(out)
+}
+
+/// Compute the current C-Factor snapshot for `learn_root` and append it to the
+/// history log.
+///
+/// Returns the snapshot that was persisted.
+pub async fn refresh_cfactor_snapshot(
+    learn_root: impl AsRef<Path>,
+) -> Result<CFactor, LearningRuntimeError> {
+    let paths = LearningPaths::under(learn_root.as_ref().to_path_buf());
+    let episodes = EpisodeLogger::read_all_lossy(&paths.episodes_jsonl).await?;
+    let snapshot = compute_cfactor(&episodes, Duration::from_secs(7 * 24 * 60 * 60));
+    append_cfactor_snapshot(&paths.cfactor_jsonl, &snapshot).await?;
+    Ok(snapshot)
 }
 
 #[cfg(test)]

@@ -6,6 +6,8 @@
 
 use std::path::{Path, PathBuf};
 
+use roko_learn::cfactor::CFactor;
+
 /// Information about a session's current state.
 #[derive(Debug, Clone)]
 pub struct SessionStatus {
@@ -21,6 +23,8 @@ pub struct SessionStatus {
     pub episode_count: Option<usize>,
     /// Last episode outcome (if any).
     pub last_episode_passed: Option<bool>,
+    /// Optional current C-Factor snapshot.
+    pub cfactor: Option<CFactor>,
 }
 
 impl SessionStatus {
@@ -34,6 +38,7 @@ impl SessionStatus {
             signal_count: None,
             episode_count: None,
             last_episode_passed: None,
+            cfactor: None,
         }
     }
 
@@ -68,6 +73,20 @@ impl SessionStatus {
                 if passed { "passed" } else { "failed" }
             ));
         }
+        if let Some(cfactor) = &self.cfactor {
+            lines.push(format!(
+                "cfactor: {:.3} (episodes: {}, computed: {})",
+                cfactor.overall, cfactor.episode_count, cfactor.computed_at
+            ));
+            lines.push(format!(
+                "  gate={:.3} cost={:.3} speed={:.3} first_try={:.3} knowledge={:.3}",
+                cfactor.components.gate_pass_rate,
+                cfactor.components.cost_efficiency,
+                cfactor.components.speed,
+                cfactor.components.first_try_rate,
+                cfactor.components.knowledge_growth
+            ));
+        }
 
         lines.join("\n")
     }
@@ -89,15 +108,20 @@ impl SessionStatus {
         let last = self
             .last_episode_passed
             .map_or_else(|| "null".to_string(), |b| b.to_string());
+        let cfactor = self.cfactor.as_ref().map_or_else(
+            || "null".to_string(),
+            |value| serde_json::to_string(value).unwrap_or_else(|_| "null".to_string()),
+        );
 
         format!(
-            r#"{{"workdir":"{}","session":{},"daemon_running":{},"signal_count":{},"episode_count":{},"last_episode_passed":{}}}"#,
+            r#"{{"workdir":"{}","session":{},"daemon_running":{},"signal_count":{},"episode_count":{},"last_episode_passed":{},"cfactor":{}}}"#,
             self.workdir.display(),
             session,
             self.daemon_running,
             signals,
             episodes,
             last,
+            cfactor,
         )
     }
 }
@@ -122,6 +146,7 @@ mod tests {
         assert!(status.session_id.is_none());
         assert!(!status.daemon_running);
         assert!(status.signal_count.is_none());
+        assert!(status.cfactor.is_none());
     }
 
     #[test]
@@ -133,6 +158,7 @@ mod tests {
             signal_count: Some(42),
             episode_count: Some(3),
             last_episode_passed: Some(true),
+            cfactor: None,
         };
         let text = status.display_text();
         assert!(text.contains("/project"));
@@ -160,6 +186,7 @@ mod tests {
             signal_count: Some(10),
             episode_count: Some(2),
             last_episode_passed: Some(false),
+            cfactor: None,
         };
         let json = status.display_json();
         assert!(json.contains(r#""session":"s1""#));

@@ -30,7 +30,7 @@ use roko_fs::{FileSubstrate, FsObservabilitySinks, RokoLayout};
 use roko_learn::efficiency::compute_role_profiles;
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
 use roko_learn::prompt_experiment::ExperimentStore;
-use roko_learn::runtime_feedback::read_efficiency_events;
+use roko_learn::runtime_feedback::{read_efficiency_events, refresh_cfactor_snapshot};
 use roko_neuro::{DEFAULT_GC_MIN_CONFIDENCE, KnowledgeStore};
 use roko_serve::{deploy, dreams, state::AppState};
 use std::collections::BTreeMap;
@@ -179,6 +179,9 @@ enum Command {
         /// Directory containing `.roko/` (default: cwd).
         #[arg(long)]
         workdir: Option<PathBuf>,
+        /// Compute and persist the latest C-Factor snapshot.
+        #[arg(long)]
+        cfactor: bool,
     },
     /// Walk the lineage DAG rooted at a signal hash and print it.
     Replay {
@@ -757,8 +760,8 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             Ok(EXIT_SUCCESS)
         }
         Command::Run { prompt, workdir } => cmd_run(cli, workdir, prompt).await,
-        Command::Status { workdir } => {
-            cmd_status(cli, workdir).await?;
+        Command::Status { workdir, cfactor } => {
+            cmd_status(cli, workdir, cfactor).await?;
             Ok(EXIT_SUCCESS)
         }
         Command::Replay { hash, workdir } => cmd_replay(workdir, hash).await,
@@ -2532,7 +2535,7 @@ async fn cmd_run(cli: &Cli, workdir: Option<PathBuf>, prompt: String) -> Result<
     }
 }
 
-async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>) -> Result<()> {
+async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>, cfactor: bool) -> Result<()> {
     let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
     let substrate = FileSubstrate::open(workdir.join(".roko"))
         .await
@@ -2543,6 +2546,16 @@ async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>) -> Result<()> {
         .query(&Query::all(), &ctx)
         .await
         .map_err(|e| anyhow!("query: {e}"))?;
+
+    let cfactor_snapshot = if cfactor {
+        Some(
+            refresh_cfactor_snapshot(workdir.join(".roko").join("learn"))
+                .await
+                .map_err(|e| anyhow!("refresh c-factor snapshot: {e}"))?,
+        )
+    } else {
+        None
+    };
 
     if cli.json {
         let mut counts: BTreeMap<String, usize> = BTreeMap::new();
@@ -2557,6 +2570,7 @@ async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>) -> Result<()> {
             signal_count: Some(all.len()),
             episode_count: Some(episode_count),
             last_episode_passed: None,
+            cfactor: cfactor_snapshot,
         };
         println!("{}", status.display_json());
         return Ok(());
@@ -2681,6 +2695,22 @@ async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>) -> Result<()> {
         }
     }
 
+    if let Some(cfactor) = cfactor_snapshot {
+        println!();
+        println!(
+            "c-factor: {:.3} | episodes={} | computed={}",
+            cfactor.overall, cfactor.episode_count, cfactor.computed_at
+        );
+        println!(
+            "  gate={:.3} cost={:.3} speed={:.3} first_try={:.3} knowledge={:.3}",
+            cfactor.components.gate_pass_rate,
+            cfactor.components.cost_efficiency,
+            cfactor.components.speed,
+            cfactor.components.first_try_rate,
+            cfactor.components.knowledge_growth
+        );
+    }
+
     Ok(())
 }
 
@@ -2762,6 +2792,9 @@ async fn cmd_dream(cli: &Cli, workdir: Option<PathBuf>) -> Result<i32> {
     };
 
     let report = roko_serve::dreams::run_dream_cycle_now(state, dream_config).await?;
+    let cfactor_snapshot = refresh_cfactor_snapshot(workdir.join(".roko").join("learn"))
+        .await
+        .map_err(|e| anyhow!("refresh c-factor snapshot: {e}"))?;
 
     if cli.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -2780,6 +2813,7 @@ async fn cmd_dream(cli: &Cli, workdir: Option<PathBuf>) -> Result<i32> {
             "report saved under: {}",
             workdir.join(".roko").join("dreams").display()
         );
+        println!("c-factor: {:.3}", cfactor_snapshot.overall);
     }
 
     Ok(EXIT_SUCCESS)
