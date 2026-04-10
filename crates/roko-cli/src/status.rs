@@ -91,6 +91,10 @@ impl SessionStatus {
                 cfactor.components.turn_taking_equality,
                 cfactor.components.social_sensitivity
             ));
+            if !cfactor.agent_contributions.is_empty() {
+                let top = cfactor.top_agent_contribution_lines(3).join(", ");
+                lines.push(format!("  agent contributions: {top}"));
+            }
         }
 
         lines.join("\n")

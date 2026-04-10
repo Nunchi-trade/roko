@@ -2783,6 +2783,12 @@ async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>, cfactor: bool) -> Resul
             cfactor.components.turn_taking_equality,
             cfactor.components.social_sensitivity
         );
+        if !cfactor.agent_contributions.is_empty() {
+            println!(
+                "  agent contributions: {}",
+                cfactor.top_agent_contribution_lines(3).join(", ")
+            );
+        }
     }
 
     Ok(())

@@ -18,10 +18,30 @@ pub struct CFactor {
     pub overall: f64,
     /// Component breakdown for the score.
     pub components: CFactorComponents,
+    /// Per-agent leave-one-out contribution scores.
+    #[serde(default)]
+    pub agent_contributions: Vec<AgentCFactorContribution>,
     /// Timestamp when the score was computed.
     pub computed_at: DateTime<Utc>,
     /// Number of episodes used in the calculation.
     pub episode_count: usize,
+}
+
+/// Leave-one-out contribution score for an individual agent.
+///
+/// Positive scores mean the agent raises the collective C-Factor. Negative
+/// scores mean the agent drags the system down relative to the same window
+/// without that agent's episodes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentCFactorContribution {
+    /// Agent identifier used to group episodes.
+    pub agent_id: String,
+    /// Number of episodes attributed to the agent.
+    pub episode_count: usize,
+    /// Collective score with this agent's episodes removed.
+    pub without_agent_overall: f64,
+    /// Full-snapshot overall minus the leave-one-out score.
+    pub contribution_score: f64,
 }
 
 /// Individual C-Factor components.
@@ -100,9 +120,29 @@ impl Default for CFactor {
         Self {
             overall: 0.0,
             components: CFactorComponents::default(),
+            agent_contributions: Vec::new(),
             computed_at: Utc::now(),
             episode_count: 0,
         }
+    }
+}
+
+impl CFactor {
+    /// Format the strongest per-agent contributions as compact summary lines.
+    #[must_use]
+    pub fn top_agent_contribution_lines(&self, limit: usize) -> Vec<String> {
+        self.agent_contributions
+            .iter()
+            .take(limit)
+            .map(|contribution| {
+                format!(
+                    "{}={:+.3} (n={})",
+                    contribution.agent_id,
+                    contribution.contribution_score,
+                    contribution.episode_count
+                )
+            })
+            .collect()
     }
 }
 
@@ -168,6 +208,7 @@ pub fn compute_cfactor(
         };
     }
 
+    let computed_at = Utc::now();
     let mut tasks: HashMap<String, TaskAggregate> = HashMap::new();
     for episode in &filtered {
         let task_key = task_key(episode);
@@ -302,7 +343,7 @@ pub fn compute_cfactor(
         + turn_taking_equality * 0.05
         + social_sensitivity * 0.05;
 
-    CFactor {
+    let mut snapshot = CFactor {
         overall: overall.clamp(0.0, 1.0),
         components: CFactorComponents {
             gate_pass_rate,
@@ -317,9 +358,19 @@ pub fn compute_cfactor(
             turn_taking_equality,
             social_sensitivity,
         },
-        computed_at: Utc::now(),
+        agent_contributions: Vec::new(),
+        computed_at,
         episode_count: filtered.len(),
-    }
+    };
+    snapshot.agent_contributions = compute_agent_contributions(
+        &filtered,
+        computed_at,
+        social_sensitivity,
+        knowledge_integration_rate,
+        convergence_velocity,
+        snapshot.overall,
+    );
+    snapshot
 }
 
 /// Derive the 7-day trend arrow from a history of C-Factor snapshots.
@@ -672,6 +723,225 @@ fn episode_new_knowledge_entries(episode: &Episode) -> usize {
     0
 }
 
+fn compute_agent_contributions(
+    filtered: &[&Episode],
+    computed_at: DateTime<Utc>,
+    social_sensitivity: f64,
+    knowledge_integration_rate: f64,
+    convergence_velocity: f64,
+    overall: f64,
+) -> Vec<AgentCFactorContribution> {
+    let mut agents: HashMap<String, Vec<&Episode>> = HashMap::new();
+    for episode in filtered {
+        agents.entry(episode_agent_key(episode)).or_default().push(episode);
+    }
+
+    let mut contributions = Vec::with_capacity(agents.len());
+    for (agent_id, agent_episodes) in agents {
+        let remaining: Vec<&Episode> = filtered
+            .iter()
+            .copied()
+            .filter(|episode| episode_agent_key(episode) != agent_id)
+            .collect();
+        let without_agent = if remaining.is_empty() {
+            CFactor {
+                overall: 0.0,
+                components: CFactorComponents::default(),
+                agent_contributions: Vec::new(),
+                computed_at,
+                episode_count: 0,
+            }
+        } else {
+            compute_cfactor_from_filtered(
+                &remaining,
+                computed_at,
+                social_sensitivity,
+                knowledge_integration_rate,
+                convergence_velocity,
+            )
+        };
+
+        contributions.push(AgentCFactorContribution {
+            agent_id,
+            episode_count: agent_episodes.len(),
+            without_agent_overall: without_agent.overall,
+            contribution_score: overall - without_agent.overall,
+        });
+    }
+
+    contributions.sort_by(|a, b| {
+        b.contribution_score
+            .partial_cmp(&a.contribution_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.agent_id.cmp(&b.agent_id))
+    });
+
+    contributions
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn compute_cfactor_from_filtered(
+    filtered: &[&Episode],
+    computed_at: DateTime<Utc>,
+    social_sensitivity: f64,
+    knowledge_integration_rate: f64,
+    convergence_velocity: f64,
+) -> CFactor {
+    let mut tasks: HashMap<String, TaskAggregate> = HashMap::new();
+    for episode in filtered {
+        let task_key = task_key(episode);
+        let entry = tasks.entry(task_key).or_insert_with(|| TaskAggregate {
+            cost_usd: 0.0,
+            duration_ms: 0.0,
+            signal_tokens: 0.0,
+            passed_gate: false,
+            saw_replan: false,
+            first_seen: episode.timestamp,
+        });
+
+        entry.cost_usd += episode.usage.cost_usd;
+        entry.duration_ms += episode_duration_ms(episode);
+        entry.signal_tokens += episode_signal_tokens(episode);
+        entry.passed_gate |= episode_passed_gate(episode);
+        entry.saw_replan |= episode_is_replan(episode);
+        if episode.timestamp < entry.first_seen {
+            entry.first_seen = episode.timestamp;
+        }
+    }
+
+    let mut task_groups: Vec<(String, TaskAggregate)> = tasks.into_iter().collect();
+    task_groups.sort_by(|left, right| {
+        left.1
+            .first_seen
+            .cmp(&right.1.first_seen)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+
+    let total_tasks = task_groups.len();
+    let passed_tasks = task_groups
+        .iter()
+        .filter(|(_, task)| task.passed_gate)
+        .count();
+    let first_try_tasks = task_groups
+        .iter()
+        .filter(|(_, task)| task.passed_gate && !task.saw_replan)
+        .count();
+    let successful_tasks: Vec<&TaskAggregate> = task_groups
+        .iter()
+        .filter_map(|(_, task)| task.passed_gate.then_some(task))
+        .collect();
+
+    let gate_pass_rate = ratio(passed_tasks, total_tasks);
+    let first_try_rate = ratio(first_try_tasks, total_tasks);
+    let task_diversity_coverage = compute_task_diversity_coverage(filtered);
+
+    let (avg_cost_per_successful_task, avg_duration_per_successful_task) =
+        if successful_tasks.is_empty() {
+            (0.0, 0.0)
+        } else {
+            let count = successful_tasks.len() as f64;
+            let total_cost: f64 = successful_tasks.iter().map(|task| task.cost_usd).sum();
+            let total_duration: f64 = successful_tasks.iter().map(|task| task.duration_ms).sum();
+            (total_cost / count, total_duration / count)
+        };
+
+    let avg_signal_throughput_per_successful_task = if successful_tasks.is_empty() {
+        0.0
+    } else {
+        let count = successful_tasks.len() as f64;
+        let total_signal_throughput: f64 = successful_tasks
+            .iter()
+            .map(|task| signal_throughput(task.signal_tokens, task.duration_ms))
+            .sum();
+        total_signal_throughput / count
+    };
+
+    let baseline_task_count = task_groups.len().min(BASELINE_TASK_COUNT);
+    let (baseline_cost, baseline_duration, baseline_signal_throughput) = if baseline_task_count == 0
+    {
+        (0.0, 0.0, 0.0)
+    } else {
+        let baseline_tasks: Vec<&(String, TaskAggregate)> =
+            task_groups.iter().take(baseline_task_count).collect();
+        let total_cost: f64 = baseline_tasks.iter().map(|(_, task)| task.cost_usd).sum();
+        let total_duration: f64 = baseline_tasks
+            .iter()
+            .map(|(_, task)| task.duration_ms)
+            .sum();
+        let total_signal_throughput: f64 = baseline_tasks
+            .iter()
+            .map(|(_, task)| signal_throughput(task.signal_tokens, task.duration_ms))
+            .sum();
+        (
+            total_cost / baseline_task_count as f64,
+            total_duration / baseline_task_count as f64,
+            total_signal_throughput / baseline_task_count as f64,
+        )
+    };
+
+    let cost_efficiency = if baseline_cost > 0.0 && avg_cost_per_successful_task > 0.0 {
+        baseline_cost / avg_cost_per_successful_task
+    } else {
+        0.0
+    };
+
+    let speed = if baseline_duration > 0.0 && avg_duration_per_successful_task > 0.0 {
+        baseline_duration / avg_duration_per_successful_task
+    } else {
+        0.0
+    };
+
+    let information_flow_rate =
+        if baseline_signal_throughput > 0.0 && avg_signal_throughput_per_successful_task > 0.0 {
+            avg_signal_throughput_per_successful_task / baseline_signal_throughput
+        } else {
+            0.0
+        };
+
+    let new_knowledge_entries: usize = filtered
+        .iter()
+        .map(|episode| episode_new_knowledge_entries(episode))
+        .sum();
+    let knowledge_growth = ratio(new_knowledge_entries, filtered.len());
+    let knowledge_integration_rate = knowledge_integration_rate.clamp(0.0, 1.0);
+    let convergence_velocity = convergence_velocity.clamp(0.0, 1.0);
+    let turn_taking_equality = compute_turn_taking_equality(filtered);
+    let social_sensitivity = social_sensitivity.clamp(0.0, 1.0);
+
+    let overall = (gate_pass_rate * 0.23
+        + cost_efficiency * 0.15
+        + speed * 0.10
+        + information_flow_rate * 0.08
+        + first_try_rate * 0.18
+        + knowledge_growth * 0.08
+        + knowledge_integration_rate * 0.07
+        + task_diversity_coverage * 0.11)
+        * 0.9
+        + convergence_velocity * 0.05
+        + turn_taking_equality * 0.05
+        + social_sensitivity * 0.05;
+
+    CFactor {
+        overall: overall.clamp(0.0, 1.0),
+        components: CFactorComponents {
+            gate_pass_rate,
+            cost_efficiency,
+            speed,
+            information_flow_rate,
+            first_try_rate,
+            knowledge_growth,
+            knowledge_integration_rate,
+            task_diversity_coverage,
+            convergence_velocity,
+            turn_taking_equality,
+            social_sensitivity,
+        },
+        agent_contributions: Vec::new(),
+        computed_at,
+        episode_count: filtered.len(),
+    }
+}
+
 fn knowledge_entry_count(value: &Value) -> usize {
     match value {
         Value::Array(items) => items.len(),
@@ -843,6 +1113,47 @@ mod tests {
 
         let cfactor = compute_cfactor(&episodes, Duration::from_secs(7 * 24 * 60 * 60), 0.0, 0.0, 0.0);
         assert!((cfactor.components.task_diversity_coverage - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn computes_agent_contribution_scores_with_leave_one_out_delta() {
+        let mut good = episode_at("task-good", 5, 5.0, 1_000, true);
+        good.agent_id = "agent-good".to_string();
+        good.extra.insert(
+            "plan_id".to_string(),
+            Value::String("plan-good".to_string()),
+        );
+
+        let mut bad = episode_at("task-bad", 4, 5.0, 1_000, false);
+        bad.agent_id = "agent-bad".to_string();
+        bad.extra.insert(
+            "plan_id".to_string(),
+            Value::String("plan-bad".to_string()),
+        );
+
+        let cfactor = compute_cfactor(
+            &[good, bad],
+            Duration::from_secs(7 * 24 * 60 * 60),
+            0.0,
+            0.0,
+            0.0,
+        );
+
+        assert_eq!(cfactor.agent_contributions.len(), 2);
+        assert_eq!(cfactor.agent_contributions[0].agent_id, "agent-good");
+        assert_eq!(cfactor.agent_contributions[1].agent_id, "agent-bad");
+        assert!(cfactor.agent_contributions[0].contribution_score > 0.0);
+        assert!(cfactor.agent_contributions[1].contribution_score < 0.0);
+        assert!(
+            cfactor.agent_contributions[0].contribution_score
+                > cfactor.agent_contributions[1].contribution_score
+        );
+        assert!(
+            cfactor
+                .top_agent_contribution_lines(1)
+                .first()
+                .is_some_and(|line| line.starts_with("agent-good="))
+        );
     }
 
     #[test]
