@@ -670,25 +670,45 @@ fn main() {
         env::var("ROKO_LOG").unwrap_or_else(|_| "info".to_string()),
     )
     .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    let scrubber = build_log_scrubber(&startup_env_redactions);
-    match cli.log_format {
-        LogFormat::Json => {
-            tracing_subscriber::fmt()
-                .event_format(RedactingFormat::new(
-                    tracing_subscriber::fmt::format().json(),
-                    scrubber,
-                ))
-                .with_env_filter(filter)
-                .init();
+
+    // ROKO_LOG_RAW=1 disables secret redaction (useful for debugging).
+    let raw_logs = env::var("ROKO_LOG_RAW")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    if raw_logs {
+        match cli.log_format {
+            LogFormat::Json => {
+                tracing_subscriber::fmt()
+                    .json()
+                    .with_env_filter(filter)
+                    .init();
+            }
+            LogFormat::Text => {
+                tracing_subscriber::fmt().with_env_filter(filter).init();
+            }
         }
-        LogFormat::Text => {
-            tracing_subscriber::fmt()
-                .event_format(RedactingFormat::new(
-                    tracing_subscriber::fmt::format(),
-                    scrubber,
-                ))
-                .with_env_filter(filter)
-                .init();
+    } else {
+        let scrubber = build_log_scrubber(&startup_env_redactions);
+        match cli.log_format {
+            LogFormat::Json => {
+                tracing_subscriber::fmt()
+                    .event_format(RedactingFormat::new(
+                        tracing_subscriber::fmt::format().json(),
+                        scrubber,
+                    ))
+                    .with_env_filter(filter)
+                    .init();
+            }
+            LogFormat::Text => {
+                tracing_subscriber::fmt()
+                    .event_format(RedactingFormat::new(
+                        tracing_subscriber::fmt::format(),
+                        scrubber,
+                    ))
+                    .with_env_filter(filter)
+                    .init();
+            }
         }
     }
 
@@ -2872,7 +2892,20 @@ async fn cmd_dream(cli: &Cli, cmd: DreamCmd) -> Result<i32> {
             prepare_runtime_hooks(&workdir, cli.quiet);
 
             let mut runner = build_dream_runner(cli, &workdir)?;
-            let report = runner.consolidate()?;
+            let report = match runner.consolidate() {
+                Ok(report) => report,
+                Err(e) => {
+                    // Appraise dream failure into the daimon affect state.
+                    use roko_daimon::{AffectEngine as _, AffectEvent, DaimonState};
+                    let daimon_path = workdir.join(".roko").join("daimon").join("affect.json");
+                    let mut daimon = DaimonState::load_or_new(&daimon_path);
+                    let _ = daimon.appraise(AffectEvent::DreamFailure {
+                        task_type: "consolidation".to_string(),
+                        failure_count: 1,
+                    });
+                    return Err(e);
+                }
+            };
             let cfactor_snapshot = refresh_cfactor_snapshot(workdir.join(".roko").join("learn"))
                 .await
                 .map_err(|e| anyhow!("refresh c-factor snapshot: {e}"))?;
@@ -4102,5 +4135,104 @@ mod tests {
     fn process_registry_does_not_match_unrelated_dir() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(!process_registry_matches_workdir(tmp.path()));
+    }
+
+    #[test]
+    fn redacting_format_scrubs_api_keys() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        // Capture output into a shared buffer.
+        #[derive(Clone)]
+        struct BufWriter(Arc<Mutex<Vec<u8>>>);
+
+        impl std::io::Write for BufWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufWriter {
+            type Writer = BufWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let writer = BufWriter(Arc::clone(&buffer));
+
+        let scrubber = build_log_scrubber(&[]);
+        let fmt_layer = tracing_subscriber::fmt::layer()
+            .event_format(RedactingFormat::new(
+                tracing_subscriber::fmt::format(),
+                scrubber,
+            ))
+            .with_writer(writer)
+            .with_ansi(false);
+
+        let subscriber = tracing_subscriber::registry().with(fmt_layer);
+
+        // Use `with_default` so the subscriber is scoped to this test — does
+        // not conflict with the global subscriber from other tests.
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(
+                "connecting with key sk-ant-api03-AAABBBCCCDDDEEEFFFGGGHHHIIIJJJ and token ghp_ABCDEFGHIJKLMNOPqrstuvwxyz1234567890"
+            );
+            tracing::warn!("Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature in header");
+            tracing::info!("ANTHROPIC_API_KEY=sk-ant-secret-value-99999 leaked");
+        });
+
+        let output = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
+
+        // API keys must be scrubbed.
+        assert!(
+            !output.contains("sk-ant-api03-AAABBBCCC"),
+            "Anthropic key should be scrubbed, got: {output}"
+        );
+        assert!(
+            !output.contains("ghp_ABCDEFGHIJKLMNOP"),
+            "GitHub PAT should be scrubbed, got: {output}"
+        );
+        assert!(
+            !output.contains("eyJhbGciOiJIUzI1NiJ9"),
+            "Bearer token should be scrubbed, got: {output}"
+        );
+        assert!(
+            !output.contains("sk-ant-secret-value"),
+            "env-var key value should be scrubbed, got: {output}"
+        );
+
+        // Redaction markers must be present.
+        assert!(
+            output.contains("[REDACTED"),
+            "redaction markers should appear, got: {output}"
+        );
+
+        // Non-secret context text must survive.
+        assert!(
+            output.contains("connecting with key"),
+            "context text should survive, got: {output}"
+        );
+    }
+
+    #[test]
+    fn build_log_scrubber_adds_env_redactions() {
+        let scrubber = build_log_scrubber(&[
+            ("MY_TOKEN".to_string(), "super-secret-42".to_string()),
+        ]);
+        let output = scrubber.scrub("leaked super-secret-42 in logs");
+        assert!(
+            !output.contains("super-secret-42"),
+            "env redaction should scrub literal value, got: {output}"
+        );
+        assert!(
+            output.contains("[REDACTED:MY_TOKEN]"),
+            "should use named redaction, got: {output}"
+        );
     }
 }

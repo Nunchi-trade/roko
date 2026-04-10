@@ -43,6 +43,7 @@ use roko_gate::{
     payload::GatePayload, test_gate::TestGate,
 };
 use roko_daimon::{AffectEngine as _, AffectEvent, DaimonState, DispatchParams};
+use roko_dreams::{DreamAgentConfig, DreamLoopConfig, DreamRunner};
 use roko_learn::costs_db::CostRecord;
 use roko_learn::efficiency::{AgentEfficiencyEvent, FleetCFactor, compute_fleet_cfactor};
 use roko_learn::episode_logger::{Episode, GateVerdict, Usage};
@@ -2935,6 +2936,9 @@ impl PlanRunner {
             "plan run complete"
         );
 
+        // Auto-dream consolidation at plan completion (§5D.05).
+        self.maybe_auto_dream().await;
+
         // Final save before returning.
         if let Err(e) = self.save_state() {
             tracing::error!("[orchestrate] final save failed: {e}");
@@ -2946,6 +2950,99 @@ impl PlanRunner {
             plans,
             fleet_cfactor,
         })
+    }
+
+    /// Trigger an automatic dream consolidation if the config enables it and
+    /// enough new episodes have accumulated since the last dream report.
+    ///
+    /// This is called at plan completion — not on a background loop. Failures
+    /// are logged as warnings but never propagate to the caller.
+    async fn maybe_auto_dream(&self) {
+        if !self.config.dreams.auto_dream {
+            tracing::debug!("[orchestrate] auto-dream disabled, skipping");
+            return;
+        }
+
+        let episodes_path = self.workdir.join(".roko").join("episodes.jsonl");
+        let episodes = match roko_learn::episode_logger::EpisodeLogger::read_all_lossy(
+            &episodes_path,
+        )
+        .await
+        {
+            Ok(eps) => eps,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "[orchestrate] auto-dream: failed to read episodes, skipping"
+                );
+                return;
+            }
+        };
+
+        // Determine a cutoff from the latest dream report so we only count
+        // episodes that arrived after the previous consolidation.
+        let dreams_dir = self.workdir.join(".roko").join("dreams");
+        let last_report = roko_dreams::runner::load_latest_dream_report(&dreams_dir)
+            .ok()
+            .flatten();
+        let cutoff = last_report
+            .as_ref()
+            .and_then(|r| r.processed_through.or(Some(r.started_at)));
+
+        let new_episode_count = episodes
+            .iter()
+            .filter(|ep| cutoff.is_none_or(|ts| ep.timestamp > ts))
+            .count();
+
+        let min_required = self.config.dreams.min_episodes_for_dream;
+        if new_episode_count < min_required {
+            tracing::debug!(
+                new_episode_count,
+                min_required,
+                "[orchestrate] auto-dream: not enough new episodes ({new_episode_count}/{min_required}), skipping"
+            );
+            return;
+        }
+
+        tracing::info!(
+            new_episode_count,
+            "[orchestrate] auto-dream: triggering consolidation ({new_episode_count} new episodes)"
+        );
+
+        let dream_config = DreamLoopConfig {
+            auto_dream: self.config.dreams.auto_dream,
+            idle_threshold_mins: self.config.dreams.idle_threshold_mins,
+            min_episodes_for_dream: self.config.dreams.min_episodes_for_dream,
+            agent: DreamAgentConfig {
+                command: self.config.agent.command.clone(),
+                args: self.config.agent.args.clone(),
+                model: self.config.agent.model.clone(),
+                bare_mode: self.config.agent.bare_mode,
+                effort: self.config.agent.effort.clone(),
+                fallback_model: self.config.agent.fallback_model.clone(),
+                timeout_ms: self.config.agent.timeout_ms,
+                env: self.config.agent.env.clone(),
+            },
+        };
+        let mut runner = DreamRunner::new(self.workdir.clone(), dream_config);
+
+        match runner.consolidate_now() {
+            Ok(report) => {
+                tracing::info!(
+                    processed = report.processed_episodes,
+                    clusters = report.clusters.len(),
+                    knowledge = report.knowledge_entries_written,
+                    playbooks = report.playbooks_created,
+                    "[orchestrate] auto-dream consolidation complete"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "[orchestrate] auto-dream consolidation failed (non-fatal)"
+                );
+            }
+        }
     }
 
     /// Run plans using tasks.toml files, routing through the full 14-phase
@@ -3564,6 +3661,20 @@ impl PlanRunner {
                 .task_arousal_with_queue_wait(task_id, queue_wait_hours)
         });
 
+        // Appraise QueueWait for any ready task that has been waiting > 24h.
+        if let Some(tracker) = self.task_trackers.get(plan_id) {
+            for tid in &ready {
+                if let Some(wait_hours) = tracker.queue_wait_hours(tid) {
+                    if wait_hours > 24.0 {
+                        let _ = self.daimon.appraise(AffectEvent::QueueWait {
+                            task_id: tid.clone(),
+                            wait_hours,
+                        });
+                    }
+                }
+            }
+        }
+
         if ready.is_empty() {
             // No ready tasks — check if all done or blocked
             let all_done = self
@@ -3584,11 +3695,55 @@ impl PlanRunner {
                 .get(plan_id)
                 .is_some_and(|tracker| tracker.has_tasks_blocked_by_plans(&completed_plans))
             {
+                // Count how many tasks are blocked by cross-plan deps.
+                let blocker_count = self
+                    .task_trackers
+                    .get(plan_id)
+                    .map(|tracker| {
+                        tracker
+                            .tasks_file
+                            .tasks
+                            .iter()
+                            .filter(|t| {
+                                !tracker.completed.contains(&t.id)
+                                    && !tracker.failed.contains(&t.id)
+                                    && !t.is_ready_with_plan_deps(
+                                        &tracker.completed,
+                                        &completed_plans,
+                                    )
+                            })
+                            .count()
+                    })
+                    .unwrap_or(1);
+                let _ = self.daimon.appraise(AffectEvent::Blocked {
+                    task_id: plan_id.to_string(),
+                    blocker_count,
+                });
                 tracing::info!(
                     "[orchestrate] {plan_id}: implementation blocked by dependent plan(s), pausing"
                 );
                 self.executor.pause_plan(plan_id);
             } else {
+                // Count remaining non-completed, non-failed tasks as blocked.
+                let blocker_count = self
+                    .task_trackers
+                    .get(plan_id)
+                    .map(|tracker| {
+                        tracker
+                            .tasks_file
+                            .tasks
+                            .iter()
+                            .filter(|t| {
+                                !tracker.completed.contains(&t.id)
+                                    && !tracker.failed.contains(&t.id)
+                            })
+                            .count()
+                    })
+                    .unwrap_or(1);
+                let _ = self.daimon.appraise(AffectEvent::Blocked {
+                    task_id: plan_id.to_string(),
+                    blocker_count,
+                });
                 tracing::error!(
                     "[orchestrate] {plan_id}: no ready tasks but not all done — blocked or failed"
                 );
@@ -4348,6 +4503,21 @@ impl PlanRunner {
             .as_ref()
             .map_or(OperatingFrequency::Theta, |td| td.operating_frequency());
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+        // Appraise time pressure when elapsed > 80% of timeout.
+        {
+            let timeout_ms = self.effective_task_timeout_ms(task_def.as_ref());
+            if timeout_ms > 0 {
+                let proximity = (wall_ms as f64) / (timeout_ms as f64);
+                if proximity > 0.8 {
+                    let _ = self.daimon.appraise(AffectEvent::TimePressure {
+                        task_id: task_id.to_string(),
+                        deadline_proximity: proximity.min(1.0),
+                    });
+                }
+            }
+        }
+
         let mut cascade_router_observed = false;
 
         // ── Observe cascade router for bandit learning (§9) ─────────
@@ -4514,6 +4684,12 @@ impl PlanRunner {
                 },
             },
         );
+
+        // Appraise task outcome for affect modulation.
+        let _ = self.daimon.appraise(AffectEvent::TaskOutcome {
+            task_id: task_id.to_string(),
+            succeeded: true,
+        });
 
         // Emit observability trace event for the successful agent dispatch.
         self.emit_agent_trace(plan_id, task_id, true, wall_ms);
@@ -5820,6 +5996,12 @@ impl PlanRunner {
             at_ms: now_unix_ms_i64(),
         };
         self.obs_sinks.trace_sink.append(trace_id, event);
+
+        // Appraise task outcome for affect modulation.
+        let _ = self.daimon.appraise(AffectEvent::TaskOutcome {
+            task_id: task_id.to_string(),
+            succeeded: false,
+        });
 
         tracing::error!(
             plan_id = %plan_id,
