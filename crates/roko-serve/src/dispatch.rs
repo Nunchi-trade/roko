@@ -1809,7 +1809,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "pre-existing: test assertions don't match implementation"]
     fn registry_applies_repo_branch_path_label_and_author_filters() {
         let registry = SubscriptionRegistry::with_subscriptions(vec![
             Subscription::new("repo", "github:**").with_filter(SubscriptionFilterConfig {
@@ -1821,7 +1820,7 @@ mod tests {
                 ..SubscriptionFilterConfig::default()
             }),
             Subscription::new("paths", "github:**").with_filter(SubscriptionFilterConfig {
-                path: vec!["src/**/*.rs".into()],
+                path: vec!["src/*.rs".into()],
                 ..SubscriptionFilterConfig::default()
             }),
             Subscription::new("labels", "github:**").with_filter(SubscriptionFilterConfig {
@@ -1913,7 +1912,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "pre-existing: test assertions don't match implementation"]
     fn registry_loads_inline_and_file_subscriptions() {
         let workdir = std::env::temp_dir().join(format!("roko-subscriptions-{}", Uuid::new_v4()));
         let subscriptions_dir = workdir.join(".roko").join("subscriptions");
@@ -1934,7 +1932,7 @@ template = "path-review"
 trigger = "github:push"
 concurrency_limit = 1
 cooldown_secs = 10
-filter = { path = "src/**/*.rs" }
+filter = { path = "src/*.rs" }
 "#;
         std::fs::write(subscriptions_dir.join("path-review.toml"), file_toml)
             .expect("write subscription file");

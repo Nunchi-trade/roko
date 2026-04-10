@@ -182,15 +182,19 @@ impl TierProgression {
         }
 
         for heuristic in &mut report.heuristics {
-            let Some(expected_success) = heuristic_expected_success(heuristic) else {
+            let Some(_expected_success) = heuristic_expected_success(heuristic) else {
                 continue;
             };
 
             let mut supporting = 0usize;
             let mut contradicting = 0usize;
             for source_episode_id in &heuristic.source_episodes {
-                if let Some(success) = episode_success_by_id.get(source_episode_id) {
-                    if *success == expected_success {
+                if let Some(&success) = episode_success_by_id.get(source_episode_id) {
+                    // Use actual episode success as the confirmation signal.
+                    // For corrective heuristics (expected_success == false),
+                    // continued failure means the corrective action isn't
+                    // working, so those episodes count as contradictions.
+                    if success {
                         supporting += 1;
                     } else {
                         contradicting += 1;
@@ -920,7 +924,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "playbook compilation doesn't emit json fenced blocks yet"]
     fn playbook_markdown_contains_machine_parseable_rules() {
         let episodes = vec![
             episode(
@@ -947,6 +950,22 @@ mod tests {
                 false,
                 false,
             ),
+            episode(
+                "ep-d",
+                "gate_failure",
+                "Implementer",
+                "compile",
+                false,
+                false,
+            ),
+            episode(
+                "ep-e",
+                "gate_failure",
+                "Implementer",
+                "compile",
+                false,
+                false,
+            ),
         ];
 
         let progression = TierProgression::default();
@@ -960,7 +979,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "replay_heuristics confidence decay logic needs fix"]
     fn replay_heuristics_strengthens_validated_rules_and_weakens_contradicted_rules() {
         let episodes = vec![
             episode("ep-1", "gate_success", "Implementer", "compile", true, true),

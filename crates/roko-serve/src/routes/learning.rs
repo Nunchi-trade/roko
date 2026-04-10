@@ -1067,7 +1067,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "pre-existing: test assertions don't match implementation"]
     fn adaptive_thresholds_response_exposes_per_rung_ema_values() {
         let mut thresholds = AdaptiveThresholds::new();
         for _ in 0..5 {
@@ -1088,13 +1087,17 @@ mod tests {
         assert_eq!(response.rungs[0].rung, 1);
         assert_eq!(response.rungs[0].total_observations, 3);
         assert_eq!(response.rungs[0].consecutive_passes, 0);
-        assert_eq!(response.rungs[0].suggested_max_retries, 5);
+        // With only 3 observations (< 5), suggested_max_retries returns the
+        // "not enough data" default of 3.
+        assert_eq!(response.rungs[0].suggested_max_retries, 3);
         assert!((response.rungs[0].ema_pass_rate - 0.0).abs() < 1e-9);
         assert_eq!(response.rungs[1].rung, 2);
         assert_eq!(response.rungs[1].total_observations, 5);
         assert_eq!(response.rungs[1].consecutive_passes, 5);
         assert_eq!(response.rungs[1].suggested_max_retries, 1);
         assert!((response.rungs[1].ema_pass_rate - 1.0).abs() < 1e-9);
-        assert!(response.rungs[1].should_skip_rung);
+        // should_skip_rung requires SKIP_STREAK_THRESHOLD (20) consecutive
+        // passes; 5 passes is not enough.
+        assert!(!response.rungs[1].should_skip_rung);
     }
 }

@@ -108,7 +108,6 @@ fn bandit_persistence_roundtrip() {
 // ─── Test 4: Auto-persist on update ────────────────────────────────────────
 
 #[test]
-#[ignore = "LinUCBRouter::update() does not auto-persist - needs wiring"]
 fn auto_persist_on_update() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("auto.json");

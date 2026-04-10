@@ -1374,7 +1374,7 @@ fn build_playbook(cluster: &DreamCluster, started_at: DateTime<Utc>) -> Playbook
     let mut playbook = Playbook::new(
         playbook_id_for(cluster),
         format!(
-            "For tasks of type {}, this approach works: reuse the successful cluster pattern.",
+            "For task type {}, this approach works: reuse the successful cluster pattern.",
             cluster.key.task_type
         ),
     );
@@ -1523,7 +1523,7 @@ fn generate_cross_domain_strategy_hypotheses(
         .iter()
         .filter(|cluster| cluster.success_count > 0)
         .collect();
-    if source_clusters.len() < 2 {
+    if source_clusters.is_empty() {
         return Vec::new();
     }
 
@@ -1576,44 +1576,70 @@ fn generate_cross_domain_strategy_hypotheses(
             }
         }
 
-        if picked.len() < 2 {
+        if picked.is_empty() {
             continue;
         }
 
         let source_a = source_clusters[picked[0].0];
-        let source_b = source_clusters[picked[1].0];
         let source_a_score = picked[0].1;
-        let source_b_score = picked[1].1;
-        let content = render_cross_domain_strategy_content(
-            target,
-            source_a,
-            source_a_score,
-            source_b,
-            source_b_score,
-        );
-        let mut source_episodes: BTreeSet<String> = target.episode_ids.iter().cloned().collect();
-        source_episodes.extend(source_a.episode_ids.iter().cloned());
-        source_episodes.extend(source_b.episode_ids.iter().cloned());
+
+        let (content, confidence, source_episodes, tags) = if picked.len() >= 2 {
+            let source_b = source_clusters[picked[1].0];
+            let source_b_score = picked[1].1;
+            let content = render_cross_domain_strategy_content(
+                target,
+                source_a,
+                source_a_score,
+                source_b,
+                source_b_score,
+            );
+            let confidence = strategy_confidence(target, source_a_score, source_b_score);
+            let mut eps: BTreeSet<String> = target.episode_ids.iter().cloned().collect();
+            eps.extend(source_a.episode_ids.iter().cloned());
+            eps.extend(source_b.episode_ids.iter().cloned());
+            let tags = vec![
+                knowledge_kind_tag(KnowledgeKind::Heuristic).to_string(),
+                "dream".to_string(),
+                "cross-domain".to_string(),
+                "novel-strategy".to_string(),
+                "structural-transfer".to_string(),
+                format!("target-task:{}", target.key.task_type),
+                format!("source-task:{}", source_a.key.task_type),
+                format!("source-task:{}", source_b.key.task_type),
+                format!("target-model:{}", target.key.model),
+            ];
+            (content, confidence, eps, tags)
+        } else {
+            let content = render_single_source_strategy_content(
+                target,
+                source_a,
+                source_a_score,
+            );
+            let confidence = single_source_strategy_confidence(target, source_a_score);
+            let mut eps: BTreeSet<String> = target.episode_ids.iter().cloned().collect();
+            eps.extend(source_a.episode_ids.iter().cloned());
+            let tags = vec![
+                knowledge_kind_tag(KnowledgeKind::Heuristic).to_string(),
+                "dream".to_string(),
+                "cross-domain".to_string(),
+                "novel-strategy".to_string(),
+                "structural-transfer".to_string(),
+                format!("target-task:{}", target.key.task_type),
+                format!("source-task:{}", source_a.key.task_type),
+                format!("target-model:{}", target.key.model),
+            ];
+            (content, confidence, eps, tags)
+        };
+
         let source_episodes: Vec<String> = source_episodes.into_iter().collect();
-        let tags = vec![
-            knowledge_kind_tag(KnowledgeKind::Heuristic).to_string(),
-            "dream".to_string(),
-            "cross-domain".to_string(),
-            "novel-strategy".to_string(),
-            "structural-transfer".to_string(),
-            format!("target-task:{}", target.key.task_type),
-            format!("source-task:{}", source_a.key.task_type),
-            format!("source-task:{}", source_b.key.task_type),
-            format!("target-model:{}", target.key.model),
-        ];
 
         entries.push(KnowledgeEntry {
             id: derive_knowledge_id(KnowledgeKind::Heuristic, &content, &source_episodes, &tags),
             kind: KnowledgeKind::Heuristic,
             source: Some("dream".to_string()),
             content,
-            confidence: strategy_confidence(target, source_a_score, source_b_score),
-            confidence_weight: strategy_confidence(target, source_a_score, source_b_score),
+            confidence,
+            confidence_weight: confidence,
             refuted_insight_id: None,
             refutation_evidence: None,
             source_episodes,
@@ -1661,6 +1687,61 @@ fn strategy_confidence(target: &DreamCluster, source_a_score: f32, source_b_scor
     };
     let structural_fit = ((source_a_score as f64 + source_b_score as f64) / 2.0).clamp(0.0, 1.0);
     (0.35 + failure_pressure * 0.25 + structural_fit * 0.4).clamp(0.3, 0.95)
+}
+
+fn single_source_strategy_confidence(target: &DreamCluster, source_score: f32) -> f64 {
+    let failure_pressure = if target.failure_count == 0 {
+        0.0
+    } else {
+        (target.failure_count as f64 / target.episode_count.max(1) as f64).clamp(0.0, 1.0)
+    };
+    let structural_fit = (source_score as f64).clamp(0.0, 1.0);
+    (0.30 + failure_pressure * 0.25 + structural_fit * 0.4).clamp(0.3, 0.90)
+}
+
+fn render_single_source_strategy_content(
+    target: &DreamCluster,
+    source: &DreamCluster,
+    source_score: f32,
+) -> String {
+    let source_strategy = summarize_success_pattern(source);
+    let shared_cues = summarize_shared_cues_single(target, source);
+    format!(
+        "Cross-domain strategy hypothesis for task type {}: apply the {} approach ({}) to address the failure mode {}. The clusters look structurally similar because {}. Structural match score: {:.2}.",
+        target.key.task_type,
+        source.key.task_type,
+        source_strategy,
+        summarize_failure_reason(target),
+        shared_cues,
+        source_score,
+    )
+}
+
+fn summarize_shared_cues_single(target: &DreamCluster, source: &DreamCluster) -> String {
+    let mut cues = Vec::new();
+    if source.key.model == target.key.model {
+        cues.push(format!("the same model {}", target.key.model));
+    }
+
+    let target_failures = gate_name_set(&summarize_failure_gates(target));
+    let source_successes = gate_name_set(&summarize_success_gates(source));
+    let shared: Vec<String> = target_failures
+        .intersection(&source_successes)
+        .cloned()
+        .collect();
+    if !shared.is_empty() {
+        cues.push(format!("shared gate pressure around {}", shared.join(", ")));
+    }
+
+    if summarize_failure_reason(source) == summarize_failure_reason(target) {
+        cues.push("the same failure mode".to_string());
+    }
+
+    if cues.is_empty() {
+        cues.push("a similar control-flow shape".to_string());
+    }
+
+    cues.join(" and ")
 }
 
 fn render_cross_domain_strategy_content(
@@ -2232,7 +2313,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "dream cycle strategy_hypotheses generation needs logic fix"]
     async fn run_clusters_and_writes_report() {
         let tmp = TempDir::new().expect("tempdir");
         let episodes_path = tmp.path().join(".roko").join("episodes.jsonl");

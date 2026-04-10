@@ -100,7 +100,6 @@ fn init_run_produces_expected_signals() {
 }
 
 #[test]
-#[ignore = "status --cfactor --workdir path resolution needs wiring fix"]
 fn status_cfactor_reports_trend_and_components() {
     let tmp = TempDir::new().unwrap();
     let workdir = tmp.path();
@@ -113,14 +112,17 @@ fn status_cfactor_reports_trend_and_components() {
         .success();
 
     let learn_dir = workdir.join(".roko").join("learn");
-    let memory_dir = workdir.join(".roko").join("memory");
     fs::create_dir_all(&learn_dir).unwrap();
-    fs::create_dir_all(&memory_dir).unwrap();
 
+    // Episode must live under learn/ — that is where LearningPaths::under()
+    // resolves episodes_jsonl when refresh_cfactor_snapshot is called with
+    // the learn directory as root.
+    let now = chrono::Utc::now();
+    let episode_ts = now.to_rfc3339();
     let episode = serde_json::json!({
         "kind": "agent_turn",
         "id": "ep-1",
-        "timestamp": "2026-04-10T12:00:00Z",
+        "timestamp": episode_ts,
         "agent_id": "agent-a",
         "task_id": "task-a",
         "input_signal_hash": "",
@@ -130,8 +132,8 @@ fn status_cfactor_reports_trend_and_components() {
         "model": "claude-sonnet",
         "trigger_kind": "manual",
         "trigger_signal_hash": "",
-        "started_at": "2026-04-10T12:00:00Z",
-        "completed_at": "2026-04-10T12:00:01Z",
+        "started_at": episode_ts,
+        "completed_at": episode_ts,
         "duration_secs": 1.0,
         "gate_verdicts": [],
         "usage": {
@@ -152,11 +154,15 @@ fn status_cfactor_reports_trend_and_components() {
         "extra": {}
     });
     fs::write(
-        memory_dir.join("episodes.jsonl"),
+        learn_dir.join("episodes.jsonl"),
         episode.to_string() + "\n",
     )
     .unwrap();
 
+    // Use timestamps relative to now so the history entries are always
+    // inside the 7-day trend window used by trend_arrow.
+    let earlier_ts = (now - chrono::Duration::days(5)).to_rfc3339();
+    let recent_ts = (now - chrono::Duration::days(2)).to_rfc3339();
     let earlier = serde_json::json!({
         "overall": 0.25,
         "components": {
@@ -164,9 +170,10 @@ fn status_cfactor_reports_trend_and_components() {
             "cost_efficiency": 0.20,
             "speed": 0.20,
             "first_try_rate": 0.20,
-            "knowledge_growth": 0.20
+            "knowledge_growth": 0.20,
+            "turn_taking_equality": 0.20
         },
-        "computed_at": "2026-04-04T12:00:00Z",
+        "computed_at": earlier_ts,
         "episode_count": 1
     });
     let recent = serde_json::json!({
@@ -176,9 +183,10 @@ fn status_cfactor_reports_trend_and_components() {
             "cost_efficiency": 0.30,
             "speed": 0.30,
             "first_try_rate": 0.30,
-            "knowledge_growth": 0.10
+            "knowledge_growth": 0.10,
+            "turn_taking_equality": 0.30
         },
-        "computed_at": "2026-04-07T12:00:00Z",
+        "computed_at": recent_ts,
         "episode_count": 1
     });
 

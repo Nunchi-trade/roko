@@ -450,11 +450,12 @@ impl CascadeRouter {
             .collect()
     }
 
-    /// Save confidence stats + model slugs to a JSON file.
+    /// Save confidence stats, model slugs, and total observation count to a JSON file.
     ///
-    /// `LinUCB` state is not persisted (it re-learns from new observations).
-    /// Only confidence stats are saved because they represent the accumulated
-    /// pass-rate history needed for stage-2 routing.
+    /// `LinUCB` arm weights are not persisted (they re-learn from new observations).
+    /// Confidence stats represent the accumulated pass-rate history needed for
+    /// stage-2 routing, and the total observation count determines which cascade
+    /// stage is active after reload.
     pub fn save(&self, path: &Path) -> Result<(), std::io::Error> {
         let snapshot = CascadeSnapshot {
             model_slugs: self.model_slugs.clone(),
@@ -472,6 +473,7 @@ impl CascadeRouter {
                     )
                 })
                 .collect(),
+            total_observations: self.linucb.total_observations(),
         };
         let json = serde_json::to_string_pretty(&snapshot)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -515,9 +517,9 @@ impl CascadeRouter {
                 let router = Self::new(slugs);
                 // Restore confidence stats.
                 let mut stats = router.confidence_stats.lock();
-                for (model, persisted) in snap.confidence_stats {
+                for (model, persisted) in &snap.confidence_stats {
                     stats.insert(
-                        model,
+                        model.clone(),
                         ModelStats {
                             trials: persisted.trials,
                             successes: persisted.successes,
@@ -525,6 +527,17 @@ impl CascadeRouter {
                     );
                 }
                 drop(stats);
+
+                // Restore total observation count so the cascade stage is correct.
+                // If the snapshot predates the `total_observations` field (default 0),
+                // recompute from the sum of per-model trials.
+                let total = if snap.total_observations > 0 {
+                    snap.total_observations
+                } else {
+                    snap.confidence_stats.values().map(|s| s.trials).sum()
+                };
+                router.linucb.set_total_observations(total);
+
                 router
             }
             None => Self::new(model_slugs),
@@ -668,6 +681,13 @@ const fn stage_for_observations(obs: u64) -> CascadeStage {
 struct CascadeSnapshot {
     model_slugs: Vec<String>,
     confidence_stats: HashMap<String, PersistedModelStats>,
+    /// Total observations across all models (used to restore cascade stage).
+    ///
+    /// Defaults to 0 for backward compatibility with snapshots written before
+    /// this field was added; in that case `load_or_new` recomputes the total
+    /// from the sum of per-model trials.
+    #[serde(default)]
+    total_observations: u64,
 }
 
 /// Serializable form of per-model confidence stats.

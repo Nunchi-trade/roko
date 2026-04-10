@@ -1487,7 +1487,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "LearningRuntime::open_under doesn't load persisted CascadeRouter - needs wiring fix"]
     async fn open_under_loads_persisted_cascade_router_state() {
         let tmp = TempDir::new().unwrap();
         let learn_root = tmp.path().join(".roko").join("learn");

@@ -381,6 +381,11 @@ impl LinUCBRouter {
         self.state.lock().total_observations
     }
 
+    /// Override the total observation count (used when restoring from persisted state).
+    pub fn set_total_observations(&self, count: u64) {
+        self.state.lock().total_observations = count;
+    }
+
     /// Select the best model for the given context.
     ///
     /// If `total_observations < COLD_START_THRESHOLD`, returns the static
@@ -442,28 +447,39 @@ impl LinUCBRouter {
     ///
     /// This is the lower-level observation entry point used by the cascade router
     /// when it already has the raw context vector.
+    ///
+    /// If a `persist_path` is configured, the router state is automatically
+    /// saved to disk after each update. Save errors are silently ignored so
+    /// that a filesystem hiccup never breaks the update flow.
     pub fn update_features(&self, x: &[f64], model_idx: usize, reward: f64) {
         if x.len() != CONTEXT_DIM {
             return;
         }
 
-        let mut state = self.state.lock();
-        let Some(arm) = state.arms.get_mut(model_idx) else {
-            return;
-        };
+        {
+            let mut state = self.state.lock();
+            let Some(arm) = state.arms.get_mut(model_idx) else {
+                return;
+            };
 
-        // A = A + x * x^T
-        for (i, row) in arm.a_matrix.iter_mut().enumerate() {
-            for (j, cell) in row.iter_mut().enumerate() {
-                *cell += x[i] * x[j];
+            // A = A + x * x^T
+            for (i, row) in arm.a_matrix.iter_mut().enumerate() {
+                for (j, cell) in row.iter_mut().enumerate() {
+                    *cell += x[i] * x[j];
+                }
             }
+            // b = b + reward * x
+            for (bi, xi) in arm.b_vector.iter_mut().zip(x) {
+                *bi += reward * xi;
+            }
+            arm.observations += 1;
+            state.total_observations += 1;
+        } // lock released before save() to avoid deadlock
+
+        // Auto-persist when a path is configured.
+        if self.persist_path.is_some() {
+            let _ = self.save();
         }
-        // b = b + reward * x
-        for (bi, xi) in arm.b_vector.iter_mut().zip(x) {
-            *bi += reward * xi;
-        }
-        arm.observations += 1;
-        state.total_observations += 1;
     }
 
     /// Return the index of the arm for `model_slug`.
