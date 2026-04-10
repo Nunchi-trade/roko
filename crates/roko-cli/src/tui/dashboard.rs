@@ -21,7 +21,6 @@ use crate::plan::{PlanSummary, plans_dir};
 use crate::task_parser::{TaskDef, TasksFile};
 use roko_core::metric::{Headlines, TaskMetric, compute_headlines};
 use roko_core::task::{TaskCategory, TaskComplexityBand};
-#[cfg(test)]
 use roko_core::OperatingFrequency;
 use roko_gate::adaptive_threshold::AdaptiveThresholds;
 use roko_learn::efficiency::AgentEfficiencyEvent;
@@ -900,6 +899,7 @@ pub struct PlanExecutionTaskRow {
     pub task_id: String,
     pub title: String,
     pub phase: String,
+    pub frequency: OperatingFrequency,
     pub model: String,
     pub duration: String,
     pub is_current: bool,
@@ -909,6 +909,7 @@ pub struct PlanExecutionTaskRow {
 #[derive(Debug, Clone)]
 pub struct PlanExecutionTaskDetail {
     pub task_id: String,
+    pub frequency: OperatingFrequency,
     pub description: String,
     pub read_files: Vec<ReadFileSnapshot>,
     pub write_files: Vec<String>,
@@ -1752,6 +1753,7 @@ fn load_current_plan_execution(
             task_id: task.id.clone(),
             title: task.title.clone(),
             phase,
+            frequency: task.operating_frequency(),
             model,
             duration,
             is_current: current_task_id.as_deref() == Some(task.id.as_str()),
@@ -1819,6 +1821,7 @@ fn build_task_detail(task: &TaskDef) -> PlanExecutionTaskDetail {
 
     PlanExecutionTaskDetail {
         task_id: task.id.clone(),
+        frequency: task.operating_frequency(),
         description: task.title.clone(),
         read_files,
         write_files: task.files.clone(),
@@ -1899,6 +1902,14 @@ fn default_model_for_tier(tier: &str) -> String {
         "focused" | "integrative" => String::from("claude-sonnet-4-6"),
         "architectural" => String::from("claude-opus-4-6"),
         _ => String::from("claude-sonnet-4-6"),
+    }
+}
+
+pub(crate) fn operating_frequency_label(frequency: OperatingFrequency) -> &'static str {
+    match frequency {
+        OperatingFrequency::Gamma => "gamma",
+        OperatingFrequency::Theta => "theta",
+        OperatingFrequency::Delta => "delta",
     }
 }
 
@@ -4848,6 +4859,7 @@ id = "task-2"
 title = "Wire dashboard"
 status = "ready"
 tier = "focused"
+frequency = "delta"
 files = ["src/dashboard.rs"]
 
   [[task.context.read_files]]
@@ -4890,6 +4902,7 @@ files = ["src/dashboard.rs"]
         assert_eq!(execution.tasks_done, 1);
         assert_eq!(execution.tasks_total, 2);
         assert_eq!(execution.tasks.len(), 2);
+        assert_eq!(execution.tasks[1].frequency, OperatingFrequency::Delta);
         assert_eq!(
             execution
                 .current_task
@@ -4897,6 +4910,14 @@ files = ["src/dashboard.rs"]
                 .expect("current task")
                 .task_id,
             "task-2"
+        );
+        assert_eq!(
+            execution
+                .current_task
+                .as_ref()
+                .expect("current task")
+                .frequency,
+            OperatingFrequency::Delta
         );
         assert_eq!(execution.agent_output_tail.len(), 20);
         assert_eq!(

@@ -20,7 +20,8 @@ use serde_json::Value;
 use super::dashboard::{
     AgentActivitySnapshot, CFactor, CascadeRouterState, DashboardData, DashboardScaffold,
     GateFailureRow, GateSummaryRow, GateThresholdRow, GateTrend, PlanExecutionSnapshot,
-    SignalSummary, Theme, build_agent_activity_snapshot, read_json_value, read_jsonl_values,
+    SignalSummary, Theme, build_agent_activity_snapshot, operating_frequency_label,
+    read_json_value, read_jsonl_values,
 };
 use super::pages::{PageId, PageRegistry};
 
@@ -1746,6 +1747,7 @@ fn render_plan_execution_table(
                 Cell::from(task.task_id.clone()),
                 Cell::from(truncate_text(&task.title, 40)),
                 Cell::from(Span::styled(task.phase.clone(), phase_style)),
+                Cell::from(operating_frequency_label(task.frequency)),
                 Cell::from(task.model.clone()),
                 Cell::from(task.duration.clone()),
             ])
@@ -1759,6 +1761,7 @@ fn render_plan_execution_table(
             Constraint::Length(12),
             Constraint::Min(24),
             Constraint::Length(14),
+            Constraint::Length(10),
             Constraint::Length(18),
             Constraint::Length(10),
         ],
@@ -1768,6 +1771,7 @@ fn render_plan_execution_table(
             Cell::from("task id"),
             Cell::from("title"),
             Cell::from("phase"),
+            Cell::from("frequency"),
             Cell::from("model"),
             Cell::from("duration"),
         ])
@@ -1848,6 +1852,16 @@ fn render_plan_execution_sidebar(
         ),
         Span::raw(": "),
         Span::raw(data.affect_indicator(&execution.plan_id)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            "frequency",
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(": "),
+        Span::raw(operating_frequency_label(task.frequency)),
     ]));
     lines.push(Line::from(vec![
         Span::styled(
