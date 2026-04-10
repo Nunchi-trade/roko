@@ -500,6 +500,24 @@ impl LearningRuntime {
         read_efficiency_events(&self.paths.efficiency_jsonl).await
     }
 
+    /// Read the latest persisted C-Factor snapshot, if one exists.
+    pub async fn latest_cfactor(&self) -> Result<Option<CFactor>, LearningRuntimeError> {
+        let contents = match tokio::fs::read_to_string(&self.paths.cfactor_jsonl).await {
+            Ok(contents) => contents,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(LearningRuntimeError::Io(err)),
+        };
+
+        let snapshot = contents
+            .lines()
+            .rev()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .and_then(|line| serde_json::from_str::<CFactor>(line).ok());
+
+        Ok(snapshot)
+    }
+
     /// Save cascade router observations to disk.
     pub fn save_cascade_router(&self) -> Result<(), LearningRuntimeError> {
         self.cascade_router.save(&self.paths.cascade_router_json)?;

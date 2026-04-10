@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::cfactor::CFactor;
 use crate::model_router::{COLD_START_THRESHOLD, CONTEXT_DIM, LinUCBRouter, RoutingContext};
 
 // ─── CascadeStage ───────────────────────────────────────────────────────────
@@ -91,6 +92,10 @@ pub struct CascadeSelection {
 const CONFIDENCE_TO_UCB_THRESHOLD: u64 = 200;
 /// Affect confidence below which the router biases toward stronger models.
 const LOW_AFFECT_CONFIDENCE_THRESHOLD: f64 = 0.3;
+/// C-Factor above which the router biases toward cheaper models.
+const HIGH_CFACTOR_THRESHOLD: f64 = 0.8;
+/// C-Factor below which the router biases toward stronger models.
+const LOW_CFACTOR_THRESHOLD: f64 = 0.4;
 
 /// Per-model observation record for the confidence stage.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -289,11 +294,12 @@ impl CascadeRouter {
         &self,
         frequency: OperatingFrequency,
         ctx: Option<&RoutingContext>,
+        cfactor: Option<&CFactor>,
     ) -> Option<ModelSpec> {
         match frequency {
             OperatingFrequency::Gamma => None,
-            OperatingFrequency::Theta => ctx.map(|ctx| self.route(ctx).primary),
-            OperatingFrequency::Delta => Some(self.strongest_model()),
+            OperatingFrequency::Theta => ctx.map(|ctx| self.route_with_cfactor(ctx, cfactor).primary),
+            OperatingFrequency::Delta => Some(self.bias_model_for_cfactor(self.strongest_model(), cfactor)),
         }
     }
 
@@ -321,6 +327,30 @@ impl CascadeRouter {
         ModelSpec::from_slug(best_slug)
     }
 
+    /// Return the cheapest model currently available to the router.
+    ///
+    /// Preference order is fast < standard < premium. Within the same tier,
+    /// the first slug wins so the choice stays stable.
+    #[must_use]
+    pub fn cheapest_model(&self) -> ModelSpec {
+        let mut best_slug = self
+            .model_slugs
+            .first()
+            .cloned()
+            .expect("CascadeRouter: need at least one model");
+        let mut best_rank = model_tier_rank(slug_to_tier(&best_slug));
+
+        for slug in self.model_slugs.iter().skip(1) {
+            let rank = model_tier_rank(slug_to_tier(slug));
+            if rank < best_rank {
+                best_rank = rank;
+                best_slug.clone_from(slug);
+            }
+        }
+
+        ModelSpec::from_slug(best_slug)
+    }
+
     /// Return the index of `slug` in the router's model list.
     #[must_use]
     pub fn model_index_for_slug(&self, slug: &str) -> Option<usize> {
@@ -329,10 +359,15 @@ impl CascadeRouter {
 
     /// Route a context through the cascade, returning a recommendation.
     pub fn route(&self, ctx: &RoutingContext) -> CascadeModel {
+        self.route_with_cfactor(ctx, None)
+    }
+
+    /// Route a context through the cascade, optionally biasing by C-Factor.
+    pub fn route_with_cfactor(&self, ctx: &RoutingContext, cfactor: Option<&CFactor>) -> CascadeModel {
         match self.current_stage() {
-            CascadeStage::Static => self.route_static(ctx),
-            CascadeStage::Confidence => self.route_confidence(ctx),
-            CascadeStage::Ucb => self.route_ucb(ctx),
+            CascadeStage::Static => self.route_static(ctx, cfactor),
+            CascadeStage::Confidence => self.route_confidence(ctx, cfactor),
+            CascadeStage::Ucb => self.route_ucb(ctx, cfactor),
         }
     }
 
@@ -488,25 +523,26 @@ impl CascadeRouter {
 
     // ── Internal routing per stage ──────────────────────────────────────
 
-    fn route_static(&self, ctx: &RoutingContext) -> CascadeModel {
+    fn route_static(&self, ctx: &RoutingContext, cfactor: Option<&CFactor>) -> CascadeModel {
         let slug = self
             .role_table
             .get(&ctx.role)
             .cloned()
             .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
 
-        let tier = slug_to_tier(&slug);
+        let selected = self.bias_model_for_cfactor(ModelSpec::from_slug(&slug), cfactor);
+        let tier = slug_to_tier(&selected.slug);
         let fallback = fallback_for_tier(tier).map(ModelSpec::from_slug);
 
         CascadeModel {
-            primary: ModelSpec::from_slug(&slug),
+            primary: selected,
             fallback,
             latency_sla_ms: default_latency_sla(tier),
             stage: CascadeStage::Static,
         }
     }
 
-    fn route_confidence(&self, ctx: &RoutingContext) -> CascadeModel {
+    fn route_confidence(&self, ctx: &RoutingContext, cfactor: Option<&CFactor>) -> CascadeModel {
         let stats = self.confidence_stats.lock();
         let low_confidence = ctx.affect_confidence < LOW_AFFECT_CONFIDENCE_THRESHOLD;
 
@@ -534,27 +570,44 @@ impl CascadeRouter {
 
         drop(stats);
 
-        let tier = slug_to_tier(&best_slug);
+        let selected = self.bias_model_for_cfactor(ModelSpec::from_slug(&best_slug), cfactor);
+        let tier = slug_to_tier(&selected.slug);
         let fallback = fallback_for_tier(tier).map(ModelSpec::from_slug);
 
         CascadeModel {
-            primary: ModelSpec::from_slug(&best_slug),
+            primary: selected,
             fallback,
             latency_sla_ms: default_latency_sla(tier),
             stage: CascadeStage::Confidence,
         }
     }
 
-    fn route_ucb(&self, ctx: &RoutingContext) -> CascadeModel {
+    fn route_ucb(&self, ctx: &RoutingContext, cfactor: Option<&CFactor>) -> CascadeModel {
         let model = self.linucb.select_model(ctx);
-        let tier = slug_to_tier(&model.slug);
+        let selected = self.bias_model_for_cfactor(model, cfactor);
+        let tier = slug_to_tier(&selected.slug);
         let fallback = fallback_for_tier(tier).map(ModelSpec::from_slug);
 
         CascadeModel {
-            primary: model,
+            primary: selected,
             fallback,
             latency_sla_ms: default_latency_sla(tier),
             stage: CascadeStage::Ucb,
+        }
+    }
+
+    /// Apply a C-Factor-based bias to a selected model.
+    fn bias_model_for_cfactor(&self, model: ModelSpec, cfactor: Option<&CFactor>) -> ModelSpec {
+        let Some(cfactor) = cfactor else {
+            return model;
+        };
+
+        if cfactor.overall > HIGH_CFACTOR_THRESHOLD {
+            self.cheapest_model()
+        } else if cfactor.overall < LOW_CFACTOR_THRESHOLD {
+            self.strongest_model()
+        } else {
+            model
         }
     }
 }
@@ -773,17 +826,52 @@ mod tests {
         let cascade = CascadeRouter::new(test_slugs());
         let ctx = default_ctx();
 
-        assert_eq!(cascade.select_for_frequency(OperatingFrequency::Gamma, Some(&ctx)), None);
+        assert_eq!(
+            cascade.select_for_frequency(OperatingFrequency::Gamma, Some(&ctx), None),
+            None
+        );
 
         let theta = cascade
-            .select_for_frequency(OperatingFrequency::Theta, Some(&ctx))
+            .select_for_frequency(OperatingFrequency::Theta, Some(&ctx), None)
             .expect("theta should route");
         assert_eq!(theta.slug, "claude-sonnet-4-5");
 
         let delta = cascade
-            .select_for_frequency(OperatingFrequency::Delta, Some(&ctx))
+            .select_for_frequency(OperatingFrequency::Delta, Some(&ctx), None)
             .expect("delta should route");
         assert_eq!(delta.slug, "claude-opus-4");
+    }
+
+    #[test]
+    fn high_cfactor_prefers_cheapest_model() {
+        let cascade = CascadeRouter::new(test_slugs());
+        let ctx = default_ctx();
+        let cfactor = CFactor {
+            overall: 0.9,
+            ..CFactor::default()
+        };
+
+        let selected = cascade
+            .select_for_frequency(OperatingFrequency::Theta, Some(&ctx), Some(&cfactor))
+            .expect("theta should route");
+
+        assert_eq!(selected.slug, "claude-haiku-3-5");
+    }
+
+    #[test]
+    fn low_cfactor_prefers_strongest_model() {
+        let cascade = CascadeRouter::new(test_slugs());
+        let ctx = default_ctx();
+        let cfactor = CFactor {
+            overall: 0.2,
+            ..CFactor::default()
+        };
+
+        let selected = cascade
+            .select_for_frequency(OperatingFrequency::Theta, Some(&ctx), Some(&cfactor))
+            .expect("theta should route");
+
+        assert_eq!(selected.slug, "claude-opus-4");
     }
 
     #[test]

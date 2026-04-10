@@ -6592,8 +6592,19 @@ impl PlanRunner {
         if let Some(td) = task_def.as_ref() {
             let cascade_router = self.learning.cascade_router();
             let routing_ctx = cascade_routing_context(self, plan_id, task, role, Some(td));
+            let cfactor_snapshot = match self.learning.latest_cfactor().await {
+                Ok(snapshot) => snapshot,
+                Err(err) => {
+                    tracing::debug!("[orchestrate] failed to read latest C-Factor: {err}");
+                    None
+                }
+            };
 
-            match cascade_router.select_for_frequency(frequency, Some(&routing_ctx)) {
+            match cascade_router.select_for_frequency(
+                frequency,
+                Some(&routing_ctx),
+                cfactor_snapshot.as_ref(),
+            ) {
                 Some(model) => {
                     tracing::info!(
                         "[orchestrate] frequency={} model={} (selected via cascade)",
