@@ -54,7 +54,7 @@ use roko_learn::runtime_feedback::{
 };
 use roko_learn::skill_library::Skill;
 use roko_learn::skill_library::{SkillExtractionRequest, SkillGateResult, SkillLibrary};
-use roko_neuro::{KnowledgeEntry, KnowledgeStore, NeuroStore};
+use roko_neuro::{KnowledgeEntry, KnowledgeKind, KnowledgeStore, NeuroStore};
 use roko_orchestrator::worktree::{WorktreeConfig, WorktreeManager};
 use roko_orchestrator::{
     EventKind, EventLog, EventLogSnapshot, ExecutorAction, ExecutorEvent, ExecutorSnapshot,
@@ -3289,6 +3289,60 @@ impl PlanRunner {
                                 at_ms: now_unix_ms_i64(),
                             };
                             self.obs_sinks.trace_sink.append(trace_id, event);
+
+                            // 5F.23: Auto-generate AntiKnowledge from gate failures.
+                            let anti_task_id = self
+                                .task_trackers
+                                .get(&plan_id)
+                                .and_then(|t| t.last_impl_task_id.clone())
+                                .unwrap_or_else(|| format!("rung-{rung}"));
+                            let anti_content = if failure_context.is_empty() {
+                                format!(
+                                    "Gate '{phase}' failed for task {anti_task_id} in plan {plan_id}: {}",
+                                    failed_gates
+                                        .iter()
+                                        .map(|g| format!("{}: {}", g.gate_name, g.summary))
+                                        .collect::<Vec<_>>()
+                                        .join("; ")
+                                )
+                            } else {
+                                let snippet = if failure_context.len() > 500 {
+                                    &failure_context[..500]
+                                } else {
+                                    &failure_context
+                                };
+                                format!(
+                                    "Gate '{phase}' failed for task {anti_task_id} in plan {plan_id}: {snippet}"
+                                )
+                            };
+                            let anti_entry = KnowledgeEntry {
+                                id: format!("anti-gate-{plan_id}-{anti_task_id}-{rung}"),
+                                kind: KnowledgeKind::AntiKnowledge,
+                                source: Some(format!("gate-failure:{phase}")),
+                                content: anti_content,
+                                confidence: 0.9,
+                                confidence_weight: -0.9,
+                                refuted_insight_id: None,
+                                refutation_evidence: None,
+                                source_episodes: vec![format!("{plan_id}:rung-{rung}")],
+                                tags: vec![
+                                    "anti-knowledge".to_string(),
+                                    "gate-failure".to_string(),
+                                    phase.to_string(),
+                                ],
+                                created_at: chrono::Utc::now(),
+                                half_life_days: KnowledgeKind::AntiKnowledge
+                                    .default_half_life_days(),
+                                hdc_vector: None,
+                            };
+                            if let Err(e) = self.knowledge_store.add(anti_entry) {
+                                tracing::warn!(
+                                    plan_id = %plan_id,
+                                    phase = %phase,
+                                    error = %e,
+                                    "failed to record AntiKnowledge for gate failure"
+                                );
+                            }
                         }
                         let failure_reason = self
                             .task_trackers

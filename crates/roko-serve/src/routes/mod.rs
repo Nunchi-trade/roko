@@ -56,6 +56,13 @@ pub fn build_router(
         api
     };
 
+    // Secret-scrubbing layer: redacts API keys / tokens from JSON responses.
+    let scrubber = Arc::clone(&state.scrubber);
+    let api = api.layer(axum::middleware::from_fn_with_state(
+        scrubber,
+        middleware::scrub_secrets,
+    ));
+
     Router::new()
         .merge(webhooks::routes())
         .nest("/api", api)

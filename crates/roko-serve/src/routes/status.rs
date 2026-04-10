@@ -47,6 +47,8 @@ pub fn routes() -> Router<Arc<AppState>> {
 /// `GET /api/health` — liveness check.
 async fn health(State(state): State<Arc<AppState>>) -> (axum::http::StatusCode, Json<Value>) {
     let uptime_secs = state.started_at.elapsed().as_secs();
+    let active_plans = state.active_plans.read().await.len();
+    let active_agents = state.supervisor.count().await;
 
     (
         axum::http::StatusCode::OK,
@@ -54,6 +56,8 @@ async fn health(State(state): State<Arc<AppState>>) -> (axum::http::StatusCode, 
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_secs": uptime_secs,
+        "active_plans": active_plans,
+        "active_agents": active_agents,
         })),
     )
 }
@@ -1610,7 +1614,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn health_reports_status_version_and_uptime() {
+    async fn health_reports_status_version_uptime_and_counts() {
         let (_dir, state) = test_state();
 
         let response = health(State(state.clone())).await;
@@ -1619,6 +1623,8 @@ mod tests {
         assert_eq!(body["status"], "ok");
         assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
         assert!(body["uptime_secs"].as_u64().is_some());
+        assert_eq!(body["active_plans"], 0);
+        assert_eq!(body["active_agents"], 0);
     }
 
     #[tokio::test]

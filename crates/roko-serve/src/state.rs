@@ -18,6 +18,7 @@ use tokio::task::JoinHandle;
 use bardo_runtime::cancel::CancelToken;
 use bardo_runtime::process::ProcessSupervisor;
 use roko_core::config::schema::RokoConfig;
+use roko_core::obs::LogScrubber;
 use roko_core::{Signal, Substrate};
 use roko_daimon::DaimonState;
 
@@ -150,6 +151,8 @@ pub struct AppState {
     pub deployments: RwLock<HashMap<String, Deployment>>,
     /// Recent template run outcomes keyed by template name.
     pub template_runs: RwLock<HashMap<String, Vec<TemplateRunRecord>>>,
+    /// Secret scrubber for redacting API-key / token patterns from responses.
+    pub scrubber: Arc<LogScrubber>,
 }
 
 impl AppState {
@@ -190,6 +193,7 @@ impl AppState {
             deploy_backend,
             deployments: RwLock::new(HashMap::new()),
             template_runs: RwLock::new(HashMap::new()),
+            scrubber: Arc::new(LogScrubber::new()),
         }
     }
 
