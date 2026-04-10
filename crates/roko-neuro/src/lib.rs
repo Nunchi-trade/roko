@@ -12,6 +12,10 @@ fn default_confidence() -> f64 {
     1.0
 }
 
+fn default_confidence_weight() -> f64 {
+    1.0
+}
+
 const fn default_half_life_days() -> f64 {
     30.0
 }
@@ -82,6 +86,15 @@ pub struct KnowledgeEntry {
     /// Confidence score in the range `0.0..=1.0`.
     #[serde(default = "default_confidence")]
     pub confidence: f64,
+    /// Signed retrieval weight for the entry.
+    #[serde(default = "default_confidence_weight")]
+    pub confidence_weight: f64,
+    /// ID of the insight this entry refutes, if it is AntiKnowledge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refuted_insight_id: Option<String>,
+    /// Evidence explaining why the refuted insight was wrong.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refutation_evidence: Option<String>,
     /// Episode IDs that contributed to this knowledge.
     #[serde(default)]
     pub source_episodes: Vec<String>,
@@ -97,6 +110,33 @@ pub struct KnowledgeEntry {
     /// Optional HDC fingerprint for similarity search.
     #[serde(default)]
     pub hdc_vector: Option<Vec<u8>>,
+}
+
+impl KnowledgeEntry {
+    /// Return the warning text for an AntiKnowledge entry, if available.
+    #[must_use]
+    pub fn refutation_warning(&self) -> Option<String> {
+        if self.kind != KnowledgeKind::AntiKnowledge {
+            return None;
+        }
+
+        let refuted_id = self.refuted_insight_id.as_deref()?.trim();
+        if refuted_id.is_empty() {
+            return None;
+        }
+
+        let evidence = self
+            .refutation_evidence
+            .as_deref()
+            .unwrap_or(self.content.as_str())
+            .trim()
+            .trim_end_matches(|ch| matches!(ch, '.' | '!' | '?'));
+        if evidence.is_empty() {
+            return None;
+        }
+
+        Some(format!("Previous insight {refuted_id} was wrong because {evidence}."))
+    }
 }
 
 /// Single entry point for durable knowledge storage backends.

@@ -1311,6 +1311,9 @@ impl DreamDistillationCandidate {
             source: Some("dream".to_string()),
             content: content.to_string(),
             confidence,
+            confidence_weight: confidence,
+            refuted_insight_id: None,
+            refutation_evidence: None,
             source_episodes: self.source_episodes,
             tags: self.tags,
             created_at: Utc::now(),
@@ -1435,6 +1438,9 @@ fn playbook_knowledge_entry(
         source: Some("dream".to_string()),
         content,
         confidence: if playbook.steps.is_empty() { 0.0 } else { 1.0 },
+        confidence_weight: if playbook.steps.is_empty() { 0.0 } else { 1.0 },
+        refuted_insight_id: None,
+        refutation_evidence: None,
         source_episodes: source_episodes.to_vec(),
         tags: vec![
             "dream".to_string(),
@@ -1449,15 +1455,33 @@ fn playbook_knowledge_entry(
 
 fn build_regression_entry(cluster: &DreamCluster, created_at: DateTime<Utc>) -> KnowledgeEntry {
     let reason = summarize_failure_reason(cluster);
-    let content = format!(
-        "Approach {} for plan {} and task type {} does not work because {}.",
-        cluster.key.model, cluster.key.plan_id, cluster.key.task_type, reason
-    );
     let kind = if cluster.success_count == 0 {
         KnowledgeKind::Constraint
     } else {
         KnowledgeKind::AntiKnowledge
     };
+    let refuted_insight_id = format!(
+        "insight:{}:{}:{}",
+        cluster.key.plan_id, cluster.key.task_type, cluster.key.model
+    );
+    let mut evidence = reason;
+    if cluster.failure_count > 0 {
+        let failing_gates = summarize_failure_gates(cluster);
+        if !failing_gates.is_empty() {
+            evidence.push_str(&format!(" The failing gates were {}.", failing_gates));
+        }
+    }
+    let content = if kind == KnowledgeKind::AntiKnowledge {
+        format!(
+            "Previous insight {refuted_insight_id} was wrong because {evidence}"
+        )
+    } else {
+        format!(
+            "Approach {} for plan {} and task type {} does not work because {}.",
+            cluster.key.model, cluster.key.plan_id, cluster.key.task_type, evidence
+        )
+    };
+    let confidence = if cluster.failure_count > 0 { 0.9 } else { 0.0 };
     KnowledgeEntry {
         id: derive_knowledge_id(
             kind,
@@ -1468,7 +1492,14 @@ fn build_regression_entry(cluster: &DreamCluster, created_at: DateTime<Utc>) -> 
         kind,
         source: Some("dream".to_string()),
         content,
-        confidence: if cluster.failure_count > 0 { 0.9 } else { 0.0 },
+        confidence,
+        confidence_weight: if kind == KnowledgeKind::AntiKnowledge {
+            -confidence
+        } else {
+            confidence
+        },
+        refuted_insight_id: (kind == KnowledgeKind::AntiKnowledge).then_some(refuted_insight_id),
+        refutation_evidence: (kind == KnowledgeKind::AntiKnowledge).then_some(evidence),
         source_episodes: cluster.episode_ids.clone(),
         tags: vec![
             knowledge_kind_tag(kind).to_string(),
@@ -1582,6 +1613,9 @@ fn generate_cross_domain_strategy_hypotheses(
             source: Some("dream".to_string()),
             content,
             confidence: strategy_confidence(target, source_a_score, source_b_score),
+            confidence_weight: strategy_confidence(target, source_a_score, source_b_score),
+            refuted_insight_id: None,
+            refutation_evidence: None,
             source_episodes,
             tags,
             created_at,
@@ -1796,6 +1830,9 @@ fn build_mistake_insight_entry(
         source: Some("dream".to_string()),
         content,
         confidence: if cluster.failure_count > 0 { 0.85 } else { 0.0 },
+        confidence_weight: if cluster.failure_count > 0 { 0.85 } else { 0.0 },
+        refuted_insight_id: None,
+        refutation_evidence: None,
         source_episodes: cluster.episode_ids.clone(),
         tags: vec![
             knowledge_kind_tag(KnowledgeKind::Insight).to_string(),
@@ -1835,22 +1872,25 @@ fn review_insights_from_heuristics(
                 "heuristic".to_string(),
                 format!("heuristic:{}", heuristic.id),
             ];
-            KnowledgeEntry {
-                id: derive_knowledge_id(
-                    KnowledgeKind::Insight,
-                    &content,
-                    &source_episodes,
+        KnowledgeEntry {
+            id: derive_knowledge_id(
+                KnowledgeKind::Insight,
+                &content,
+                &source_episodes,
                     &tags,
-                ),
-                kind: KnowledgeKind::Insight,
-                source: Some("dream".to_string()),
-                content,
-                confidence: heuristic.confidence.clamp(0.0, 1.0),
-                source_episodes,
-                tags,
-                created_at,
-                half_life_days: KnowledgeKind::Insight.default_half_life_days(),
-                hdc_vector: None,
+            ),
+            kind: KnowledgeKind::Insight,
+            source: Some("dream".to_string()),
+            content,
+            confidence: heuristic.confidence.clamp(0.0, 1.0),
+            confidence_weight: heuristic.confidence.clamp(0.0, 1.0),
+            refuted_insight_id: None,
+            refutation_evidence: None,
+            source_episodes,
+            tags,
+            created_at,
+            half_life_days: KnowledgeKind::Insight.default_half_life_days(),
+            hdc_vector: None,
             }
         })
         .collect()

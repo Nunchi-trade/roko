@@ -8375,13 +8375,24 @@ fn render_knowledge_context(entries: Vec<KnowledgeEntry>) -> String {
             entry.source_episodes.join(", ")
         };
 
-        let _ = write!(
-            content,
-            "\n### {}. {:?} ({confidence:.2})\nSource: {source}\nTags: {tags}\nEpisodes: {episodes}\n```\n{}\n```\n",
-            idx + 1,
-            entry.kind,
-            entry.content.trim(),
-        );
+        if let Some(warning) = entry.refutation_warning() {
+            let _ = write!(
+                content,
+                "\n### {}. Warning {:?} ({confidence:.2})\nSource: {source}\nWeight: {:.2}\nTags: {tags}\nEpisodes: {episodes}\n{warning}\n```\n{}\n```\n",
+                idx + 1,
+                entry.kind,
+                entry.confidence_weight,
+                entry.content.trim(),
+            );
+        } else {
+            let _ = write!(
+                content,
+                "\n### {}. {:?} ({confidence:.2})\nSource: {source}\nTags: {tags}\nEpisodes: {episodes}\n```\n{}\n```\n",
+                idx + 1,
+                entry.kind,
+                entry.content.trim(),
+            );
+        }
     }
 
     content

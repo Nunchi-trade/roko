@@ -309,17 +309,27 @@ fn knowledge_chunk(entry: KnowledgeEntry, idx: usize) -> ContextChunk {
     let recency = recency_score(entry.created_at.timestamp());
     let track_record = knowledge_track_record(confidence, entry.source_episodes.len());
     let source = entry.source.clone();
-    let content = format!(
-        "### Knowledge {:?}\nConfidence: {:.2}\nTags: {}\n```\n{}\n```",
-        entry.kind,
-        confidence,
-        if entry.tags.is_empty() {
-            String::from("-")
-        } else {
-            entry.tags.join(", ")
-        },
-        entry.content,
-    );
+    let tags = if entry.tags.is_empty() {
+        String::from("-")
+    } else {
+        entry.tags.join(", ")
+    };
+    let content = if let Some(warning) = entry.refutation_warning() {
+        format!(
+            "### Warning {:?}\nConfidence: {:.2}\nWeight: {:.2}\n{}\nTags: {}\n```\n{}\n```",
+            entry.kind,
+            confidence,
+            entry.confidence_weight,
+            warning,
+            tags,
+            entry.content,
+        )
+    } else {
+        format!(
+            "### Knowledge {:?}\nConfidence: {:.2}\nTags: {}\n```\n{}\n```",
+            entry.kind, confidence, tags, entry.content,
+        )
+    };
     ContextChunk {
         content,
         source: ContextSource::KnowledgeEntry {
@@ -1023,6 +1033,9 @@ mod tests {
                 source: None,
                 content: "Prompt assembly should keep high-value context near the edges.".into(),
                 confidence: 0.9,
+                confidence_weight: 0.9,
+                refuted_insight_id: None,
+                refutation_evidence: None,
                 source_episodes: vec![],
                 tags: vec!["context".into(), "prompt".into()],
                 created_at: Utc::now(),
@@ -1111,6 +1124,9 @@ mod tests {
                 source: None,
                 content: "Use the rollback command after each migration".into(),
                 confidence: 0.9,
+                confidence_weight: 0.9,
+                refuted_insight_id: None,
+                refutation_evidence: None,
                 source_episodes: vec!["ep-a".into()],
                 tags: vec!["rollback".into(), "migration".into()],
                 created_at: now,
@@ -1125,6 +1141,9 @@ mod tests {
                 source: None,
                 content: "Never deploy without a rollback plan".into(),
                 confidence: 0.9,
+                confidence_weight: -0.9,
+                refuted_insight_id: Some("insight:deploy-rollback".into()),
+                refutation_evidence: Some("deploys failed when rollback was missing".into()),
                 source_episodes: vec!["ep-b".into()],
                 tags: vec!["rollback".into(), "deploy".into()],
                 created_at: now - chrono::Duration::days(10),
@@ -1139,6 +1158,9 @@ mod tests {
                 source: None,
                 content: "Deployments happen on weekdays".into(),
                 confidence: 0.9,
+                confidence_weight: 0.9,
+                refuted_insight_id: None,
+                refutation_evidence: None,
                 source_episodes: vec!["ep-c".into()],
                 tags: vec!["deploy".into()],
                 created_at: now - chrono::Duration::days(3),

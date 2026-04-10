@@ -369,6 +369,9 @@ impl From<&InsightRecord> for KnowledgeEntry {
             source: None,
             content: value.summary(),
             confidence: value.confidence,
+            confidence_weight: value.confidence,
+            refuted_insight_id: None,
+            refutation_evidence: None,
             source_episodes: value.source_episodes.clone(),
             tags: vec![
                 "tier:insight".to_string(),
@@ -390,6 +393,9 @@ impl From<&HeuristicRule> for KnowledgeEntry {
             source: None,
             content: value.summary(),
             confidence: value.confidence,
+            confidence_weight: value.confidence,
+            refuted_insight_id: None,
+            refutation_evidence: None,
             source_episodes: value.source_episodes.clone(),
             tags: vec![
                 "tier:heuristic".to_string(),
@@ -411,6 +417,9 @@ impl From<&PlaybookCompilation> for KnowledgeEntry {
             source: None,
             content: value.markdown.clone(),
             confidence: if value.rules.is_empty() { 0.0 } else { 1.0 },
+            confidence_weight: if value.rules.is_empty() { 0.0 } else { 1.0 },
+            refuted_insight_id: None,
+            refutation_evidence: None,
             source_episodes: value
                 .rules
                 .iter()
