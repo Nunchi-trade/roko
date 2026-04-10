@@ -14,7 +14,9 @@ use crate::error::ApiError;
 use crate::event_bus::Envelope;
 use crate::state::AppState;
 use roko_learn::cascade_router::CascadeStage;
+use roko_learn::cfactor::{AgentDispatchBias, CFactor, CFactorComponents};
 use roko_learn::efficiency::AgentEfficiencyEvent;
+use roko_learn::efficiency::{compute_fleet_cfactor, FleetCFactor};
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
 use roko_learn::model_router::COLD_START_THRESHOLD;
 use roko_learn::prompt_experiment::{ExperimentStatus, ExperimentStore};
@@ -27,6 +29,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/metrics/summary", get(metrics_summary))
         .route("/metrics/success_rate", get(success_rate))
         .route("/metrics/engagement", get(engagement))
+        .route("/metrics/c_factor", get(c_factor_metrics))
         .route("/metrics/model_efficiency", get(model_efficiency))
         .route("/metrics/gate_rate", get(gate_rate))
         .route("/metrics/experiments", get(experiments_metric))
@@ -101,6 +104,24 @@ async fn success_rate(State(state): State<Arc<AppState>>) -> Json<Value> {
 async fn engagement(State(state): State<Arc<AppState>>) -> Json<Value> {
     let runs = state.template_runs.read().await;
     Json(build_template_engagement(&runs))
+}
+
+/// `GET /api/metrics/c_factor` — composite C-Factor, component metrics, per-agent, and per-fleet.
+async fn c_factor_metrics(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+    let composite_path = state.workdir.join(".roko/learn/c-factor.jsonl");
+    let efficiency_path = state.workdir.join(".roko/learn/efficiency.jsonl");
+
+    let history = read_cfactor_history(&composite_path).await?;
+    let events = read_efficiency_events(&efficiency_path).await?;
+    let fleet = compute_fleet_cfactor(&events);
+
+    Ok(Json(build_cfactor_metrics_response(
+        &composite_path,
+        &history,
+        &efficiency_path,
+        &events,
+        fleet,
+    )))
 }
 
 /// `GET /api/metrics/model_efficiency` — cost per successful episode for each routed model.
@@ -335,6 +356,44 @@ struct TemplateSummary {
     name: String,
     runs: u64,
     success_rate: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct CFactorMetricsResponse {
+    source: CFactorMetricsSource,
+    composite: CFactorCompositeSummary,
+    sub_metrics: CFactorComponents,
+    per_agent: Vec<CFactorAgentSummary>,
+    per_fleet: FleetCFactor,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct CFactorMetricsSource {
+    composite_history_path: String,
+    efficiency_events_path: String,
+    composite_history_count: usize,
+    efficiency_event_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct CFactorCompositeSummary {
+    overall: f64,
+    computed_at: chrono::DateTime<chrono::Utc>,
+    episode_count: usize,
+    history_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct CFactorAgentSummary {
+    agent_id: String,
+    episode_count: usize,
+    without_agent_overall: f64,
+    contribution_score: f64,
+    dispatch_bias: String,
 }
 
 #[derive(Debug, Default)]
@@ -973,6 +1032,26 @@ fn median(values: &[f64]) -> Option<f64> {
     }
 }
 
+async fn read_cfactor_history(path: &std::path::Path) -> Result<Vec<CFactor>, ApiError> {
+    let content = match tokio::fs::read_to_string(path).await {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(ApiError::internal(format!("read {}: {e}", path.display()))),
+    };
+
+    let mut history = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(snapshot) = serde_json::from_str::<CFactor>(trimmed) {
+            history.push(snapshot);
+        }
+    }
+    Ok(history)
+}
+
 async fn read_efficiency_events(
     path: &std::path::Path,
 ) -> Result<Vec<AgentEfficiencyEvent>, ApiError> {
@@ -1361,6 +1440,61 @@ fn extract_gate_duration_ms(entry: &Value) -> Option<u64> {
         .or_else(|| entry.pointer("/tags/duration_ms").and_then(Value::as_u64))
 }
 
+fn build_cfactor_metrics_response(
+    composite_path: &std::path::Path,
+    history: &[CFactor],
+    efficiency_path: &std::path::Path,
+    events: &[AgentEfficiencyEvent],
+    fleet: FleetCFactor,
+) -> Value {
+    let composite = history.last().cloned().unwrap_or_default();
+    let per_agent = composite
+        .agent_contributions
+        .iter()
+        .map(|contribution| CFactorAgentSummary {
+            agent_id: contribution.agent_id.clone(),
+            episode_count: contribution.episode_count,
+            without_agent_overall: contribution.without_agent_overall,
+            contribution_score: contribution.contribution_score,
+            dispatch_bias: dispatch_bias_label(
+                composite.dispatch_bias_for_agent(contribution.agent_id.as_str()),
+            ),
+        })
+        .collect::<Vec<_>>();
+
+    let response = CFactorMetricsResponse {
+        source: CFactorMetricsSource {
+            composite_history_path: composite_path.display().to_string(),
+            efficiency_events_path: efficiency_path.display().to_string(),
+            composite_history_count: history.len(),
+            efficiency_event_count: events.len(),
+        },
+        composite: CFactorCompositeSummary {
+            overall: composite.overall,
+            computed_at: composite.computed_at,
+            episode_count: composite.episode_count,
+            history_count: history.len(),
+        },
+        sub_metrics: composite.components,
+        per_agent,
+        per_fleet: fleet,
+    };
+
+    serde_json::to_value(response).unwrap_or_else(|e| {
+        json!({
+            "error": format!("serialize c-factor metrics: {e}"),
+        })
+    })
+}
+
+fn dispatch_bias_label(bias: AgentDispatchBias) -> String {
+    match bias {
+        AgentDispatchBias::PreferStronger => "prefer_stronger".to_string(),
+        AgentDispatchBias::PreferCheaper => "prefer_cheaper".to_string(),
+        AgentDispatchBias::Neutral => "neutral".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1485,6 +1619,209 @@ mod tests {
         assert_eq!(body["status"], "ok");
         assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
         assert!(body["uptime_secs"].as_u64().is_some());
+    }
+
+    #[tokio::test]
+    async fn c_factor_metrics_combines_composite_and_fleet_snapshots() {
+        let (dir, state) = test_state();
+        let learn_dir = dir.path().join(".roko").join("learn");
+        tokio::fs::create_dir_all(&learn_dir)
+            .await
+            .expect("create learn dir");
+
+        let c_factor_path = learn_dir.join("c-factor.jsonl");
+        let efficiency_path = learn_dir.join("efficiency.jsonl");
+
+        let earlier = serde_json::json!({
+            "overall": 0.25,
+            "components": {
+                "gate_pass_rate": 0.20,
+                "cost_efficiency": 0.20,
+                "speed": 0.20,
+                "information_flow_rate": 0.20,
+                "first_try_rate": 0.20,
+                "knowledge_growth": 0.20,
+                "knowledge_integration_rate": 0.20,
+                "task_diversity_coverage": 0.20,
+                "convergence_velocity": 0.20,
+                "turn_taking_equality": 0.20,
+                "social_sensitivity": 0.20
+            },
+            "agent_contributions": [
+                {
+                    "agent_id": "agent-a",
+                    "episode_count": 1,
+                    "without_agent_overall": 0.10,
+                    "contribution_score": 0.15
+                }
+            ],
+            "computed_at": "2026-04-04T12:00:00Z",
+            "episode_count": 1
+        });
+        let recent = serde_json::json!({
+            "overall": 0.71,
+            "components": {
+                "gate_pass_rate": 0.80,
+                "cost_efficiency": 0.60,
+                "speed": 0.55,
+                "information_flow_rate": 0.40,
+                "first_try_rate": 0.75,
+                "knowledge_growth": 0.30,
+                "knowledge_integration_rate": 0.25,
+                "task_diversity_coverage": 0.35,
+                "convergence_velocity": 0.45,
+                "turn_taking_equality": 0.50,
+                "social_sensitivity": 0.65
+            },
+            "agent_contributions": [
+                {
+                    "agent_id": "agent-a",
+                    "episode_count": 3,
+                    "without_agent_overall": 0.58,
+                    "contribution_score": 0.13
+                },
+                {
+                    "agent_id": "agent-b",
+                    "episode_count": 2,
+                    "without_agent_overall": 0.79,
+                    "contribution_score": -0.08
+                }
+            ],
+            "computed_at": "2026-04-07T12:00:00Z",
+            "episode_count": 5
+        });
+
+        tokio::fs::write(
+            &c_factor_path,
+            [earlier.to_string(), recent.to_string()].join("\n") + "\n",
+        )
+        .await
+        .expect("write c-factor history");
+
+        let events = vec![
+            serde_json::json!({
+                "agent_id": "agent-a",
+                "role": "Implementer",
+                "backend": "claude",
+                "model": "claude-sonnet-4-6",
+                "plan_id": "plan-a",
+                "task_id": "task-a1",
+                "input_tokens": 1000,
+                "output_tokens": 200,
+                "cache_read_tokens": 100,
+                "cache_write_tokens": 10,
+                "cost_usd": 0.40,
+                "cost_usd_without_cache": 0.50,
+                "prompt_sections": [],
+                "total_prompt_tokens": 1200,
+                "system_prompt_tokens": 200,
+                "tools_available": 8,
+                "tools_used": 4,
+                "tool_calls": [],
+                "wall_time_ms": 4000,
+                "duration_ms": 4000,
+                "time_to_first_token_ms": 500,
+                "was_warm_start": false,
+                "iteration": 1,
+                "gate_passed": true,
+                "outcome": "success",
+                "gate_errors": [],
+                "model_used": "claude-sonnet-4-6",
+                "frequency": "theta",
+                "strategy_attempted": "none",
+                "timestamp": "2026-04-07T12:00:00Z"
+            }),
+            serde_json::json!({
+                "agent_id": "agent-b",
+                "role": "Reviewer",
+                "backend": "claude",
+                "model": "claude-sonnet-4-6",
+                "plan_id": "plan-a",
+                "task_id": "task-a2",
+                "input_tokens": 900,
+                "output_tokens": 150,
+                "cache_read_tokens": 80,
+                "cache_write_tokens": 10,
+                "cost_usd": 0.30,
+                "cost_usd_without_cache": 0.40,
+                "prompt_sections": [],
+                "total_prompt_tokens": 1050,
+                "system_prompt_tokens": 200,
+                "tools_available": 8,
+                "tools_used": 3,
+                "tool_calls": [],
+                "wall_time_ms": 3000,
+                "duration_ms": 3000,
+                "time_to_first_token_ms": 450,
+                "was_warm_start": true,
+                "iteration": 1,
+                "gate_passed": true,
+                "outcome": "success",
+                "gate_errors": [],
+                "model_used": "claude-sonnet-4-6",
+                "frequency": "theta",
+                "strategy_attempted": "none",
+                "timestamp": "2026-04-07T12:05:00Z"
+            }),
+            serde_json::json!({
+                "agent_id": "agent-c",
+                "role": "Implementer",
+                "backend": "claude",
+                "model": "claude-haiku-4-5",
+                "plan_id": "plan-b",
+                "task_id": "task-b1",
+                "input_tokens": 700,
+                "output_tokens": 100,
+                "cache_read_tokens": 50,
+                "cache_write_tokens": 5,
+                "cost_usd": 0.10,
+                "cost_usd_without_cache": 0.15,
+                "prompt_sections": [],
+                "total_prompt_tokens": 800,
+                "system_prompt_tokens": 180,
+                "tools_available": 6,
+                "tools_used": 2,
+                "tool_calls": [],
+                "wall_time_ms": 2000,
+                "duration_ms": 2000,
+                "time_to_first_token_ms": 350,
+                "was_warm_start": false,
+                "iteration": 1,
+                "gate_passed": false,
+                "outcome": "failure",
+                "gate_errors": ["test failed"],
+                "model_used": "claude-haiku-4-5",
+                "frequency": "theta",
+                "strategy_attempted": "retry_same",
+                "timestamp": "2026-04-07T12:10:00Z"
+            }),
+        ];
+        tokio::fs::write(
+            &efficiency_path,
+            events
+                .into_iter()
+                .map(|event| event.to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .await
+        .expect("write efficiency events");
+
+        let response = c_factor_metrics(State(state)).await.expect("c-factor metrics");
+        let body = response.0;
+
+        assert_eq!(body["source"]["composite_history_count"], 2);
+        assert_eq!(body["source"]["efficiency_event_count"], 3);
+        assert_eq!(body["composite"]["overall"], 0.71);
+        assert_eq!(body["composite"]["episode_count"], 5);
+        assert_eq!(body["sub_metrics"]["gate_pass_rate"], 0.80);
+        assert_eq!(body["per_agent"][0]["agent_id"], "agent-a");
+        assert_eq!(body["per_agent"][0]["dispatch_bias"], "prefer_cheaper");
+        assert_eq!(body["per_agent"][1]["dispatch_bias"], "prefer_stronger");
+        assert_eq!(body["per_fleet"]["plan_count"], 2);
+        assert_eq!(body["per_fleet"]["agent_count"], 3);
+        assert_eq!(body["per_fleet"]["observation_count"], 3);
     }
 
     #[tokio::test]
