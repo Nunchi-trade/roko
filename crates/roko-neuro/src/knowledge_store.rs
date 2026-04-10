@@ -16,7 +16,7 @@ use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use serde::Serialize;
 
-use crate::{KnowledgeEntry, KnowledgeKind};
+use crate::{KnowledgeEntry, KnowledgeKind, NeuroStore};
 
 /// Default garbage-collection threshold for knowledge entries.
 pub const DEFAULT_GC_MIN_CONFIDENCE: f64 = 0.05;
@@ -106,21 +106,37 @@ impl KnowledgeStore {
     /// Returns an error if the directory cannot be created, the entry
     /// cannot be serialized, or the write fails.
     pub fn add(&self, entry: KnowledgeEntry) -> Result<()> {
+        self.ingest(vec![entry])
+    }
+
+    /// Append a batch of knowledge entries to the JSONL log.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be created, an entry
+    /// cannot be serialized, or the write fails.
+    pub fn ingest(&self, entries: Vec<KnowledgeEntry>) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).context("create knowledge directory")?;
         }
 
         let _guard = self.write_gate.lock();
-        let mut line = serde_json::to_string(&entry).context("serialize knowledge entry")?;
-        line.push('\n');
 
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)
             .with_context(|| format!("open knowledge store at {}", self.path.display()))?;
-        file.write_all(line.as_bytes())
-            .context("append knowledge entry")?;
+        for entry in entries {
+            let mut line = serde_json::to_string(&entry).context("serialize knowledge entry")?;
+            line.push('\n');
+            file.write_all(line.as_bytes())
+                .context("append knowledge entry")?;
+        }
         file.flush().context("flush knowledge entry")?;
         file.sync_all().context("sync knowledge entry")?;
         Ok(())
@@ -226,17 +242,19 @@ impl KnowledgeStore {
     /// # Errors
     ///
     /// Returns an error if the store cannot be read or rewritten.
-    pub fn decay(&self) -> Result<()> {
+    pub fn decay(&self) -> Result<usize> {
         let _guard = self.write_gate.lock();
         let now = Utc::now();
         let mut entries = self.read_all()?;
+        let decayed = entries.len();
 
         for entry in &mut entries {
             let factor = recency_factor(entry, now);
             entry.confidence = (entry.confidence.max(0.0) * factor).clamp(0.0, 1.0);
         }
 
-        self.rewrite_all(&entries)
+        self.rewrite_all(&entries)?;
+        Ok(decayed)
     }
 
     /// Garbage-collect entries whose confidence falls below `min_confidence`.
@@ -244,15 +262,18 @@ impl KnowledgeStore {
     /// # Errors
     ///
     /// Returns an error if the store cannot be read or rewritten.
-    pub fn gc(&self, min_confidence: f64) -> Result<()> {
+    pub fn gc(&self, min_confidence: f64) -> Result<usize> {
         let _guard = self.write_gate.lock();
         let threshold = min_confidence.max(0.0);
-        let entries = self
-            .read_all()?
+        let before = self.read_all()?;
+        let before_len = before.len();
+        let entries = before
             .into_iter()
             .filter(|entry| effective_confidence(entry) >= threshold)
             .collect::<Vec<_>>();
-        self.rewrite_all(&entries)
+        let removed = before_len.saturating_sub(entries.len());
+        self.rewrite_all(&entries)?;
+        Ok(removed)
     }
 
     fn read_all(&self) -> Result<Vec<KnowledgeEntry>> {
@@ -329,6 +350,28 @@ impl KnowledgeStore {
     /// Returns an error if the store cannot be read.
     pub fn memory_index(&self) -> Result<MemoryIndex> {
         Ok(MemoryIndex::from_entries(self.read_all()?))
+    }
+}
+
+impl NeuroStore for KnowledgeStore {
+    fn init(path: &Path) -> Result<Self> {
+        Ok(Self::new(path))
+    }
+
+    fn query(&self, topic: &str, limit: usize) -> Result<Vec<KnowledgeEntry>> {
+        KnowledgeStore::query(self, topic, limit)
+    }
+
+    fn ingest(&mut self, entries: Vec<KnowledgeEntry>) -> Result<()> {
+        KnowledgeStore::ingest(self, entries)
+    }
+
+    fn decay(&mut self) -> Result<usize> {
+        KnowledgeStore::decay(self)
+    }
+
+    fn gc(&mut self, min_confidence: f64) -> Result<usize> {
+        KnowledgeStore::gc(self, min_confidence)
     }
 }
 

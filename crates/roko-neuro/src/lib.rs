@@ -2,6 +2,9 @@
 
 #![deny(missing_docs)]
 
+use std::path::Path;
+
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -94,6 +97,24 @@ pub struct KnowledgeEntry {
     /// Optional HDC fingerprint for similarity search.
     #[serde(default)]
     pub hdc_vector: Option<Vec<u8>>,
+}
+
+/// Single entry point for durable knowledge storage backends.
+pub trait NeuroStore: Sized {
+    /// Initialize a store at the given path.
+    fn init(path: &Path) -> Result<Self>;
+
+    /// Query a topic for relevant knowledge entries.
+    fn query(&self, topic: &str, limit: usize) -> Result<Vec<KnowledgeEntry>>;
+
+    /// Ingest a batch of knowledge entries.
+    fn ingest(&mut self, entries: Vec<KnowledgeEntry>) -> Result<()>;
+
+    /// Apply decay and return the number of entries processed.
+    fn decay(&mut self) -> Result<usize>;
+
+    /// Garbage-collect low-confidence entries and return the number removed.
+    fn gc(&mut self, min_confidence: f64) -> Result<usize>;
 }
 
 pub mod context;

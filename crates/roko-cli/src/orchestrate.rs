@@ -52,6 +52,7 @@ use roko_learn::runtime_feedback::{
 };
 use roko_learn::skill_library::Skill;
 use roko_learn::skill_library::{SkillExtractionRequest, SkillGateResult, SkillLibrary};
+use roko_neuro::{KnowledgeEntry, KnowledgeStore, NeuroStore};
 use roko_orchestrator::worktree::{WorktreeConfig, WorktreeManager};
 use roko_orchestrator::{
     EventKind, EventLog, EventLogSnapshot, ExecutorAction, ExecutorEvent, ExecutorSnapshot,
@@ -885,6 +886,8 @@ pub struct PlanRunner {
     /// Playbook store for reusable successful task sequences.
     #[allow(dead_code)]
     playbook: PlaybookStore,
+    /// Durable knowledge store queried per task for task-scoped context.
+    knowledge_store: KnowledgeStore,
     /// Process supervisor for tracking and cleaning up agent subprocesses.
     supervisor: ProcessSupervisor,
     /// Root cancellation token for coordinated shutdown.
@@ -1827,6 +1830,13 @@ impl PlanRunner {
         )
         .await
         .context("init playbook store")?;
+        let knowledge_store = KnowledgeStore::init(
+            &workdir
+                .join(".roko")
+                .join("neuro")
+                .join("knowledge.jsonl"),
+        )
+        .context("init knowledge store")?;
         let selected_mcp_servers = if any_task_without_mcp_list || requested_mcp_servers.is_empty()
         {
             None
@@ -1900,6 +1910,7 @@ impl PlanRunner {
             server_event_bus: None,
             cloud_execution: None,
             playbook,
+            knowledge_store,
         })
     }
 
@@ -1934,6 +1945,13 @@ impl PlanRunner {
         )
         .await
         .context("init playbook store")?;
+        let knowledge_store = KnowledgeStore::init(
+            &workdir
+                .join(".roko")
+                .join("neuro")
+                .join("knowledge.jsonl"),
+        )
+        .context("init knowledge store")?;
         let (mcp_clients, tool_registry, mcp_server_names, mcp_server_configs) =
             Self::setup_mcp(&config, workdir, None).await;
         let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
@@ -2001,6 +2019,7 @@ impl PlanRunner {
             server_event_bus: None,
             cloud_execution: None,
             playbook,
+            knowledge_store,
         })
     }
 
@@ -2039,6 +2058,13 @@ impl PlanRunner {
         )
         .await
         .context("init playbook store")?;
+        let knowledge_store = KnowledgeStore::init(
+            &workdir
+                .join(".roko")
+                .join("neuro")
+                .join("knowledge.jsonl"),
+        )
+        .context("init knowledge store")?;
         let (mcp_clients, tool_registry, mcp_server_names, mcp_server_configs) =
             Self::setup_mcp(&config, workdir, None).await;
         let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
@@ -2106,6 +2132,7 @@ impl PlanRunner {
             server_event_bus: None,
             cloud_execution: None,
             playbook,
+            knowledge_store,
         })
     }
 
@@ -4111,7 +4138,12 @@ impl PlanRunner {
     ///
     /// Returns the context text plus any matched skill/rule IDs for flowing
     /// into `CompletedRunInput` so confidence gets updated.
-    fn build_learned_context(&self, role: AgentRole, task_text: &str) -> LearnedContext {
+    fn build_learned_context(
+        &self,
+        role: AgentRole,
+        task_text: &str,
+        task_tier: Option<&str>,
+    ) -> LearnedContext {
         use roko_learn::playbook_rules::MatchContext;
 
         let mut parts: Vec<String> = Vec::new();
@@ -4169,7 +4201,12 @@ impl PlanRunner {
             parts.push(pat_section);
         }
 
-        // 4. Prompt experiment variants — check if any active experiment applies.
+        // 4. Durable knowledge queried from NeuroStore for this task.
+        if let Some(knowledge_context) = self.build_knowledge_context(task_text, task_tier) {
+            parts.push(knowledge_context);
+        }
+
+        // 5. Prompt experiment variants — check if any active experiment applies.
         let mut experiment_variant_id = None;
         // Check standard prompt section names for active experiments.
         {
@@ -4183,7 +4220,7 @@ impl PlanRunner {
             }
         }
 
-        // 5. Crate familiarity score from cascade router observations (§9).
+        // 6. Crate familiarity score from cascade router observations (§9).
         let obs_count = self.learning.cascade_router().total_observations();
         if obs_count > 0 {
             let familiarity = (obs_count as f64 / 100.0).min(1.0);
@@ -4193,15 +4230,36 @@ impl PlanRunner {
             ));
         }
 
-        // Ignore task_text for now — use it in future for semantic search
-        let _ = task_text;
-
         LearnedContext {
             text: parts.join("\n"),
             matched_skill_id,
             matched_rule_id,
             experiment_variant_id,
         }
+    }
+
+    fn build_knowledge_context(
+        &self,
+        task_text: &str,
+        task_tier: Option<&str>,
+    ) -> Option<String> {
+        let query_limit = match task_tier.unwrap_or("focused") {
+            "mechanical" => 3,
+            "focused" => 5,
+            "integrative" => 5,
+            "architectural" => 6,
+            _ => 4,
+        };
+
+        let Ok(entries) = NeuroStore::query(&self.knowledge_store, task_text, query_limit) else {
+            tracing::debug!("[orchestrate] knowledge query failed for task context");
+            return None;
+        };
+        if entries.is_empty() {
+            return None;
+        }
+
+        Some(render_knowledge_context(entries))
     }
 
     /// Record a successful task result: persist output, episode, mark completed.
@@ -6863,7 +6921,7 @@ impl PlanRunner {
         }
 
         // ── Inject learned knowledge (skills, playbook rules, patterns) ──
-        let learned = self.build_learned_context(role, &task_text);
+        let learned = self.build_learned_context(role, &task_text, task_def.as_ref().map(|td| td.tier.as_str()));
         if !learned.text.is_empty() {
             let learned_section = PromptSection::new("learned-context", &learned.text)
                 .with_priority(SectionPriority::Normal)
@@ -8262,6 +8320,36 @@ impl PlanRunner {
 
         Ok(())
     }
+}
+
+fn render_knowledge_context(entries: Vec<KnowledgeEntry>) -> String {
+    use std::fmt::Write as _;
+
+    let mut content = String::from("## Durable Knowledge\n");
+    for (idx, entry) in entries.into_iter().enumerate() {
+        let confidence = entry.confidence.clamp(0.0, 1.0);
+        let source = entry.source.as_deref().unwrap_or("-");
+        let tags = if entry.tags.is_empty() {
+            String::from("-")
+        } else {
+            entry.tags.join(", ")
+        };
+        let episodes = if entry.source_episodes.is_empty() {
+            String::from("-")
+        } else {
+            entry.source_episodes.join(", ")
+        };
+
+        let _ = write!(
+            content,
+            "\n### {}. {:?} ({confidence:.2})\nSource: {source}\nTags: {tags}\nEpisodes: {episodes}\n```\n{}\n```\n",
+            idx + 1,
+            entry.kind,
+            entry.content.trim(),
+        );
+    }
+
+    content
 }
 
 fn parse_git_status_changed_files(status: &str) -> Vec<String> {
