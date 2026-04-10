@@ -27,6 +27,7 @@ use roko_core::config::schema::RokoConfig;
 use roko_core::{ContentHash, Context, Kind, Query, Substrate};
 use roko_core::{Headlines, TaskMetric, compute_headlines};
 use roko_fs::{FileSubstrate, FsObservabilitySinks, RokoLayout};
+use roko_learn::cfactor::{CFactor, trend_arrow as cfactor_trend_arrow};
 use roko_learn::efficiency::compute_role_profiles;
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
 use roko_learn::prompt_experiment::ExperimentStore;
@@ -39,6 +40,7 @@ use std::fmt::Write as _;
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{info, warn};
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
 use tracing_subscriber::registry::LookupSpan;
@@ -1063,6 +1065,8 @@ struct DashboardSnapshot {
     episodes: Vec<Episode>,
     task_metrics: Vec<TaskMetric>,
     headlines: Headlines,
+    cfactor_history: Vec<CFactor>,
+    cfactor: Option<CFactor>,
 }
 
 impl DashboardSnapshot {
@@ -1070,11 +1074,15 @@ impl DashboardSnapshot {
         let layout = RokoLayout::for_project(workdir);
         let episodes = EpisodeLogger::read_all_lossy(layout.episodes_path()).await?;
         let task_metrics = load_task_metrics(layout.memory_dir().join("task-metrics.jsonl")).await;
+        let cfactor_history = load_cfactor_history(workdir.join(".roko").join("learn").join("c-factor.jsonl")).await;
+        let cfactor = cfactor_history.last().cloned();
         let headlines = compute_headlines(&task_metrics);
         Ok(Self {
             episodes,
             task_metrics,
             headlines,
+            cfactor_history,
+            cfactor,
         })
     }
 
@@ -1088,16 +1096,16 @@ impl DashboardSnapshot {
 
     fn render_health_page_text(&self) -> String {
         let summary = self.health_summary();
+        let cfactor = self.cfactor.as_ref().cloned().unwrap_or_default();
+        let trend = cfactor_trend_arrow(&self.cfactor_history, Duration::from_secs(7 * 24 * 60 * 60));
         render_data_page(
             "Health",
             PageId::Health.slug(),
             "Top-line health gauges derived from the latest snapshot.",
             &[
                 format!(
-                    "focus: {} episodes, {} success, {} avg cost",
-                    summary.episode_count,
-                    format_percent(summary.success_rate),
-                    format_currency(summary.avg_cost_per_episode)
+                    "focus: current C-Factor {:.2} {}, {} episodes",
+                    cfactor.overall, trend, summary.episode_count
                 ),
                 format!("episodes: {}", summary.episode_count),
                 format!("success rate: {}", format_percent(summary.success_rate)),
@@ -1111,6 +1119,24 @@ impl DashboardSnapshot {
                 ),
                 format!("cache hit rate: {}", format_percent(summary.cache_hit_rate)),
                 format!("haiku share: {}", format_percent(summary.haiku_share)),
+                format!("current c-factor: {:.2} {}", cfactor.overall, trend),
+                format!(
+                    "gate pass rate: {}",
+                    format_percent(cfactor.components.gate_pass_rate)
+                ),
+                format!(
+                    "cost efficiency: {}",
+                    format_percent(cfactor.components.cost_efficiency)
+                ),
+                format!("speed: {}", format_percent(cfactor.components.speed)),
+                format!(
+                    "first-try rate: {}",
+                    format_percent(cfactor.components.first_try_rate)
+                ),
+                format!(
+                    "knowledge growth: {}",
+                    format_percent(cfactor.components.knowledge_growth)
+                ),
             ],
         )
     }
@@ -1279,6 +1305,17 @@ async fn load_task_metrics(path: PathBuf) -> Vec<TaskMetric> {
         }
     }
     records
+}
+
+async fn load_cfactor_history(path: PathBuf) -> Vec<CFactor> {
+    let Ok(text) = tokio::fs::read_to_string(&path).await else {
+        return Vec::new();
+    };
+
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str::<CFactor>(line).ok())
+        .collect()
 }
 
 // -----------------------------------------------------------------------
@@ -3793,6 +3830,8 @@ mod tests {
     async fn seed_dashboard_snapshot(workdir: &Path) {
         let memory_dir = workdir.join(".roko").join("memory");
         fs::create_dir_all(&memory_dir).await.unwrap();
+        let learn_dir = workdir.join(".roko").join("learn");
+        fs::create_dir_all(&learn_dir).await.unwrap();
 
         let mut ep1 = Episode::new("agent-a", "task-a");
         ep1.success = true;
@@ -3836,6 +3875,35 @@ mod tests {
         let task_metrics =
             [metric1.to_jsonl().unwrap(), metric2.to_jsonl().unwrap()].join("\n") + "\n";
         fs::write(&task_metrics_path, task_metrics).await.unwrap();
+
+        let cfactor_path = learn_dir.join("c-factor.jsonl");
+        let mut cf1 = CFactor::default();
+        cf1.overall = 0.48;
+        cf1.computed_at = chrono::Utc::now() - chrono::Duration::days(6);
+
+        let mut cf2 = CFactor::default();
+        cf2.overall = 0.53;
+        cf2.computed_at = chrono::Utc::now() - chrono::Duration::days(3);
+
+        let mut cf3 = CFactor::default();
+        cf3.overall = 0.67;
+        cf3.components = roko_learn::cfactor::CFactorComponents {
+            gate_pass_rate: 0.82,
+            cost_efficiency: 0.76,
+            speed: 0.71,
+            first_try_rate: 0.64,
+            knowledge_growth: 0.18,
+        };
+        cf3.computed_at = chrono::Utc::now();
+
+        let cfactor_history = [
+            serde_json::to_string(&cf1).unwrap(),
+            serde_json::to_string(&cf2).unwrap(),
+            serde_json::to_string(&cf3).unwrap(),
+        ]
+        .join("\n")
+            + "\n";
+        fs::write(&cfactor_path, cfactor_history).await.unwrap();
     }
 
     #[tokio::test]
@@ -3857,6 +3925,9 @@ mod tests {
         assert!(health.contains("success rate: 50.0%"));
         assert!(health.contains("avg cost / episode: $2.0000"));
         assert!(health.contains("cache hit rate: 25.0%"));
+        assert!(health.contains("current c-factor: 0.67 ↑"));
+        assert!(health.contains("gate pass rate: 82.0%"));
+        assert!(health.contains("knowledge growth: 18.0%"));
 
         let trends = dashboard_output(
             &cli,

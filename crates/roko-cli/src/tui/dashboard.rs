@@ -439,6 +439,8 @@ pub struct DashboardData {
     episodes: Vec<Episode>,
     /// Conductor alerts filtered from signals.
     pub conductor_alerts: Vec<AlertSummary>,
+    /// Full C-Factor history from `.roko/learn/c-factor.jsonl`.
+    pub cfactor_history: Vec<CFactor>,
     /// Latest C-Factor snapshot, if present.
     pub cfactor: Option<CFactor>,
     /// Last observed C-Factor file metadata.
@@ -505,7 +507,8 @@ impl DashboardData {
             .filter(|signal| signal.kind.starts_with("conductor:alert:"))
             .map(AlertSummary::from_signal)
             .collect();
-        let cfactor = load_latest_jsonl_value::<CFactor>(&cfactor_path);
+        let cfactor_history = load_cfactor_history(&cfactor_path);
+        let cfactor = cfactor_history.last().cloned();
         let cfactor_stamp = file_stamp(&cfactor_path);
         let current_plan_execution = load_current_plan_execution(&root, &state, &episodes);
         let efficiency_stamp = file_stamp(&efficiency_path);
@@ -536,6 +539,7 @@ impl DashboardData {
             episodes_state,
             episodes,
             conductor_alerts,
+            cfactor_history,
             cfactor,
             cfactor_stamp,
             cascade_router_stamp,
@@ -632,7 +636,8 @@ impl DashboardData {
         let stamp = file_stamp(&cfactor_path);
         if stamp != self.cfactor_stamp {
             self.cfactor_stamp = stamp;
-            self.cfactor = load_latest_jsonl_value::<CFactor>(&cfactor_path);
+            self.cfactor_history = load_cfactor_history(&cfactor_path);
+            self.cfactor = self.cfactor_history.last().cloned();
         }
 
         if state_changed {
@@ -2132,16 +2137,15 @@ fn build_gate_results_page_data(
     }
 }
 
-fn load_latest_jsonl_value<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
-    let text = std::fs::read_to_string(path).ok()?;
-    text.lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())
-        .and_then(|line| serde_json::from_str(line).ok())
-}
-
 fn file_stamp(path: &Path) -> FileStamp {
     FileStamp::from_path(path).unwrap_or_default()
+}
+
+fn load_cfactor_history(path: &Path) -> Vec<CFactor> {
+    read_jsonl_values(path)
+        .into_iter()
+        .filter_map(|entry| serde_json::from_value::<CFactor>(entry).ok())
+        .collect()
 }
 
 fn load_signal_state(

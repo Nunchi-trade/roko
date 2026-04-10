@@ -210,6 +210,40 @@ pub fn compute_cfactor(episodes: &[Episode], window: Duration) -> CFactor {
     }
 }
 
+/// Derive the 7-day trend arrow from a history of C-Factor snapshots.
+///
+/// Compares the oldest and newest snapshot in the requested window.
+/// Returns `↑` when the score increased, `↓` when it decreased, and `→`
+/// when the window is flat or has insufficient data.
+#[must_use]
+pub fn trend_arrow(history: &[CFactor], window: Duration) -> &'static str {
+    let cutoff = match chrono::Duration::from_std(window) {
+        Ok(delta) => Utc::now() - delta,
+        Err(_) => DateTime::<Utc>::MIN_UTC,
+    };
+
+    let mut snapshots: Vec<&CFactor> = history
+        .iter()
+        .filter(|snapshot| snapshot.computed_at >= cutoff)
+        .collect();
+    snapshots.sort_by(|left, right| left.computed_at.cmp(&right.computed_at));
+
+    let Some(first) = snapshots.first() else {
+        return "→";
+    };
+    let Some(last) = snapshots.last() else {
+        return "→";
+    };
+
+    if last.overall > first.overall {
+        "↑"
+    } else if last.overall < first.overall {
+        "↓"
+    } else {
+        "→"
+    }
+}
+
 fn ratio(numer: usize, denom: usize) -> f64 {
     if denom == 0 {
         0.0
@@ -351,6 +385,29 @@ mod tests {
         assert!((cfactor.components.cost_efficiency - 110.0 / 115.0).abs() < 1e-9);
         assert!((cfactor.components.speed - 110.0 / 115.0).abs() < 1e-9);
         assert!((cfactor.components.knowledge_growth - 2.0 / 13.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn trend_arrow_uses_snapshots_inside_window() {
+        let mut older = CFactor::default();
+        older.overall = 0.35;
+        older.computed_at = Utc::now() - chrono::Duration::days(8);
+
+        let mut first = CFactor::default();
+        first.overall = 0.40;
+        first.computed_at = Utc::now() - chrono::Duration::days(6);
+
+        let mut latest = CFactor::default();
+        latest.overall = 0.55;
+        latest.computed_at = Utc::now() - chrono::Duration::days(1);
+
+        assert_eq!(
+            trend_arrow(
+                &[older, first, latest],
+                Duration::from_secs(7 * 24 * 60 * 60)
+            ),
+            "↑"
+        );
     }
 
     #[test]
