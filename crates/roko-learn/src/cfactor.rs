@@ -40,6 +40,8 @@ pub struct CFactorComponents {
     pub first_try_rate: f64,
     /// Rate of new knowledge entries per episode.
     pub knowledge_growth: f64,
+    /// Evenness of agent participation inside a plan, normalized to `[0..1]`.
+    pub turn_taking_equality: f64,
 }
 
 /// Regression alert for a C-Factor drop against a trailing history window.
@@ -72,6 +74,7 @@ impl Default for CFactorComponents {
             information_flow_rate: 0.0,
             first_try_rate: 0.0,
             knowledge_growth: 0.0,
+            turn_taking_equality: 0.0,
         }
     }
 }
@@ -110,6 +113,8 @@ struct TaskAggregate {
 /// - `first_try_rate` over task groups that did not require a replan
 /// - `knowledge_growth` from explicit knowledge counters present in episode
 ///   metadata
+/// - `turn_taking_equality` from the Gini coefficient of per-plan agent
+///   contribution counts
 #[allow(clippy::cast_precision_loss)]
 #[must_use]
 pub fn compute_cfactor(episodes: &[Episode], window: Duration) -> CFactor {
@@ -249,13 +254,16 @@ pub fn compute_cfactor(episodes: &[Episode], window: Duration) -> CFactor {
         .map(|episode| episode_new_knowledge_entries(episode))
         .sum();
     let knowledge_growth = ratio(new_knowledge_entries, filtered.len());
+    let turn_taking_equality = compute_turn_taking_equality(&filtered);
 
-    let overall = gate_pass_rate * 0.28
+    let overall = (gate_pass_rate * 0.28
         + cost_efficiency * 0.18
         + speed * 0.12
         + information_flow_rate * 0.10
         + first_try_rate * 0.22
-        + knowledge_growth * 0.10;
+        + knowledge_growth * 0.10)
+        * 0.9
+        + turn_taking_equality * 0.1;
 
     CFactor {
         overall,
@@ -266,6 +274,7 @@ pub fn compute_cfactor(episodes: &[Episode], window: Duration) -> CFactor {
             information_flow_rate,
             first_try_rate,
             knowledge_growth,
+            turn_taking_equality,
         },
         computed_at: Utc::now(),
         episode_count: filtered.len(),
@@ -372,6 +381,99 @@ fn ratio(numer: usize, denom: usize) -> f64 {
     } else {
         numer as f64 / denom as f64
     }
+}
+
+fn compute_turn_taking_equality(episodes: &[&Episode]) -> f64 {
+    let mut plan_contributions: HashMap<String, HashMap<String, u64>> = HashMap::new();
+    for episode in episodes {
+        let plan_key = episode_plan_key(episode);
+        let agent_key = episode_agent_key(episode);
+        let agent_counts = plan_contributions.entry(plan_key).or_default();
+        *agent_counts.entry(agent_key).or_default() += 1;
+    }
+
+    let mut total_equality = 0.0;
+    let mut plan_count = 0.0;
+    for agent_counts in plan_contributions.values() {
+        if agent_counts.is_empty() {
+            continue;
+        }
+
+        let equality = turn_taking_equality_for_counts(agent_counts.values().copied().collect());
+        total_equality += equality;
+        plan_count += 1.0;
+    }
+
+    if plan_count == 0.0 {
+        0.0
+    } else {
+        (total_equality / plan_count).clamp(0.0, 1.0)
+    }
+}
+
+fn turn_taking_equality_for_counts(counts: Vec<u64>) -> f64 {
+    if counts.len() < 2 {
+        return 0.0;
+    }
+
+    let gini = gini_coefficient(&counts);
+    (1.0 - gini).clamp(0.0, 1.0)
+}
+
+fn gini_coefficient(counts: &[u64]) -> f64 {
+    if counts.len() < 2 {
+        return 0.0;
+    }
+
+    let mut values: Vec<f64> = counts.iter().map(|&count| count as f64).collect();
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let total: f64 = values.iter().sum();
+    if total <= 0.0 {
+        return 0.0;
+    }
+
+    let weighted_sum: f64 = values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| (index as f64 + 1.0) * value)
+        .sum();
+    let n = values.len() as f64;
+    let gini = (2.0 * weighted_sum) / (n * total) - (n + 1.0) / n;
+    gini.clamp(0.0, 1.0)
+}
+
+fn episode_plan_key(episode: &Episode) -> String {
+    episode
+        .extra
+        .get("plan_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            let task_id = episode.task_id.trim();
+            if task_id.is_empty() {
+                None
+            } else {
+                Some(task_id.to_string())
+            }
+        })
+        .unwrap_or_else(|| episode.id.clone())
+}
+
+fn episode_agent_key(episode: &Episode) -> String {
+    let agent_id = episode.agent_id.trim();
+    if !agent_id.is_empty() {
+        return agent_id.to_string();
+    }
+
+    let template = episode.agent_template.trim();
+    if !template.is_empty() {
+        return template.to_string();
+    }
+
+    episode.id.clone()
 }
 
 fn task_key(episode: &Episode) -> String {
@@ -557,6 +659,36 @@ mod tests {
     }
 
     #[test]
+    fn computes_turn_taking_equality_from_agent_participation() {
+        let mut episodes = Vec::new();
+
+        let mut even_a = episode_at("task-even", 5, 10.0, 1_000, true);
+        even_a.agent_id = "agent-a".to_string();
+        even_a
+            .extra
+            .insert("plan_id".to_string(), Value::String("plan-even".to_string()));
+        episodes.push(even_a);
+
+        let mut even_b = episode_at("task-even", 4, 10.0, 1_000, true);
+        even_b.agent_id = "agent-b".to_string();
+        even_b
+            .extra
+            .insert("plan_id".to_string(), Value::String("plan-even".to_string()));
+        episodes.push(even_b);
+
+        let mut solo = episode_at("task-solo", 3, 10.0, 1_000, true);
+        solo.agent_id = "agent-c".to_string();
+        solo.extra.insert(
+            "plan_id".to_string(),
+            Value::String("plan-solo".to_string()),
+        );
+        episodes.push(solo);
+
+        let cfactor = compute_cfactor(&episodes, Duration::from_secs(7 * 24 * 60 * 60));
+        assert!((cfactor.components.turn_taking_equality - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
     fn trend_arrow_uses_snapshots_inside_window() {
         let mut older = CFactor::default();
         older.overall = 0.35;
@@ -594,6 +726,7 @@ mod tests {
         assert!((cfactor.components.gate_pass_rate - 1.0).abs() < 1e-9);
         assert!((cfactor.components.first_try_rate - 1.0).abs() < 1e-9);
         assert!((cfactor.components.knowledge_growth - 0.0).abs() < 1e-9);
+        assert!((cfactor.components.turn_taking_equality - 0.0).abs() < 1e-9);
     }
 
     #[test]

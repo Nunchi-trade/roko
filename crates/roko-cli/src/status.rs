@@ -79,13 +79,14 @@ impl SessionStatus {
                 cfactor.overall, cfactor.episode_count, cfactor.computed_at
             ));
             lines.push(format!(
-                "  gate={:.3} cost={:.3} speed={:.3} flow={:.3} first_try={:.3} knowledge={:.3}",
+                "  gate={:.3} cost={:.3} speed={:.3} flow={:.3} first_try={:.3} knowledge={:.3} turn={:.3}",
                 cfactor.components.gate_pass_rate,
                 cfactor.components.cost_efficiency,
                 cfactor.components.speed,
                 cfactor.components.information_flow_rate,
                 cfactor.components.first_try_rate,
-                cfactor.components.knowledge_growth
+                cfactor.components.knowledge_growth,
+                cfactor.components.turn_taking_equality
             ));
         }
 
