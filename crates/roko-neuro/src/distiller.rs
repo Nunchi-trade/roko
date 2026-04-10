@@ -148,10 +148,7 @@ struct DistillationEnvelope {
 
 impl DistillationEnvelope {
     fn into_entries(self, episodes: &[Episode]) -> Vec<KnowledgeEntry> {
-        let fallback_source = match episodes {
-            [episode] => Some(episode_source_id(episode).to_string()),
-            _ => None,
-        };
+        let fallback_source = batch_source_episodes(episodes);
 
         self.entries
             .into_iter()
@@ -177,7 +174,7 @@ struct DistillationCandidate {
 }
 
 impl DistillationCandidate {
-    fn into_entry(mut self, fallback_source: Option<&str>) -> Option<KnowledgeEntry> {
+    fn into_entry(mut self, fallback_source: Option<&[String]>) -> Option<KnowledgeEntry> {
         let content = self.content.trim();
         if content.is_empty() {
             return None;
@@ -186,7 +183,7 @@ impl DistillationCandidate {
         if self.source_episodes.is_empty()
             && let Some(source) = fallback_source
         {
-            self.source_episodes.push(source.to_string());
+            self.source_episodes.extend(source.iter().cloned());
         }
 
         self.source_episodes.sort();
@@ -389,6 +386,23 @@ fn episode_source_id(episode: &Episode) -> &str {
     }
 }
 
+fn batch_source_episodes(episodes: &[Episode]) -> Option<Vec<String>> {
+    let mut source_episodes: Vec<String> = episodes
+        .iter()
+        .map(episode_source_id)
+        .filter(|source| !source.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    source_episodes.sort();
+    source_episodes.dedup();
+
+    if source_episodes.is_empty() {
+        None
+    } else {
+        Some(source_episodes)
+    }
+}
+
 fn default_candidate_confidence() -> f64 {
     DEFAULT_CONFIDENCE
 }
@@ -468,6 +482,19 @@ mod tests {
         assert!(prompt.contains("ep-a"));
         assert!(prompt.contains("ep-b"));
         assert!(prompt.contains("Target categories"));
+    }
+
+    #[tokio::test]
+    async fn distiller_falls_back_to_batch_confirmation_chain() {
+        let backend = MockBackend::new(
+            r#"<|json|>{"entries":[{"kind":"insight","content":"shared insight","confidence":0.9,"tags":["shared"]}]}<|/json|>"#,
+        );
+        let distiller = Distiller::with_backend(backend);
+        let episodes = vec![episode("signal-a", "ep-a", true), episode("signal-b", "ep-b", true)];
+
+        let entries = distiller.distill(&episodes).await.expect("distill");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].source_episodes, vec!["ep-a", "ep-b"]);
     }
 
     #[test]

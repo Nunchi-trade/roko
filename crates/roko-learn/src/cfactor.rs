@@ -40,6 +40,9 @@ pub struct CFactorComponents {
     pub first_try_rate: f64,
     /// Rate of new knowledge entries per episode.
     pub knowledge_growth: f64,
+    /// Speed at which shared insights accumulate confirmation chains.
+    #[serde(default)]
+    pub knowledge_integration_rate: f64,
     /// Evenness of agent participation inside a plan, normalized to `[0..1]`.
     pub turn_taking_equality: f64,
     /// Normalized reference rate for completed dependency outputs.
@@ -77,6 +80,7 @@ impl Default for CFactorComponents {
             information_flow_rate: 0.0,
             first_try_rate: 0.0,
             knowledge_growth: 0.0,
+            knowledge_integration_rate: 0.0,
             turn_taking_equality: 0.0,
             social_sensitivity: 0.0,
         }
@@ -117,13 +121,20 @@ struct TaskAggregate {
 /// - `first_try_rate` over task groups that did not require a replan
 /// - `knowledge_growth` from explicit knowledge counters present in episode
 ///   metadata
+/// - `knowledge_integration_rate` from confirmation chains emitted by Neuro
+///   distillation
 /// - `turn_taking_equality` from the Gini coefficient of per-plan agent
 ///   contribution counts
 /// - `social_sensitivity` from the fraction of `prior_output` context
 ///   sections that were referenced in the agent's output
 #[allow(clippy::cast_precision_loss)]
 #[must_use]
-pub fn compute_cfactor(episodes: &[Episode], window: Duration, social_sensitivity: f64) -> CFactor {
+pub fn compute_cfactor(
+    episodes: &[Episode],
+    window: Duration,
+    social_sensitivity: f64,
+    knowledge_integration_rate: f64,
+) -> CFactor {
     if episodes.is_empty() {
         return CFactor::default();
     }
@@ -260,15 +271,17 @@ pub fn compute_cfactor(episodes: &[Episode], window: Duration, social_sensitivit
         .map(|episode| episode_new_knowledge_entries(episode))
         .sum();
     let knowledge_growth = ratio(new_knowledge_entries, filtered.len());
+    let knowledge_integration_rate = knowledge_integration_rate.clamp(0.0, 1.0);
     let turn_taking_equality = compute_turn_taking_equality(&filtered);
     let social_sensitivity = social_sensitivity.clamp(0.0, 1.0);
 
-    let overall = (gate_pass_rate * 0.28
-        + cost_efficiency * 0.18
-        + speed * 0.12
-        + information_flow_rate * 0.10
-        + first_try_rate * 0.22
-        + knowledge_growth * 0.10)
+    let overall = (gate_pass_rate * 0.26
+        + cost_efficiency * 0.17
+        + speed * 0.11
+        + information_flow_rate * 0.09
+        + first_try_rate * 0.20
+        + knowledge_growth * 0.09
+        + knowledge_integration_rate * 0.08)
         * 0.9
         + turn_taking_equality * 0.05
         + social_sensitivity * 0.05;
@@ -282,6 +295,7 @@ pub fn compute_cfactor(episodes: &[Episode], window: Duration, social_sensitivit
             information_flow_rate,
             first_try_rate,
             knowledge_growth,
+            knowledge_integration_rate,
             turn_taking_equality,
             social_sensitivity,
         },
@@ -598,7 +612,7 @@ mod tests {
 
     #[test]
     fn empty_window_returns_default_snapshot() {
-        let cfactor = compute_cfactor(&[], Duration::from_secs(7 * 24 * 60 * 60), 0.0);
+        let cfactor = compute_cfactor(&[], Duration::from_secs(7 * 24 * 60 * 60), 0.0, 0.0);
         assert_eq!(cfactor.overall, 0.0);
         assert_eq!(cfactor.components, CFactorComponents::default());
         assert_eq!(cfactor.episode_count, 0);
@@ -636,7 +650,7 @@ mod tests {
         );
         episodes.push(knowledge_episode);
 
-        let cfactor = compute_cfactor(&episodes, Duration::from_secs(7 * 24 * 60 * 60), 0.0);
+        let cfactor = compute_cfactor(&episodes, Duration::from_secs(7 * 24 * 60 * 60), 0.0, 0.0);
 
         assert_eq!(cfactor.episode_count, 13);
         assert!((cfactor.components.gate_pass_rate - 11.0 / 12.0).abs() < 1e-9);
@@ -644,6 +658,7 @@ mod tests {
         assert!((cfactor.components.cost_efficiency - 110.0 / 115.0).abs() < 1e-9);
         assert!((cfactor.components.speed - 110.0 / 115.0).abs() < 1e-9);
         assert!((cfactor.components.knowledge_growth - 2.0 / 13.0).abs() < 1e-9);
+        assert!((cfactor.components.knowledge_integration_rate - 0.0).abs() < 1e-9);
         assert!((cfactor.components.social_sensitivity - 0.0).abs() < 1e-9);
     }
 
@@ -664,7 +679,7 @@ mod tests {
         current.usage.output_tokens = 600;
         episodes.push(current);
 
-        let cfactor = compute_cfactor(&episodes, Duration::from_secs(7 * 24 * 60 * 60), 0.0);
+        let cfactor = compute_cfactor(&episodes, Duration::from_secs(7 * 24 * 60 * 60), 0.0, 0.0);
         assert!((cfactor.components.information_flow_rate - 3.0).abs() < 1e-9);
     }
 
@@ -694,7 +709,7 @@ mod tests {
         );
         episodes.push(solo);
 
-        let cfactor = compute_cfactor(&episodes, Duration::from_secs(7 * 24 * 60 * 60), 0.0);
+        let cfactor = compute_cfactor(&episodes, Duration::from_secs(7 * 24 * 60 * 60), 0.0, 0.0);
         assert!((cfactor.components.turn_taking_equality - 0.5).abs() < 1e-9);
     }
 
@@ -730,7 +745,12 @@ mod tests {
             Value::Number(5u64.into()),
         );
 
-        let cfactor = compute_cfactor(&[recent.clone(), old], Duration::from_secs(24 * 60 * 60), 0.0);
+        let cfactor = compute_cfactor(
+            &[recent.clone(), old],
+            Duration::from_secs(24 * 60 * 60),
+            0.0,
+            0.0,
+        );
 
         assert_eq!(cfactor.episode_count, 1);
         assert!((cfactor.components.gate_pass_rate - 1.0).abs() < 1e-9);
@@ -743,10 +763,20 @@ mod tests {
     #[test]
     fn social_sensitivity_is_captured_in_overall_score() {
         let episodes = vec![episode_at("task-1", 1, 10.0, 1_000, true)];
-        let baseline = compute_cfactor(&episodes, Duration::from_secs(24 * 60 * 60), 0.0);
-        let cfactor = compute_cfactor(&episodes, Duration::from_secs(24 * 60 * 60), 0.8);
+        let baseline = compute_cfactor(&episodes, Duration::from_secs(24 * 60 * 60), 0.0, 0.0);
+        let cfactor = compute_cfactor(&episodes, Duration::from_secs(24 * 60 * 60), 0.8, 0.0);
 
         assert!((cfactor.components.social_sensitivity - 0.8).abs() < 1e-9);
+        assert!(cfactor.overall > baseline.overall);
+    }
+
+    #[test]
+    fn knowledge_integration_rate_is_captured_in_overall_score() {
+        let episodes = vec![episode_at("task-1", 1, 10.0, 1_000, true)];
+        let baseline = compute_cfactor(&episodes, Duration::from_secs(24 * 60 * 60), 0.0, 0.0);
+        let cfactor = compute_cfactor(&episodes, Duration::from_secs(24 * 60 * 60), 0.0, 0.8);
+
+        assert!((cfactor.components.knowledge_integration_rate - 0.8).abs() < 1e-9);
         assert!(cfactor.overall > baseline.overall);
     }
 

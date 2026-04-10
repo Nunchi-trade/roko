@@ -1144,6 +1144,10 @@ impl DashboardSnapshot {
                     format_percent(cfactor.components.knowledge_growth)
                 ),
                 format!(
+                    "knowledge integration rate: {}",
+                    format_percent(cfactor.components.knowledge_integration_rate)
+                ),
+                format!(
                     "turn-taking equality: {}",
                     format_percent(cfactor.components.turn_taking_equality)
                 ),
@@ -2763,13 +2767,14 @@ async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>, cfactor: bool) -> Resul
             cfactor.overall, cfactor_trend, cfactor.episode_count, cfactor.computed_at
         );
         println!(
-            "  gate={:.3} cost={:.3} speed={:.3} flow={:.3} first_try={:.3} knowledge={:.3} turn={:.3} social={:.3}",
+            "  gate={:.3} cost={:.3} speed={:.3} flow={:.3} first_try={:.3} knowledge={:.3} integration={:.3} turn={:.3} social={:.3}",
             cfactor.components.gate_pass_rate,
             cfactor.components.cost_efficiency,
             cfactor.components.speed,
             cfactor.components.information_flow_rate,
             cfactor.components.first_try_rate,
             cfactor.components.knowledge_growth,
+            cfactor.components.knowledge_integration_rate,
             cfactor.components.turn_taking_equality,
             cfactor.components.social_sensitivity
         );
@@ -3921,6 +3926,7 @@ mod tests {
             information_flow_rate: 0.89,
             first_try_rate: 0.64,
             knowledge_growth: 0.18,
+            knowledge_integration_rate: 0.57,
             turn_taking_equality: 0.74,
             social_sensitivity: 0.68,
         };

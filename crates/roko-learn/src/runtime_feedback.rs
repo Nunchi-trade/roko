@@ -4,6 +4,7 @@
 //! pass one completed run, and the helper updates all configured learning
 //! subsystems in a consistent order.
 
+use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -788,6 +789,14 @@ fn extra_f64(episode: &Episode, key: &str) -> Option<f64> {
     episode.extra.get(key).and_then(serde_json::Value::as_f64)
 }
 
+fn episode_source_id(episode: &Episode) -> &str {
+    if episode.episode_id.trim().is_empty() {
+        &episode.id
+    } else {
+        &episode.episode_id
+    }
+}
+
 /// Parse an [`AgentRole`] from either the persisted kebab-case label or the
 /// debug-style variant name used by `format!("{role:?}")` in orchestration.
 fn parse_agent_role(raw: &str) -> Option<AgentRole> {
@@ -980,15 +989,27 @@ async fn compute_cfactor_snapshot(learn_root: &Path) -> Result<CFactor, Learning
         .parent()
         .unwrap_or(learn_root)
         .join("context-attribution.jsonl");
+    let knowledge_path = learn_root
+        .parent()
+        .unwrap_or(learn_root)
+        .join("neuro")
+        .join("knowledge.jsonl");
     let attribution_records = read_context_attribution_records(&attribution_path).await?;
+    let knowledge_records = read_knowledge_records(&knowledge_path).await?;
     let social_sensitivity = social_sensitivity_from_attribution(
         &attribution_records,
+        Duration::from_secs(7 * 24 * 60 * 60),
+    );
+    let knowledge_integration_rate = knowledge_integration_rate(
+        &knowledge_records,
+        &episodes,
         Duration::from_secs(7 * 24 * 60 * 60),
     );
     Ok(compute_cfactor(
         &episodes,
         Duration::from_secs(7 * 24 * 60 * 60),
         social_sensitivity,
+        knowledge_integration_rate,
     ))
 }
 
@@ -1047,6 +1068,101 @@ fn default_now() -> DateTime<Utc> {
     Utc::now()
 }
 
+#[derive(Debug, Deserialize)]
+struct KnowledgeConfirmationRecord {
+    #[serde(default = "default_now")]
+    created_at: DateTime<Utc>,
+    #[serde(default)]
+    source_episodes: Vec<String>,
+}
+
+async fn read_knowledge_records(
+    path: &Path,
+) -> Result<Vec<KnowledgeConfirmationRecord>, LearningRuntimeError> {
+    let file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(LearningRuntimeError::Io(err)),
+    };
+
+    let mut lines = BufReader::new(file).lines();
+    let mut out = Vec::new();
+    while let Some(line) = lines.next_line().await? {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(record) = serde_json::from_str::<KnowledgeConfirmationRecord>(trimmed) {
+            out.push(record);
+        }
+    }
+    Ok(out)
+}
+
+fn knowledge_integration_rate(
+    records: &[KnowledgeConfirmationRecord],
+    episodes: &[Episode],
+    window: Duration,
+) -> f64 {
+    let cutoff = match chrono::Duration::from_std(window) {
+        Ok(delta) => Utc::now() - delta,
+        Err(_) => DateTime::<Utc>::MIN_UTC,
+    };
+
+    let mut episode_timestamps: HashMap<String, DateTime<Utc>> = HashMap::new();
+    for episode in episodes {
+        let source_id = episode_source_id(episode).to_string();
+        episode_timestamps
+            .entry(source_id)
+            .and_modify(|current| {
+                if episode.timestamp < *current {
+                    *current = episode.timestamp;
+                }
+            })
+            .or_insert(episode.timestamp);
+    }
+
+    let mut weighted_speed_sum = 0.0;
+    let mut total_weight = 0.0;
+
+    for record in records.iter().filter(|record| record.created_at >= cutoff) {
+        let mut source_ids = record
+            .source_episodes
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        source_ids.sort();
+        source_ids.dedup();
+
+        let mut timestamps: Vec<DateTime<Utc>> = source_ids
+            .iter()
+            .filter_map(|source| episode_timestamps.get(source).copied())
+            .collect();
+        timestamps.sort();
+        if timestamps.len() < 2 {
+            continue;
+        }
+
+        let confirmations = source_ids.len().saturating_sub(1);
+        let span = timestamps
+            .last()
+            .copied()
+            .unwrap_or(record.created_at)
+            .signed_duration_since(timestamps.first().copied().unwrap_or(record.created_at));
+        let span_hours = span.to_std().map(|duration| duration.as_secs_f64() / 3_600.0).unwrap_or(0.0);
+        let normalized_speed = ((confirmations as f64) / span_hours.max(1.0 / 60.0) / 4.0).clamp(0.0, 1.0);
+        let weight = confirmations as f64;
+        weighted_speed_sum += normalized_speed * weight;
+        total_weight += weight;
+    }
+
+    if total_weight == 0.0 {
+        0.0
+    } else {
+        (weighted_speed_sum / total_weight).clamp(0.0, 1.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1083,6 +1199,15 @@ mod tests {
         );
         ep.extra
             .insert("task_category".to_string(), serde_json::json!("bugfix"));
+        ep
+    }
+
+    fn episode_at(task_id: &str, minutes_ago: i64, success: bool) -> Episode {
+        let mut ep = sample_episode(success);
+        ep.id = format!("{task_id}-id");
+        ep.episode_id = task_id.to_string();
+        ep.task_id = task_id.to_string();
+        ep.timestamp = Utc::now() - chrono::Duration::minutes(minutes_ago);
         ep
     }
 
@@ -1184,6 +1309,37 @@ mod tests {
 
         let score = social_sensitivity_from_attribution(&records, Duration::from_secs(60));
         assert!((score - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn knowledge_integration_rate_uses_confirmation_chains() {
+        let episodes = vec![
+            episode_at("task-1", 5, true),
+            episode_at("task-2", 4, true),
+            episode_at("task-3", 3, true),
+        ];
+        let records = vec![
+            KnowledgeConfirmationRecord {
+                created_at: Utc::now(),
+                source_episodes: vec!["task-1".to_string(), "task-2".to_string()],
+            },
+            KnowledgeConfirmationRecord {
+                created_at: Utc::now(),
+                source_episodes: vec![
+                    "task-1".to_string(),
+                    "task-2".to_string(),
+                    "task-3".to_string(),
+                ],
+            },
+            KnowledgeConfirmationRecord {
+                created_at: Utc::now(),
+                source_episodes: vec!["task-1".to_string()],
+            },
+        ];
+
+        let score = knowledge_integration_rate(&records, &episodes, Duration::from_secs(60));
+        assert!(score > 0.0);
+        assert!(score <= 1.0);
     }
 
     #[tokio::test]
