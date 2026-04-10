@@ -797,6 +797,20 @@ fn episode_source_id(episode: &Episode) -> &str {
     }
 }
 
+fn episode_agent_label(episode: &Episode) -> String {
+    let agent_id = episode.agent_id.trim();
+    if !agent_id.is_empty() {
+        return agent_id.to_string();
+    }
+
+    let template = episode.agent_template.trim();
+    if !template.is_empty() {
+        return template.to_string();
+    }
+
+    episode.id.clone()
+}
+
 /// Parse an [`AgentRole`] from either the persisted kebab-case label or the
 /// debug-style variant name used by `format!("{role:?}")` in orchestration.
 fn parse_agent_role(raw: &str) -> Option<AgentRole> {
@@ -1005,11 +1019,17 @@ async fn compute_cfactor_snapshot(learn_root: &Path) -> Result<CFactor, Learning
         &episodes,
         Duration::from_secs(7 * 24 * 60 * 60),
     );
+    let convergence_velocity = convergence_velocity_from_agreement(
+        &knowledge_records,
+        &episodes,
+        Duration::from_secs(7 * 24 * 60 * 60),
+    );
     Ok(compute_cfactor(
         &episodes,
         Duration::from_secs(7 * 24 * 60 * 60),
         social_sensitivity,
         knowledge_integration_rate,
+        convergence_velocity,
     ))
 }
 
@@ -1163,6 +1183,88 @@ fn knowledge_integration_rate(
     }
 }
 
+fn convergence_velocity_from_agreement(
+    records: &[KnowledgeConfirmationRecord],
+    episodes: &[Episode],
+    window: Duration,
+) -> f64 {
+    let cutoff = match chrono::Duration::from_std(window) {
+        Ok(delta) => Utc::now() - delta,
+        Err(_) => DateTime::<Utc>::MIN_UTC,
+    };
+
+    let mut episode_agents: HashMap<String, (DateTime<Utc>, String)> = HashMap::new();
+    for episode in episodes {
+        let source_id = episode_source_id(episode).to_string();
+        let agent_id = episode_agent_label(episode);
+        episode_agents
+            .entry(source_id)
+            .and_modify(|current| {
+                if episode.timestamp < current.0 {
+                    current.0 = episode.timestamp;
+                    current.1 = agent_id.clone();
+                }
+            })
+            .or_insert((episode.timestamp, agent_id));
+    }
+
+    let mut weighted_speed_sum = 0.0;
+    let mut total_weight = 0.0;
+
+    for record in records.iter().filter(|record| record.created_at >= cutoff) {
+        let mut source_ids = record
+            .source_episodes
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        source_ids.sort();
+        source_ids.dedup();
+
+        let mut agent_timestamps: HashMap<String, DateTime<Utc>> = HashMap::new();
+        for source_id in source_ids {
+            let Some((timestamp, agent_id)) = episode_agents.get(&source_id).cloned() else {
+                continue;
+            };
+            agent_timestamps
+                .entry(agent_id)
+                .and_modify(|current| {
+                    if timestamp < *current {
+                        *current = timestamp;
+                    }
+                })
+                .or_insert(timestamp);
+        }
+
+        if agent_timestamps.len() < 2 {
+            continue;
+        }
+
+        let mut timestamps: Vec<DateTime<Utc>> = agent_timestamps.values().copied().collect();
+        timestamps.sort();
+        let span = timestamps
+            .last()
+            .copied()
+            .unwrap_or(record.created_at)
+            .signed_duration_since(timestamps.first().copied().unwrap_or(record.created_at));
+        let span_hours = span
+            .to_std()
+            .map(|duration| duration.as_secs_f64() / 3_600.0)
+            .unwrap_or(0.0);
+        let agreements = agent_timestamps.len().saturating_sub(1);
+        let normalized_velocity =
+            ((agreements as f64) / span_hours.max(1.0 / 60.0) / 4.0).clamp(0.0, 1.0);
+        let weight = agreements as f64;
+        weighted_speed_sum += normalized_velocity * weight;
+        total_weight += weight;
+    }
+
+    if total_weight == 0.0 {
+        0.0
+    } else {
+        (weighted_speed_sum / total_weight).clamp(0.0, 1.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1208,6 +1310,12 @@ mod tests {
         ep.episode_id = task_id.to_string();
         ep.task_id = task_id.to_string();
         ep.timestamp = Utc::now() - chrono::Duration::minutes(minutes_ago);
+        ep
+    }
+
+    fn episode_with_agent(task_id: &str, minutes_ago: i64, success: bool, agent_id: &str) -> Episode {
+        let mut ep = episode_at(task_id, minutes_ago, success);
+        ep.agent_id = agent_id.to_string();
         ep
     }
 
@@ -1338,6 +1446,33 @@ mod tests {
         ];
 
         let score = knowledge_integration_rate(&records, &episodes, Duration::from_secs(60));
+        assert!(score > 0.0);
+        assert!(score <= 1.0);
+    }
+
+    #[test]
+    fn convergence_velocity_uses_agreement_across_agents() {
+        let episodes = vec![
+            episode_with_agent("task-1", 6, true, "agent-a"),
+            episode_with_agent("task-2", 4, true, "agent-b"),
+            episode_with_agent("task-3", 2, true, "agent-c"),
+        ];
+        let records = vec![
+            KnowledgeConfirmationRecord {
+                created_at: Utc::now(),
+                source_episodes: vec!["task-1".to_string(), "task-2".to_string()],
+            },
+            KnowledgeConfirmationRecord {
+                created_at: Utc::now(),
+                source_episodes: vec![
+                    "task-1".to_string(),
+                    "task-2".to_string(),
+                    "task-3".to_string(),
+                ],
+            },
+        ];
+
+        let score = convergence_velocity_from_agreement(&records, &episodes, Duration::from_secs(60));
         assert!(score > 0.0);
         assert!(score <= 1.0);
     }

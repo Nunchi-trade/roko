@@ -2184,6 +2184,10 @@ fn render_cfactor_breakdown(frame: &mut Frame<'_>, area: Rect, data: &DashboardD
             format_pct(snapshot.components.knowledge_integration_rate)
         )),
         Line::from(format!(
+            "convergence velocity: {}",
+            format_pct(snapshot.components.convergence_velocity)
+        )),
+        Line::from(format!(
             "turn-taking equality: {}",
             format_pct(snapshot.components.turn_taking_equality)
         )),
