@@ -39,6 +39,27 @@ pub struct CFactorComponents {
     pub knowledge_growth: f64,
 }
 
+/// Regression alert for a C-Factor drop against a trailing history window.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CFactorRegression {
+    /// Timestamp of the newest snapshot in the analyzed window.
+    pub current_snapshot_at: DateTime<Utc>,
+    /// Start of the analyzed history window.
+    pub window_start: DateTime<Utc>,
+    /// End of the analyzed history window.
+    pub window_end: DateTime<Utc>,
+    /// Number of historical snapshots used to compute the average.
+    pub sample_count: usize,
+    /// Average C-Factor across the historical snapshots.
+    pub historical_average: f64,
+    /// C-Factor on the newest snapshot.
+    pub current: f64,
+    /// Fractional drop from the historical average to the current value.
+    pub drop_fraction: f64,
+    /// Threshold that was breached.
+    pub threshold: f64,
+}
+
 impl Default for CFactorComponents {
     fn default() -> Self {
         Self {
@@ -244,6 +265,63 @@ pub fn trend_arrow(history: &[CFactor], window: Duration) -> &'static str {
     }
 }
 
+/// Detect whether the latest C-Factor snapshot regressed against the recent window.
+///
+/// The newest snapshot is compared against the average of prior snapshots in
+/// the same window. If the newest value drops by more than `threshold`, the
+/// regression is returned for downstream alerting.
+#[allow(clippy::cast_precision_loss)]
+#[must_use]
+pub fn detect_cfactor_regression(
+    history: &[CFactor],
+    window: Duration,
+    threshold: f64,
+) -> Option<CFactorRegression> {
+    let cutoff = match chrono::Duration::from_std(window) {
+        Ok(delta) => Utc::now() - delta,
+        Err(_) => DateTime::<Utc>::MIN_UTC,
+    };
+
+    let mut snapshots: Vec<&CFactor> = history
+        .iter()
+        .filter(|snapshot| snapshot.computed_at >= cutoff)
+        .collect();
+    snapshots.sort_by(|left, right| left.computed_at.cmp(&right.computed_at));
+
+    let Some(current) = snapshots.last().copied() else {
+        return None;
+    };
+    let historical = &snapshots[..snapshots.len().saturating_sub(1)];
+    if historical.is_empty() {
+        return None;
+    }
+
+    let historical_average =
+        historical.iter().map(|snapshot| snapshot.overall).sum::<f64>() / historical.len() as f64;
+    if historical_average <= 0.0 || current.overall >= historical_average {
+        return None;
+    }
+
+    let drop_fraction = (historical_average - current.overall) / historical_average;
+    if drop_fraction <= threshold {
+        return None;
+    }
+
+    Some(CFactorRegression {
+        current_snapshot_at: current.computed_at,
+        window_start: historical
+            .first()
+            .map(|snapshot| snapshot.computed_at)
+            .unwrap_or(current.computed_at),
+        window_end: current.computed_at,
+        sample_count: historical.len(),
+        historical_average,
+        current: current.overall,
+        drop_fraction,
+        threshold,
+    })
+}
+
 fn ratio(numer: usize, denom: usize) -> f64 {
     if denom == 0 {
         0.0
@@ -327,6 +405,9 @@ fn knowledge_entry_count(value: &Value) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const CFACTOR_REGRESSION_WINDOW_SECS: u64 = 7 * 24 * 60 * 60;
+    const CFACTOR_REGRESSION_THRESHOLD: f64 = 0.20;
 
     fn episode_at(
         task_id: &str,
@@ -426,5 +507,51 @@ mod tests {
         assert!((cfactor.components.gate_pass_rate - 1.0).abs() < 1e-9);
         assert!((cfactor.components.first_try_rate - 1.0).abs() < 1e-9);
         assert!((cfactor.components.knowledge_growth - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn detects_cfactor_regression_against_recent_average() {
+        let mut older = CFactor::default();
+        older.overall = 0.92;
+        older.computed_at = Utc::now() - chrono::Duration::days(6);
+
+        let mut middle = CFactor::default();
+        middle.overall = 0.84;
+        middle.computed_at = Utc::now() - chrono::Duration::days(3);
+
+        let mut current = CFactor::default();
+        current.overall = 0.55;
+        current.computed_at = Utc::now() - chrono::Duration::days(1);
+
+        let regression = detect_cfactor_regression(
+            &[older, middle, current],
+            Duration::from_secs(CFACTOR_REGRESSION_WINDOW_SECS),
+            CFACTOR_REGRESSION_THRESHOLD,
+        )
+        .expect("regression");
+
+        assert_eq!(regression.sample_count, 2);
+        assert!((regression.historical_average - 0.88).abs() < 1e-9);
+        assert!((regression.current - 0.55).abs() < 1e-9);
+        assert!(regression.drop_fraction > CFACTOR_REGRESSION_THRESHOLD);
+    }
+
+    #[test]
+    fn does_not_fire_at_exact_threshold() {
+        let mut older = CFactor::default();
+        older.overall = 1.0;
+        older.computed_at = Utc::now() - chrono::Duration::days(6);
+
+        let mut current = CFactor::default();
+        current.overall = 0.8;
+        current.computed_at = Utc::now() - chrono::Duration::days(1);
+
+        let regression = detect_cfactor_regression(
+            &[older, current],
+            Duration::from_secs(CFACTOR_REGRESSION_WINDOW_SECS),
+            CFACTOR_REGRESSION_THRESHOLD,
+        );
+
+        assert!(regression.is_none());
     }
 }

@@ -12,6 +12,7 @@ use std::hash::{Hash, Hasher};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -20,6 +21,7 @@ use chrono::{DateTime, Utc};
 use roko_agent::{Agent, AgentResult, nl_to_format::NlToFormatConverter};
 use roko_core::{Body, Context as RokoContext, Kind, Signal};
 use roko_learn::{
+    cfactor::{CFactor, CFactorRegression, detect_cfactor_regression},
     episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage},
     playbook::{Playbook, PlaybookStep, PlaybookStore},
 };
@@ -71,6 +73,9 @@ pub struct DreamCycleReport {
     pub processed_through: Option<DateTime<Utc>>,
     /// Batch analysis from the existing tier-progression pipeline.
     pub analysis: TierProgressionReport,
+    /// C-Factor regression analysis from the trailing 7-day snapshot window.
+    #[serde(default)]
+    pub cfactor_regression: Option<CFactorRegression>,
     /// Cluster summaries discovered during the dream cycle.
     pub clusters: Vec<DreamClusterReport>,
     /// Number of knowledge entries written to the durable store.
@@ -402,6 +407,7 @@ impl DreamCycle {
 
         let processed_through = batch.iter().map(|episode| episode.timestamp).max();
         self.emit_success_rate_regression(&historical, &batch, started_at)?;
+        let cfactor_regression = self.emit_cfactor_regression(started_at)?;
         let progression = TierProgression::default();
         let mut analysis = progression.analyze(&batch);
         progression.replay_heuristics(&mut analysis, &batch);
@@ -457,6 +463,7 @@ impl DreamCycle {
             processed_episodes: clusters.iter().map(|cluster| cluster.episode_count).sum(),
             processed_through,
             analysis,
+            cfactor_regression,
             clusters: clusters.iter().map(DreamClusterReport::from).collect(),
             knowledge_entries_written,
             playbooks_created,
@@ -548,6 +555,65 @@ impl DreamCycle {
         Ok(())
     }
 
+    fn emit_cfactor_regression(&self, started_at: DateTime<Utc>) -> Result<Option<CFactorRegression>> {
+        let Some(path) = self.cfactor_history_path() else {
+            return Ok(None);
+        };
+        let history = match read_cfactor_history(&path) {
+            Ok(history) => history,
+            Err(_) => return Ok(None),
+        };
+        let Some(regression) = detect_cfactor_regression(
+            &history,
+            Duration::from_secs(7 * 24 * 60 * 60),
+            0.20,
+        ) else {
+            return Ok(None);
+        };
+
+        let Some(path) = self.signals_path() else {
+            return Ok(Some(regression));
+        };
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create dream signal directory {}", parent.display()))?;
+        }
+
+        let signal = Signal::builder(Kind::Custom("cfactor:regression".to_string()))
+            .body(
+                Body::from_json(&regression)
+                    .context("serialize cfactor regression payload")?,
+            )
+            .provenance(roko_core::Provenance::trusted("dreams"))
+            .tag("current", format!("{:.4}", regression.current))
+            .tag(
+                "historical_average",
+                format!("{:.4}", regression.historical_average),
+            )
+            .tag("drop_fraction", format!("{:.4}", regression.drop_fraction))
+            .tag("threshold", format!("{:.4}", regression.threshold))
+            .tag("sample_count", regression.sample_count.to_string())
+            .tag("window_start", regression.window_start.to_rfc3339())
+            .tag("window_end", regression.window_end.to_rfc3339())
+            .tag("started_at", started_at.to_rfc3339())
+            .build();
+
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("open dream signal log {}", path.display()))?;
+        let mut writer = BufWriter::new(file);
+        serde_json::to_writer(&mut writer, &signal).context("serialize cfactor regression signal")?;
+        writer
+            .write_all(b"\n")
+            .context("write cfactor regression newline")?;
+        writer.flush().context("flush cfactor regression signal")?;
+
+        Ok(Some(regression))
+    }
+
     async fn write_report(&self, report: &DreamCycleReport) -> Result<()> {
         let path = dream_report_path(self.episode_store.path(), report.started_at);
         if let Some(parent) = path.parent() {
@@ -589,6 +655,15 @@ impl DreamCycle {
         Ok(())
     }
 
+    fn cfactor_history_path(&self) -> Option<PathBuf> {
+        let root = self
+            .episode_store
+            .path()
+            .parent()
+            .unwrap_or_else(|| Path::new("."));
+        Some(root.join("learn").join("c-factor.jsonl"))
+    }
+
     fn signals_path(&self) -> Option<PathBuf> {
         let root = self
             .episode_store
@@ -606,6 +681,26 @@ fn success_rate(episodes: &[Episode]) -> Option<(usize, usize, f64)> {
     }
     let successes = episodes.iter().filter(|episode| episode.success).count();
     Some((successes, records, successes as f64 / records as f64))
+}
+
+fn read_cfactor_history(path: &Path) -> Result<Vec<CFactor>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).with_context(|| format!("read C-Factor history {}", path.display())),
+    };
+
+    let mut history = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(snapshot) = serde_json::from_str::<CFactor>(trimmed) {
+            history.push(snapshot);
+        }
+    }
+    Ok(history)
 }
 
 #[derive(Debug, Clone)]
@@ -2081,6 +2176,17 @@ mod tests {
             .collect()
     }
 
+    fn write_cfactor_history(path: &Path, snapshots: &[CFactor]) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create c-factor directory");
+        }
+        let mut lines = Vec::new();
+        for snapshot in snapshots {
+            lines.push(serde_json::to_string(snapshot).expect("serialize c-factor snapshot"));
+        }
+        std::fs::write(path, lines.join("\n") + "\n").expect("write c-factor history");
+    }
+
     #[tokio::test]
     async fn run_clusters_and_writes_report() {
         let tmp = TempDir::new().expect("tempdir");
@@ -2319,6 +2425,137 @@ mod tests {
         let signal_log = tmp.path().join(".roko").join("signals.jsonl");
         let signals = read_signals(&signal_log);
         assert!(signals.iter().all(|signal| signal.kind.as_str() != "dreams:regression"));
+    }
+
+    #[tokio::test]
+    async fn cfactor_regression_signal_emitted_when_recent_average_drops() {
+        let tmp = TempDir::new().expect("tempdir");
+        let episodes_path = tmp.path().join(".roko").join("episodes.jsonl");
+        let learn_path = tmp.path().join(".roko").join("learn").join("c-factor.jsonl");
+        let knowledge_path = tmp
+            .path()
+            .join(".roko")
+            .join("neuro")
+            .join("knowledge.jsonl");
+        let playbooks_root = tmp.path().join(".roko").join("playbooks");
+        let logger = EpisodeLogger::new(&episodes_path);
+        let knowledge_store = Arc::new(KnowledgeStore::new(&knowledge_path));
+        let playbook_store = Arc::new(PlaybookStore::new(&playbooks_root));
+        let dispatcher = Arc::new(MockDispatcher {
+            response: r#"<|json|>{"entries":[]}<|/json|>"#.to_string(),
+        });
+
+        let mut historical = CFactor::default();
+        historical.overall = 0.92;
+        historical.computed_at = Utc::now() - ChronoDuration::days(6);
+
+        let mut middle = CFactor::default();
+        middle.overall = 0.84;
+        middle.computed_at = Utc::now() - ChronoDuration::days(3);
+
+        let mut current = CFactor::default();
+        current.overall = 0.55;
+        current.computed_at = Utc::now() - ChronoDuration::days(1);
+
+        write_cfactor_history(&learn_path, &[historical, middle, current]);
+
+        let historical_episode = episode_at(
+            "hist-1",
+            "plan-a",
+            "implementation",
+            "claude-haiku-4-5",
+            true,
+            None,
+            Utc::now() - ChronoDuration::hours(2),
+        );
+        let recent_episode = episode_at(
+            "recent-1",
+            "plan-b",
+            "implementation",
+            "claude-haiku-4-5",
+            true,
+            None,
+            Utc::now(),
+        );
+        write_episode(&logger, &historical_episode).await;
+        write_episode(&logger, &recent_episode).await;
+
+        let mut cycle = DreamCycle::new(
+            Arc::new(logger),
+            knowledge_store,
+            playbook_store,
+            dispatcher,
+        );
+        cycle.set_last_dream_at(Some(Utc::now() - ChronoDuration::minutes(30)));
+
+        let report = cycle.run().await.expect("run");
+        let regression = report
+            .cfactor_regression
+            .as_ref()
+            .expect("cfactor regression analysis");
+        assert!(regression.drop_fraction > 0.20);
+
+        let signal_log = tmp.path().join(".roko").join("signals.jsonl");
+        let signals = read_signals(&signal_log);
+        assert_eq!(signals.len(), 1);
+        assert_eq!(signals[0].kind.as_str(), "cfactor:regression");
+        assert!(signals[0].tag("drop_fraction").is_some());
+    }
+
+    #[tokio::test]
+    async fn cfactor_regression_signal_not_emitted_at_exact_threshold() {
+        let tmp = TempDir::new().expect("tempdir");
+        let episodes_path = tmp.path().join(".roko").join("episodes.jsonl");
+        let learn_path = tmp.path().join(".roko").join("learn").join("c-factor.jsonl");
+        let knowledge_path = tmp
+            .path()
+            .join(".roko")
+            .join("neuro")
+            .join("knowledge.jsonl");
+        let playbooks_root = tmp.path().join(".roko").join("playbooks");
+        let logger = EpisodeLogger::new(&episodes_path);
+        let knowledge_store = Arc::new(KnowledgeStore::new(&knowledge_path));
+        let playbook_store = Arc::new(PlaybookStore::new(&playbooks_root));
+        let dispatcher = Arc::new(MockDispatcher {
+            response: r#"<|json|>{"entries":[]}<|/json|>"#.to_string(),
+        });
+
+        let mut historical = CFactor::default();
+        historical.overall = 1.0;
+        historical.computed_at = Utc::now() - ChronoDuration::days(6);
+
+        let mut current = CFactor::default();
+        current.overall = 0.8;
+        current.computed_at = Utc::now() - ChronoDuration::days(1);
+
+        write_cfactor_history(&learn_path, &[historical, current]);
+
+        let episode = episode_at(
+            "recent-1",
+            "plan-a",
+            "implementation",
+            "claude-haiku-4-5",
+            true,
+            None,
+            Utc::now(),
+        );
+        write_episode(&logger, &episode).await;
+
+        let mut cycle = DreamCycle::new(
+            Arc::new(logger),
+            knowledge_store,
+            playbook_store,
+            dispatcher,
+        );
+
+        let report = cycle.run().await.expect("run");
+        assert!(report.cfactor_regression.is_none());
+
+        let signal_log = tmp.path().join(".roko").join("signals.jsonl");
+        let signals = read_signals(&signal_log);
+        assert!(signals
+            .iter()
+            .all(|signal| signal.kind.as_str() != "cfactor:regression"));
     }
 
     #[tokio::test]

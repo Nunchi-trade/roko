@@ -341,6 +341,7 @@ mod tests {
             processed_episodes: 3,
             processed_through: None,
             analysis: roko_neuro::tier_progression::TierProgression::default().analyze(&[]),
+            cfactor_regression: None,
             clusters: vec![DreamClusterReport {
                 key: DreamClusterKey {
                     plan_id: "plan-a".to_string(),
