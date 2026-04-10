@@ -126,6 +126,45 @@ impl KnowledgeStore {
 
         let _guard = self.write_gate.lock();
 
+        let mut has_antiknowledge = false;
+        for entry in &entries {
+            if entry.kind == KnowledgeKind::AntiKnowledge
+                && entry
+                    .refuted_insight_id
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|refuted_id| !refuted_id.is_empty())
+            {
+                has_antiknowledge = true;
+                break;
+            }
+        }
+
+        if has_antiknowledge {
+            let mut current = self.read_all()?;
+            current.extend(entries.iter().cloned());
+
+            for anti in &entries {
+                if anti.kind != KnowledgeKind::AntiKnowledge {
+                    continue;
+                }
+
+                let Some(refuted_id) = anti.refuted_insight_id.as_deref().map(str::trim) else {
+                    continue;
+                };
+                if refuted_id.is_empty() {
+                    continue;
+                }
+
+                if let Some(original) = current.iter_mut().find(|entry| entry.id == refuted_id) {
+                    original.confidence *= 0.5;
+                }
+            }
+
+            self.rewrite_all(&current)?;
+            return Ok(());
+        }
+
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -847,6 +886,50 @@ mod tests {
         let all = store.read_all().expect("read");
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].id, "validated");
+    }
+
+    #[test]
+    fn antiknowledge_halves_refuted_entry_confidence() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let now = Utc::now();
+
+        store
+            .add(entry(
+                KnowledgeKind::Insight,
+                "insight-1",
+                "A reusable insight",
+                &["insight"],
+                1.0,
+                &["ep-a"],
+                now,
+            ))
+            .expect("add original");
+        store
+            .add(KnowledgeEntry {
+                id: "anti-1".to_owned(),
+                kind: KnowledgeKind::AntiKnowledge,
+                source: None,
+                content: "Previous insight insight-1 was wrong because it failed in practice."
+                    .to_owned(),
+                confidence: 0.9,
+                confidence_weight: -0.9,
+                refuted_insight_id: Some("insight-1".to_owned()),
+                refutation_evidence: Some("it failed in practice".to_owned()),
+                source_episodes: vec!["ep-b".to_owned()],
+                tags: vec!["anti_knowledge".to_owned(), "insight".to_owned()],
+                created_at: now,
+                half_life_days: KnowledgeKind::AntiKnowledge.default_half_life_days(),
+                hdc_vector: None,
+            })
+            .expect("add anti knowledge");
+
+        let all = store.read_all().expect("read");
+        let original = all.iter().find(|entry| entry.id == "insight-1").expect("original");
+        let anti = all.iter().find(|entry| entry.id == "anti-1").expect("anti");
+
+        assert!((original.confidence - 0.5).abs() < f64::EPSILON);
+        assert_eq!(anti.kind, KnowledgeKind::AntiKnowledge);
     }
 
     #[test]
