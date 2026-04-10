@@ -44,6 +44,17 @@ pub struct AgentCFactorContribution {
     pub contribution_score: f64,
 }
 
+/// Directional routing preference derived from a C-Factor contribution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentDispatchBias {
+    /// Prefer a stronger / more capable agent or model for this dispatch.
+    PreferStronger,
+    /// Prefer the cheaper / lighter agent or model for this dispatch.
+    PreferCheaper,
+    /// Keep the current routing decision.
+    Neutral,
+}
+
 /// Individual C-Factor components.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CFactorComponents {
@@ -143,6 +154,34 @@ impl CFactor {
                 )
             })
             .collect()
+    }
+
+    /// Look up the contribution score for a specific agent.
+    #[must_use]
+    pub fn agent_contribution(&self, agent_id: &str) -> Option<&AgentCFactorContribution> {
+        self.agent_contributions
+            .iter()
+            .find(|contribution| contribution.agent_id == agent_id)
+    }
+
+    /// Convert a per-agent contribution into a dispatch bias.
+    ///
+    /// Negative contributors get routed toward stronger models so dispatch
+    /// decisions compensate for the gap. Positive contributors can be routed
+    /// lighter once the overall fleet is healthy.
+    #[must_use]
+    pub fn dispatch_bias_for_agent(&self, agent_id: &str) -> AgentDispatchBias {
+        let Some(contribution) = self.agent_contribution(agent_id) else {
+            return AgentDispatchBias::Neutral;
+        };
+
+        if contribution.contribution_score <= -0.05 {
+            AgentDispatchBias::PreferStronger
+        } else if contribution.contribution_score >= 0.05 && self.overall >= 0.65 {
+            AgentDispatchBias::PreferCheaper
+        } else {
+            AgentDispatchBias::Neutral
+        }
     }
 }
 
@@ -1153,6 +1192,40 @@ mod tests {
                 .top_agent_contribution_lines(1)
                 .first()
                 .is_some_and(|line| line.starts_with("agent-good="))
+        );
+    }
+
+    #[test]
+    fn dispatch_bias_prefers_stronger_for_negative_contributor() {
+        let mut snapshot = CFactor::default();
+        snapshot.overall = 0.72;
+        snapshot.agent_contributions = vec![AgentCFactorContribution {
+            agent_id: "agent-neg".to_string(),
+            episode_count: 4,
+            without_agent_overall: 0.78,
+            contribution_score: -0.06,
+        }];
+
+        assert_eq!(
+            snapshot.dispatch_bias_for_agent("agent-neg"),
+            AgentDispatchBias::PreferStronger
+        );
+    }
+
+    #[test]
+    fn dispatch_bias_prefers_cheaper_for_positive_contributor() {
+        let mut snapshot = CFactor::default();
+        snapshot.overall = 0.83;
+        snapshot.agent_contributions = vec![AgentCFactorContribution {
+            agent_id: "agent-pos".to_string(),
+            episode_count: 5,
+            without_agent_overall: 0.76,
+            contribution_score: 0.07,
+        }];
+
+        assert_eq!(
+            snapshot.dispatch_bias_for_agent("agent-pos"),
+            AgentDispatchBias::PreferCheaper
         );
     }
 

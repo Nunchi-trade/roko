@@ -6601,6 +6601,7 @@ impl PlanRunner {
         if let Some(td) = task_def.as_ref() {
             let cascade_router = self.learning.cascade_router();
             let routing_ctx = cascade_routing_context(self, plan_id, task, role, Some(td));
+            let agent_id = format!("{role:?}");
             let cfactor_snapshot = match self.learning.latest_cfactor().await {
                 Ok(snapshot) => snapshot,
                 Err(err) => {
@@ -6613,6 +6614,7 @@ impl PlanRunner {
                 frequency,
                 Some(&routing_ctx),
                 cfactor_snapshot.as_ref(),
+                Some(agent_id.as_str()),
             ) {
                 Some(model) => {
                     tracing::info!(

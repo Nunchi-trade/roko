@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::cfactor::CFactor;
+use crate::cfactor::{AgentDispatchBias, CFactor};
 use crate::model_router::{COLD_START_THRESHOLD, CONTEXT_DIM, LinUCBRouter, RoutingContext};
 
 // ─── CascadeStage ───────────────────────────────────────────────────────────
@@ -295,14 +295,15 @@ impl CascadeRouter {
         frequency: OperatingFrequency,
         ctx: Option<&RoutingContext>,
         cfactor: Option<&CFactor>,
+        agent_id: Option<&str>,
     ) -> Option<ModelSpec> {
         match frequency {
             OperatingFrequency::Gamma => None,
             OperatingFrequency::Theta => {
-                ctx.map(|ctx| self.route_with_cfactor(ctx, cfactor).primary)
+                ctx.map(|ctx| self.route_with_cfactor(ctx, cfactor, agent_id).primary)
             }
             OperatingFrequency::Delta => {
-                Some(self.bias_model_for_cfactor(self.strongest_model(), cfactor))
+                Some(self.bias_model_for_cfactor(self.strongest_model(), cfactor, agent_id))
             }
         }
     }
@@ -363,7 +364,7 @@ impl CascadeRouter {
 
     /// Route a context through the cascade, returning a recommendation.
     pub fn route(&self, ctx: &RoutingContext) -> CascadeModel {
-        self.route_with_cfactor(ctx, None)
+        self.route_with_cfactor(ctx, None, None)
     }
 
     /// Route a context through the cascade, optionally biasing by C-Factor.
@@ -371,11 +372,12 @@ impl CascadeRouter {
         &self,
         ctx: &RoutingContext,
         cfactor: Option<&CFactor>,
+        agent_id: Option<&str>,
     ) -> CascadeModel {
         match self.current_stage() {
-            CascadeStage::Static => self.route_static(ctx, cfactor),
-            CascadeStage::Confidence => self.route_confidence(ctx, cfactor),
-            CascadeStage::Ucb => self.route_ucb(ctx, cfactor),
+            CascadeStage::Static => self.route_static(ctx, cfactor, agent_id),
+            CascadeStage::Confidence => self.route_confidence(ctx, cfactor, agent_id),
+            CascadeStage::Ucb => self.route_ucb(ctx, cfactor, agent_id),
         }
     }
 
@@ -531,14 +533,19 @@ impl CascadeRouter {
 
     // ── Internal routing per stage ──────────────────────────────────────
 
-    fn route_static(&self, ctx: &RoutingContext, cfactor: Option<&CFactor>) -> CascadeModel {
+    fn route_static(
+        &self,
+        ctx: &RoutingContext,
+        cfactor: Option<&CFactor>,
+        agent_id: Option<&str>,
+    ) -> CascadeModel {
         let slug = self
             .role_table
             .get(&ctx.role)
             .cloned()
             .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
 
-        let selected = self.bias_model_for_cfactor(ModelSpec::from_slug(&slug), cfactor);
+        let selected = self.bias_model_for_cfactor(ModelSpec::from_slug(&slug), cfactor, agent_id);
         let tier = slug_to_tier(&selected.slug);
         let fallback = fallback_for_tier(tier).map(ModelSpec::from_slug);
 
@@ -550,7 +557,12 @@ impl CascadeRouter {
         }
     }
 
-    fn route_confidence(&self, ctx: &RoutingContext, cfactor: Option<&CFactor>) -> CascadeModel {
+    fn route_confidence(
+        &self,
+        ctx: &RoutingContext,
+        cfactor: Option<&CFactor>,
+        agent_id: Option<&str>,
+    ) -> CascadeModel {
         let stats = self.confidence_stats.lock();
         let low_confidence = ctx.affect_confidence < LOW_AFFECT_CONFIDENCE_THRESHOLD;
 
@@ -578,7 +590,7 @@ impl CascadeRouter {
 
         drop(stats);
 
-        let selected = self.bias_model_for_cfactor(ModelSpec::from_slug(&best_slug), cfactor);
+        let selected = self.bias_model_for_cfactor(ModelSpec::from_slug(&best_slug), cfactor, agent_id);
         let tier = slug_to_tier(&selected.slug);
         let fallback = fallback_for_tier(tier).map(ModelSpec::from_slug);
 
@@ -590,9 +602,14 @@ impl CascadeRouter {
         }
     }
 
-    fn route_ucb(&self, ctx: &RoutingContext, cfactor: Option<&CFactor>) -> CascadeModel {
+    fn route_ucb(
+        &self,
+        ctx: &RoutingContext,
+        cfactor: Option<&CFactor>,
+        agent_id: Option<&str>,
+    ) -> CascadeModel {
         let model = self.linucb.select_model(ctx);
-        let selected = self.bias_model_for_cfactor(model, cfactor);
+        let selected = self.bias_model_for_cfactor(model, cfactor, agent_id);
         let tier = slug_to_tier(&selected.slug);
         let fallback = fallback_for_tier(tier).map(ModelSpec::from_slug);
 
@@ -605,10 +622,23 @@ impl CascadeRouter {
     }
 
     /// Apply a C-Factor-based bias to a selected model.
-    fn bias_model_for_cfactor(&self, model: ModelSpec, cfactor: Option<&CFactor>) -> ModelSpec {
+    fn bias_model_for_cfactor(
+        &self,
+        model: ModelSpec,
+        cfactor: Option<&CFactor>,
+        agent_id: Option<&str>,
+    ) -> ModelSpec {
         let Some(cfactor) = cfactor else {
             return model;
         };
+
+        if let Some(agent_id) = agent_id {
+            match cfactor.dispatch_bias_for_agent(agent_id) {
+                AgentDispatchBias::PreferStronger => return self.strongest_model(),
+                AgentDispatchBias::PreferCheaper => return self.cheapest_model(),
+                AgentDispatchBias::Neutral => {}
+            }
+        }
 
         if cfactor.overall > HIGH_CFACTOR_THRESHOLD {
             self.cheapest_model()
@@ -835,17 +865,17 @@ mod tests {
         let ctx = default_ctx();
 
         assert_eq!(
-            cascade.select_for_frequency(OperatingFrequency::Gamma, Some(&ctx), None),
+            cascade.select_for_frequency(OperatingFrequency::Gamma, Some(&ctx), None, None),
             None
         );
 
         let theta = cascade
-            .select_for_frequency(OperatingFrequency::Theta, Some(&ctx), None)
+            .select_for_frequency(OperatingFrequency::Theta, Some(&ctx), None, None)
             .expect("theta should route");
         assert_eq!(theta.slug, "claude-sonnet-4-5");
 
         let delta = cascade
-            .select_for_frequency(OperatingFrequency::Delta, Some(&ctx), None)
+            .select_for_frequency(OperatingFrequency::Delta, Some(&ctx), None, None)
             .expect("delta should route");
         assert_eq!(delta.slug, "claude-opus-4");
     }
@@ -860,7 +890,12 @@ mod tests {
         };
 
         let selected = cascade
-            .select_for_frequency(OperatingFrequency::Theta, Some(&ctx), Some(&cfactor))
+            .select_for_frequency(
+                OperatingFrequency::Theta,
+                Some(&ctx),
+                Some(&cfactor),
+                Some("Implementer"),
+            )
             .expect("theta should route");
 
         assert_eq!(selected.slug, "claude-haiku-3-5");
@@ -876,7 +911,12 @@ mod tests {
         };
 
         let selected = cascade
-            .select_for_frequency(OperatingFrequency::Theta, Some(&ctx), Some(&cfactor))
+            .select_for_frequency(
+                OperatingFrequency::Theta,
+                Some(&ctx),
+                Some(&cfactor),
+                Some("Implementer"),
+            )
             .expect("theta should route");
 
         assert_eq!(selected.slug, "claude-opus-4");
