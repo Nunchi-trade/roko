@@ -2092,7 +2092,7 @@ token_budget = 8000
             vec!["run".to_string(), "llama3".to_string()]
         );
         assert_eq!(merged.agent.timeout_ms, 60_000);
-        assert!(!merged.tools.prefer_mcp);
+        assert!(merged.tools.prefer_mcp);
         assert_eq!(merged.tools.global_denied, vec!["web_fetch".to_string()]);
         assert_eq!(merged.tools.mcp_timeout_secs, 99);
         assert_eq!(merged.prompt.token_budget, 8000);

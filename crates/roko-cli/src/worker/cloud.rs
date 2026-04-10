@@ -524,6 +524,7 @@ mod tests {
             pr_title: None,
             pr_body: None,
             plan_dir: None,
+            workspace_dir: None,
             github_mcp_command: None,
             github_mcp_args: None,
         };

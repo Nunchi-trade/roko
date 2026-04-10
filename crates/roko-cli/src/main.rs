@@ -382,8 +382,8 @@ enum PlanCmd {
         #[arg(long)]
         workdir: Option<PathBuf>,
         /// Resume from `.roko/state/executor.json` in the working directory.
-        #[arg(long, num_args = 0..=1, default_missing_value = ".roko/state/executor.json")]
-        resume: Option<PathBuf>,
+        #[arg(long = "resume-plan", num_args = 0..=1, default_missing_value = ".roko/state/executor.json")]
+        resume_plan: Option<PathBuf>,
     },
     /// Generate implementation plans from a prompt, file, or PRD.
     Generate {
@@ -1595,7 +1595,7 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
         PlanCmd::Run {
             plans_dir,
             workdir,
-            resume,
+            resume_plan,
         } => {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             prepare_runtime_hooks(&wd, cli.quiet);
@@ -1605,7 +1605,7 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             let metrics = std::sync::Arc::new(roko_core::obs::MetricRegistry::new());
             roko_core::obs::register_standard_metrics(&metrics);
 
-            let mut runner = if let Some(snap_path) = resume {
+            let mut runner = if let Some(snap_path) = resume_plan {
                 let snap_path = if snap_path.is_relative() {
                     wd.join(snap_path)
                 } else {
@@ -3699,12 +3699,12 @@ mod tests {
 
     #[test]
     fn cli_parses_plan_resume_flag() {
-        let cli = Cli::try_parse_from(["roko", "plan", "run", "plans", "--resume"]).unwrap();
+        let cli = Cli::try_parse_from(["roko", "plan", "run", "plans", "--resume-plan"]).unwrap();
         assert!(matches!(
             cli.command,
             Some(Command::Plan {
                 cmd: PlanCmd::Run {
-                    resume: Some(_),
+                    resume_plan: Some(_),
                     ..
                 }
             })

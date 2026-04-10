@@ -847,10 +847,10 @@ async fn collect_slack_feedback(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roko_learn::cascade_router::CascadeRouter;
     use roko_learn::prompt_experiment::{ExperimentStore, PromptExperiment, PromptVariant};
     use serde_json::json;
     use std::fs;
-    use uuid::Uuid;
     use uuid::Uuid;
 
     #[test]

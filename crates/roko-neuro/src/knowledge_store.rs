@@ -315,7 +315,8 @@ impl KnowledgeStore {
         Ok(removed)
     }
 
-    fn read_all(&self) -> Result<Vec<KnowledgeEntry>> {
+    /// Read all knowledge entries from the store.
+    pub fn read_all(&self) -> Result<Vec<KnowledgeEntry>> {
         let file = match File::open(&self.path) {
             Ok(file) => file,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),

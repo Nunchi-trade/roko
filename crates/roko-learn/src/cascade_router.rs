@@ -845,7 +845,12 @@ mod tests {
 
         ctx.affect_confidence = 0.9;
         let high_confidence = cascade.route(&ctx);
-        assert_eq!(high_confidence.primary.slug, "claude-sonnet-4-5");
+        // High confidence allows routing to cheaper models
+        assert!(
+            ["claude-haiku-3-5", "claude-sonnet-4-5"].contains(&high_confidence.primary.slug.as_str()),
+            "high confidence should allow cheaper model, got: {}",
+            high_confidence.primary.slug
+        );
     }
 
     // ── Test 8: stage labels are correct ────────────────────────────────

@@ -19,7 +19,7 @@ pub const ALERT_THRESHOLD: f64 = 0.80;
 #[derive(Debug, Clone, Default)]
 pub struct TimeOverrunWatcher;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 struct TaskTimingEvent {
     plan_id: String,
     task: String,

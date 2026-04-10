@@ -9193,7 +9193,7 @@ mod tests {
             None,
             None,
         );
-        assert_eq!(csv, "Read,Edit");
+        assert_eq!(csv, "Read,Write");
     }
 
     #[test]
@@ -9216,7 +9216,7 @@ mod tests {
             None,
         );
         assert!(csv.contains("Read"));
-        assert!(!csv.contains("Edit"));
+        assert!(!csv.contains(",Write,") && !csv.starts_with("Write,") && !csv.ends_with(",Write"));
     }
 
     #[test]

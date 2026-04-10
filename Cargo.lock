@@ -5176,6 +5176,7 @@ dependencies = [
  "roko-core",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -5214,6 +5215,7 @@ dependencies = [
  "roko-neuro",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 

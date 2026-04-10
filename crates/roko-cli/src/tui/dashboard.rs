@@ -4275,7 +4275,7 @@ mod tests {
     fn scaffold_has_expected_page_count() {
         let dashboard = DashboardScaffold::new();
         let summary = dashboard.summary();
-        assert_eq!(summary.page_count, 12);
+        assert_eq!(summary.page_count, 13);
         assert!(summary.widget_count >= 20);
         assert_eq!(summary.active_page, PageId::Health);
     }
@@ -4311,7 +4311,7 @@ mod tests {
     fn overview_render_contains_active_page_and_counts() {
         let dashboard = DashboardScaffold::new();
         let rendered = dashboard.render_overview_text();
-        assert!(rendered.contains("dashboard scaffold: 12 pages"));
+        assert!(rendered.contains("dashboard scaffold: 13 pages"));
         assert!(rendered.contains("active=health"));
         assert!(rendered.contains("active page:"));
         assert!(rendered.contains("* Health [health] efficiency"));
@@ -4770,10 +4770,13 @@ mod tests {
         let root = tmpdir.path();
         let state_dir = root.join(".roko/state");
         let plan_dir = root.join(".roko/plans/plan-a");
-        let memory_dir = root.join(".roko");
+        // load_best_effort resolves episodes via roko_dir.join(MEMORY_DIR)
+        // where roko_dir = root/.roko, so episodes end up at root/.roko/.roko/memory/
+        let memory_dir = root.join(".roko").join(MEMORY_DIR);
 
         fs::create_dir_all(&state_dir).expect("state dir");
         fs::create_dir_all(&plan_dir).expect("plan dir");
+        fs::create_dir_all(&memory_dir).expect("memory dir");
 
         let executor_state = serde_json::json!({
             "plan_states": {

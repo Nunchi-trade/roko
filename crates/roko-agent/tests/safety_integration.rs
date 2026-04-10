@@ -8,11 +8,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use roko_agent::dispatcher::{HandlerResolver, SafetyPolicy, ToolDispatcher};
+use roko_agent::dispatcher::{HandlerResolver, ToolDispatcher};
 use roko_agent::safety::bash::BashPolicy;
 use roko_agent::safety::git::GitPolicy;
 use roko_agent::safety::network::NetworkPolicy;
 use roko_agent::safety::rate_limit::{RateLimitPolicy, RateLimiter};
+use roko_agent::safety::SafetyLayer;
 use roko_core::tool::{
     ToolCall, ToolCategory, ToolConcurrency, ToolContext, ToolDef, ToolError, ToolHandler,
     ToolPermission, ToolResult, VecToolRegistry,
@@ -82,13 +83,8 @@ async fn bash_rm_rf_blocked_by_dispatcher() {
         Arc::new(NoopHandler { tool_name: "bash" }) as Arc<dyn ToolHandler>,
     )]);
 
-    let policy = SafetyPolicy {
-        bash: Some(BashPolicy::default()),
-        network: None,
-        git: None,
-        rate_limiter: None,
-    };
-    let dispatcher = ToolDispatcher::new(registry, resolver).with_safety_policy(policy);
+    let layer = SafetyLayer::with_defaults();
+    let dispatcher = ToolDispatcher::new(registry, resolver).with_safety(layer);
 
     let call = ToolCall::new("c1", "bash", serde_json::json!({ "command": "rm -rf /" }));
     let result = dispatcher.dispatch(call, &ctx_with_exec()).await;
@@ -121,13 +117,8 @@ async fn network_rfc1918_blocked() {
         }) as Arc<dyn ToolHandler>,
     )]);
 
-    let policy = SafetyPolicy {
-        bash: None,
-        network: Some(NetworkPolicy::default()),
-        git: None,
-        rate_limiter: None,
-    };
-    let dispatcher = ToolDispatcher::new(registry, resolver).with_safety_policy(policy);
+    let layer = SafetyLayer::with_defaults();
+    let dispatcher = ToolDispatcher::new(registry, resolver).with_safety(layer);
 
     // HTTP scheme to a private IP: blocked both by scheme and by private-network policy.
     let call = ToolCall::new(
@@ -160,13 +151,8 @@ async fn network_rfc1918_blocked() {
             tool_name: "web_fetch",
         }) as Arc<dyn ToolHandler>,
     )]);
-    let policy2 = SafetyPolicy {
-        bash: None,
-        network: Some(NetworkPolicy::default()),
-        git: None,
-        rate_limiter: None,
-    };
-    let dispatcher2 = ToolDispatcher::new(registry2, resolver2).with_safety_policy(policy2);
+    let layer2 = SafetyLayer::with_defaults();
+    let dispatcher2 = ToolDispatcher::new(registry2, resolver2).with_safety(layer2);
 
     let call2 = ToolCall::new(
         "c3",
@@ -201,13 +187,8 @@ async fn git_force_push_blocked() {
         Arc::new(NoopHandler { tool_name: "bash" }) as Arc<dyn ToolHandler>,
     )]);
 
-    let policy = SafetyPolicy {
-        bash: None, // do not check bash denylist for this test
-        network: None,
-        git: Some(GitPolicy::default()),
-        rate_limiter: None,
-    };
-    let dispatcher = ToolDispatcher::new(registry, resolver).with_safety_policy(policy);
+    let layer = SafetyLayer::with_defaults();
+    let dispatcher = ToolDispatcher::new(registry, resolver).with_safety(layer);
 
     let call = ToolCall::new(
         "c4",
@@ -247,13 +228,9 @@ async fn rate_limit_exceeded() {
         window_duration: Duration::from_secs(60),
     });
 
-    let policy = SafetyPolicy {
-        bash: None,
-        network: None,
-        git: None,
-        rate_limiter: Some(Arc::new(tight_limiter)),
-    };
-    let dispatcher = ToolDispatcher::new(registry, resolver).with_safety_policy(policy);
+    let mut layer = SafetyLayer::with_defaults();
+    layer.rate_limiter = Some(Arc::new(tight_limiter));
+    let dispatcher = ToolDispatcher::new(registry, resolver).with_safety(layer);
     let ctx = ctx_with_exec();
 
     // First 3 calls succeed (cap = 3).
@@ -301,8 +278,8 @@ async fn safe_calls_pass_through_with_all_policies() {
         Arc::new(NoopHandler { tool_name: "bash" }) as Arc<dyn ToolHandler>,
     )]);
 
-    let policy = SafetyPolicy::defaults();
-    let dispatcher = ToolDispatcher::new(registry, resolver).with_safety_policy(policy);
+    let layer = SafetyLayer::with_defaults();
+    let dispatcher = ToolDispatcher::new(registry, resolver).with_safety(layer);
 
     let call = ToolCall::new("safe", "bash", serde_json::json!({ "command": "ls -la" }));
     let result = dispatcher.dispatch(call, &ctx_with_exec()).await;

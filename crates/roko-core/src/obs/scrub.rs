@@ -231,7 +231,7 @@ mod tests {
         let input = "export ANTHROPIC_API_KEY=sk-ant-secret-key-12345";
         let output = scrubber.scrub(input);
         assert!(!output.contains("sk-ant-secret-key"));
-        assert!(output.contains("[REDACTED:API_KEY]"));
+        assert!(output.contains("[REDACTED]"));
     }
 
     #[test]
@@ -240,7 +240,7 @@ mod tests {
         let input = "OPENAI_API_KEY=sk-proj-myverysecretkey12345678";
         let output = scrubber.scrub(input);
         assert!(!output.contains("sk-proj-"));
-        assert!(output.contains("[REDACTED:API_KEY]"));
+        assert!(output.contains("[REDACTED]"));
     }
 
     #[test]

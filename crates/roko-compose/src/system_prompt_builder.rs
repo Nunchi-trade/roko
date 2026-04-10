@@ -609,10 +609,18 @@ mod tests {
         let text = builder.build();
         let sections = builder.build_sections();
 
-        // Every section's content should appear in the built text.
+        // Every section's content should appear in the built text after
+        // normalizing consecutive newlines.  `build()` uses "\n\n" between
+        // header and body while `build_sections()` sometimes uses "\n",
+        // so we collapse runs of whitespace for the comparison.
+        let normalize = |s: &str| {
+            s.split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+        let norm_text = normalize(&text);
         for section in &sections {
+            let norm_section = normalize(&section.content);
             assert!(
-                text.contains(&section.content),
+                norm_text.contains(&norm_section),
                 "Section '{}' content not found in built text",
                 section.name
             );

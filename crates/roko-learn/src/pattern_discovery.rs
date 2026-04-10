@@ -877,7 +877,7 @@ mod tests {
         );
         episode.gate_verdicts = gate_names
             .iter()
-            .map(|gate| crate::episode_logger::GateVerdict::new(gate, success))
+            .map(|gate| crate::episode_logger::GateVerdict::new(*gate, success))
             .collect();
         episode
     }

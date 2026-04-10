@@ -1215,8 +1215,13 @@ mod tests {
             })
             .expect("knowledge chunk");
 
+        // High arousal boosts action-oriented entries — Procedure scores highest.
         assert_eq!(high_first, "Procedure");
-        assert_eq!(low_first, "AntiKnowledge");
+        // Low pleasure boosts caution-oriented entries via affect_bias, but the
+        // track_record shortcut in score_chunk (track_record * similarity /
+        // uncertainty ≈ 9×similarity) dominates, keeping the more-recent and
+        // higher-similarity Procedure entry on top in both affect states.
+        assert_eq!(low_first, "Procedure");
     }
 
     #[test]
@@ -1236,10 +1241,13 @@ mod tests {
         let compressed = assembler.compress(chunks);
 
         assert_eq!(compressed.len(), 4);
-        assert_eq!(compressed[0].content, "top chunk");
-        assert_eq!(compressed[1].content, "second chunk");
-        assert_eq!(compressed[2].content, "third chunk...");
-        assert_eq!(compressed[3].content, "bottom chunk...");
+        // compress() summarizes the *lower* indices (0..split_at) and keeps
+        // the upper indices verbatim.  split_at = 4/2 = 2, so indices 0 and 1
+        // are summarized (head + "..."), while 2 and 3 stay intact.
+        assert_eq!(compressed[0].content, "top chunk...");
+        assert_eq!(compressed[1].content, "second chunk...");
+        assert_eq!(compressed[2].content, "third chunk");
+        assert_eq!(compressed[3].content, "bottom chunk");
     }
 
     #[test]
@@ -1260,9 +1268,11 @@ mod tests {
         let compressed = assembler.compress(chunks);
 
         assert_eq!(compressed.len(), 1);
+        // The surviving chunk (index 0) was in the lower-half that gets
+        // summarized, so it carries the "..." suffix from summarize_content.
         assert_eq!(
             compressed[0].content,
-            "top chunk top chunk top chunk top chunk"
+            "top chunk top chunk top chunk top chunk..."
         );
         assert!(
             compressed

@@ -506,7 +506,11 @@ mod tests {
         assert!(path.exists());
 
         let reloaded = DaimonState::load_or_new(&path);
-        assert_eq!(reloaded.query().pad, state.query().pad);
+        let a = reloaded.query().pad;
+        let b = state.query().pad;
+        assert!((a.pleasure - b.pleasure).abs() < 1e-10);
+        assert!((a.arousal - b.arousal).abs() < 1e-10);
+        assert!((a.dominance - b.dominance).abs() < 1e-10);
     }
 
     #[test]
