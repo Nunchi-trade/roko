@@ -2593,6 +2593,16 @@ async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>, cfactor: bool) -> Resul
     } else {
         None
     };
+    let cfactor_history = if cfactor_snapshot.is_some() {
+        load_cfactor_history(workdir.join(".roko").join("learn").join("c-factor.jsonl")).await
+    } else {
+        Vec::new()
+    };
+    let cfactor_trend = if cfactor_snapshot.is_some() {
+        cfactor_trend_arrow(&cfactor_history, Duration::from_secs(7 * 24 * 60 * 60))
+    } else {
+        "→"
+    };
 
     if cli.json {
         let mut counts: BTreeMap<String, usize> = BTreeMap::new();
@@ -2735,8 +2745,8 @@ async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>, cfactor: bool) -> Resul
     if let Some(cfactor) = cfactor_snapshot {
         println!();
         println!(
-            "c-factor: {:.3} | episodes={} | computed={}",
-            cfactor.overall, cfactor.episode_count, cfactor.computed_at
+            "c-factor: {:.3} | trend={} | episodes={} | computed={}",
+            cfactor.overall, cfactor_trend, cfactor.episode_count, cfactor.computed_at
         );
         println!(
             "  gate={:.3} cost={:.3} speed={:.3} first_try={:.3} knowledge={:.3}",
