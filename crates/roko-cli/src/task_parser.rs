@@ -13,7 +13,7 @@ use std::path::Path;
 use anyhow::{Context as _, Result};
 use roko_core::OperatingFrequency;
 use roko_orchestrator::ReplanStrategy;
-use roko_std::RESEARCHER_TOOL_PROFILE;
+use roko_std::denied_tools_for_role;
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// Parsed `[meta]` section of tasks.toml.
@@ -503,18 +503,8 @@ impl TaskDef {
             return;
         }
 
-        if self
-            .role
-            .as_deref()
-            .is_some_and(|role| role.eq_ignore_ascii_case("researcher"))
-        {
-            self.denied_tools = Some(
-                RESEARCHER_TOOL_PROFILE
-                    .denied_tools
-                    .iter()
-                    .map(|tool| (*tool).to_string())
-                    .collect(),
-            );
+        if let Some(denied) = self.role.as_deref().and_then(denied_tools_for_role) {
+            self.denied_tools = Some(denied.iter().map(|tool| (*tool).to_string()).collect());
         }
     }
 }
@@ -1068,16 +1058,12 @@ command = "cargo check -p roko-cli"
             Some(vec!["filesystem".into(), "git".into()])
         );
         assert_eq!(task.max_retries, 5);
-        assert_eq!(
-            task.denied_tools,
-            Some(
-                RESEARCHER_TOOL_PROFILE
-                    .denied_tools
-                    .iter()
-                    .map(|tool| (*tool).to_string())
-                    .collect()
-            )
-        );
+        let expected_denied: Vec<String> = denied_tools_for_role("researcher")
+            .unwrap()
+            .iter()
+            .map(|tool| (*tool).to_string())
+            .collect();
+        assert_eq!(task.denied_tools, Some(expected_denied));
         assert_eq!(task.timeout_secs, 600);
         assert!(task.context.is_some());
         let ctx = task.context.as_ref().unwrap();
@@ -1691,4 +1677,112 @@ read_files = [{ path = "src/lib.rs" }]
         let issues = validate_modern_fields_content(content).unwrap();
         assert!(issues.is_empty());
     }
+
+    #[test]
+    fn apply_role_tool_defaults_reviewer_denies_write_tools() {
+        let toml = r#"
+[meta]
+plan = "test"
+total = 1
+
+[[task]]
+id = "T1"
+title = "Review code"
+role = "reviewer"
+depends_on = []
+"#;
+        let parsed: TasksFile = toml::from_str(toml).unwrap();
+        let task = &parsed.tasks[0];
+        let denied = task.denied_tools.as_ref().expect("reviewer should have denied_tools");
+        assert!(denied.contains(&"write_file".to_string()));
+        assert!(denied.contains(&"edit_file".to_string()));
+        assert!(!denied.contains(&"bash".to_string()));
+    }
+
+    #[test]
+    fn apply_role_tool_defaults_strategist_denies_destructive_tools() {
+        let toml = r#"
+[meta]
+plan = "test"
+total = 1
+
+[[task]]
+id = "T1"
+title = "Plan work"
+role = "strategist"
+depends_on = []
+"#;
+        let parsed: TasksFile = toml::from_str(toml).unwrap();
+        let task = &parsed.tasks[0];
+        let denied = task.denied_tools.as_ref().expect("strategist should have denied_tools");
+        assert!(denied.contains(&"write_file".to_string()));
+        assert!(denied.contains(&"edit_file".to_string()));
+        assert!(denied.contains(&"bash".to_string()));
+        assert!(denied.contains(&"run_tests".to_string()));
+    }
+
+    #[test]
+    fn apply_role_tool_defaults_scribe_denies_exec_tools() {
+        let toml = r#"
+[meta]
+plan = "test"
+total = 1
+
+[[task]]
+id = "T1"
+title = "Write docs"
+role = "scribe"
+depends_on = []
+"#;
+        let parsed: TasksFile = toml::from_str(toml).unwrap();
+        let task = &parsed.tasks[0];
+        let denied = task.denied_tools.as_ref().expect("scribe should have denied_tools");
+        assert!(denied.contains(&"bash".to_string()));
+        assert!(denied.contains(&"run_tests".to_string()));
+        // Scribe CAN write files.
+        assert!(!denied.contains(&"write_file".to_string()));
+        assert!(!denied.contains(&"edit_file".to_string()));
+    }
+
+    #[test]
+    fn apply_role_tool_defaults_implementer_has_no_denials() {
+        let toml = r#"
+[meta]
+plan = "test"
+total = 1
+
+[[task]]
+id = "T1"
+title = "Write code"
+role = "implementer"
+depends_on = []
+"#;
+        let parsed: TasksFile = toml::from_str(toml).unwrap();
+        let task = &parsed.tasks[0];
+        assert!(
+            task.denied_tools.is_none(),
+            "implementer should have no denied tools"
+        );
+    }
+
+    #[test]
+    fn apply_role_tool_defaults_auditor_gets_reviewer_profile() {
+        let toml = r#"
+[meta]
+plan = "test"
+total = 1
+
+[[task]]
+id = "T1"
+title = "Audit code"
+role = "auditor"
+depends_on = []
+"#;
+        let parsed: TasksFile = toml::from_str(toml).unwrap();
+        let task = &parsed.tasks[0];
+        let denied = task.denied_tools.as_ref().expect("auditor should have denied_tools");
+        assert!(denied.contains(&"write_file".to_string()));
+        assert!(denied.contains(&"edit_file".to_string()));
+    }
+
 }

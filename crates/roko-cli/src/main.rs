@@ -3544,16 +3544,20 @@ fn dashboard_page_slugs() -> Vec<&'static str> {
 
 fn load_startup_env_files() -> Result<Vec<(String, String)>> {
     let mut redactions = Vec::new();
+
+    // 1. Global: ~/.roko/.env — lower priority, does NOT override existing env vars.
     if let Some(home) = env::var_os("HOME") {
         let global_env = PathBuf::from(home).join(".roko").join(".env");
         if global_env.is_file() {
             redactions.extend(load_env_file(&global_env)?);
-            dotenvy::from_path_override(&global_env)
+            dotenvy::from_path(&global_env)
                 .with_context(|| format!("load {}", global_env.display()))?;
         }
     }
 
-    let local_env = PathBuf::from(".env");
+    // 2. Project-local: {workdir}/.roko/.env — higher priority, overrides existing vars.
+    //    At this point the CLI hasn't parsed yet, so workdir == cwd.
+    let local_env = PathBuf::from(".roko").join(".env");
     if local_env.is_file() {
         redactions.extend(load_env_file(&local_env)?);
         dotenvy::from_path_override(&local_env)

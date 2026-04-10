@@ -25,7 +25,7 @@ pub use memory::MemorySubstrate;
 pub use noop::{NoOpComposer, NoOpGate, NoOpPolicy, NoOpRouter, NoOpScorer};
 pub use roles::{
     IMPLEMENTER_TOOL_PROFILE, RESEARCHER_TOOL_PROFILE, REVIEWER_TOOL_PROFILE, RoleToolProfile,
-    RoleToolProfileKind, STRATEGIST_TOOL_PROFILE,
+    RoleToolProfileKind, SCRIBE_TOOL_PROFILE, STRATEGIST_TOOL_PROFILE, denied_tools_for_role,
 };
 pub use router::{FirstRouter, HighestScoreRouter, RoundRobinRouter};
 pub use scorer::{ConstScorer, MulScorer, SumScorer};

@@ -809,6 +809,40 @@ fn render_skill_context(skill: &Skill) -> String {
     parts.join("\n\n")
 }
 
+/// Render up to 3 prior skills into a "## Prior Experience" context section.
+///
+/// Follows the same pattern as `render_knowledge_context` — a markdown heading
+/// followed by numbered entries with key metadata so the agent can leverage
+/// successful approaches from prior tasks.
+fn render_prior_experience(skills: &[Skill]) -> String {
+    use std::fmt::Write as _;
+
+    let mut content = String::from("## Prior Experience\n\nThe following skills were successful in similar prior tasks:\n");
+    for (idx, skill) in skills.iter().enumerate() {
+        let _ = write!(
+            content,
+            "\n### {}. {} (success rate: {:.0}%)\n",
+            idx + 1,
+            skill.name,
+            (skill.success_rate.clamp(0.0, 1.0) * 100.0).round(),
+        );
+        let _ = writeln!(content, "Summary: {}", skill.summary);
+        if !skill.description.is_empty() {
+            let _ = writeln!(content, "Description: {}", skill.description);
+        }
+        if !skill.files.is_empty() {
+            let _ = writeln!(content, "Files: {}", skill.files.join(", "));
+        }
+        if !skill.pattern.is_empty() {
+            let _ = writeln!(content, "Pattern:\n{}", skill.pattern);
+        }
+        if !skill.prompt_template.is_empty() {
+            let _ = writeln!(content, "Template:\n{}", skill.prompt_template);
+        }
+    }
+    content
+}
+
 fn render_playbook_context(playbook: &Playbook) -> String {
     let mut parts = vec![
         format!("Name: {}", playbook.name),
@@ -6726,7 +6760,7 @@ impl PlanRunner {
             .unwrap_or_default();
         let task_tier_for_skill_query = task_def.as_ref().map(|td| td.tier.as_str()).unwrap_or("");
         let symbols_for_skill_query = extract_task_symbols(&task_text);
-        let skill_context_section = self
+        let prior_skills: Vec<_> = self
             .skill_library
             .query(
                 &task_files_for_skill_query,
@@ -6734,18 +6768,22 @@ impl PlanRunner {
                 &symbols_for_skill_query,
             )
             .into_iter()
-            .find(|skill| skill.success_rate > 0.5)
-            .map(|skill| {
-                let skill_text = render_skill_context(&skill);
-                let skill_text_len = skill_text.len();
-                (
-                    PromptSection::new("skill-library", skill_text)
-                        .with_priority(SectionPriority::Low)
-                        .with_placement(Placement::Middle)
-                        .with_hard_cap(1024),
-                    skill_text_len,
-                )
-            });
+            .filter(|skill| skill.success_rate > 0.5)
+            .take(3)
+            .collect();
+        let skill_context_section = if prior_skills.is_empty() {
+            None
+        } else {
+            let skill_text = render_prior_experience(&prior_skills);
+            let skill_text_len = skill_text.len();
+            Some((
+                PromptSection::new("skill-library", skill_text)
+                    .with_priority(SectionPriority::Low)
+                    .with_placement(Placement::Middle)
+                    .with_hard_cap(2048),
+                skill_text_len,
+            ))
+        };
 
         let playbook_context_section = match self.playbook.lookup(task).await {
             Ok(Some(playbook)) => {
