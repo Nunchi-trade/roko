@@ -7,12 +7,14 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use thiserror::Error;
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex as AsyncMutex;
 
+use crate::cfactor::compute_cfactor;
 use roko_core::metric::TaskMetric;
 
 use crate::cascade_router::CascadeRouter;
@@ -87,6 +89,8 @@ pub struct LearningPaths {
     pub task_metrics_jsonl: PathBuf,
     /// Append-only efficiency events JSONL file.
     pub efficiency_jsonl: PathBuf,
+    /// Append-only C-Factor history JSONL file.
+    pub cfactor_jsonl: PathBuf,
     /// Cascade router persisted observations JSON.
     pub cascade_router_json: PathBuf,
     /// Prompt experiment store JSON.
@@ -108,6 +112,7 @@ impl LearningPaths {
             playbook_rules_toml: root.join("playbook-rules.toml"),
             task_metrics_jsonl: root.join("task-metrics.jsonl"),
             efficiency_jsonl: root.join("efficiency.jsonl"),
+            cfactor_jsonl: root.join("c-factor.jsonl"),
             cascade_router_json: root.join("cascade-router.json"),
             experiments_json: root.join("experiments.json"),
             gate_thresholds_json: root.join("gate-thresholds.json"),
@@ -608,6 +613,8 @@ impl LearningRuntime {
                 compute_regression_report(&metrics_snapshot, &self.regression);
         }
 
+        self.append_cfactor_snapshot().await?;
+
         // ── Pattern mining ──────────────────────────────────────────────
         let actions = EpisodeActions::from_episode(&input.episode);
         if !actions.actions.is_empty() {
@@ -736,6 +743,14 @@ impl LearningRuntime {
         let bump = AffectEngine::queue_wait_arousal(queued_hours);
         (base + bump).clamp(-1.0, 1.0)
     }
+
+    /// Compute the current C-Factor snapshot and append it to the history log.
+    async fn append_cfactor_snapshot(&self) -> Result<(), LearningRuntimeError> {
+        let episodes = EpisodeLogger::read_all_lossy(&self.paths.episodes_jsonl).await?;
+        let snapshot = compute_cfactor(&episodes, Duration::from_secs(7 * 24 * 60 * 60));
+        append_cfactor_snapshot(&self.paths.cfactor_jsonl, &snapshot).await?;
+        Ok(())
+    }
 }
 
 /// Read optional string value from `episode.extra`.
@@ -828,6 +843,27 @@ async fn append_task_metric(path: &Path, metric: &TaskMetric) -> io::Result<()> 
     }
     let mut line =
         serde_json::to_string(metric).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    line.push('\n');
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .await?;
+    file.write_all(line.as_bytes()).await?;
+    file.sync_data().await?;
+    Ok(())
+}
+
+/// Append one `CFactor` snapshot to `path`.
+async fn append_cfactor_snapshot(
+    path: &Path,
+    snapshot: &crate::cfactor::CFactor,
+) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let mut line = serde_json::to_string(snapshot)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     line.push('\n');
     let mut file = OpenOptions::new()
         .create(true)
@@ -981,6 +1017,31 @@ mod tests {
         assert!(pad.contains_key("pleasure"));
         assert!(pad.contains_key("arousal"));
         assert!(pad.contains_key("dominance"));
+    }
+
+    #[tokio::test]
+    async fn completed_runs_append_cfactor_history() {
+        let tmp = TempDir::new().unwrap();
+        let runtime = LearningRuntime::open_under(tmp.path()).await.unwrap();
+
+        runtime
+            .record_completed_run(CompletedRunInput::from_episode(sample_episode(true)))
+            .await
+            .unwrap();
+        runtime
+            .record_completed_run(CompletedRunInput::from_episode(sample_episode(true)))
+            .await
+            .unwrap();
+
+        let cfactor_jsonl = std::fs::read_to_string(&runtime.paths().cfactor_jsonl).unwrap();
+        let snapshots: Vec<crate::cfactor::CFactor> = cfactor_jsonl
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("valid c-factor snapshot"))
+            .collect();
+
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[0].episode_count, 1);
+        assert_eq!(snapshots[1].episode_count, 2);
     }
 
     #[tokio::test]
