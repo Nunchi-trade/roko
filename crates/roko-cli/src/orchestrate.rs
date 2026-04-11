@@ -21,6 +21,12 @@ use bardo_runtime::process::ProcessSupervisor;
 use roko_agent::chat_types::FinishReason;
 use roko_agent::mcp::{McpConfig, McpServerConfig};
 use roko_agent::provider::{AgentOptions, create_agent_for_model};
+use roko_agent::task_runner::{
+    AnomalyDetector as RunnerAnomalyDetector, BudgetGuardrail as RunnerBudgetGuardrail,
+    CostTable as RunnerCostTable, ConductorBandit as RunnerConductorBandit,
+    EventBus as RunnerEventBus, ModelPricing as RunnerModelPricing, TaskRunner,
+    TaskRunnerError,
+};
 use roko_agent::translate::{ClaudeTranslator, RenderedTools, Translator};
 use roko_agent::{Agent, AgentResult, ClaudeCliAgent, ExecAgent};
 use roko_compose::{
@@ -258,6 +264,24 @@ fn mechanical_tier_model(tier_models: &HashMap<String, String>) -> String {
         .get("mechanical")
         .cloned()
         .unwrap_or_else(|| "claude-haiku-4-5".into())
+}
+
+fn task_runner_cost_table(resolved: &roko_core::agent::ResolvedModel) -> RunnerCostTable {
+    let mut cost_table = RunnerCostTable::default();
+
+    if let Some(profile) = resolved.profile.as_ref() {
+        cost_table.insert(
+            resolved.slug.clone(),
+            RunnerModelPricing {
+                input_per_m: profile.cost_input_per_m.unwrap_or(0.0),
+                output_per_m: profile.cost_output_per_m.unwrap_or(0.0),
+                cache_read_per_m: profile.cost_cache_read_per_m.unwrap_or(0.0),
+                cache_write_per_m: profile.cost_cache_write_per_m.unwrap_or(0.0),
+            },
+        );
+    }
+
+    cost_table
 }
 
 // ─── ContextAttributionTracker ────────────────────────────────────────────
@@ -7954,6 +7978,16 @@ impl PlanRunner {
             .map_err(|e| anyhow!("persist prompt: {e}"))?;
 
         // ── Run the agent with per-task model selection ─────────────
+        let ctx = ctx
+            .with_attr("task_id", task)
+            .with_attr(
+                "task_complexity",
+                task_def
+                    .as_ref()
+                    .map(|td| td.tier.as_str())
+                    .unwrap_or("focused"),
+            )
+            .with_attr("model_tier", Self::retry_model_tier_label(&selected_model));
         let result: AgentResult = if self.config.agent.command == "claude" {
             let task_role = task_def
                 .as_ref()
@@ -8002,7 +8036,50 @@ impl PlanRunner {
                 },
             )
             .map_err(|e| anyhow!("create agent for model {selected_model}: {e}"))?;
-            agent.run(&prompt, &ctx).await
+            let resolved = resolve_model(&roko_config, &selected_model);
+            let cost_table = task_runner_cost_table(&resolved);
+            let mut runner_budget = RunnerBudgetGuardrail::new(
+                self.config.budget.max_task_usd,
+                self.config.budget.max_session_usd,
+                self.config.budget.max_plan_usd,
+                f64::from(self.config.budget.warn_at_percent) / 100.0,
+            );
+            let task_spend = self.task_spent(plan_id, task);
+            let _ = runner_budget.record_cost(task_spend, "task");
+            let _ = runner_budget.record_cost(self.plan_costs.values().sum::<f64>(), "session");
+
+            let mut runner = TaskRunner {
+                agent,
+                event_bus: RunnerEventBus::new(16),
+                anomaly: RunnerAnomalyDetector::new(self.anomaly_detector.session_start_ms()),
+                budget: runner_budget,
+                conductor: RunnerConductorBandit::new(),
+                cost_table,
+                model_slug: resolved.slug.clone(),
+                provider_id: resolved.provider_kind.label().to_string(),
+                // Orchestrate still owns cross-attempt retry/escalation logic.
+                max_iterations: 1,
+            };
+            let task_result = runner.run_task(&prompt, &ctx).await.map_err(|err| match err {
+                TaskRunnerError::BudgetExhausted => anyhow!(
+                    "task {plan_id}/{task} budget exhausted while running {selected_model}"
+                ),
+                TaskRunnerError::Anomaly(anomaly) => anyhow!(
+                    "task {plan_id}/{task} anomaly detected while running {selected_model}: {anomaly:?}"
+                ),
+                TaskRunnerError::ModelEscalation => anyhow!(
+                    "task {plan_id}/{task} requested model escalation while running {selected_model}"
+                ),
+            })?;
+
+            let mut usage = task_result.total_usage;
+            usage.cost_usd = task_result.total_cost_usd as f32;
+            AgentResult {
+                output: task_result.output,
+                trace: Vec::new(),
+                usage,
+                success: task_result.gate_passed,
+            }
         } else {
             let task_role = task_def
                 .as_ref()
@@ -8022,7 +8099,51 @@ impl PlanRunner {
             for (k, v) in &self.config.agent.env {
                 agent = agent.with_env_var(k, v);
             }
-            agent.run(&prompt, &ctx).await
+            let mut runner_budget = RunnerBudgetGuardrail::new(
+                self.config.budget.max_task_usd,
+                self.config.budget.max_session_usd,
+                self.config.budget.max_plan_usd,
+                f64::from(self.config.budget.warn_at_percent) / 100.0,
+            );
+            let task_spend = self.task_spent(plan_id, task);
+            let _ = runner_budget.record_cost(task_spend, "task");
+            let _ = runner_budget.record_cost(self.plan_costs.values().sum::<f64>(), "session");
+
+            let mut runner = TaskRunner {
+                agent: Box::new(agent),
+                event_bus: RunnerEventBus::new(16),
+                anomaly: RunnerAnomalyDetector::new(self.anomaly_detector.session_start_ms()),
+                budget: runner_budget,
+                conductor: RunnerConductorBandit::new(),
+                cost_table: RunnerCostTable::default(),
+                model_slug: selected_model.clone(),
+                provider_id: self.provider_id_for_model(&selected_model),
+                // Orchestrate still owns cross-attempt retry/escalation logic.
+                max_iterations: 1,
+            };
+            let task_result = runner.run_task(&prompt, &ctx).await.map_err(|err| match err {
+                TaskRunnerError::BudgetExhausted => anyhow!(
+                    "task {plan_id}/{task} budget exhausted while running {}",
+                    self.config.agent.command
+                ),
+                TaskRunnerError::Anomaly(anomaly) => anyhow!(
+                    "task {plan_id}/{task} anomaly detected while running {}: {anomaly:?}",
+                    self.config.agent.command
+                ),
+                TaskRunnerError::ModelEscalation => anyhow!(
+                    "task {plan_id}/{task} requested model escalation while running {}",
+                    self.config.agent.command
+                ),
+            })?;
+
+            let mut usage = task_result.total_usage;
+            usage.cost_usd = task_result.total_cost_usd as f32;
+            AgentResult {
+                output: task_result.output,
+                trace: Vec::new(),
+                usage,
+                success: task_result.gate_passed,
+            }
         };
 
         self.record_turn_learning_feedback(&prompt, &selected_model, &result);
