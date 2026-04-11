@@ -209,6 +209,10 @@ pub(crate) fn parse_glm_response(json: &serde_json::Value) -> (String, Option<St
 #[must_use]
 pub fn parse_glm_metadata(json: &serde_json::Value) -> crate::translate::ResponseMetadata {
     crate::translate::ResponseMetadata {
+        model_used: json
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .map(|s| s.to_string()),
         content_filter: json
             .get("content_filter")
             .filter(|value| value.is_array())
