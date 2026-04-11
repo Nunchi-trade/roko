@@ -23,6 +23,8 @@
 pub mod anomaly;
 pub mod bandits;
 pub mod baseline;
+/// Budget tracking and enforcement guardrails for routing decisions.
+pub mod budget;
 pub mod cascade_router;
 pub mod cfactor;
 pub mod context_pack_cache;
