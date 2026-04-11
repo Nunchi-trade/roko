@@ -22,6 +22,7 @@
 use parking_lot::Mutex;
 use roko_core::OperatingFrequency;
 use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
+use roko_core::task::TaskCategory;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -151,10 +152,29 @@ impl ModelStats {
 /// Premium-tier roles get opus.
 fn default_role_model_table(model_slugs: &[String]) -> HashMap<AgentRole, String> {
     let mut table = HashMap::new();
+
+    // Research role → Perplexity Sonar when available, standard-tier fallback.
+    table.insert(
+        AgentRole::Researcher,
+        pick_static_slug(
+            model_slugs,
+            &[
+                "sonar-pro",
+                "sonar",
+                "kimi-k2.5",
+                "claude-sonnet-4-6",
+                "claude-sonnet-4-5",
+            ],
+        ),
+    );
+
     let all_roles: Vec<AgentRole> = std::iter::once(AgentRole::Conductor)
         .chain(AgentRole::ALL_AGENTS.iter().copied())
         .collect();
     for role in all_roles {
+        if table.contains_key(&role) {
+            continue;
+        }
         let slug = match role.model_tier() {
             ModelTier::Fast => pick_static_slug(model_slugs, &["claude-haiku-3-5"]),
             ModelTier::Premium => pick_static_slug(model_slugs, &["claude-opus-4"]),
@@ -668,11 +688,24 @@ impl CascadeRouter {
         cfactor: Option<&CFactor>,
         agent_id: Option<&str>,
     ) -> CascadeModel {
-        let slug = self
-            .role_table
-            .get(&ctx.role)
-            .cloned()
-            .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
+        // For research tasks, prefer Perplexity Sonar when available.
+        let slug = if ctx.task_category == TaskCategory::Research {
+            self.model_slugs
+                .iter()
+                .find(|s| s.as_str() == "sonar-pro" || s.as_str() == "sonar")
+                .cloned()
+                .unwrap_or_else(|| {
+                    self.role_table
+                        .get(&ctx.role)
+                        .cloned()
+                        .unwrap_or_else(|| "claude-sonnet-4-5".to_string())
+                })
+        } else {
+            self.role_table
+                .get(&ctx.role)
+                .cloned()
+                .unwrap_or_else(|| "claude-sonnet-4-5".to_string())
+        };
 
         let selected = self.bias_model_for_cfactor(ModelSpec::from_slug(&slug), cfactor, agent_id);
         let tier = slug_to_tier(&selected.slug);
@@ -1513,6 +1546,55 @@ mod tests {
 
         let stats = cascade.confidence_snapshot();
         assert_eq!(stats.get("claude-sonnet-4-5"), Some(&(1, 1)));
+    }
+
+    // ── cascade_perplexity: Researcher routes to sonar-pro ───────────────
+
+    #[test]
+    fn cascade_perplexity_researcher_routes_to_sonar_pro() {
+        let slugs = vec![
+            "sonar-pro".to_string(),
+            "sonar".to_string(),
+            "claude-haiku-3-5".to_string(),
+            "claude-sonnet-4-5".to_string(),
+        ];
+        let cascade = CascadeRouter::new(slugs);
+        let mut ctx = default_ctx();
+        ctx.role = AgentRole::Researcher;
+        ctx.task_category = TaskCategory::Research;
+
+        let result = cascade.route(&ctx);
+        assert_eq!(result.stage, CascadeStage::Static);
+        assert_eq!(result.primary.slug, "sonar-pro");
+    }
+
+    #[test]
+    fn cascade_perplexity_research_category_biases_any_role() {
+        let slugs = vec![
+            "sonar-pro".to_string(),
+            "claude-haiku-3-5".to_string(),
+            "claude-sonnet-4-5".to_string(),
+        ];
+        let cascade = CascadeRouter::new(slugs);
+        let mut ctx = default_ctx();
+        ctx.role = AgentRole::Implementer;
+        ctx.task_category = TaskCategory::Research;
+
+        let result = cascade.route(&ctx);
+        assert_eq!(result.primary.slug, "sonar-pro");
+    }
+
+    #[test]
+    fn cascade_perplexity_falls_back_to_standard_when_no_sonar() {
+        let cascade = CascadeRouter::new(test_slugs()); // no sonar in test_slugs
+        let mut ctx = default_ctx();
+        ctx.role = AgentRole::Researcher;
+        ctx.task_category = TaskCategory::Research;
+
+        let result = cascade.route(&ctx);
+        // No sonar available → standard tier fallback
+        assert_ne!(result.primary.slug, "sonar-pro");
+        assert_ne!(result.primary.slug, "sonar");
     }
 
     #[test]
