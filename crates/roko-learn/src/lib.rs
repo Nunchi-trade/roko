@@ -36,6 +36,7 @@ pub mod latency;
 pub mod model_router;
 pub mod pareto;
 pub mod pattern_discovery;
+pub mod quality_judge;
 pub mod playbook;
 pub mod playbook_rules;
 pub mod prompt_experiment;
