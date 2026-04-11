@@ -174,6 +174,35 @@ impl fmt::Display for ProviderError {
 
 impl std::error::Error for ProviderError {}
 
+/// Retry decision for a classified provider error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryAction {
+    /// Wait for the specified delay, then retry the same provider.
+    WaitAndRetry { delay_ms: u64 },
+    /// Try a different provider or backend.
+    TryFallback,
+    /// Retry with a smaller or shorter context.
+    TryWithSmallerContext,
+    /// Do not retry this error.
+    Skip,
+}
+
+/// Map a provider error class to a retry action.
+#[must_use]
+pub fn should_retry(error: &ProviderError) -> RetryAction {
+    match error {
+        ProviderError::RateLimit { retry_after_ms } => RetryAction::WaitAndRetry {
+            delay_ms: retry_after_ms.unwrap_or(5_000),
+        },
+        ProviderError::AuthFailure => RetryAction::Skip,
+        ProviderError::Timeout => RetryAction::TryFallback,
+        ProviderError::ServerError(_) => RetryAction::TryFallback,
+        ProviderError::ContentPolicy => RetryAction::Skip,
+        ProviderError::ContextOverflow => RetryAction::TryWithSmallerContext,
+        _ => RetryAction::TryFallback,
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum AgentCreationError {
     #[error("Missing API key: env var {0} not set")]
