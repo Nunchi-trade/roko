@@ -12,9 +12,10 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use roko_agent::gemini::GroundingMetadata;
 use roko_agent::perplexity::embed::PerplexityEmbedAgent;
 use roko_agent::perplexity::types::{PerplexityMetadata, SearchOptions};
-use roko_core::config::schema::PerplexityConfig;
+use roko_core::config::schema::{GeminiConfig, PerplexityConfig};
 
 fn research_dir(workdir: &Path) -> PathBuf {
     workdir.join(".roko").join("research")
@@ -311,6 +312,114 @@ pub fn build_research_prompt_perplexity(
     (prompt, search_opts)
 }
 
+/// Build a research prompt for Gemini grounding-backed research.
+///
+/// Returns the prompt and whether Google Search grounding should be enabled.
+#[must_use]
+pub fn build_research_prompt_gemini(
+    workdir: &Path,
+    topic: &str,
+    mode: ResearchMode,
+    gemini_config: &GeminiConfig,
+) -> (String, bool) {
+    let prompt = build_research_prompt(workdir, topic, "", mode);
+    let enable_grounding = gemini_config.grounding_model.is_some();
+    (prompt, enable_grounding)
+}
+
+/// Extract `(title, url)` citation pairs from Gemini grounding metadata.
+#[must_use]
+pub fn grounding_to_citations(meta: &GroundingMetadata) -> Vec<(String, String)> {
+    let mut citations = Vec::new();
+
+    if let Some(chunks) = &meta.grounding_chunks {
+        for chunk in chunks {
+            if let Some(web) = &chunk.web {
+                let citation = (web.title.clone(), web.uri.clone());
+                if !citations.contains(&citation) {
+                    citations.push(citation);
+                }
+            }
+        }
+    }
+
+    citations
+}
+
+/// Convert Gemini grounding metadata into the same markdown research shape
+/// used by search-grounded Perplexity research.
+pub fn save_research_with_grounding(
+    workdir: &Path,
+    topic: &str,
+    content: &str,
+    metadata: &GroundingMetadata,
+) -> Result<PathBuf> {
+    let mut doc = String::new();
+    writeln!(doc, "# Research: {topic}\n")?;
+    writeln!(
+        doc,
+        "> Generated via Gemini Google Search grounding — {}\n",
+        chrono::Local::now().format("%Y-%m-%d")
+    )?;
+    writeln!(doc, "{content}\n")?;
+
+    let citations = grounding_to_citations(metadata);
+    if !citations.is_empty() {
+        writeln!(doc, "\n## Sources\n")?;
+        for (i, (title, url)) in citations.iter().enumerate() {
+            writeln!(doc, "{}. [{title}]({url})", i + 1)?;
+        }
+    }
+
+    let has_queries = metadata
+        .web_search_queries
+        .as_ref()
+        .is_some_and(|queries| !queries.is_empty());
+    let has_supports = metadata
+        .grounding_supports
+        .as_ref()
+        .is_some_and(|supports| !supports.is_empty());
+
+    if has_queries || has_supports {
+        writeln!(doc, "\n## Search Context\n")?;
+
+        if let Some(queries) = &metadata.web_search_queries
+            && !queries.is_empty()
+        {
+            writeln!(doc, "### Queries\n")?;
+            for query in queries {
+                writeln!(doc, "- {query}")?;
+            }
+            writeln!(doc)?;
+        }
+
+        if let Some(supports) = &metadata.grounding_supports
+            && !supports.is_empty()
+        {
+            writeln!(doc, "### Supports\n")?;
+            for support in supports {
+                let refs = support
+                    .grounding_chunk_indices
+                    .iter()
+                    .map(|index| (index + 1).to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let segment = support.segment.text.trim();
+
+                if refs.is_empty() {
+                    writeln!(doc, "- {segment}")?;
+                } else {
+                    writeln!(doc, "- {segment} [{refs}]")?;
+                }
+            }
+        }
+    }
+
+    let path = research_dir(workdir).join(format!("{}.md", slug(topic)));
+    std::fs::write(&path, doc)?;
+    Ok(path)
+}
+
 /// Research mode determines what kind of output to produce.
 #[derive(Debug, Clone, Copy)]
 pub enum ResearchMode {
@@ -578,6 +687,81 @@ mod tests {
         );
         assert_eq!(opts.return_related_questions, Some(true));
         assert_eq!(opts.return_images, Some(false));
+    }
+
+    #[test]
+    fn research_gemini_grounding_prompt_enabled_when_model_configured() {
+        let cfg = GeminiConfig {
+            grounding_model: Some("gemini-3-flash-preview".to_string()),
+            ..Default::default()
+        };
+
+        let (prompt, enable_grounding) = build_research_prompt_gemini(
+            Path::new("/test"),
+            "rust async runtimes",
+            ResearchMode::Topic,
+            &cfg,
+        );
+
+        assert!(enable_grounding);
+        assert!(prompt.contains("rust async runtimes"));
+        assert!(prompt.contains("[AUTHOR-YEAR]"));
+    }
+
+    #[test]
+    fn research_gemini_grounding_saves_sources_and_supports() {
+        use roko_agent::gemini::{
+            GroundingChunk, GroundingMetadata, GroundingSupport, TextSegment, WebChunk,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        ensure_dirs(tmp.path()).unwrap();
+
+        let metadata = GroundingMetadata {
+            web_search_queries: Some(vec!["Rust async runtimes benchmark".to_string()]),
+            grounding_chunks: Some(vec![
+                GroundingChunk {
+                    web: Some(WebChunk {
+                        uri: "https://tokio.rs".to_string(),
+                        title: "Tokio".to_string(),
+                    }),
+                },
+                GroundingChunk {
+                    web: Some(WebChunk {
+                        uri: "https://docs.rs/async-std".to_string(),
+                        title: "async-std".to_string(),
+                    }),
+                },
+            ]),
+            grounding_supports: Some(vec![GroundingSupport {
+                segment: TextSegment {
+                    start_index: 0,
+                    end_index: 32,
+                    text: "Tokio remains the dominant runtime.".to_string(),
+                },
+                grounding_chunk_indices: vec![0],
+                confidence_scores: Some(vec![0.93]),
+            }]),
+            search_entry_point: None,
+        };
+
+        let path = save_research_with_grounding(
+            tmp.path(),
+            "rust async runtimes",
+            "Tokio remains the dominant runtime.",
+            &metadata,
+        )
+        .unwrap();
+
+        let doc = std::fs::read_to_string(&path).unwrap();
+        assert!(doc.contains("# Research: rust async runtimes"));
+        assert!(doc.contains("Gemini Google Search grounding"));
+        assert!(doc.contains("## Sources"));
+        assert!(doc.contains("[Tokio](https://tokio.rs)"));
+        assert!(doc.contains("[async-std](https://docs.rs/async-std)"));
+        assert!(doc.contains("## Search Context"));
+        assert!(doc.contains("Rust async runtimes benchmark"));
+        assert!(doc.contains("Tokio remains the dominant runtime. [1]"));
     }
 
     #[test]

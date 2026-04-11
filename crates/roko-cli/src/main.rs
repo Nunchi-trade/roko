@@ -1948,7 +1948,8 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
 async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
     use roko_cli::agent_exec::{AgentExecOpts, load_gateway_env, model_from_config, run_agent};
     use roko_cli::research::{
-        ResearchMode, build_research_prompt, build_research_prompt_perplexity,
+        ResearchMode, build_research_prompt, build_research_prompt_gemini,
+        build_research_prompt_perplexity, grounding_to_citations, save_research_with_grounding,
     };
 
     let workdir = resolve_workdir(cli);
@@ -2058,6 +2059,133 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
             }
 
             // If Perplexity is configured, use PerplexityChatAgent for search-grounded research.
+            if let Some(model_slug) = config.gemini.grounding_model.clone() {
+                use roko_agent::agent::Agent as _;
+                use roko_agent::gemini::{GeminiMetadata, GeminiNativeAgent};
+                use roko_agent::provider::AgentOptions;
+                use roko_core::Body;
+                use roko_core::config::schema::ModelProfile;
+
+                let (combined_prompt, enable_grounding) = build_research_prompt_gemini(
+                    &workdir,
+                    &topic,
+                    ResearchMode::Topic,
+                    &config.gemini,
+                );
+                if enable_grounding {
+                    let configured_profile = config.models.get(&model_slug).cloned();
+                    let provider = configured_profile
+                        .as_ref()
+                        .and_then(|profile| config.providers.get(&profile.provider))
+                        .or_else(|| config.providers.get("gemini"));
+                    let api_key_env = provider
+                        .and_then(|provider| provider.api_key_env.clone())
+                        .unwrap_or_else(|| "GEMINI_API_KEY".to_string());
+                    let api_key = std::env::var(&api_key_env)
+                        .with_context(|| format!("{api_key_env} not set"))?;
+                    let base_url = provider
+                        .and_then(|provider| provider.base_url.clone())
+                        .unwrap_or_else(|| "https://generativelanguage.googleapis.com".to_string());
+                    let timeout_ms = provider
+                        .and_then(|provider| provider.timeout_ms)
+                        .unwrap_or(300_000);
+
+                    let mut model_profile = configured_profile.unwrap_or_else(|| ModelProfile {
+                        provider: "gemini".to_string(),
+                        slug: model_slug.clone(),
+                        context_window: 1_048_576,
+                        max_output: Some(65_536),
+                        supports_tools: true,
+                        supports_thinking: true,
+                        supports_vision: false,
+                        supports_web_search: false,
+                        supports_mcp_tools: false,
+                        supports_partial: false,
+                        supports_grounding: true,
+                        supports_code_execution: false,
+                        supports_caching: false,
+                        provider_routing: None,
+                        tool_format: "gemini_native".to_string(),
+                        cost_input_per_m: None,
+                        cost_output_per_m: None,
+                        cost_input_per_m_high: None,
+                        cost_output_per_m_high: None,
+                        cost_cache_read_per_m: None,
+                        cost_cache_write_per_m: None,
+                        thinking_level: Some(config.gemini.thinking_level.clone()),
+                        max_tools: None,
+                        tokenizer_ratio: None,
+                        supports_search: false,
+                        supports_citations: false,
+                        supports_async: false,
+                        is_embedding_model: false,
+                        search_context_size: None,
+                        cost_per_request: None,
+                    });
+                    model_profile.supports_grounding = true;
+                    model_profile.tool_format = "gemini_native".to_string();
+                    if model_profile.thinking_level.is_none() {
+                        model_profile.thinking_level = Some(config.gemini.thinking_level.clone());
+                    }
+
+                    let agent = GeminiNativeAgent::new(
+                        api_key,
+                        base_url,
+                        model_profile,
+                        &AgentOptions {
+                            timeout_ms: Some(timeout_ms),
+                            effort: Some(config.gemini.thinking_level.clone()),
+                            name: format!("gemini:{model_slug}"),
+                            ..Default::default()
+                        },
+                    );
+
+                    let input = roko_core::Signal::builder(Kind::Prompt)
+                        .body(Body::text(&combined_prompt))
+                        .build();
+                    let result = agent.run(&input, &Context::now()).await;
+
+                    if !result.success {
+                        let err_text = result.output.body.as_text().unwrap_or("unknown error");
+                        anyhow::bail!("Gemini research failed: {err_text}");
+                    }
+
+                    let content = result
+                        .output
+                        .body
+                        .as_text()
+                        .map_err(|e| anyhow::anyhow!("response body not text: {e}"))?
+                        .to_string();
+
+                    let grounding = result
+                        .output
+                        .tag("gemini_meta")
+                        .and_then(|meta_json| {
+                            serde_json::from_str::<GeminiMetadata>(meta_json).ok()
+                        })
+                        .and_then(|metadata| metadata.grounding_metadata);
+
+                    let out_path = if let Some(grounding) = &grounding {
+                        save_research_with_grounding(&workdir, &topic, &content, grounding)?
+                    } else {
+                        let slug = topic.to_lowercase().replace(' ', "-");
+                        let out_path = workdir.join(".roko/research").join(format!("{slug}.md"));
+                        std::fs::write(&out_path, &content)
+                            .with_context(|| format!("write {}", out_path.display()))?;
+                        out_path
+                    };
+
+                    println!("📄 Saved: {}", out_path.display());
+                    if let Some(grounding) = &grounding {
+                        let citations = grounding_to_citations(grounding);
+                        if !citations.is_empty() {
+                            println!("📚 {} citations", citations.len());
+                        }
+                    }
+                    return Ok(0);
+                }
+            }
+
             if let Some(model_slug) = config.perplexity.default_search_model.clone() {
                 use roko_agent::agent::Agent as _;
                 use roko_agent::perplexity::PerplexityChatAgent;

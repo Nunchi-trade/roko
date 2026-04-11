@@ -390,12 +390,20 @@ impl Agent for GeminiNativeAgent {
         let mut usage = parsed.usage;
         usage.wall_ms = wall_ms;
 
-        let output = input
+        let mut builder = input
             .derive(Kind::AgentOutput, Body::text(&parsed.content))
             .provenance(Provenance::agent(&self.name))
             .tag("agent", &self.name)
-            .tag("model", &self.model.slug)
-            .build();
+            .tag("model", &self.model.slug);
+        if let Some(meta_json) = parsed
+            .metadata
+            .extra
+            .as_ref()
+            .and_then(|meta| serde_json::to_string(meta).ok())
+        {
+            builder = builder.tag("gemini_meta", &meta_json);
+        }
+        let output = builder.build();
 
         AgentResult::ok(output).with_usage(usage)
     }
@@ -698,7 +706,18 @@ mod tests {
                             "role": "model",
                             "parts": [{ "text": "native response" }]
                         },
-                        "finishReason": "STOP"
+                        "finishReason": "STOP",
+                        "groundingMetadata": {
+                            "webSearchQueries": ["inspect this crate"],
+                            "groundingChunks": [
+                                {
+                                    "web": {
+                                        "uri": "https://example.com/source",
+                                        "title": "Example Source"
+                                    }
+                                }
+                            ]
+                        }
                     }
                 ],
                 "usageMetadata": {
@@ -733,6 +752,16 @@ mod tests {
         );
         assert_eq!(result.usage.input_tokens, 11);
         assert_eq!(result.usage.output_tokens, 4);
+        let metadata: GeminiMetadata =
+            serde_json::from_str(result.output.tag("gemini_meta").expect("gemini_meta tag"))
+                .expect("deserialize gemini_meta");
+        assert_eq!(
+            metadata
+                .grounding_metadata
+                .and_then(|grounding| grounding.web_search_queries)
+                .expect("grounding queries"),
+            vec!["inspect this crate".to_string()]
+        );
 
         let captured = captured.lock().expect("capture lock");
         assert_eq!(
