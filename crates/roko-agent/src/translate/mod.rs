@@ -79,6 +79,21 @@ pub enum FinishReason {
     Error(String),
 }
 
+/// Normalize provider-specific finish reasons into canonical [`FinishReason`] values.
+#[must_use]
+pub fn normalize_finish_reason(raw: &str) -> FinishReason {
+    match raw {
+        "stop" | "end_turn" => FinishReason::Stop,
+        "length" | "max_tokens" => FinishReason::Length,
+        "tool_calls" | "tool_use" => FinishReason::ToolCalls,
+        "content_filter" | "sensitive" => FinishReason::ContentFilter,
+        "network_error" | "model_context_window_exceeded" => {
+            FinishReason::Error(raw.to_string())
+        }
+        other => FinishReason::Error(other.to_string()),
+    }
+}
+
 /// Bidirectional bridge between canonical tools and a backend's wire format.
 ///
 /// Implementors are sync and **pure**: given identical inputs they must
@@ -397,6 +412,30 @@ mod tests {
         assert_eq!(FinishReason::ToolCalls, FinishReason::ToolCalls);
         assert_eq!(FinishReason::ContentFilter, FinishReason::ContentFilter);
         assert_eq!(FinishReason::Error("boom".into()), FinishReason::Error("boom".into()));
+    }
+
+    #[test]
+    fn normalize_finish_reason_maps_provider_variants() {
+        assert_eq!(normalize_finish_reason("stop"), FinishReason::Stop);
+        assert_eq!(normalize_finish_reason("end_turn"), FinishReason::Stop);
+        assert_eq!(normalize_finish_reason("length"), FinishReason::Length);
+        assert_eq!(normalize_finish_reason("max_tokens"), FinishReason::Length);
+        assert_eq!(normalize_finish_reason("tool_calls"), FinishReason::ToolCalls);
+        assert_eq!(normalize_finish_reason("tool_use"), FinishReason::ToolCalls);
+        assert_eq!(normalize_finish_reason("content_filter"), FinishReason::ContentFilter);
+        assert_eq!(normalize_finish_reason("sensitive"), FinishReason::ContentFilter);
+        assert_eq!(
+            normalize_finish_reason("network_error"),
+            FinishReason::Error("network_error".into())
+        );
+        assert_eq!(
+            normalize_finish_reason("model_context_window_exceeded"),
+            FinishReason::Error("model_context_window_exceeded".into())
+        );
+        assert_eq!(
+            normalize_finish_reason("something_else"),
+            FinishReason::Error("something_else".into())
+        );
     }
 
     #[test]
