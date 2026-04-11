@@ -29,6 +29,7 @@
 
 use crate::PadState;
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
+use crate::token_counter::TokenCounter;
 use roko_core::tool::ToolDef;
 use roko_learn::section_effect::{PriorityChange, SectionEffectivenessRegistry};
 
@@ -63,6 +64,8 @@ pub struct SystemPromptBuilder {
     affect_state: Option<PadState>,
     /// Whether to insert cache alignment markers between tiers.
     cache_markers: bool,
+    /// Optional token budget enforced by [`build_with_counter`](Self::build_with_counter).
+    token_budget: Option<usize>,
     /// Learned section-effectiveness data scoped to one role.
     section_effectiveness: Option<SectionEffectivenessConfig>,
 }
@@ -112,6 +115,7 @@ impl SystemPromptBuilder {
             anti_patterns: Vec::new(),
             affect_state: None,
             cache_markers: false,
+            token_budget: None,
             section_effectiveness: None,
         }
     }
@@ -183,6 +187,13 @@ impl SystemPromptBuilder {
         self
     }
 
+    /// Enforce a token budget when building via [`build_with_counter`](Self::build_with_counter).
+    #[must_use]
+    pub const fn with_token_budget(mut self, token_budget: usize) -> Self {
+        self.token_budget = Some(token_budget);
+        self
+    }
+
     /// Apply learned section-effectiveness adjustments for `role`.
     #[must_use]
     pub fn with_section_effectiveness(
@@ -207,6 +218,72 @@ impl SystemPromptBuilder {
             self.build_sections(),
             self.cache_markers,
         ))
+    }
+
+    /// Build the final system prompt under the configured token budget.
+    ///
+    /// If no budget was configured with [`with_token_budget`](Self::with_token_budget),
+    /// this falls back to [`build`](Self::build).
+    #[must_use]
+    pub fn build_with_counter(&self, counter: &TokenCounter) -> String {
+        let Some(token_budget) = self.token_budget else {
+            return self.build();
+        };
+
+        let rendered_sections = self
+            .build_sections()
+            .into_iter()
+            .map(|section| RenderedSection {
+                rendered: render_section(&section),
+                section,
+            })
+            .collect::<Vec<_>>();
+
+        let mut kept = vec![None; rendered_sections.len()];
+        let mut selection_order = (0..rendered_sections.len()).collect::<Vec<_>>();
+        selection_order.sort_by(|&a, &b| {
+            rendered_sections[b]
+                .section
+                .priority
+                .cmp(&rendered_sections[a].section.priority)
+                .then_with(|| {
+                    rendered_sections[a]
+                        .section
+                        .cache_layer
+                        .cmp(&rendered_sections[b].section.cache_layer)
+                })
+                .then_with(|| a.cmp(&b))
+        });
+
+        for index in selection_order {
+            let rendered = &rendered_sections[index].rendered;
+            if candidate_fits(
+                &rendered_sections,
+                &kept,
+                index,
+                rendered,
+                self.cache_markers,
+                token_budget,
+                counter,
+            ) {
+                kept[index] = Some(rendered.clone());
+                continue;
+            }
+
+            if rendered_sections[index].section.priority == SectionPriority::Critical {
+                kept[index] = truncate_to_fit(
+                    &rendered_sections,
+                    &kept,
+                    index,
+                    rendered,
+                    self.cache_markers,
+                    token_budget,
+                    counter,
+                );
+            }
+        }
+
+        assemble_selected_sections(&rendered_sections, &kept, self.cache_markers)
     }
 
     /// Build the system prompt as a vector of [`PromptSection`]s.
@@ -403,6 +480,12 @@ const fn section_priority_from_u8(priority: u8) -> SectionPriority {
     }
 }
 
+#[derive(Clone)]
+struct RenderedSection {
+    section: PromptSection,
+    rendered: String,
+}
+
 fn sort_sections(sections: &mut [PromptSection]) {
     sections.sort_by(|a, b| {
         a.cache_layer
@@ -414,25 +497,18 @@ fn sort_sections(sections: &mut [PromptSection]) {
 fn assemble_sections(mut sections: Vec<PromptSection>, cache_markers: bool) -> String {
     sort_sections(&mut sections);
 
-    let mut parts = Vec::with_capacity(sections.len().saturating_add(2));
-
-    for (index, section) in sections.iter().enumerate() {
-        parts.push(render_section(section));
-
-        if !cache_markers {
-            continue;
-        }
-
-        let current = section.cache_layer;
-        let next = sections.get(index + 1).map(|section| section.cache_layer);
-        if next != Some(current) {
-            if let Some(marker) = cache_marker(current) {
-                parts.push(marker.to_string());
-            }
-        }
-    }
-
-    parts.join("\n\n")
+    let rendered = sections
+        .into_iter()
+        .map(|section| RenderedSection {
+            rendered: render_section(&section),
+            section,
+        })
+        .collect::<Vec<_>>();
+    let kept = rendered
+        .iter()
+        .map(|section| Some(section.rendered.clone()))
+        .collect::<Vec<_>>();
+    assemble_selected_sections(&rendered, &kept, cache_markers)
 }
 
 fn render_section(section: &PromptSection) -> String {
@@ -446,6 +522,100 @@ fn render_section(section: &PromptSection) -> String {
         "task_context" => format!("## Current Task\n\n{}", section.content),
         _ => section.content.clone(),
     }
+}
+
+fn assemble_selected_sections(
+    sections: &[RenderedSection],
+    kept: &[Option<String>],
+    cache_markers: bool,
+) -> String {
+    let selected_indices = kept
+        .iter()
+        .enumerate()
+        .filter_map(|(index, rendered)| rendered.as_ref().map(|_| index))
+        .collect::<Vec<_>>();
+
+    let mut parts = Vec::with_capacity(selected_indices.len().saturating_mul(2));
+
+    for (position, index) in selected_indices.iter().copied().enumerate() {
+        if let Some(rendered) = &kept[index] {
+            parts.push(rendered.clone());
+        }
+
+        if !cache_markers {
+            continue;
+        }
+
+        let current = sections[index].section.cache_layer;
+        let next = selected_indices
+            .get(position + 1)
+            .map(|next_index| sections[*next_index].section.cache_layer);
+        if next != Some(current) {
+            if let Some(marker) = cache_marker(current) {
+                parts.push(marker.to_string());
+            }
+        }
+    }
+
+    normalize_for_caching(&parts.join("\n\n"))
+}
+
+fn candidate_fits(
+    sections: &[RenderedSection],
+    kept: &[Option<String>],
+    index: usize,
+    candidate: &str,
+    cache_markers: bool,
+    token_budget: usize,
+    counter: &TokenCounter,
+) -> bool {
+    let mut next = kept.to_vec();
+    next[index] = Some(candidate.to_string());
+    counter.count(&assemble_selected_sections(sections, &next, cache_markers)) <= token_budget
+}
+
+fn truncate_to_fit(
+    sections: &[RenderedSection],
+    kept: &[Option<String>],
+    index: usize,
+    rendered: &str,
+    cache_markers: bool,
+    token_budget: usize,
+    counter: &TokenCounter,
+) -> Option<String> {
+    let mut boundaries = rendered
+        .char_indices()
+        .map(|(boundary, _)| boundary)
+        .collect::<Vec<_>>();
+    boundaries.push(rendered.len());
+
+    let mut low = 0usize;
+    let mut high = boundaries.len();
+    let mut best = None;
+
+    while low < high {
+        let mid = (low + high) / 2;
+        let candidate = &rendered[..boundaries[mid]];
+
+        if !candidate.is_empty()
+            && candidate_fits(
+                sections,
+                kept,
+                index,
+                candidate,
+                cache_markers,
+                token_budget,
+                counter,
+            )
+        {
+            best = Some(candidate.to_string());
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+
+    best
 }
 
 const fn cache_marker(layer: CacheLayer) -> Option<&'static str> {
@@ -985,5 +1155,50 @@ mod tests {
 
         assert_eq!(prompt_a, prompt_b);
         assert!(prompt_a.contains("bash, read_file, write_file"));
+    }
+
+    #[test]
+    fn budget_enforcement_never_exceeds_token_budget() {
+        let counter = TokenCounter::Heuristic {
+            chars_per_token: 1.0,
+        };
+        let builder = SystemPromptBuilder::new("ROLE")
+            .with_conventions("HIGH")
+            .with_tools("normal tools that should be dropped")
+            .with_task("critical task")
+            .with_token_budget(70);
+
+        let prompt = builder.build_with_counter(&counter);
+
+        assert!(
+            counter.count(&prompt) <= 70,
+            "prompt exceeded budget: {} > 70",
+            counter.count(&prompt)
+        );
+        assert!(prompt.contains("ROLE"));
+        assert!(prompt.contains("HIGH"));
+        assert!(prompt.contains("critical task"));
+        assert!(!prompt.contains("normal tools"));
+    }
+
+    #[test]
+    fn budget_enforcement_truncates_critical_sections_to_fit() {
+        let counter = TokenCounter::Heuristic {
+            chars_per_token: 1.0,
+        };
+        let builder = SystemPromptBuilder::new("ROLE")
+            .with_task("task details that are too long for the remaining budget")
+            .with_token_budget(24);
+
+        let prompt = builder.build_with_counter(&counter);
+
+        assert!(
+            counter.count(&prompt) <= 24,
+            "prompt exceeded budget: {} > 24",
+            counter.count(&prompt)
+        );
+        assert!(prompt.contains("ROLE"));
+        assert!(prompt.contains("## Current Task"));
+        assert!(!prompt.contains("remaining budget"));
     }
 }
