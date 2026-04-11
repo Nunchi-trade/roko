@@ -13,7 +13,7 @@
 //! | 6. Anti-patterns | What NOT to do | Session (semi-stable) |
 //! | 7. Affect guidance | Emotional tone and focus | Dynamic |
 //!
-//! The builder emits sections in this exact order, with optional cache
+//! The builder emits sections in cache-layer order, with optional cache
 //! alignment markers between stability tiers. Layers 1 + 2 + 5 form the
 //! prefix-cacheable "system" tier; layers 3 + 6 form the "session" tier;
 //! layer 4 is per-task; layer 7 is dynamic tone/focus guidance.
@@ -176,79 +176,11 @@ impl SystemPromptBuilder {
 
     /// Build the final system prompt as a single string.
     ///
-    /// Layers are emitted in order 1-7, with cache markers between
+    /// Sections are emitted in cache-layer order, with markers between
     /// stability tiers if enabled. Empty layers are skipped.
     #[must_use]
     pub fn build(&self) -> String {
-        let mut parts: Vec<String> = Vec::with_capacity(10);
-
-        // ── Layer 1: Role Identity (System tier) ──
-        parts.push(self.role_identity.clone());
-
-        // ── Layer 2: Conventions (System tier) ──
-        if let Some(ref conv) = self.conventions {
-            if !conv.is_empty() {
-                parts.push(format!("## Project Conventions\n\n{conv}"));
-            }
-        }
-
-        // ── Layer 5: Tool Instructions (System tier — grouped with 1+2 for cache) ──
-        if let Some(ref tools) = self.tools {
-            if !tools.is_empty() {
-                parts.push(format!("## Tool Instructions\n\n{tools}"));
-            }
-        }
-
-        // Cache break: end of System tier.
-        if self.cache_markers {
-            parts.push("<!-- cache:system -->".to_string());
-        }
-
-        // ── Layer 3: Domain Context (Session tier) ──
-        if let Some(ref domain) = self.domain {
-            if !domain.is_empty() {
-                parts.push(format!("## Domain Context\n\n{domain}"));
-            }
-        }
-
-        // ── Layer 3b: Relevant Context (Session tier) ──
-        if let Some(ref context) = self.context {
-            if !context.is_empty() {
-                parts.push(format!("## Relevant Context\n\n{context}"));
-            }
-        }
-
-        // ── Layer 6: Anti-Patterns (Session tier — grouped with 3) ──
-        if !self.anti_patterns.is_empty() {
-            let mut anti = String::from("## Anti-Patterns\n\nDo NOT:\n");
-            for pattern in &self.anti_patterns {
-                anti.push_str("- ");
-                anti.push_str(pattern);
-                anti.push('\n');
-            }
-            parts.push(anti);
-        }
-
-        // ── Layer 7: Affect Guidance (Dynamic tier) ──
-        if let Some(affect) = self.affect_guidance() {
-            parts.push(format!("## Affect Guidance\n\n{affect}"));
-        }
-
-        // Cache break: end of Session tier.
-        if self.cache_markers
-            && (self.domain.is_some() || self.context.is_some() || !self.anti_patterns.is_empty())
-        {
-            parts.push("<!-- cache:session -->".to_string());
-        }
-
-        // ── Layer 4: Task Context (Task tier — most volatile) ──
-        if let Some(ref task) = self.task {
-            if !task.is_empty() {
-                parts.push(format!("## Current Task\n\n{task}"));
-            }
-        }
-
-        parts.join("\n\n")
+        assemble_sections(self.build_sections(), self.cache_markers)
     }
 
     /// Build the system prompt as a vector of [`PromptSection`]s.
@@ -367,6 +299,7 @@ impl SystemPromptBuilder {
             }
         }
 
+        sort_sections(&mut sections);
         sections
     }
 
@@ -444,6 +377,59 @@ const fn section_priority_from_u8(priority: u8) -> SectionPriority {
     }
 }
 
+fn sort_sections(sections: &mut [PromptSection]) {
+    sections.sort_by(|a, b| {
+        a.cache_layer
+            .cmp(&b.cache_layer)
+            .then_with(|| b.priority.cmp(&a.priority))
+    });
+}
+
+fn assemble_sections(mut sections: Vec<PromptSection>, cache_markers: bool) -> String {
+    sort_sections(&mut sections);
+
+    let mut parts = Vec::with_capacity(sections.len().saturating_add(2));
+
+    for (index, section) in sections.iter().enumerate() {
+        parts.push(render_section(section));
+
+        if !cache_markers {
+            continue;
+        }
+
+        let current = section.cache_layer;
+        let next = sections.get(index + 1).map(|section| section.cache_layer);
+        if next != Some(current) {
+            if let Some(marker) = cache_marker(current) {
+                parts.push(marker.to_string());
+            }
+        }
+    }
+
+    parts.join("\n\n")
+}
+
+fn render_section(section: &PromptSection) -> String {
+    match section.name.as_str() {
+        "role_identity" => section.content.clone(),
+        "conventions" => format!("## Project Conventions\n\n{}", section.content),
+        "tool_instructions" => format!("## Tool Instructions\n\n{}", section.content),
+        "domain_context" => format!("## Domain Context\n\n{}", section.content),
+        "anti_patterns" => format!("## Anti-Patterns\n\n{}", section.content),
+        "affect_guidance" => format!("## Affect Guidance\n\n{}", section.content),
+        "task_context" => format!("## Current Task\n\n{}", section.content),
+        _ => section.content.clone(),
+    }
+}
+
+const fn cache_marker(layer: CacheLayer) -> Option<&'static str> {
+    match layer {
+        CacheLayer::Role => Some("<!-- cache:system -->"),
+        CacheLayer::Workspace => Some("<!-- cache:session -->"),
+        CacheLayer::Plan | CacheLayer::Volatile => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -500,20 +486,17 @@ mod tests {
         let pos_domain = prompt.find("LAYER3_DOMAIN").unwrap();
         let pos_context = prompt.find("LAYER3B_CONTEXT").unwrap();
         let pos_anti = prompt.find("LAYER6_ANTI").unwrap();
-        let pos_affect = prompt.find("time pressure").unwrap();
         let pos_task = prompt.find("LAYER4_TASK").unwrap();
+        let pos_affect = prompt.find("time pressure").unwrap();
 
-        // Order: role(1) -> conv(2) -> tools(5) -> domain(3) -> context(3b) -> anti(6) -> affect(7) -> task(4)
+        // Cache order: role -> workspace -> plan -> volatile.
         assert!(pos_role < pos_conv, "role before conventions");
         assert!(pos_conv < pos_tools, "conventions before tools");
         assert!(pos_tools < pos_domain, "tools before domain");
         assert!(pos_domain < pos_context, "domain before context");
         assert!(pos_context < pos_anti, "context before anti-patterns");
-        assert!(
-            pos_anti < pos_affect,
-            "anti-patterns before affect guidance"
-        );
-        assert!(pos_affect < pos_task, "affect guidance before task");
+        assert!(pos_anti < pos_task, "workspace sections before task");
+        assert!(pos_task < pos_affect, "task before affect guidance");
     }
 
     #[test]
@@ -610,16 +593,16 @@ mod tests {
         assert_eq!(sections[5].cache_layer, CacheLayer::Workspace);
         assert_eq!(sections[5].placement, Placement::End);
 
-        // Layer 7: affect_guidance
-        assert_eq!(sections[6].name, "affect_guidance");
-        assert_eq!(sections[6].priority, SectionPriority::Normal);
-        assert_eq!(sections[6].cache_layer, CacheLayer::Volatile);
+        // Layer 4: task_context
+        assert_eq!(sections[6].name, "task_context");
+        assert_eq!(sections[6].priority, SectionPriority::Critical);
+        assert_eq!(sections[6].cache_layer, CacheLayer::Plan);
         assert_eq!(sections[6].placement, Placement::End);
 
-        // Layer 4: task_context
-        assert_eq!(sections[7].name, "task_context");
-        assert_eq!(sections[7].priority, SectionPriority::Critical);
-        assert_eq!(sections[7].cache_layer, CacheLayer::Plan);
+        // Layer 7: affect_guidance
+        assert_eq!(sections[7].name, "affect_guidance");
+        assert_eq!(sections[7].priority, SectionPriority::Normal);
+        assert_eq!(sections[7].cache_layer, CacheLayer::Volatile);
         assert_eq!(sections[7].placement, Placement::End);
     }
 
@@ -792,6 +775,42 @@ mod tests {
         assert!(prompt.contains("<!-- cache:system -->"));
         // No session marker because domain and anti_patterns are empty.
         assert!(!prompt.contains("<!-- cache:session -->"));
+    }
+
+    #[test]
+    fn section_cache_order_keeps_stable_sections_before_task_content() {
+        let sections = SystemPromptBuilder::new("Role")
+            .with_conventions("Conv")
+            .with_domain("Domain")
+            .with_task("Task")
+            .with_tools("Tools")
+            .with_affect_state(Some(PadState::new(0.0, 0.8, 0.0)))
+            .build_sections();
+
+        let ordered: Vec<_> = sections.iter().map(|section| section.name.as_str()).collect();
+        assert_eq!(
+            ordered,
+            vec![
+                "role_identity",
+                "conventions",
+                "tool_instructions",
+                "domain_context",
+                "task_context",
+                "affect_guidance",
+            ]
+        );
+
+        let prompt = SystemPromptBuilder::new("Role")
+            .with_conventions("Conv")
+            .with_domain("Domain")
+            .with_task("Task")
+            .with_tools("Tools")
+            .with_affect_state(Some(PadState::new(0.0, 0.8, 0.0)))
+            .build();
+
+        assert!(prompt.find("Role").unwrap() < prompt.find("Task").unwrap());
+        assert!(prompt.find("Domain").unwrap() < prompt.find("Task").unwrap());
+        assert!(prompt.find("Task").unwrap() < prompt.find("time pressure").unwrap());
     }
 
     #[test]
