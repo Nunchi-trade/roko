@@ -90,6 +90,72 @@ pub struct ProviderHealth {
     pub failure_window: Vec<FailureRecord>,
 }
 
+impl ProviderHealth {
+    /// Record a successful request.
+    ///
+    /// A successful probe from `HalfOpen` closes the circuit again.
+    pub fn record_success(&mut self) {
+        self.total_requests = self.total_requests.saturating_add(1);
+        self.consecutive_failures = 0;
+        self.cooldown_until = None;
+        if self.state == CircuitState::HalfOpen {
+            self.state = CircuitState::Closed;
+        }
+    }
+
+    /// Record a failed request and update the circuit state.
+    pub fn record_failure(&mut self, error: ErrorClass, now_ms: i64) {
+        self.total_requests = self.total_requests.saturating_add(1);
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        self.total_failures = self.total_failures.saturating_add(1);
+        self.last_failure_at = Some(now_ms);
+        self.failure_window.push(FailureRecord {
+            timestamp_ms: now_ms,
+            error_class: error,
+        });
+        if self.failure_window.len() > 20 {
+            self.failure_window.remove(0);
+        }
+
+        // Trip to Open after 3 consecutive failures.
+        if self.consecutive_failures >= 3 {
+            self.state = CircuitState::Open;
+            self.cooldown_until = Some(now_ms + self.cooldown_ms(error));
+        }
+    }
+
+    /// Return whether the provider can receive a request at `now_ms`.
+    ///
+    /// When an open circuit's cooldown expires, the state advances to
+    /// `HalfOpen` so the next request can act as a probe.
+    pub fn is_available(&mut self, now_ms: i64) -> bool {
+        match self.state {
+            CircuitState::Closed => true,
+            CircuitState::Open => {
+                if let Some(until) = self.cooldown_until {
+                    if now_ms >= until {
+                        self.state = CircuitState::HalfOpen;
+                        return true;
+                    }
+                }
+                false
+            }
+            CircuitState::HalfOpen => true,
+        }
+    }
+
+    /// Error-class-specific cooldown in milliseconds.
+    fn cooldown_ms(&self, error: ErrorClass) -> i64 {
+        match error {
+            ErrorClass::RateLimit => 5_000,
+            ErrorClass::Timeout => 10_000,
+            ErrorClass::ServerError => 30_000,
+            ErrorClass::AuthFailure => 300_000,
+            _ => 5_000,
+        }
+    }
+}
+
 // ─── HealthState ─────────────────────────────────────────────────────────────
 
 /// Circuit-breaker state for a single provider.
@@ -547,5 +613,66 @@ mod tests {
         let decoded_state: CircuitState =
             serde_json::from_str(&state_json).expect("deserialize state");
         assert_eq!(decoded_state, CircuitState::Open);
+    }
+
+    /// Three consecutive failures trip the circuit to Open, and cooldown
+    /// expiry advances it to HalfOpen.
+    #[test]
+    fn provider_health_circuit_breaker_transitions() {
+        let mut health = ProviderHealth {
+            provider_id: "openai".to_owned(),
+            state: CircuitState::Closed,
+            consecutive_failures: 0,
+            total_requests: 0,
+            total_failures: 0,
+            last_failure_at: None,
+            cooldown_until: None,
+            failure_window: Vec::new(),
+        };
+
+        health.record_failure(ErrorClass::Timeout, 1_000);
+        health.record_failure(ErrorClass::Timeout, 2_000);
+        assert_eq!(health.state, CircuitState::Closed);
+        assert!(health.is_available(2_500));
+
+        health.record_failure(ErrorClass::Timeout, 3_000);
+        assert_eq!(health.state, CircuitState::Open);
+        assert_eq!(health.cooldown_until, Some(13_000));
+        assert!(!health.is_available(12_999));
+        assert!(health.is_available(13_000));
+        assert_eq!(health.state, CircuitState::HalfOpen);
+
+        health.record_success();
+        assert_eq!(health.state, CircuitState::Closed);
+        assert_eq!(health.consecutive_failures, 0);
+    }
+
+    /// Error classes map to distinct cooldown durations.
+    #[test]
+    fn provider_health_circuit_breaker_cooldowns() {
+        let mut health = ProviderHealth {
+            provider_id: "anthropic".to_owned(),
+            state: CircuitState::Closed,
+            consecutive_failures: 0,
+            total_requests: 0,
+            total_failures: 0,
+            last_failure_at: None,
+            cooldown_until: None,
+            failure_window: Vec::new(),
+        };
+
+        health.record_failure(ErrorClass::RateLimit, 10);
+        health.record_failure(ErrorClass::RateLimit, 20);
+        health.record_failure(ErrorClass::RateLimit, 30);
+        assert_eq!(health.cooldown_until, Some(5_030));
+
+        health.state = CircuitState::Closed;
+        health.consecutive_failures = 0;
+        health.cooldown_until = None;
+
+        health.record_failure(ErrorClass::AuthFailure, 100);
+        health.record_failure(ErrorClass::AuthFailure, 200);
+        health.record_failure(ErrorClass::AuthFailure, 300);
+        assert_eq!(health.cooldown_until, Some(300_300));
     }
 }
