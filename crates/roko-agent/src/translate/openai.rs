@@ -108,7 +108,12 @@ fn render_tool(t: &ToolDef) -> serde_json::Value {
         }),
         ToolKind::WebSearch => serde_json::json!({
             "type": "web_search",
-            "web_search": t.parameters.as_value(),
+            "web_search": {
+                "enable": true,
+                "search_engine": "search_std",
+                "count": 10,
+                "content_size": "high",
+            },
         }),
         ToolKind::Retrieval => serde_json::json!({
             "type": "retrieval",
@@ -244,7 +249,7 @@ mod tests {
     }
 
     #[test]
-    fn render_extended_tools_mixed_function_and_web_search() {
+    fn glm_web_search_render() {
         let tools = [
             tool("read_file", "Read a file"),
             ToolDef::new(
@@ -252,11 +257,7 @@ mod tests {
                 "Search the web",
                 ToolCategory::Network,
                 ToolPermission::networked(),
-            )
-            .with_parameters(ToolSchema::from_value(serde_json::json!({
-                "enable": true,
-                "search_engine": "bing"
-            }))),
+            ),
         ];
 
         let rendered = OpenAiTranslator.render_tools(&tools);
@@ -269,7 +270,9 @@ mod tests {
         assert_eq!(arr[0]["function"]["name"], "read_file");
         assert_eq!(arr[1]["type"], "web_search");
         assert_eq!(arr[1]["web_search"]["enable"], true);
-        assert_eq!(arr[1]["web_search"]["search_engine"], "bing");
+        assert_eq!(arr[1]["web_search"]["search_engine"], "search_std");
+        assert_eq!(arr[1]["web_search"]["count"], 10);
+        assert_eq!(arr[1]["web_search"]["content_size"], "high");
     }
 
     #[test]
