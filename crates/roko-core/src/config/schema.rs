@@ -665,7 +665,46 @@ where
 
 // ---- [project] -----------------------------------------------------------
 
-/// A single provider entry from `[providers.*]`.
+/// Provider registry entry for `[providers.<name>]`.
+///
+/// A provider describes where requests go and how the runtime talks to that
+/// endpoint. Use it to capture auth, transport, and provider-specific limits
+/// without hardcoding them into Rust.
+///
+/// Fields and defaults:
+/// - `kind` (required): protocol family, such as `anthropic_api`,
+///   `claude_cli`, `openai_compat`, or `cursor_acp`
+/// - `base_url`: optional HTTP endpoint for HTTP-based providers
+/// - `api_key_env`: optional environment variable name that holds the API key
+/// - `command`: optional CLI binary name for subprocess providers
+/// - `args`: optional CLI arguments for subprocess providers
+/// - `timeout_ms`: optional request or subprocess timeout
+/// - `extra_headers`: optional HTTP headers to inject on outbound requests
+/// - `max_concurrent`: optional concurrency limit for this provider
+///
+/// Defaults:
+/// - `kind`: no default, must be set explicitly
+/// - `base_url`: `None`
+/// - `api_key_env`: `None`
+/// - `command`: `None`
+/// - `args`: `None`
+/// - `timeout_ms`: `None`
+/// - `extra_headers`: `None`
+/// - `max_concurrent`: `None`
+///
+/// Examples:
+/// ```toml
+/// [providers.anthropic]
+/// kind = "anthropic_api"
+/// base_url = "https://api.anthropic.com"
+/// api_key_env = "ANTHROPIC_API_KEY"
+/// timeout_ms = 120000
+///
+/// [providers.claude_cli]
+/// kind = "claude_cli"
+/// command = "claude"
+/// args = ["--print", "--output-format", "stream-json"]
+/// ```
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProviderConfig {
@@ -704,7 +743,51 @@ impl ProviderConfig {
     }
 }
 
-/// A single model entry from `[models.*]`.
+/// Model registry entry for `[models.<name>]`.
+///
+/// A model binds a logical model name to a provider entry and the concrete
+/// API slug that gets sent on the wire. This is the layer that carries model
+/// capabilities and cost metadata, while `provider` points to the transport.
+///
+/// Fields and defaults:
+/// - `provider` (required): key into `[providers.*]`
+/// - `slug` (required): model ID sent to the provider API
+/// - `context_window`: token window size, defaults to `128_000`
+/// - `max_output`: optional output-token cap
+/// - `supports_tools`: defaults to `true`
+/// - `supports_thinking`: defaults to `false`
+/// - `supports_vision`: defaults to `false`
+/// - `supports_web_search`: defaults to `false`
+/// - `supports_mcp_tools`: defaults to `false`
+/// - `supports_partial`: defaults to `false`
+/// - `tool_format`: tool wire format, defaults to `"openai_json"`
+/// - `cost_input_per_m`: optional input-token cost per million tokens
+/// - `cost_output_per_m`: optional output-token cost per million tokens
+/// - `cost_cache_read_per_m`: optional cache-read cost per million tokens
+/// - `cost_cache_write_per_m`: optional cache-write cost per million tokens
+/// - `max_tools`: optional cap before tool behavior degrades
+/// - `tokenizer_ratio`: optional ratio versus OpenAI `o200k_base`
+///
+/// Examples:
+/// ```toml
+/// [models.glm-5-1]
+/// provider = "zai"
+/// slug = "glm-5.1"
+/// context_window = 200000
+/// max_output = 131072
+/// supports_thinking = true
+/// supports_web_search = true
+/// tool_format = "openai_json"
+/// cost_input_per_m = 1.40
+/// cost_output_per_m = 4.40
+///
+/// [models.claude-opus]
+/// provider = "anthropic"
+/// slug = "claude-opus-4-6"
+/// context_window = 200000
+/// supports_tools = true
+/// tool_format = "anthropic_blocks"
+/// ```
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModelProfile {
