@@ -24,12 +24,14 @@ use crate::translate::{BackendResponse, RenderedTools, SessionState, Translator}
 use crate::usage::Usage;
 
 pub mod agent_wrapper;
+pub mod backends;
 pub mod checkpoint;
 pub mod max_iter;
 pub mod prune;
 pub mod result_msg;
 
 pub use agent_wrapper::ToolLoopAgent;
+pub use backends::OpenAiCompatBackend;
 pub use checkpoint::Checkpoint;
 pub use max_iter::DEFAULT_MAX_ITERATIONS;
 pub use prune::DEFAULT_CONTEXT_TOKEN_LIMIT;
