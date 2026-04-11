@@ -26,7 +26,8 @@ use crate::costs_db::{CostRecord, CostsDb};
 use crate::costs_log::CostsLog;
 use crate::efficiency::AgentEfficiencyEvent;
 use crate::episode_logger::{Episode, EpisodeLogger, LoggerError};
-use crate::model_router::RoutingContext;
+use crate::latency::LatencyRegistry;
+use crate::model_router::{RoutingContext, compute_routing_reward_v2};
 use crate::pattern_discovery::{
     CrossEpisodeConsolidationReport, CrossEpisodeConsolidator, EpisodeView, PatternMiner,
 };
@@ -93,6 +94,8 @@ pub struct LearningPaths {
     pub task_metrics_jsonl: PathBuf,
     /// Append-only efficiency events JSONL file.
     pub efficiency_jsonl: PathBuf,
+    /// Persisted latency registry snapshot.
+    pub latency_stats_json: PathBuf,
     /// Append-only C-Factor history JSONL file.
     pub cfactor_jsonl: PathBuf,
     /// Cascade router persisted observations JSON.
@@ -116,6 +119,7 @@ impl LearningPaths {
             playbook_rules_toml: root.join("playbook-rules.toml"),
             task_metrics_jsonl: root.join("task-metrics.jsonl"),
             efficiency_jsonl: root.join("efficiency.jsonl"),
+            latency_stats_json: root.join("latency-stats.json"),
             cfactor_jsonl: root.join("c-factor.jsonl"),
             cascade_router_json: root.join("cascade-router.json"),
             experiments_json: root.join("experiments.json"),
@@ -261,6 +265,7 @@ pub struct LearningRuntime {
     regression: RegressionConfig,
     task_metrics: AsyncMutex<Vec<TaskMetric>>,
     pattern_miner: parking_lot::Mutex<PatternMiner>,
+    latency_registry: LatencyRegistry,
     cascade_router: CascadeRouter,
     context_pack_cache: ContextPackCache,
     experiment_store: parking_lot::Mutex<ExperimentStore>,
@@ -296,6 +301,7 @@ impl LearningRuntime {
         let task_metrics = load_task_metrics(&paths.task_metrics_jsonl).await?;
 
         let pattern_miner = parking_lot::Mutex::new(PatternMiner::new(3, 0.5));
+        let latency_registry = LatencyRegistry::load_or_new(&paths.latency_stats_json);
         let cascade_router = CascadeRouter::load_or_new(
             &paths.cascade_router_json,
             vec![
@@ -319,6 +325,7 @@ impl LearningRuntime {
             regression,
             task_metrics: AsyncMutex::new(task_metrics),
             pattern_miner,
+            latency_registry,
             cascade_router,
             context_pack_cache,
             experiment_store: parking_lot::Mutex::new(experiment_store),
@@ -355,6 +362,7 @@ impl LearningRuntime {
         let task_metrics = load_task_metrics(&paths.task_metrics_jsonl).await?;
 
         let pattern_miner = parking_lot::Mutex::new(PatternMiner::new(3, 0.5));
+        let latency_registry = LatencyRegistry::load_or_new(&paths.latency_stats_json);
         let cascade_router = CascadeRouter::load_or_new(&paths.cascade_router_json, models);
         let context_pack_cache = ContextPackCache::new(256, paths.root.join("context-cache.json"));
         let experiment_store = ExperimentStore::load_or_new(&paths.experiments_json);
@@ -372,6 +380,7 @@ impl LearningRuntime {
             regression,
             task_metrics: AsyncMutex::new(task_metrics),
             pattern_miner,
+            latency_registry,
             cascade_router,
             context_pack_cache,
             experiment_store: parking_lot::Mutex::new(experiment_store),
@@ -439,6 +448,12 @@ impl LearningRuntime {
     #[must_use]
     pub const fn playbook_rules(&self) -> &PlaybookRules {
         &self.playbook_rules
+    }
+
+    /// Borrow the latency registry used for routing feedback.
+    #[must_use]
+    pub const fn latency_registry(&self) -> &LatencyRegistry {
+        &self.latency_registry
     }
 
     /// Borrow pattern miner (behind `parking_lot::Mutex` for `&mut` access).
@@ -510,7 +525,32 @@ impl LearningRuntime {
             .open(&self.paths.efficiency_jsonl)
             .await?;
         f.write_all(line.as_bytes()).await?;
+        self.record_latency_from_efficiency_event(event)?;
         Ok(())
+    }
+
+    /// Compute a latency-aware routing reward for a model/provider observation.
+    ///
+    /// The current wall-clock latency comes from the efficiency event emitted
+    /// for this turn. When that timing is unavailable, the historical p50 for
+    /// the same `(model, provider)` pair is used as a fallback.
+    #[must_use]
+    pub fn compute_routing_reward_with_latency(
+        &self,
+        gate_passed: bool,
+        cost_usd: f64,
+        wall_time_ms: u64,
+        model: &str,
+        provider: &str,
+    ) -> f64 {
+        compute_reward_with_latency(
+            gate_passed,
+            cost_usd,
+            wall_time_ms,
+            &self.latency_registry,
+            model,
+            provider,
+        )
     }
 
     /// Read all persisted efficiency events from the JSONL log.
@@ -797,7 +837,16 @@ impl LearningRuntime {
         {
             return false;
         }
-        let reward = if episode.success { 1.0 } else { 0.0 };
+        let provider = extra_string(episode, "provider")
+            .or_else(|| extra_string(episode, "backend"))
+            .unwrap_or_else(|| "unknown-provider".to_string());
+        let reward = self.compute_routing_reward_with_latency(
+            episode.success,
+            episode.usage.cost_usd,
+            episode.usage.wall_ms,
+            &slug,
+            &provider,
+        );
         self.cascade_router
             .record_observation(&ctx, &slug, reward, episode.success);
         true
@@ -826,6 +875,74 @@ impl LearningRuntime {
     async fn append_cfactor_snapshot(&self) -> Result<(), LearningRuntimeError> {
         let snapshot = compute_cfactor_snapshot(&self.paths.root).await?;
         append_cfactor_snapshot(&self.paths.cfactor_jsonl, &snapshot).await?;
+        Ok(())
+    }
+}
+
+fn compute_reward_with_latency(
+    gate_passed: bool,
+    cost_usd: f64,
+    wall_time_ms: u64,
+    latency_stats: &LatencyRegistry,
+    model: &str,
+    provider: &str,
+) -> f64 {
+    let pass_rate = if gate_passed { 1.0 } else { 0.0 };
+    let max_cost = 5.0;
+    let normalized_cost = (cost_usd / max_cost).min(1.0);
+    let historical_p50_ms = latency_stats
+        .get(model, provider)
+        .map(|stats| stats.p50_ms());
+    let observed_latency_ms = if wall_time_ms > 0 {
+        wall_time_ms as f64
+    } else {
+        historical_p50_ms.unwrap_or(30_000.0)
+    };
+    let sla_ms = 120_000.0;
+    compute_routing_reward_v2(pass_rate, normalized_cost, observed_latency_ms, sla_ms)
+}
+
+fn latency_model_slug(event: &AgentEfficiencyEvent) -> &str {
+    let model = event.model_used.trim();
+    if model.is_empty() {
+        event.model.trim()
+    } else {
+        model
+    }
+}
+
+fn latency_provider_id(event: &AgentEfficiencyEvent) -> &str {
+    event.backend.trim()
+}
+
+fn latency_total_ms(event: &AgentEfficiencyEvent) -> f64 {
+    if event.wall_time_ms > 0 {
+        event.wall_time_ms as f64
+    } else {
+        event.duration_ms as f64
+    }
+}
+
+impl LearningRuntime {
+    fn record_latency_from_efficiency_event(
+        &self,
+        event: &AgentEfficiencyEvent,
+    ) -> Result<(), LearningRuntimeError> {
+        let model = latency_model_slug(event);
+        let provider = latency_provider_id(event);
+        if model.is_empty() || provider.is_empty() {
+            return Ok(());
+        }
+
+        let total_ms = latency_total_ms(event);
+        self.latency_registry.record(
+            model,
+            provider,
+            event.time_to_first_token_ms as f64,
+            total_ms,
+            event.output_tokens,
+        );
+        self.latency_registry.save(&self.paths.latency_stats_json)?;
         Ok(())
     }
 }
@@ -1855,5 +1972,75 @@ mod tests {
             .expect("persisted router stats");
         assert_eq!(opus.trials, 1);
         assert_eq!(opus.successes, 0);
+    }
+
+    #[tokio::test]
+    async fn latency_aware_reward_prefers_faster_models() {
+        let tmp = TempDir::new().unwrap();
+        let runtime = LearningRuntime::open_under(tmp.path()).await.unwrap();
+
+        let event = AgentEfficiencyEvent {
+            backend: "anthropic".to_string(),
+            model: "claude-opus-4-6".to_string(),
+            model_used: "claude-opus-4-6".to_string(),
+            wall_time_ms: 1_000,
+            duration_ms: 1_000,
+            output_tokens: 128,
+            ..AgentEfficiencyEvent::default()
+        };
+        runtime.append_efficiency_event(&event).await.unwrap();
+
+        let faster = runtime.compute_routing_reward_with_latency(
+            true,
+            0.25,
+            1_000,
+            "claude-opus-4-6",
+            "anthropic",
+        );
+        let slower = runtime.compute_routing_reward_with_latency(
+            true,
+            0.25,
+            60_000,
+            "claude-opus-4-6",
+            "anthropic",
+        );
+
+        assert!(faster > slower, "faster={faster}, slower={slower}");
+    }
+
+    #[tokio::test]
+    async fn latency_aware_reward_uses_latency_registry_fallback() {
+        let tmp = TempDir::new().unwrap();
+        let runtime = LearningRuntime::open_under(tmp.path()).await.unwrap();
+
+        for wall_time_ms in [10_000_u64, 20_000, 30_000] {
+            let event = AgentEfficiencyEvent {
+                backend: "anthropic".to_string(),
+                model: "claude-opus-4-6".to_string(),
+                model_used: "claude-opus-4-6".to_string(),
+                wall_time_ms,
+                duration_ms: wall_time_ms,
+                output_tokens: 64,
+                ..AgentEfficiencyEvent::default()
+            };
+            runtime.append_efficiency_event(&event).await.unwrap();
+        }
+
+        let reloaded = LearningRuntime::open_under(tmp.path()).await.unwrap();
+        let stats = reloaded
+            .latency_registry()
+            .get("claude-opus-4-6", "anthropic")
+            .expect("latency stats");
+        assert_eq!(stats.p50_ms(), 20_000.0);
+
+        let reward = reloaded.compute_routing_reward_with_latency(
+            true,
+            0.25,
+            0,
+            "claude-opus-4-6",
+            "anthropic",
+        );
+        let expected = compute_routing_reward_v2(1.0, 0.25_f64 / 5.0, 20_000.0, 120_000.0);
+        assert!((reward - expected).abs() < 1e-9);
     }
 }

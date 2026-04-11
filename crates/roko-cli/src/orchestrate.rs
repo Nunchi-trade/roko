@@ -5192,7 +5192,7 @@ impl PlanRunner {
         // ── Observe cascade router for bandit learning (§9) ─────────
         if result.success {
             use roko_core::TaskComplexityBand;
-            use roko_learn::model_router::{CONTEXT_DIM, compute_routing_reward};
+            use roko_learn::model_router::CONTEXT_DIM;
 
             let model = self.effective_model();
             if let Some(model_idx) = self.learning.cascade_router().model_index_for_slug(&model) {
@@ -5243,20 +5243,24 @@ impl PlanRunner {
                 };
                 context_vec[16] = 1.0;
 
-                let normalized_cost = if self.config.budget.max_task_usd > 0.0 {
-                    (f64::from(result.usage.cost_usd) / self.config.budget.max_task_usd).min(1.0)
-                } else {
-                    0.0
-                };
-                let normalized_duration = {
-                    let timeout_ms = self.effective_task_timeout_ms(task_def.as_ref());
-                    if timeout_ms > 0 {
-                        (wall_ms as f64 / timeout_ms as f64).min(1.0)
-                    } else {
-                        0.0
-                    }
-                };
-                let reward = compute_routing_reward(1.0, normalized_cost, normalized_duration);
+                let provider = load_roko_config(&self.workdir)
+                    .map(|config| {
+                        let providers = routing_model_provider_map(&config);
+                        provider_id_for_routing_model(&config, &providers, &model)
+                    })
+                    .unwrap_or_else(|_| {
+                        resolve_model(&RokoConfig::default(), &model)
+                            .provider_kind
+                            .label()
+                            .to_owned()
+                    });
+                let reward = self.learning.compute_routing_reward_with_latency(
+                    true,
+                    f64::from(result.usage.cost_usd),
+                    wall_ms,
+                    &model,
+                    &provider,
+                );
 
                 self.learning
                     .cascade_router()
@@ -7582,12 +7586,12 @@ impl PlanRunner {
             }
         };
         let model_providers = routing_model_provider_map(&roko_config);
-        let pending_force_model_override = if task_def.is_some() && explicit_model_override.is_none()
-        {
-            self.force_model_override.take()
-        } else {
-            None
-        };
+        let pending_force_model_override =
+            if task_def.is_some() && explicit_model_override.is_none() {
+                self.force_model_override.take()
+            } else {
+                None
+            };
 
         // ── Adaptive model selection via CascadeRouter ───────────────
         if let Some(forced_model) = pending_force_model_override {
@@ -10733,10 +10737,10 @@ files = ["crates/roko-cli/src/orchestrate.rs"]
     #[test]
     fn cost_anomaly_downgrade() {
         let mut config = Config::default();
-        config.agent.tier_models.insert(
-            "mechanical".to_string(),
-            "claude-haiku-4-5".to_string(),
-        );
+        config
+            .agent
+            .tier_models
+            .insert("mechanical".to_string(), "claude-haiku-4-5".to_string());
 
         let mut detector = AnomalyDetector::new(1_700_000_000_000);
         for cost in [1.0, 1.2, 0.9, 1.1, 1.05, 0.95, 1.15, 1.0] {
