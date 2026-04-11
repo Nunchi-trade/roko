@@ -24,7 +24,7 @@ use roko_agent::translate::{ClaudeTranslator, RenderedTools, Translator};
 use roko_agent::{Agent, AgentResult, ClaudeCliAgent, ExecAgent};
 use roko_compose::{
     ContextProvider, Placement, PlanArtifacts, PromptComposer, PromptSection, RoleSystemPromptSpec,
-    SectionPriority, TaskContext,
+    SectionPriority, TaskContext, budget_for,
 };
 use roko_conductor::diagnosis::DiagnosisEngine;
 use roko_conductor::{Conductor, ConductorDecision};
@@ -38,7 +38,7 @@ use roko_core::tool::trace::{FailureKind, FailureTrace, TraceStep};
 use roko_core::tool::{FormatBandit, ProfileBandit, ToolTraceEvent, TraceSink};
 use roko_core::{
     AgentRole, Body, Budget, Composer, Context, Gate, Kind, OperatingFrequency, PhaseKind,
-    Provenance, Signal, Substrate, Verdict,
+    Provenance, Signal, Substrate, TaskCategory, Verdict,
 };
 use roko_daimon::{AffectEngine as _, AffectEvent, DaimonState, DispatchParams};
 use roko_dreams::{DreamAgentConfig, DreamLoopConfig, DreamRunner};
@@ -58,7 +58,9 @@ use roko_learn::runtime_feedback::{
     refresh_cfactor_snapshot,
 };
 use roko_learn::skill_library::Skill;
-use roko_learn::skill_library::{SkillExtractionRequest, SkillGateResult, SkillLibrary};
+use roko_learn::skill_library::{
+    SkillExtractionRequest, SkillGateResult, SkillLibrary, SkillQuery,
+};
 use roko_neuro::{KnowledgeEntry, KnowledgeKind, KnowledgeStore, NeuroStore};
 use roko_orchestrator::worktree::{WorktreeConfig, WorktreeManager};
 use roko_orchestrator::{
@@ -981,17 +983,28 @@ fn render_prior_experience(skills: &[Skill]) -> String {
     use std::fmt::Write as _;
 
     let mut content = String::from(
-        "## Prior Experience\n\nThe following skills were successful in similar prior tasks:\n",
+        "## Relevant Skills\n\nThe following skills were high-confidence matches for this task:\n",
     );
     for (idx, skill) in skills.iter().enumerate() {
         let _ = write!(
             content,
-            "\n### {}. {} (success rate: {:.0}%)\n",
+            "\n### {}. {} (confidence: {:.0}%)\n",
             idx + 1,
             skill.name,
-            (skill.success_rate.clamp(0.0, 1.0) * 100.0).round(),
+            (skill.score.clamp(0.0, 1.0) * 100.0).round(),
         );
         let _ = writeln!(content, "Summary: {}", skill.summary);
+        if skill.usage_count > 0 {
+            let _ = writeln!(
+                content,
+                "Telemetry: {:.0}% success over {} uses",
+                (skill.success_rate.clamp(0.0, 1.0) * 100.0).round(),
+                skill.usage_count
+            );
+        }
+        if skill.validated_count > 0 {
+            let _ = writeln!(content, "Validated matches: {}", skill.validated_count);
+        }
         if !skill.description.is_empty() {
             let _ = writeln!(content, "Description: {}", skill.description);
         }
@@ -1006,6 +1019,32 @@ fn render_prior_experience(skills: &[Skill]) -> String {
         }
     }
     content
+}
+
+fn select_prompt_skills(
+    skill_library: &SkillLibrary,
+    task_def: Option<&crate::task_parser::TaskDef>,
+    task_text: &str,
+    limit: usize,
+) -> Vec<Skill> {
+    let task_files = task_def.map(|task| task.files.clone()).unwrap_or_default();
+    let mut tags = extract_task_symbols(task_text);
+    if let Some(crate_name) = task_crate_name(task_def) {
+        tags.push(crate_name);
+    }
+
+    let query = SkillQuery {
+        tags,
+        category: Some(TaskCategory::Implementation.label().to_string()),
+        files_hint: task_files,
+    };
+
+    skill_library
+        .select(&query, limit)
+        .into_iter()
+        .filter(|skill| skill.score >= 0.5)
+        .filter(|skill| !skill.tags.iter().any(|tag| tag == "outcome:failure"))
+        .collect()
 }
 
 fn render_playbook_context(playbook: &Playbook) -> String {
@@ -7580,24 +7619,10 @@ impl PlanRunner {
         }
 
         // ── Dispatch-time skill hint from successful prior tasks ──────
-        let task_files_for_skill_query = task_def
-            .as_ref()
-            .map(|td| td.files.clone())
-            .unwrap_or_default();
-        let task_tier_for_skill_query = task_def.as_ref().map(|td| td.tier.as_str()).unwrap_or("");
-        let symbols_for_skill_query = extract_task_symbols(&task_text);
-        let prior_skills: Vec<_> = self
-            .skill_library
-            .query(
-                &task_files_for_skill_query,
-                task_tier_for_skill_query,
-                &symbols_for_skill_query,
-            )
-            .into_iter()
-            .filter(|skill| skill.success_rate > 0.5)
-            .take(3)
-            .collect();
-        let skill_context_section = if prior_skills.is_empty() {
+        let prior_skills =
+            select_prompt_skills(&self.skill_library, task_def.as_ref(), &task_text, 5);
+        let skill_budget = budget_for(role).skills;
+        let skill_context_section = if prior_skills.is_empty() || skill_budget == 0 {
             None
         } else {
             let skill_text = render_prior_experience(&prior_skills);
@@ -7606,7 +7631,7 @@ impl PlanRunner {
                 PromptSection::new("skill-library", skill_text)
                     .with_priority(SectionPriority::Low)
                     .with_placement(Placement::Middle)
-                    .with_hard_cap(2048),
+                    .with_hard_cap(skill_budget),
                 skill_text_len,
             ))
         };
@@ -10571,6 +10596,73 @@ files = ["crates/roko-cli/src/orchestrate.rs"]
 
         let reloaded = CrateFamiliarityTracker::load(&path);
         assert!((reloaded.score_for_task(Some(&task)) - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn skill_injection_selects_high_confidence_matching_skills() {
+        let tmp = TempDir::new().unwrap();
+        let library = SkillLibrary::new(tmp.path().join("skills.json"))
+            .await
+            .unwrap();
+
+        let mut matching = Skill::new(
+            "matching_skill",
+            "Wire prompt assembly through the skill library",
+            "Inject the skill section before the task body.",
+        );
+        matching.task_category = "implementation".to_string();
+        matching.files = vec!["crates/roko-cli/src/orchestrate.rs".to_string()];
+        matching.tags = vec!["PromptComposer".to_string(), "roko-cli".to_string()];
+        matching.score = 0.91;
+        matching.success_rate = 0.75;
+        matching.usage_count = 4;
+        matching.validated_count = 2;
+        library.register(&matching).await.unwrap();
+
+        let mut low_confidence = Skill::new(
+            "low_confidence_skill",
+            "Weakly related prompt tweak",
+            "This should not be injected.",
+        );
+        low_confidence.task_category = "implementation".to_string();
+        low_confidence.files = vec!["crates/roko-cli/src/orchestrate.rs".to_string()];
+        low_confidence.score = 0.2;
+        library.register(&low_confidence).await.unwrap();
+
+        let mut failed = Skill::new(
+            "failed_skill",
+            "Failure pattern that should stay out of the prompt",
+            "This should not be injected.",
+        );
+        failed.task_category = "implementation".to_string();
+        failed.files = vec!["crates/roko-cli/src/orchestrate.rs".to_string()];
+        failed.tags = vec!["outcome:failure".to_string()];
+        failed.score = 0.95;
+        library.register(&failed).await.unwrap();
+
+        let task: crate::task_parser::TaskDef = toml::from_str(
+            r#"
+id = "T1"
+title = "Wire Skill Library into PromptComposer"
+files = ["crates/roko-cli/src/orchestrate.rs"]
+"#,
+        )
+        .unwrap();
+
+        let selected = select_prompt_skills(
+            &library,
+            Some(&task),
+            "Wire Skill Library into PromptComposer and inject relevant skills",
+            5,
+        );
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].name, "matching_skill");
+
+        let rendered = render_prior_experience(&selected);
+        assert!(rendered.contains("matching_skill"));
+        assert!(rendered.contains("confidence: 91%"));
+        assert!(rendered.contains("Telemetry: 75% success over 4 uses"));
     }
 
     #[test]
