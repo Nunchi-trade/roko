@@ -77,6 +77,20 @@ pub trait HttpPoster: Send + Sync {
         body: &[u8],
         timeout_ms: u64,
     ) -> Result<String, HttpPostError>;
+
+    /// Perform a GET request to `url` with `headers`.
+    ///
+    /// The default implementation returns an error. Override in implementations
+    /// that need GET support (e.g. polling endpoints).
+    async fn get_json(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        timeout_ms: u64,
+    ) -> Result<String, HttpPostError> {
+        let _ = (url, headers, timeout_ms);
+        Err(HttpPostError::transport("get_json not supported by this poster"))
+    }
 }
 
 /// Production [`HttpPoster`] backed by `reqwest`.
@@ -120,6 +134,35 @@ impl HttpPoster for ReqwestPoster {
         }
         let resp = req
             .body(body.to_vec())
+            .send()
+            .await
+            .map_err(|e| HttpPostError::transport(format!("request failed: {e}")))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| HttpPostError::transport(format!("read body failed: {e}")))?;
+        if status.is_success() {
+            Ok(text)
+        } else {
+            Err(HttpPostError::http(status.as_u16(), text))
+        }
+    }
+
+    async fn get_json(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        timeout_ms: u64,
+    ) -> Result<String, HttpPostError> {
+        let mut req = self
+            .client
+            .get(url)
+            .timeout(Duration::from_millis(timeout_ms));
+        for (k, v) in headers {
+            req = req.header(k.as_str(), v.as_str());
+        }
+        let resp = req
             .send()
             .await
             .map_err(|e| HttpPostError::transport(format!("request failed: {e}")))?;
