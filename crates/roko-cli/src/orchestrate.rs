@@ -8,9 +8,11 @@
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::collections::hash_map::DefaultHasher;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::hash::{Hash, Hasher};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow};
@@ -27,6 +29,7 @@ use roko_compose::{
 use roko_conductor::diagnosis::DiagnosisEngine;
 use roko_conductor::{Conductor, ConductorDecision};
 use roko_core::config::schema::RokoConfig;
+use roko_core::agent::resolve_model;
 use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::obs::health::{AlwaysUpProbe, ProbeRegistry};
 use roko_core::obs::{LabelSet, MetricRegistry};
@@ -46,9 +49,11 @@ use roko_gate::{
     adaptive_threshold::AdaptiveThresholds, clippy_gate::ClippyGate, compile::CompileGate,
     payload::GatePayload, test_gate::TestGate,
 };
+use roko_learn::anomaly::AnomalyDetector;
 use roko_learn::costs_db::CostRecord;
 use roko_learn::efficiency::{AgentEfficiencyEvent, FleetCFactor, compute_fleet_cfactor};
 use roko_learn::episode_logger::{Episode, GateVerdict, Usage};
+use roko_learn::latency::LatencyRegistry;
 use roko_learn::playbook::{Playbook, PlaybookStore};
 use roko_learn::runtime_feedback::{
     CompletedRunInput, LearningRuntime, LearningUpdate, read_efficiency_events,
@@ -84,6 +89,10 @@ const GHOST_TURN_SIGNAL_KIND: &str = "conductor.ghost_turn";
 
 fn daimon_state_path(workdir: &Path) -> PathBuf {
     workdir.join(".roko").join("daimon").join("affect.json")
+}
+
+fn latency_registry_path(workdir: &Path) -> PathBuf {
+    workdir.join(".roko").join("learn").join("latency-stats.json")
 }
 
 fn install_episode_distillation_hook(learning: &mut LearningRuntime, workdir: &Path) {
@@ -981,6 +990,10 @@ pub struct PlanRunner {
     health_probes: ProbeRegistry,
     /// Adaptive gate thresholds for retry budgeting.
     adaptive_thresholds: AdaptiveThresholds,
+    /// Rolling latency registry for routed model/provider pairs.
+    latency_registry: LatencyRegistry,
+    /// Session-local anomaly detector for runaway loops and cost spikes.
+    anomaly_detector: AnomalyDetector,
     /// In-memory efficiency events collected during this run.
     efficiency_events: Vec<AgentEfficiencyEvent>,
     /// Optional event bus sender for HTTP API event streaming.
@@ -1965,6 +1978,8 @@ impl PlanRunner {
                     .join("learn")
                     .join("gate-thresholds.json"),
             ),
+            latency_registry: LatencyRegistry::load_or_new(&latency_registry_path(workdir)),
+            anomaly_detector: AnomalyDetector::new(chrono::Utc::now().timestamp_millis()),
             efficiency_events: Vec::new(),
             server_event_bus: None,
             state_hub_sender: None,
@@ -2073,6 +2088,8 @@ impl PlanRunner {
                     .join("learn")
                     .join("gate-thresholds.json"),
             ),
+            latency_registry: LatencyRegistry::load_or_new(&latency_registry_path(workdir)),
+            anomaly_detector: AnomalyDetector::new(chrono::Utc::now().timestamp_millis()),
             efficiency_events: Vec::new(),
             server_event_bus: None,
             state_hub_sender: None,
@@ -2185,6 +2202,8 @@ impl PlanRunner {
                     .join("learn")
                     .join("gate-thresholds.json"),
             ),
+            latency_registry: LatencyRegistry::load_or_new(&latency_registry_path(workdir)),
+            anomaly_detector: AnomalyDetector::new(chrono::Utc::now().timestamp_millis()),
             efficiency_events: Vec::new(),
             server_event_bus: None,
             state_hub_sender: None,
@@ -4310,10 +4329,11 @@ impl PlanRunner {
         gate_passed: Option<bool>,
         iteration: u32,
     ) -> CompletedRunInput {
+        let provider = self.provider_id_for_model(model);
         let cost = CostRecord {
             timestamp: chrono::Utc::now().to_rfc3339(),
             model: model.to_string(),
-            provider: "anthropic".to_string(),
+            provider: provider.clone(),
             role: role.to_string(),
             plan_id: plan_id.to_string(),
             task_id: task_id.to_string(),
@@ -4328,7 +4348,7 @@ impl PlanRunner {
         };
 
         let mut input = CompletedRunInput::from_episode(ep).with_cost_record(cost);
-        input.provider = Some(model.to_string());
+        input.provider = Some(provider);
 
         // Flow matched skill/rule/experiment IDs from the task tracker so
         // record_completed_run can update confidence scores and experiment outcomes.
@@ -4373,6 +4393,90 @@ impl PlanRunner {
             .model
             .clone()
             .unwrap_or_else(|| "claude-sonnet-4-6".into())
+    }
+
+    /// Resolve the runtime provider id for a model slug using `roko.toml`.
+    fn provider_id_for_model(&self, model_slug: &str) -> String {
+        let Ok(routing_config) = load_roko_config(&self.workdir) else {
+            return model_slug.to_string();
+        };
+        let resolved = resolve_model(&routing_config, model_slug);
+        resolved
+            .profile
+            .as_ref()
+            .map(|profile| profile.provider.clone())
+            .or_else(|| {
+                resolved
+                    .provider_config
+                    .as_ref()
+                    .map(|provider| provider.kind.label().to_string())
+            })
+            .unwrap_or_else(|| resolved.slug.clone())
+    }
+
+    /// Record post-turn latency and anomaly feedback before any later early return.
+    fn record_turn_learning_feedback(
+        &mut self,
+        prompt: &Signal,
+        model: &str,
+        result: &AgentResult,
+    ) {
+        let provider_id = self.provider_id_for_model(model);
+
+        let prompt_hash = {
+            let mut hasher = DefaultHasher::new();
+            prompt.id.to_hex().hash(&mut hasher);
+            hasher.finish()
+        };
+
+        let ttft_source_ms = result
+            .trace
+            .first()
+            .map(|signal| signal.created_at_ms)
+            .unwrap_or(result.output.created_at_ms);
+        let ttft_ms = ttft_source_ms.saturating_sub(prompt.created_at_ms).max(0) as u64;
+        let total_ms = result.usage.wall_ms;
+        let output_tokens = u64::from(result.usage.output_tokens);
+
+        self.latency_registry.record(
+            model,
+            &provider_id,
+            ttft_ms as f64,
+            total_ms as f64,
+            output_tokens,
+        );
+        tracing::info!(
+            model = %model,
+            provider = %provider_id,
+            ttft_ms,
+            total_ms,
+            output_tokens,
+            "learning latency recorded"
+        );
+
+        if let Some(anomaly) = self.anomaly_detector.check_prompt(prompt_hash) {
+            tracing::warn!(
+                model = %model,
+                provider = %provider_id,
+                ?anomaly,
+                "learning anomaly detected from prompt"
+            );
+        }
+
+        if let Some(anomaly) = self.anomaly_detector.check_cost(f64::from(result.usage.cost_usd)) {
+            tracing::warn!(
+                model = %model,
+                provider = %provider_id,
+                ?anomaly,
+                "learning anomaly detected from cost"
+            );
+        } else {
+            tracing::info!(
+                model = %model,
+                provider = %provider_id,
+                "learning anomaly scan complete"
+            );
+        }
     }
 
     /// Record a LinUCB observation for the implementer task route.
@@ -7056,7 +7160,8 @@ impl PlanRunner {
         };
 
         // ── Provider health check ────────────────────────────────────
-        let selected_model = if !self.learning.provider_health().is_healthy(&selected_model) {
+        let selected_provider = self.provider_id_for_model(&selected_model);
+        let selected_model = if !self.learning.provider_health().is_healthy(&selected_provider) {
             let fallback = self
                 .config
                 .agent
@@ -7064,7 +7169,7 @@ impl PlanRunner {
                 .clone()
                 .unwrap_or_else(|| "claude-sonnet-4-6".into());
             tracing::warn!(
-                unhealthy_model = %selected_model,
+                unhealthy_provider = %selected_provider,
                 fallback_model = %fallback,
                 "model marked unhealthy by ProviderHealthTracker, falling back"
             );
@@ -7385,6 +7490,8 @@ impl PlanRunner {
             }
             agent.run(&prompt, &ctx).await
         };
+
+        self.record_turn_learning_feedback(&prompt, &selected_model, &result);
 
         let task_cost = f64::from(result.usage.cost_usd);
         self.add_task_spend(plan_id, task, task_cost);
