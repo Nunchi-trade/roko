@@ -218,6 +218,7 @@ impl EfficiencyTracker {
             task_id: String::new(),
             input_tokens: tokens,
             output_tokens: 0,
+            reasoning_tokens: 0,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
             cost_usd: 0.0,

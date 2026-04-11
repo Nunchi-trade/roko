@@ -140,6 +140,7 @@ mod tests {
             task_id: "task-1".into(),
             input_tokens: prompt_tokens,
             output_tokens: 10,
+            reasoning_tokens: 0,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
             cost_usd: 0.5,

@@ -4246,6 +4246,7 @@ mod tests {
             task_id: task.to_string(),
             input_tokens,
             output_tokens,
+            reasoning_tokens: 0,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
             cost_usd,

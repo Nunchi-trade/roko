@@ -88,6 +88,9 @@ pub struct AgentEfficiencyEvent {
     pub input_tokens: u64,
     /// Output tokens from provider response.
     pub output_tokens: u64,
+    /// Tokens used for reasoning/thinking.
+    #[serde(default)]
+    pub reasoning_tokens: u64,
     /// Tokens served from cache (subset of input).
     pub cache_read_tokens: u64,
     /// Tokens written to cache.
@@ -200,6 +203,7 @@ impl Default for AgentEfficiencyEvent {
             task_id: String::new(),
             input_tokens: 0,
             output_tokens: 0,
+            reasoning_tokens: 0,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
             cost_usd: 0.0,
@@ -759,9 +763,10 @@ fn make_test_event(
         model: "claude-sonnet-4-5".into(),
         plan_id: "plan-1".into(),
         task_id: "t1".into(),
-        input_tokens,
-        output_tokens,
-        cache_read_tokens: cache_read,
+    input_tokens,
+    output_tokens,
+    reasoning_tokens: 0,
+    cache_read_tokens: cache_read,
         cache_write_tokens: 0,
         cost_usd: cost,
         cost_usd_without_cache: cost * 1.5,
@@ -907,6 +912,19 @@ mod tests {
         let e = make_test_event("Implementer", 0.42, 1500, 300, 200, 45000, 8, 3, true, true);
         let json = serde_json::to_string(&e).expect("serialize");
         let e2: AgentEfficiencyEvent = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(e, e2);
+    }
+
+    #[test]
+    fn efficiency_reasoning_tokens() {
+        let mut e = make_test_event("Implementer", 0.42, 1500, 300, 200, 45000, 8, 3, true, true);
+        e.reasoning_tokens = 120;
+
+        let json = serde_json::to_string(&e).expect("serialize");
+        assert!(json.contains("\"reasoning_tokens\":120"));
+
+        let e2: AgentEfficiencyEvent = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(e2.reasoning_tokens, 120);
         assert_eq!(e, e2);
     }
 
