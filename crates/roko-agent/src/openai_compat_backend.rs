@@ -194,6 +194,7 @@ impl LlmBackend for OpenAiCompatLlmBackend {
         &self,
         messages: &[serde_json::Value],
         tools: &RenderedTools,
+        _session: &SessionState,
     ) -> Result<BackendResponse, LlmError> {
         let body_bytes = self.build_body(messages, tools, false)?;
 
@@ -218,6 +219,7 @@ impl LlmBackend for OpenAiCompatLlmBackend {
         &self,
         messages: &[serde_json::Value],
         tools: &RenderedTools,
+        _session: &SessionState,
         event_tx: mpsc::UnboundedSender<StreamChunk>,
     ) -> Result<BackendResponse, LlmError> {
         let body_bytes = self.build_body(messages, tools, true)?;
@@ -515,6 +517,7 @@ mod tests {
                         }
                     }
                 }])),
+                &SessionState::default(),
             )
             .await
             .expect("send turn");
@@ -863,6 +866,7 @@ mod tests {
             .send_turn(
                 &[serde_json::json!({ "role": "user", "content": "hi" })],
                 &RenderedTools::CliFlag("echo".to_string()),
+                &SessionState::default(),
             )
             .await
             .expect_err("non-json tools should fail");

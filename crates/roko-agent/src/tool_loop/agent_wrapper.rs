@@ -225,6 +225,7 @@ mod tests {
             &self,
             _messages: &[serde_json::Value],
             _tools: &RenderedTools,
+            _session: &crate::translate::SessionState,
         ) -> Result<BackendResponse, LlmError> {
             let call = self.call_count.fetch_add(1, Ordering::SeqCst);
             if call == 0 {
@@ -251,6 +252,7 @@ mod tests {
             &self,
             _messages: &[serde_json::Value],
             _tools: &RenderedTools,
+            _session: &crate::translate::SessionState,
         ) -> Result<BackendResponse, LlmError> {
             Err(LlmError::Backend("server error".into()))
         }

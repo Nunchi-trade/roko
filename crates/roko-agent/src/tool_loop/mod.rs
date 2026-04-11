@@ -55,6 +55,7 @@ pub trait LlmBackend: Send + Sync {
         &self,
         messages: &[serde_json::Value],
         tools: &RenderedTools,
+        session: &SessionState,
     ) -> Result<BackendResponse, LlmError>;
 
     /// Extract provider-issued session or conversation identifiers from a turn response.
@@ -70,10 +71,11 @@ pub trait LlmBackend: Send + Sync {
         &self,
         messages: &[serde_json::Value],
         tools: &RenderedTools,
+        session: &SessionState,
         event_tx: mpsc::UnboundedSender<StreamChunk>,
     ) -> Result<BackendResponse, LlmError> {
         let _ = event_tx;
-        self.send_turn(messages, tools).await
+        self.send_turn(messages, tools, session).await
     }
 }
 
@@ -232,6 +234,7 @@ impl ToolLoop {
         event_tx: Option<mpsc::UnboundedSender<StreamChunk>>,
     ) -> ToolLoopOutput {
         let rendered_tools = self.translator.render_tools(tools);
+        let mut session = SessionState::default();
 
         loop {
             // §36.54 — iteration cap.
@@ -264,10 +267,19 @@ impl ToolLoop {
             let response = match match &event_tx {
                 Some(event_tx) => {
                     self.backend
-                        .send_turn_streaming(&messages, &rendered_tools, event_tx.clone())
+                        .send_turn_streaming(
+                            &messages,
+                            &rendered_tools,
+                            &session,
+                            event_tx.clone(),
+                        )
                         .await
                 }
-                None => self.backend.send_turn(&messages, &rendered_tools).await,
+                None => {
+                    self.backend
+                        .send_turn(&messages, &rendered_tools, &session)
+                        .await
+                }
             } {
                 Ok(r) => r,
                 Err(e) => {
@@ -282,7 +294,7 @@ impl ToolLoop {
                     };
                 }
             };
-            let _session = self.backend.extract_session(&response);
+            merge_session_state(&mut session, self.backend.extract_session(&response));
             total_usage.add(&response.extract_usage());
 
             // Parse tool calls from the response.
@@ -332,6 +344,18 @@ impl ToolLoop {
 
             iterations += 1;
         }
+    }
+}
+
+fn merge_session_state(current: &mut SessionState, next: SessionState) {
+    if next.session_id.is_some() {
+        current.session_id = next.session_id;
+    }
+    if next.thread_id.is_some() {
+        current.thread_id = next.thread_id;
+    }
+    if next.conversation_id.is_some() {
+        current.conversation_id = next.conversation_id;
     }
 }
 
@@ -462,6 +486,7 @@ mod tests {
             &self,
             _messages: &[serde_json::Value],
             _tools: &RenderedTools,
+            _session: &SessionState,
         ) -> Result<BackendResponse, LlmError> {
             Ok(BackendResponse::Json(
                 serde_json::json!({"message": {"content": self.text}}),
@@ -478,6 +503,7 @@ mod tests {
             &self,
             _messages: &[serde_json::Value],
             _tools: &RenderedTools,
+            _session: &SessionState,
         ) -> Result<BackendResponse, LlmError> {
             Ok(BackendResponse::Json(serde_json::json!({
                 "tool_calls": [{"id": "c1", "name": "echo", "arguments": {}}]
@@ -504,6 +530,7 @@ mod tests {
             &self,
             _messages: &[serde_json::Value],
             _tools: &RenderedTools,
+            _session: &SessionState,
         ) -> Result<BackendResponse, LlmError> {
             let n = self.call_count.fetch_add(1, Ordering::SeqCst);
             if n == 0 {
@@ -527,6 +554,7 @@ mod tests {
             &self,
             _messages: &[serde_json::Value],
             _tools: &RenderedTools,
+            _session: &SessionState,
         ) -> Result<BackendResponse, LlmError> {
             Err(LlmError::Backend("server error".into()))
         }
@@ -551,6 +579,7 @@ mod tests {
             &self,
             _messages: &[serde_json::Value],
             _tools: &RenderedTools,
+            _session: &SessionState,
         ) -> Result<BackendResponse, LlmError> {
             let n = self.call_count.fetch_add(1, Ordering::SeqCst);
             if n == 0 {
@@ -589,6 +618,7 @@ mod tests {
             &self,
             messages: &[serde_json::Value],
             _tools: &RenderedTools,
+            _session: &SessionState,
         ) -> Result<BackendResponse, LlmError> {
             self.captured.lock().push(messages.to_vec());
             let n = self.call_count.fetch_add(1, Ordering::SeqCst);
@@ -624,6 +654,7 @@ mod tests {
             &self,
             _messages: &[serde_json::Value],
             _tools: &RenderedTools,
+            _session: &SessionState,
         ) -> Result<BackendResponse, LlmError> {
             let turn = self.call_count.fetch_add(1, Ordering::SeqCst);
             if turn == 0 {
@@ -670,6 +701,7 @@ mod tests {
             &self,
             messages: &[serde_json::Value],
             _tools: &RenderedTools,
+            _session: &SessionState,
         ) -> Result<BackendResponse, LlmError> {
             self.captured.lock().push(messages.to_vec());
 
@@ -729,6 +761,54 @@ mod tests {
         let dispatcher = Arc::new(ToolDispatcher::new(registry, resolver));
         let translator: Arc<dyn Translator> = Arc::new(MockTranslator);
         ToolLoop::new(translator, dispatcher, backend).with_max_iterations(max_iterations)
+    }
+
+    struct SessionContinuityBackend {
+        call_count: AtomicUsize,
+        seen_sessions: parking_lot::Mutex<Vec<SessionState>>,
+    }
+
+    impl SessionContinuityBackend {
+        fn new() -> Self {
+            Self {
+                call_count: AtomicUsize::new(0),
+                seen_sessions: parking_lot::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmBackend for SessionContinuityBackend {
+        async fn send_turn(
+            &self,
+            _messages: &[serde_json::Value],
+            _tools: &RenderedTools,
+            session: &SessionState,
+        ) -> Result<BackendResponse, LlmError> {
+            self.seen_sessions.lock().push(session.clone());
+            let turn = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if turn == 0 {
+                Ok(BackendResponse::Json(serde_json::json!({
+                    "tool_calls": [{"id": "c1", "name": "echo", "arguments": {"x": 1}}]
+                })))
+            } else {
+                Ok(BackendResponse::Json(
+                    serde_json::json!({"message": {"content": "final answer"}}),
+                ))
+            }
+        }
+
+        fn extract_session(&self, response: &BackendResponse) -> SessionState {
+            let turn = response
+                .extract_text()
+                .is_empty()
+                .then_some("session-1")
+                .map(str::to_string);
+            SessionState {
+                session_id: turn,
+                ..Default::default()
+            }
+        }
     }
 
     // ─── Tests ───────────────────────────────────────────────────────
@@ -924,6 +1004,22 @@ mod tests {
 
         assert_eq!(out.stop_reason, StopReason::Stop);
         assert_eq!(backend.extracted_sessions.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn session_continuity_passes_previous_state_into_next_turn() {
+        let backend = Arc::new(SessionContinuityBackend::new());
+        let tl = make_tool_loop(backend.clone(), 25);
+        let ctx = ToolContext::testing("/tmp");
+
+        let out = tl.run("system", "user", &test_tools(), &ctx).await;
+
+        assert_eq!(out.stop_reason, StopReason::Stop);
+
+        let seen_sessions = backend.seen_sessions.lock();
+        assert_eq!(seen_sessions.len(), 2);
+        assert_eq!(seen_sessions[0].session_id, None);
+        assert_eq!(seen_sessions[1].session_id.as_deref(), Some("session-1"));
     }
 
     #[tokio::test]

@@ -6,7 +6,7 @@ use async_trait::async_trait;
 
 use crate::http::{HttpPoster, ReqwestPoster};
 use crate::tool_loop::{LlmBackend, LlmError};
-use crate::translate::{BackendResponse, RenderedTools};
+use crate::translate::{BackendResponse, RenderedTools, SessionState};
 
 const DEFAULT_BASE_URL: &str = "http://localhost:11434";
 const DEFAULT_TIMEOUT_MS: u64 = 180_000;
@@ -59,6 +59,7 @@ impl LlmBackend for OllamaLlmBackend {
         &self,
         messages: &[serde_json::Value],
         tools: &RenderedTools,
+        _session: &SessionState,
     ) -> Result<BackendResponse, LlmError> {
         let tools_value = match tools {
             RenderedTools::JsonArray(arr) => arr.clone(),
@@ -158,7 +159,9 @@ mod tests {
 
         let msgs = vec![serde_json::json!({"role": "user", "content": "hi"})];
         let tools = RenderedTools::JsonArray(serde_json::json!([]));
-        let _ = backend.send_turn(&msgs, &tools).await;
+        let _ = backend
+            .send_turn(&msgs, &tools, &SessionState::default())
+            .await;
 
         assert_eq!(
             url_ref.lock().unwrap().as_deref(),
@@ -174,7 +177,9 @@ mod tests {
 
         let msgs = vec![serde_json::json!({"role": "user", "content": "hi"})];
         let tools = RenderedTools::JsonArray(serde_json::json!([]));
-        let _ = backend.send_turn(&msgs, &tools).await;
+        let _ = backend
+            .send_turn(&msgs, &tools, &SessionState::default())
+            .await;
 
         let body: serde_json::Value =
             serde_json::from_slice(body_ref.lock().unwrap().as_ref().unwrap()).unwrap();
@@ -191,7 +196,10 @@ mod tests {
 
         let msgs = vec![serde_json::json!({"role": "user", "content": "hi"})];
         let tools = RenderedTools::JsonArray(serde_json::json!([]));
-        let result = backend.send_turn(&msgs, &tools).await.unwrap();
+        let result = backend
+            .send_turn(&msgs, &tools, &SessionState::default())
+            .await
+            .unwrap();
         match result {
             BackendResponse::Json(v) => assert!(v["message"]["tool_calls"].is_array()),
             other => panic!("expected Json, got {other:?}"),
@@ -205,7 +213,10 @@ mod tests {
 
         let msgs = vec![serde_json::json!({"role": "user", "content": "hi"})];
         let tools = RenderedTools::JsonArray(serde_json::json!([]));
-        let err = backend.send_turn(&msgs, &tools).await.unwrap_err();
+        let err = backend
+            .send_turn(&msgs, &tools, &SessionState::default())
+            .await
+            .unwrap_err();
         assert!(matches!(err, LlmError::Network(_)));
     }
 
@@ -216,7 +227,10 @@ mod tests {
 
         let msgs = vec![serde_json::json!({"role": "user", "content": "hi"})];
         let tools = RenderedTools::JsonArray(serde_json::json!([]));
-        let err = backend.send_turn(&msgs, &tools).await.unwrap_err();
+        let err = backend
+            .send_turn(&msgs, &tools, &SessionState::default())
+            .await
+            .unwrap_err();
         assert!(matches!(err, LlmError::Backend(_)));
     }
 
@@ -230,7 +244,9 @@ mod tests {
 
         let msgs = vec![serde_json::json!({"role": "user", "content": "x"})];
         let tools = RenderedTools::JsonArray(serde_json::json!([]));
-        let _ = backend.send_turn(&msgs, &tools).await;
+        let _ = backend
+            .send_turn(&msgs, &tools, &SessionState::default())
+            .await;
 
         assert_eq!(
             url_ref.lock().unwrap().as_deref(),
