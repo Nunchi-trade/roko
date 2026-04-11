@@ -21,6 +21,8 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod agent;
+/// Short-lived content-addressed response cache for identical backend requests.
+pub mod cache;
 pub mod claude_agent;
 pub mod claude_cli_agent;
 pub mod codex_agent;

@@ -3,7 +3,9 @@
 //! Always sets `stream: false` (M21: Ollama silently drops tool calls in streaming mode).
 
 use async_trait::async_trait;
+use std::sync::Arc;
 
+use crate::cache::{ResponseCache, request_hash, shared_response_cache};
 use crate::http::{HttpPoster, ReqwestPoster};
 use crate::tool_loop::{LlmBackend, LlmError};
 use crate::translate::{BackendResponse, RenderedTools};
@@ -17,6 +19,7 @@ pub struct OllamaLlmBackend {
     base_url: String,
     timeout_ms: u64,
     poster: Box<dyn HttpPoster>,
+    response_cache: Option<Arc<ResponseCache>>,
 }
 
 impl OllamaLlmBackend {
@@ -28,6 +31,7 @@ impl OllamaLlmBackend {
             base_url: DEFAULT_BASE_URL.to_string(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             poster: Box::new(ReqwestPoster::new()),
+            response_cache: Some(shared_response_cache()),
         }
     }
 
@@ -50,6 +54,37 @@ impl OllamaLlmBackend {
     pub fn with_poster(mut self, poster: Box<dyn HttpPoster>) -> Self {
         self.poster = poster;
         self
+    }
+
+    /// Override the response cache used for identical request payloads.
+    #[must_use]
+    pub fn with_response_cache(mut self, response_cache: Arc<ResponseCache>) -> Self {
+        self.response_cache = Some(response_cache);
+        self
+    }
+
+    /// Disable content-addressed response caching for this backend instance.
+    #[must_use]
+    pub fn without_response_cache(mut self) -> Self {
+        self.response_cache = None;
+        self
+    }
+
+    async fn execute_request(
+        &self,
+        url: &str,
+        body_bytes: &[u8],
+    ) -> Result<BackendResponse, LlmError> {
+        let raw = self
+            .poster
+            .post_json(url, &[], body_bytes, self.timeout_ms)
+            .await
+            .map_err(|e| LlmError::Network(e.to_string()))?;
+
+        let json: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|e| LlmError::Backend(format!("parse response: {e}")))?;
+
+        Ok(BackendResponse::Json(json))
     }
 }
 
@@ -76,16 +111,16 @@ impl LlmBackend for OllamaLlmBackend {
             serde_json::to_vec(&body).map_err(|e| LlmError::Backend(format!("serialize: {e}")))?;
 
         let url = format!("{}/api/chat", self.base_url.trim_end_matches('/'));
-        let raw = self
-            .poster
-            .post_json(&url, &[], &body_bytes, self.timeout_ms)
-            .await
-            .map_err(|e| LlmError::Network(e.to_string()))?;
-
-        let json: serde_json::Value = serde_json::from_str(&raw)
-            .map_err(|e| LlmError::Backend(format!("parse response: {e}")))?;
-
-        Ok(BackendResponse::Json(json))
+        if let Some(response_cache) = &self.response_cache {
+            let prompt_hash = request_hash("ollama", &url, &body_bytes);
+            response_cache
+                .get_or_compute(prompt_hash, || async {
+                    self.execute_request(&url, &body_bytes).await
+                })
+                .await
+        } else {
+            self.execute_request(&url, &body_bytes).await
+        }
     }
 }
 
@@ -103,12 +138,14 @@ impl std::fmt::Debug for OllamaLlmBackend {
 mod tests {
     use super::*;
     use crate::http::HttpPostError;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     struct MockPoster {
         response: Result<String, HttpPostError>,
         last_url: Arc<Mutex<Option<String>>>,
         last_body: Arc<Mutex<Option<Vec<u8>>>>,
+        call_count: Arc<AtomicUsize>,
     }
 
     impl MockPoster {
@@ -117,6 +154,7 @@ mod tests {
                 response: Ok(body.into()),
                 last_url: Arc::new(Mutex::new(None)),
                 last_body: Arc::new(Mutex::new(None)),
+                call_count: Arc::new(AtomicUsize::new(0)),
             }
         }
 
@@ -125,6 +163,7 @@ mod tests {
                 response: Err(HttpPostError::transport(msg)),
                 last_url: Arc::new(Mutex::new(None)),
                 last_body: Arc::new(Mutex::new(None)),
+                call_count: Arc::new(AtomicUsize::new(0)),
             }
         }
     }
@@ -138,6 +177,7 @@ mod tests {
             body: &[u8],
             _timeout_ms: u64,
         ) -> Result<String, HttpPostError> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
             *self.last_url.lock().unwrap() = Some(url.to_string());
             *self.last_body.lock().unwrap() = Some(body.to_vec());
             self.response.clone()
@@ -154,6 +194,7 @@ mod tests {
         let url_ref = poster.last_url.clone();
         let backend = OllamaLlmBackend::new("gemma4:26b")
             .with_base_url("http://myhost:11434")
+            .without_response_cache()
             .with_poster(Box::new(poster));
 
         let msgs = vec![serde_json::json!({"role": "user", "content": "hi"})];
@@ -170,7 +211,9 @@ mod tests {
     async fn send_turn_enforces_stream_false() {
         let poster = MockPoster::ok(canned_response());
         let body_ref = poster.last_body.clone();
-        let backend = OllamaLlmBackend::new("gemma4:26b").with_poster(Box::new(poster));
+        let backend = OllamaLlmBackend::new("gemma4:26b")
+            .without_response_cache()
+            .with_poster(Box::new(poster));
 
         let msgs = vec![serde_json::json!({"role": "user", "content": "hi"})];
         let tools = RenderedTools::JsonArray(serde_json::json!([]));
@@ -187,7 +230,9 @@ mod tests {
         let poster = MockPoster::ok(
             r#"{"message":{"role":"assistant","content":"","tool_calls":[{"id":"c1","type":"function","function":{"name":"read_file","arguments":{"path":"x"}}}]}}"#,
         );
-        let backend = OllamaLlmBackend::new("m").with_poster(Box::new(poster));
+        let backend = OllamaLlmBackend::new("m")
+            .without_response_cache()
+            .with_poster(Box::new(poster));
 
         let msgs = vec![serde_json::json!({"role": "user", "content": "hi"})];
         let tools = RenderedTools::JsonArray(serde_json::json!([]));
@@ -201,7 +246,9 @@ mod tests {
     #[tokio::test]
     async fn send_turn_network_error() {
         let poster = MockPoster::err("connection refused");
-        let backend = OllamaLlmBackend::new("m").with_poster(Box::new(poster));
+        let backend = OllamaLlmBackend::new("m")
+            .without_response_cache()
+            .with_poster(Box::new(poster));
 
         let msgs = vec![serde_json::json!({"role": "user", "content": "hi"})];
         let tools = RenderedTools::JsonArray(serde_json::json!([]));
@@ -212,7 +259,9 @@ mod tests {
     #[tokio::test]
     async fn send_turn_malformed_json() {
         let poster = MockPoster::ok("not json {{{");
-        let backend = OllamaLlmBackend::new("m").with_poster(Box::new(poster));
+        let backend = OllamaLlmBackend::new("m")
+            .without_response_cache()
+            .with_poster(Box::new(poster));
 
         let msgs = vec![serde_json::json!({"role": "user", "content": "hi"})];
         let tools = RenderedTools::JsonArray(serde_json::json!([]));
@@ -226,6 +275,7 @@ mod tests {
         let url_ref = poster.last_url.clone();
         let backend = OllamaLlmBackend::new("m")
             .with_base_url("http://h:11434/")
+            .without_response_cache()
             .with_poster(Box::new(poster));
 
         let msgs = vec![serde_json::json!({"role": "user", "content": "x"})];
@@ -244,5 +294,25 @@ mod tests {
         let s = format!("{backend:?}");
         assert!(s.contains("OllamaLlmBackend"));
         assert!(s.contains("test-model"));
+    }
+
+    #[tokio::test]
+    async fn response_cache_avoids_second_http_call() {
+        let poster = MockPoster::ok(canned_response());
+        let call_count = Arc::clone(&poster.call_count);
+        let backend = OllamaLlmBackend::new("cached-model")
+            .with_base_url("http://cache-test:11434")
+            .with_response_cache(Arc::new(ResponseCache::new(30_000)))
+            .with_poster(Box::new(poster));
+
+        let msgs = vec![serde_json::json!({"role": "user", "content": "hi"})];
+        let tools = RenderedTools::JsonArray(serde_json::json!([]));
+
+        let first = backend.send_turn(&msgs, &tools).await.unwrap();
+        let second = backend.send_turn(&msgs, &tools).await.unwrap();
+
+        assert!(matches!(first, BackendResponse::Json(_)));
+        assert!(matches!(second, BackendResponse::Json(_)));
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
     }
 }
