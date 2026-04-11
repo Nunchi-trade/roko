@@ -5,6 +5,8 @@ use serde_json::Value;
 use std::fmt;
 use std::path::PathBuf;
 
+pub mod openai_compat;
+
 /// Adapter for a protocol family. Creates Agent instances configured for a
 /// specific provider and model.
 pub trait ProviderAdapter: Send + Sync {
