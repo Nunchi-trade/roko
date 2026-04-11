@@ -144,6 +144,8 @@ const HIGH_CFACTOR_THRESHOLD: f64 = 0.8;
 const LOW_CFACTOR_THRESHOLD: f64 = 0.4;
 /// Cold-start bonus for reusing the previous model.
 const CACHE_AFFINITY_BONUS: f64 = 0.15;
+/// Minimum score improvement required before switching away from the incumbent.
+const HYSTERESIS_THRESHOLD: f64 = 0.10;
 /// Recompute the Pareto frontier after every 50 observations.
 const PARETO_RECOMPUTE_INTERVAL: u64 = 50;
 
@@ -667,6 +669,26 @@ fn apply_cache_affinity(scores: &mut [(String, f64)], previous_model: Option<&st
             }
         }
     }
+}
+
+fn select_with_hysteresis(candidates: &[(String, f64)], previous_model: Option<&str>) -> String {
+    let best = candidates
+        .iter()
+        .max_by(|lhs, rhs| lhs.1.total_cmp(&rhs.1))
+        .expect("CascadeRouter: score-based routing requires at least one candidate");
+
+    if let Some(previous_model) = previous_model
+        && let Some(previous_score) = candidates
+            .iter()
+            .find(|(slug, _)| slug == previous_model)
+            .map(|(_, score)| *score)
+        && best.0 != previous_model
+        && best.1 - previous_score < HYSTERESIS_THRESHOLD
+    {
+        return previous_model.to_string();
+    }
+
+    best.0.clone()
 }
 
 fn model_tier_rank(tier: ModelTier) -> u8 {
@@ -1649,7 +1671,7 @@ impl CascadeRouter {
     ) -> CascadeModel {
         let thinking_candidates = thinking_filtered_candidates(&self.model_slugs, ctx);
         let scores = self.confidence_scores(&thinking_candidates, ctx);
-        let best_slug = choose_best_scored_slug(scores);
+        let best_slug = select_with_hysteresis(&scores, ctx.previous_model.as_deref());
 
         let selected =
             self.bias_model_for_cfactor(ModelSpec::from_slug(&best_slug), cfactor, agent_id);
@@ -1671,7 +1693,7 @@ impl CascadeRouter {
     ) -> CascadeModel {
         let thinking_candidates = thinking_filtered_candidates(candidates, ctx);
         let scores = self.confidence_scores(&thinking_candidates, ctx);
-        let best_slug = choose_best_scored_slug(scores);
+        let best_slug = select_with_hysteresis(&scores, ctx.previous_model.as_deref());
 
         let selected = ModelSpec::from_slug(best_slug);
         let tier = slug_to_tier(&selected.slug);
@@ -1825,28 +1847,10 @@ impl CascadeRouter {
     }
 
     fn select_ucb_model(&self, ctx: &RoutingContext, candidates: &[String]) -> ModelSpec {
-        self.refresh_pareto_frontier_if_needed();
-
-        let frontier = {
-            let state = self.pareto_frontier.lock();
-            if state.bucket == 0 || state.frontier.is_empty() {
-                None
-            } else {
-                Some(state.frontier.clone())
-            }
-        };
-
-        if let Some(frontier) = frontier {
-            let base_alpha = self.linucb.current_alpha();
-            self.linucb
-                .select_features_from_candidates_with_alpha_adjuster(ctx, candidates, |slug| {
-                    pareto_adjusted_alpha(base_alpha, slug, &frontier)
-                })
-        } else if candidates.len() == self.model_slugs.len() {
-            self.linucb.select_model(ctx)
-        } else {
-            self.linucb.select_features_from_candidates(ctx, candidates)
-        }
+        let frontier = self.current_pareto_frontier();
+        let scores = self.ucb_scores(ctx, candidates, frontier.as_deref());
+        let best_slug = select_with_hysteresis(&scores, ctx.previous_model.as_deref());
+        ModelSpec::from_slug(best_slug)
     }
 
     fn refresh_pareto_frontier_if_needed(&self) {
@@ -1919,19 +1923,8 @@ impl CascadeRouter {
             }
             CascadeStage::Ucb => {
                 let thinking_candidates = thinking_filtered_candidates(candidates, ctx);
-                let base_alpha = self.linucb.current_alpha();
-                let frontier = frontier.map(|frontier| frontier.to_vec());
                 let score_map: HashMap<_, _> = self
-                    .linucb
-                    .score_features_from_candidates_with_alpha_adjuster(
-                        ctx,
-                        &thinking_candidates,
-                        |slug| {
-                            frontier.as_ref().map_or(base_alpha, |frontier| {
-                                pareto_adjusted_alpha(base_alpha, slug, frontier)
-                            })
-                        },
-                    )
+                    .ucb_scores(ctx, &thinking_candidates, frontier)
                     .into_iter()
                     .collect();
                 candidates
@@ -1940,6 +1933,22 @@ impl CascadeRouter {
                     .collect()
             }
         }
+    }
+
+    fn ucb_scores(
+        &self,
+        ctx: &RoutingContext,
+        candidates: &[String],
+        frontier: Option<&[String]>,
+    ) -> Vec<(String, f64)> {
+        let base_alpha = self.linucb.current_alpha();
+
+        self.linucb
+            .score_features_from_candidates_with_alpha_adjuster(ctx, candidates, |slug| {
+                frontier.map_or(base_alpha, |frontier| {
+                    pareto_adjusted_alpha(base_alpha, slug, frontier)
+                })
+            })
     }
 
     fn recompute_pareto_frontier(&self) -> Vec<String> {
@@ -1981,22 +1990,6 @@ impl CascadeRouter {
         frontier.dedup();
         frontier
     }
-}
-
-fn choose_best_scored_slug(scores: Vec<(String, f64)>) -> String {
-    let mut iter = scores.into_iter();
-    let Some((mut best_slug, mut best_score)) = iter.next() else {
-        unreachable!("CascadeRouter: confidence scoring requires at least one candidate");
-    };
-
-    for (slug, score) in iter {
-        if score > best_score {
-            best_score = score;
-            best_slug = slug;
-        }
-    }
-
-    best_slug
 }
 
 fn pareto_adjusted_alpha(base_alpha: f64, slug: &str, frontier: &[String]) -> f64 {
@@ -2532,6 +2525,32 @@ mod tests {
         ctx.previous_model = Some("claude-sonnet-4-5".to_string());
         let with_affinity = cascade.route(&ctx);
         assert_eq!(with_affinity.primary.slug, "claude-sonnet-4-5");
+    }
+
+    #[test]
+    fn routing_hysteresis_keeps_incumbent_below_threshold() {
+        let candidates = vec![
+            ("claude-sonnet-4-5".to_string(), 0.82),
+            ("claude-sonnet-4-6".to_string(), 0.91),
+        ];
+
+        assert_eq!(
+            select_with_hysteresis(&candidates, Some("claude-sonnet-4-5")),
+            "claude-sonnet-4-5"
+        );
+    }
+
+    #[test]
+    fn routing_hysteresis_switches_at_threshold() {
+        let candidates = vec![
+            ("claude-sonnet-4-5".to_string(), 0.82),
+            ("claude-sonnet-4-6".to_string(), 0.92),
+        ];
+
+        assert_eq!(
+            select_with_hysteresis(&candidates, Some("claude-sonnet-4-5")),
+            "claude-sonnet-4-6"
+        );
     }
 
     // ── Test 7c: health-aware routing skips unhealthy providers ─────────
