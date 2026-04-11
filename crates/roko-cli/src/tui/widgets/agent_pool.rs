@@ -7,7 +7,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
-use super::super::mori_atmosphere::Atmosphere;
 use super::super::mori_theme::{gradient_context, brighten, Gradient, MoriTheme};
 use super::super::tui_state::TuiState;
 
