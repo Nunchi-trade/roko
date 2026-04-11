@@ -20,6 +20,7 @@ use crate::agent::{Agent, AgentResult};
 #[cfg(test)]
 use crate::http::HttpPostError;
 use crate::http::{HttpPoster, ReqwestPoster};
+use crate::provider::ProviderSemaphores;
 use crate::usage::Usage;
 use async_trait::async_trait;
 use roko_core::{Body, Context, Kind, Provenance, Signal};
@@ -142,6 +143,8 @@ pub struct CodexAgent {
     extra_headers: Vec<(String, String)>,
     extra_body_params: Map<String, Value>,
     poster: Arc<dyn HttpPoster>,
+    provider_id: Option<String>,
+    provider_semaphores: Option<Arc<ProviderSemaphores>>,
 }
 
 impl std::fmt::Debug for CodexAgent {
@@ -172,6 +175,8 @@ impl CodexAgent {
             extra_headers: Vec::new(),
             extra_body_params: Map::new(),
             poster: Arc::new(ReqwestPoster::new()),
+            provider_id: None,
+            provider_semaphores: None,
         }
     }
 
@@ -230,6 +235,19 @@ impl CodexAgent {
     #[must_use]
     pub fn with_http_poster(mut self, poster: Arc<dyn HttpPoster>) -> Self {
         self.poster = poster;
+        self
+    }
+
+    /// Attach shared provider semaphores so outbound requests respect the
+    /// provider's max in-flight limit.
+    #[must_use]
+    pub fn with_provider_semaphores(
+        mut self,
+        provider_id: impl Into<String>,
+        provider_semaphores: Arc<ProviderSemaphores>,
+    ) -> Self {
+        self.provider_id = Some(provider_id.into());
+        self.provider_semaphores = Some(provider_semaphores);
         self
     }
 
@@ -314,18 +332,27 @@ impl Agent for CodexAgent {
         let url = self.endpoint();
         let headers = self.headers();
 
-        let response_text = match self
-            .poster
-            .post_json(&url, &headers, &body, self.timeout_ms)
-            .await
-        {
-            Ok(text) => text,
-            Err(e) => {
-                let reason = match e.status {
-                    Some(code) => format!("http {code}: {}", e.message),
-                    None => format!("transport error: {}", e.message),
-                };
-                return self.fail(input, &reason, started);
+        let response_text = {
+            let _permit = match (&self.provider_id, &self.provider_semaphores) {
+                (Some(provider_id), Some(provider_semaphores)) => {
+                    Some(provider_semaphores.acquire(provider_id).await)
+                }
+                _ => None,
+            };
+
+            match self
+                .poster
+                .post_json(&url, &headers, &body, self.timeout_ms)
+                .await
+            {
+                Ok(text) => text,
+                Err(e) => {
+                    let reason = match e.status {
+                        Some(code) => format!("http {code}: {}", e.message),
+                        None => format!("transport error: {}", e.message),
+                    };
+                    return self.fail(input, &reason, started);
+                }
             }
         };
 
@@ -390,7 +417,13 @@ impl Agent for CodexAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roko_core::agent::ProviderKind;
+    use roko_core::config::schema::ProviderConfig;
+    use std::collections::HashMap;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Notify;
+    use tokio::time::{Duration, sleep, timeout};
 
     // A mock HttpPoster that returns canned responses and records calls.
     struct MockPoster {
@@ -459,6 +492,66 @@ mod tests {
                 Ok(s) => Ok(s.clone()),
                 Err(e) => Err(e.clone()),
             }
+        }
+    }
+
+    struct BlockingPoster {
+        response: String,
+        first_call_entered: Notify,
+        release_first_call: Notify,
+        entered_calls: AtomicUsize,
+        in_flight: AtomicUsize,
+        max_in_flight: AtomicUsize,
+    }
+
+    impl BlockingPoster {
+        fn new(body: impl Into<String>) -> Arc<Self> {
+            Arc::new(Self {
+                response: body.into(),
+                first_call_entered: Notify::new(),
+                release_first_call: Notify::new(),
+                entered_calls: AtomicUsize::new(0),
+                in_flight: AtomicUsize::new(0),
+                max_in_flight: AtomicUsize::new(0),
+            })
+        }
+
+        fn update_max_in_flight(&self, current: usize) {
+            let mut observed = self.max_in_flight.load(Ordering::SeqCst);
+            while current > observed {
+                match self.max_in_flight.compare_exchange(
+                    observed,
+                    current,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => break,
+                    Err(actual) => observed = actual,
+                }
+            }
+        }
+    }
+
+    #[async_trait]
+    impl HttpPoster for BlockingPoster {
+        async fn post_json(
+            &self,
+            _url: &str,
+            _headers: &[(String, String)],
+            _body: &[u8],
+            _timeout_ms: u64,
+        ) -> Result<String, HttpPostError> {
+            let call_number = self.entered_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            let current_in_flight = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.update_max_in_flight(current_in_flight);
+
+            if call_number == 1 {
+                self.first_call_entered.notify_waiters();
+                self.release_first_call.notified().await;
+            }
+
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(self.response.clone())
         }
     }
 
@@ -765,6 +858,65 @@ mod tests {
             header_map.get("authorization"),
             Some(&"Bearer k".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn semaphore_wired_blocks_second_openai_compat_request() {
+        let mut configs = HashMap::new();
+        configs.insert(
+            "zai".to_string(),
+            ProviderConfig {
+                kind: ProviderKind::OpenAiCompat,
+                base_url: Some("https://api.z.ai/api/paas/v4".to_string()),
+                api_key_env: Some("ZAI_API_KEY".to_string()),
+                command: None,
+                args: None,
+                timeout_ms: Some(1_500),
+                ttft_timeout_ms: Some(15_000),
+                connect_timeout_ms: Some(5_000),
+                extra_headers: None,
+                max_concurrent: Some(1),
+            },
+        );
+
+        let semaphores = Arc::new(ProviderSemaphores::new(&configs));
+        let poster = BlockingPoster::new(canned_ok("ok", 1, 1));
+        let agent = Arc::new(
+            agent_with(poster.clone()).with_provider_semaphores("zai", Arc::clone(&semaphores)),
+        );
+
+        let first_agent = Arc::clone(&agent);
+        let first_prompt = prompt("first");
+        let first =
+            tokio::spawn(async move { first_agent.run(&first_prompt, &Context::now()).await });
+
+        timeout(Duration::from_secs(1), poster.first_call_entered.notified())
+            .await
+            .expect("first request should reach the poster");
+
+        let second_agent = Arc::clone(&agent);
+        let second_prompt = prompt("second");
+        let second =
+            tokio::spawn(async move { second_agent.run(&second_prompt, &Context::now()).await });
+
+        sleep(Duration::from_millis(50)).await;
+        assert_eq!(poster.entered_calls.load(Ordering::SeqCst), 1);
+
+        poster.release_first_call.notify_waiters();
+
+        let first_result = timeout(Duration::from_secs(1), first)
+            .await
+            .expect("first request should finish")
+            .expect("first task should join");
+        let second_result = timeout(Duration::from_secs(1), second)
+            .await
+            .expect("second request should finish")
+            .expect("second task should join");
+
+        assert!(first_result.success);
+        assert!(second_result.success);
+        assert_eq!(poster.entered_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(poster.max_in_flight.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

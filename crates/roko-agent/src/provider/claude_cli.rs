@@ -194,6 +194,7 @@ printf '%s\n' '{{"type":"content_block_delta","delta":{{"text":"adapter-ok"}}}}'
             cached_content: None,
             tools: Some("Read,Edit".to_string()),
             mcp_config: Some(mcp_config_arg),
+            provider_semaphores: None,
             env: vec![("CLAUDE_TEST_ENV".to_string(), "env-value".to_string())],
             extra_args: vec!["--option-flag".to_string(), "option-value".to_string()],
             effort: Some("high".to_string()),

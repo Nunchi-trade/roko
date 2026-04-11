@@ -95,6 +95,7 @@ pub fn create_agent_for_model(
     model_key: &str,
     options: AgentOptions,
 ) -> Result<Box<dyn Agent>, AgentCreationError> {
+    let mut options = options;
     let resolved = resolve_model(config, model_key);
 
     let profile = resolved
@@ -114,6 +115,11 @@ pub fn create_agent_for_model(
         base_url = ?provider_config.base_url,
         "creating agent via provider adapter"
     );
+
+    if options.provider_semaphores.is_none() {
+        let providers = config.effective_providers();
+        options.provider_semaphores = Some(Arc::new(ProviderSemaphores::new(&providers)));
+    }
 
     let adapter = adapter_for_kind(resolved.provider_kind);
     adapter.create_agent(&provider_config, &profile, &options)
@@ -182,6 +188,7 @@ pub struct AgentOptions {
     pub cached_content: Option<String>,
     pub tools: Option<String>,
     pub mcp_config: Option<PathBuf>,
+    pub provider_semaphores: Option<Arc<ProviderSemaphores>>,
     pub env: Vec<(String, String)>,
     pub extra_args: Vec<String>,
     pub effort: Option<String>,

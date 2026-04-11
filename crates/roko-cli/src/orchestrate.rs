@@ -7608,6 +7608,7 @@ impl PlanRunner {
                     cached_content,
                     tools: Some(task_allowed_tools_csv.clone()),
                     mcp_config: self.resolve_mcp_config_path().await,
+                    provider_semaphores: None,
                     env: self.config.agent.env.clone(),
                     extra_args,
                     effort: Some(dispatch_effort.clone()),

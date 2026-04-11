@@ -1703,6 +1703,7 @@ fn build_agent(
             cached_content: None,
             tools: Some(allowed_tools.to_string()),
             mcp_config: mcp_config.cloned(),
+            provider_semaphores: None,
             env: Vec::new(),
             extra_args: Vec::new(),
             effort: None,

@@ -211,12 +211,16 @@ impl ProviderAdapter for OpenAiCompatAdapter {
         inject_kimi_params(&mut extra_body_params, model);
         inject_provider_routing(&mut extra_body_params, provider, model);
 
-        let agent = CodexAgent::new(api_key, model.slug.clone())
+        let mut agent = CodexAgent::new(api_key, model.slug.clone())
             .with_base_url(base_url)
             .with_timeout_ms(timeout)
             .with_max_tokens(max_tokens)
             .with_extra_body_params(extra_body_params)
             .with_name(options.name.clone());
+
+        if let Some(provider_semaphores) = options.provider_semaphores.clone() {
+            agent = agent.with_provider_semaphores(model.provider.clone(), provider_semaphores);
+        }
 
         Ok(Box::new(agent))
     }

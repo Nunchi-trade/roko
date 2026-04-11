@@ -69,6 +69,7 @@ pub async fn run_agent(opts: AgentExecOpts<'_>) -> Result<i32> {
             cached_content: None,
             tools: None,
             mcp_config: None,
+            provider_semaphores: None,
             env: opts.env_vars.to_vec(),
             extra_args,
             effort: Some(opts.effort.unwrap_or("medium").to_string()),
