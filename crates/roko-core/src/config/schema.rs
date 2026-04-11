@@ -2607,6 +2607,41 @@ port = 3000
     }
 
     #[test]
+    fn openrouter_config() {
+        let example = include_str!("../../../../examples/roko-openrouter.toml");
+        let cfg = RokoConfig::from_toml(example).expect("roko-openrouter example should parse");
+        assert_eq!(cfg.schema_version, CURRENT_SCHEMA_VERSION);
+
+        let provider = cfg
+            .providers
+            .get("openrouter")
+            .expect("openrouter provider");
+        assert_eq!(provider.kind, ProviderKind::OpenAiCompat);
+        assert_eq!(
+            provider.base_url.as_deref(),
+            Some("https://openrouter.ai/api/v1")
+        );
+        assert_eq!(
+            provider.api_key_env.as_deref(),
+            Some("OPENROUTER_API_KEY")
+        );
+        assert_eq!(
+            provider
+                .extra_headers
+                .as_ref()
+                .expect("extra headers")
+                .get("HTTP-Referer")
+                .map(String::as_str),
+            Some("https://github.com/nunchi/roko")
+        );
+
+        for model_key in ["glm-5-1-or", "kimi-k2-5-or", "claude-opus-or"] {
+            let model = cfg.models.get(model_key).expect("openrouter model");
+            assert_eq!(model.provider, "openrouter");
+        }
+    }
+
+    #[test]
     fn role_override_absent_fields_are_none() {
         let toml = r#"
 [agent.roles.implementer]
