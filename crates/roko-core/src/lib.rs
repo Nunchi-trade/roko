@@ -39,6 +39,8 @@
 pub mod agent;
 pub mod body;
 pub mod build;
+/// Canonical provider-agnostic chat message types.
+pub mod chat_types;
 pub mod conductor;
 pub mod config;
 pub mod context;
@@ -74,6 +76,9 @@ pub use agent::{
 };
 pub use body::Body;
 pub use build::{BuildCommand, BuildSystem};
+pub use chat_types::{
+    ChatMessage, ContentBlock, ImageUrl, MessageContent, ToolCallFunction, ToolCallMessage,
+};
 pub use conductor::ConductorDecision;
 pub use context::Context;
 pub use decay::Decay;
