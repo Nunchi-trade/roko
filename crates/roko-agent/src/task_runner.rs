@@ -4,7 +4,7 @@
 //! execution, events, anomaly detection, budget enforcement, conductor actions,
 //! and cost accounting across task iterations.
 
-use crate::{chat_types::FinishReason, Agent, Usage};
+use crate::{Agent, Usage, chat_types::FinishReason};
 use roko_core::{Context, Signal};
 use std::collections::{HashMap, VecDeque};
 use thiserror::Error;

@@ -23,9 +23,8 @@ use roko_agent::mcp::{McpConfig, McpServerConfig};
 use roko_agent::provider::{AgentOptions, create_agent_for_model};
 use roko_agent::task_runner::{
     AnomalyDetector as RunnerAnomalyDetector, BudgetGuardrail as RunnerBudgetGuardrail,
-    CostTable as RunnerCostTable, ConductorBandit as RunnerConductorBandit,
-    EventBus as RunnerEventBus, ModelPricing as RunnerModelPricing, TaskRunner,
-    TaskRunnerError,
+    ConductorBandit as RunnerConductorBandit, CostTable as RunnerCostTable,
+    EventBus as RunnerEventBus, ModelPricing as RunnerModelPricing, TaskRunner, TaskRunnerError,
 };
 use roko_agent::translate::{ClaudeTranslator, RenderedTools, Translator};
 use roko_agent::{Agent, AgentResult, ClaudeCliAgent, ExecAgent};
@@ -8121,20 +8120,23 @@ impl PlanRunner {
                 // Orchestrate still owns cross-attempt retry/escalation logic.
                 max_iterations: 1,
             };
-            let task_result = runner.run_task(&prompt, &ctx).await.map_err(|err| match err {
-                TaskRunnerError::BudgetExhausted => anyhow!(
-                    "task {plan_id}/{task} budget exhausted while running {}",
-                    self.config.agent.command
-                ),
-                TaskRunnerError::Anomaly(anomaly) => anyhow!(
-                    "task {plan_id}/{task} anomaly detected while running {}: {anomaly:?}",
-                    self.config.agent.command
-                ),
-                TaskRunnerError::ModelEscalation => anyhow!(
-                    "task {plan_id}/{task} requested model escalation while running {}",
-                    self.config.agent.command
-                ),
-            })?;
+            let task_result = runner
+                .run_task(&prompt, &ctx)
+                .await
+                .map_err(|err| match err {
+                    TaskRunnerError::BudgetExhausted => anyhow!(
+                        "task {plan_id}/{task} budget exhausted while running {}",
+                        self.config.agent.command
+                    ),
+                    TaskRunnerError::Anomaly(anomaly) => anyhow!(
+                        "task {plan_id}/{task} anomaly detected while running {}: {anomaly:?}",
+                        self.config.agent.command
+                    ),
+                    TaskRunnerError::ModelEscalation => anyhow!(
+                        "task {plan_id}/{task} requested model escalation while running {}",
+                        self.config.agent.command
+                    ),
+                })?;
 
             let mut usage = task_result.total_usage;
             usage.cost_usd = task_result.total_cost_usd as f32;
