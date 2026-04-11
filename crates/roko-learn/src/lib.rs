@@ -48,5 +48,6 @@ pub mod provider_health;
 pub mod quality_judge;
 pub mod regression;
 pub mod runtime_feedback;
+pub mod section_effect;
 pub mod skill_library;
 pub mod task_metric;
