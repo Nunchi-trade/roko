@@ -180,6 +180,17 @@ pub(crate) fn parse_glm_response(json: &serde_json::Value) -> (String, Option<St
     (content, reasoning)
 }
 
+#[must_use]
+pub(crate) fn parse_glm_metadata(json: &serde_json::Value) -> crate::translate::ResponseMetadata {
+    crate::translate::ResponseMetadata {
+        content_filter: json
+            .get("content_filter")
+            .filter(|value| value.is_array())
+            .cloned(),
+        ..Default::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -678,5 +689,33 @@ mod tests {
             response.reasoning,
             Some("Let me think step by step...".to_string())
         );
+    }
+
+    #[test]
+    fn glm_content_filter() {
+        let raw = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "The answer is 42."
+                }
+            }],
+            "content_filter": [
+                { "role": "user", "level": 2 },
+                { "role": "assistant", "level": 0 }
+            ]
+        });
+
+        let (content, reasoning) = parse_glm_response(&raw);
+        let response = crate::translate::ChatResponse {
+            content,
+            reasoning,
+            metadata: parse_glm_metadata(&raw),
+            ..Default::default()
+        };
+
+        assert_eq!(response.metadata.content_filter, Some(serde_json::json!([
+            { "role": "user", "level": 2 },
+            { "role": "assistant", "level": 0 }
+        ])));
     }
 }
