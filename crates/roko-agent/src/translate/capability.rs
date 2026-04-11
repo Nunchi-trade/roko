@@ -76,6 +76,21 @@ pub fn capabilities_for(slug: &str) -> ModelCapabilities {
         };
     }
 
+    if slug.starts_with("kimi-k2") {
+        return ModelCapabilities {
+            supports_tools: true,
+            supports_parallel_tool_calls: true,
+            tool_format: ToolFormat::OpenAiJson,
+            max_tools_before_degrade: 128,
+            supports_thinking: true,
+            supports_vision: slug.contains("k2.5") || slug.contains("k2-5"),
+            supports_web_search: false,
+            supports_mcp_tools: false,
+            supports_partial: true,
+            supports_tool_streaming: false,
+        };
+    }
+
     let profile = profile_for_model(slug);
     ModelCapabilities {
         supports_tools: profile.supports_tools,
@@ -212,6 +227,21 @@ mod tests {
         assert!(caps.supports_web_search);
         assert!(caps.supports_mcp_tools);
         assert!(caps.supports_tool_streaming);
+    }
+
+    #[test]
+    fn kimi_capabilities_for_kimi_k25_returns_expected_profile() {
+        let caps = capabilities_for("kimi-k2.5");
+        assert!(caps.supports_tools);
+        assert!(caps.supports_parallel_tool_calls);
+        assert_eq!(caps.tool_format, ToolFormat::OpenAiJson);
+        assert_eq!(caps.max_tools_before_degrade, 128);
+        assert!(caps.supports_thinking);
+        assert!(caps.supports_vision);
+        assert!(caps.supports_partial);
+        assert!(!caps.supports_web_search);
+        assert!(!caps.supports_mcp_tools);
+        assert!(!caps.supports_tool_streaming);
     }
 
     #[test]
