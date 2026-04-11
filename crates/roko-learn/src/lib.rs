@@ -27,6 +27,8 @@ pub mod baseline;
 pub mod budget;
 pub mod cascade_router;
 pub mod cfactor;
+/// Learned intervention policy for conductor retries and aborts.
+pub mod conductor;
 pub mod context_pack_cache;
 pub mod cost_table;
 pub mod costs_db;

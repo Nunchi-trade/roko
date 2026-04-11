@@ -267,12 +267,7 @@ impl ToolLoop {
             let response = match match &event_tx {
                 Some(event_tx) => {
                     self.backend
-                        .send_turn_streaming(
-                            &messages,
-                            &rendered_tools,
-                            &session,
-                            event_tx.clone(),
-                        )
+                        .send_turn_streaming(&messages, &rendered_tools, &session, event_tx.clone())
                         .await
                 }
                 None => {
