@@ -1,0 +1,127 @@
+schema_version = 2
+
+[project]
+name = "roko-perplexity"
+root = "."
+fresh_base_branch = "main"
+
+# Default to Claude Opus for coding; researcher/fact_checker roles use Perplexity.
+[agent]
+default_model = "claude-opus"
+effort = "high"
+bare_mode = true
+timeout_ms = 300000
+
+[agent.roles.researcher]
+model = "sonar-pro"
+
+[agent.roles.fact_checker]
+model = "sonar"
+
+[prompt]
+token_budget = 12000
+role = "You are a Roko agent. Use Perplexity (sonar-pro) for research tasks requiring web-grounded citations, sonar for fast fact-checking, and Claude Opus for all coding and implementation work."
+
+[gates]
+clippy_enabled = true
+skip_tests = false
+max_iterations = 3
+
+# ── Providers ────────────────────────────────────────────────────────────────
+
+# Perplexity Sonar: web-grounded research with real citations
+[providers.perplexity]
+kind = "perplexity_api"
+base_url = "https://api.perplexity.ai"
+api_key_env = "PERPLEXITY_API_KEY"
+timeout_ms = 120000
+
+# Claude CLI: coding, implementation, and architectural tasks
+[providers.claude_cli]
+kind = "claude_cli"
+command = "claude"
+args = ["--print", "--output-format", "stream-json"]
+
+# ── Models ───────────────────────────────────────────────────────────────────
+
+# Fast factual queries and real-time fact-checking: $1/M + $5/1K requests
+[models.sonar]
+provider = "perplexity"
+slug = "sonar"
+context_window = 127000
+max_output = 16384
+supports_tools = false
+supports_search = true
+supports_citations = true
+search_context_size = "medium"
+tool_format = "openai_json"
+cost_input_per_m = 1.00
+cost_output_per_m = 1.00
+cost_per_request = 0.005
+
+# Multi-step research and complex queries: $3/M + $15/M + $6/1K requests
+[models.sonar-pro]
+provider = "perplexity"
+slug = "sonar-pro"
+context_window = 200000
+max_output = 16384
+supports_tools = false
+supports_search = true
+supports_citations = true
+search_context_size = "high"
+tool_format = "openai_json"
+cost_input_per_m = 3.00
+cost_output_per_m = 15.00
+cost_per_request = 0.014
+
+# Exhaustive long-form reports via async polling: $2/M + $8/M + $5/1K searches
+[models.sonar-deep-research]
+provider = "perplexity"
+slug = "sonar-deep-research"
+context_window = 128000
+max_output = 65536
+supports_tools = false
+supports_search = true
+supports_citations = true
+supports_thinking = true
+supports_async = true
+tool_format = "openai_json"
+cost_input_per_m = 2.00
+cost_output_per_m = 8.00
+
+# Premium coding + architecture via Claude CLI
+[models.claude-opus]
+provider = "claude_cli"
+slug = "claude-opus-4-6"
+context_window = 200000
+max_output = 32768
+supports_tools = true
+tool_format = "anthropic_blocks"
+cost_input_per_m = 15.00
+cost_output_per_m = 75.00
+
+# ── Perplexity search settings ───────────────────────────────────────────────
+
+[perplexity]
+default_search_model = "sonar"
+default_research_model = "sonar-pro"
+academic_mode = true
+search_recency_filter = "year"
+return_related_questions = true
+
+# ── Notes ────────────────────────────────────────────────────────────────────
+#
+# How model routing works with this config:
+#
+#   Role          Model          Provider       Use case
+#   ─────────────────────────────────────────────────────────────────────────
+#   (default)     claude-opus    claude_cli     Coding, implementation, refactors
+#   researcher    sonar-pro      perplexity     Deep multi-step research with citations
+#   fact_checker  sonar          perplexity     Fast factual verification
+#   (manual)      sonar-deep     perplexity     Exhaustive async research reports
+#
+# To run research:
+#   PERPLEXITY_API_KEY=... roko research topic "transformer scaling laws"
+#
+# The CascadeRouter will learn pass rates for each model and route accordingly.
+# Router state persists to `.roko/learn/cascade-router.json`

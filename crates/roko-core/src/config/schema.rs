@@ -2827,6 +2827,73 @@ return_related_questions = false
     }
 
     #[test]
+    fn perplexity_example_config() {
+        let example = include_str!("../../../../examples/roko-perplexity.toml");
+        let cfg = RokoConfig::from_toml(example).expect("roko-perplexity example should parse");
+        assert_eq!(cfg.schema_version, CURRENT_SCHEMA_VERSION);
+
+        // Perplexity provider
+        let pplx = cfg.providers.get("perplexity").expect("perplexity provider");
+        assert_eq!(pplx.kind, ProviderKind::PerplexityApi);
+        assert_eq!(
+            pplx.base_url.as_deref(),
+            Some("https://api.perplexity.ai")
+        );
+        assert_eq!(pplx.api_key_env.as_deref(), Some("PERPLEXITY_API_KEY"));
+
+        // Claude CLI provider
+        let claude = cfg.providers.get("claude_cli").expect("claude_cli provider");
+        assert_eq!(claude.kind, ProviderKind::ClaudeCli);
+
+        // Sonar models resolve to the perplexity provider
+        for model_key in ["sonar", "sonar-pro", "sonar-deep-research"] {
+            let model = cfg.models.get(model_key).expect(model_key);
+            assert_eq!(
+                model.provider, "perplexity",
+                "{model_key} should use perplexity provider"
+            );
+            assert!(model.supports_search, "{model_key} should support search");
+            assert!(
+                model.supports_citations,
+                "{model_key} should support citations"
+            );
+        }
+
+        // Claude Opus resolves to claude_cli provider
+        let claude_opus = cfg.models.get("claude-opus").expect("claude-opus model");
+        assert_eq!(claude_opus.provider, "claude_cli");
+        assert_eq!(claude_opus.slug, "claude-opus-4-6");
+        assert!(claude_opus.supports_tools);
+
+        // sonar-deep-research has async support
+        let deep = cfg.models.get("sonar-deep-research").expect("sonar-deep-research");
+        assert!(deep.supports_async);
+
+        // Perplexity search config
+        assert_eq!(
+            cfg.perplexity.default_search_model.as_deref(),
+            Some("sonar")
+        );
+        assert_eq!(
+            cfg.perplexity.default_research_model.as_deref(),
+            Some("sonar-pro")
+        );
+        assert!(cfg.perplexity.academic_mode);
+        assert_eq!(cfg.perplexity.search_recency_filter, "year");
+        assert!(cfg.perplexity.return_related_questions);
+
+        // Role overrides
+        let researcher = cfg.agent.roles.get("researcher").expect("researcher role");
+        assert_eq!(researcher.model.as_deref(), Some("sonar-pro"));
+        let fact_checker = cfg
+            .agent
+            .roles
+            .get("fact_checker")
+            .expect("fact_checker role");
+        assert_eq!(fact_checker.model.as_deref(), Some("sonar"));
+    }
+
+    #[test]
     fn parse_bool_env_variants() {
         assert!(parse_bool_env("true"));
         assert!(parse_bool_env("1"));
