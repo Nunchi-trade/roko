@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
+use crate::agent::ProviderKind;
 use serde::{Deserialize, Serialize};
 
 /// Current schema version. Bump on incompatible changes.
@@ -475,6 +476,35 @@ where
 }
 
 // ---- [project] -----------------------------------------------------------
+
+/// A single provider entry from `[providers.*]`.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProviderConfig {
+    /// Protocol family used to talk to the provider.
+    pub kind: ProviderKind,
+    /// Base URL for HTTP providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Environment variable name holding the API key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+    /// Command to spawn for CLI providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Arguments passed to the CLI command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    /// Request timeout in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    /// Extra headers to inject on outbound requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_headers: Option<HashMap<String, String>>,
+    /// Maximum concurrent requests allowed for this provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent: Option<u32>,
+}
 
 /// PRD lifecycle settings.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1413,6 +1443,43 @@ fresh_base_branch = "develop"
         assert_eq!(cfg.project.name, "my-dapp");
         assert_eq!(cfg.project.root, "/home/user/code");
         assert_eq!(cfg.project.fresh_base_branch, "develop");
+    }
+
+    #[test]
+    fn provider_config_parses_and_roundtrips() {
+        let toml = r#"
+kind = "openai_compat"
+base_url = "https://api.example.com"
+api_key_env = "EXAMPLE_API_KEY"
+command = "claude"
+args = ["--print", "--output-format", "stream-json"]
+timeout_ms = 120000
+extra_headers = { "HTTP-Referer" = "roko-agent" }
+max_concurrent = 4
+"#;
+        let cfg = toml::from_str::<ProviderConfig>(toml).expect("parse");
+        assert_eq!(cfg.kind, ProviderKind::OpenAiCompat);
+        assert_eq!(cfg.base_url.as_deref(), Some("https://api.example.com"));
+        assert_eq!(cfg.api_key_env.as_deref(), Some("EXAMPLE_API_KEY"));
+        assert_eq!(cfg.command.as_deref(), Some("claude"));
+        assert_eq!(
+            cfg.args.as_ref().expect("args"),
+            &vec!["--print".to_string(), "--output-format".to_string(), "stream-json".to_string()]
+        );
+        assert_eq!(cfg.timeout_ms, Some(120000));
+        assert_eq!(
+            cfg.extra_headers
+                .as_ref()
+                .expect("extra_headers")
+                .get("HTTP-Referer")
+                .map(String::as_str),
+            Some("roko-agent")
+        );
+        assert_eq!(cfg.max_concurrent, Some(4));
+
+        let text = toml::to_string(&cfg).expect("serialize");
+        let back = toml::from_str::<ProviderConfig>(&text).expect("reparse");
+        assert_eq!(cfg, back);
     }
 
     #[test]
