@@ -139,6 +139,47 @@ impl LatencyRegistry {
             .cloned()
     }
 
+    /// Return aggregate latency stats pooled across all models for `provider`.
+    #[must_use]
+    pub fn get_all_for_provider(&self, provider: &str) -> LatencyStats {
+        let stats = self.stats.lock();
+        let mut aggregate = LatencyStats {
+            provider_id: provider.to_owned(),
+            ..Default::default()
+        };
+        let mut weighted_ttft = 0.0;
+        let mut weighted_total = 0.0;
+        let mut weighted_tps = 0.0;
+
+        for entry in stats
+            .values()
+            .filter(|entry| entry.provider_id.as_str() == provider)
+        {
+            let weight = entry.observations as f64;
+            aggregate.observations = aggregate.observations.saturating_add(entry.observations);
+            aggregate
+                .recent_latencies
+                .extend(entry.recent_latencies.iter().copied());
+            weighted_ttft += entry.ttft_ema_ms * weight;
+            weighted_total += entry.total_latency_ema_ms * weight;
+            weighted_tps += entry.tokens_per_second_ema * weight;
+        }
+
+        if aggregate.observations > 0 {
+            let total_weight = aggregate.observations as f64;
+            aggregate.ttft_ema_ms = weighted_ttft / total_weight;
+            aggregate.total_latency_ema_ms = weighted_total / total_weight;
+            aggregate.tokens_per_second_ema = weighted_tps / total_weight;
+        }
+
+        if aggregate.recent_latencies.len() > 100 {
+            let excess = aggregate.recent_latencies.len() - 100;
+            aggregate.recent_latencies.drain(0..excess);
+        }
+
+        aggregate
+    }
+
     /// Persist the registry to `path` as JSON.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         let mut entries: Vec<_> = self
@@ -327,5 +368,22 @@ mod tests {
         assert_eq!(anthropic.provider_id, "anthropic");
         assert_eq!(anthropic.observations, 1);
         assert_eq!(anthropic.recent_latencies, vec![160.0]);
+    }
+
+    #[test]
+    fn latency_registry_aggregates_provider_percentiles() {
+        let registry = LatencyRegistry::new();
+
+        registry.record("glm-5.1", "zai", 10.0, 100.0, 1);
+        registry.record("glm-5.1", "zai", 20.0, 200.0, 1);
+        registry.record("glm-4.6", "zai", 30.0, 300.0, 1);
+        registry.record("gpt-4o", "openai", 40.0, 400.0, 1);
+
+        let stats = registry.get_all_for_provider("zai");
+        assert_eq!(stats.provider_id, "zai");
+        assert_eq!(stats.observations, 3);
+        assert_close(stats.p50_ms(), 200.0);
+        assert_close(stats.p95_ms(), 300.0);
+        assert_close(stats.p99_ms(), 300.0);
     }
 }

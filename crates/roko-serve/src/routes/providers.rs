@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -14,6 +14,7 @@ use roko_learn::provider_health::{HealthState, ProviderStatus};
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/providers", get(list_providers))
+        .route("/providers/{id}/health", get(provider_health))
         .route("/models", get(list_models))
 }
 
@@ -75,6 +76,29 @@ async fn list_models(State(state): State<Arc<AppState>>) -> Json<ModelsResponse>
     Json(ModelsResponse { models })
 }
 
+/// `GET /api/providers/{id}/health` — detailed health for a specific provider.
+async fn provider_health(
+    State(state): State<Arc<AppState>>,
+    Path(provider_id): Path<String>,
+) -> Json<ProviderHealthResponse> {
+    let health = state.provider_health.get(&provider_id);
+    let latency = state.latency_registry.get_all_for_provider(&provider_id);
+
+    Json(ProviderHealthResponse {
+        provider_id,
+        state: provider_state_label(health.state).to_string(),
+        consecutive_failures: health.consecutive_failures,
+        lifetime_attempts: health.total_attempts,
+        lifetime_successes: health.total_successes,
+        last_success_at: health.last_success_at,
+        last_failure_at: health.last_failure_at,
+        latency_p50_ms: latency.p50_ms(),
+        latency_p95_ms: latency.p95_ms(),
+        latency_p99_ms: latency.p99_ms(),
+        error_rate: health.error_rate(),
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProvidersResponse {
     providers: Vec<ProviderInfo>,
@@ -83,6 +107,23 @@ struct ProvidersResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ModelsResponse {
     models: Vec<ModelInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProviderHealthResponse {
+    provider_id: String,
+    state: String,
+    consecutive_failures: u32,
+    lifetime_attempts: u64,
+    lifetime_successes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_success_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_failure_at: Option<chrono::DateTime<chrono::Utc>>,
+    latency_p50_ms: f64,
+    latency_p95_ms: f64,
+    latency_p99_ms: f64,
+    error_rate: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,16 +164,19 @@ struct ProviderHealthInfo {
 impl From<ProviderStatus> for ProviderHealthInfo {
     fn from(status: ProviderStatus) -> Self {
         Self {
-            state: match status.state {
-                HealthState::Healthy => "healthy",
-                HealthState::Unhealthy { .. } => "unhealthy",
-                HealthState::Probing => "probing",
-            }
-            .to_string(),
+            state: provider_state_label(status.state).to_string(),
             consecutive_failures: status.consecutive_failures,
             total_attempts: status.total_attempts,
             total_successes: status.total_successes,
         }
+    }
+}
+
+fn provider_state_label(state: HealthState) -> &'static str {
+    match state {
+        HealthState::Healthy => "healthy",
+        HealthState::Unhealthy { .. } => "unhealthy",
+        HealthState::Probing => "probing",
     }
 }
 
@@ -328,5 +372,80 @@ mod tests {
         assert!(model.supports_vision);
         assert_eq!(model.cost_input_per_m, Some(1.40));
         assert_eq!(model.cost_output_per_m, Some(4.40));
+    }
+
+    #[tokio::test]
+    async fn provider_health_returns_circuit_state_and_latency_percentiles() {
+        let dir = tempdir().expect("tempdir");
+        let workdir = dir.path().to_path_buf();
+        let deploy_backend =
+            Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
+        let mut config = roko_core::config::schema::RokoConfig::default();
+        config.providers.insert(
+            "zai".into(),
+            roko_core::config::schema::ProviderConfig {
+                kind: roko_core::agent::ProviderKind::OpenAiCompat,
+                base_url: Some("https://api.z.ai/api/paas/v4".into()),
+                api_key_env: Some("ZAI_API_KEY".into()),
+                command: None,
+                args: None,
+                timeout_ms: Some(120_000),
+                ttft_timeout_ms: Some(15_000),
+                connect_timeout_ms: Some(5_000),
+                extra_headers: None,
+                max_concurrent: None,
+            },
+        );
+
+        let state = Arc::new(AppState::new(
+            workdir,
+            Arc::new(NoOpRuntime),
+            config,
+            deploy_backend,
+        ));
+        state.provider_health.record_success("zai");
+        state.provider_health.record_failure("zai");
+        state.provider_health.record_failure("zai");
+        state.provider_health.record_failure("zai");
+        state
+            .latency_registry
+            .record("glm-5.1", "zai", 10.0, 100.0, 1);
+        state
+            .latency_registry
+            .record("glm-5.1", "zai", 20.0, 200.0, 1);
+        state
+            .latency_registry
+            .record("glm-4.6", "zai", 30.0, 300.0, 1);
+
+        let app = routes().with_state(Arc::clone(&state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/providers/zai/health")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let response: ProviderHealthResponse =
+            serde_json::from_slice(&body).expect("parse response");
+
+        assert_eq!(response.provider_id, "zai");
+        assert_eq!(response.state, "unhealthy");
+        assert_eq!(response.consecutive_failures, 3);
+        assert_eq!(response.lifetime_attempts, 4);
+        assert_eq!(response.lifetime_successes, 1);
+        assert!(response.last_success_at.is_some());
+        assert!(response.last_failure_at.is_some());
+        assert_eq!(response.latency_p50_ms, 200.0);
+        assert_eq!(response.latency_p95_ms, 300.0);
+        assert_eq!(response.latency_p99_ms, 300.0);
+        assert_eq!(response.error_rate, 0.75);
     }
 }

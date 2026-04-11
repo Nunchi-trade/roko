@@ -21,6 +21,7 @@ use roko_core::config::schema::RokoConfig;
 use roko_core::obs::LogScrubber;
 use roko_core::{Signal, Substrate};
 use roko_daimon::DaimonState;
+use roko_learn::latency::LatencyRegistry;
 use roko_learn::provider_health::ProviderHealthTracker;
 
 use crate::deploy::{DeployBackend, Deployment};
@@ -142,6 +143,8 @@ pub struct AppState {
     pub roko_config: RwLock<RokoConfig>,
     /// In-memory provider health tracker exposed via serve APIs.
     pub provider_health: ProviderHealthTracker,
+    /// In-memory provider latency stats exposed via serve APIs.
+    pub latency_registry: LatencyRegistry,
     /// Active one-shot runs.
     pub active_runs: RwLock<HashMap<String, RunHandle>>,
     /// Active plan executions.
@@ -193,6 +196,7 @@ impl AppState {
             runtime,
             roko_config: RwLock::new(roko_config),
             provider_health: ProviderHealthTracker::new(),
+            latency_registry: LatencyRegistry::new(),
             active_runs: RwLock::new(HashMap::new()),
             active_plans: RwLock::new(HashMap::new()),
             operations: RwLock::new(HashMap::new()),
