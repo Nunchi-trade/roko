@@ -86,6 +86,8 @@ pub struct RoutingContext {
     pub has_prior_failure: bool,
     /// Affect-derived confidence hint in `[0.0, 1.0]`.
     pub affect_confidence: f64,
+    /// Requested thinking / reasoning level for this task, if any.
+    pub thinking_level: Option<String>,
     /// Model used for the previous task in the same plan.
     pub previous_model: Option<String>,
     /// Estimated shared prefix size for cached context reuse.
@@ -869,6 +871,7 @@ mod tests {
             crate_familiarity: 0.5,
             has_prior_failure: false,
             affect_confidence: 0.5,
+            thinking_level: None,
             previous_model: None,
             plan_context_tokens: None,
         }

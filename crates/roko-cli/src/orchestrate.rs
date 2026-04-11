@@ -403,7 +403,11 @@ fn read_full_crate_source(crate_root: &Path) -> Result<String> {
         let contents =
             std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
         let relative = path.strip_prefix(crate_root).unwrap_or(path.as_path());
-        combined.push_str(&format!("// FILE: {}\n{}\n\n", relative.display(), contents));
+        combined.push_str(&format!(
+            "// FILE: {}\n{}\n\n",
+            relative.display(),
+            contents
+        ));
     }
 
     Ok(combined)
@@ -1199,6 +1203,7 @@ fn cascade_routing_context(
         crate_familiarity,
         has_prior_failure,
         affect_confidence,
+        thinking_level: Some(runner.config.agent.effort.clone()),
         previous_model: None,
         plan_context_tokens: None,
     }
@@ -2838,10 +2843,12 @@ impl PlanRunner {
             return Ok(None);
         }
 
-        let Some(provider) = resolved
-            .provider_config
-            .or_else(|| roko_config.effective_providers().get(&model.provider).cloned())
-        else {
+        let Some(provider) = resolved.provider_config.or_else(|| {
+            roko_config
+                .effective_providers()
+                .get(&model.provider)
+                .cloned()
+        }) else {
             return Ok(None);
         };
 

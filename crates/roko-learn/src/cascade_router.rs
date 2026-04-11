@@ -22,7 +22,7 @@
 use parking_lot::Mutex;
 use roko_core::OperatingFrequency;
 use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
-use roko_core::task::TaskCategory;
+use roko_core::task::{TaskCategory, TaskComplexityBand};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -364,6 +364,94 @@ fn low_confidence_tier_bonus(tier: ModelTier) -> f64 {
         ModelTier::Fast => 0.0,
         _ => 0.05,
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThinkingPreference {
+    Neutral,
+    PreferThinking,
+    PreferNonThinking,
+}
+
+fn thinking_preference(ctx: &RoutingContext) -> ThinkingPreference {
+    let Some(level) = ctx.thinking_level.as_deref() else {
+        return ThinkingPreference::Neutral;
+    };
+
+    let level = level.trim().to_ascii_lowercase();
+    match level.as_str() {
+        "high" | "max" if ctx.complexity == TaskComplexityBand::Complex => {
+            ThinkingPreference::PreferThinking
+        }
+        "minimal" | "none" | "disabled" | "off" | "false" => ThinkingPreference::PreferNonThinking,
+        _ => ThinkingPreference::Neutral,
+    }
+}
+
+fn model_supports_thinking(slug: &str) -> bool {
+    let slug = slug.to_ascii_lowercase();
+    if slug.contains("gemini-2.5-flash-lite")
+        || slug.starts_with("sonar")
+        || slug.starts_with("perplexity/")
+    {
+        return false;
+    }
+
+    slug.contains("gemini-2.5-flash")
+        || slug.contains("gemini-2.5-pro")
+        || slug.contains("gemini-3")
+        || slug.starts_with("kimi-k2")
+        || slug.starts_with("glm")
+        || slug.contains("gpt-5")
+        || slug.starts_with("o1")
+        || slug.starts_with("o3")
+        || slug.starts_with("o4")
+        || slug.contains("thinking")
+        || slug.contains("reasoning")
+}
+
+fn thinking_filtered_candidates(candidates: &[String], ctx: &RoutingContext) -> Vec<String> {
+    let wants_thinking = match thinking_preference(ctx) {
+        ThinkingPreference::PreferThinking => Some(true),
+        ThinkingPreference::PreferNonThinking => Some(false),
+        ThinkingPreference::Neutral => None,
+    };
+    let Some(wants_thinking) = wants_thinking else {
+        return candidates.to_vec();
+    };
+
+    let filtered: Vec<String> = candidates
+        .iter()
+        .filter(|slug| model_supports_thinking(slug) == wants_thinking)
+        .cloned()
+        .collect();
+    if filtered.is_empty() {
+        candidates.to_vec()
+    } else {
+        filtered
+    }
+}
+
+fn pick_tier_extreme(candidates: &[String], prefer_strongest: bool) -> Option<String> {
+    let mut iter = candidates.iter();
+    let first = iter.next()?.clone();
+    let mut best = first;
+    let mut best_rank = model_tier_rank(slug_to_tier(&best));
+
+    for slug in iter {
+        let rank = model_tier_rank(slug_to_tier(slug));
+        let better = if prefer_strongest {
+            rank > best_rank
+        } else {
+            rank < best_rank
+        };
+        if better {
+            best = slug.clone();
+            best_rank = rank;
+        }
+    }
+
+    Some(best)
 }
 
 fn apply_cache_affinity(scores: &mut [(String, f64)], previous_model: Option<&str>) {
@@ -890,6 +978,31 @@ impl CascadeRouter {
         cfactor: Option<&CFactor>,
         agent_id: Option<&str>,
     ) -> CascadeModel {
+        if let Some(thinking_selected) = match thinking_preference(ctx) {
+            ThinkingPreference::PreferThinking => {
+                pick_tier_extreme(&thinking_filtered_candidates(&self.model_slugs, ctx), true)
+            }
+            ThinkingPreference::PreferNonThinking => {
+                pick_tier_extreme(&thinking_filtered_candidates(&self.model_slugs, ctx), false)
+            }
+            ThinkingPreference::Neutral => None,
+        } {
+            let selected = self.bias_model_for_cfactor(
+                ModelSpec::from_slug(thinking_selected),
+                cfactor,
+                agent_id,
+            );
+            let tier = slug_to_tier(&selected.slug);
+            let fallback = fallback_for_tier(tier).map(ModelSpec::from_slug);
+
+            return CascadeModel {
+                primary: selected,
+                fallback,
+                latency_sla_ms: default_latency_sla(tier),
+                stage: CascadeStage::Static,
+            };
+        }
+
         // For research tasks, prefer Perplexity Sonar when available.
         let slug = if ctx.task_category == TaskCategory::Research {
             self.model_slugs
@@ -922,6 +1035,27 @@ impl CascadeRouter {
     }
 
     fn route_static_filtered(&self, ctx: &RoutingContext, candidates: &[String]) -> CascadeModel {
+        if let Some(thinking_selected) = match thinking_preference(ctx) {
+            ThinkingPreference::PreferThinking => {
+                pick_tier_extreme(&thinking_filtered_candidates(candidates, ctx), true)
+            }
+            ThinkingPreference::PreferNonThinking => {
+                pick_tier_extreme(&thinking_filtered_candidates(candidates, ctx), false)
+            }
+            ThinkingPreference::Neutral => None,
+        } {
+            let selected = ModelSpec::from_slug(thinking_selected);
+            let tier = slug_to_tier(&selected.slug);
+            let fallback = fallback_for_tier(tier).map(ModelSpec::from_slug);
+
+            return CascadeModel {
+                primary: selected,
+                fallback,
+                latency_sla_ms: default_latency_sla(tier),
+                stage: CascadeStage::Static,
+            };
+        }
+
         let slug = self
             .role_table
             .get(&ctx.role)
@@ -968,7 +1102,8 @@ impl CascadeRouter {
         cfactor: Option<&CFactor>,
         agent_id: Option<&str>,
     ) -> CascadeModel {
-        let scores = self.confidence_scores(&self.model_slugs, ctx);
+        let thinking_candidates = thinking_filtered_candidates(&self.model_slugs, ctx);
+        let scores = self.confidence_scores(&thinking_candidates, ctx);
         let best_slug = choose_best_scored_slug(scores);
 
         let selected =
@@ -989,7 +1124,8 @@ impl CascadeRouter {
         ctx: &RoutingContext,
         candidates: &[String],
     ) -> CascadeModel {
-        let scores = self.confidence_scores(candidates, ctx);
+        let thinking_candidates = thinking_filtered_candidates(candidates, ctx);
+        let scores = self.confidence_scores(&thinking_candidates, ctx);
         let best_slug = choose_best_scored_slug(scores);
 
         let selected = ModelSpec::from_slug(best_slug);
@@ -1010,7 +1146,8 @@ impl CascadeRouter {
         cfactor: Option<&CFactor>,
         agent_id: Option<&str>,
     ) -> CascadeModel {
-        let model = self.select_ucb_model(ctx, &self.model_slugs);
+        let thinking_candidates = thinking_filtered_candidates(&self.model_slugs, ctx);
+        let model = self.select_ucb_model(ctx, &thinking_candidates);
         let selected = self.bias_model_for_cfactor(model, cfactor, agent_id);
         let tier = slug_to_tier(&selected.slug);
         let fallback = fallback_for_tier(tier).map(ModelSpec::from_slug);
@@ -1024,7 +1161,8 @@ impl CascadeRouter {
     }
 
     fn route_ucb_filtered(&self, ctx: &RoutingContext, candidates: &[String]) -> CascadeModel {
-        let model = self.select_ucb_model(ctx, candidates);
+        let thinking_candidates = thinking_filtered_candidates(candidates, ctx);
+        let model = self.select_ucb_model(ctx, &thinking_candidates);
         let selected = model;
         let tier = slug_to_tier(&selected.slug);
         let fallback = fallback_for_tier(tier).map(ModelSpec::from_slug);
@@ -1288,6 +1426,7 @@ mod tests {
             crate_familiarity: 0.5,
             has_prior_failure: false,
             affect_confidence: 0.5,
+            thinking_level: None,
             previous_model: None,
             plan_context_tokens: None,
         }
@@ -1795,7 +1934,10 @@ mod tests {
         let mut ctx = default_ctx();
 
         ctx.role = AgentRole::Conductor;
-        assert_eq!(cascade.route(&ctx).primary.slug, "google/gemini-2.5-flash-lite");
+        assert_eq!(
+            cascade.route(&ctx).primary.slug,
+            "google/gemini-2.5-flash-lite"
+        );
 
         ctx.role = AgentRole::Implementer;
         assert_eq!(cascade.route(&ctx).primary.slug, "google/gemini-2.5-flash");
@@ -1805,6 +1947,36 @@ mod tests {
             cascade.route(&ctx).primary.slug,
             "google/gemini-3.1-pro-preview"
         );
+    }
+
+    #[test]
+    fn routing_context_thinking_high_prefers_thinking_models() {
+        let cascade = CascadeRouter::new(vec![
+            "gemini-2.5-flash-lite".to_string(),
+            "gemini-2.5-flash".to_string(),
+            "gemini-2.5-pro".to_string(),
+        ]);
+        let mut ctx = default_ctx();
+        ctx.complexity = TaskComplexityBand::Complex;
+        ctx.thinking_level = Some("high".to_string());
+
+        let result = cascade.route(&ctx);
+        assert_ne!(result.primary.slug, "gemini-2.5-flash-lite");
+        assert!(model_supports_thinking(&result.primary.slug));
+    }
+
+    #[test]
+    fn routing_context_thinking_minimal_prefers_non_thinking_models() {
+        let cascade = CascadeRouter::new(vec![
+            "gemini-2.5-flash-lite".to_string(),
+            "gemini-2.5-flash".to_string(),
+            "gemini-2.5-pro".to_string(),
+        ]);
+        let mut ctx = default_ctx();
+        ctx.thinking_level = Some("minimal".to_string());
+
+        let result = cascade.route(&ctx);
+        assert_eq!(result.primary.slug, "gemini-2.5-flash-lite");
     }
 
     // ── Test 18: UCB stage uses linucb selection ────────────────────────
