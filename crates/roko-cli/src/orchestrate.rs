@@ -986,6 +986,8 @@ pub struct PlanRunner {
     /// Optional event bus sender for HTTP API event streaming.
     server_event_bus:
         Option<bardo_runtime::event_bus::BusSender<crate::serve::events::ServerEvent>>,
+    /// Optional state hub sender for unified dashboard snapshot updates.
+    state_hub_sender: Option<roko_core::StateHubSender>,
     /// Optional cloud execution state for code-implementer runs.
     cloud_execution: Option<CloudExecution>,
 }
@@ -1963,6 +1965,7 @@ impl PlanRunner {
             ),
             efficiency_events: Vec::new(),
             server_event_bus: None,
+            state_hub_sender: None,
             cloud_execution: None,
             playbook,
             knowledge_store,
@@ -2070,6 +2073,7 @@ impl PlanRunner {
             ),
             efficiency_events: Vec::new(),
             server_event_bus: None,
+            state_hub_sender: None,
             cloud_execution: None,
             playbook,
             knowledge_store,
@@ -2181,6 +2185,7 @@ impl PlanRunner {
             ),
             efficiency_events: Vec::new(),
             server_event_bus: None,
+            state_hub_sender: None,
             cloud_execution: None,
             playbook,
             knowledge_store,
@@ -2201,13 +2206,25 @@ impl PlanRunner {
         self.server_event_bus = Some(bus);
     }
 
+    /// Attach a state hub sender for unified dashboard snapshot updates.
+    pub fn set_state_hub(&mut self, sender: roko_core::StateHubSender) {
+        self.state_hub_sender = Some(sender);
+    }
+
     /// Enable cloud execution behavior for the current plan run.
     pub fn enable_cloud_execution(&mut self, cloud_execution: CloudExecution) {
         self.cloud_execution = Some(cloud_execution);
     }
 
-    /// Emit a server event if a bus is attached.
+    /// Emit a server event if a bus is attached, and publish to the state hub.
     fn emit_server_event(&self, event: crate::serve::events::ServerEvent) {
+        // Publish to the unified state hub (for TUI, web, API).
+        if let Some(hub) = &self.state_hub_sender {
+            if let Some(dashboard_event) = server_event_to_dashboard(&event) {
+                hub.publish(dashboard_event);
+            }
+        }
+        // Also publish to the HTTP server's event bus (for WebSocket).
         if let Some(bus) = &self.server_event_bus {
             bus.emit(event);
         }
@@ -8742,6 +8759,110 @@ fn normalize_resume_session(session_id: Option<String>) -> Option<String> {
             Some(trimmed.to_string())
         }
     })
+}
+
+/// Convert a `ServerEvent` into a `DashboardEvent` for the state hub.
+///
+/// Returns `None` for event types that don't affect the dashboard snapshot
+/// (e.g. deployment events, webhook signals).
+fn server_event_to_dashboard(
+    event: &crate::serve::events::ServerEvent,
+) -> Option<roko_core::DashboardEvent> {
+    use crate::serve::events::ServerEvent;
+    use roko_core::DashboardEvent;
+
+    match event {
+        ServerEvent::PlanStarted { plan_id } => Some(DashboardEvent::PlanStarted {
+            plan_id: plan_id.clone(),
+        }),
+        ServerEvent::PlanCompleted { plan_id, success } => Some(DashboardEvent::PlanCompleted {
+            plan_id: plan_id.clone(),
+            success: *success,
+        }),
+        ServerEvent::AgentSpawned { agent_id, role } => Some(DashboardEvent::AgentSpawned {
+            agent_id: agent_id.clone(),
+            role: role.clone(),
+        }),
+        ServerEvent::AgentOutput { agent_id, content } => Some(DashboardEvent::AgentOutput {
+            agent_id: agent_id.clone(),
+            content: content.clone(),
+        }),
+        ServerEvent::GateResult {
+            plan_id,
+            task_id,
+            gate,
+            passed,
+        } => Some(DashboardEvent::GateResult {
+            plan_id: plan_id.clone(),
+            task_id: task_id.clone(),
+            gate: gate.clone(),
+            passed: *passed,
+        }),
+        ServerEvent::Execution { plan_id, event } => {
+            use crate::serve::events::ExecutionEvent;
+            match event {
+                ExecutionEvent::TaskStarted { task_id, phase } => {
+                    Some(DashboardEvent::TaskStarted {
+                        plan_id: plan_id.clone(),
+                        task_id: task_id.clone(),
+                        phase: phase.clone(),
+                    })
+                }
+                ExecutionEvent::TaskCompleted { task_id, outcome } => {
+                    Some(DashboardEvent::TaskCompleted {
+                        plan_id: plan_id.clone(),
+                        task_id: task_id.clone(),
+                        outcome: outcome.clone(),
+                    })
+                }
+                ExecutionEvent::TaskPhaseChanged {
+                    task_id,
+                    old_phase,
+                    new_phase,
+                } => Some(DashboardEvent::TaskPhaseChanged {
+                    plan_id: plan_id.clone(),
+                    task_id: task_id.clone(),
+                    old_phase: old_phase.clone(),
+                    new_phase: new_phase.clone(),
+                }),
+                ExecutionEvent::GateResult {
+                    task_id,
+                    gate,
+                    passed,
+                    ..
+                } => Some(DashboardEvent::GateResult {
+                    plan_id: plan_id.clone(),
+                    task_id: task_id.clone(),
+                    gate: gate.clone(),
+                    passed: *passed,
+                }),
+                _ => None,
+            }
+        }
+        ServerEvent::PhaseTransition { plan_id, from, to } => {
+            Some(DashboardEvent::PhaseTransition {
+                plan_id: plan_id.clone(),
+                from: from.clone(),
+                to: to.clone(),
+            })
+        }
+        ServerEvent::EfficiencyEvent {
+            plan_id,
+            task_id,
+            metric,
+            value,
+        } => Some(DashboardEvent::EfficiencyEvent {
+            plan_id: plan_id.clone(),
+            task_id: task_id.clone(),
+            metric: metric.clone(),
+            value: *value,
+        }),
+        ServerEvent::Error { message } => Some(DashboardEvent::Error {
+            message: message.clone(),
+        }),
+        // Deployment, webhook, run, and operation events don't affect the dashboard snapshot.
+        _ => None,
+    }
 }
 
 fn now_unix_ms_i64() -> i64 {

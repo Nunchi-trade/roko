@@ -1,4 +1,8 @@
-//! Crossterm event polling for the TUI shell.
+//! Async-compatible terminal event handling for the TUI shell.
+//!
+//! Provides both a sync [`EventHandler`] (for backward compat) and an
+//! async [`EventStream`](crossterm::event::EventStream) integration used
+//! by the new `tokio::select!`-based render loop.
 
 use std::io;
 use std::time::{Duration, Instant};
@@ -16,7 +20,10 @@ pub enum Event {
     Tick,
 }
 
-/// Polls crossterm for keyboard, resize, and tick events.
+/// Polls crossterm for keyboard, resize, and tick events (synchronous API).
+///
+/// Retained for the standalone `App::run()` path. The new async path uses
+/// `crossterm::event::EventStream` directly via `tokio::select!`.
 #[derive(Debug, Clone)]
 pub struct EventHandler {
     tick_rate: Duration,
@@ -72,4 +79,43 @@ impl EventHandler {
             }
         }
     }
+}
+
+/// Actions the TUI can perform in response to events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TuiAction {
+    /// Quit the application.
+    Quit,
+    /// Navigate to a specific tab by index (0-based).
+    TabSelect(usize),
+    /// Navigate to the next tab.
+    TabNext,
+    /// Navigate to the previous tab.
+    TabPrev,
+    /// Scroll up by the given amount.
+    ScrollUp(u16),
+    /// Scroll down by the given amount.
+    ScrollDown(u16),
+    /// Scroll to the top.
+    ScrollHome,
+    /// Page up (scroll by 8).
+    PageUp,
+    /// Page down (scroll by 8).
+    PageDown,
+    /// Move selection up.
+    SelectUp,
+    /// Move selection down.
+    SelectDown,
+    /// Open detail view for selected item.
+    OpenDetail,
+    /// Close detail view or modal.
+    CloseOverlay,
+    /// Toggle help overlay.
+    ToggleHelp,
+    /// Force refresh data from disk.
+    ForceRefresh,
+    /// Render tick (redraw the screen).
+    Render,
+    /// Snapshot changed (StateHub update).
+    SnapshotChanged,
 }

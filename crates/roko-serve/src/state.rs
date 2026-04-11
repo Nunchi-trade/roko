@@ -131,6 +131,8 @@ pub struct AppState {
     pub affect_engine: Mutex<DaimonState>,
     /// Event bus for streaming server events to clients.
     pub event_bus: EventBus<ServerEvent>,
+    /// Unified state hub for dashboard snapshot + event streaming.
+    pub state_hub: roko_core::SharedStateHub,
     /// Event subscriptions loaded at startup.
     pub subscriptions: SubscriptionRegistry,
     /// Runtime bridge to CLI operations (run_once, status, dashboard).
@@ -183,6 +185,7 @@ impl AppState {
             supervisor,
             affect_engine: Mutex::new(DaimonState::load_or_new(&affect_path)),
             event_bus: EventBus::new(1024),
+            state_hub: roko_core::shared_state_hub(),
             subscriptions,
             runtime,
             roko_config: RwLock::new(roko_config),

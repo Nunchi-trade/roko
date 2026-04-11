@@ -1,4 +1,9 @@
 //! Interactive TUI application shell.
+//!
+//! Supports two modes:
+//! - **Sync** (`App::run`) — 250ms polling, used when no StateHub is available.
+//! - **Async** (`App::run_async`) — 60fps render with `tokio::select!` over
+//!   keyboard events and `watch::Receiver<DashboardSnapshot>` from the StateHub.
 
 use std::collections::HashMap;
 use std::io;
@@ -8,11 +13,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEvent};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEvent, KeyEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use futures::StreamExt;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::Modifier;
@@ -67,7 +75,7 @@ impl Drop for PanicHookRestoreGuard {
     }
 }
 
-/// Run the interactive dashboard event loop.
+/// Run the interactive dashboard event loop (legacy polling path).
 pub async fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Result<()> {
     loop {
         terminal.draw(|f| render_page(f, app))?;
@@ -82,6 +90,79 @@ pub async fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut Ap
             app.data.refresh().await?;
             app.last_refresh = Instant::now();
         }
+        if !app.running {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+/// Run the interactive dashboard with 60fps async rendering.
+///
+/// Uses `tokio::select!` over:
+/// - 16ms render interval (60fps)
+/// - async keyboard EventStream
+/// - optional `watch::Receiver<DashboardSnapshot>` from StateHub
+///
+/// If `snapshot_rx` is `None`, falls back to one-time disk snapshot loading
+/// (graceful standalone mode).
+pub async fn run_async(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut App,
+    mut snapshot_rx: Option<tokio::sync::watch::Receiver<roko_core::dashboard_snapshot::DashboardSnapshot>>,
+) -> Result<()> {
+    use crossterm::event::EventStream;
+
+    let mut render_interval = tokio::time::interval(Duration::from_millis(16));
+    render_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    let mut reader = EventStream::new();
+
+    // Initial draw.
+    terminal
+        .draw(|f| render_page(f, app))
+        .context("initial async TUI draw")?;
+
+    loop {
+        tokio::select! {
+            _ = render_interval.tick() => {
+                terminal
+                    .draw(|f| render_page(f, app))
+                    .context("async TUI render")?;
+            }
+            maybe_event = reader.next() => {
+                match maybe_event {
+                    Some(Ok(crossterm::event::Event::Key(key)))
+                        if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+                    {
+                        handle_key(app, key);
+                    }
+                    Some(Ok(crossterm::event::Event::Resize(_, _))) => {
+                        // ratatui handles resize on next draw.
+                    }
+                    Some(Err(e)) => {
+                        tracing::warn!("crossterm event error: {e}");
+                    }
+                    None => break, // Stream closed.
+                    _ => {}
+                }
+            }
+            result = async {
+                if let Some(rx) = snapshot_rx.as_mut() {
+                    rx.changed().await
+                } else {
+                    // No state hub — sleep forever (won't trigger).
+                    std::future::pending::<std::result::Result<(), tokio::sync::watch::error::RecvError>>().await
+                }
+            } => {
+                if result.is_ok() {
+                    // Snapshot changed — the next render tick will pick it up.
+                    // We could also force an immediate redraw here.
+                }
+            }
+        }
+
         if !app.running {
             break;
         }

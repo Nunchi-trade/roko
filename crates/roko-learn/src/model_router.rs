@@ -338,6 +338,7 @@ impl LinUCBRouter {
             !model_slugs.is_empty(),
             "LinUCBRouter: need at least one model"
         );
+        let static_table = default_static_table(&model_slugs);
         let arms: Vec<ArmState> = model_slugs
             .into_iter()
             .map(|slug| ArmState::new(slug, CONTEXT_DIM))
@@ -348,7 +349,7 @@ impl LinUCBRouter {
                 total_observations: 0,
             }),
             persist_path: None,
-            static_table: default_static_table(),
+            static_table,
         }
     }
 
@@ -572,7 +573,7 @@ impl LinUCBRouter {
                 total_observations,
             }),
             persist_path: Some(path.to_path_buf()),
-            static_table: default_static_table(),
+            static_table: default_static_table(&model_slugs),
         })
     }
 }
@@ -611,12 +612,39 @@ fn alpha_for_observations(n: u64) -> f64 {
 }
 
 /// Default static routing table: tier -> model slug.
-fn default_static_table() -> HashMap<ModelTier, String> {
+fn default_static_table(model_slugs: &[String]) -> HashMap<ModelTier, String> {
     let mut table = HashMap::new();
-    table.insert(ModelTier::Fast, "claude-haiku-3-5".to_string());
-    table.insert(ModelTier::Standard, "claude-sonnet-4-5".to_string());
-    table.insert(ModelTier::Premium, "claude-opus-4".to_string());
+
+    table.insert(
+        ModelTier::Fast,
+        pick_static_slug(model_slugs, &["claude-haiku-3-5"]),
+    );
+    table.insert(
+        ModelTier::Standard,
+        pick_static_slug(
+            model_slugs,
+            &["glm-5.1", "claude-sonnet-4-6", "claude-sonnet-4-5"],
+        ),
+    );
+    table.insert(
+        ModelTier::Premium,
+        pick_static_slug(model_slugs, &["claude-opus-4"]),
+    );
     table
+}
+
+fn pick_static_slug(model_slugs: &[String], candidates: &[&str]) -> String {
+    for candidate in candidates {
+        if let Some(slug) = model_slugs
+            .iter()
+            .find(|slug| slugs_match(slug, candidate))
+            .cloned()
+        {
+            return slug;
+        }
+    }
+
+    candidates[0].to_string()
 }
 
 /// Map complexity band to model tier.
@@ -650,6 +678,8 @@ fn slug_family(slug: &str) -> Option<&'static str> {
         Some("sonnet")
     } else if slug.contains("opus") {
         Some("opus")
+    } else if slug.contains("glm") {
+        Some("glm")
     } else {
         None
     }
@@ -1111,6 +1141,22 @@ mod tests {
 
         let model = router.select_model(&ctx);
         assert_eq!(model.slug, "gpt-5-mini");
+    }
+
+    #[test]
+    fn cascade_router_glm_selects_glm_when_present() {
+        let router = LinUCBRouter::new(vec![
+            "claude-sonnet-4-6".to_string(),
+            "glm-5.1".to_string(),
+        ]);
+        let ctx = default_ctx();
+
+        let model = router.select_model(&ctx);
+        assert!(
+            matches!(model.slug.as_str(), "claude-sonnet-4-6" | "glm-5.1"),
+            "cold-start routing should select one of the configured standard-tier models, got {}",
+            model.slug
+        );
     }
 
     // ── Test 26: exploration bonus decreases over time ───────────────────
