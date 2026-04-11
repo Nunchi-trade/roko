@@ -506,6 +506,61 @@ pub struct ProviderConfig {
     pub max_concurrent: Option<u32>,
 }
 
+/// A single model entry from `[models.*]`.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModelProfile {
+    /// Key into the `[providers.*]` table.
+    pub provider: String,
+    /// Model ID sent to the API.
+    pub slug: String,
+    /// Context window in tokens.
+    #[serde(default = "default_context_window")]
+    pub context_window: u64,
+    /// Maximum output tokens, if the provider/model sets one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output: Option<u64>,
+    /// Whether the model supports tool calls.
+    #[serde(default = "default_true")]
+    pub supports_tools: bool,
+    /// Whether the model supports thinking/reasoning output.
+    #[serde(default)]
+    pub supports_thinking: bool,
+    /// Whether the model supports vision inputs.
+    #[serde(default)]
+    pub supports_vision: bool,
+    /// Whether the model supports web search.
+    #[serde(default)]
+    pub supports_web_search: bool,
+    /// Whether the model supports MCP tools.
+    #[serde(default)]
+    pub supports_mcp_tools: bool,
+    /// Whether the model supports partial continuation.
+    #[serde(default)]
+    pub supports_partial: bool,
+    /// Wire format used for tools.
+    #[serde(default = "default_tool_format")]
+    pub tool_format: String,
+    /// Input token cost per million tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_input_per_m: Option<f64>,
+    /// Output token cost per million tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_output_per_m: Option<f64>,
+    /// Cache read cost per million tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_read_per_m: Option<f64>,
+    /// Cache write cost per million tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_write_per_m: Option<f64>,
+    /// Maximum number of tools before behavior degrades.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tools: Option<u32>,
+    /// Tokenizer ratio vs OpenAI `o200k_base`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokenizer_ratio: Option<f64>,
+}
+
 /// PRD lifecycle settings.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrdConfig {
@@ -601,8 +656,16 @@ const fn default_context_limit_k() -> u32 {
     200
 }
 
+const fn default_context_window() -> u64 {
+    128_000
+}
+
 const fn default_true() -> bool {
     true
+}
+
+fn default_tool_format() -> String {
+    "openai_json".into()
 }
 
 impl Default for AgentConfig {
@@ -1479,6 +1542,36 @@ max_concurrent = 4
 
         let text = toml::to_string(&cfg).expect("serialize");
         let back = toml::from_str::<ProviderConfig>(&text).expect("reparse");
+        assert_eq!(cfg, back);
+    }
+
+    #[test]
+    fn model_profile_parses_with_defaults() {
+        let toml = r#"
+provider = "anthropic"
+slug = "claude-opus-4-6"
+"#;
+        let cfg = toml::from_str::<ModelProfile>(toml).expect("parse");
+        assert_eq!(cfg.provider, "anthropic");
+        assert_eq!(cfg.slug, "claude-opus-4-6");
+        assert_eq!(cfg.context_window, 128_000);
+        assert_eq!(cfg.max_output, None);
+        assert!(cfg.supports_tools);
+        assert!(!cfg.supports_thinking);
+        assert!(!cfg.supports_vision);
+        assert!(!cfg.supports_web_search);
+        assert!(!cfg.supports_mcp_tools);
+        assert!(!cfg.supports_partial);
+        assert_eq!(cfg.tool_format, "openai_json");
+        assert_eq!(cfg.cost_input_per_m, None);
+        assert_eq!(cfg.cost_output_per_m, None);
+        assert_eq!(cfg.cost_cache_read_per_m, None);
+        assert_eq!(cfg.cost_cache_write_per_m, None);
+        assert_eq!(cfg.max_tools, None);
+        assert_eq!(cfg.tokenizer_ratio, None);
+
+        let text = toml::to_string(&cfg).expect("serialize");
+        let back = toml::from_str::<ModelProfile>(&text).expect("reparse");
         assert_eq!(cfg, back);
     }
 
