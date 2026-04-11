@@ -29,6 +29,7 @@
 
 use crate::PadState;
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
+use roko_core::tool::ToolDef;
 use roko_learn::section_effect::{PriorityChange, SectionEffectivenessRegistry};
 
 /// A composable system prompt built from 7 layers.
@@ -72,6 +73,28 @@ struct SectionEffectivenessConfig {
     registry: SectionEffectivenessRegistry,
 }
 
+/// Normalize prompt text so logically-identical content yields identical bytes.
+#[must_use]
+pub fn normalize_for_caching(content: &str) -> String {
+    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
+    normalized
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .replace('\t', "    ")
+}
+
+/// Canonicalize tool definition order before rendering prompt/tool payloads.
+pub fn canonical_tool_order(tools: &mut [ToolDef]) {
+    tools.sort_by(|a, b| a.name.cmp(&b.name));
+}
+
+fn normalize_owned(content: impl Into<String>) -> String {
+    let content = content.into();
+    normalize_for_caching(&content)
+}
+
 impl SystemPromptBuilder {
     /// Start building a system prompt with the role identity (layer 1).
     ///
@@ -80,7 +103,7 @@ impl SystemPromptBuilder {
     #[must_use]
     pub fn new(role_identity: impl Into<String>) -> Self {
         Self {
-            role_identity: role_identity.into(),
+            role_identity: normalize_owned(role_identity),
             conventions: None,
             domain: None,
             context: None,
@@ -96,49 +119,49 @@ impl SystemPromptBuilder {
     /// Set layer 2: project conventions (coding standards, naming, etc.).
     #[must_use]
     pub fn with_conventions(mut self, conventions: impl Into<String>) -> Self {
-        self.conventions = Some(conventions.into());
+        self.conventions = Some(normalize_owned(conventions));
         self
     }
 
     /// Set layer 3: domain context (project-specific knowledge).
     #[must_use]
     pub fn with_domain(mut self, domain: impl Into<String>) -> Self {
-        self.domain = Some(domain.into());
+        self.domain = Some(normalize_owned(domain));
         self
     }
 
     /// Set layer 3b: relevant assembled context for the current task.
     #[must_use]
     pub fn with_context(mut self, context: impl Into<String>) -> Self {
-        self.context = Some(context.into());
+        self.context = Some(normalize_owned(context));
         self
     }
 
     /// Set layer 4: task context (current task details).
     #[must_use]
     pub fn with_task(mut self, task: impl Into<String>) -> Self {
-        self.task = Some(task.into());
+        self.task = Some(normalize_owned(task));
         self
     }
 
     /// Set layer 5: tool instructions (available tools and usage guidance).
     #[must_use]
     pub fn with_tools(mut self, tools: impl Into<String>) -> Self {
-        self.tools = Some(tools.into());
+        self.tools = Some(normalize_owned(tools));
         self
     }
 
     /// Set layer 6: anti-patterns (things the agent must NOT do).
     #[must_use]
     pub fn with_anti_patterns(mut self, patterns: Vec<String>) -> Self {
-        self.anti_patterns = patterns;
+        self.anti_patterns = patterns.into_iter().map(normalize_owned).collect();
         self
     }
 
     /// Add a single anti-pattern to layer 6.
     #[must_use]
     pub fn add_anti_pattern(mut self, pattern: impl Into<String>) -> Self {
-        self.anti_patterns.push(pattern.into());
+        self.anti_patterns.push(normalize_owned(pattern));
         self
     }
 
@@ -180,7 +203,10 @@ impl SystemPromptBuilder {
     /// stability tiers if enabled. Empty layers are skipped.
     #[must_use]
     pub fn build(&self) -> String {
-        assemble_sections(self.build_sections(), self.cache_markers)
+        normalize_for_caching(&assemble_sections(
+            self.build_sections(),
+            self.cache_markers,
+        ))
     }
 
     /// Build the system prompt as a vector of [`PromptSection`]s.
@@ -433,7 +459,17 @@ const fn cache_marker(layer: CacheLayer) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roko_core::tool::{ToolCategory, ToolPermission};
     use roko_learn::section_effect::SectionEffectivenessRegistry;
+
+    fn test_tool(name: &str) -> ToolDef {
+        ToolDef::new(
+            name,
+            format!("{name} description"),
+            ToolCategory::Read,
+            ToolPermission::read_only(),
+        )
+    }
 
     #[test]
     fn build_with_all_layers() {
@@ -787,7 +823,10 @@ mod tests {
             .with_affect_state(Some(PadState::new(0.0, 0.8, 0.0)))
             .build_sections();
 
-        let ordered: Vec<_> = sections.iter().map(|section| section.name.as_str()).collect();
+        let ordered: Vec<_> = sections
+            .iter()
+            .map(|section| section.name.as_str())
+            .collect();
         assert_eq!(
             ordered,
             vec![
@@ -893,5 +932,58 @@ mod tests {
             tools.map(|section| section.priority),
             Some(SectionPriority::Normal)
         );
+    }
+
+    #[test]
+    fn prompt_normalization_whitespace_variants_produce_identical_output() {
+        let prompt_a = SystemPromptBuilder::new("Role\tIdentity  \r\n")
+            .with_conventions("Use snake_case.\t\r\nKeep changes minimal.   ")
+            .with_task("Implement cache normalization.\t")
+            .build();
+        let prompt_b = SystemPromptBuilder::new("Role    Identity\n")
+            .with_conventions("Use snake_case.    \nKeep changes minimal.")
+            .with_task("Implement cache normalization.")
+            .build();
+
+        assert_eq!(prompt_a, prompt_b);
+        assert!(!prompt_a.contains('\r'));
+        assert!(!prompt_a.contains('\t'));
+    }
+
+    #[test]
+    fn prompt_normalization_canonical_tool_order_produces_identical_output() {
+        let mut tools_a = vec![
+            test_tool("write_file"),
+            test_tool("bash"),
+            test_tool("read_file"),
+        ];
+        let mut tools_b = vec![
+            test_tool("read_file"),
+            test_tool("write_file"),
+            test_tool("bash"),
+        ];
+        canonical_tool_order(&mut tools_a);
+        canonical_tool_order(&mut tools_b);
+
+        let tools_a = tools_a
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let tools_b = tools_b
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let prompt_a = SystemPromptBuilder::new("Role")
+            .with_tools(format!("Available tools:\n{tools_a}\t"))
+            .build();
+        let prompt_b = SystemPromptBuilder::new("Role")
+            .with_tools(format!("Available tools:\r\n{tools_b}"))
+            .build();
+
+        assert_eq!(prompt_a, prompt_b);
+        assert!(prompt_a.contains("bash, read_file, write_file"));
     }
 }

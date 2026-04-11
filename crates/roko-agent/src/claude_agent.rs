@@ -907,7 +907,9 @@ mod tests {
         let call = poster.last_call().expect("call recorded");
         let v: serde_json::Value =
             serde_json::from_slice(&call.body).expect("request body is valid JSON");
-        let message_blocks = v["messages"][0]["content"].as_array().expect("message blocks");
+        let message_blocks = v["messages"][0]["content"]
+            .as_array()
+            .expect("message blocks");
         assert_eq!(message_blocks.len(), 2);
         assert_eq!(message_blocks[0]["cache_control"]["type"], "ephemeral");
         assert!(message_blocks[1].get("cache_control").is_none());
