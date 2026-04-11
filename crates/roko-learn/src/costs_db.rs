@@ -125,6 +125,23 @@ pub struct ModelPricing {
     pub output_per_m: f64,
     /// Cached input token cost per 1M tokens, in USD.
     pub cache_read_per_m: Option<f64>,
+    /// Cache write cost per 1M tokens, in USD.
+    pub cache_write_per_m: Option<f64>,
+    /// Flat per-request fee, in USD (e.g. Perplexity search fee).
+    pub per_request: Option<f64>,
+}
+
+impl ModelPricing {
+    /// Estimate total cost for a request given token counts.
+    ///
+    /// Adds per-request fee (if any) on top of token-based costs.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn estimate_total(&self, input_tokens: u64, output_tokens: u64) -> f64 {
+        let token_cost = (input_tokens as f64 / 1_000_000.0) * self.input_per_m
+            + (output_tokens as f64 / 1_000_000.0) * self.output_per_m;
+        token_cost + self.per_request.unwrap_or(0.0)
+    }
 }
 
 /// Default pricing table keyed by model slug.
@@ -141,7 +158,7 @@ impl CostTable {
         self.models.get(model)
     }
 
-    /// Build the default cost table with the GLM and OpenRouter pricing rows.
+    /// Build the default cost table with the GLM, OpenRouter, and Perplexity pricing rows.
     #[must_use]
     pub fn with_defaults() -> Self {
         let mut models = HashMap::new();
@@ -151,6 +168,8 @@ impl CostTable {
                 input_per_m: 0.60,
                 output_per_m: 3.00,
                 cache_read_per_m: Some(0.10),
+                cache_write_per_m: None,
+                per_request: None,
             },
         );
         models.insert(
@@ -159,6 +178,8 @@ impl CostTable {
                 input_per_m: 0.38,
                 output_per_m: 1.72,
                 cache_read_per_m: Some(0.10),
+                cache_write_per_m: None,
+                per_request: None,
             },
         );
         models.insert(
@@ -167,6 +188,8 @@ impl CostTable {
                 input_per_m: 0.60,
                 output_per_m: 2.50,
                 cache_read_per_m: Some(0.15),
+                cache_write_per_m: None,
+                per_request: None,
             },
         );
         models.insert(
@@ -175,6 +198,8 @@ impl CostTable {
                 input_per_m: 1.40,
                 output_per_m: 4.40,
                 cache_read_per_m: Some(0.26),
+                cache_write_per_m: None,
+                per_request: None,
             },
         );
         models.insert(
@@ -183,6 +208,8 @@ impl CostTable {
                 input_per_m: 1.26,
                 output_per_m: 3.96,
                 cache_read_per_m: Some(0.26),
+                cache_write_per_m: None,
+                per_request: None,
             },
         );
         models.insert(
@@ -191,6 +218,8 @@ impl CostTable {
                 input_per_m: 1.00,
                 output_per_m: 3.20,
                 cache_read_per_m: None,
+                cache_write_per_m: None,
+                per_request: None,
             },
         );
         models.insert(
@@ -199,6 +228,8 @@ impl CostTable {
                 input_per_m: 0.60,
                 output_per_m: 2.20,
                 cache_read_per_m: None,
+                cache_write_per_m: None,
+                per_request: None,
             },
         );
         models.insert(
@@ -207,6 +238,60 @@ impl CostTable {
                 input_per_m: 15.00,
                 output_per_m: 75.00,
                 cache_read_per_m: None,
+                cache_write_per_m: None,
+                per_request: None,
+            },
+        );
+
+        // Perplexity Sonar models — include per-request search fee.
+        models.insert(
+            "sonar".to_string(),
+            ModelPricing {
+                input_per_m: 1.00,
+                output_per_m: 1.00,
+                cache_read_per_m: None,
+                cache_write_per_m: None,
+                per_request: Some(0.005),
+            },
+        );
+        models.insert(
+            "sonar-pro".to_string(),
+            ModelPricing {
+                input_per_m: 3.00,
+                output_per_m: 15.00,
+                cache_read_per_m: None,
+                cache_write_per_m: None,
+                per_request: Some(0.014),
+            },
+        );
+        models.insert(
+            "sonar-reasoning".to_string(),
+            ModelPricing {
+                input_per_m: 1.00,
+                output_per_m: 5.00,
+                cache_read_per_m: None,
+                cache_write_per_m: None,
+                per_request: Some(0.005),
+            },
+        );
+        models.insert(
+            "sonar-reasoning-pro".to_string(),
+            ModelPricing {
+                input_per_m: 2.00,
+                output_per_m: 8.00,
+                cache_read_per_m: None,
+                cache_write_per_m: None,
+                per_request: Some(0.008),
+            },
+        );
+        models.insert(
+            "sonar-deep-research".to_string(),
+            ModelPricing {
+                input_per_m: 2.00,
+                output_per_m: 8.00,
+                cache_read_per_m: None,
+                cache_write_per_m: None,
+                per_request: Some(0.005),
             },
         );
 
@@ -768,6 +853,64 @@ mod tests {
         let json = serde_json::to_string(&r).expect("serialize");
         let r2: CostRecord = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(r, r2);
+    }
+
+    #[test]
+    fn perplexity_costs() {
+        let table = CostTable::default();
+
+        // sonar: $1.00/M in, $1.00/M out, $0.005 per-request
+        let sonar = table.lookup("sonar").expect("sonar pricing");
+        assert!((sonar.input_per_m - 1.00).abs() < 1e-9);
+        assert!((sonar.output_per_m - 1.00).abs() < 1e-9);
+        assert_eq!(sonar.per_request, Some(0.005));
+
+        // sonar-pro: $3.00/M in, $15.00/M out, $0.014 per-request
+        let sonar_pro = table.lookup("sonar-pro").expect("sonar-pro pricing");
+        assert!((sonar_pro.input_per_m - 3.00).abs() < 1e-9);
+        assert!((sonar_pro.output_per_m - 15.00).abs() < 1e-9);
+        assert_eq!(sonar_pro.per_request, Some(0.014));
+
+        // sonar-reasoning: $1.00/M in, $5.00/M out, $0.005 per-request
+        let sonar_r = table
+            .lookup("sonar-reasoning")
+            .expect("sonar-reasoning pricing");
+        assert!((sonar_r.input_per_m - 1.00).abs() < 1e-9);
+        assert!((sonar_r.output_per_m - 5.00).abs() < 1e-9);
+        assert_eq!(sonar_r.per_request, Some(0.005));
+
+        // sonar-reasoning-pro: $2.00/M in, $8.00/M out, $0.008 per-request
+        let sonar_rp = table
+            .lookup("sonar-reasoning-pro")
+            .expect("sonar-reasoning-pro pricing");
+        assert!((sonar_rp.input_per_m - 2.00).abs() < 1e-9);
+        assert!((sonar_rp.output_per_m - 8.00).abs() < 1e-9);
+        assert_eq!(sonar_rp.per_request, Some(0.008));
+
+        // sonar-deep-research: $2.00/M in, $8.00/M out, $0.005 per-request
+        let sonar_dr = table
+            .lookup("sonar-deep-research")
+            .expect("sonar-deep-research pricing");
+        assert!((sonar_dr.input_per_m - 2.00).abs() < 1e-9);
+        assert!((sonar_dr.output_per_m - 8.00).abs() < 1e-9);
+        assert_eq!(sonar_dr.per_request, Some(0.005));
+
+        // estimate_total includes the per-request fee.
+        // 1M input + 1M output on sonar = $1.00 + $1.00 + $0.005 = $2.005
+        let total = sonar.estimate_total(1_000_000, 1_000_000);
+        assert!((total - 2.005).abs() < 1e-9);
+
+        // 500k input + 200k output on sonar-pro:
+        // token = 0.5 * $3.00 + 0.2 * $15.00 = $1.50 + $3.00 = $4.50
+        // + $0.014 per-request = $4.514
+        let total_pro = sonar_pro.estimate_total(500_000, 200_000);
+        assert!((total_pro - 4.514).abs() < 1e-9);
+
+        // Non-Perplexity model has no per-request fee.
+        let glm_5 = table.lookup("glm-5").expect("glm-5 pricing");
+        assert_eq!(glm_5.per_request, None);
+        let glm_total = glm_5.estimate_total(1_000_000, 1_000_000);
+        assert!((glm_total - 4.20).abs() < 1e-9);
     }
 
     #[test]
