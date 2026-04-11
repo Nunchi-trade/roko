@@ -12,6 +12,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use roko_agent::perplexity::embed::PerplexityEmbedAgent;
 use roko_agent::perplexity::types::{PerplexityMetadata, SearchOptions};
 use roko_core::config::schema::PerplexityConfig;
 
@@ -353,6 +354,164 @@ pub fn list_research(workdir: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+// ── Embedding index ───────────────────────────────────────────────────────────
+
+/// Split markdown `content` into chunks of at most `max_tokens` (estimated at
+/// 4 chars/token), respecting paragraph boundaries where possible.
+pub fn chunk_markdown(content: &str, max_tokens: usize) -> Vec<String> {
+    if content.trim().is_empty() {
+        return Vec::new();
+    }
+    let max_chars = max_tokens * 4;
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+
+    for para in content.split("\n\n") {
+        if current.len() + para.len() + 2 > max_chars && !current.is_empty() {
+            chunks.push(current.trim().to_string());
+            current = para.to_string();
+        } else {
+            if !current.is_empty() {
+                current.push_str("\n\n");
+            }
+            current.push_str(para);
+        }
+    }
+    if !current.trim().is_empty() {
+        chunks.push(current.trim().to_string());
+    }
+    chunks
+}
+
+/// A single entry in the research index.
+struct IndexEntry {
+    file: PathBuf,
+    chunk: String,
+    embedding: Vec<f32>,
+}
+
+/// In-memory semantic index over `.roko/research/` chunks.
+pub struct ResearchIndex {
+    entries: Vec<IndexEntry>,
+}
+
+/// A single search result.
+pub struct ResearchHit {
+    pub file: PathBuf,
+    pub chunk: String,
+    pub score: f32,
+}
+
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+    dot / (norm_a * norm_b)
+}
+
+impl ResearchIndex {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    /// Add a chunk with its pre-computed embedding.
+    pub fn add(&mut self, file: PathBuf, chunk: String, embedding: Vec<f32>) {
+        self.entries.push(IndexEntry {
+            file,
+            chunk,
+            embedding,
+        });
+    }
+
+    /// Return the top-k entries by cosine similarity to `query_embedding`.
+    pub fn search(&self, query_embedding: &[f32], top_k: usize) -> Result<Vec<ResearchHit>> {
+        let mut scored: Vec<(f32, usize)> = self
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (cosine_similarity(query_embedding, &e.embedding), i))
+            .collect();
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        let hits = scored
+            .into_iter()
+            .take(top_k)
+            .map(|(score, i)| ResearchHit {
+                file: self.entries[i].file.clone(),
+                chunk: self.entries[i].chunk.clone(),
+                score,
+            })
+            .collect();
+        Ok(hits)
+    }
+
+    /// Number of indexed chunks.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+impl Default for ResearchIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Build a [`ResearchIndex`] from all `.roko/research/*.md` files in `workdir`.
+///
+/// Each file is split into ~512-token chunks and embedded via `embed_agent`.
+pub async fn build_research_index(
+    workdir: &Path,
+    embed_agent: &PerplexityEmbedAgent,
+) -> Result<ResearchIndex> {
+    let files = list_research(workdir)?;
+    let mut index = ResearchIndex::new();
+
+    for file in files {
+        let content = std::fs::read_to_string(&file)?;
+        let chunks = chunk_markdown(&content, 512);
+        let texts: Vec<&str> = chunks.iter().map(String::as_str).collect();
+        if texts.is_empty() {
+            continue;
+        }
+        let embeddings = embed_agent
+            .embed(&texts)
+            .await
+            .map_err(|e| anyhow::anyhow!("embed failed: {e}"))?;
+
+        for (chunk, embedding) in chunks.into_iter().zip(embeddings) {
+            index.add(file.clone(), chunk, embedding);
+        }
+    }
+
+    Ok(index)
+}
+
+/// Semantically search the index for chunks relevant to `query`.
+pub async fn search_research(
+    index: &ResearchIndex,
+    embed_agent: &PerplexityEmbedAgent,
+    query: &str,
+    top_k: usize,
+) -> Result<Vec<ResearchHit>> {
+    let query_embedding = embed_agent
+        .embed(&[query])
+        .await
+        .map_err(|e| anyhow::anyhow!("embed failed: {e}"))?;
+    index.search(&query_embedding[0], top_k)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,5 +642,78 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         ensure_dirs(tmp.path()).unwrap();
         assert!(tmp.path().join(".roko/research").is_dir());
+    }
+
+    // ── research_index ────────────────────────────────────────────────────────
+
+    #[test]
+    fn research_index_add_and_search() {
+        let mut index = ResearchIndex::new();
+        let file = PathBuf::from("/test/research.md");
+
+        // Three entries with 2D mock embeddings.
+        index.add(file.clone(), "chunk about agents".to_string(), vec![1.0, 0.0]);
+        index.add(
+            file.clone(),
+            "chunk about models".to_string(),
+            vec![0.0, 1.0],
+        );
+        index.add(
+            file.clone(),
+            "chunk about orchestration".to_string(),
+            vec![0.9, 0.1_f32],
+        );
+
+        // Query pointing along [1.0, 0.0] — should rank "agents" first,
+        // "orchestration" second.
+        let results = index.search(&[1.0, 0.0], 2).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].chunk, "chunk about agents");
+        assert_eq!(results[1].chunk, "chunk about orchestration");
+        assert!(results[0].score > results[1].score);
+    }
+
+    #[test]
+    fn research_index_top_k_capped_at_index_size() {
+        let mut index = ResearchIndex::new();
+        let file = PathBuf::from("/test/a.md");
+        index.add(file.clone(), "x".to_string(), vec![1.0]);
+        index.add(file.clone(), "y".to_string(), vec![0.5]);
+
+        let results = index.search(&[1.0], 10).unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn research_index_empty_search_returns_empty() {
+        let index = ResearchIndex::new();
+        let results = index.search(&[1.0, 0.0], 5).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn chunk_markdown_splits_on_paragraphs() {
+        // With max_tokens=3 (~12 chars), each paragraph forces a new chunk.
+        let content = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph.";
+        let chunks = chunk_markdown(content, 3);
+        assert!(chunks.len() >= 2, "expected multiple chunks, got {chunks:?}");
+        let all = chunks.join(" ");
+        assert!(all.contains("First paragraph"));
+        assert!(all.contains("Second paragraph"));
+        assert!(all.contains("Third paragraph"));
+    }
+
+    #[test]
+    fn chunk_markdown_empty_returns_empty() {
+        assert!(chunk_markdown("", 512).is_empty());
+        assert!(chunk_markdown("   \n\n  ", 512).is_empty());
+    }
+
+    #[test]
+    fn chunk_markdown_single_chunk_when_small() {
+        let content = "Short content.";
+        let chunks = chunk_markdown(content, 512);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], "Short content.");
     }
 }
