@@ -109,6 +109,10 @@ pub struct RokoConfig {
     /// Cloud deployment settings (Railway, etc.).
     #[serde(default)]
     pub deploy: DeployConfig,
+
+    /// Perplexity-specific settings (search recency, domain filters, etc.).
+    #[serde(default)]
+    pub perplexity: PerplexityConfig,
 }
 
 const fn default_schema_version() -> u32 {
@@ -137,6 +141,7 @@ impl Default for RokoConfig {
             subscriptions: Vec::new(),
             server: ServerConfig::default(),
             deploy: DeployConfig::default(),
+            perplexity: PerplexityConfig::default(),
         }
     }
 }
@@ -1804,6 +1809,56 @@ impl Default for DeployConfig {
     }
 }
 
+// ---- Perplexity config ---------------------------------------------------
+
+fn default_recency() -> String {
+    "year".to_string()
+}
+
+/// Perplexity-specific search and model settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PerplexityConfig {
+    /// Default model for search-grounded queries.
+    pub default_search_model: Option<String>,
+    /// Default model for deep research tasks.
+    pub default_research_model: Option<String>,
+    /// Default model for reasoning tasks.
+    pub default_reasoning_model: Option<String>,
+    /// Default model for embeddings.
+    pub default_embed_model: Option<String>,
+    /// Recency filter applied to web search: "hour"/"day"/"week"/"month"/"year".
+    #[serde(default = "default_recency")]
+    pub search_recency_filter: String,
+    /// Restrict results to academic sources.
+    #[serde(default)]
+    pub academic_mode: bool,
+    /// Global domain allowlist for web search.
+    #[serde(default)]
+    pub search_domain_filter: Vec<String>,
+    /// Include images in search results.
+    #[serde(default)]
+    pub return_images: bool,
+    /// Include related questions in search results.
+    #[serde(default = "default_true")]
+    pub return_related_questions: bool,
+}
+
+impl Default for PerplexityConfig {
+    fn default() -> Self {
+        Self {
+            default_search_model: None,
+            default_research_model: None,
+            default_reasoning_model: None,
+            default_embed_model: None,
+            search_recency_filter: default_recency(),
+            academic_mode: false,
+            search_domain_filter: Vec::new(),
+            return_images: false,
+            return_related_questions: true,
+        }
+    }
+}
+
 // ---- tests ---------------------------------------------------------------
 
 #[cfg(test)]
@@ -2730,6 +2785,45 @@ model = "opus"
         assert!(imp.backend.is_none());
         assert!(imp.context_limit_k.is_none());
         assert!(imp.turn_budget_usd.is_none());
+    }
+
+    #[test]
+    fn perplexity_config_defaults() {
+        let cfg = RokoConfig::from_toml("").expect("parse empty");
+        assert_eq!(cfg.perplexity.search_recency_filter, "year");
+        assert!(!cfg.perplexity.academic_mode);
+        assert!(cfg.perplexity.search_domain_filter.is_empty());
+        assert!(!cfg.perplexity.return_images);
+        assert!(cfg.perplexity.return_related_questions);
+        assert!(cfg.perplexity.default_search_model.is_none());
+    }
+
+    #[test]
+    fn perplexity_config_section_parses() {
+        let toml = r#"
+[perplexity]
+default_search_model = "sonar"
+default_research_model = "sonar-deep-research"
+search_recency_filter = "week"
+academic_mode = true
+search_domain_filter = ["arxiv.org", "nature.com"]
+return_images = true
+return_related_questions = false
+"#;
+        let cfg = RokoConfig::from_toml(toml).expect("parse");
+        assert_eq!(cfg.perplexity.default_search_model.as_deref(), Some("sonar"));
+        assert_eq!(
+            cfg.perplexity.default_research_model.as_deref(),
+            Some("sonar-deep-research")
+        );
+        assert_eq!(cfg.perplexity.search_recency_filter, "week");
+        assert!(cfg.perplexity.academic_mode);
+        assert_eq!(
+            cfg.perplexity.search_domain_filter,
+            vec!["arxiv.org", "nature.com"]
+        );
+        assert!(cfg.perplexity.return_images);
+        assert!(!cfg.perplexity.return_related_questions);
     }
 
     #[test]
