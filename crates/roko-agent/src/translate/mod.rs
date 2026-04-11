@@ -33,7 +33,7 @@
 
 #![allow(clippy::module_name_repetitions)]
 
-use crate::usage::Usage;
+pub use crate::chat_types::{ChatResponse, FinishReason, ResponseMetadata, SessionState};
 use roko_core::tool::{ToolCall, ToolDef, ToolFormat, ToolResult};
 
 pub mod capability;
@@ -49,38 +49,6 @@ pub use claude::ClaudeTranslator;
 pub use ollama::OllamaTranslator;
 pub use openai::OpenAiTranslator;
 pub use react::ReActTranslator;
-
-/// Canonical response from any provider, after adapter parsing.
-#[derive(Debug, Clone, Default)]
-pub struct ChatResponse {
-    pub content: String,
-    pub reasoning: Option<String>,
-    pub tool_calls: Vec<ToolCall>,
-    pub usage: Usage,
-    pub finish_reason: FinishReason,
-    pub metadata: ResponseMetadata,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ResponseMetadata {
-    pub response_id: Option<String>,
-    pub model_used: Option<String>,
-    pub cached_tokens: Option<u64>,
-    pub content_filter: Option<serde_json::Value>,
-    pub web_search: Option<serde_json::Value>,
-    pub provider_latency_ms: Option<u64>,
-    pub raw_finish_reason: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum FinishReason {
-    #[default]
-    Stop,
-    Length,
-    ToolCalls,
-    ContentFilter,
-    Error(String),
-}
 
 /// Normalize provider-specific finish reasons into canonical [`FinishReason`] values.
 #[must_use]
@@ -323,6 +291,7 @@ pub enum TranslatorError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Usage;
 
     #[test]
     fn backend_response_extract_text_from_text() {
