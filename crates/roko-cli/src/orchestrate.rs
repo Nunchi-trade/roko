@@ -1201,6 +1201,8 @@ struct TaskTracker {
     last_gate_failure_phase: Option<String>,
     /// The task id that was most recently dispatched for implementation.
     last_impl_task_id: Option<String>,
+    /// Model slug used by the most recently dispatched implementation task.
+    last_impl_model_slug: Option<String>,
     review_feedback: Option<String>,
     impl_round: u32,
     /// Skill matched during the last dispatch (for confidence updates).
@@ -1318,6 +1320,7 @@ impl TaskTracker {
             last_gate_failure: None,
             last_gate_failure_phase: None,
             last_impl_task_id: None,
+            last_impl_model_slug: None,
             review_feedback: None,
             impl_round: 0,
             last_matched_skill_id: None,
@@ -2679,6 +2682,7 @@ impl PlanRunner {
             ConductorDecision::Continue => {}
             ConductorDecision::Restart { watcher, reason } => {
                 tracing::info!("[conductor] {plan_id}: RESTART ({watcher}) — {reason}");
+                self.record_conductor_negative_feedback(plan_id, &decision);
                 self.emit_execution_event(
                     plan_id,
                     crate::serve::events::ExecutionEvent::WatcherAlert {
@@ -2689,6 +2693,7 @@ impl PlanRunner {
             }
             ConductorDecision::Fail { watcher, reason } => {
                 tracing::error!("[conductor] {plan_id}: FAIL ({watcher}) — {reason}");
+                self.record_conductor_negative_feedback(plan_id, &decision);
                 self.emit_execution_event(
                     plan_id,
                     crate::serve::events::ExecutionEvent::WatcherAlert {
@@ -2700,6 +2705,40 @@ impl PlanRunner {
             _ => {}
         }
         decision
+    }
+
+    fn record_conductor_negative_feedback(&self, plan_id: &str, intervention: &ConductorDecision) {
+        let Some((task_id, model_slug, task_def)) =
+            self.task_trackers.get(plan_id).and_then(|tracker| {
+                Some((
+                    tracker.last_impl_task_id.clone()?,
+                    tracker.last_impl_model_slug.clone()?,
+                    tracker.last_impl_task().cloned(),
+                ))
+            })
+        else {
+            return;
+        };
+
+        let routing_context = cascade_routing_context(
+            self,
+            plan_id,
+            &task_id,
+            AgentRole::Implementer,
+            task_def.as_ref(),
+        );
+        if self
+            .learning
+            .record_conductor_intervention(&routing_context, &model_slug, intervention)
+        {
+            tracing::info!(
+                plan_id = %plan_id,
+                task_id = %task_id,
+                model = %model_slug,
+                decision = intervention.label(),
+                "recorded conductor intervention as negative routing feedback"
+            );
+        }
     }
 
     /// Push a conductor signal so watchers can detect anomalies (§7).
@@ -4416,6 +4455,7 @@ impl PlanRunner {
         // Track which task is being worked on (used by autofix if gates fail).
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
             tracker.last_impl_task_id = Some(task_id.to_string());
+            tracker.last_impl_model_slug = None;
         }
 
         let wt_id = format!("{plan_id}-{task_id}");
@@ -4599,6 +4639,7 @@ impl PlanRunner {
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
             if let Some(first) = task_ids.first() {
                 tracker.last_impl_task_id = Some(first.clone());
+                tracker.last_impl_model_slug = None;
             }
         }
 
@@ -6014,6 +6055,7 @@ impl PlanRunner {
                             tracker.last_gate_failure = None;
                             tracker.last_gate_failure_phase = None;
                             tracker.last_impl_task_id = None;
+                            tracker.last_impl_model_slug = None;
                         }
                         self.record_replan_episode(
                             plan_id,
@@ -6354,6 +6396,7 @@ impl PlanRunner {
                     tracker.last_gate_failure = None;
                     tracker.last_gate_failure_phase = None;
                     tracker.last_impl_task_id = None;
+                    tracker.last_impl_model_slug = None;
                 }
             }
             Err(e) => {
@@ -7619,6 +7662,10 @@ impl PlanRunner {
         let selected_model = dispatch_params.model;
         let dispatch_turn_limit = dispatch_params.turn_limit;
         let dispatch_effort = dispatch_params.effort.clone();
+        if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+            tracker.last_impl_task_id = Some(task.to_string());
+            tracker.last_impl_model_slug = Some(selected_model.clone());
+        }
 
         // ── Build context via tiered ContextProvider ───────────────
         let context_sections = if let Some(ref td) = task_def {

@@ -36,6 +36,7 @@ use crate::prompt_experiment::ExperimentStore;
 use crate::provider_health::ProviderHealthTracker;
 use crate::regression::{RegressionReport, RegressionThresholds, detect_regressions};
 use crate::skill_library::{SkillLibrary, SkillLibraryError, TemplatePatternGenerator};
+use roko_core::ConductorDecision;
 use roko_core::agent::AgentRole;
 use roko_core::task::{TaskCategory, TaskComplexityBand};
 use roko_daimon::{AffectEngine as _, AffectEvent, DaimonState, queue_wait_arousal};
@@ -543,6 +544,32 @@ impl LearningRuntime {
     pub fn save_cascade_router(&self) -> Result<(), LearningRuntimeError> {
         self.cascade_router.save(&self.paths.cascade_router_json)?;
         Ok(())
+    }
+
+    /// Record conductor-driven negative feedback for the routed model.
+    ///
+    /// Restart/fail interventions indicate the selected model failed to make
+    /// acceptable progress for the current routing context, so they are fed
+    /// back into the cascade router as a zero-reward failure.
+    pub fn record_conductor_intervention(
+        &self,
+        routing_context: &RoutingContext,
+        model_slug: &str,
+        intervention: &ConductorDecision,
+    ) -> bool {
+        if !matches!(
+            intervention,
+            ConductorDecision::Restart { .. } | ConductorDecision::Fail { .. }
+        ) {
+            return false;
+        }
+
+        self.cascade_router
+            .record_observation(routing_context, model_slug, 0.0, false);
+        if let Err(err) = self.save_cascade_router() {
+            eprintln!("[learn] cascade router save failed after conductor intervention: {err}");
+        }
+        true
     }
 
     /// Append one raw episode record without triggering any learning updates.
@@ -1777,5 +1804,56 @@ mod tests {
             .expect("theta should route to a healthy model");
 
         assert_eq!(selected.slug, "anthropic-safe");
+    }
+
+    #[tokio::test]
+    async fn conductor_negative_feedback_records_failed_router_observation() {
+        let tmp = TempDir::new().unwrap();
+        let runtime = LearningRuntime::open_with_models(
+            LearningPaths::under(tmp.path()),
+            RegressionConfig::default(),
+            vec!["claude-opus-4-6".to_string()],
+        )
+        .await
+        .unwrap();
+
+        let routing_context = RoutingContext {
+            task_category: TaskCategory::Implementation,
+            complexity: TaskComplexityBand::Standard,
+            iteration: 1,
+            role: AgentRole::Implementer,
+            crate_familiarity: 0.5,
+            has_prior_failure: false,
+            affect_confidence: 0.5,
+            thinking_level: None,
+            previous_model: None,
+            plan_context_tokens: None,
+        };
+
+        let recorded = runtime.record_conductor_intervention(
+            &routing_context,
+            "claude-opus-4-6",
+            &ConductorDecision::restart("stuck-pattern", "repeated output"),
+        );
+        assert!(recorded);
+
+        let stats = runtime.cascade_router().observation_snapshot();
+        let opus = stats.get("claude-opus-4-6").expect("router stats");
+        assert_eq!(opus.trials, 1);
+        assert_eq!(opus.successes, 0);
+
+        let reloaded = LearningRuntime::open_with_models(
+            LearningPaths::under(tmp.path()),
+            RegressionConfig::default(),
+            vec!["claude-opus-4-6".to_string()],
+        )
+        .await
+        .unwrap();
+        let persisted = reloaded.cascade_router().observation_snapshot();
+        let opus = persisted
+            .get("claude-opus-4-6")
+            .expect("persisted router stats");
+        assert_eq!(opus.trials, 1);
+        assert_eq!(opus.successes, 0);
     }
 }
