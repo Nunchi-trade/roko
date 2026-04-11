@@ -113,6 +113,10 @@ pub struct RokoConfig {
     /// Perplexity-specific settings (search recency, domain filters, etc.).
     #[serde(default)]
     pub perplexity: PerplexityConfig,
+
+    /// Gemini-specific settings (model defaults, thinking, safety, caching).
+    #[serde(default)]
+    pub gemini: GeminiConfig,
 }
 
 const fn default_schema_version() -> u32 {
@@ -142,6 +146,7 @@ impl Default for RokoConfig {
             server: ServerConfig::default(),
             deploy: DeployConfig::default(),
             perplexity: PerplexityConfig::default(),
+            gemini: GeminiConfig::default(),
         }
     }
 }
@@ -1833,6 +1838,61 @@ impl Default for DeployConfig {
     }
 }
 
+// ---- Gemini config -------------------------------------------------------
+
+fn default_thinking_medium() -> String {
+    "medium".to_string()
+}
+
+/// Gemini-specific model and request settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GeminiConfig {
+    /// Default model for standard Gemini chat requests.
+    pub default_model: Option<String>,
+    /// Default model for Gemini grounding requests.
+    pub grounding_model: Option<String>,
+    /// Default model for Gemini code execution requests.
+    pub code_exec_model: Option<String>,
+    /// Default Gemini embedding model.
+    pub embed_model: Option<String>,
+    /// Prefer the standard-tier free models when available.
+    #[serde(default)]
+    pub use_free_tier: bool,
+    /// Gemini native thinking depth: "minimal", "low", "medium", or "high".
+    #[serde(default = "default_thinking_medium")]
+    pub thinking_level: String,
+    /// Enable provider-side context caching when supported.
+    #[serde(default)]
+    pub enable_context_caching: bool,
+    /// Per-category Gemini safety thresholds.
+    #[serde(default)]
+    pub safety_settings: Vec<SafetySetting>,
+}
+
+impl Default for GeminiConfig {
+    fn default() -> Self {
+        Self {
+            default_model: None,
+            grounding_model: None,
+            code_exec_model: None,
+            embed_model: None,
+            use_free_tier: false,
+            thinking_level: default_thinking_medium(),
+            enable_context_caching: false,
+            safety_settings: Vec::new(),
+        }
+    }
+}
+
+/// Gemini native safety configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SafetySetting {
+    /// Gemini harm category, e.g. `HARM_CATEGORY_HATE_SPEECH`.
+    pub category: String,
+    /// Gemini blocking threshold, e.g. `BLOCK_NONE`.
+    pub threshold: String,
+}
+
 // ---- Perplexity config ---------------------------------------------------
 
 fn default_recency() -> String {
@@ -2930,6 +2990,76 @@ return_related_questions = false
             .get("fact_checker")
             .expect("fact_checker role");
         assert_eq!(fact_checker.model.as_deref(), Some("sonar"));
+    }
+
+    #[test]
+    fn gemini_config_defaults() {
+        let cfg = RokoConfig::from_toml("").expect("parse empty");
+        assert!(cfg.gemini.default_model.is_none());
+        assert!(cfg.gemini.grounding_model.is_none());
+        assert!(cfg.gemini.code_exec_model.is_none());
+        assert!(cfg.gemini.embed_model.is_none());
+        assert!(!cfg.gemini.use_free_tier);
+        assert_eq!(cfg.gemini.thinking_level, "medium");
+        assert!(!cfg.gemini.enable_context_caching);
+        assert!(cfg.gemini.safety_settings.is_empty());
+    }
+
+    #[test]
+    fn gemini_config_section_parses() {
+        let toml = r#"
+[gemini]
+default_model = "gemini-2.5-flash"
+grounding_model = "gemini-3-flash-preview"
+code_exec_model = "gemini-2.5-pro"
+embed_model = "gemini-embedding-2-preview"
+use_free_tier = true
+thinking_level = "high"
+enable_context_caching = true
+
+[[gemini.safety_settings]]
+category = "HARM_CATEGORY_HATE_SPEECH"
+threshold = "BLOCK_NONE"
+
+[[gemini.safety_settings]]
+category = "HARM_CATEGORY_HARASSMENT"
+threshold = "BLOCK_LOW_AND_ABOVE"
+"#;
+        let cfg = RokoConfig::from_toml(toml).expect("parse");
+        assert_eq!(
+            cfg.gemini.default_model.as_deref(),
+            Some("gemini-2.5-flash")
+        );
+        assert_eq!(
+            cfg.gemini.grounding_model.as_deref(),
+            Some("gemini-3-flash-preview")
+        );
+        assert_eq!(
+            cfg.gemini.code_exec_model.as_deref(),
+            Some("gemini-2.5-pro")
+        );
+        assert_eq!(
+            cfg.gemini.embed_model.as_deref(),
+            Some("gemini-embedding-2-preview")
+        );
+        assert!(cfg.gemini.use_free_tier);
+        assert_eq!(cfg.gemini.thinking_level, "high");
+        assert!(cfg.gemini.enable_context_caching);
+        assert_eq!(cfg.gemini.safety_settings.len(), 2);
+        assert_eq!(
+            cfg.gemini.safety_settings[0],
+            SafetySetting {
+                category: "HARM_CATEGORY_HATE_SPEECH".to_string(),
+                threshold: "BLOCK_NONE".to_string(),
+            }
+        );
+        assert_eq!(
+            cfg.gemini.safety_settings[1],
+            SafetySetting {
+                category: "HARM_CATEGORY_HARASSMENT".to_string(),
+                threshold: "BLOCK_LOW_AND_ABOVE".to_string(),
+            }
+        );
     }
 
     #[test]
