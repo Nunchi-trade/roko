@@ -822,6 +822,12 @@ mod tests {
     }
 
     #[test]
+    fn glm_backend_routing() {
+        assert!(!is_cursor_slug("glm-5.1"));
+        assert_eq!(AgentBackend::from_model("glm-5.1"), AgentBackend::Codex);
+    }
+
+    #[test]
     fn backend_to_provider_kind() {
         assert_eq!(ProviderKind::from(AgentBackend::Claude), ProviderKind::ClaudeCli);
         assert_eq!(ProviderKind::from(AgentBackend::Codex), ProviderKind::OpenAiCompat);
