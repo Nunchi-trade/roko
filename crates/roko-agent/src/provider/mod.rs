@@ -154,6 +154,29 @@ pub enum ProviderError {
     Other(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryAction {
+    WaitAndRetry { delay_ms: u64 },
+    TryFallback,
+    TryWithSmallerContext,
+    Skip,
+}
+
+#[must_use]
+pub fn should_retry(error: &ProviderError) -> RetryAction {
+    match error {
+        ProviderError::RateLimit { retry_after_ms } => RetryAction::WaitAndRetry {
+            delay_ms: retry_after_ms.unwrap_or(5_000),
+        },
+        ProviderError::AuthFailure => RetryAction::Skip,
+        ProviderError::Timeout => RetryAction::TryFallback,
+        ProviderError::ServerError(_) => RetryAction::TryFallback,
+        ProviderError::ContentPolicy => RetryAction::Skip,
+        ProviderError::ContextOverflow => RetryAction::TryWithSmallerContext,
+        _ => RetryAction::TryFallback,
+    }
+}
+
 impl fmt::Display for ProviderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -373,5 +396,39 @@ mod tests {
         assert_eq!(parsed["messages"][0]["content"], "hello");
 
         handle.join().expect("server thread");
+    }
+
+    #[test]
+    fn retry_policy_maps_error_classes() {
+        assert_eq!(
+            should_retry(&ProviderError::RateLimit {
+                retry_after_ms: Some(1_250),
+            }),
+            RetryAction::WaitAndRetry { delay_ms: 1_250 }
+        );
+        assert_eq!(
+            should_retry(&ProviderError::RateLimit {
+                retry_after_ms: None,
+            }),
+            RetryAction::WaitAndRetry { delay_ms: 5_000 }
+        );
+        assert_eq!(should_retry(&ProviderError::AuthFailure), RetryAction::Skip);
+        assert_eq!(should_retry(&ProviderError::Timeout), RetryAction::TryFallback);
+        assert_eq!(
+            should_retry(&ProviderError::ServerError(503)),
+            RetryAction::TryFallback
+        );
+        assert_eq!(
+            should_retry(&ProviderError::ContentPolicy),
+            RetryAction::Skip
+        );
+        assert_eq!(
+            should_retry(&ProviderError::ContextOverflow),
+            RetryAction::TryWithSmallerContext
+        );
+        assert_eq!(
+            should_retry(&ProviderError::Other("x".to_string())),
+            RetryAction::TryFallback
+        );
     }
 }
