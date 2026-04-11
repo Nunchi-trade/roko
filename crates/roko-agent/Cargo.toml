@@ -10,6 +10,9 @@ description = "Agent trait and backends for Roko: spawn LLMs (Claude, exec'd CLI
 [lints]
 workspace = true
 
+[features]
+integration = []
+
 [dependencies]
 roko-core = { path = "../roko-core" }
 async-trait = "0.1"
