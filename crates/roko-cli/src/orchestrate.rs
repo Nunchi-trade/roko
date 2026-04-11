@@ -49,6 +49,7 @@ use roko_gate::{
     adaptive_threshold::AdaptiveThresholds, clippy_gate::ClippyGate, compile::CompileGate,
     payload::GatePayload, test_gate::TestGate,
 };
+use roko_learn::anomaly::{Anomaly, AnomalyDetector};
 use roko_learn::costs_db::CostRecord;
 use roko_learn::efficiency::{AgentEfficiencyEvent, FleetCFactor, compute_fleet_cfactor};
 use roko_learn::episode_logger::{Episode, GateVerdict, Usage};
@@ -1191,6 +1192,10 @@ pub struct PlanRunner {
     plan_costs: HashMap<String, f64>,
     /// Cumulative USD cost per plan/task dispatch key.
     task_costs: HashMap<String, f64>,
+    /// Session-local detector for prompt loops, cost spikes, and quality drift.
+    anomaly_detector: AnomalyDetector,
+    /// Pending one-shot model override applied to the next routed task dispatch.
+    force_model_override: Option<String>,
     /// Metric registry for counters/histograms/gauges (prometheus-style).
     metrics: Arc<MetricRegistry>,
     /// Format-selection bandit for adaptive tool-call format per model/role.
@@ -2191,6 +2196,8 @@ impl PlanRunner {
             ),
             plan_costs: HashMap::new(),
             task_costs: HashMap::new(),
+            anomaly_detector: AnomalyDetector::new(now_unix_ms_i64()),
+            force_model_override: None,
             metrics,
             format_bandit: ProfileBandit::with_static_profiles(),
             mcp_server_names,
@@ -2303,6 +2310,8 @@ impl PlanRunner {
             ),
             plan_costs: HashMap::new(),
             task_costs: HashMap::new(),
+            anomaly_detector: AnomalyDetector::new(now_unix_ms_i64()),
+            force_model_override: None,
             metrics,
             format_bandit: ProfileBandit::with_static_profiles(),
             mcp_server_names,
@@ -2419,6 +2428,8 @@ impl PlanRunner {
             ),
             plan_costs: HashMap::new(),
             task_costs: HashMap::new(),
+            anomaly_detector: AnomalyDetector::new(now_unix_ms_i64()),
+            force_model_override: None,
             metrics,
             format_bandit: ProfileBandit::with_static_profiles(),
             mcp_server_names,
@@ -7512,6 +7523,7 @@ impl PlanRunner {
         let frequency = task_def
             .as_ref()
             .map_or(OperatingFrequency::Theta, |td| td.operating_frequency());
+        let explicit_model_override = model_override;
 
         let mcp_lease = self.acquire_task_mcp_servers(task_def.as_ref()).await;
 
@@ -7519,7 +7531,7 @@ impl PlanRunner {
         // Also collect attribution keys for context feedback after the agent runs.
         let mut attribution_keys: Vec<(String, String)> = Vec::new();
         let (task_text, mut selected_model) = if let Some(override_prompt) = prompt_override {
-            let model = model_override.unwrap_or_else(|| {
+            let model = explicit_model_override.clone().unwrap_or_else(|| {
                 self.config
                     .agent
                     .model
@@ -7529,14 +7541,16 @@ impl PlanRunner {
             (override_prompt, model)
         } else if let Some(ref td) = task_def {
             let prompt = td.build_prompt(plan_id, &self.workdir);
-            let model = td.effective_model(
-                self.config
-                    .agent
-                    .model
-                    .as_deref()
-                    .unwrap_or("claude-sonnet-4-6"),
-                Some(&self.config.agent.tier_models),
-            );
+            let model = explicit_model_override.clone().unwrap_or_else(|| {
+                td.effective_model(
+                    self.config
+                        .agent
+                        .model
+                        .as_deref()
+                        .unwrap_or("claude-sonnet-4-6"),
+                    Some(&self.config.agent.tier_models),
+                )
+            });
             tracing::info!(
                 "[orchestrate] Task {} tier={} model={} max_loc={:?} context={} verify={}",
                 td.id,
@@ -7568,9 +7582,21 @@ impl PlanRunner {
             }
         };
         let model_providers = routing_model_provider_map(&roko_config);
+        let pending_force_model_override = if task_def.is_some() && explicit_model_override.is_none()
+        {
+            self.force_model_override.take()
+        } else {
+            None
+        };
 
         // ── Adaptive model selection via CascadeRouter ───────────────
-        if let Some(td) = task_def.as_ref() {
+        if let Some(forced_model) = pending_force_model_override {
+            tracing::warn!(
+                forced_model = %forced_model,
+                "applying pending cost-anomaly model override before routing"
+            );
+            selected_model = forced_model;
+        } else if let Some(td) = task_def.as_ref() {
             let cascade_router = self.learning.cascade_router();
             let routing_ctx = cascade_routing_context(self, plan_id, task, role, Some(td));
             let agent_id = format!("{role:?}");
@@ -8151,6 +8177,12 @@ impl PlanRunner {
                         .display()
                 );
             }
+        }
+
+        if let Some(forced_model) =
+            detect_cost_anomaly_override(&mut self.anomaly_detector, task_cost, &self.config)
+        {
+            self.force_model_override = Some(forced_model);
         }
 
         if !result.success {
@@ -9492,6 +9524,39 @@ fn now_unix_ms_i64() -> i64 {
     }
 }
 
+fn mechanical_tier_model(config: &Config) -> Option<String> {
+    config.agent.tier_models.get("mechanical").cloned()
+}
+
+fn detect_cost_anomaly_override(
+    detector: &mut AnomalyDetector,
+    turn_cost: f64,
+    config: &Config,
+) -> Option<String> {
+    match detector.check_cost(turn_cost) {
+        Some(Anomaly::CostSpike { z_score }) => {
+            let mechanical_model = mechanical_tier_model(config);
+            match mechanical_model.as_deref() {
+                Some(model) => {
+                    tracing::warn!(
+                        z_score,
+                        forced_model = %model,
+                        "cost anomaly detected; forcing cheaper model on next routed turn"
+                    );
+                }
+                None => {
+                    tracing::warn!(
+                        z_score,
+                        "cost anomaly detected but no mechanical tier model is configured"
+                    );
+                }
+            }
+            mechanical_model
+        }
+        _ => None,
+    }
+}
+
 fn build_system_prompt(role: AgentRole, plan_id: &str, task: &str, tools_csv: &str) -> String {
     build_system_prompt_with_context(role, plan_id, task, tools_csv, None)
 }
@@ -10663,6 +10728,25 @@ files = ["crates/roko-cli/src/orchestrate.rs"]
         assert!(rendered.contains("matching_skill"));
         assert!(rendered.contains("confidence: 91%"));
         assert!(rendered.contains("Telemetry: 75% success over 4 uses"));
+    }
+
+    #[test]
+    fn cost_anomaly_downgrade() {
+        let mut config = Config::default();
+        config.agent.tier_models.insert(
+            "mechanical".to_string(),
+            "claude-haiku-4-5".to_string(),
+        );
+
+        let mut detector = AnomalyDetector::new(1_700_000_000_000);
+        for cost in [1.0, 1.2, 0.9, 1.1, 1.05, 0.95, 1.15, 1.0] {
+            assert!(detect_cost_anomaly_override(&mut detector, cost, &config).is_none());
+        }
+
+        assert_eq!(
+            detect_cost_anomaly_override(&mut detector, 10.0, &config),
+            Some("claude-haiku-4-5".to_string())
+        );
     }
 
     #[test]
