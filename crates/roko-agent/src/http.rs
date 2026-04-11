@@ -93,6 +93,22 @@ pub trait HttpPoster: Send + Sync {
             "get_json not supported by this poster",
         ))
     }
+
+    /// Perform a DELETE request to `url` with `headers`.
+    ///
+    /// The default implementation returns an error. Override in implementations
+    /// that need DELETE support.
+    async fn delete_json(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        timeout_ms: u64,
+    ) -> Result<String, HttpPostError> {
+        let _ = (url, headers, timeout_ms);
+        Err(HttpPostError::transport(
+            "delete_json not supported by this poster",
+        ))
+    }
 }
 
 /// Production [`HttpPoster`] backed by `reqwest`.
@@ -160,6 +176,35 @@ impl HttpPoster for ReqwestPoster {
         let mut req = self
             .client
             .get(url)
+            .timeout(Duration::from_millis(timeout_ms));
+        for (k, v) in headers {
+            req = req.header(k.as_str(), v.as_str());
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| HttpPostError::transport(format!("request failed: {e}")))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| HttpPostError::transport(format!("read body failed: {e}")))?;
+        if status.is_success() {
+            Ok(text)
+        } else {
+            Err(HttpPostError::http(status.as_u16(), text))
+        }
+    }
+
+    async fn delete_json(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        timeout_ms: u64,
+    ) -> Result<String, HttpPostError> {
+        let mut req = self
+            .client
+            .delete(url)
             .timeout(Duration::from_millis(timeout_ms));
         for (k, v) in headers {
             req = req.header(k.as_str(), v.as_str());
