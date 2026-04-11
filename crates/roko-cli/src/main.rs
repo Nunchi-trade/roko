@@ -461,6 +461,9 @@ enum ResearchCmd {
     Topic {
         /// The research topic.
         topic: Vec<String>,
+        /// Use Perplexity deep research (async, 1-10 min).
+        #[arg(long, help = "Use Perplexity deep research (async, 1-10 min)")]
+        deep: bool,
     },
     /// Enhance a PRD with academic citations, diagrams, and research-backed improvements.
     EnhancePrd {
@@ -1946,9 +1949,100 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
     let config = load_roko_config(&workdir).unwrap_or_default();
 
     match cmd {
-        ResearchCmd::Topic { topic } => {
+        ResearchCmd::Topic { topic, deep } => {
             let topic = topic.join(" ");
             println!("🔬 Researching: {topic}");
+
+            // --deep: use PerplexityDeepResearchAgent (sonar-deep-research, async polling)
+            if deep {
+                use roko_agent::agent::Agent as _;
+                use roko_agent::perplexity::PerplexityDeepResearchAgent;
+                use roko_agent::perplexity::types::PerplexityMetadata;
+                use roko_core::Body;
+
+                let api_key = std::env::var("PERPLEXITY_API_KEY")
+                    .context("PERPLEXITY_API_KEY not set")?;
+                let model_slug = config
+                    .perplexity
+                    .default_research_model
+                    .clone()
+                    .unwrap_or_else(|| "sonar-deep-research".to_string());
+
+                let (combined_prompt, _) = build_research_prompt_perplexity(
+                    &workdir,
+                    &topic,
+                    "",
+                    ResearchMode::Topic,
+                    &config.perplexity,
+                );
+
+                let agent = PerplexityDeepResearchAgent::new(
+                    api_key,
+                    "https://api.perplexity.ai",
+                    &model_slug,
+                    format!("perplexity:{model_slug}"),
+                );
+                println!("⏳ Deep research submitted ({model_slug}). This takes 1-10 min...");
+
+                let input = roko_core::Signal::builder(Kind::Prompt)
+                    .body(Body::text(&combined_prompt))
+                    .build();
+
+                let mut handle =
+                    tokio::spawn(async move { agent.run(&input, &Context::now()).await });
+                let poll_started = std::time::Instant::now();
+                let result = loop {
+                    tokio::select! {
+                        r = &mut handle => break r.context("agent task panicked")?,
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(15)) => {
+                            let elapsed = poll_started.elapsed().as_secs();
+                            println!("  ⏳ Still researching... ({elapsed}s elapsed)");
+                        }
+                    }
+                };
+
+                if !result.success {
+                    let err_text = result.output.body.as_text().unwrap_or("unknown error");
+                    anyhow::bail!("Deep research failed: {err_text}");
+                }
+
+                let content = result
+                    .output
+                    .body
+                    .as_text()
+                    .map_err(|e| anyhow::anyhow!("response body not text: {e}"))?
+                    .to_string();
+
+                let citations: Vec<String> = result
+                    .output
+                    .tag("pplx_meta")
+                    .and_then(|meta_json| {
+                        serde_json::from_str::<PerplexityMetadata>(meta_json)
+                            .ok()
+                            .map(|m| m.citations)
+                    })
+                    .unwrap_or_default();
+
+                let mut output = content;
+                if !citations.is_empty() {
+                    output.push_str("\n\n## Sources\n\n");
+                    for (i, url) in citations.iter().enumerate() {
+                        let _ = writeln!(output, "{}. {url}", i + 1);
+                    }
+                }
+
+                let slug = topic.to_lowercase().replace(' ', "-");
+                let out_path = workdir
+                    .join(".roko/research")
+                    .join(format!("{slug}-deep.md"));
+                std::fs::write(&out_path, &output)
+                    .with_context(|| format!("write {}", out_path.display()))?;
+                println!("📄 Saved: {}", out_path.display());
+                if !citations.is_empty() {
+                    println!("📚 {} citations", citations.len());
+                }
+                return Ok(0);
+            }
 
             // If Perplexity is configured, use PerplexityChatAgent for search-grounded research.
             if let Some(model_slug) = config.perplexity.default_search_model.clone() {
