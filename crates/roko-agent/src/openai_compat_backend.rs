@@ -19,6 +19,7 @@ pub struct OpenAiCompatLlmBackend {
     model: String,
     base_url: String,
     timeout_ms: u64,
+    max_tokens: Option<u32>,
     extra_headers: Vec<(String, String)>,
     extra_body_params: Map<String, Value>,
     poster: Box<dyn HttpPoster>,
@@ -33,6 +34,7 @@ impl OpenAiCompatLlmBackend {
             model: model.into(),
             base_url: DEFAULT_BASE_URL.to_string(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
+            max_tokens: None,
             extra_headers: Vec::new(),
             extra_body_params: Map::new(),
             poster: Box::new(ReqwestPoster::new()),
@@ -50,6 +52,13 @@ impl OpenAiCompatLlmBackend {
     #[must_use]
     pub const fn with_timeout_ms(mut self, ms: u64) -> Self {
         self.timeout_ms = ms;
+        self
+    }
+
+    /// Override the max output tokens sent on every request.
+    #[must_use]
+    pub const fn with_max_tokens(mut self, max_tokens: u32) -> Self {
+        self.max_tokens = Some(max_tokens);
         self
     }
 
@@ -111,6 +120,9 @@ impl LlmBackend for OpenAiCompatLlmBackend {
         });
 
         if let Some(body_obj) = body.as_object_mut() {
+            if let Some(max_tokens) = self.max_tokens {
+                body_obj.insert("max_tokens".to_string(), Value::from(max_tokens));
+            }
             for (key, value) in &self.extra_body_params {
                 body_obj.insert(key.clone(), value.clone());
             }
@@ -143,6 +155,7 @@ impl std::fmt::Debug for OpenAiCompatLlmBackend {
             .field("model", &self.model)
             .field("base_url", &self.base_url)
             .field("timeout_ms", &self.timeout_ms)
+            .field("max_tokens", &self.max_tokens)
             .finish_non_exhaustive()
     }
 }

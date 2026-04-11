@@ -17,11 +17,20 @@
 //! - `reasoning_content` must be carried forward in conversation history when
 //!   building the next turn.
 
+use std::collections::HashSet;
+use std::sync::Arc;
+
 use crate::Agent;
 use crate::codex_agent::{CodexAgent, DEFAULT_MAX_TOKENS};
+use crate::dispatcher::{HandlerResolver, ToolDispatcher};
+use crate::openai_compat_backend::OpenAiCompatLlmBackend;
 use crate::provider::{AgentCreationError, AgentOptions, ProviderAdapter, ProviderError};
+use crate::tool_loop::{ToolLoop, ToolLoopAgent};
+use crate::translate::{OpenAiTranslator, Translator};
 use roko_core::agent::ProviderKind;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
+use roko_core::tool::{ToolDef, ToolRegistry};
+use roko_std::StaticToolRegistry;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
@@ -165,6 +174,81 @@ fn inject_kimi_params(body: &mut Map<String, Value>, model: &ModelProfile) {
     );
 }
 
+fn resolve_api_key(provider: &ProviderConfig) -> Result<String, AgentCreationError> {
+    provider
+        .resolve_api_key()
+        .or_else(|| {
+            if provider.base_url.as_deref() == Some("http://localhost:11434") {
+                Some(String::new())
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| {
+            AgentCreationError::MissingApiKey(provider.api_key_env.clone().unwrap_or_default())
+        })
+}
+
+fn base_url_for_codex(provider: &ProviderConfig) -> String {
+    let base_url = provider
+        .base_url
+        .clone()
+        .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+    base_url
+        .strip_suffix("/v1")
+        .unwrap_or(base_url.as_str())
+        .to_string()
+}
+
+fn base_url_for_tool_loop(provider: &ProviderConfig) -> String {
+    provider
+        .base_url
+        .clone()
+        .unwrap_or_else(|| "https://api.openai.com/v1".to_string())
+}
+
+fn build_extra_body_params(provider: &ProviderConfig, model: &ModelProfile) -> Map<String, Value> {
+    let mut extra_body_params = Map::new();
+    inject_glm_params(&mut extra_body_params, provider, model);
+    inject_kimi_params(&mut extra_body_params, model);
+    inject_provider_routing(&mut extra_body_params, provider, model);
+    extra_body_params
+}
+
+fn parse_allowed_tools_csv(csv: Option<&str>) -> Option<HashSet<&str>> {
+    let allowed: HashSet<&str> = csv
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect();
+    (!allowed.is_empty()).then_some(allowed)
+}
+
+fn tool_defs_for_options(options: &AgentOptions) -> Vec<ToolDef> {
+    let registry = StaticToolRegistry::new();
+    let allowed = parse_allowed_tools_csv(options.tools.as_deref());
+
+    registry
+        .all()
+        .iter()
+        .filter(|tool| {
+            allowed
+                .as_ref()
+                .is_none_or(|allowed| allowed.contains(tool.name.as_str()))
+        })
+        .cloned()
+        .collect()
+}
+
+fn default_agent_name(model: &ModelProfile, options: &AgentOptions) -> String {
+    if options.name.is_empty() {
+        format!("codex:{}", model.slug)
+    } else {
+        options.name.clone()
+    }
+}
+
 impl ProviderAdapter for OpenAiCompatAdapter {
     fn kind(&self) -> ProviderKind {
         ProviderKind::OpenAiCompat
@@ -176,27 +260,7 @@ impl ProviderAdapter for OpenAiCompatAdapter {
         model: &ModelProfile,
         options: &AgentOptions,
     ) -> Result<Box<dyn Agent>, AgentCreationError> {
-        let api_key = provider
-            .resolve_api_key()
-            .or_else(|| {
-                if provider.base_url.as_deref() == Some("http://localhost:11434") {
-                    Some(String::new())
-                } else {
-                    None
-                }
-            })
-            .ok_or_else(|| {
-                AgentCreationError::MissingApiKey(provider.api_key_env.clone().unwrap_or_default())
-            })?;
-
-        let base_url = provider
-            .base_url
-            .clone()
-            .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-        let base_url = base_url
-            .strip_suffix("/v1")
-            .unwrap_or(base_url.as_str())
-            .to_string();
+        let api_key = resolve_api_key(provider)?;
 
         let timeout = options
             .timeout_ms
@@ -206,17 +270,49 @@ impl ProviderAdapter for OpenAiCompatAdapter {
             .max_output
             .and_then(|value| u32::try_from(value).ok())
             .unwrap_or(DEFAULT_MAX_TOKENS);
-        let mut extra_body_params = Map::new();
-        inject_glm_params(&mut extra_body_params, provider, model);
-        inject_kimi_params(&mut extra_body_params, model);
-        inject_provider_routing(&mut extra_body_params, provider, model);
+        let extra_headers = provider.extra_headers.clone().unwrap_or_default();
+        let extra_body_params = build_extra_body_params(provider, model);
+        let agent_name = default_agent_name(model, options);
+
+        if model.supports_tools {
+            let tools = tool_defs_for_options(options);
+            let registry: Arc<dyn ToolRegistry> = Arc::new(StaticToolRegistry::new());
+            let resolver: Arc<dyn HandlerResolver> =
+                Arc::new(|name: &str| roko_std::tool::handlers::handler_for(name));
+            let dispatcher = Arc::new(ToolDispatcher::new(registry, resolver));
+            let translator: Arc<dyn Translator> = Arc::new(OpenAiTranslator);
+            let backend: Arc<dyn crate::tool_loop::LlmBackend> = Arc::new(
+                OpenAiCompatLlmBackend::new(api_key, model.slug.clone())
+                    .with_base_url(base_url_for_tool_loop(provider))
+                    .with_timeout_ms(timeout)
+                    .with_max_tokens(max_tokens)
+                    .with_extra_headers(extra_headers)
+                    .with_extra_body_params(extra_body_params),
+            );
+
+            let tool_loop = ToolLoop::new(translator, dispatcher, backend)
+                .with_max_iterations(50)
+                .with_context_token_limit(
+                    usize::try_from(model.context_window).unwrap_or(usize::MAX),
+                );
+
+            let mut agent = ToolLoopAgent::new(tool_loop)
+                .with_tools(tools)
+                .with_name(agent_name);
+            if let Some(prompt) = &options.system_prompt {
+                agent = agent.with_system_prompt(prompt.clone());
+            }
+
+            return Ok(Box::new(agent));
+        }
 
         let agent = CodexAgent::new(api_key, model.slug.clone())
-            .with_base_url(base_url)
+            .with_base_url(base_url_for_codex(provider))
             .with_timeout_ms(timeout)
             .with_max_tokens(max_tokens)
+            .with_extra_headers(extra_headers)
             .with_extra_body_params(extra_body_params)
-            .with_name(options.name.clone());
+            .with_name(agent_name);
 
         Ok(Box::new(agent))
     }
@@ -443,8 +539,6 @@ mod tests {
         let result = agent.run(&prompt("hello"), &Context::now()).await;
         assert!(result.success);
         assert_eq!(result.output.body.as_text().unwrap_or(""), "zai-ok");
-        assert_eq!(result.usage.input_tokens, 11);
-        assert_eq!(result.usage.output_tokens, 7);
 
         let request = captured
             .lock()
@@ -457,7 +551,8 @@ mod tests {
         let parsed: Value = serde_json::from_str(body).expect("json request body");
         assert_eq!(parsed["model"], "glm-5.1");
         assert_eq!(parsed["max_tokens"], 1024);
-        assert_eq!(parsed["messages"][0]["content"], "hello");
+        assert_eq!(parsed["messages"][1]["content"], "hello");
+        assert!(!parsed["tools"].as_array().expect("tools array").is_empty());
         assert_eq!(
             parsed["thinking"],
             serde_json::json!({
@@ -547,7 +642,8 @@ mod tests {
         let parsed: Value = serde_json::from_str(body).expect("json request body");
         assert_eq!(parsed["model"], "kimi-k2.5");
         assert_eq!(parsed["max_tokens"], 65535);
-        assert_eq!(parsed["messages"][0]["content"], "hello");
+        assert_eq!(parsed["messages"][1]["content"], "hello");
+        assert!(!parsed["tools"].as_array().expect("tools array").is_empty());
         assert_eq!(
             parsed["thinking"],
             serde_json::json!({

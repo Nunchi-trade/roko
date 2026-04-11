@@ -15,6 +15,7 @@ integration = []
 
 [dependencies]
 roko-core = { path = "../roko-core" }
+roko-std = { path = "../roko-std" }
 async-trait = "0.1"
 tokio = { workspace = true, features = ["process", "io-util", "time", "sync", "rt", "macros"] }
 serde = { workspace = true, features = ["derive"] }
@@ -33,6 +34,5 @@ tracing = { workspace = true }
 libc = "0.2"
 
 [dev-dependencies]
-roko-std = { path = "../roko-std" }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tempfile = { workspace = true }

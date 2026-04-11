@@ -1,6 +1,6 @@
 use roko_agent::chat_types::ChatResponse;
-use roko_core::tool::ToolCall;
 use roko_core::ChatMessage;
+use roko_core::tool::ToolCall;
 
 #[test]
 fn chat_response_to_message_preserves_tool_calls() {
