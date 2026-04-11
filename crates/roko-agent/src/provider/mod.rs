@@ -5,12 +5,31 @@ use serde_json::Value;
 use std::fmt;
 use std::path::PathBuf;
 
-pub mod openai_compat;
-pub mod claude_cli;
-/// Anthropic Messages API adapter.
 pub mod anthropic_api;
-/// Cursor ACP adapter.
+pub mod claude_cli;
 pub mod cursor_acp;
+pub mod openai_compat;
+
+pub use anthropic_api::AnthropicApiAdapter;
+pub use claude_cli::ClaudeCliAdapter;
+pub use cursor_acp::CursorAcpAdapter;
+pub use openai_compat::OpenAiCompatAdapter;
+
+static ANTHROPIC_API_ADAPTER: AnthropicApiAdapter = AnthropicApiAdapter;
+static CLAUDE_CLI_ADAPTER: ClaudeCliAdapter = ClaudeCliAdapter;
+static CURSOR_ACP_ADAPTER: CursorAcpAdapter = CursorAcpAdapter;
+static OPENAI_COMPAT_ADAPTER: OpenAiCompatAdapter = OpenAiCompatAdapter;
+
+/// Return the static adapter for a provider kind.
+#[must_use]
+pub fn adapter_for_kind(kind: ProviderKind) -> &'static dyn ProviderAdapter {
+    match kind {
+        ProviderKind::OpenAiCompat => &OPENAI_COMPAT_ADAPTER,
+        ProviderKind::ClaudeCli => &CLAUDE_CLI_ADAPTER,
+        ProviderKind::AnthropicApi => &ANTHROPIC_API_ADAPTER,
+        ProviderKind::CursorAcp => &CURSOR_ACP_ADAPTER,
+    }
+}
 
 /// Adapter for a protocol family. Creates Agent instances configured for a
 /// specific provider and model.
@@ -86,4 +105,29 @@ pub enum AgentCreationError {
     MissingConfig(String),
     #[error("Invalid provider kind: {0:?}")]
     InvalidKind(ProviderKind),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adapter_for_kind_returns_expected_adapter() {
+        assert_eq!(
+            adapter_for_kind(ProviderKind::OpenAiCompat).kind(),
+            ProviderKind::OpenAiCompat
+        );
+        assert_eq!(
+            adapter_for_kind(ProviderKind::ClaudeCli).kind(),
+            ProviderKind::ClaudeCli
+        );
+        assert_eq!(
+            adapter_for_kind(ProviderKind::AnthropicApi).kind(),
+            ProviderKind::AnthropicApi
+        );
+        assert_eq!(
+            adapter_for_kind(ProviderKind::CursorAcp).kind(),
+            ProviderKind::CursorAcp
+        );
+    }
 }
