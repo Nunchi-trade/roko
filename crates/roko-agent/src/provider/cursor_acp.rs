@@ -169,6 +169,12 @@ mod tests {
             cost_cache_write_per_m: None,
             max_tools: None,
             tokenizer_ratio: None,
+            supports_search: false,
+            supports_citations: false,
+            supports_async: false,
+            is_embedding_model: false,
+            search_context_size: None,
+            cost_per_request: None,
         }
     }
 

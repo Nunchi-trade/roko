@@ -425,6 +425,12 @@ mod tests {
             cost_cache_write_per_m: None,
             max_tools: None,
             tokenizer_ratio: None,
+            supports_search: false,
+            supports_citations: false,
+            supports_async: false,
+            is_embedding_model: false,
+            search_context_size: None,
+            cost_per_request: None,
         };
         let options = AgentOptions {
             timeout_ms: Some(2_500),
@@ -517,6 +523,12 @@ mod tests {
             cost_cache_write_per_m: None,
             max_tools: Some(128),
             tokenizer_ratio: None,
+            supports_search: false,
+            supports_citations: false,
+            supports_async: false,
+            is_embedding_model: false,
+            search_context_size: None,
+            cost_per_request: None,
         };
         let options = AgentOptions {
             timeout_ms: Some(2_500),
@@ -611,6 +623,12 @@ mod tests {
             cost_cache_write_per_m: None,
             max_tools: None,
             tokenizer_ratio: None,
+            supports_search: false,
+            supports_citations: false,
+            supports_async: false,
+            is_embedding_model: false,
+            search_context_size: None,
+            cost_per_request: None,
         };
         let options = AgentOptions {
             timeout_ms: Some(2_500),
@@ -686,6 +704,12 @@ mod tests {
             cost_cache_write_per_m: None,
             max_tools: Some(128),
             tokenizer_ratio: None,
+            supports_search: false,
+            supports_citations: false,
+            supports_async: false,
+            is_embedding_model: false,
+            search_context_size: None,
+            cost_per_request: None,
         };
 
         let base64_message = ChatMessage {

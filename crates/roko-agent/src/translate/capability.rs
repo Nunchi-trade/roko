@@ -304,6 +304,12 @@ mod tests {
             cost_cache_write_per_m: None,
             max_tools: Some(32),
             tokenizer_ratio: Some(1.0),
+            supports_search: false,
+            supports_citations: false,
+            supports_async: false,
+            is_embedding_model: false,
+            search_context_size: None,
+            cost_per_request: None,
         };
 
         let caps = capabilities_from_profile(&profile);
