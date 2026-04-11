@@ -20,7 +20,7 @@ use tokio::sync::mpsc;
 
 use crate::dispatcher::ToolDispatcher;
 use crate::streaming::StreamChunk;
-use crate::translate::{BackendResponse, RenderedTools, Translator};
+use crate::translate::{BackendResponse, RenderedTools, SessionState, Translator};
 use crate::usage::Usage;
 
 pub mod agent_wrapper;
@@ -56,6 +56,12 @@ pub trait LlmBackend: Send + Sync {
         messages: &[serde_json::Value],
         tools: &RenderedTools,
     ) -> Result<BackendResponse, LlmError>;
+
+    /// Extract provider-issued session or conversation identifiers from a turn response.
+    fn extract_session(&self, response: &BackendResponse) -> SessionState {
+        let _ = response;
+        SessionState::default()
+    }
 
     /// Send the current conversation state to the backend in streaming mode.
     ///
@@ -276,6 +282,7 @@ impl ToolLoop {
                     };
                 }
             };
+            let _session = self.backend.extract_session(&response);
             total_usage.add(&response.extract_usage());
 
             // Parse tool calls from the response.
@@ -597,6 +604,50 @@ mod tests {
         }
     }
 
+    struct SessionTrackingBackend {
+        call_count: AtomicUsize,
+        extracted_sessions: AtomicUsize,
+    }
+
+    impl SessionTrackingBackend {
+        fn new() -> Self {
+            Self {
+                call_count: AtomicUsize::new(0),
+                extracted_sessions: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmBackend for SessionTrackingBackend {
+        async fn send_turn(
+            &self,
+            _messages: &[serde_json::Value],
+            _tools: &RenderedTools,
+        ) -> Result<BackendResponse, LlmError> {
+            let turn = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if turn == 0 {
+                Ok(BackendResponse::Json(serde_json::json!({
+                    "id": "chatcmpl-turn-1",
+                    "tool_calls": [{"id": "c1", "name": "echo", "arguments": {"x": 1}}]
+                })))
+            } else {
+                Ok(BackendResponse::Json(serde_json::json!({
+                    "id": "chatcmpl-turn-2",
+                    "message": {"content": "final answer"}
+                })))
+            }
+        }
+
+        fn extract_session(&self, _response: &BackendResponse) -> SessionState {
+            self.extracted_sessions.fetch_add(1, Ordering::SeqCst);
+            SessionState {
+                conversation_id: Some("conversation-1".to_string()),
+                ..Default::default()
+            }
+        }
+    }
+
     /// Captures each request and emits three thinking tool-call turns before
     /// returning a final answer.
     struct ReasoningCaptureBackend {
@@ -861,6 +912,18 @@ mod tests {
             .find(|m| m.get("tool_call_id").is_some())
             .expect("should have a tool-result message");
         assert_eq!(tool_msg["tool_call_id"], "call-42");
+    }
+
+    #[tokio::test]
+    async fn session_extraction_runs_after_each_turn() {
+        let backend = Arc::new(SessionTrackingBackend::new());
+        let tl = make_tool_loop(backend.clone(), 25);
+        let ctx = ToolContext::testing("/tmp");
+
+        let out = tl.run("system", "user", &test_tools(), &ctx).await;
+
+        assert_eq!(out.stop_reason, StopReason::Stop);
+        assert_eq!(backend.extracted_sessions.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

@@ -12,7 +12,7 @@ use crate::http::{HttpPoster, ReqwestPoster};
 use crate::streaming::{StreamAccumulator, StreamChunk, parse_sse_line};
 use crate::tool_loop::{LlmBackend, LlmError};
 use crate::translate::FinishReason;
-use crate::translate::{BackendResponse, RenderedTools};
+use crate::translate::{BackendResponse, RenderedTools, SessionState};
 use crate::usage::Usage;
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -171,6 +171,23 @@ impl OpenAiCompatLlmBackend {
     }
 }
 
+fn extract_session(response: &Value) -> SessionState {
+    SessionState {
+        session_id: response
+            .pointer("/session_id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        thread_id: response
+            .pointer("/thread_id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        conversation_id: response
+            .pointer("/id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    }
+}
+
 #[async_trait]
 impl LlmBackend for OpenAiCompatLlmBackend {
     async fn send_turn(
@@ -257,6 +274,13 @@ impl LlmBackend for OpenAiCompatLlmBackend {
 
         let json = Self::stream_response_to_json(accumulator.finalize())?;
         Ok(BackendResponse::Json(json))
+    }
+
+    fn extract_session(&self, response: &BackendResponse) -> SessionState {
+        match response {
+            BackendResponse::Json(json) => extract_session(json),
+            BackendResponse::StreamJson(_) | BackendResponse::Text(_) => SessionState::default(),
+        }
     }
 }
 
@@ -518,6 +542,47 @@ mod tests {
         assert_eq!(requests[0].body["model"], "glm-5.1");
         assert_eq!(requests[0].body["thinking"]["type"], "enabled");
         assert_eq!(requests[0].body["tools"][0]["function"]["name"], "echo");
+    }
+
+    #[test]
+    fn session_extraction_reads_openai_compat_response_ids() {
+        let backend = OpenAiCompatLlmBackend::new("test-key", "glm-5.1");
+        let response = BackendResponse::Json(serde_json::json!({
+            "id": "chatcmpl-glm",
+            "session_id": "sess-glm",
+            "thread_id": "thread-glm",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "done"
+                }
+            }]
+        }));
+
+        let session = backend.extract_session(&response);
+
+        assert_eq!(session.conversation_id.as_deref(), Some("chatcmpl-glm"));
+        assert_eq!(session.session_id.as_deref(), Some("sess-glm"));
+        assert_eq!(session.thread_id.as_deref(), Some("thread-glm"));
+    }
+
+    #[test]
+    fn session_extraction_defaults_when_ids_are_absent() {
+        let backend = OpenAiCompatLlmBackend::new("test-key", "kimi-k2.5");
+        let response = BackendResponse::Json(serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "done"
+                }
+            }]
+        }));
+
+        let session = backend.extract_session(&response);
+
+        assert!(session.session_id.is_none());
+        assert!(session.thread_id.is_none());
+        assert!(session.conversation_id.is_none());
     }
 
     #[tokio::test]
