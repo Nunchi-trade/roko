@@ -287,7 +287,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_loop_agent_trait() {
+    async fn tool_loop_agent_wrapper_runs_tool_loop() {
         let agent = ToolLoopAgent::new(make_tool_loop(Arc::new(TwoStepBackend::new())))
             .with_name("glm-tool-loop")
             .with_system_prompt("system prompt")
@@ -311,7 +311,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_loop_agent_trait_maps_backend_errors_to_failures() {
+    async fn tool_loop_agent_wrapper_maps_backend_errors_to_failures() {
         let agent = ToolLoopAgent::new(make_tool_loop(Arc::new(ErrorBackend)))
             .with_tools(test_tools())
             .with_worktree_path("/tmp");
