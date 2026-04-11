@@ -5155,6 +5155,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bardo-primitives",
+ "bardo-runtime",
  "blake3",
  "chrono",
  "parking_lot",
@@ -5164,6 +5165,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
  "toml",
 ]
 

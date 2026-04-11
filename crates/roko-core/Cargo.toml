@@ -12,10 +12,12 @@ workspace = true
 
 [dependencies]
 bardo-primitives = { path = "../bardo-primitives" }
+bardo-runtime = { path = "../bardo-runtime" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
 blake3 = "1"
 async-trait = "0.1"
 parking_lot = "0.12"

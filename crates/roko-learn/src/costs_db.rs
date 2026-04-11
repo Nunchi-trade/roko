@@ -114,6 +114,72 @@ impl CostSummary {
     }
 }
 
+// ─── CostTable ──────────────────────────────────────────────────────────────
+
+/// Per-model pricing data stored in the default cost table.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelPricing {
+    /// Input token cost per 1M tokens, in USD.
+    pub input_per_m: f64,
+    /// Output token cost per 1M tokens, in USD.
+    pub output_per_m: f64,
+    /// Cached input token cost per 1M tokens, in USD.
+    pub cache_read_per_m: Option<f64>,
+}
+
+/// Default pricing table keyed by model slug.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CostTable {
+    /// Pricing records keyed by model slug.
+    pub models: HashMap<String, ModelPricing>,
+}
+
+impl CostTable {
+    /// Look up the pricing entry for a model slug.
+    #[must_use]
+    pub fn lookup(&self, model: &str) -> Option<&ModelPricing> {
+        self.models.get(model)
+    }
+
+    /// Build the default cost table with the GLM pricing rows.
+    #[must_use]
+    pub fn with_defaults() -> Self {
+        let mut models = HashMap::new();
+        models.insert(
+            "glm-5.1".to_string(),
+            ModelPricing {
+                input_per_m: 1.40,
+                output_per_m: 4.40,
+                cache_read_per_m: Some(0.26),
+            },
+        );
+        models.insert(
+            "glm-5".to_string(),
+            ModelPricing {
+                input_per_m: 1.00,
+                output_per_m: 3.20,
+                cache_read_per_m: None,
+            },
+        );
+        models.insert(
+            "glm-4.7".to_string(),
+            ModelPricing {
+                input_per_m: 0.60,
+                output_per_m: 2.20,
+                cache_read_per_m: None,
+            },
+        );
+
+        Self { models }
+    }
+}
+
+impl Default for CostTable {
+    fn default() -> Self {
+        Self::with_defaults()
+    }
+}
+
 // ─── CostsDb ────────────────────────────────────────────────────────────────
 
 /// In-memory costs database with query methods.
@@ -350,6 +416,26 @@ fn make_test_record(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn glm_cost_table() {
+        let table = CostTable::default();
+
+        let glm_5_1 = table.lookup("glm-5.1").expect("glm-5.1 pricing");
+        assert!((glm_5_1.input_per_m - 1.40).abs() < 1e-9);
+        assert!((glm_5_1.output_per_m - 4.40).abs() < 1e-9);
+        assert_eq!(glm_5_1.cache_read_per_m, Some(0.26));
+
+        let glm_5 = table.lookup("glm-5").expect("glm-5 pricing");
+        assert!((glm_5.input_per_m - 1.00).abs() < 1e-9);
+        assert!((glm_5.output_per_m - 3.20).abs() < 1e-9);
+        assert_eq!(glm_5.cache_read_per_m, None);
+
+        let glm_4_7 = table.lookup("glm-4.7").expect("glm-4.7 pricing");
+        assert!((glm_4_7.input_per_m - 0.60).abs() < 1e-9);
+        assert!((glm_4_7.output_per_m - 2.20).abs() < 1e-9);
+        assert_eq!(glm_4_7.cache_read_per_m, None);
+    }
 
     #[test]
     fn costs_db_insert_and_len() {

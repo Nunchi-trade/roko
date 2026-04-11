@@ -42,6 +42,7 @@ pub mod build;
 pub mod conductor;
 pub mod config;
 pub mod context;
+pub mod dashboard_snapshot;
 pub mod decay;
 pub mod error;
 pub mod hash;
@@ -61,6 +62,7 @@ pub mod secrets;
 pub mod shutdown;
 pub mod signal;
 pub mod signal_kinds;
+pub mod state_hub;
 pub mod task;
 pub mod tool;
 pub mod traits;
@@ -112,5 +114,7 @@ pub use tool::{
     ToolTraceEvent, TraceBuilder, TraceId, TraceSink, TraceStep, VecToolRegistry, compute_reward,
     galileo_tsq, profile_for_model,
 };
+pub use dashboard_snapshot::{DashboardEvent, DashboardSnapshot};
+pub use state_hub::{SharedStateHub, StateHub, StateHubSender, shared_state_hub};
 pub use traits::{Composer, Gate, Policy, Router, Scorer, Substrate};
 pub use verdict::{Outcome, Selection, TestCount, Verdict};
