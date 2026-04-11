@@ -754,6 +754,103 @@ impl DashboardData {
             .map(DashboardAffectState::valence_indicator)
             .unwrap_or("😐")
     }
+
+    /// Convert disk-loaded data into a `DashboardSnapshot` for the new view layer.
+    ///
+    /// This bridges the old file-polling data model to the new event-driven
+    /// snapshot so views render correctly even without a live StateHub.
+    #[must_use]
+    pub fn to_core_snapshot(&self) -> roko_core::dashboard_snapshot::DashboardSnapshot {
+        use roko_core::dashboard_snapshot::*;
+
+        let mut snapshot = DashboardSnapshot::default();
+
+        // Plans.
+        for plan in &self.plans {
+            let done = if plan.completed {
+                plan.task_count
+            } else {
+                0
+            };
+            snapshot.plans.insert(
+                plan.id.clone(),
+                PlanState {
+                    plan_id: plan.id.clone(),
+                    phase: if plan.completed {
+                        "completed".into()
+                    } else {
+                        "running".into()
+                    },
+                    tasks_total: plan.task_count,
+                    tasks_done: done,
+                    tasks_failed: 0,
+                    active: !plan.completed,
+                },
+            );
+            if plan.completed {
+                snapshot.stats.plans_completed += 1;
+            } else {
+                snapshot.stats.plans_active += 1;
+            }
+        }
+
+        // Active tasks.
+        for task in &self.active_tasks {
+            let key = format!("{}/{}", task.plan_id, task.task_id);
+            snapshot.tasks.insert(
+                key,
+                TaskState {
+                    task_id: task.task_id.clone(),
+                    plan_id: task.plan_id.clone(),
+                    phase: task.status.clone(),
+                    outcome: None,
+                },
+            );
+            snapshot.stats.tasks_active += 1;
+        }
+
+        // Agents.
+        for agent in &self.agents {
+            snapshot.agents.insert(
+                agent.id.clone(),
+                AgentState {
+                    agent_id: agent.id.clone(),
+                    role: agent.label.clone(),
+                    active: agent.status == "running",
+                    output_bytes: 0,
+                },
+            );
+            if agent.status == "running" {
+                snapshot.stats.agents_active += 1;
+            }
+        }
+
+        // Gate results.
+        for gate in &self.gate_results {
+            if gate.passed {
+                snapshot.stats.gates_passed += 1;
+            } else {
+                snapshot.stats.gates_failed += 1;
+            }
+            snapshot.gates.push(GateVerdict {
+                plan_id: gate.plan_id.clone(),
+                task_id: String::new(),
+                gate: gate.gate_name.clone(),
+                passed: gate.passed,
+                ts_millis: 0,
+            });
+        }
+
+        // Gate failure rows → errors.
+        for row in &self.gate_results_page.failure_rows {
+            snapshot.errors.push(ErrorEntry {
+                message: format!("{}: {} ({})", row.gate_name, row.error_excerpt, row.task_id),
+                ts_millis: row.created_at_ms as u64,
+            });
+        }
+
+        snapshot
+    }
 }
 
 /// Summary of a task that is currently active.

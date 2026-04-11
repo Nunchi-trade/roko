@@ -140,6 +140,10 @@ pub async fn run_async(
     loop {
         tokio::select! {
             _ = render_interval.tick() => {
+                // In standalone mode (no StateHub), periodically refresh from disk.
+                if snapshot_rx.is_none() {
+                    app.refresh_snapshot_if_needed();
+                }
                 terminal
                     .draw(|f| render_page(f, app))
                     .context("async TUI render")?;
@@ -202,12 +206,13 @@ impl App {
             let _ = scaffold.set_active_page(page);
         }
         let data = DashboardData::load_best_effort(&workdir);
+        let live_snapshot = Some(data.to_core_snapshot());
         Self {
             workdir,
             current_page: scaffold.active_page(),
             active_tab: Tab::Dashboard,
             data,
-            live_snapshot: None,
+            live_snapshot,
             scaffold,
             running: true,
             last_refresh: Instant::now(),
@@ -570,6 +575,7 @@ impl App {
 
     fn refresh_snapshot(&mut self) {
         self.data = DashboardData::load_best_effort(&self.workdir);
+        self.live_snapshot = Some(self.data.to_core_snapshot());
         self.scaffold = DashboardScaffold::new_in(&self.workdir);
         self.last_refresh = Instant::now();
         self.clamp_signal_selection();
