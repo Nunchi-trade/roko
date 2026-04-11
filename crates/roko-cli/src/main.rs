@@ -484,6 +484,17 @@ enum ResearchCmd {
     Analyze,
     /// List all research artifacts.
     List,
+    /// Direct web search using Perplexity's pure search API. Returns raw results without synthesis.
+    Search {
+        /// The search query.
+        query: Vec<String>,
+        /// Restrict results to these domains (comma-separated, e.g. "docs.rs,github.com").
+        #[arg(long, value_delimiter = ',')]
+        domains: Vec<String>,
+        /// Recency filter: day, week, month, year.
+        #[arg(long)]
+        recency: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -2269,6 +2280,79 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                     println!("  {name:<45} {size:>6} bytes");
                 }
             }
+            Ok(0)
+        }
+        ResearchCmd::Search {
+            query,
+            domains,
+            recency,
+        } => {
+            use roko_agent::perplexity::search::{PerplexitySearchClient, SearchQuery};
+
+            let query_str = query.join(" ");
+            if query_str.trim().is_empty() {
+                anyhow::bail!("provide a search query");
+            }
+
+            let api_key = std::env::var("PERPLEXITY_API_KEY")
+                .context("PERPLEXITY_API_KEY not set")?;
+
+            let date_range = recency.as_deref().map(|r| {
+                let now = chrono::Local::now();
+                let after = match r {
+                    "day" => now - chrono::Duration::days(1),
+                    "week" => now - chrono::Duration::weeks(1),
+                    "month" => now - chrono::Duration::days(30),
+                    "year" => now - chrono::Duration::days(365),
+                    _ => now - chrono::Duration::days(30),
+                };
+                (
+                    after.format("%Y-%m-%d").to_string(),
+                    now.format("%Y-%m-%d").to_string(),
+                )
+            });
+
+            let search_query = SearchQuery {
+                query: query_str.clone(),
+                domain_filter: if domains.is_empty() {
+                    None
+                } else {
+                    Some(domains)
+                },
+                date_range,
+                ..Default::default()
+            };
+
+            println!("🔍 Searching: {query_str}");
+
+            let client = PerplexitySearchClient::new(api_key);
+            let responses = client
+                .search_batch(&[search_query])
+                .await
+                .map_err(|e| anyhow::anyhow!("search error: {e}"))?;
+
+            let results: Vec<_> = responses.into_iter().flat_map(|r| r.results).collect();
+
+            if results.is_empty() {
+                println!("No results found.");
+            } else {
+                println!("\n═══ Results ═══\n");
+                for (i, r) in results.iter().enumerate() {
+                    println!("{}. {}", i + 1, r.title);
+                    println!("   {}", r.url);
+                    if let Some(date) = &r.date {
+                        println!("   Published: {date}");
+                    }
+                    let snippet = if r.content.len() > 300 {
+                        format!("{}…", &r.content[..300])
+                    } else {
+                        r.content.clone()
+                    };
+                    println!("   {snippet}");
+                    println!();
+                }
+            }
+
             Ok(0)
         }
     }
