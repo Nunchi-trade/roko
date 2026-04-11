@@ -28,7 +28,11 @@
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // ─── Serializable health snapshot types ────────────────────────────────────
@@ -171,7 +175,17 @@ struct ProviderHealthRegistrySnapshot {
 /// The registry stores [`ProviderHealth`] values keyed by provider id and
 /// provides a disk-backed persistence layer for the runtime circuit breaker.
 pub struct ProviderHealthRegistry {
-    providers: Mutex<HashMap<String, ProviderHealth>>,
+    providers: Arc<Mutex<HashMap<String, ProviderHealth>>>,
+    save_tx: Option<Sender<PersistCommand>>,
+    save_worker: Option<JoinHandle<()>>,
+}
+
+const HEALTH_SAVE_DEBOUNCE: Duration = Duration::from_millis(100);
+
+#[derive(Debug, Clone, Copy)]
+enum PersistCommand {
+    Dirty,
+    FlushAndStop,
 }
 
 impl ProviderHealthRegistry {
@@ -179,7 +193,9 @@ impl ProviderHealthRegistry {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            providers: Mutex::new(HashMap::new()),
+            providers: Arc::new(Mutex::new(HashMap::new())),
+            save_tx: None,
+            save_worker: None,
         }
     }
 
@@ -190,6 +206,8 @@ impl ProviderHealthRegistry {
             .entry(provider_id.to_owned())
             .or_insert_with(|| new_provider_health(provider_id));
         health.record_success();
+        drop(providers);
+        self.schedule_persist();
     }
 
     /// Record a failed request for `provider_id`.
@@ -199,6 +217,8 @@ impl ProviderHealthRegistry {
             .entry(provider_id.to_owned())
             .or_insert_with(|| new_provider_health(provider_id));
         health.record_failure(error, unix_ms_now());
+        drop(providers);
+        self.schedule_persist();
     }
 
     /// Return whether `provider_id` is currently available for routing.
@@ -206,10 +226,21 @@ impl ProviderHealthRegistry {
     /// Unknown providers are treated as available.
     pub fn is_available(&self, provider_id: &str) -> bool {
         let mut providers = self.providers.lock();
-        match providers.get_mut(provider_id) {
-            Some(health) => health.is_available(unix_ms_now()),
+        let mut should_persist = false;
+        let available = match providers.get_mut(provider_id) {
+            Some(health) => {
+                let previous_state = health.state;
+                let available = health.is_available(unix_ms_now());
+                should_persist = previous_state != health.state;
+                available
+            }
             None => true,
+        };
+        drop(providers);
+        if should_persist {
+            self.schedule_persist();
         }
+        available
     }
 
     /// Filter `candidates` to only providers that are currently available.
@@ -226,15 +257,7 @@ impl ProviderHealthRegistry {
         let snapshot = ProviderHealthRegistrySnapshot {
             providers: self.providers.lock().clone(),
         };
-        let json = serde_json::to_string_pretty(&snapshot)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, json)?;
-        std::fs::rename(&tmp, path)?;
-        Ok(())
+        save_snapshot(path, &snapshot)
     }
 
     /// Load the registry from `path`, or return a new empty registry.
@@ -244,10 +267,24 @@ impl ProviderHealthRegistry {
             .and_then(|s| serde_json::from_str::<ProviderHealthRegistrySnapshot>(&s).ok());
 
         match snapshot {
-            Some(snapshot) => Self {
-                providers: Mutex::new(snapshot.providers),
-            },
-            None => Self::new(),
+            Some(snapshot) => Self::with_persistence(path.to_path_buf(), snapshot.providers),
+            None => Self::with_persistence(path.to_path_buf(), HashMap::new()),
+        }
+    }
+
+    fn with_persistence(path: PathBuf, providers: HashMap<String, ProviderHealth>) -> Self {
+        let providers = Arc::new(Mutex::new(providers));
+        let (save_tx, save_worker) = spawn_save_worker(path, Arc::clone(&providers));
+        Self {
+            providers,
+            save_tx: Some(save_tx),
+            save_worker: Some(save_worker),
+        }
+    }
+
+    fn schedule_persist(&self) {
+        if let Some(tx) = &self.save_tx {
+            let _ = tx.send(PersistCommand::Dirty);
         }
     }
 }
@@ -256,6 +293,93 @@ impl Default for ProviderHealthRegistry {
     fn default() -> Self {
         Self::new()
     }
+}
+
+impl Drop for ProviderHealthRegistry {
+    fn drop(&mut self) {
+        if let Some(tx) = self.save_tx.take() {
+            let _ = tx.send(PersistCommand::FlushAndStop);
+        }
+        if let Some(handle) = self.save_worker.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn spawn_save_worker(
+    path: PathBuf,
+    providers: Arc<Mutex<HashMap<String, ProviderHealth>>>,
+) -> (Sender<PersistCommand>, JoinHandle<()>) {
+    let (tx, rx) = mpsc::channel();
+    let handle = thread::spawn(move || loop {
+        match rx.recv() {
+            Ok(PersistCommand::Dirty) => loop {
+                match rx.recv_timeout(HEALTH_SAVE_DEBOUNCE) {
+                    Ok(PersistCommand::Dirty) => continue,
+                    Ok(PersistCommand::FlushAndStop) => {
+                        let snapshot = ProviderHealthRegistrySnapshot {
+                            providers: providers.lock().clone(),
+                        };
+                        let _ = save_snapshot(&path, &snapshot);
+                        return;
+                    }
+                    Err(RecvTimeoutError::Timeout) => {
+                        let snapshot = ProviderHealthRegistrySnapshot {
+                            providers: providers.lock().clone(),
+                        };
+                        let _ = save_snapshot(&path, &snapshot);
+                        break;
+                    }
+                    Err(RecvTimeoutError::Disconnected) => {
+                        let snapshot = ProviderHealthRegistrySnapshot {
+                            providers: providers.lock().clone(),
+                        };
+                        let _ = save_snapshot(&path, &snapshot);
+                        return;
+                    }
+                }
+            },
+            Ok(PersistCommand::FlushAndStop) => {
+                let snapshot = ProviderHealthRegistrySnapshot {
+                    providers: providers.lock().clone(),
+                };
+                let _ = save_snapshot(&path, &snapshot);
+                return;
+            }
+            Err(_) => return,
+        }
+    });
+    (tx, handle)
+}
+
+fn save_snapshot(
+    path: &Path,
+    snapshot: &ProviderHealthRegistrySnapshot,
+) -> Result<(), std::io::Error> {
+    let json = serde_json::to_string_pretty(snapshot)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp_path = unique_tmp_path(path);
+    std::fs::write(&tmp_path, json)?;
+    std::fs::rename(&tmp_path, path)?;
+    Ok(())
+}
+
+fn unique_tmp_path(path: &Path) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("provider-health.json");
+    parent.join(format!(".{stem}.tmp-{stamp}-{seq}"))
 }
 
 fn new_provider_health(provider_id: &str) -> ProviderHealth {
@@ -835,5 +959,37 @@ mod tests {
         let mut providers = loaded.providers.lock().keys().cloned().collect::<Vec<_>>();
         providers.sort();
         assert_eq!(providers, vec!["alpha".to_owned(), "beta".to_owned()]);
+    }
+
+    /// Persisted registry state survives a restart without a manual save.
+    #[test]
+    fn provider_health_health_persistence_round_trip() {
+        let tmp = TempDir::new().expect("create tempdir");
+        let path = tmp.path().join(".roko/learn/provider-health.json");
+
+        {
+            let registry = ProviderHealthRegistry::load_or_new(&path);
+            registry.record_success("alpha");
+            registry.record_failure("beta", ErrorClass::Timeout);
+            registry.record_failure("beta", ErrorClass::Timeout);
+            registry.record_failure("beta", ErrorClass::Timeout);
+
+            std::thread::sleep(Duration::from_millis(250));
+            assert!(path.exists(), "debounced autosave should create the file");
+
+            let loaded = ProviderHealthRegistry::load_or_new(&path);
+            assert!(loaded.is_available("alpha"));
+            assert!(!loaded.is_available("beta"));
+
+            let beta = loaded
+                .providers
+                .lock()
+                .get("beta")
+                .cloned()
+                .expect("beta state");
+            assert_eq!(beta.provider_id, "beta");
+            assert_eq!(beta.total_failures, 3);
+            assert_eq!(beta.state, CircuitState::Open);
+        }
     }
 }
