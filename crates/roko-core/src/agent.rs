@@ -41,6 +41,8 @@ pub enum ProviderKind {
     OpenAiCompat,
     /// Cursor Agent Client Protocol.
     CursorAcp,
+    /// Perplexity Sonar HTTP API (OpenAI-compatible base, Sonar extensions).
+    PerplexityApi,
 }
 
 impl ProviderKind {
@@ -52,6 +54,7 @@ impl ProviderKind {
             Self::ClaudeCli => "claude_cli",
             Self::OpenAiCompat => "openai_compat",
             Self::CursorAcp => "cursor_acp",
+            Self::PerplexityApi => "perplexity_api",
         }
     }
 }
@@ -82,6 +85,8 @@ pub enum AgentBackend {
     Ollama,
     /// Raw `OpenAI` HTTP API (no CLI).
     OpenAi,
+    /// Perplexity Sonar HTTP API.
+    Perplexity,
 }
 
 impl AgentBackend {
@@ -94,6 +99,7 @@ impl AgentBackend {
             Self::Cursor => "cx",
             Self::Ollama => "ol",
             Self::OpenAi => "oa",
+            Self::Perplexity => "px",
         }
     }
 
@@ -104,6 +110,7 @@ impl AgentBackend {
     /// - `composer-*`, `cursor-*`, `sonnet-*`, `opus-*`, `haiku-*`,
     ///   `gemini-*`, `auto`, `*-high`, `*-xhigh-fast` → Cursor
     /// - `ollama/*` or `llama*` → Ollama
+    /// - `sonar*` or `perplexity/*` → Perplexity
     /// - everything else → Codex (default GPT routing)
     #[must_use]
     pub fn from_model(slug: &str) -> Self {
@@ -112,6 +119,8 @@ impl AgentBackend {
             Self::Claude
         } else if slug.starts_with("ollama/") || slug.starts_with("llama") {
             Self::Ollama
+        } else if slug.starts_with("sonar") || slug.starts_with("perplexity/") {
+            Self::Perplexity
         } else if is_cursor_slug(slug) {
             Self::Cursor
         } else {
@@ -127,6 +136,7 @@ impl From<AgentBackend> for ProviderKind {
             AgentBackend::Codex | AgentBackend::OpenAi => ProviderKind::OpenAiCompat,
             AgentBackend::Cursor => ProviderKind::CursorAcp,
             AgentBackend::Ollama => ProviderKind::OpenAiCompat,
+            AgentBackend::Perplexity => ProviderKind::PerplexityApi,
         }
     }
 }
@@ -850,6 +860,10 @@ mod tests {
             ProviderKind::from(AgentBackend::Ollama),
             ProviderKind::OpenAiCompat
         );
+        assert_eq!(
+            ProviderKind::from(AgentBackend::Perplexity),
+            ProviderKind::PerplexityApi
+        );
     }
 
     #[test]
@@ -859,6 +873,7 @@ mod tests {
             (ProviderKind::ClaudeCli, "claude_cli"),
             (ProviderKind::OpenAiCompat, "openai_compat"),
             (ProviderKind::CursorAcp, "cursor_acp"),
+            (ProviderKind::PerplexityApi, "perplexity_api"),
         ];
 
         for (kind, label) in kinds {
@@ -963,6 +978,7 @@ mod tests {
             AgentBackend::Cursor,
             AgentBackend::Ollama,
             AgentBackend::OpenAi,
+            AgentBackend::Perplexity,
         ] {
             assert_eq!(b.short().len(), 2);
         }

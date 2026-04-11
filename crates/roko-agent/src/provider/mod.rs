@@ -72,6 +72,8 @@ pub fn adapter_for_kind(kind: ProviderKind) -> &'static dyn ProviderAdapter {
         ProviderKind::ClaudeCli => &CLAUDE_CLI_ADAPTER,
         ProviderKind::AnthropicApi => &ANTHROPIC_API_ADAPTER,
         ProviderKind::CursorAcp => &CURSOR_ACP_ADAPTER,
+        // TODO(2Q): replace with dedicated PerplexityAdapter once implemented.
+        ProviderKind::PerplexityApi => &OPENAI_COMPAT_ADAPTER,
     }
 }
 
