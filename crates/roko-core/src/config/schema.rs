@@ -2595,6 +2595,18 @@ port = 3000
     }
 
     #[test]
+    fn kimi_config_parse() {
+        let example = include_str!("../../../../examples/roko-kimi.toml");
+        let cfg = RokoConfig::from_toml(example).expect("roko-kimi example should parse");
+        assert_eq!(cfg.schema_version, CURRENT_SCHEMA_VERSION);
+
+        let model = cfg.models.get("kimi-k2-5").expect("kimi model profile");
+        assert_eq!(model.provider, "moonshot");
+        assert_eq!(model.slug, "kimi-k2.5");
+        assert_eq!(model.max_tools, Some(128));
+    }
+
+    #[test]
     fn role_override_absent_fields_are_none() {
         let toml = r#"
 [agent.roles.implementer]
