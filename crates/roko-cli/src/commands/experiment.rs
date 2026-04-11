@@ -39,6 +39,11 @@ pub enum ModelExperimentCmd {
         #[arg(long = "min-trials", default_value_t = 20)]
         min_trials: u64,
     },
+    /// Show a model experiment's results.
+    Show {
+        /// Experiment identifier.
+        id: String,
+    },
     /// List all model experiments.
     List,
 }
@@ -58,6 +63,7 @@ fn dispatch_model_experiment(cli: &Cli, cmd: ModelExperimentCmd) -> Result<i32> 
             variants,
             min_trials,
         } => cmd_model_create(cli, id, role, variants, min_trials),
+        ModelExperimentCmd::Show { id } => cmd_model_show(cli, id),
         ModelExperimentCmd::List => cmd_model_list(cli),
     }
 }
@@ -201,6 +207,85 @@ fn cmd_model_list(cli: &Cli) -> Result<i32> {
     Ok(EXIT_SUCCESS)
 }
 
+fn cmd_model_show(cli: &Cli, id: String) -> Result<i32> {
+    let wd = resolve_workdir(cli);
+    let path = model_experiments_path(&wd);
+    let store = ModelExperimentStore::load_or_new(&path);
+    let experiment = store.get(&id).ok_or_else(|| {
+        anyhow::anyhow!("model experiment '{id}' not found in {}", path.display())
+    })?;
+
+    if cli.json {
+        let total_trials: u64 = experiment.stats.values().map(|stats| stats.trials).sum();
+        let json = serde_json::json!({
+            "path": path,
+            "experiment": {
+                "id": experiment.experiment_id.clone(),
+                "description": experiment.description.clone(),
+                "role": experiment.role.clone(),
+                "task_category": experiment.task_category.clone(),
+                "status": format!("{:?}", experiment.status),
+                "winner_id": experiment.winner_id.clone(),
+                "min_trials_per_variant": experiment.min_trials_per_variant,
+                "min_effect_size": experiment.min_effect_size,
+                "created_at": experiment.created_at.clone(),
+                "total_trials": total_trials,
+                "variants": experiment
+                    .variants
+                    .iter()
+                    .map(|variant| {
+                        let stats = experiment.stats.get(&variant.id).cloned().unwrap_or_default();
+                        let ucb_score = if stats.trials == 0 || total_trials == 0 {
+                            serde_json::Value::Null
+                        } else {
+                            serde_json::json!(model_variant_ucb_score(&stats, total_trials))
+                        };
+
+                        serde_json::json!({
+                            "id": variant.id.clone(),
+                            "model_key": variant.model_key.clone(),
+                            "slug": variant.slug.clone(),
+                            "provider": variant.provider.clone(),
+                            "stats": {
+                                "trials": stats.trials,
+                                "successes": stats.successes,
+                                "total_cost_usd": stats.total_cost_usd,
+                                "total_tokens": stats.total_tokens,
+                                "total_duration_ms": stats.total_duration_ms,
+                                "pass_rate": stats.pass_rate,
+                                "avg_cost_usd": stats.avg_cost_usd,
+                                "cost_per_success": stats.cost_per_success,
+                                "avg_duration_ms": stats.avg_duration_ms,
+                                "ucb_score": ucb_score,
+                            },
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            }
+        });
+        println!("{}", serde_json::to_string_pretty(&json)?);
+        return Ok(EXIT_SUCCESS);
+    }
+
+    if !cli.quiet {
+        println!(
+            "Experiment: {} ({:?})",
+            experiment.experiment_id, experiment.status
+        );
+        println!(
+            "Role: {} | Category: {}",
+            experiment.role.as_deref().unwrap_or("any"),
+            experiment.task_category.as_deref().unwrap_or("any")
+        );
+        println!();
+        println!("{}", render_model_experiment_table(experiment));
+        println!();
+        println!("{}", render_model_experiment_status(experiment));
+    }
+
+    Ok(EXIT_SUCCESS)
+}
+
 fn parse_variant_spec(spec: &str) -> Result<ModelVariant> {
     let parts: Vec<&str> = spec.split(':').collect();
     if parts.len() != 3 {
@@ -227,4 +312,151 @@ fn model_experiments_path(workdir: &Path) -> PathBuf {
         .join(".roko")
         .join("learn")
         .join("model-experiments.json")
+}
+
+fn render_model_experiment_table(experiment: &ModelExperiment) -> String {
+    let total_trials: u64 = experiment.stats.values().map(|stats| stats.trials).sum();
+    let headers = [
+        "Variant".to_string(),
+        "Trials".to_string(),
+        "Pass %".to_string(),
+        "Avg Cost".to_string(),
+        "$/Success".to_string(),
+        "UCB Score".to_string(),
+    ];
+    let mut rows = Vec::with_capacity(experiment.variants.len());
+
+    for variant in &experiment.variants {
+        let stats = experiment
+            .stats
+            .get(&variant.id)
+            .cloned()
+            .unwrap_or_default();
+        let ucb_score = if stats.trials == 0 || total_trials == 0 {
+            "∞".to_string()
+        } else {
+            format!("{:.2}", model_variant_ucb_score(&stats, total_trials))
+        };
+        rows.push([
+            variant.id.clone(),
+            stats.trials.to_string(),
+            format!("{:.1}%", stats.pass_rate * 100.0),
+            format!("${:.2}", stats.avg_cost_usd),
+            format!("${:.2}", stats.cost_per_success),
+            ucb_score,
+        ]);
+    }
+
+    let mut widths = headers
+        .iter()
+        .map(|header| header.len())
+        .collect::<Vec<_>>();
+    for row in &rows {
+        for (idx, cell) in row.iter().enumerate() {
+            widths[idx] = widths[idx].max(cell.len());
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str(&render_table_border('┌', '┬', '┐', &widths));
+    out.push('\n');
+    out.push_str(&render_table_row(&headers, &widths, false));
+    out.push('\n');
+    out.push_str(&render_table_border('├', '┼', '┤', &widths));
+    out.push('\n');
+    for (idx, row) in rows.iter().enumerate() {
+        out.push_str(&render_table_row(row, &widths, true));
+        if idx + 1 != rows.len() {
+            out.push('\n');
+        }
+    }
+    if rows.is_empty() {
+        out.push_str(&render_table_row(&[], &widths, true));
+    }
+    out.push('\n');
+    out.push_str(&render_table_border('└', '┴', '┘', &widths));
+    out
+}
+
+fn render_table_border(left: char, middle: char, right: char, widths: &[usize]) -> String {
+    let mut out = String::new();
+    out.push(left);
+    for (idx, width) in widths.iter().enumerate() {
+        out.push_str(&"─".repeat(*width + 2));
+        out.push(if idx + 1 == widths.len() {
+            right
+        } else {
+            middle
+        });
+    }
+    out
+}
+
+fn render_table_row(cells: &[String], widths: &[usize], numeric: bool) -> String {
+    let mut out = String::new();
+    out.push('│');
+    for (idx, width) in widths.iter().enumerate() {
+        let cell = cells.get(idx).map(String::as_str).unwrap_or("");
+        out.push(' ');
+        if numeric && idx != 0 {
+            out.push_str(&format!("{cell:^width$}", width = *width));
+        } else if idx == 0 && cells.len() == widths.len() {
+            out.push_str(&format!("{cell:<width$}", width = *width));
+        } else {
+            out.push_str(&format!("{cell:^width$}", width = *width));
+        }
+        out.push(' ');
+        out.push('│');
+    }
+    out
+}
+
+fn render_model_experiment_status(experiment: &ModelExperiment) -> String {
+    match experiment.status {
+        ExperimentStatus::Concluded => match experiment.winner_id.as_deref() {
+            Some(winner) => format!("Status: Concluded (winner: {winner})"),
+            None => "Status: Concluded".to_string(),
+        },
+        ExperimentStatus::Running => {
+            let mut needs = Vec::new();
+            let mut first_remaining = true;
+            for variant in &experiment.variants {
+                let trials = experiment
+                    .stats
+                    .get(&variant.id)
+                    .map(|stats| stats.trials)
+                    .unwrap_or(0);
+                let remaining = experiment.min_trials_per_variant.saturating_sub(trials);
+                if remaining == 0 {
+                    continue;
+                }
+                if first_remaining {
+                    needs.push(format!("{remaining} more trials for {}", variant.id));
+                    first_remaining = false;
+                } else {
+                    needs.push(format!("{remaining} more for {}", variant.id));
+                }
+            }
+
+            if needs.is_empty() {
+                "Status: Minimum trials met; awaiting effect-size separation".to_string()
+            } else {
+                format!("Status: Need {}", needs.join(", "))
+            }
+        }
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn model_variant_ucb_score(
+    stats: &roko_learn::model_experiment::ModelVariantStats,
+    total_trials: u64,
+) -> f64 {
+    if stats.trials == 0 || total_trials == 0 {
+        return f64::INFINITY;
+    }
+
+    let mean = stats.successes as f64 / stats.trials as f64;
+    let exploration = (2.0 * (total_trials as f64).ln() / stats.trials as f64).sqrt();
+    mean + exploration
 }

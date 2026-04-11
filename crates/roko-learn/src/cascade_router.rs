@@ -457,8 +457,7 @@ impl CascadeRouter {
         ctx: &RoutingContext,
         experiments: &ModelExperimentStore,
     ) -> CascadeModel {
-        if let Some(variant) =
-            experiments.assign_model(ctx.role.label(), ctx.task_category.label())
+        if let Some(variant) = experiments.assign_model(ctx.role.label(), ctx.task_category.label())
         {
             return CascadeModel {
                 primary: ModelSpec::from_slug(&variant.slug),
