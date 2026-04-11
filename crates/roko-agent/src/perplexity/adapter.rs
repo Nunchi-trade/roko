@@ -1,0 +1,440 @@
+//! Perplexity Sonar provider adapter.
+//!
+//! Routes model creation to the appropriate agent type based on model capabilities:
+//! - Embedding models → [`PerplexityEmbedAgent`]
+//! - Async/deep-research models → [`PerplexityDeepResearchAgent`]
+//! - Standard chat models → [`PerplexityChatAgent`]
+
+use crate::agent::{Agent, AgentResult};
+use crate::openai_agent::OpenAiAgent;
+use crate::provider::{AgentCreationError, AgentOptions, ProviderAdapter, ProviderError};
+use async_trait::async_trait;
+use roko_core::agent::ProviderKind;
+use roko_core::config::schema::{ModelProfile, ProviderConfig};
+use roko_core::{Context, Signal};
+use serde_json::Value;
+
+/// Default Perplexity API base URL.
+const DEFAULT_BASE_URL: &str = "https://api.perplexity.ai";
+
+// ─── PerplexityChatAgent ─────────────────────────────────────────────────────
+
+/// Standard Perplexity Sonar chat agent with search-grounded completions.
+///
+/// Uses the OpenAI-compatible `/chat/completions` endpoint at the Perplexity
+/// base URL. Search-specific extensions (citations, annotations, search options)
+/// will be wired in a follow-on task.
+pub struct PerplexityChatAgent {
+    inner: OpenAiAgent,
+    name: String,
+}
+
+impl PerplexityChatAgent {
+    #[must_use]
+    pub fn new(
+        api_key: String,
+        base_url: String,
+        model: ModelProfile,
+        options: &AgentOptions,
+    ) -> Self {
+        let name = if options.name.is_empty() {
+            format!("perplexity:{}", model.slug)
+        } else {
+            options.name.clone()
+        };
+        let timeout = options.timeout_ms.unwrap_or(120_000);
+        let inner = OpenAiAgent::new(api_key, model.slug)
+            .with_base_url(base_url)
+            .with_timeout_ms(timeout);
+        Self { inner, name }
+    }
+}
+
+#[async_trait]
+impl Agent for PerplexityChatAgent {
+    async fn run(&self, input: &Signal, ctx: &Context) -> AgentResult {
+        self.inner.run(input, ctx).await
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn supports_streaming(&self) -> bool {
+        false
+    }
+}
+
+// ─── PerplexityEmbedAgent ────────────────────────────────────────────────────
+
+/// Embedding-only Perplexity agent.
+///
+/// Stub implementation — a proper `/embeddings` endpoint will be wired in a
+/// follow-on task. For now this delegates to the chat completions surface so
+/// the adapter routing compiles and can be tested.
+pub struct PerplexityEmbedAgent {
+    inner: OpenAiAgent,
+    name: String,
+}
+
+impl PerplexityEmbedAgent {
+    #[must_use]
+    pub fn new(api_key: String, base_url: String, model_slug: String) -> Self {
+        let name = format!("perplexity-embed:{model_slug}");
+        let inner = OpenAiAgent::new(api_key, &model_slug).with_base_url(base_url);
+        Self { inner, name }
+    }
+}
+
+#[async_trait]
+impl Agent for PerplexityEmbedAgent {
+    async fn run(&self, input: &Signal, ctx: &Context) -> AgentResult {
+        self.inner.run(input, ctx).await
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn supports_streaming(&self) -> bool {
+        false
+    }
+}
+
+// ─── PerplexityDeepResearchAgent ─────────────────────────────────────────────
+
+/// Async deep-research Perplexity agent.
+///
+/// Stub implementation — the Perplexity Agent/Responses async API will be
+/// wired in a follow-on task. For now this delegates to the synchronous chat
+/// completions surface so the adapter routing compiles and can be tested.
+pub struct PerplexityDeepResearchAgent {
+    inner: OpenAiAgent,
+    name: String,
+}
+
+impl PerplexityDeepResearchAgent {
+    #[must_use]
+    pub fn new(
+        api_key: String,
+        base_url: String,
+        model_slug: String,
+        options: &AgentOptions,
+    ) -> Self {
+        let name = if options.name.is_empty() {
+            format!("perplexity-deep:{model_slug}")
+        } else {
+            options.name.clone()
+        };
+        let timeout = options.timeout_ms.unwrap_or(300_000);
+        let inner = OpenAiAgent::new(api_key, &model_slug)
+            .with_base_url(base_url)
+            .with_timeout_ms(timeout);
+        Self { inner, name }
+    }
+}
+
+#[async_trait]
+impl Agent for PerplexityDeepResearchAgent {
+    async fn run(&self, input: &Signal, ctx: &Context) -> AgentResult {
+        self.inner.run(input, ctx).await
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn supports_streaming(&self) -> bool {
+        false
+    }
+}
+
+// ─── PerplexityAdapter ───────────────────────────────────────────────────────
+
+/// Provider adapter for the Perplexity Sonar API.
+pub struct PerplexityAdapter;
+
+impl ProviderAdapter for PerplexityAdapter {
+    fn kind(&self) -> ProviderKind {
+        ProviderKind::PerplexityApi
+    }
+
+    fn create_agent(
+        &self,
+        provider: &ProviderConfig,
+        model: &ModelProfile,
+        options: &AgentOptions,
+    ) -> Result<Box<dyn Agent>, AgentCreationError> {
+        let api_key = provider.resolve_api_key().ok_or_else(|| {
+            AgentCreationError::MissingApiKey(
+                provider
+                    .api_key_env
+                    .clone()
+                    .unwrap_or_else(|| "PERPLEXITY_API_KEY".into()),
+            )
+        })?;
+
+        let base_url = provider
+            .base_url
+            .clone()
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
+
+        if model.is_embedding_model {
+            return Ok(Box::new(PerplexityEmbedAgent::new(
+                api_key,
+                base_url,
+                model.slug.clone(),
+            )));
+        }
+
+        if model.supports_async {
+            return Ok(Box::new(PerplexityDeepResearchAgent::new(
+                api_key,
+                base_url,
+                model.slug.clone(),
+                options,
+            )));
+        }
+
+        Ok(Box::new(PerplexityChatAgent::new(
+            api_key,
+            base_url,
+            model.clone(),
+            options,
+        )))
+    }
+
+    fn classify_error(&self, status: u16, body: &Value) -> ProviderError {
+        match status {
+            429 => ProviderError::RateLimit {
+                retry_after_ms: body
+                    .pointer("/retry_after")
+                    .and_then(|v| v.as_u64())
+                    .map(|s| s * 1000),
+            },
+            401 | 403 => ProviderError::AuthFailure,
+            404 => ProviderError::ModelNotFound,
+            408 | 504 => ProviderError::Timeout,
+            500..=599 => ProviderError::ServerError(status),
+            _ => ProviderError::Other(format!("HTTP {status}")),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use roko_core::config::schema::ProviderConfig;
+
+    fn base_model() -> ModelProfile {
+        ModelProfile {
+            provider: "perplexity".to_string(),
+            slug: "sonar".to_string(),
+            context_window: 127_072,
+            max_output: Some(8_192),
+            supports_tools: false,
+            supports_thinking: false,
+            supports_vision: false,
+            supports_web_search: true,
+            supports_mcp_tools: false,
+            supports_partial: false,
+            provider_routing: None,
+            tool_format: "openai_json".to_string(),
+            cost_input_per_m: None,
+            cost_output_per_m: None,
+            cost_cache_read_per_m: None,
+            cost_cache_write_per_m: None,
+            max_tools: None,
+            tokenizer_ratio: None,
+            supports_search: true,
+            supports_citations: true,
+            supports_async: false,
+            is_embedding_model: false,
+            search_context_size: Some("medium".to_string()),
+            cost_per_request: None,
+        }
+    }
+
+    fn perplexity_provider() -> ProviderConfig {
+        ProviderConfig {
+            kind: ProviderKind::PerplexityApi,
+            base_url: None,
+            api_key_env: Some("PATH".to_string()), // PATH is always set
+            command: None,
+            args: None,
+            timeout_ms: None,
+            extra_headers: None,
+            max_concurrent: None,
+        }
+    }
+
+    fn named_options(name: &str) -> AgentOptions {
+        AgentOptions {
+            name: name.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn perplexity_adapter_kind() {
+        assert_eq!(PerplexityAdapter.kind(), ProviderKind::PerplexityApi);
+    }
+
+    #[test]
+    fn perplexity_adapter_creates_chat_agent_with_options_name() {
+        let model = base_model();
+        let agent = PerplexityAdapter
+            .create_agent(&perplexity_provider(), &model, &named_options("my-agent"))
+            .expect("create chat agent");
+        assert_eq!(agent.name(), "my-agent");
+    }
+
+    #[test]
+    fn perplexity_adapter_creates_chat_agent_default_name() {
+        let model = base_model();
+        let agent = PerplexityAdapter
+            .create_agent(&perplexity_provider(), &model, &named_options(""))
+            .expect("create chat agent");
+        assert_eq!(agent.name(), "perplexity:sonar");
+    }
+
+    #[test]
+    fn perplexity_adapter_routes_embedding_model_to_embed_agent() {
+        let model = ModelProfile {
+            is_embedding_model: true,
+            slug: "sonar-embeddings".to_string(),
+            ..base_model()
+        };
+        let agent = PerplexityAdapter
+            .create_agent(&perplexity_provider(), &model, &named_options(""))
+            .expect("create embed agent");
+        assert_eq!(agent.name(), "perplexity-embed:sonar-embeddings");
+    }
+
+    #[test]
+    fn perplexity_adapter_routes_async_model_to_deep_research_agent() {
+        let model = ModelProfile {
+            supports_async: true,
+            slug: "sonar-deep-research".to_string(),
+            ..base_model()
+        };
+        let agent = PerplexityAdapter
+            .create_agent(&perplexity_provider(), &model, &named_options(""))
+            .expect("create deep research agent");
+        assert_eq!(agent.name(), "perplexity-deep:sonar-deep-research");
+    }
+
+    #[test]
+    fn perplexity_adapter_embedding_takes_priority_over_async() {
+        // A model that is both embedding AND async → embed agent wins
+        let model = ModelProfile {
+            is_embedding_model: true,
+            supports_async: true,
+            slug: "sonar-embed-async".to_string(),
+            ..base_model()
+        };
+        let agent = PerplexityAdapter
+            .create_agent(&perplexity_provider(), &model, &named_options(""))
+            .expect("create agent");
+        assert_eq!(agent.name(), "perplexity-embed:sonar-embed-async");
+    }
+
+    #[test]
+    fn perplexity_adapter_missing_api_key_returns_error() {
+        let model = base_model();
+        let provider = ProviderConfig {
+            api_key_env: Some("PERPLEXITY_TEST_KEY_NONEXISTENT_ZZZZ".to_string()),
+            ..perplexity_provider()
+        };
+        let result = PerplexityAdapter.create_agent(&provider, &model, &named_options(""));
+        assert!(matches!(result, Err(AgentCreationError::MissingApiKey(_))));
+    }
+
+    #[test]
+    fn perplexity_adapter_missing_api_key_env_returns_error() {
+        let model = base_model();
+        let provider = ProviderConfig {
+            api_key_env: None,
+            ..perplexity_provider()
+        };
+        let result = PerplexityAdapter.create_agent(&provider, &model, &named_options(""));
+        let Err(AgentCreationError::MissingApiKey(env_name)) = result else {
+            panic!("expected MissingApiKey error");
+        };
+        assert_eq!(env_name, "PERPLEXITY_API_KEY");
+    }
+
+    #[test]
+    fn perplexity_adapter_classify_rate_limit_with_retry_after() {
+        let err = PerplexityAdapter
+            .classify_error(429, &serde_json::json!({ "retry_after": 10 }));
+        match err {
+            ProviderError::RateLimit {
+                retry_after_ms: Some(ms),
+            } => assert_eq!(ms, 10_000),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn perplexity_adapter_classify_rate_limit_no_retry_after() {
+        let err =
+            PerplexityAdapter.classify_error(429, &serde_json::Value::Null);
+        assert!(matches!(
+            err,
+            ProviderError::RateLimit {
+                retry_after_ms: None
+            }
+        ));
+    }
+
+    #[test]
+    fn perplexity_adapter_classify_auth() {
+        assert!(matches!(
+            PerplexityAdapter.classify_error(401, &serde_json::Value::Null),
+            ProviderError::AuthFailure
+        ));
+        assert!(matches!(
+            PerplexityAdapter.classify_error(403, &serde_json::Value::Null),
+            ProviderError::AuthFailure
+        ));
+    }
+
+    #[test]
+    fn perplexity_adapter_classify_not_found() {
+        assert!(matches!(
+            PerplexityAdapter.classify_error(404, &serde_json::Value::Null),
+            ProviderError::ModelNotFound
+        ));
+    }
+
+    #[test]
+    fn perplexity_adapter_classify_timeout() {
+        assert!(matches!(
+            PerplexityAdapter.classify_error(408, &serde_json::Value::Null),
+            ProviderError::Timeout
+        ));
+        assert!(matches!(
+            PerplexityAdapter.classify_error(504, &serde_json::Value::Null),
+            ProviderError::Timeout
+        ));
+    }
+
+    #[test]
+    fn perplexity_adapter_classify_server_error() {
+        assert!(matches!(
+            PerplexityAdapter.classify_error(500, &serde_json::Value::Null),
+            ProviderError::ServerError(500)
+        ));
+        assert!(matches!(
+            PerplexityAdapter.classify_error(503, &serde_json::Value::Null),
+            ProviderError::ServerError(503)
+        ));
+    }
+
+    #[test]
+    fn perplexity_adapter_classify_other() {
+        let err = PerplexityAdapter.classify_error(422, &serde_json::Value::Null);
+        assert!(matches!(err, ProviderError::Other(msg) if msg == "HTTP 422"));
+    }
+}

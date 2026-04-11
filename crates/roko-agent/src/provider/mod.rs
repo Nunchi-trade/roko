@@ -59,10 +59,13 @@ pub use cursor_acp::CursorAcpAdapter;
 pub use openai_compat::OpenAiCompatAdapter;
 pub use openrouter_meta::fetch_model_metadata;
 
+use crate::perplexity::PerplexityAdapter;
+
 static ANTHROPIC_API_ADAPTER: AnthropicApiAdapter = AnthropicApiAdapter;
 static CLAUDE_CLI_ADAPTER: ClaudeCliAdapter = ClaudeCliAdapter;
 static CURSOR_ACP_ADAPTER: CursorAcpAdapter = CursorAcpAdapter;
 static OPENAI_COMPAT_ADAPTER: OpenAiCompatAdapter = OpenAiCompatAdapter;
+static PERPLEXITY_ADAPTER: PerplexityAdapter = PerplexityAdapter;
 
 /// Return the static adapter for a provider kind.
 #[must_use]
@@ -72,8 +75,7 @@ pub fn adapter_for_kind(kind: ProviderKind) -> &'static dyn ProviderAdapter {
         ProviderKind::ClaudeCli => &CLAUDE_CLI_ADAPTER,
         ProviderKind::AnthropicApi => &ANTHROPIC_API_ADAPTER,
         ProviderKind::CursorAcp => &CURSOR_ACP_ADAPTER,
-        // TODO(2Q): replace with dedicated PerplexityAdapter once implemented.
-        ProviderKind::PerplexityApi => &OPENAI_COMPAT_ADAPTER,
+        ProviderKind::PerplexityApi => &PERPLEXITY_ADAPTER,
     }
 }
 
