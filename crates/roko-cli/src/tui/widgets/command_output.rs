@@ -3,11 +3,11 @@
 //!
 //! Ported from Mori's command_output.rs.
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use ratatui::Frame;
 
 use super::super::mori_theme::MoriTheme;
 use super::super::tui_state::TuiState;
@@ -24,8 +24,15 @@ pub fn render_command_output(frame: &mut Frame<'_>, area: Rect, state: &TuiState
         .iter()
         .rev()
         .map(|g| {
-            let badge = if g.passed { "\u{2713} PASS" } else { "\u{2717} FAIL" };
-            format!("[{}] {} \u{00b7} {}\n{}\n", badge, g.gate, g.plan_id, g.output)
+            let badge = if g.passed {
+                "\u{2713} PASS"
+            } else {
+                "\u{2717} FAIL"
+            };
+            format!(
+                "[{}] {} \u{00b7} {}\n{}\n",
+                badge, g.gate, g.plan_id, g.output
+            )
         })
         .collect();
 
@@ -54,18 +61,12 @@ pub fn render_command_output(frame: &mut Frame<'_>, area: Rect, state: &TuiState
     let title: Line = if failed {
         Line::from(vec![
             Span::raw(title_text),
-            Span::styled(
-                " \u{2717} FAIL",
-                Style::default().fg(MoriTheme::EMBER),
-            ),
+            Span::styled(" \u{2717} FAIL", Style::default().fg(MoriTheme::EMBER)),
         ])
     } else if passed {
         Line::from(vec![
             Span::raw(title_text),
-            Span::styled(
-                " \u{2713} PASS",
-                Style::default().fg(MoriTheme::SAGE),
-            ),
+            Span::styled(" \u{2713} PASS", Style::default().fg(MoriTheme::SAGE)),
         ])
     } else {
         Line::from(title_text)
@@ -95,16 +96,15 @@ pub fn render_command_output(frame: &mut Frame<'_>, area: Rect, state: &TuiState
             .iter()
             .map(|&line| {
                 let lower = line.to_lowercase();
-                let style = if lower.contains("pass")
-                    || lower.contains(" ok ")
-                    || lower.contains("passed")
-                {
-                    Style::default().fg(MoriTheme::SAGE)
-                } else if lower.contains("fail") || lower.contains("error") {
-                    Style::default().fg(MoriTheme::EMBER)
-                } else {
-                    Style::default().fg(MoriTheme::FG_DIM)
-                };
+                let style =
+                    if lower.contains("pass") || lower.contains(" ok ") || lower.contains("passed")
+                    {
+                        Style::default().fg(MoriTheme::SAGE)
+                    } else if lower.contains("fail") || lower.contains("error") {
+                        Style::default().fg(MoriTheme::EMBER)
+                    } else {
+                        Style::default().fg(MoriTheme::FG_DIM)
+                    };
                 Line::from(vec![Span::raw(" "), Span::styled(line, style)])
             })
             .collect()

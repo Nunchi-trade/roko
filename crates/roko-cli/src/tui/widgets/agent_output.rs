@@ -2,11 +2,11 @@
 //!
 //! Ported from Mori's agent_output.rs (core render logic only).
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use ratatui::Frame;
 
 use super::super::mori_theme::MoriTheme;
 use super::super::tui_state::TuiState;

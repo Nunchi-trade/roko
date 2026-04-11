@@ -20,7 +20,9 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::widgets::{
+    Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+};
 
 use super::super::mori_theme::MoriTheme;
 use super::super::tui_state::{TaskRowStatus, TuiState};
@@ -30,20 +32,27 @@ use super::super::tui_state::{TaskRowStatus, TuiState};
 // ---------------------------------------------------------------------------
 
 /// Render the task progress widget.
-pub fn render_task_progress(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    state: &TuiState,
-    focused: bool,
-) {
+pub fn render_task_progress(frame: &mut Frame<'_>, area: Rect, state: &TuiState, focused: bool) {
     let atm = &state.atmosphere;
     let tasks = &state.current_task_checklist;
 
     // Count by status
-    let done = tasks.iter().filter(|t| t.status == TaskRowStatus::Done).count();
-    let active = tasks.iter().filter(|t| t.status == TaskRowStatus::Active).count();
-    let blocked = tasks.iter().filter(|t| t.status == TaskRowStatus::Blocked).count();
-    let failed = tasks.iter().filter(|t| t.status == TaskRowStatus::Failed).count();
+    let done = tasks
+        .iter()
+        .filter(|t| t.status == TaskRowStatus::Done)
+        .count();
+    let active = tasks
+        .iter()
+        .filter(|t| t.status == TaskRowStatus::Active)
+        .count();
+    let blocked = tasks
+        .iter()
+        .filter(|t| t.status == TaskRowStatus::Blocked)
+        .count();
+    let failed = tasks
+        .iter()
+        .filter(|t| t.status == TaskRowStatus::Failed)
+        .count();
     let total = tasks.len();
     let pending = total.saturating_sub(done + active + blocked + failed);
 
@@ -123,10 +132,7 @@ pub fn render_task_progress(
         let is_selected = global_idx == scroll && focused;
 
         let (icon, icon_style) = match task.status {
-            TaskRowStatus::Done => (
-                "\u{2713}",
-                Style::default().fg(MoriTheme::STATUS_OK),
-            ),
+            TaskRowStatus::Done => ("\u{2713}", Style::default().fg(MoriTheme::STATUS_OK)),
             TaskRowStatus::Active => {
                 let pulse_color = pulse_rose(atm.heartbeat());
                 (
@@ -136,18 +142,9 @@ pub fn render_task_progress(
                         .add_modifier(Modifier::BOLD),
                 )
             }
-            TaskRowStatus::Blocked => (
-                "\u{2717}",
-                Style::default().fg(MoriTheme::STATUS_ERROR),
-            ),
-            TaskRowStatus::Failed => (
-                "\u{2717}",
-                Style::default().fg(MoriTheme::EMBER),
-            ),
-            TaskRowStatus::Pending => (
-                "\u{00b7}",
-                Style::default().fg(MoriTheme::TEXT_DIM),
-            ),
+            TaskRowStatus::Blocked => ("\u{2717}", Style::default().fg(MoriTheme::STATUS_ERROR)),
+            TaskRowStatus::Failed => ("\u{2717}", Style::default().fg(MoriTheme::EMBER)),
+            TaskRowStatus::Pending => ("\u{00b7}", Style::default().fg(MoriTheme::TEXT_DIM)),
         };
 
         let (text_style, bg) = if is_selected {
@@ -182,7 +179,11 @@ pub fn render_task_progress(
         let prefix_len = 4 + task.id.len() + time_tag_len;
         let max_title = (inner.width as usize).saturating_sub(prefix_len + 2);
         let title_display = if task.title.chars().count() > max_title && max_title > 3 {
-            let truncated: String = task.title.chars().take(max_title.saturating_sub(3)).collect();
+            let truncated: String = task
+                .title
+                .chars()
+                .take(max_title.saturating_sub(3))
+                .collect();
             format!("{truncated}...")
         } else {
             task.title.clone()
@@ -327,7 +328,10 @@ fn build_summary_line(
     let summary_str = details.join(" \u{00b7} ");
     let max_len = width.saturating_sub(status_text.len() + 4);
     let summary = if summary_str.chars().count() > max_len && max_len > 3 {
-        let truncated: String = summary_str.chars().take(max_len.saturating_sub(3)).collect();
+        let truncated: String = summary_str
+            .chars()
+            .take(max_len.saturating_sub(3))
+            .collect();
         format!("{truncated}...")
     } else {
         summary_str
@@ -381,8 +385,8 @@ fn pulse_rose(heartbeat: f64) -> Color {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::super::tui_state::{TaskRow, TaskRowStatus, TuiState};
+    use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 

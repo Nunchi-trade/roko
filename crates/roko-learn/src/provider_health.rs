@@ -832,12 +832,7 @@ mod tests {
         assert!(loaded.is_available("alpha"));
         assert!(!loaded.is_available("beta"));
 
-        let mut providers = loaded
-            .providers
-            .lock()
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
+        let mut providers = loaded.providers.lock().keys().cloned().collect::<Vec<_>>();
         providers.sort();
         assert_eq!(providers, vec!["alpha".to_owned(), "beta".to_owned()]);
     }

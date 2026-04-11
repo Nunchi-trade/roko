@@ -50,14 +50,14 @@ use std::path::PathBuf;
 pub mod anthropic_api;
 pub mod claude_cli;
 pub mod cursor_acp;
-pub mod openrouter_meta;
 pub mod openai_compat;
+pub mod openrouter_meta;
 
 pub use anthropic_api::AnthropicApiAdapter;
 pub use claude_cli::ClaudeCliAdapter;
 pub use cursor_acp::CursorAcpAdapter;
-pub use openrouter_meta::fetch_model_metadata;
 pub use openai_compat::OpenAiCompatAdapter;
+pub use openrouter_meta::fetch_model_metadata;
 
 static ANTHROPIC_API_ADAPTER: AnthropicApiAdapter = AnthropicApiAdapter;
 static CLAUDE_CLI_ADAPTER: ClaudeCliAdapter = ClaudeCliAdapter;

@@ -62,9 +62,7 @@ impl MoriTheme {
     }
 
     pub fn active_style() -> Style {
-        Style::default()
-            .fg(Self::ROSE)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(Self::ROSE).add_modifier(Modifier::BOLD)
     }
 
     pub fn title_style() -> Style {
@@ -106,9 +104,7 @@ impl MoriTheme {
     }
 
     pub fn focused_title_style() -> Style {
-        Style::default()
-            .fg(Self::BONE)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(Self::BONE).add_modifier(Modifier::BOLD)
     }
 
     pub fn unfocused_border_style() -> Style {

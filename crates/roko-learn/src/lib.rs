@@ -14,11 +14,13 @@
 //! - [`pattern_discovery`] — mining episodes for recurring shapes
 //! - [`provider_health`] — per-provider circuit breaker for LLM routing
 //! - [`latency`] — rolling latency EMAs and percentiles for routing feedback
+//! - [`anomaly`] — runaway loop, cost spike, and quality degradation detection
 //! - [`pareto`] — cost-quality Pareto frontier computation for models
 
 #![deny(missing_docs)]
 #![allow(clippy::module_name_repetitions)]
 
+pub mod anomaly;
 pub mod bandits;
 pub mod baseline;
 pub mod cascade_router;
@@ -31,8 +33,8 @@ pub mod episode_logger;
 pub mod hdc_clustering;
 /// Rolling latency EMAs and percentiles for routing feedback.
 pub mod latency;
-pub mod pareto;
 pub mod model_router;
+pub mod pareto;
 pub mod pattern_discovery;
 pub mod playbook;
 pub mod playbook_rules;

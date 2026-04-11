@@ -1,13 +1,13 @@
 //! Agent pool widget — combines Mori's agent_pool + parallel_pool into
 //! a single compact roster with per-agent context gauges.
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
-use ratatui::Frame;
 
-use super::super::mori_theme::{gradient_context, brighten, Gradient, MoriTheme};
+use super::super::mori_theme::{Gradient, MoriTheme, brighten, gradient_context};
 use super::super::tui_state::TuiState;
 
 // ---------------------------------------------------------------------------
@@ -153,7 +153,11 @@ pub fn render_agent_pool(frame: &mut Frame<'_>, area: Rect, state: &TuiState, fo
         // Role label + plan:task
         let role_w = 11usize;
         let plan_task_w = content_width.saturating_div(3).clamp(16, 30);
-        let bar_w = if content_width > 88 { 16usize } else { gauge_width };
+        let bar_w = if content_width > 88 {
+            16usize
+        } else {
+            gauge_width
+        };
 
         let role_label = truncate_middle(&agent.role, role_w);
         let short_model = shorten_model(&agent.model);

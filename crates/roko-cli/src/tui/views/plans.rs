@@ -104,12 +104,7 @@ pub fn render_plans_view(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
 
 // ── Per-plan line builder ─────────────────────────────────────────────────
 
-fn render_plan_lines(
-    lines: &mut Vec<Line>,
-    plan: &PlanEntry,
-    idx: usize,
-    state: &TuiState,
-) {
+fn render_plan_lines(lines: &mut Vec<Line>, plan: &PlanEntry, idx: usize, state: &TuiState) {
     let is_selected = idx == state.selected_plan;
     let bg = if is_selected {
         MoriTheme::BG_HIGHLIGHT

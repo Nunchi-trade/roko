@@ -64,12 +64,7 @@ fn plan_icon(plan: &PlanEntry) -> (&'static str, Style) {
 
 /// Render the collapsible plan tree: Wave -> Plan hierarchy.
 /// Falls back to flat list when no waves are configured.
-pub fn render_plan_tree(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    state: &TuiState,
-    focused: bool,
-) {
+pub fn render_plan_tree(frame: &mut Frame<'_>, area: Rect, state: &TuiState, focused: bool) {
     let total = state.plans.len();
     let completed = state
         .plans
@@ -180,12 +175,7 @@ pub fn render_plan_tree(
             } else {
                 0.0
             };
-            render_data_rain(
-                frame,
-                empty_area,
-                state.atmosphere.elapsed(),
-                plan_progress,
-            );
+            render_data_rain(frame, empty_area, state.atmosphere.elapsed(), plan_progress);
         }
     }
 
@@ -197,13 +187,7 @@ pub fn render_plan_tree(
             area.width.saturating_sub(2),
             area.height.saturating_sub(2),
         );
-        render_scrollbar(
-            frame,
-            inner,
-            total_lines,
-            visible_height,
-            scroll_offset,
-        );
+        render_scrollbar(frame, inner, total_lines, visible_height, scroll_offset);
     }
 }
 
@@ -211,20 +195,13 @@ pub fn render_plan_tree(
 // Wave tree rendering
 // ---------------------------------------------------------------------------
 
-fn render_wave_tree(
-    lines: &mut Vec<Line<'static>>,
-    state: &TuiState,
-    focused: bool,
-    area: Rect,
-) {
+fn render_wave_tree(lines: &mut Vec<Line<'static>>, state: &TuiState, focused: bool, area: Rect) {
     for wave in &state.execution_waves {
         let all_done = wave.done == wave.total && wave.total > 0;
-        let any_active = wave.plans.iter().any(|plan_id| {
-            state
-                .plans
-                .iter()
-                .any(|p| p.id == *plan_id && p.active)
-        });
+        let any_active = wave
+            .plans
+            .iter()
+            .any(|plan_id| state.plans.iter().any(|p| p.id == *plan_id && p.active));
 
         // Wave header icon and style
         let (wave_icon, wave_style) = if all_done {
@@ -246,7 +223,11 @@ fn render_wave_tree(
             )
         };
 
-        let collapse_icon = if wave.expanded { "\u{25be}" } else { "\u{25b8}" }; // ▾ / ▸
+        let collapse_icon = if wave.expanded {
+            "\u{25be}"
+        } else {
+            "\u{25b8}"
+        }; // ▾ / ▸
 
         let mut wave_spans = vec![
             Span::styled(
@@ -279,12 +260,16 @@ fn render_wave_tree(
         ));
 
         // Count failed plans in this wave
-        let wave_failed = wave.plans.iter().filter(|plan_id| {
-            state
-                .plans
-                .iter()
-                .any(|p| p.id == **plan_id && !p.active && p.phase == "failed")
-        }).count();
+        let wave_failed = wave
+            .plans
+            .iter()
+            .filter(|plan_id| {
+                state
+                    .plans
+                    .iter()
+                    .any(|p| p.id == **plan_id && !p.active && p.phase == "failed")
+            })
+            .count();
         if wave_failed > 0 {
             wave_spans.push(Span::styled(
                 format!(" \u{2717}{wave_failed}"),
@@ -322,12 +307,7 @@ fn render_wave_tree(
 // Flat plan list (no waves)
 // ---------------------------------------------------------------------------
 
-fn render_flat_plans(
-    lines: &mut Vec<Line<'static>>,
-    state: &TuiState,
-    focused: bool,
-    area: Rect,
-) {
+fn render_flat_plans(lines: &mut Vec<Line<'static>>, state: &TuiState, focused: bool, area: Rect) {
     for plan in &state.plans {
         if matches_filter(plan, &state.filter) {
             render_plan_line(lines, plan, state, focused, area, false);
@@ -348,10 +328,7 @@ fn render_plan_line(
     indented: bool,
 ) {
     let plan_idx = state.plans.iter().position(|p| p.id == plan.id);
-    let is_selected = focused
-        && plan_idx
-            .map(|i| i == state.selected_plan)
-            .unwrap_or(false);
+    let is_selected = focused && plan_idx.map(|i| i == state.selected_plan).unwrap_or(false);
 
     let (icon, icon_style) = plan_icon(plan);
 
@@ -529,7 +506,12 @@ fn render_plan_line(
         Span::styled(padded, style)
     };
 
-    let sep = |bg_c: Color| Span::styled("\u{2502}", Style::default().fg(MoriTheme::TEXT_PHANTOM).bg(bg_c));
+    let sep = |bg_c: Color| {
+        Span::styled(
+            "\u{2502}",
+            Style::default().fg(MoriTheme::TEXT_PHANTOM).bg(bg_c),
+        )
+    };
 
     let mut spans = vec![Span::styled(prefix_plain, icon_s.bg(bg)), title_span];
     spans.extend([
@@ -570,10 +552,7 @@ fn render_plan_line(
             detail_parts.push((format!("phase {}", plan.phase), MoriTheme::ROSE_DIM));
         }
         if plan.tasks_failed > 0 {
-            detail_parts.push((
-                format!("{} failed", plan.tasks_failed),
-                MoriTheme::EMBER,
-            ));
+            detail_parts.push((format!("{} failed", plan.tasks_failed), MoriTheme::EMBER));
         }
         if plan.elapsed_secs > 0.0 {
             detail_parts.push((
@@ -645,11 +624,7 @@ fn render_column_header(area: Rect) -> Line<'static> {
 // Gradient bar spans (ocean gradient)
 // ---------------------------------------------------------------------------
 
-fn render_gradient_bar(
-    width: usize,
-    fill_pct: f64,
-    heartbeat: Option<f64>,
-) -> Vec<Span<'static>> {
+fn render_gradient_bar(width: usize, fill_pct: f64, heartbeat: Option<f64>) -> Vec<Span<'static>> {
     let grad = gradient_ocean();
     let filled = ((fill_pct.clamp(0.0, 1.0)) * width as f64).round() as usize;
     let empty = width.saturating_sub(filled);
@@ -683,12 +658,7 @@ fn render_gradient_bar(
 // Data-rain fill for empty space
 // ---------------------------------------------------------------------------
 
-fn render_data_rain(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    elapsed: f64,
-    progress: f64,
-) {
+fn render_data_rain(frame: &mut Frame<'_>, area: Rect, elapsed: f64, progress: f64) {
     // Subtle animated rain effect — density increases with progress
     let base_density = 0.02 + progress * 0.08;
     let buf = frame.buffer_mut();
@@ -699,16 +669,13 @@ fn render_data_rain(
             let seed = (x as f64 * 13.37 + y as f64 * 7.31 + elapsed * 2.0).sin();
             if seed.abs() < base_density {
                 let ch = match ((seed * 1000.0).abs() as usize) % 4 {
-                    0 => '\u{00b7}',  // ·
-                    1 => '\u{2502}',  // │
-                    2 => '\u{2500}',  // ─
-                    _ => '\u{00b0}',  // °
+                    0 => '\u{00b7}', // ·
+                    1 => '\u{2502}', // │
+                    2 => '\u{2500}', // ─
+                    _ => '\u{00b0}', // °
                 };
                 let brightness = 0.3 + (seed.abs() * 0.7);
-                let color = super::super::mori_theme::brighten(
-                    MoriTheme::TEXT_PHANTOM,
-                    brightness,
-                );
+                let color = super::super::mori_theme::brighten(MoriTheme::TEXT_PHANTOM, brightness);
                 if let Some(cell) = buf.cell_mut((x, y)) {
                     cell.set_char(ch);
                     cell.set_fg(color);
@@ -728,7 +695,7 @@ fn render_scrollbar(
     total: usize,
     visible: usize,
     offset: usize,
-    ) {
+) {
     if total <= visible || area.height == 0 {
         return;
     }
@@ -738,9 +705,8 @@ fn render_scrollbar(
         .ceil()
         .max(1.0) as usize;
     let thumb_top = if total > visible {
-        ((offset as f64 / (total - visible) as f64)
-            * (track_height - thumb_height) as f64)
-            .round() as usize
+        ((offset as f64 / (total - visible) as f64) * (track_height - thumb_height) as f64).round()
+            as usize
     } else {
         0
     };

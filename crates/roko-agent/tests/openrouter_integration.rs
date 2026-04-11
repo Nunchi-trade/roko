@@ -147,8 +147,7 @@ async fn openrouter_glm() {
         request
             .headers
             .iter()
-            .any(|(name, value)| name.eq_ignore_ascii_case("X-Title")
-                && value == "roko-agent")
+            .any(|(name, value)| name.eq_ignore_ascii_case("X-Title") && value == "roko-agent")
     );
 }
 

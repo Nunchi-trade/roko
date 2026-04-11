@@ -19,11 +19,7 @@ const HEARTBEAT_FRAMES: [&str; 4] = ["\u{00b7}", "\u{00b0}", ".", "\u{25cf}"];
 // ---------------------------------------------------------------------------
 
 /// Render the bottom status bar.
-pub fn render_status_bar(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    state: &TuiState,
-) {
+pub fn render_status_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
     let bg = Style::default().bg(MoriTheme::BG_SECONDARY);
 
     let (done, total) = state.task_counts();
@@ -97,11 +93,7 @@ pub fn render_status_bar(
     // Health summary: active plans, live agents, flailing, retries, failures
     let active_count = state.plans.iter().filter(|p| p.active).count();
     let live_agents = state.active_agent_count();
-    let flailing_count = state
-        .plans
-        .iter()
-        .filter(|p| p.tasks_failed >= 3)
-        .count();
+    let flailing_count = state.plans.iter().filter(|p| p.tasks_failed >= 3).count();
     let total_failures: usize = state.plans.iter().map(|p| p.tasks_failed).sum();
 
     if active_count > 0 || live_agents > 0 {
@@ -174,8 +166,8 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    use super::super::super::tui_state::TuiState;
     use super::super::super::dashboard::DashboardData;
+    use super::super::super::tui_state::TuiState;
 
     #[test]
     fn status_bar_renders_without_panic() {

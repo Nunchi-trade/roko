@@ -767,11 +767,7 @@ impl DashboardData {
 
         // Plans.
         for plan in &self.plans {
-            let done = if plan.completed {
-                plan.task_count
-            } else {
-                0
-            };
+            let done = if plan.completed { plan.task_count } else { 0 };
             snapshot.plans.insert(
                 plan.id.clone(),
                 PlanState {
@@ -870,11 +866,7 @@ impl DashboardData {
                             task_id: row.task_id.clone(),
                             plan_id: exec.plan_id.clone(),
                             phase: row.phase.clone(),
-                            outcome: if completed {
-                                Some("done".into())
-                            } else {
-                                None
-                            },
+                            outcome: if completed { Some("done".into()) } else { None },
                         },
                     );
                     if completed {

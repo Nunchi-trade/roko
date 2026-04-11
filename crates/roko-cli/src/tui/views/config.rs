@@ -171,7 +171,10 @@ fn right_panel(state: &TuiState) -> Paragraph<'static> {
 
 fn stat(label: &'static str, value: usize) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("{label}: "), Style::default().fg(MoriTheme::TEXT_DIM)),
+        Span::styled(
+            format!("{label}: "),
+            Style::default().fg(MoriTheme::TEXT_DIM),
+        ),
         Span::styled(
             value.to_string(),
             Style::default()

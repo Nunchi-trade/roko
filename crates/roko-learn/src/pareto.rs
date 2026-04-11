@@ -48,7 +48,7 @@ pub fn compute_pareto_frontier(stats: &HashMap<String, ModelObservation>) -> Vec
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_pareto_frontier, ModelObservation};
+    use super::{ModelObservation, compute_pareto_frontier};
     use std::collections::HashMap;
 
     #[test]

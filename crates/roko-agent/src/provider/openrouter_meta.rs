@@ -45,13 +45,13 @@ async fn fetch_model_metadata_from(
         .header("X-Title", X_TITLE)
         .send()
         .await
-        .map_err(|err| {
-            RokoError::Invalid(format!("failed to fetch OpenRouter metadata: {err}"))
-        })?;
+        .map_err(|err| RokoError::Invalid(format!("failed to fetch OpenRouter metadata: {err}")))?;
 
     let status = response.status();
     let body = response.text().await.map_err(|err| {
-        RokoError::Invalid(format!("failed to read OpenRouter metadata response: {err}"))
+        RokoError::Invalid(format!(
+            "failed to read OpenRouter metadata response: {err}"
+        ))
     })?;
     if !status.is_success() {
         return Err(RokoError::Invalid(format!(
@@ -115,7 +115,11 @@ impl OpenRouterModel {
     fn into_profile(self) -> ModelProfile {
         let context_window = self
             .context_length
-            .or_else(|| self.top_provider.as_ref().and_then(|provider| provider.context_length))
+            .or_else(|| {
+                self.top_provider
+                    .as_ref()
+                    .and_then(|provider| provider.context_length)
+            })
             .unwrap_or(128_000);
         let max_output = self
             .top_provider
@@ -336,9 +340,10 @@ mod tests {
         .to_string();
         let (base_url, captured, handle) = spawn_models_server(response);
 
-        let profile = fetch_model_metadata_from(&format!("{base_url}/api/v1"), "test-key", "z-ai/glm-5.1")
-            .await
-            .expect("fetch model metadata");
+        let profile =
+            fetch_model_metadata_from(&format!("{base_url}/api/v1"), "test-key", "z-ai/glm-5.1")
+                .await
+                .expect("fetch model metadata");
 
         assert_eq!(profile.provider, "openrouter");
         assert_eq!(profile.slug, "z-ai/glm-5.1");

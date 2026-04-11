@@ -4,11 +4,11 @@
 //! phase compact + task progress. Right panel (62%): sub-tab bar + routed
 //! content (agents/output/diff/errors/git).
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use ratatui::Frame;
 
 use super::super::mori_theme::MoriTheme;
 use super::super::tui_state::{DetailSubTab, FocusZone, TuiState};
@@ -80,8 +80,7 @@ fn render_left_panel(f: &mut Frame, area: Rect, state: &TuiState) {
             4
         };
         let min_task = desired_min_task.min(available.saturating_sub(1));
-        let min_plan = desired_min_plan
-            .min(available.saturating_sub(min_task).max(1));
+        let min_plan = desired_min_plan.min(available.saturating_sub(min_task).max(1));
 
         if total_content <= available {
             let preferred_task = if task_focused {
@@ -122,7 +121,12 @@ fn render_left_panel(f: &mut Frame, area: Rect, state: &TuiState) {
         .split(area);
 
     widgets::plan_tree::render_plan_tree(f, left[0], state, plan_focused);
-    widgets::phase_compact::render_phase_compact(f, left[1], state, state.focus == FocusZone::PhaseCompact);
+    widgets::phase_compact::render_phase_compact(
+        f,
+        left[1],
+        state,
+        state.focus == FocusZone::PhaseCompact,
+    );
     widgets::task_progress::render_task_progress(f, left[2], state, task_focused);
 }
 
@@ -135,7 +139,7 @@ fn render_right_panel(f: &mut Frame, area: Rect, state: &TuiState) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // sub-tab bar
-            Constraint::Min(0),   // content
+            Constraint::Min(0),    // content
         ])
         .split(area);
 
@@ -255,12 +259,7 @@ fn render_sub_tab_bar(f: &mut Frame, area: Rect, state: &TuiState) {
 }
 
 /// Agents content: agent pool + agent output + bottom strip (token burn | sys metrics).
-fn render_agents_content(
-    f: &mut Frame,
-    area: Rect,
-    state: &TuiState,
-    output_focused: bool,
-) {
+fn render_agents_content(f: &mut Frame, area: Rect, state: &TuiState, output_focused: bool) {
     let active_agent_count = state
         .agents
         .iter()
@@ -314,12 +313,7 @@ fn render_agents_content(
 }
 
 /// Token burn (left 50%) | System metrics (right 50%) side by side.
-fn render_bottom_strip(
-    f: &mut Frame,
-    area: Rect,
-    state: &TuiState,
-    has_burn_data: bool,
-) {
+fn render_bottom_strip(f: &mut Frame, area: Rect, state: &TuiState, has_burn_data: bool) {
     if has_burn_data {
         let cols = Layout::default()
             .direction(Direction::Horizontal)

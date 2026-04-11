@@ -33,12 +33,7 @@ use super::super::tui_state::{PhaseStatus, TuiState};
 /// │ ✧ implementer  42%  2m31s  ETA ~4m      │
 /// └─────────────────────────────────────────┘
 /// ```
-pub fn render_phase_compact(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    state: &TuiState,
-    focused: bool,
-) {
+pub fn render_phase_compact(frame: &mut Frame<'_>, area: Rect, state: &TuiState, focused: bool) {
     let atm = &state.atmosphere;
 
     // Find active phase index
@@ -105,10 +100,7 @@ pub fn render_phase_compact(
                 if w > 0 {
                     let fill_count = w.saturating_sub(1);
                     let fill: String = "\u{2588}".repeat(fill_count);
-                    bar_spans.push(Span::styled(
-                        fill,
-                        Style::default().fg(MoriTheme::WARNING),
-                    ));
+                    bar_spans.push(Span::styled(fill, Style::default().fg(MoriTheme::WARNING)));
                     bar_spans.push(Span::styled(
                         spinner_ch.to_string(),
                         Style::default()
@@ -155,10 +147,7 @@ pub fn render_phase_compact(
                     .fg(MoriTheme::EMBER)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                format!("at {name}"),
-                Style::default().fg(MoriTheme::EMBER),
-            ),
+            Span::styled(format!("at {name}"), Style::default().fg(MoriTheme::EMBER)),
         ])
     } else if let Some(idx) = active_idx {
         build_active_detail(&state.phase_pipeline[idx], atm)
@@ -257,9 +246,9 @@ fn pulse_active(heartbeat: f64) -> Color {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::super::mori_atmosphere::Atmosphere;
     use super::super::super::tui_state::{PhaseStatus, PhaseStep, TuiState};
+    use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 

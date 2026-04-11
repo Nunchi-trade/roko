@@ -10,7 +10,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use super::super::mori_theme::{gradient_fire, MoriTheme};
+use super::super::mori_theme::{MoriTheme, gradient_fire};
 use super::super::tui_state::TuiState;
 
 const HEARTBEAT_FRAMES: [&str; 4] = ["\u{00b7}", "\u{00b0}", "\u{2219}", "\u{25cf}"];
@@ -75,11 +75,7 @@ fn shorten_model(slug: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Render the header bar with all 8 sections.
-pub fn render_header_bar(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    state: &TuiState,
-) {
+pub fn render_header_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
     let bg = Style::default().bg(MoriTheme::BG_SECONDARY);
     let compact = area.width < 120;
 
@@ -137,9 +133,7 @@ pub fn render_header_bar(
         if filled > 0 {
             spans.push(Span::styled(
                 "\u{2588}".repeat(filled),
-                Style::default()
-                    .fg(bar_color)
-                    .bg(MoriTheme::BG_SECONDARY),
+                Style::default().fg(bar_color).bg(MoriTheme::BG_SECONDARY),
             ));
         }
         if empty > 0 {
@@ -296,15 +290,8 @@ pub fn render_header_bar(
         let short = shorten_model(&agent.model);
         let role_color = MoriTheme::role_accent(&agent.role);
         spans.push(Span::styled(
-            format!(
-                "  {} {}({})",
-                state.atmosphere.spinner(),
-                agent.role,
-                short
-            ),
-            Style::default()
-                .fg(role_color)
-                .bg(MoriTheme::BG_SECONDARY),
+            format!("  {} {}({})", state.atmosphere.spinner(), agent.role, short),
+            Style::default().fg(role_color).bg(MoriTheme::BG_SECONDARY),
         ));
     }
 
@@ -380,8 +367,8 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    use super::super::super::tui_state::TuiState;
     use super::super::super::dashboard::DashboardData;
+    use super::super::super::tui_state::TuiState;
 
     #[test]
     fn header_bar_renders_without_panic() {

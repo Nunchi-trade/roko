@@ -636,10 +636,7 @@ mod tests {
             .expect("capture lock")
             .clone()
             .expect("captured request");
-        assert_eq!(
-            request.url,
-            "https://openrouter.ai/api/v1/chat/completions"
-        );
+        assert_eq!(request.url, "https://openrouter.ai/api/v1/chat/completions");
         assert_eq!(request.timeout_ms, 120_000);
         assert!(
             request

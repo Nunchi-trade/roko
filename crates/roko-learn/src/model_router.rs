@@ -136,9 +136,9 @@ impl RoutingContext {
         idx += 1;
 
         // Cache affinity bonus for reusing the same model as the previous task.
-        x[idx] = if candidate_model.is_some_and(|candidate| {
-            self.previous_model.as_deref() == Some(candidate)
-        }) {
+        x[idx] = if candidate_model
+            .is_some_and(|candidate| self.previous_model.as_deref() == Some(candidate))
+        {
             1.0
         } else {
             0.0
@@ -548,7 +548,10 @@ impl LinUCBRouter {
         let mut best_score = f64::NEG_INFINITY;
 
         for arm in &state.arms {
-            if !candidate_slugs.iter().any(|candidate| slugs_match(&arm.slug, candidate)) {
+            if !candidate_slugs
+                .iter()
+                .any(|candidate| slugs_match(&arm.slug, candidate))
+            {
                 continue;
             }
 

@@ -498,9 +498,7 @@ mod tests {
     fn openrouter_cost_table() {
         let table = CostTable::default();
 
-        let glm_5_1 = table
-            .lookup("z-ai/glm-5.1")
-            .expect("z-ai/glm-5.1 pricing");
+        let glm_5_1 = table.lookup("z-ai/glm-5.1").expect("z-ai/glm-5.1 pricing");
         assert!((glm_5_1.input_per_m - 1.26).abs() < 1e-9);
         assert!((glm_5_1.output_per_m - 3.96).abs() < 1e-9);
 

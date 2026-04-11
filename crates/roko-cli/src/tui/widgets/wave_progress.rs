@@ -3,13 +3,13 @@
 //!
 //! Ported from Mori's wave_progress.rs.
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use ratatui::Frame;
 
-use super::super::mori_theme::{gradient_ocean, MoriTheme};
+use super::super::mori_theme::{MoriTheme, gradient_ocean};
 use super::super::tui_state::TuiState;
 
 // ---------------------------------------------------------------------------

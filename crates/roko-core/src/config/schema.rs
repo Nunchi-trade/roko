@@ -457,22 +457,22 @@ impl RokoConfig {
             _ => default_context_window(),
         };
 
-            ModelProfile {
-                provider: provider.to_owned(),
-                slug: slug.to_owned(),
-                context_window,
-                max_output: None,
-                supports_tools: tool_profile.supports_tools,
-                supports_thinking: false,
-                supports_vision: false,
-                supports_web_search: false,
-                supports_mcp_tools: false,
-                supports_partial: false,
-                provider_routing: None,
-                tool_format: tool_profile.preferred.as_str().to_owned(),
-                cost_input_per_m: None,
-                cost_output_per_m: None,
-                cost_cache_read_per_m: None,
+        ModelProfile {
+            provider: provider.to_owned(),
+            slug: slug.to_owned(),
+            context_window,
+            max_output: None,
+            supports_tools: tool_profile.supports_tools,
+            supports_thinking: false,
+            supports_vision: false,
+            supports_web_search: false,
+            supports_mcp_tools: false,
+            supports_partial: false,
+            provider_routing: None,
+            tool_format: tool_profile.preferred.as_str().to_owned(),
+            cost_input_per_m: None,
+            cost_output_per_m: None,
+            cost_cache_read_per_m: None,
             cost_cache_write_per_m: None,
             max_tools: Some(u32::from(tool_profile.max_tools_before_degrade)),
             tokenizer_ratio: None,
@@ -2675,10 +2675,7 @@ port = 3000
             provider.base_url.as_deref(),
             Some("https://openrouter.ai/api/v1")
         );
-        assert_eq!(
-            provider.api_key_env.as_deref(),
-            Some("OPENROUTER_API_KEY")
-        );
+        assert_eq!(provider.api_key_env.as_deref(), Some("OPENROUTER_API_KEY"));
         assert_eq!(
             provider
                 .extra_headers

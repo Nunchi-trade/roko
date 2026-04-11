@@ -3,13 +3,13 @@
 //!
 //! Ported from Mori's token_sparkline.rs.
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
-use ratatui::Frame;
 
-use super::super::mori_theme::{brighten, MoriTheme};
+use super::super::mori_theme::{MoriTheme, brighten};
 use super::super::tui_state::TuiState;
 use super::braille;
 

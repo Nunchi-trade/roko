@@ -94,7 +94,11 @@ fn gate_row<'a>(
     gate: &'a str,
     is_selected: bool,
 ) -> Row<'a> {
-    let (icon, result_str) = if passed { ("✓", "pass") } else { ("✗", "FAIL") };
+    let (icon, result_str) = if passed {
+        ("✓", "pass")
+    } else {
+        ("✗", "FAIL")
+    };
 
     let result_style = if passed {
         Style::default().fg(MoriTheme::SAGE)

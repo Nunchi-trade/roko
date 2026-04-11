@@ -27,8 +27,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::cfactor::{AgentDispatchBias, CFactor};
-use crate::pareto::{compute_pareto_frontier, ModelObservation};
 use crate::model_router::{COLD_START_THRESHOLD, CONTEXT_DIM, LinUCBRouter, RoutingContext};
+use crate::pareto::{ModelObservation, compute_pareto_frontier};
 use crate::provider_health::ProviderHealthRegistry;
 
 // ─── CascadeStage ───────────────────────────────────────────────────────────
@@ -161,7 +161,12 @@ fn default_role_model_table(model_slugs: &[String]) -> HashMap<AgentRole, String
             // Standard and forward-compat
             _ => pick_static_slug(
                 model_slugs,
-                &["kimi-k2.5", "kimi-k2-thinking", "claude-sonnet-4-6", "claude-sonnet-4-5"],
+                &[
+                    "kimi-k2.5",
+                    "kimi-k2-thinking",
+                    "claude-sonnet-4-6",
+                    "claude-sonnet-4-5",
+                ],
             ),
         };
         table.insert(role, slug);
@@ -688,7 +693,10 @@ impl CascadeRouter {
             .cloned()
             .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
 
-        let selected_slug = if candidates.iter().any(|candidate| slugs_match(candidate, &slug)) {
+        let selected_slug = if candidates
+            .iter()
+            .any(|candidate| slugs_match(candidate, &slug))
+        {
             slug
         } else {
             let tier_candidates: &[&str] = match ctx.role.model_tier() {
@@ -855,11 +863,9 @@ impl CascadeRouter {
         if let Some(frontier) = frontier {
             let base_alpha = self.linucb.current_alpha();
             self.linucb
-                .select_features_from_candidates_with_alpha_adjuster(
-                    ctx,
-                    candidates,
-                    |slug| pareto_adjusted_alpha(base_alpha, slug, &frontier),
-                )
+                .select_features_from_candidates_with_alpha_adjuster(ctx, candidates, |slug| {
+                    pareto_adjusted_alpha(base_alpha, slug, &frontier)
+                })
         } else if candidates.len() == self.model_slugs.len() {
             self.linucb.select_model(ctx)
         } else {
@@ -903,7 +909,8 @@ impl CascadeRouter {
                         slug.clone(),
                         ModelObservation {
                             pass_rate: model_stats.pass_rate(),
-                            cost_per_success: pareto_cost_proxy(slug) / model_stats.pass_rate().max(0.01),
+                            cost_per_success: pareto_cost_proxy(slug)
+                                / model_stats.pass_rate().max(0.01),
                             avg_latency_ms: pareto_latency_proxy(slug),
                             observations: model_stats.trials,
                         },
@@ -1008,8 +1015,8 @@ struct PersistedModelStats {
 mod tests {
     use super::*;
     use crate::provider_health::{ErrorClass, ProviderHealthRegistry};
-    use std::collections::HashMap;
     use roko_core::task::{TaskCategory, TaskComplexityBand};
+    use std::collections::HashMap;
 
     fn test_slugs() -> Vec<String> {
         vec![
@@ -1513,9 +1520,13 @@ mod tests {
         let frontier = vec!["claude-sonnet-4-5".to_string()];
         let base_alpha = 0.8;
 
-        assert!((pareto_adjusted_alpha(base_alpha, "claude-sonnet-4-5", &frontier) - base_alpha).abs() < f64::EPSILON);
         assert!(
-            (pareto_adjusted_alpha(base_alpha, "claude-haiku-3-5", &frontier) - base_alpha * 0.1).abs()
+            (pareto_adjusted_alpha(base_alpha, "claude-sonnet-4-5", &frontier) - base_alpha).abs()
+                < f64::EPSILON
+        );
+        assert!(
+            (pareto_adjusted_alpha(base_alpha, "claude-haiku-3-5", &frontier) - base_alpha * 0.1)
+                .abs()
                 < f64::EPSILON
         );
     }

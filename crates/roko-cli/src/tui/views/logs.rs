@@ -38,10 +38,7 @@ pub fn render_logs_view(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
                     Style::default().fg(MoriTheme::TEXT_GHOST),
                 ),
                 Span::styled("  ✗ ", Style::default().fg(MoriTheme::EMBER)),
-                Span::styled(
-                    err.message.clone(),
-                    Style::default().fg(MoriTheme::EMBER),
-                ),
+                Span::styled(err.message.clone(), Style::default().fg(MoriTheme::EMBER)),
             ]));
         }
 
@@ -69,10 +66,7 @@ pub fn render_logs_view(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
                         format_ts(g.ts_millis),
                         Style::default().fg(MoriTheme::TEXT_GHOST),
                     ),
-                    Span::styled(
-                        format!("  [{icon}] "),
-                        Style::default().fg(color),
-                    ),
+                    Span::styled(format!("  [{icon}] "), Style::default().fg(color)),
                     Span::styled(
                         format!("{}/{}: {}", g.plan_id, g.task_id, g.gate),
                         Style::default().fg(MoriTheme::TEXT),
@@ -87,10 +81,7 @@ pub fn render_logs_view(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
                         format_ts(g.ts_millis),
                         Style::default().fg(MoriTheme::TEXT_GHOST),
                     ),
-                    Span::styled(
-                        format!("  [{icon}] "),
-                        Style::default().fg(color),
-                    ),
+                    Span::styled(format!("  [{icon}] "), Style::default().fg(color)),
                     Span::styled(
                         format!("{}/{}: {}", g.plan_id, g.task_id, g.gate),
                         Style::default().fg(MoriTheme::TEXT),

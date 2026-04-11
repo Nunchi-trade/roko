@@ -694,9 +694,7 @@ impl App {
 
     fn adjust_vertical(&mut self, delta: i16) {
         // On Dashboard tab, j/k adjusts selected plan in the plan tree
-        if self.active_tab == Tab::Dashboard
-            && self.tui_state.focus == FocusZone::PlanTree
-        {
+        if self.active_tab == Tab::Dashboard && self.tui_state.focus == FocusZone::PlanTree {
             let len = self.tui_state.plans.len();
             if len == 0 {
                 self.plan_selection = 0;
