@@ -8,7 +8,8 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use crate::agent::ProviderKind;
+use crate::agent::{AgentBackend, ProviderKind};
+use crate::tool::{profile_for_model, ToolFormat};
 use serde::{Deserialize, Serialize};
 
 /// Current schema version. Bump on incompatible changes.
@@ -406,6 +407,77 @@ impl RokoConfig {
         providers
     }
 
+    /// Return the model registry that should be used at runtime.
+    ///
+    /// New-style configs use `[models.*]` directly. Older configs only had
+    /// `[agent.tier_models]` and a default model, so we synthesize the
+    /// minimum model registry needed for backwards compatibility.
+    #[must_use]
+    pub fn effective_models(&self) -> HashMap<String, ModelProfile> {
+        if !self.models.is_empty() {
+            return self.models.clone();
+        }
+
+        let mut models = HashMap::new();
+
+        for slug in self.agent.tier_models.values() {
+            let slug = slug.trim();
+            if slug.is_empty() {
+                continue;
+            }
+
+            models
+                .entry(slug.to_owned())
+                .or_insert_with(|| self.synthesized_model_profile(slug));
+        }
+
+        let default_model = self.agent.default_model.trim();
+        if !default_model.is_empty() {
+            models
+                .entry(default_model.to_owned())
+                .or_insert_with(|| self.synthesized_model_profile(default_model));
+        }
+
+        models
+    }
+
+    fn synthesized_model_profile(&self, slug: &str) -> ModelProfile {
+        let tool_profile = profile_for_model(slug);
+        let backend = AgentBackend::from_model(slug);
+        let provider = match backend {
+            AgentBackend::Claude => ProviderKind::ClaudeCli.label(),
+            AgentBackend::Cursor => ProviderKind::CursorAcp.label(),
+            AgentBackend::Codex | AgentBackend::OpenAi | AgentBackend::Ollama => {
+                ProviderKind::OpenAiCompat.label()
+            }
+        };
+
+        let context_window = match tool_profile.preferred {
+            ToolFormat::AnthropicBlocks => 200_000,
+            _ => default_context_window(),
+        };
+
+        ModelProfile {
+            provider: provider.to_owned(),
+            slug: slug.to_owned(),
+            context_window,
+            max_output: None,
+            supports_tools: tool_profile.supports_tools,
+            supports_thinking: false,
+            supports_vision: false,
+            supports_web_search: false,
+            supports_mcp_tools: false,
+            supports_partial: false,
+            tool_format: tool_profile.preferred.as_str().to_owned(),
+            cost_input_per_m: None,
+            cost_output_per_m: None,
+            cost_cache_read_per_m: None,
+            cost_cache_write_per_m: None,
+            max_tools: Some(u32::from(tool_profile.max_tools_before_degrade)),
+            tokenizer_ratio: None,
+        }
+    }
+
     fn agent_env_value(&self, key: &str) -> Option<&str> {
         self.agent.env.as_ref().and_then(|entries| {
             entries
@@ -747,6 +819,9 @@ pub struct AgentConfig {
     /// Legacy subprocess environment variables.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<Vec<(String, String)>>,
+    /// Legacy per-tier model mapping used before `[models.*]` existed.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub tier_models: HashMap<String, String>,
     /// Global fallback model: if an agent spawn fails, retry with this.
     #[serde(default)]
     pub fallback_model: Option<String>,
@@ -795,6 +870,7 @@ impl Default for AgentConfig {
             args: None,
             timeout_ms: None,
             env: None,
+            tier_models: HashMap::new(),
             fallback_model: None,
             roles: HashMap::new(),
         }
@@ -1698,6 +1774,24 @@ tool_format = "openai_json"
         assert_eq!(model.slug, "glm-5.1");
         assert!(model.supports_thinking);
         assert_eq!(model.tool_format, "openai_json");
+    }
+
+    #[test]
+    fn effective_models_backwards_compat() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../roko.toml");
+        let text = std::fs::read_to_string(path).expect("read roko.toml");
+        let cfg = RokoConfig::from_toml(&text).expect("parse roko.toml");
+        let models = cfg.effective_models();
+
+        let mechanical = models.get("claude-haiku-4-5").expect("mechanical model");
+        assert_eq!(mechanical.provider, "claude_cli");
+        assert_eq!(mechanical.slug, "claude-haiku-4-5");
+        assert!(mechanical.supports_tools);
+        assert_eq!(mechanical.tool_format, "anthropic_blocks");
+
+        let default_model = models.get("claude-sonnet-4-6").expect("default model");
+        assert_eq!(default_model.provider, "claude_cli");
+        assert_eq!(default_model.slug, "claude-sonnet-4-6");
     }
 
     #[test]

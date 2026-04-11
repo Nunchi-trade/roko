@@ -171,6 +171,7 @@ fn convert_agent(m: &MoriConfig) -> AgentConfig {
         args: None,
         timeout_ms: None,
         env: None,
+        tier_models: d.tier_models,
         fallback_model: m.fallback_model.clone().or(d.fallback_model),
         roles,
     }
