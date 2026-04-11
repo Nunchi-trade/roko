@@ -5,7 +5,7 @@
 //! (`decay` and `gc`) rewrite the file atomically through a temporary
 //! sibling.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -14,7 +14,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{KnowledgeEntry, KnowledgeKind, NeuroStore};
 
@@ -22,6 +22,30 @@ use crate::{KnowledgeEntry, KnowledgeKind, NeuroStore};
 pub const DEFAULT_GC_MIN_CONFIDENCE: f64 = 0.05;
 /// Multiplier applied when a knowledge entry has multiple independent sources.
 const CONFIRMATION_BOOST: f64 = 1.5;
+/// Minimum number of shared tags for two entries to be considered similar.
+const MIN_TAG_OVERLAP: usize = 1;
+/// Minimum number of shared content keywords for two entries to be
+/// considered similar (applied when tag overlap meets the threshold).
+const MIN_KEYWORD_OVERLAP: usize = 2;
+
+/// A record emitted when a newly ingested knowledge entry overlaps with
+/// an existing entry, indicating that an insight has been independently
+/// confirmed by a separate episode.
+///
+/// These records are consumed by the C-Factor metrics
+/// (`knowledge_integration_rate` and `convergence_velocity`) in
+/// `roko-learn`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeConfirmationRecord {
+    /// Timestamp of the confirmation event.
+    pub created_at: DateTime<Utc>,
+    /// Combined source episodes from the existing entry and the new entry.
+    pub source_episodes: Vec<String>,
+    /// ID of the existing entry that was confirmed.
+    pub confirmed_entry_id: String,
+    /// ID of the new entry that confirmed the existing one.
+    pub confirming_entry_id: String,
+}
 
 #[cfg(feature = "hdc")]
 const HDC_VECTOR_BYTES: usize = 1280;
@@ -34,9 +58,15 @@ use bardo_primitives::hdc::HdcVector;
 /// The store is cheap to clone: it holds the path and a process-local
 /// write gate so that concurrent maintenance operations never interleave
 /// file rewrites.
+///
+/// When new entries overlap with existing entries (by tag and keyword
+/// similarity), the store emits [`KnowledgeConfirmationRecord`]s to a
+/// sibling JSONL file. These records feed the C-Factor metrics
+/// `knowledge_integration_rate` and `convergence_velocity`.
 #[derive(Debug, Clone)]
 pub struct KnowledgeStore {
     path: PathBuf,
+    confirmations_path: PathBuf,
     write_gate: Arc<Mutex<()>>,
 }
 
@@ -57,10 +87,19 @@ pub struct KnowledgeStats {
 
 impl KnowledgeStore {
     /// Construct a store pointed at an explicit JSONL path.
+    ///
+    /// Confirmation records are written to a sibling file named
+    /// `knowledge-confirmations.jsonl` in the same directory.
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        let confirmations_path = path
+            .parent()
+            .map(|parent| parent.join("knowledge-confirmations.jsonl"))
+            .unwrap_or_else(|| PathBuf::from("knowledge-confirmations.jsonl"));
         Self {
-            path: path.into(),
+            path,
+            confirmations_path,
             write_gate: Arc::new(Mutex::new(())),
         }
     }
@@ -97,6 +136,12 @@ impl KnowledgeStore {
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Path of the confirmation records JSONL file.
+    #[must_use]
+    pub fn confirmations_path(&self) -> &Path {
+        &self.confirmations_path
     }
 
     /// Append a knowledge entry to the JSONL log.
@@ -165,6 +210,10 @@ impl KnowledgeStore {
             return Ok(());
         }
 
+        // Detect confirmations by comparing new entries against existing ones.
+        let existing = self.read_all().unwrap_or_default();
+        let confirmations = detect_confirmations(&existing, &entries);
+
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -178,6 +227,12 @@ impl KnowledgeStore {
         }
         file.flush().context("flush knowledge entry")?;
         file.sync_all().context("sync knowledge entry")?;
+
+        // Append confirmation records to the sibling JSONL file.
+        if !confirmations.is_empty() {
+            self.append_confirmations(&confirmations)?;
+        }
+
         Ok(())
     }
 
@@ -344,6 +399,70 @@ impl KnowledgeStore {
             }
         }
         Ok(entries)
+    }
+
+    /// Read all confirmation records from the confirmations JSONL file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file exists but cannot be read.
+    pub fn read_confirmations(&self) -> Result<Vec<KnowledgeConfirmationRecord>> {
+        let file = match File::open(&self.confirmations_path) {
+            Ok(file) => file,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "open confirmations file at {}",
+                        self.confirmations_path.display()
+                    )
+                });
+            }
+        };
+
+        let reader = BufReader::new(file);
+        let mut records = Vec::new();
+        for line in reader.lines() {
+            let line = line.context("read confirmation line")?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Ok(record) = serde_json::from_str::<KnowledgeConfirmationRecord>(&line) {
+                records.push(record);
+            }
+        }
+        Ok(records)
+    }
+
+    fn append_confirmations(&self, records: &[KnowledgeConfirmationRecord]) -> Result<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
+
+        if let Some(parent) = self.confirmations_path.parent() {
+            fs::create_dir_all(parent).context("create confirmations directory")?;
+        }
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.confirmations_path)
+            .with_context(|| {
+                format!(
+                    "open confirmations file at {}",
+                    self.confirmations_path.display()
+                )
+            })?;
+        for record in records {
+            let mut line =
+                serde_json::to_string(record).context("serialize confirmation record")?;
+            line.push('\n');
+            file.write_all(line.as_bytes())
+                .context("append confirmation record")?;
+        }
+        file.flush().context("flush confirmation records")?;
+        file.sync_all().context("sync confirmation records")?;
+        Ok(())
     }
 
     fn rewrite_all(&self, entries: &[KnowledgeEntry]) -> Result<()> {
@@ -653,6 +772,78 @@ fn hdc_similarity(entry: &KnowledgeEntry, topic: &str) -> f64 {
     let entry_vec = HdcVector::from_bytes(&bytes);
     let topic_vec = HdcVector::from_seed(topic.as_bytes());
     topic_vec.similarity(&entry_vec) as f64
+}
+
+/// Compare two knowledge entries for topic-level similarity using tag
+/// overlap and content keyword matching. This is deliberately lightweight
+/// (no ML, no embedding) to keep `ingest()` fast.
+fn entries_are_similar(existing: &KnowledgeEntry, new_entry: &KnowledgeEntry) -> bool {
+    // Skip AntiKnowledge entries -- they are refutations, not confirmations.
+    if existing.kind == KnowledgeKind::AntiKnowledge
+        || new_entry.kind == KnowledgeKind::AntiKnowledge
+    {
+        return false;
+    }
+
+    // Tag overlap: normalize and intersect.
+    let existing_tags: HashSet<String> = existing.tags.iter().map(|tag| normalize(tag)).collect();
+    let new_tags: HashSet<String> = new_entry.tags.iter().map(|tag| normalize(tag)).collect();
+    let tag_overlap = existing_tags.intersection(&new_tags).count();
+
+    if tag_overlap < MIN_TAG_OVERLAP {
+        return false;
+    }
+
+    // Content keyword overlap: tokenize and intersect.
+    let existing_keywords: HashSet<String> =
+        tokenize(&existing.content).into_iter().collect();
+    let new_keywords: HashSet<String> = tokenize(&new_entry.content).into_iter().collect();
+    let keyword_overlap = existing_keywords.intersection(&new_keywords).count();
+
+    keyword_overlap >= MIN_KEYWORD_OVERLAP
+}
+
+/// Scan new entries against existing entries to find confirmations.
+///
+/// Returns a list of confirmation records for each (existing, new) pair
+/// where the entries are similar enough to indicate independent
+/// confirmation of the same insight.
+fn detect_confirmations(
+    existing: &[KnowledgeEntry],
+    new_entries: &[KnowledgeEntry],
+) -> Vec<KnowledgeConfirmationRecord> {
+    let now = Utc::now();
+    let mut confirmations = Vec::new();
+
+    for new_entry in new_entries {
+        for existing_entry in existing {
+            if existing_entry.id == new_entry.id {
+                continue;
+            }
+            if !entries_are_similar(existing_entry, new_entry) {
+                continue;
+            }
+
+            // Merge source episodes from both entries.
+            let mut source_episodes: Vec<String> = existing_entry
+                .source_episodes
+                .iter()
+                .chain(new_entry.source_episodes.iter())
+                .cloned()
+                .collect();
+            source_episodes.sort();
+            source_episodes.dedup();
+
+            confirmations.push(KnowledgeConfirmationRecord {
+                created_at: now,
+                source_episodes,
+                confirmed_entry_id: existing_entry.id.clone(),
+                confirming_entry_id: new_entry.id.clone(),
+            });
+        }
+    }
+
+    confirmations
 }
 
 #[cfg(test)]
@@ -1075,5 +1266,244 @@ mod tests {
         let hits = index.search("semantic retrieval over durable knowledge", 1);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].entry.id, "k1");
+    }
+
+    // ── Confirmation detection tests ─────────────────────────────────
+
+    #[test]
+    fn entries_are_similar_detects_tag_and_keyword_overlap() {
+        let now = Utc::now();
+        let existing = entry(
+            KnowledgeKind::Fact,
+            "k1",
+            "Rust async actors are useful for concurrent pipelines",
+            &["rust", "async", "concurrency"],
+            1.0,
+            &["ep-a"],
+            now,
+        );
+        let similar = entry(
+            KnowledgeKind::Fact,
+            "k2",
+            "Rust async runtime handles concurrent execution well",
+            &["rust", "async"],
+            0.9,
+            &["ep-b"],
+            now,
+        );
+        let unrelated = entry(
+            KnowledgeKind::Fact,
+            "k3",
+            "PostgreSQL requires VACUUM for dead tuple cleanup",
+            &["postgres", "maintenance"],
+            0.8,
+            &["ep-c"],
+            now,
+        );
+
+        assert!(entries_are_similar(&existing, &similar));
+        assert!(!entries_are_similar(&existing, &unrelated));
+    }
+
+    #[test]
+    fn entries_are_similar_requires_minimum_keyword_overlap() {
+        let now = Utc::now();
+        let existing = entry(
+            KnowledgeKind::Fact,
+            "k1",
+            "Rust async actors are useful",
+            &["rust"],
+            1.0,
+            &["ep-a"],
+            now,
+        );
+        // Shares the tag "rust" but only one keyword overlap ("rust").
+        let one_keyword = entry(
+            KnowledgeKind::Fact,
+            "k2",
+            "Rust borrow checker prevents data races",
+            &["rust"],
+            0.9,
+            &["ep-b"],
+            now,
+        );
+
+        // Meets MIN_TAG_OVERLAP but not MIN_KEYWORD_OVERLAP.
+        assert!(!entries_are_similar(&existing, &one_keyword));
+    }
+
+    #[test]
+    fn entries_are_similar_skips_antiknowledge() {
+        let now = Utc::now();
+        let existing = entry(
+            KnowledgeKind::Fact,
+            "k1",
+            "Rust async actors are useful for concurrent pipelines",
+            &["rust", "async"],
+            1.0,
+            &["ep-a"],
+            now,
+        );
+        let anti = KnowledgeEntry {
+            id: "anti-1".to_owned(),
+            kind: KnowledgeKind::AntiKnowledge,
+            source: None,
+            content: "Rust async actors are not suitable for all concurrent pipelines".to_owned(),
+            confidence: 0.9,
+            confidence_weight: -0.9,
+            refuted_insight_id: Some("k1".to_owned()),
+            refutation_evidence: Some("test".to_owned()),
+            source_episodes: vec!["ep-b".to_owned()],
+            tags: vec!["rust".to_owned(), "async".to_owned()],
+            created_at: now,
+            half_life_days: KnowledgeKind::AntiKnowledge.default_half_life_days(),
+            hdc_vector: None,
+        };
+
+        assert!(!entries_are_similar(&existing, &anti));
+    }
+
+    #[test]
+    fn detect_confirmations_finds_similar_entries() {
+        let now = Utc::now();
+        let existing = vec![entry(
+            KnowledgeKind::Fact,
+            "k1",
+            "Rust async actors are useful for concurrent pipelines",
+            &["rust", "async"],
+            1.0,
+            &["ep-a"],
+            now,
+        )];
+        let new_entries = vec![entry(
+            KnowledgeKind::Fact,
+            "k2",
+            "Rust async runtime handles concurrent execution well",
+            &["rust", "async"],
+            0.9,
+            &["ep-b"],
+            now,
+        )];
+
+        let confirmations = detect_confirmations(&existing, &new_entries);
+        assert_eq!(confirmations.len(), 1);
+        assert_eq!(confirmations[0].confirmed_entry_id, "k1");
+        assert_eq!(confirmations[0].confirming_entry_id, "k2");
+        assert!(confirmations[0].source_episodes.contains(&"ep-a".to_owned()));
+        assert!(confirmations[0].source_episodes.contains(&"ep-b".to_owned()));
+    }
+
+    #[test]
+    fn detect_confirmations_skips_unrelated_entries() {
+        let now = Utc::now();
+        let existing = vec![entry(
+            KnowledgeKind::Fact,
+            "k1",
+            "Rust async actors are useful for concurrent pipelines",
+            &["rust", "async"],
+            1.0,
+            &["ep-a"],
+            now,
+        )];
+        let new_entries = vec![entry(
+            KnowledgeKind::Fact,
+            "k3",
+            "PostgreSQL requires VACUUM for dead tuple cleanup",
+            &["postgres", "maintenance"],
+            0.8,
+            &["ep-c"],
+            now,
+        )];
+
+        let confirmations = detect_confirmations(&existing, &new_entries);
+        assert!(confirmations.is_empty());
+    }
+
+    #[test]
+    fn ingest_writes_confirmation_records_for_similar_entries() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let now = Utc::now();
+
+        // Add first entry.
+        store
+            .add(entry(
+                KnowledgeKind::Fact,
+                "k1",
+                "Rust async actors are useful for concurrent pipelines",
+                &["rust", "async"],
+                1.0,
+                &["ep-a"],
+                now,
+            ))
+            .expect("add first");
+
+        // No confirmations after first entry.
+        let records = store.read_confirmations().expect("read confirmations");
+        assert!(records.is_empty());
+
+        // Add a similar entry.
+        store
+            .add(entry(
+                KnowledgeKind::Fact,
+                "k2",
+                "Rust async runtime handles concurrent execution well",
+                &["rust", "async"],
+                0.9,
+                &["ep-b"],
+                now,
+            ))
+            .expect("add similar");
+
+        // Now there should be a confirmation record.
+        let records = store.read_confirmations().expect("read confirmations");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].confirmed_entry_id, "k1");
+        assert_eq!(records[0].confirming_entry_id, "k2");
+        assert!(records[0].source_episodes.contains(&"ep-a".to_owned()));
+        assert!(records[0].source_episodes.contains(&"ep-b".to_owned()));
+    }
+
+    #[test]
+    fn ingest_does_not_write_confirmations_for_unrelated_entries() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let now = Utc::now();
+
+        store
+            .add(entry(
+                KnowledgeKind::Fact,
+                "k1",
+                "Rust async actors are useful for concurrent pipelines",
+                &["rust", "async"],
+                1.0,
+                &["ep-a"],
+                now,
+            ))
+            .expect("add first");
+
+        store
+            .add(entry(
+                KnowledgeKind::Fact,
+                "k3",
+                "PostgreSQL requires VACUUM for dead tuple cleanup",
+                &["postgres", "maintenance"],
+                0.8,
+                &["ep-c"],
+                now,
+            ))
+            .expect("add unrelated");
+
+        let records = store.read_confirmations().expect("read confirmations");
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn confirmations_path_is_sibling_of_knowledge_path() {
+        let store = KnowledgeStore::new("/some/path/neuro/knowledge.jsonl");
+        assert_eq!(
+            store.confirmations_path(),
+            Path::new("/some/path/neuro/knowledge-confirmations.jsonl")
+        );
     }
 }

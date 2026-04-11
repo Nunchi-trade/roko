@@ -195,11 +195,16 @@ fn matches_query(signal: &Signal, q: &Query, ctx: &Context) -> bool {
 #[async_trait]
 impl Substrate for FileSubstrate {
     async fn put(&self, signal: Signal) -> Result<ContentHash> {
-        let id = signal.id;
         // Dedupe: skip write if already present.
-        if self.index.read().contains_key(&id) {
-            return Ok(id);
+        if self.index.read().contains_key(&signal.id) {
+            return Ok(signal.id);
         }
+        // Attach HDC fingerprint when the feature is enabled and the signal
+        // does not already carry one. The fingerprint is stored as a
+        // base64-encoded tag so it survives JSON serialization without
+        // inflating the line with raw bytes.
+        let signal = attach_hdc_fingerprint(signal);
+        let id = signal.id;
         // Serialize and append.
         let line = serde_json::to_string(&signal).map_err(RokoError::body_encode)?;
         let mut guard = self.log_writer.lock().await;
@@ -252,6 +257,38 @@ impl Substrate for FileSubstrate {
     fn name(&self) -> &'static str {
         "file_substrate"
     }
+}
+
+/// HDC fingerprint tag key. The value is a base64-encoded 1280-byte
+/// HDC vector computed from the signal's kind + body.
+const HDC_TAG: &str = "hdc_fingerprint";
+
+/// Attach a deterministic HDC fingerprint to a signal's tags.
+///
+/// The fingerprint is derived from `kind|body` so that signals with
+/// identical semantic content produce identical vectors. Signals that
+/// already carry the tag are returned unchanged. Fingerprinting never
+/// fails: if anything goes wrong the signal is returned as-is.
+#[cfg(feature = "hdc")]
+fn attach_hdc_fingerprint(mut signal: Signal) -> Signal {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+
+    if signal.tags.contains_key(HDC_TAG) {
+        return signal;
+    }
+    let fingerprint = bardo_primitives::hdc::fingerprint(&signal.body);
+    signal
+        .tags
+        .insert(HDC_TAG.into(), BASE64.encode(fingerprint.to_bytes()));
+    // Recompute the content hash since tags are identity-bearing.
+    signal.id = signal.content_hash();
+    signal
+}
+
+#[cfg(not(feature = "hdc"))]
+fn attach_hdc_fingerprint(signal: Signal) -> Signal {
+    signal
 }
 
 #[cfg(test)]
@@ -461,5 +498,45 @@ mod tests {
             h.await.unwrap().unwrap();
         }
         assert_eq!(sub.len().await.unwrap(), 20);
+    }
+
+    #[tokio::test]
+    async fn hdc_fingerprint_is_attached_on_put() {
+        let tmp = TempDir::new().unwrap();
+        let sub = FileSubstrate::open(tmp.path()).await.unwrap();
+        let s = sig(Kind::Task, "fingerprint me", 0);
+        assert!(s.tags.get(HDC_TAG).is_none());
+        let id = sub.put(s).await.unwrap();
+        let stored = sub.get(&id).await.unwrap().expect("signal must exist");
+        // When the hdc feature is enabled the tag is present; otherwise
+        // the signal is stored unmodified.
+        #[cfg(feature = "hdc")]
+        {
+            assert!(stored.tags.contains_key(HDC_TAG));
+            // Fingerprint is a base64-encoded 1280-byte vector.
+            let encoded = stored.tags.get(HDC_TAG).unwrap();
+            let decoded = base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                encoded,
+            )
+            .expect("valid base64");
+            assert_eq!(decoded.len(), 1280);
+        }
+        #[cfg(not(feature = "hdc"))]
+        {
+            assert!(!stored.tags.contains_key(HDC_TAG));
+        }
+    }
+
+    #[tokio::test]
+    async fn hdc_fingerprint_not_overwritten_if_present() {
+        let tmp = TempDir::new().unwrap();
+        let sub = FileSubstrate::open(tmp.path()).await.unwrap();
+        let mut s = sig(Kind::Task, "already tagged", 0);
+        s.tags.insert(HDC_TAG.into(), "pre-existing".into());
+        s.id = s.content_hash();
+        let id = sub.put(s).await.unwrap();
+        let stored = sub.get(&id).await.unwrap().expect("signal must exist");
+        assert_eq!(stored.tags.get(HDC_TAG).unwrap(), "pre-existing");
     }
 }

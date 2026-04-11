@@ -5224,6 +5224,8 @@ name = "roko-fs"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bardo-primitives",
+ "base64",
  "chrono",
  "filetime",
  "parking_lot",

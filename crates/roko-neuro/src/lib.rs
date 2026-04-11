@@ -169,6 +169,8 @@ pub mod tier_progression;
 pub use context::{ContextAssembler, EpisodeStore};
 pub use distiller::{DistillationBackend, Distiller};
 pub use episode_completion::spawn_episode_distillation;
-pub use knowledge_store::{DEFAULT_GC_MIN_CONFIDENCE, KnowledgeStats, KnowledgeStore};
+pub use knowledge_store::{
+    DEFAULT_GC_MIN_CONFIDENCE, KnowledgeConfirmationRecord, KnowledgeStats, KnowledgeStore,
+};
 #[cfg(feature = "hdc")]
 pub use knowledge_store::{MemoryHit, MemoryIndex};

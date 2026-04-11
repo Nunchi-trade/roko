@@ -549,7 +549,7 @@ impl LearningRuntime {
     ) -> Result<LearningUpdate, LearningRuntimeError> {
         let mut update = LearningUpdate::default();
 
-        input.episode.attach_text_fingerprint();
+        input.episode.attach_all_fingerprints();
         self.apply_affect_signature(&mut input.episode);
         self.episode_logger.append(&input.episode).await?;
         update.episode_logged = ApplyStatus::Applied;
@@ -1017,8 +1017,18 @@ async fn compute_cfactor_snapshot(learn_root: &Path) -> Result<CFactor, Learning
         .unwrap_or(learn_root)
         .join("neuro")
         .join("knowledge.jsonl");
+    // Dedicated confirmation records emitted by KnowledgeStore on ingest.
+    let confirmations_path = learn_root
+        .parent()
+        .unwrap_or(learn_root)
+        .join("neuro")
+        .join("knowledge-confirmations.jsonl");
     let attribution_records = read_context_attribution_records(&attribution_path).await?;
-    let knowledge_records = read_knowledge_records(&knowledge_path).await?;
+    // Read from both legacy knowledge entries and the dedicated
+    // confirmation records file, then merge.
+    let mut knowledge_records = read_knowledge_records(&knowledge_path).await?;
+    let confirmation_records = read_knowledge_records(&confirmations_path).await?;
+    knowledge_records.extend(confirmation_records);
     let social_sensitivity = social_sensitivity_from_attribution(
         &attribution_records,
         Duration::from_secs(7 * 24 * 60 * 60),

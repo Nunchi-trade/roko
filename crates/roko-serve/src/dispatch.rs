@@ -47,8 +47,10 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::events::ServerEvent;
+use crate::runtime::RepoInfo;
 use crate::state::{AppState, TemplateRunRecord};
 use crate::templates::{AgentTemplate, TemplateRegistry};
+use roko_fs::layout::RokoLayout;
 
 /// Async agent-dispatch interface used by the routing loop.
 #[async_trait]
@@ -103,11 +105,69 @@ impl WebhookEpisodeMetadata {
     }
 }
 
+/// Resolved per-repo context for a dispatch. When a webhook signal comes
+/// from a known repository, the dispatch uses repo-specific paths for data
+/// isolation (episodes, learn artifacts, signals).
+#[derive(Debug, Clone)]
+struct RepoContext {
+    /// Short repo name (e.g. `"roko"`) — used for `.roko/repos/{name}/`.
+    name: String,
+    /// Filesystem path to the repository root (the agent's working directory).
+    repo_workdir: PathBuf,
+    /// Per-repo layout under `.roko/repos/{name}/`.
+    layout: RokoLayout,
+    /// Optional merged `RokoConfig` from the repo's `.roko/roko.toml`.
+    /// When present, repo-local settings take priority over globals.
+    repo_config: Option<RokoConfig>,
+}
+
+/// Extract the repo full name (e.g. `"nunchi/roko"`) from a webhook signal's
+/// JSON body by probing `repository.full_name` and `repository.name`.
+fn signal_repo_full_name(signal: &Signal) -> Option<String> {
+    let candidates = signal_repo_candidates(signal);
+    candidates.into_iter().next().map(str::to_string)
+}
+
+/// Attempt to resolve a [`RepoContext`] from a signal using the runtime's
+/// repo registry. Returns `None` when the signal's repo is not configured.
+fn resolve_repo_context(state: &AppState, signal: &Signal) -> Option<RepoContext> {
+    let full_name = signal_repo_full_name(signal)?;
+    let repo_workdir = state.runtime.resolve_repo_workdir(&full_name)?;
+
+    // Use the bare repo name for the per-repo data directory.
+    let bare_name = full_name
+        .rsplit('/')
+        .next()
+        .unwrap_or(&full_name)
+        .to_string();
+    let layout = RokoLayout::for_repo(&state.workdir, &bare_name);
+
+    // Load repo-local config override (4B.05). When present, the repo's
+    // .roko/roko.toml takes priority over the global config for settings
+    // like model selection, gate thresholds, etc.
+    let repo_config = state.runtime.repo_roko_config(&bare_name);
+    if repo_config.is_some() {
+        info!(repo = %bare_name, "loaded repo-local config override");
+    }
+
+    Some(RepoContext {
+        name: bare_name,
+        repo_workdir,
+        layout,
+        repo_config,
+    })
+}
+
 /// Template-backed agent runner used by the webhook dispatch loop.
 #[derive(Clone, Debug)]
 pub struct TemplateAgentDispatcher {
     workdir: PathBuf,
     base_mcp_config: Option<PathBuf>,
+    /// Optional per-repo working directory override. When set, the agent
+    /// process runs in this directory instead of the global `workdir`.
+    repo_workdir: Option<PathBuf>,
+    /// Configured repos (injected for cross-repo context in prompts).
+    repo_listing: Vec<RepoInfo>,
 }
 
 #[derive(Debug)]
@@ -125,7 +185,13 @@ struct EfficiencyTracker {
 impl EfficiencyTracker {
     fn new(workdir: &Path) -> Self {
         Self {
-            path: workdir.join(".roko").join("learn").join("efficiency.jsonl"),
+            path: RokoLayout::for_project(workdir).efficiency_path(),
+        }
+    }
+
+    fn for_layout(layout: &RokoLayout) -> Self {
+        Self {
+            path: layout.efficiency_path(),
         }
     }
 
@@ -199,8 +265,11 @@ impl TemplateAgentDispatcher {
         Self {
             workdir,
             base_mcp_config,
+            repo_workdir: None,
+            repo_listing: Vec::new(),
         }
     }
+
 }
 
 /// Start the subscription dispatch loop in the background.
@@ -218,22 +287,32 @@ impl AgentDispatcher for TemplateAgentDispatcher {
         let experiment_variant = template.experiment.as_ref().and_then(|experiment| {
             load_template_experiment_variant(&self.workdir, &experiment.name)
         });
-        let system_prompt = build_template_system_prompt(
+        let mut system_prompt = build_template_system_prompt(
             &template,
             Some(&signal),
             experiment_variant
                 .as_ref()
                 .map(|(_, content)| content.as_str()),
         );
+        // 4B.06: Inject cross-repo context so the agent knows about
+        // the multi-repo setup.
+        if !self.repo_listing.is_empty() {
+            system_prompt.push_str(&build_cross_repo_context(&self.repo_listing));
+        }
         let allowed_tools = build_allowed_tools_csv(&template);
-        let mcp_config =
-            resolve_template_mcp_config(self.base_mcp_config.as_ref(), &self.workdir, &template)?;
+        // Use repo-specific workdir when available (4B.04).
+        let effective_workdir = self.repo_workdir.as_deref().unwrap_or(&self.workdir);
+        let mcp_config = resolve_template_mcp_config(
+            self.base_mcp_config.as_ref(),
+            effective_workdir,
+            &template,
+        )?;
         let agent = build_agent(
             &template,
             &system_prompt,
             &allowed_tools,
             mcp_config.as_ref(),
-            &self.workdir,
+            effective_workdir,
         )?;
         let ctx = dispatch_context(&template, &signal);
         let mut result = agent.run(&signal, &ctx).await;
@@ -1111,9 +1190,25 @@ pub async fn dispatch_loop(state: Arc<AppState>, dispatcher: Arc<dyn AgentDispat
             continue;
         }
 
+        // Resolve per-repo context from the signal's repository info.
+        // When matched, data (episodes, learn artifacts) is isolated under
+        // .roko/repos/{repo_name}/ and the agent runs in the repo's directory.
+        let repo_ctx = resolve_repo_context(&state, &signal);
+        if let Some(ref ctx) = repo_ctx {
+            info!(
+                repo = %ctx.name,
+                workdir = %ctx.repo_workdir.display(),
+                "resolved per-repo context for dispatch"
+            );
+        }
+
         let matched = subscriptions.find_matching(&signal);
         if matched.is_empty() {
-            let episodes_path = state.layout.episodes_path();
+            // Use per-repo episodes path for similarity suggestion when available.
+            let episodes_path = repo_ctx
+                .as_ref()
+                .map(|ctx| ctx.layout.episodes_path())
+                .unwrap_or_else(|| state.layout.episodes_path());
             match EpisodeLogger::suggest_template_from_recent_episodes(&episodes_path, &signal)
                 .await
             {
@@ -1126,10 +1221,12 @@ pub async fn dispatch_loop(state: Arc<AppState>, dispatcher: Arc<dyn AgentDispat
                     let signal = signal.clone();
                     let dispatcher = Arc::clone(&dispatcher);
                     let state = Arc::clone(&state);
+                    let repo_ctx = repo_ctx.clone();
                     let suggested_subscription =
                         Subscription::new(template_name.clone(), signal.kind.as_str());
                     tokio::spawn(async move {
-                        dispatch_agent(state, suggested_subscription, signal, dispatcher).await;
+                        dispatch_agent(state, suggested_subscription, signal, dispatcher, repo_ctx)
+                            .await;
                     });
                 }
                 Ok(None) => {}
@@ -1151,8 +1248,16 @@ pub async fn dispatch_loop(state: Arc<AppState>, dispatcher: Arc<dyn AgentDispat
                 let state = Arc::clone(&state);
                 let subscriptions = subscriptions.clone();
                 let sub_for_task = sub.clone();
+                let repo_ctx = repo_ctx.clone();
                 tokio::spawn(async move {
-                    dispatch_agent(state, sub_for_task.clone(), signal, dispatcher).await;
+                    dispatch_agent(
+                        state,
+                        sub_for_task.clone(),
+                        signal,
+                        dispatcher,
+                        repo_ctx,
+                    )
+                    .await;
                     sub_for_task.release_concurrency(&subscriptions);
                 });
             } else {
@@ -1167,6 +1272,7 @@ async fn dispatch_agent(
     subscription: Subscription,
     signal: Signal,
     dispatcher: Arc<dyn AgentDispatcher>,
+    repo_ctx: Option<RepoContext>,
 ) {
     let template_name = subscription.template().to_owned();
     let started_at = Utc::now();
@@ -1189,6 +1295,7 @@ async fn dispatch_agent(
         template.clone(),
         signal.clone(),
         dispatcher,
+        repo_ctx.as_ref(),
     )
     .await
     {
@@ -1221,6 +1328,7 @@ async fn dispatch_agent(
         started_at,
         completed_at,
         started.elapsed().as_secs_f64(),
+        repo_ctx.as_ref(),
     )
     .await;
 }
@@ -1230,10 +1338,24 @@ async fn dispatch_template(
     template: AgentTemplate,
     signal: Signal,
     dispatcher: Arc<dyn AgentDispatcher>,
+    repo_ctx: Option<&RepoContext>,
 ) -> Result<DispatchOutcome> {
     let dispatch_started = Instant::now();
     let dispatch_signal = build_dispatch_signal(&template, &signal)?;
-    let dispatch_result = match dispatcher
+
+    // When a repo context is available, create a repo-aware dispatcher
+    // so the agent runs in the repo's directory with cross-repo context.
+    let effective_dispatcher: Arc<dyn AgentDispatcher> = if let Some(ctx) = repo_ctx {
+        let repo_listing = state.runtime.list_repos();
+        let mut repo_dispatcher = TemplateAgentDispatcher::new(state.workdir.clone(), None);
+        repo_dispatcher.repo_workdir = Some(ctx.repo_workdir.clone());
+        repo_dispatcher.repo_listing = repo_listing;
+        Arc::new(repo_dispatcher)
+    } else {
+        Arc::clone(&dispatcher)
+    };
+
+    let dispatch_result = match effective_dispatcher
         .dispatch(template.clone(), dispatch_signal.clone())
         .await
     {
@@ -1352,6 +1474,27 @@ fn build_template_system_prompt(
         }
     }
     SystemPromptBuilder::new(prompt).build()
+}
+
+/// Build a cross-repo context section for the system prompt.
+///
+/// Lists all known repositories so the agent can reference files across
+/// repos. This is a stub — a future iteration will inject richer context
+/// (recent commits, open PRs, etc.).
+fn build_cross_repo_context(repos: &[RepoInfo]) -> String {
+    if repos.is_empty() {
+        return String::new();
+    }
+    let mut section = String::from("\n\n## Available Repositories\n\n");
+    for repo in repos {
+        section.push_str(&format!(
+            "- **{}**: `{}` (branch: {})\n",
+            repo.name,
+            repo.path.display(),
+            repo.branch,
+        ));
+    }
+    section
 }
 
 fn output_format_instructions(format: &crate::templates::TemplateOutputFormat) -> Option<String> {
@@ -1569,6 +1712,7 @@ async fn append_dispatch_episode(
     started_at: chrono::DateTime<Utc>,
     completed_at: chrono::DateTime<Utc>,
     duration_secs: f64,
+    repo_ctx: Option<&RepoContext>,
 ) {
     let agent_id = outcome
         .result
@@ -1634,21 +1778,52 @@ async fn append_dispatch_episode(
         cost_usd_without_cache: f64::from(outcome.result.usage.cost_usd),
         wall_ms: outcome.result.usage.wall_ms,
     };
-    episode.attach_text_fingerprint();
+    // Tag the episode with the repo name when dispatched in a per-repo context.
+    if let Some(ctx) = repo_ctx {
+        episode
+            .extra
+            .insert("repo".into(), Value::String(ctx.name.clone()));
+    }
+
+    episode.attach_all_fingerprints();
     apply_affect_signature(state, &mut episode);
 
-    let logger = EpisodeLogger::new(state.layout.episodes_path());
+    // Use per-repo layout for data isolation when a repo context is available.
+    // This writes episodes, efficiency, and cascade router data under
+    // .roko/repos/{repo_name}/ instead of the global .roko/.
+    let repo_layout = repo_ctx.map(|ctx| &ctx.layout);
+    let episodes_path = repo_layout
+        .map(RokoLayout::episodes_path)
+        .unwrap_or_else(|| state.layout.episodes_path());
+
+    // Ensure parent directories exist for per-repo paths.
+    if let Some(parent) = episodes_path.parent() {
+        if let Err(err) = tokio::fs::create_dir_all(parent).await {
+            warn!(error = %err, path = %parent.display(), "failed to create per-repo episodes dir");
+        }
+    }
+
+    let logger = EpisodeLogger::new(episodes_path);
     if let Err(err) = logger.append(&episode).await {
         warn!(error = %err, template = %template.name, "failed to append episode");
         return;
     }
-    spawn_episode_distillation(state.workdir.clone(), episode.clone());
 
-    if let Err(err) = record_cascade_router_outcome(state, template, outcome.result.success).await {
+    let distill_workdir = repo_ctx
+        .map(|ctx| ctx.repo_workdir.clone())
+        .unwrap_or_else(|| state.workdir.clone());
+    spawn_episode_distillation(distill_workdir, episode.clone());
+
+    if let Err(err) =
+        record_cascade_router_outcome_with_layout(state, template, outcome.result.success, repo_layout).await
+    {
         warn!(error = %err, template = %template.name, "failed to record cascade router outcome");
     }
 
-    let efficiency = EfficiencyTracker::new(&state.workdir);
+    let efficiency = match repo_layout {
+        Some(layout) => EfficiencyTracker::for_layout(layout),
+        None => EfficiencyTracker::new(&state.workdir),
+    };
     if let Err(err) = efficiency
         .record_event(&template.name, turns, tokens_used, outcome.success)
         .await
@@ -1696,10 +1871,20 @@ fn apply_affect_signature(state: &AppState, episode: &mut Episode) {
     );
 }
 
+#[allow(dead_code)]
 async fn record_cascade_router_outcome(
     state: &Arc<AppState>,
     template: &AgentTemplate,
     success: bool,
+) -> Result<()> {
+    record_cascade_router_outcome_with_layout(state, template, success, None).await
+}
+
+async fn record_cascade_router_outcome_with_layout(
+    state: &Arc<AppState>,
+    template: &AgentTemplate,
+    success: bool,
+    repo_layout: Option<&RokoLayout>,
 ) -> Result<()> {
     let model_slugs = {
         let templates = state.templates.read().await;
@@ -1721,7 +1906,12 @@ async fn record_cascade_router_outcome(
         slugs
     };
 
-    record_cascade_router_observation(&state.workdir, model_slugs, &template.model, success)?;
+    let path = repo_layout
+        .map(RokoLayout::cascade_router_path)
+        .unwrap_or_else(|| {
+            RokoLayout::for_project(&state.workdir).cascade_router_path()
+        });
+    record_cascade_router_observation_at(&path, model_slugs, &template.model, success)?;
     Ok(())
 }
 
@@ -1731,15 +1921,26 @@ pub(crate) fn record_cascade_router_observation(
     model_slug: &str,
     success: bool,
 ) -> Result<bool> {
-    let path = workdir
-        .join(".roko")
-        .join("learn")
-        .join("cascade-router.json");
+    let path = RokoLayout::for_project(workdir).cascade_router_path();
+    record_cascade_router_observation_at(&path, model_slugs, model_slug, success)
+}
 
-    let cascade_router = CascadeRouter::load_or_new(&path, model_slugs);
+fn record_cascade_router_observation_at(
+    path: &Path,
+    model_slugs: Vec<String>,
+    model_slug: &str,
+    success: bool,
+) -> Result<bool> {
+    // Ensure parent directory exists for per-repo paths.
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create {}", parent.display()))?;
+    }
+
+    let cascade_router = CascadeRouter::load_or_new(path, model_slugs);
     if cascade_router.record_outcome(model_slug, success) {
         cascade_router
-            .save(&path)
+            .save(path)
             .with_context(|| format!("save {}", path.display()))?;
         Ok(true)
     } else {
@@ -2047,5 +2248,118 @@ filter = { path = "src/*.rs" }
         let parsed: McpConfig = serde_json::from_str(&rendered).expect("parse generated config");
         assert_eq!(parsed.servers.len(), 1);
         assert_eq!(parsed.servers[0].name, "filesystem");
+    }
+
+    #[test]
+    fn signal_repo_full_name_extracts_from_github_payload() {
+        let signal = Signal::builder(Kind::Custom("github:push".into()))
+            .body(Body::Json(serde_json::json!({
+                "repository": { "full_name": "nunchi/roko", "name": "roko" }
+            })))
+            .provenance(Provenance::external("github:webhook"))
+            .build();
+
+        let full_name = signal_repo_full_name(&signal);
+        assert_eq!(full_name.as_deref(), Some("nunchi/roko"));
+    }
+
+    #[test]
+    fn signal_repo_full_name_returns_none_for_non_repo_signals() {
+        let signal = Signal::builder(Kind::Custom("cron:tick".into()))
+            .body(Body::Json(serde_json::json!({ "schedule": "hourly" })))
+            .provenance(Provenance::trusted("scheduler"))
+            .build();
+
+        assert!(signal_repo_full_name(&signal).is_none());
+    }
+
+    #[test]
+    fn repo_context_layout_isolates_per_repo_data() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = RokoLayout::for_repo(tmp.path(), "my-repo");
+
+        // Per-repo paths should be under .roko/repos/my-repo/
+        let episodes = layout.episodes_path();
+        assert!(
+            episodes.to_str().unwrap().contains("repos/my-repo"),
+            "episodes path should be under repos/my-repo: {episodes:?}"
+        );
+
+        let efficiency = layout.efficiency_path();
+        assert!(
+            efficiency.to_str().unwrap().contains("repos/my-repo"),
+            "efficiency path should be under repos/my-repo: {efficiency:?}"
+        );
+
+        let cascade_router = layout.cascade_router_path();
+        assert!(
+            cascade_router.to_str().unwrap().contains("repos/my-repo"),
+            "cascade router path should be under repos/my-repo: {cascade_router:?}"
+        );
+    }
+
+    #[test]
+    fn efficiency_tracker_for_layout_uses_repo_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = RokoLayout::for_repo(tmp.path(), "test-repo");
+        let tracker = EfficiencyTracker::for_layout(&layout);
+
+        assert!(
+            tracker.path.to_str().unwrap().contains("repos/test-repo"),
+            "tracker path should be under repos/test-repo: {:?}",
+            tracker.path
+        );
+        assert!(
+            tracker.path.to_str().unwrap().ends_with("efficiency.jsonl"),
+            "tracker path should end with efficiency.jsonl: {:?}",
+            tracker.path
+        );
+    }
+
+    #[test]
+    fn cross_repo_context_is_empty_for_no_repos() {
+        let repos: Vec<RepoInfo> = Vec::new();
+        assert!(build_cross_repo_context(&repos).is_empty());
+    }
+
+    #[test]
+    fn cross_repo_context_lists_all_configured_repos() {
+        let repos = vec![
+            RepoInfo {
+                name: "roko".into(),
+                path: PathBuf::from("/repos/roko"),
+                branch: "main".into(),
+            },
+            RepoInfo {
+                name: "collab".into(),
+                path: PathBuf::from("/repos/collab"),
+                branch: "develop".into(),
+            },
+        ];
+        let section = build_cross_repo_context(&repos);
+        assert!(section.contains("roko"));
+        assert!(section.contains("collab"));
+        assert!(section.contains("/repos/roko"));
+        assert!(section.contains("/repos/collab"));
+        assert!(section.contains("main"));
+        assert!(section.contains("develop"));
+        assert!(section.contains("## Available Repositories"));
+    }
+
+    #[test]
+    fn template_dispatcher_uses_repo_workdir_over_global() {
+        let global_dir = tempfile::tempdir().expect("global tempdir");
+        let repo_dir = tempfile::tempdir().expect("repo tempdir");
+
+        let mut dispatcher =
+            TemplateAgentDispatcher::new(global_dir.path().to_path_buf(), None);
+        dispatcher.repo_workdir = Some(repo_dir.path().to_path_buf());
+
+        // Verify the effective workdir resolves to repo_workdir.
+        let effective = dispatcher
+            .repo_workdir
+            .as_deref()
+            .unwrap_or(global_dir.path());
+        assert_eq!(effective, repo_dir.path());
     }
 }

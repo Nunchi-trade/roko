@@ -46,6 +46,7 @@ use tokio::sync::Mutex as AsyncMutex;
 /// optimizer cannot blow up the log.
 const MAX_EXTRA_BYTES: usize = 16 * 1024;
 const TEXT_FINGERPRINT_KEY: &str = "text_fingerprint";
+const METADATA_FINGERPRINT_KEY: &str = "metadata_fingerprint";
 const TEMPLATE_SUGGESTION_MIN_SIMILARITY: f64 = 0.7;
 const TEMPLATE_SUGGESTION_MAX_AGE_DAYS: i64 = 30;
 const TEMPLATE_SUGGESTION_MAX_CANDIDATES: usize = 256;
@@ -308,6 +309,29 @@ impl Episode {
         );
     }
 
+    /// Attach a deterministic HDC fingerprint of the episode's structured
+    /// metadata: agent_id, task_id, model, gate verdicts, and success.
+    ///
+    /// This fingerprint captures the *shape* of the execution (who ran it,
+    /// what model, which gates fired, did it succeed) rather than the
+    /// textual content. It enables similarity search across episodes with
+    /// structurally similar execution profiles.
+    pub fn attach_metadata_fingerprint(&mut self) {
+        let text = self.metadata_fingerprint_text();
+        let fingerprint = text_fingerprint(&text);
+        self.extra.insert(
+            METADATA_FINGERPRINT_KEY.to_string(),
+            serde_json::to_value(fingerprint)
+                .expect("HDC metadata fingerprint serialization should not fail"),
+        );
+    }
+
+    /// Attach both text and metadata fingerprints in one call.
+    pub fn attach_all_fingerprints(&mut self) {
+        self.attach_text_fingerprint();
+        self.attach_metadata_fingerprint();
+    }
+
     fn completion_fingerprint_text(&self) -> String {
         let actions =
             serde_json::to_string(&self.external_actions).unwrap_or_else(|_| "[]".to_string());
@@ -324,6 +348,20 @@ impl Episode {
         format!(
             "trigger_kind={}\nagent_template={}\nactions={}\noutcome={}",
             self.trigger_kind, self.agent_template, actions, outcome
+        )
+    }
+
+    fn metadata_fingerprint_text(&self) -> String {
+        let gate_summary: String = self
+            .gate_verdicts
+            .iter()
+            .map(|gv| format!("{}:{}", gv.gate, if gv.passed { "pass" } else { "fail" }))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        format!(
+            "agent_id={}\ntask_id={}\nmodel={}\ngates=[{}]\nsuccess={}",
+            self.agent_id, self.task_id, self.model, gate_summary, self.success
         )
     }
 }
@@ -377,8 +415,13 @@ fn suggest_template_from_episodes(episodes: &[Episode], signal: &Signal) -> Opti
 }
 
 fn episode_fingerprint(episode: &Episode) -> Option<HdcVector> {
-    let fingerprint_value = episode.extra.get(TEXT_FINGERPRINT_KEY)?.clone();
-    serde_json::from_value(fingerprint_value).ok()
+    // Prefer the text fingerprint; fall back to metadata fingerprint.
+    episode
+        .extra
+        .get(TEXT_FINGERPRINT_KEY)
+        .or_else(|| episode.extra.get(METADATA_FINGERPRINT_KEY))
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
 }
 
 fn normalized_template(template: &str) -> Option<String> {
@@ -1302,5 +1345,121 @@ mod tests {
         let policy = RetentionPolicy::default();
         assert_eq!(policy.max_episodes, 200);
         assert_eq!(policy.max_age_days, 90);
+    }
+
+    #[test]
+    fn episode_metadata_fingerprint_is_deterministic() {
+        let mut ep1 = Episode::new("agent-a", "task-a");
+        ep1.model = "claude-3.5-sonnet".to_string();
+        ep1.success = true;
+        ep1.gate_verdicts = vec![
+            GateVerdict::new("compile", true),
+            GateVerdict::new("test", true),
+        ];
+        ep1.attach_metadata_fingerprint();
+
+        let mut ep2 = Episode::new("agent-a", "task-a");
+        ep2.model = "claude-3.5-sonnet".to_string();
+        ep2.success = true;
+        ep2.gate_verdicts = vec![
+            GateVerdict::new("compile", true),
+            GateVerdict::new("test", true),
+        ];
+        ep2.attach_metadata_fingerprint();
+
+        let fp1: HdcVector = serde_json::from_value(
+            ep1.extra
+                .get(METADATA_FINGERPRINT_KEY)
+                .cloned()
+                .expect("metadata fingerprint"),
+        )
+        .expect("deserialize fp1");
+        let fp2: HdcVector = serde_json::from_value(
+            ep2.extra
+                .get(METADATA_FINGERPRINT_KEY)
+                .cloned()
+                .expect("metadata fingerprint"),
+        )
+        .expect("deserialize fp2");
+        assert_eq!(fp1, fp2);
+    }
+
+    #[test]
+    fn episode_metadata_fingerprint_differs_by_success() {
+        let mut success_ep = Episode::new("agent-a", "task-a");
+        success_ep.model = "claude-3.5-sonnet".to_string();
+        success_ep.success = true;
+        success_ep.attach_metadata_fingerprint();
+
+        let mut failure_ep = Episode::new("agent-a", "task-a");
+        failure_ep.model = "claude-3.5-sonnet".to_string();
+        failure_ep.success = false;
+        failure_ep.attach_metadata_fingerprint();
+
+        let fp_success: HdcVector = serde_json::from_value(
+            success_ep.extra.get(METADATA_FINGERPRINT_KEY).cloned().unwrap(),
+        )
+        .unwrap();
+        let fp_failure: HdcVector = serde_json::from_value(
+            failure_ep.extra.get(METADATA_FINGERPRINT_KEY).cloned().unwrap(),
+        )
+        .unwrap();
+        assert_ne!(fp_success, fp_failure);
+    }
+
+    #[test]
+    fn attach_all_fingerprints_populates_both_keys() {
+        let mut ep = Episode::new("agent-a", "task-a");
+        ep.trigger_kind = "webhook_dispatch".to_string();
+        ep.agent_template = "template-a".to_string();
+        ep.model = "claude-3.5-sonnet".to_string();
+        ep.success = true;
+        ep.gate_verdicts = vec![GateVerdict::new("compile", true)];
+
+        ep.attach_all_fingerprints();
+
+        assert!(
+            ep.extra.contains_key(TEXT_FINGERPRINT_KEY),
+            "text fingerprint should be present"
+        );
+        assert!(
+            ep.extra.contains_key(METADATA_FINGERPRINT_KEY),
+            "metadata fingerprint should be present"
+        );
+    }
+
+    #[tokio::test]
+    async fn suggest_template_falls_back_to_metadata_fingerprint() {
+        let (_dir, path) = tmp_log();
+        let signal = suggestion_signal(Kind::Task, "implement similarity fallback");
+
+        // Create an episode with only a metadata fingerprint (no text fingerprint).
+        let mut episode = Episode::new("agent-a", "task-a");
+        episode.agent_template = "code-implementer".to_string();
+        episode.timestamp = Utc::now();
+        episode.started_at = episode.timestamp;
+        episode.completed_at = episode.timestamp;
+        // Encode the signal text as a metadata fingerprint to simulate
+        // the scenario where only metadata_fingerprint is available.
+        episode.extra.insert(
+            METADATA_FINGERPRINT_KEY.to_string(),
+            serde_json::to_value(text_fingerprint(&signal_fingerprint_text(&signal)))
+                .expect("serialize fingerprint"),
+        );
+
+        tokio::fs::write(
+            &path,
+            format!(
+                "{}\n",
+                serde_json::to_string(&episode).expect("serialize episode")
+            ),
+        )
+        .await
+        .expect("write episodes");
+
+        let suggestion = EpisodeLogger::suggest_template_from_recent_episodes(&path, &signal)
+            .await
+            .expect("suggest template");
+        assert_eq!(suggestion.as_deref(), Some("code-implementer"));
     }
 }

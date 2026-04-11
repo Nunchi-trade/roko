@@ -16,6 +16,18 @@ pub struct RunResult {
     pub success: bool,
 }
 
+/// Summary info for a configured repository, used to give agents
+/// cross-repo context during dispatch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepoInfo {
+    /// Human-readable repo name (matches the `[[repos]]` entry name).
+    pub name: String,
+    /// Filesystem path to the repository root.
+    pub path: PathBuf,
+    /// Branch tracked for this repo.
+    pub branch: String,
+}
+
 /// Snapshot of session status (mirrors `roko_cli::SessionStatus` fields).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionStatusInfo {
@@ -95,5 +107,11 @@ pub trait CliRuntime: Send + Sync + 'static {
     /// is not configured.
     fn repo_roko_config(&self, _repo_name: &str) -> Option<roko_core::config::schema::RokoConfig> {
         None
+    }
+
+    /// Return a list of all configured repositories. Used to inject
+    /// cross-repo context into agent system prompts during dispatch.
+    fn list_repos(&self) -> Vec<RepoInfo> {
+        Vec::new()
     }
 }

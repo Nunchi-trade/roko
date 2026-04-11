@@ -20,6 +20,45 @@
 //! inference) and the per-role budget table in `mori-agents/03`.
 
 use serde::{Deserialize, Serialize};
+use std::fmt;
+
+// ─── ProviderKind (which protocol family to use) ─────────────────────────
+
+/// Which protocol family a provider belongs to.
+///
+/// This is the primary dispatch key for the provider registry layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderKind {
+    /// Anthropic Messages API over HTTP.
+    AnthropicApi,
+    /// `claude` CLI subprocess protocol.
+    ClaudeCli,
+    /// OpenAI chat completions-compatible HTTP APIs.
+    #[serde(rename = "openai_compat", alias = "open_ai_compat")]
+    OpenAiCompat,
+    /// Cursor Agent Client Protocol.
+    CursorAcp,
+}
+
+impl ProviderKind {
+    /// Canonical snake_case label for logs, config, and display.
+    #[must_use]
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::AnthropicApi => "anthropic_api",
+            Self::ClaudeCli => "claude_cli",
+            Self::OpenAiCompat => "openai_compat",
+            Self::CursorAcp => "cursor_acp",
+        }
+    }
+}
+
+impl fmt::Display for ProviderKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
 
 // ─── AgentBackend (which CLI to spawn) ────────────────────────────────────
 
@@ -711,6 +750,25 @@ mod tests {
     fn backend_from_codex_slug() {
         assert_eq!(AgentBackend::from_model("gpt-5"), AgentBackend::Codex);
         assert_eq!(AgentBackend::from_model("o3-mini"), AgentBackend::Codex);
+    }
+
+    #[test]
+    fn provider_kind_labels_and_display() {
+        let kinds = [
+            (ProviderKind::AnthropicApi, "anthropic_api"),
+            (ProviderKind::ClaudeCli, "claude_cli"),
+            (ProviderKind::OpenAiCompat, "openai_compat"),
+            (ProviderKind::CursorAcp, "cursor_acp"),
+        ];
+
+        for (kind, label) in kinds {
+            assert_eq!(kind.label(), label);
+            assert_eq!(kind.to_string(), label);
+            let json = serde_json::to_string(&kind).unwrap();
+            assert_eq!(json, format!("\"{label}\""));
+            let decoded: ProviderKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, kind);
+        }
     }
 
     #[test]

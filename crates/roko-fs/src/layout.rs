@@ -153,7 +153,38 @@ impl RokoLayout {
         self.root.join("cache")
     }
 
+    /// `.roko/learn/` — efficiency events, cascade router, experiments,
+    /// gate thresholds, and other learning artifacts.
+    #[must_use]
+    pub fn learn_dir(&self) -> PathBuf {
+        self.root.join("learn")
+    }
+
     // ── per-entity paths ─────────────────────────────────────────────────
+
+    /// `.roko/signals.jsonl` — the main signal log.
+    #[must_use]
+    pub fn signals_path(&self) -> PathBuf {
+        self.root.join("signals.jsonl")
+    }
+
+    /// `.roko/learn/efficiency.jsonl` — per-turn efficiency events.
+    #[must_use]
+    pub fn efficiency_path(&self) -> PathBuf {
+        self.learn_dir().join("efficiency.jsonl")
+    }
+
+    /// `.roko/learn/cascade-router.json` — model routing bandit state.
+    #[must_use]
+    pub fn cascade_router_path(&self) -> PathBuf {
+        self.learn_dir().join("cascade-router.json")
+    }
+
+    /// `.roko/learn/experiments.json` — prompt experiment store.
+    #[must_use]
+    pub fn experiments_path(&self) -> PathBuf {
+        self.learn_dir().join("experiments.json")
+    }
 
     /// `.roko/plans/{plan_id}/` — enrichment artifacts for one plan.
     #[must_use]
@@ -264,6 +295,7 @@ impl RokoLayout {
             self.state_dir(),
             self.config_dir(),
             self.cache_dir(),
+            self.learn_dir(),
         ]
     }
 
@@ -327,10 +359,10 @@ mod tests {
     }
 
     #[test]
-    fn top_level_dirs_returns_seven() {
+    fn top_level_dirs_returns_eight() {
         let layout = RokoLayout::new("/tmp/.roko");
         let dirs = layout.top_level_dirs();
-        assert_eq!(dirs.len(), 7);
+        assert_eq!(dirs.len(), 8);
         assert!(dirs.contains(&PathBuf::from("/tmp/.roko/runtime")));
         assert!(dirs.contains(&PathBuf::from("/tmp/.roko/memory")));
         assert!(dirs.contains(&PathBuf::from("/tmp/.roko/plans")));
@@ -338,6 +370,7 @@ mod tests {
         assert!(dirs.contains(&PathBuf::from("/tmp/.roko/state")));
         assert!(dirs.contains(&PathBuf::from("/tmp/.roko/config")));
         assert!(dirs.contains(&PathBuf::from("/tmp/.roko/cache")));
+        assert!(dirs.contains(&PathBuf::from("/tmp/.roko/learn")));
     }
 
     #[test]
