@@ -1679,6 +1679,16 @@ impl Default for DeployConfig {
 mod tests {
     use super::*;
 
+    fn assert_error_contains(err: toml::de::Error, expected: &[&str]) {
+        let message = err.to_string();
+        for needle in expected {
+            assert!(
+                message.contains(needle),
+                "expected error `{message}` to contain `{needle}`"
+            );
+        }
+    }
+
     #[test]
     fn default_roundtrips_through_toml() {
         let cfg = RokoConfig::default();
@@ -1736,6 +1746,208 @@ default_model = "claude-sonnet-4-6"
         assert_eq!(cfg.agent.default_model, "claude-sonnet-4-6");
         assert!(cfg.providers.is_empty());
         assert!(cfg.models.is_empty());
+    }
+
+    #[test]
+    fn config_deser_full_config_with_providers_and_models() {
+        let toml = r#"
+schema_version = 2
+
+[agent]
+default_model = "glm-5-1"
+fallback_model = "kimi-k2-5"
+bare_mode = true
+
+[providers.zai]
+kind = "openai_compat"
+base_url = "https://api.z.ai/api/paas/v4"
+api_key_env = "ZAI_API_KEY"
+timeout_ms = 180000
+extra_headers = { "HTTP-Referer" = "roko-agent" }
+
+[providers.moonshot]
+kind = "openai_compat"
+base_url = "https://api.moonshot.ai/v1"
+api_key_env = "MOONSHOT_API_KEY"
+
+[models.glm-5-1]
+provider = "zai"
+slug = "glm-5.1"
+context_window = 200000
+max_output = 131072
+supports_tools = true
+supports_thinking = true
+supports_web_search = true
+supports_mcp_tools = true
+tool_format = "openai_json"
+cost_input_per_m = 1.40
+cost_output_per_m = 4.40
+
+[models.kimi-k2-5]
+provider = "moonshot"
+slug = "kimi-k2.5"
+context_window = 256000
+max_output = 65535
+supports_tools = true
+supports_thinking = true
+supports_vision = true
+supports_partial = true
+tool_format = "openai_json"
+cost_input_per_m = 0.60
+cost_output_per_m = 3.00
+cost_cache_read_per_m = 0.10
+"#;
+        let cfg = toml::from_str::<RokoConfig>(toml).expect("parse");
+
+        assert_eq!(cfg.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(cfg.agent.default_model, "glm-5-1");
+        assert_eq!(cfg.agent.fallback_model.as_deref(), Some("kimi-k2-5"));
+        assert!(cfg.agent.bare_mode);
+
+        let zai = cfg.providers.get("zai").expect("zai provider");
+        assert_eq!(zai.kind, ProviderKind::OpenAiCompat);
+        assert_eq!(zai.base_url.as_deref(), Some("https://api.z.ai/api/paas/v4"));
+        assert_eq!(zai.api_key_env.as_deref(), Some("ZAI_API_KEY"));
+        assert_eq!(zai.timeout_ms, Some(180_000));
+        assert_eq!(
+            zai.extra_headers
+                .as_ref()
+                .expect("extra headers")
+                .get("HTTP-Referer")
+                .map(String::as_str),
+            Some("roko-agent")
+        );
+
+        let moonshot = cfg.providers.get("moonshot").expect("moonshot provider");
+        assert_eq!(moonshot.kind, ProviderKind::OpenAiCompat);
+        assert_eq!(
+            moonshot.base_url.as_deref(),
+            Some("https://api.moonshot.ai/v1")
+        );
+        assert_eq!(moonshot.api_key_env.as_deref(), Some("MOONSHOT_API_KEY"));
+
+        let glm = cfg.models.get("glm-5-1").expect("glm model");
+        assert_eq!(glm.provider, "zai");
+        assert_eq!(glm.slug, "glm-5.1");
+        assert_eq!(glm.context_window, 200_000);
+        assert_eq!(glm.max_output, Some(131_072));
+        assert!(glm.supports_tools);
+        assert!(glm.supports_thinking);
+        assert!(glm.supports_web_search);
+        assert!(glm.supports_mcp_tools);
+        assert_eq!(glm.tool_format, "openai_json");
+        assert_eq!(glm.cost_input_per_m, Some(1.40));
+        assert_eq!(glm.cost_output_per_m, Some(4.40));
+
+        let kimi = cfg.models.get("kimi-k2-5").expect("kimi model");
+        assert_eq!(kimi.provider, "moonshot");
+        assert_eq!(kimi.slug, "kimi-k2.5");
+        assert_eq!(kimi.context_window, 256_000);
+        assert_eq!(kimi.max_output, Some(65_535));
+        assert!(kimi.supports_tools);
+        assert!(kimi.supports_thinking);
+        assert!(kimi.supports_vision);
+        assert!(kimi.supports_partial);
+        assert_eq!(kimi.tool_format, "openai_json");
+        assert_eq!(kimi.cost_input_per_m, Some(0.60));
+        assert_eq!(kimi.cost_output_per_m, Some(3.00));
+        assert_eq!(kimi.cost_cache_read_per_m, Some(0.10));
+    }
+
+    #[test]
+    fn config_deser_minimal_config_only_agent_section() {
+        let toml = r#"
+[agent]
+default_model = "claude-sonnet-4-6"
+"#;
+        let cfg = toml::from_str::<RokoConfig>(toml).expect("parse");
+
+        assert_eq!(cfg.agent.default_model, "claude-sonnet-4-6");
+        assert!(cfg.providers.is_empty());
+        assert!(cfg.models.is_empty());
+    }
+
+    #[test]
+    fn config_deser_mixed_config_with_providers_but_no_models() {
+        let toml = r#"
+[agent]
+default_model = "claude-sonnet-4-6"
+
+[providers.claude]
+kind = "claude_cli"
+command = "claude"
+args = ["--print", "--output-format", "stream-json"]
+timeout_ms = 120000
+
+[providers.ollama]
+kind = "openai_compat"
+base_url = "http://localhost:11434"
+"#;
+        let cfg = toml::from_str::<RokoConfig>(toml).expect("parse");
+
+        assert_eq!(cfg.agent.default_model, "claude-sonnet-4-6");
+        assert_eq!(cfg.providers.len(), 2);
+        assert!(cfg.models.is_empty());
+
+        let claude = cfg.providers.get("claude").expect("claude provider");
+        assert_eq!(claude.kind, ProviderKind::ClaudeCli);
+        assert_eq!(claude.command.as_deref(), Some("claude"));
+        assert_eq!(
+            claude.args.as_ref().expect("claude args"),
+            &vec![
+                "--print".to_string(),
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+            ]
+        );
+        assert_eq!(claude.timeout_ms, Some(120_000));
+
+        let ollama = cfg.providers.get("ollama").expect("ollama provider");
+        assert_eq!(ollama.kind, ProviderKind::OpenAiCompat);
+        assert_eq!(ollama.base_url.as_deref(), Some("http://localhost:11434"));
+    }
+
+    #[test]
+    fn config_deser_invalid_provider_kind_is_descriptive() {
+        let toml = r#"
+[providers.bad]
+kind = "not_a_real_kind"
+"#;
+        let err = toml::from_str::<RokoConfig>(toml).expect_err("should fail");
+        assert_error_contains(
+            err,
+            &[
+                "kind",
+                "unknown variant",
+                "not_a_real_kind",
+                "anthropic_api",
+                "claude_cli",
+                "openai_compat",
+                "cursor_acp",
+            ],
+        );
+    }
+
+    #[test]
+    fn config_deser_missing_required_fields_is_descriptive() {
+        let toml = r#"
+[providers.zai]
+base_url = "https://api.z.ai/api/paas/v4"
+"#;
+        let err = toml::from_str::<RokoConfig>(toml).expect_err("should fail");
+        assert_error_contains(err, &["providers.zai", "kind", "missing field"]);
+    }
+
+    #[test]
+    fn config_deser_api_key_env_is_parsed_as_string_reference() {
+        let toml = r#"
+[providers.zai]
+kind = "openai_compat"
+api_key_env = "ZAI_API_KEY"
+"#;
+        let cfg = toml::from_str::<RokoConfig>(toml).expect("parse");
+        let provider = cfg.providers.get("zai").expect("provider");
+        assert_eq!(provider.api_key_env.as_deref(), Some("ZAI_API_KEY"));
     }
 
     #[test]
