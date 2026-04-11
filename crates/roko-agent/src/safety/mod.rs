@@ -27,6 +27,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod bash;
+pub mod contract;
 pub mod git;
 pub mod network;
 pub mod path;
