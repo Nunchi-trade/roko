@@ -27,8 +27,8 @@
 //!
 //! Anti-pattern #8: **no `std::fs`**. All content arrives via builder methods.
 
-use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
 use crate::PadState;
+use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
 use roko_learn::section_effect::{PriorityChange, SectionEffectivenessRegistry};
 
 /// A composable system prompt built from 7 layers.
@@ -771,9 +771,11 @@ mod tests {
         assert!(start_sections.iter().any(|s| s.name == "role_identity"));
         assert!(start_sections.iter().any(|s| s.name == "conventions"));
         // Tools at Middle.
-        assert!(middle_sections
-            .iter()
-            .any(|s| s.name == "tool_instructions"));
+        assert!(
+            middle_sections
+                .iter()
+                .any(|s| s.name == "tool_instructions")
+        );
         // Task and anti-patterns at End.
         assert!(end_sections.iter().any(|s| s.name == "task_context"));
         assert!(end_sections.iter().any(|s| s.name == "anti_patterns"));

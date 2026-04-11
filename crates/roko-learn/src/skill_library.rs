@@ -58,12 +58,46 @@ pub enum SkillLibraryError {
 /// A reusable capability the agent can invoke.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Skill {
+    /// Stable identifier for the skill record.
+    #[serde(default)]
+    pub id: String,
+    /// Human-readable name for the skill.
     /// Unique, human-readable identifier for the skill (`snake_case` preferred).
     pub name: String,
     /// One-line description of what the skill does.
     pub summary: String,
     /// Prompt template injected when the skill is selected.
     pub prompt_template: String,
+    /// When to apply this skill.
+    #[serde(default)]
+    pub precondition: String,
+    /// Procedure or tool-call sequence summary.
+    #[serde(default)]
+    pub procedure: String,
+    /// Expected result after following the procedure.
+    #[serde(default)]
+    pub postcondition: String,
+    /// Confidence in `[0.0, 1.0]`, derived from validation outcomes.
+    #[serde(default)]
+    pub confidence: f64,
+    /// Episode IDs this skill was extracted from.
+    #[serde(default)]
+    pub source_episodes: Vec<String>,
+    /// Number of successful validations.
+    #[serde(default)]
+    pub validations: u64,
+    /// Number of failed applications.
+    #[serde(default)]
+    pub failures: u64,
+    /// Task categories where the skill applies.
+    #[serde(default)]
+    pub task_categories: Vec<String>,
+    /// RFC3339 timestamp when the skill was created.
+    #[serde(default)]
+    pub created_at: String,
+    /// RFC3339 timestamp of the last validation outcome.
+    #[serde(default)]
+    pub last_validated_at: Option<String>,
     /// Names of tools this skill expects the caller to expose.
     #[serde(default)]
     pub required_tools: Vec<String>,
@@ -123,10 +157,72 @@ impl Skill {
         summary: impl Into<String>,
         prompt_template: impl Into<String>,
     ) -> Self {
+        let name = name.into();
+        let summary = summary.into();
+        let prompt_template = prompt_template.into();
         Self {
-            name: name.into(),
-            summary: summary.into(),
-            prompt_template: prompt_template.into(),
+            id: name.clone(),
+            name,
+            summary: summary.clone(),
+            prompt_template: prompt_template.clone(),
+            precondition: String::new(),
+            procedure: prompt_template,
+            postcondition: summary,
+            confidence: 0.0,
+            source_episodes: Vec::new(),
+            validations: 0,
+            failures: 0,
+            task_categories: Vec::new(),
+            created_at: Utc::now().to_rfc3339(),
+            last_validated_at: None,
+            required_tools: Vec::new(),
+            example_inputs: Vec::new(),
+            example_outputs: Vec::new(),
+            tags: Vec::new(),
+            success_rate: 0.0,
+            usage_count: 0,
+            description: String::new(),
+            plan_id: String::new(),
+            files: Vec::new(),
+            pattern: String::new(),
+            score: 0.0,
+            first_seen: None,
+            last_matched: None,
+            match_count: 0,
+            validated_count: 0,
+            task_category: String::new(),
+        }
+    }
+
+    /// Construct a structured skill contract with explicit applicability and outcome fields.
+    pub fn new_structured(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        precondition: impl Into<String>,
+        procedure: impl Into<String>,
+        postcondition: impl Into<String>,
+    ) -> Self {
+        let id = id.into();
+        let name = name.into();
+        let precondition = precondition.into();
+        let procedure = procedure.into();
+        let postcondition = postcondition.into();
+
+        Self {
+            id: id.clone(),
+            name,
+            summary: postcondition.clone(),
+            prompt_template: procedure.clone(),
+            precondition,
+            procedure,
+            postcondition,
+            confidence: 0.0,
+            source_episodes: Vec::new(),
+            validations: 0,
+            failures: 0,
+            task_categories: Vec::new(),
+            created_at: Utc::now().to_rfc3339(),
+            last_validated_at: None,
             required_tools: Vec::new(),
             example_inputs: Vec::new(),
             example_outputs: Vec::new(),
@@ -181,6 +277,113 @@ impl Skill {
     {
         self.tags = tags.into_iter().map(Into::into).collect();
         self
+    }
+
+    /// Builder helper: attach task categories.
+    #[must_use]
+    pub fn with_task_categories<I, S>(mut self, categories: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.task_categories = categories.into_iter().map(Into::into).collect();
+        if self.task_category.is_empty() {
+            self.task_category = self.task_categories.first().cloned().unwrap_or_default();
+        }
+        self
+    }
+
+    /// Builder helper: attach source episode IDs.
+    #[must_use]
+    pub fn with_source_episodes<I, S>(mut self, episode_ids: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.source_episodes = episode_ids.into_iter().map(Into::into).collect();
+        self
+    }
+
+    fn normalize(&mut self) {
+        if self.id.is_empty() {
+            self.id = self.name.clone();
+        }
+        if self.name.is_empty() {
+            self.name = self.id.clone();
+        }
+        if self.procedure.is_empty() {
+            self.procedure = self.prompt_template.clone();
+        }
+        if self.prompt_template.is_empty() {
+            self.prompt_template = self.procedure.clone();
+        }
+        if self.postcondition.is_empty() {
+            self.postcondition = self.summary.clone();
+        }
+        if self.summary.is_empty() {
+            self.summary = self.postcondition.clone();
+        }
+        if self.created_at.is_empty() {
+            self.created_at = self
+                .first_seen
+                .map(|ts| ts.to_rfc3339())
+                .unwrap_or_else(|| Utc::now().to_rfc3339());
+        }
+
+        if self.task_categories.is_empty() {
+            if !self.task_category.is_empty() {
+                self.task_categories.push(self.task_category.clone());
+            }
+        } else {
+            self.task_categories = dedup_strings(std::mem::take(&mut self.task_categories));
+            if self.task_category.is_empty() {
+                self.task_category = self.task_categories.first().cloned().unwrap_or_default();
+            } else if !self.task_categories.contains(&self.task_category) {
+                self.task_categories.insert(0, self.task_category.clone());
+            }
+        }
+
+        if self.validations == 0 && self.failures == 0 {
+            if self.usage_count > 0 {
+                #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+                let inferred_validations =
+                    (self.success_rate.clamp(0.0, 1.0) * self.usage_count as f64).round() as u64;
+                self.validations = inferred_validations.min(self.usage_count);
+                self.failures = self.usage_count.saturating_sub(self.validations);
+            } else if self.validated_count > 0 {
+                self.validations = u64::from(self.validated_count);
+            }
+        }
+
+        if self.last_validated_at.is_none() && (self.validations > 0 || self.failures > 0) {
+            self.last_validated_at = self.last_matched.map(|ts| ts.to_rfc3339());
+        }
+
+        self.recompute_confidence();
+    }
+
+    fn recompute_confidence(&mut self) {
+        let total = self.validations.saturating_add(self.failures);
+        self.confidence = if total == 0 {
+            self.success_rate.clamp(0.0, 1.0)
+        } else {
+            #[allow(clippy::cast_precision_loss)]
+            let total_f = total as f64;
+            #[allow(clippy::cast_precision_loss)]
+            let validations_f = self.validations as f64;
+            (validations_f / total_f).clamp(0.0, 1.0)
+        };
+    }
+
+    fn matches_task_category(&self, task_category: &str) -> bool {
+        if task_category.is_empty() {
+            return true;
+        }
+        self.task_category == task_category
+            || self
+                .task_categories
+                .iter()
+                .any(|category| category == task_category)
     }
 }
 
@@ -368,7 +571,12 @@ impl SkillLibrary {
             Ok(bytes) if bytes.is_empty() => BTreeMap::new(),
             Ok(bytes) => {
                 let list: Vec<Skill> = serde_json::from_slice(&bytes)?;
-                list.into_iter().map(|s| (s.name.clone(), s)).collect()
+                list.into_iter()
+                    .map(|mut skill| {
+                        skill.normalize();
+                        (skill.name.clone(), skill)
+                    })
+                    .collect()
             }
             Err(err) if err.kind() == io::ErrorKind::NotFound => BTreeMap::new(),
             Err(err) => return Err(SkillLibraryError::Io(err)),
@@ -383,12 +591,14 @@ impl SkillLibrary {
     /// Register a new skill. Returns [`SkillLibraryError::Duplicate`] if a
     /// skill with the same name is already present.
     pub async fn register(&self, skill: &Skill) -> Result<(), SkillLibraryError> {
+        let mut skill = skill.clone();
+        skill.normalize();
         {
             let mut guard = self.skills.write();
             if guard.contains_key(&skill.name) {
                 return Err(SkillLibraryError::Duplicate(skill.name.clone()));
             }
-            guard.insert(skill.name.clone(), skill.clone());
+            guard.insert(skill.name.clone(), skill);
         }
         self.persist().await
     }
@@ -433,6 +643,7 @@ impl SkillLibrary {
             let prior_f = prior as f64;
             skill.success_rate = (skill.success_rate.mul_add(prior_f, outcome)) / (prior_f + 1.0);
             skill.usage_count = prior.saturating_add(1);
+            Self::record_validation_fields(skill, success);
         }
         self.persist().await
     }
@@ -468,6 +679,26 @@ impl SkillLibrary {
             files_hint: task_files.to_vec(),
         };
         self.select(&query, usize::MAX)
+    }
+
+    /// Return all skills applicable to `task_category`, ordered by confidence,
+    /// validation count, then name.
+    pub fn query_by_task_category(&self, task_category: &str) -> Vec<Skill> {
+        let mut skills: Vec<Skill> = self
+            .skills
+            .read()
+            .values()
+            .filter(|skill| skill.matches_task_category(task_category))
+            .cloned()
+            .collect();
+        skills.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.validations.cmp(&a.validations))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        skills
     }
 
     // ── Voyager-style extraction & selection (§16.3.2-16.3.4) ──────
@@ -705,6 +936,11 @@ impl SkillLibrary {
         skill.score = score;
         skill.first_seen = Some(Utc::now());
         skill.task_category = category;
+        skill.task_categories = vec![skill.task_category.clone()];
+        skill.precondition = format!("Apply for {} tasks matching these symbols.", task_tier);
+        skill.procedure = skill.pattern.clone();
+        skill.postcondition = skill.summary.clone();
+        skill.created_at = Utc::now().to_rfc3339();
 
         {
             let mut guard = self.skills.write();
@@ -747,7 +983,7 @@ impl SkillLibrary {
         }
         let guard = self.skills.read();
         for existing in guard.values() {
-            if existing.task_category == category {
+            if existing.matches_task_category(category) {
                 let overlap = tags.iter().filter(|t| existing.tags.contains(t)).count();
                 let denom = tags.len().max(1);
                 if overlap as f64 / denom as f64 >= 0.7 {
@@ -784,6 +1020,12 @@ impl SkillLibrary {
         skill.score = eval_score;
         skill.first_seen = Some(Utc::now());
         skill.task_category = category;
+        skill.task_categories = vec![skill.task_category.clone()];
+        skill.precondition = format!("Apply for {} tasks.", skill.task_category);
+        skill.procedure = skill.pattern.clone();
+        skill.postcondition = skill.summary.clone();
+        skill.source_episodes = vec![episode.id.clone()];
+        skill.created_at = Utc::now().to_rfc3339();
         skill
     }
 
@@ -809,7 +1051,7 @@ impl SkillLibrary {
             .values()
             .filter(|skill| {
                 if let Some(ref cat) = query.category {
-                    if !skill.task_category.is_empty() && skill.task_category != *cat {
+                    if !skill.matches_task_category(cat) {
                         return false;
                     }
                 }
@@ -859,6 +1101,25 @@ impl SkillLibrary {
     /// subsequent gate check passed. Increments `match_count` (always) and
     /// `validated_count` (if `gate_passed`), and updates `last_matched`.
     #[allow(clippy::significant_drop_tightening)]
+    pub async fn record_validation(
+        &self,
+        skill_name: &str,
+        success: bool,
+    ) -> Result<(), SkillLibraryError> {
+        {
+            let mut guard = self.skills.write();
+            let Some(skill) = guard.get_mut(skill_name) else {
+                return Err(SkillLibraryError::NotFound(skill_name.to_string()));
+            };
+            Self::record_validation_fields(skill, success);
+        }
+        self.persist().await
+    }
+
+    /// Record that a skill was injected into a prompt and whether the
+    /// subsequent gate check passed. Increments `match_count` (always) and
+    /// `validated_count` (if `gate_passed`), and updates `last_matched`.
+    #[allow(clippy::significant_drop_tightening)]
     pub async fn record_outcome(
         &self,
         skill_name: &str,
@@ -874,6 +1135,7 @@ impl SkillLibrary {
                 skill.validated_count = skill.validated_count.saturating_add(1);
             }
             skill.last_matched = Some(Utc::now());
+            Self::record_validation_fields(skill, gate_passed);
         }
         self.persist().await
     }
@@ -942,6 +1204,16 @@ impl SkillLibrary {
         tokio::fs::rename(&tmp, &self.path).await?;
         Ok(())
     }
+
+    fn record_validation_fields(skill: &mut Skill, success: bool) {
+        if success {
+            skill.validations = skill.validations.saturating_add(1);
+        } else {
+            skill.failures = skill.failures.saturating_add(1);
+        }
+        skill.last_validated_at = Some(Utc::now().to_rfc3339());
+        skill.recompute_confidence();
+    }
 }
 
 fn dedup_strings(values: Vec<String>) -> Vec<String> {
@@ -1004,11 +1276,13 @@ mod tests {
 
         let fetched = library.get("alpha").unwrap();
         assert_eq!(fetched.name, "alpha");
+        assert_eq!(fetched.id, "alpha");
         assert_eq!(fetched.required_tools, vec!["read", "write"]);
         assert_eq!(fetched.example_inputs.len(), 2);
         assert_eq!(fetched.example_outputs.len(), 2);
         assert_eq!(fetched.usage_count, 0);
         assert!((fetched.success_rate - 0.0).abs() < f64::EPSILON);
+        assert!(!fetched.created_at.is_empty());
     }
 
     #[tokio::test]
@@ -1218,6 +1492,90 @@ mod tests {
         assert_eq!(skill.example_outputs, vec!["r"]);
     }
 
+    #[test]
+    fn structured_skill_contract_fields_are_preserved() {
+        let skill = Skill::new_structured(
+            "skill.contract",
+            "Contract Skill",
+            "When the task requires a compile-test-fix loop",
+            "Run cargo check, fix compiler errors, then run targeted tests",
+            "The crate compiles and the failing test scope passes",
+        )
+        .with_task_categories(["implementation", "verification"])
+        .with_source_episodes(["ep-001", "ep-002"]);
+
+        assert_eq!(skill.id, "skill.contract");
+        assert_eq!(skill.name, "Contract Skill");
+        assert_eq!(
+            skill.precondition,
+            "When the task requires a compile-test-fix loop"
+        );
+        assert_eq!(
+            skill.procedure,
+            "Run cargo check, fix compiler errors, then run targeted tests"
+        );
+        assert_eq!(
+            skill.postcondition,
+            "The crate compiles and the failing test scope passes"
+        );
+        assert_eq!(
+            skill.task_categories,
+            vec!["implementation", "verification"]
+        );
+        assert_eq!(skill.source_episodes, vec!["ep-001", "ep-002"]);
+        assert!(!skill.created_at.is_empty());
+    }
+
+    #[tokio::test]
+    async fn record_validation_updates_confidence_and_category_query() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("skills.json");
+        let library = SkillLibrary::new(&path).await.unwrap();
+
+        let implementation = Skill::new_structured(
+            "impl.loop",
+            "Compile Loop",
+            "Compilation is broken",
+            "Check compiler output, patch code, re-run cargo check",
+            "Build passes",
+        )
+        .with_task_categories(["implementation"]);
+        let docs = Skill::new_structured(
+            "docs.skill",
+            "Docs Skill",
+            "Docs task",
+            "Edit markdown",
+            "Docs updated",
+        )
+        .with_task_categories(["docs"]);
+
+        library.register(&implementation).await.unwrap();
+        library.register(&docs).await.unwrap();
+
+        library
+            .record_validation("Compile Loop", true)
+            .await
+            .unwrap();
+        library
+            .record_validation("Compile Loop", true)
+            .await
+            .unwrap();
+        library
+            .record_validation("Compile Loop", false)
+            .await
+            .unwrap();
+
+        let skill = library.get("Compile Loop").unwrap();
+        assert_eq!(skill.validations, 2);
+        assert_eq!(skill.failures, 1);
+        assert!((skill.confidence - (2.0 / 3.0)).abs() < 1e-9);
+        assert!(skill.last_validated_at.is_some());
+
+        let queried = library.query_by_task_category("implementation");
+        assert_eq!(queried.len(), 1);
+        assert_eq!(queried[0].name, "Compile Loop");
+    }
+
     // ── Voyager extraction / selection tests (§16.3.2-16.3.4) ──────
 
     fn make_episode(
@@ -1264,8 +1622,10 @@ mod tests {
         assert!(!skill.pattern.is_empty());
         assert_eq!(skill.tags, vec!["rust", "async"]);
         assert_eq!(skill.task_category, "backend");
+        assert_eq!(skill.task_categories, vec!["backend"]);
         assert!((skill.score - 0.9).abs() < f64::EPSILON);
         assert!(skill.first_seen.is_some());
+        assert_eq!(skill.source_episodes.len(), 1);
         assert_eq!(library.len(), 1);
     }
 
