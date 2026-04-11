@@ -36,8 +36,8 @@ pub mod episode_logger;
 pub mod hdc_clustering;
 /// Rolling latency EMAs and percentiles for routing feedback.
 pub mod latency;
-pub mod model_router;
 pub mod model_experiment;
+pub mod model_router;
 pub mod pareto;
 pub mod pattern_discovery;
 pub mod playbook;
