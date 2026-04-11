@@ -352,6 +352,68 @@ impl RokoConfig {
         self.schema_version < CURRENT_SCHEMA_VERSION
     }
 
+    /// Return the provider registry that should be used at runtime.
+    ///
+    /// New-style configs use `[providers.*]` directly. Older configs only had
+    /// a legacy `[agent]` section, so we synthesize the minimum provider
+    /// registry needed for backwards compatibility.
+    #[must_use]
+    pub fn effective_providers(&self) -> HashMap<String, ProviderConfig> {
+        if !self.providers.is_empty() {
+            return self.providers.clone();
+        }
+
+        let mut providers = HashMap::new();
+
+        let claude_command = self
+            .agent
+            .command
+            .clone()
+            .unwrap_or_else(|| "claude".to_string());
+
+        providers.insert(
+            "claude_cli".into(),
+            ProviderConfig {
+                kind: ProviderKind::ClaudeCli,
+                base_url: None,
+                api_key_env: None,
+                command: Some(claude_command),
+                args: self.agent.args.clone(),
+                timeout_ms: self.agent.timeout_ms,
+                extra_headers: None,
+                max_concurrent: None,
+            },
+        );
+
+        if let Some(base_url) = self.agent_env_value("ANTHROPIC_BASE_URL") {
+            providers.insert(
+                "anthropic".into(),
+                ProviderConfig {
+                    kind: ProviderKind::AnthropicApi,
+                    base_url: Some(base_url.to_owned()),
+                    api_key_env: self
+                        .agent_env_value("ANTHROPIC_API_KEY")
+                        .map(|_| "ANTHROPIC_API_KEY".to_string()),
+                    command: None,
+                    args: None,
+                    timeout_ms: self.agent.timeout_ms,
+                    extra_headers: None,
+                    max_concurrent: None,
+                },
+            );
+        }
+
+        providers
+    }
+
+    fn agent_env_value(&self, key: &str) -> Option<&str> {
+        self.agent.env.as_ref().and_then(|entries| {
+            entries
+                .iter()
+                .find_map(|(entry_key, entry_value)| (entry_key == key).then_some(entry_value.as_str()))
+        })
+    }
+
     /// Apply environment variable overrides.
     ///
     /// Recognized variables:
@@ -659,13 +721,13 @@ impl Default for ProjectConfig {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AgentConfig {
     /// Default model slug (e.g. `"claude-sonnet-4-6"`).
-    #[serde(default = "default_model")]
+    #[serde(default = "default_model", alias = "model")]
     pub default_model: String,
     /// Default backend (e.g. `"claude"`, `"codex"`, `"cursor"`).
     #[serde(default = "default_backend")]
     pub default_backend: String,
     /// Default reasoning effort (`"low"`, `"medium"`, `"high"`, `"max"`).
-    #[serde(default = "default_effort")]
+    #[serde(default = "default_effort", alias = "effort")]
     pub default_effort: String,
     /// Context window limit in thousands of tokens.
     #[serde(default = "default_context_limit_k")]
@@ -673,6 +735,18 @@ pub struct AgentConfig {
     /// When true, agents use `--bare` (skip built-in system prompt).
     #[serde(default = "default_true")]
     pub bare_mode: bool,
+    /// Legacy agent command used when no provider registry is configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Legacy CLI args used for the Claude subprocess path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    /// Legacy subprocess timeout in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    /// Legacy subprocess environment variables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<Vec<(String, String)>>,
     /// Global fallback model: if an agent spawn fails, retry with this.
     #[serde(default)]
     pub fallback_model: Option<String>,
@@ -717,6 +791,10 @@ impl Default for AgentConfig {
             default_effort: default_effort(),
             context_limit_k: default_context_limit_k(),
             bare_mode: default_true(),
+            command: None,
+            args: None,
+            timeout_ms: None,
+            env: None,
             fallback_model: None,
             roles: HashMap::new(),
         }
@@ -1559,6 +1637,39 @@ default_model = "claude-sonnet-4-6"
         assert_eq!(cfg.agent.default_model, "claude-sonnet-4-6");
         assert!(cfg.providers.is_empty());
         assert!(cfg.models.is_empty());
+    }
+
+    #[test]
+    fn effective_providers_backwards_compat() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../roko.toml");
+        let text = std::fs::read_to_string(path).expect("read roko.toml");
+        let cfg = RokoConfig::from_toml(&text).expect("parse roko.toml");
+        let providers = cfg.effective_providers();
+
+        let claude = providers.get("claude_cli").expect("claude_cli provider");
+        assert_eq!(claude.kind, ProviderKind::ClaudeCli);
+        assert_eq!(claude.command.as_deref(), Some("claude"));
+        assert_eq!(
+            claude.args.as_ref().expect("claude args"),
+            &vec![
+                "--print".to_string(),
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+                "--dangerously-skip-permissions".to_string(),
+            ]
+        );
+        assert_eq!(claude.timeout_ms, Some(300_000));
+
+        let anthropic = providers.get("anthropic").expect("anthropic provider");
+        assert_eq!(anthropic.kind, ProviderKind::AnthropicApi);
+        assert_eq!(
+            anthropic.base_url.as_deref(),
+            Some("http://127.0.0.1:4000")
+        );
+        assert_eq!(
+            anthropic.api_key_env.as_deref(),
+            Some("ANTHROPIC_API_KEY")
+        );
     }
 
     #[test]

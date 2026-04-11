@@ -167,6 +167,10 @@ fn convert_agent(m: &MoriConfig) -> AgentConfig {
         default_effort,
         context_limit_k: m.context_limit_k.unwrap_or(d.context_limit_k),
         bare_mode: m.agent_bare_mode.unwrap_or(d.bare_mode),
+        command: None,
+        args: None,
+        timeout_ms: None,
+        env: None,
         fallback_model: m.fallback_model.clone().or(d.fallback_model),
         roles,
     }
