@@ -43,6 +43,18 @@ impl CostTable {
             + (usage.cache_create_tokens as f64 * pricing.cache_write_per_m / 1_000_000.0)
     }
 
+    /// Normalize a token count to OpenAI-equivalent tokens for cross-provider comparison.
+    #[must_use]
+    pub fn normalize_tokens(&self, model_slug: &str, tokens: u64) -> u64 {
+        let ratio = self
+            .models
+            .get(model_slug)
+            .map(|pricing| pricing.tokenizer_ratio)
+            .unwrap_or(1.0);
+
+        (tokens as f64 * ratio) as u64
+    }
+
     /// Return the blended per-million-token cost normalized for tokenizer size.
     ///
     /// The blended value uses a 3:1 input/output weighting, matching the
@@ -162,6 +174,24 @@ mod tests {
 
         let cost = table.calculate("glm-5.1", &usage);
         assert!((cost - 0.002_393_5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn token_normalization_uses_tokenizer_ratio() {
+        let mut models = HashMap::new();
+        models.insert(
+            "glm-5.1".into(),
+            ModelPricing {
+                input_per_m: 1.40,
+                output_per_m: 4.40,
+                cache_read_per_m: 0.26,
+                cache_write_per_m: 1.75,
+                tokenizer_ratio: 1.05,
+            },
+        );
+
+        let table = CostTable { models };
+        assert_eq!(table.normalize_tokens("glm-5.1", 1_000), 1_050);
     }
 
     #[test]
