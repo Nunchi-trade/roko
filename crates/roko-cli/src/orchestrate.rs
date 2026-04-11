@@ -68,6 +68,7 @@ use roko_orchestrator::{
 use roko_std::NoOpScorer;
 use roko_std::StaticToolRegistry;
 use serde::{Deserialize, Serialize};
+use tokio::signal;
 use tokio::io::AsyncWriteExt;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken as TokioCancellationToken;
@@ -84,9 +85,51 @@ const WATCHER_INTERVAL_SECS: u64 = 30;
 const WATCHER_SIGNAL_TAIL: usize = 200;
 const EFFICIENCY_SIGNAL_TAIL: usize = 256;
 const GHOST_TURN_SIGNAL_KIND: &str = "conductor.ghost_turn";
+const SHUTDOWN_DRAIN_GRACE_SECS: u64 = 30;
 
 fn daimon_state_path(workdir: &Path) -> PathBuf {
     workdir.join(".roko").join("daimon").join("affect.json")
+}
+
+fn state_dir(workdir: &Path) -> PathBuf {
+    workdir.join(".roko").join("state")
+}
+
+fn executor_snapshot_path(workdir: &Path) -> PathBuf {
+    state_dir(workdir).join("executor.json")
+}
+
+async fn wait_for_shutdown_signal() -> Result<&'static str> {
+    #[cfg(unix)]
+    {
+        let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
+            .map_err(|e| anyhow!("install SIGTERM handler: {e}"))?;
+        tokio::select! {
+            result = signal::ctrl_c() => {
+                result.map_err(|e| anyhow!("wait for SIGINT: {e}"))?;
+                Ok("SIGINT")
+            }
+            _ = sigterm.recv() => Ok("SIGTERM"),
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        signal::ctrl_c()
+            .await
+            .map_err(|e| anyhow!("wait for Ctrl+C: {e}"))?;
+        Ok("SIGINT")
+    }
+}
+
+fn sync_file_if_present(path: &Path) -> Result<()> {
+    match std::fs::File::open(path) {
+        Ok(file) => file
+            .sync_all()
+            .with_context(|| format!("sync {}", path.display())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("open {}", path.display())),
+    }
 }
 
 fn install_episode_distillation_hook(learning: &mut LearningRuntime, workdir: &Path) {
@@ -2460,6 +2503,29 @@ impl PlanRunner {
         mcp_state.ref_counts.clear();
     }
 
+    /// Force-kill all managed agent processes, then persist runtime artifacts.
+    async fn force_shutdown(&self) {
+        let killed = self.supervisor.kill_all().await;
+        if !killed.is_empty() {
+            tracing::warn!(
+                "[orchestrate] killed {} agent processes after shutdown timeout",
+                killed.len()
+            );
+        }
+        self.shutdown().await;
+    }
+
+    /// Flush log-like runtime artifacts so resume sees the latest state.
+    async fn flush_logs(&self) -> Result<()> {
+        sync_file_if_present(&self.workdir.join(".roko").join("signals.jsonl"))?;
+        sync_file_if_present(&self.workdir.join(".roko").join("episodes.jsonl"))?;
+        sync_file_if_present(&self.workdir.join(".roko").join("logs").join("daemon.log"))?;
+        sync_file_if_present(&self.workdir.join(".roko").join("logs").join("daemon.err"))?;
+        std::io::stdout().flush().context("flush stdout")?;
+        std::io::stderr().flush().context("flush stderr")?;
+        Ok(())
+    }
+
     /// The root cancellation token — callers can cancel to trigger shutdown.
     #[must_use]
     pub const fn cancel_token(&self) -> &CancelToken {
@@ -2638,7 +2704,7 @@ impl PlanRunner {
     /// Returns an error if the state directory cannot be created or the
     /// files cannot be written.
     pub fn save_state(&self) -> Result<()> {
-        let state_dir = self.workdir.join(".roko").join("state");
+        let state_dir = state_dir(&self.workdir);
         std::fs::create_dir_all(&state_dir).map_err(|e| anyhow!("create state dir: {e}"))?;
 
         // Executor snapshot — atomic write.
@@ -2674,6 +2740,72 @@ impl PlanRunner {
         }
 
         Ok(())
+    }
+
+    /// Persist the current state and ensure the executor snapshot is present at
+    /// `snapshot_path`, even when the caller wants a non-default location.
+    fn save_state_to(&self, snapshot_path: &Path) -> Result<()> {
+        self.save_state()?;
+
+        let default_snapshot = executor_snapshot_path(&self.workdir);
+        if snapshot_path == default_snapshot {
+            return Ok(());
+        }
+
+        let snapshot_json = self.snapshot()?;
+        if let Some(parent) = snapshot_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create snapshot dir {}", parent.display()))?;
+        }
+        let tmp_path = snapshot_path.with_extension("json.tmp");
+        std::fs::write(&tmp_path, snapshot_json)
+            .with_context(|| format!("write snapshot tmp {}", tmp_path.display()))?;
+        std::fs::rename(&tmp_path, snapshot_path)
+            .with_context(|| format!("rename snapshot {}", snapshot_path.display()))?;
+        Ok(())
+    }
+
+    fn current_report(&self) -> OrchestrationReport {
+        let snapshot = self.executor.snapshot(0);
+        let mut plan_ids = snapshot.queue_order;
+        for plan_id in snapshot.plan_states.keys() {
+            if !plan_ids.iter().any(|queued| queued == plan_id) {
+                plan_ids.push(plan_id.clone());
+            }
+        }
+
+        let plans = plan_ids
+            .iter()
+            .map(|id| {
+                let state = self.executor.plan_state(id);
+                let succeeded = state.is_some_and(|s| {
+                    matches!(
+                        s.current_phase.kind(),
+                        PhaseKind::Complete | PhaseKind::Done
+                    )
+                });
+                PlanRunReport {
+                    plan_id: id.clone(),
+                    succeeded,
+                    agent_calls: self.per_plan_agents.get(id).copied().unwrap_or(0),
+                    gate_results: self.per_plan_gates.get(id).cloned().unwrap_or_default(),
+                }
+            })
+            .collect();
+
+        let fleet_cfactor = compute_fleet_cfactor(&self.efficiency_events);
+        let fleet_cfactor = if fleet_cfactor.plan_count > 0 {
+            Some(fleet_cfactor)
+        } else {
+            None
+        };
+
+        OrchestrationReport {
+            total_agent_calls: self.agent_calls,
+            total_gate_runs: self.gate_runs,
+            plans,
+            fleet_cfactor,
+        }
     }
 
     /// Returns a reference to the inner executor (for status queries).
@@ -3024,6 +3156,11 @@ impl PlanRunner {
                 break;
             }
 
+            if self.cancel.is_cancelled() {
+                tracing::warn!("[orchestrate] shutdown requested; stopping new dispatches");
+                break;
+            }
+
             let completed_plans = self.executor.completed_plans();
             for plan_id in &plan_ids {
                 let Some(state) = self.executor.plan_state(plan_id) else {
@@ -3049,12 +3186,17 @@ impl PlanRunner {
                 // No actions but not all terminal — wait and retry.
                 tokio::select! {
                     _ = watcher_cancel.cancelled() => break,
+                    _ = self.cancel.cancelled() => break,
                     _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {}
                 }
                 continue;
             }
 
             for action in actions {
+                if self.cancel.is_cancelled() {
+                    tracing::warn!("[orchestrate] shutdown requested; leaving remaining actions queued");
+                    break;
+                }
                 self.dispatch_action(action).await;
             }
 
@@ -3092,51 +3234,55 @@ impl PlanRunner {
             })
             .collect();
 
-        // Emit plan-completed server events.
-        for p in &plans {
-            self.emit_server_event(crate::serve::events::ServerEvent::PlanCompleted {
-                plan_id: p.plan_id.clone(),
-                success: p.succeeded,
-            });
-            self.emit_execution_event(
-                &p.plan_id,
-                crate::serve::events::ExecutionEvent::PlanCompleted {
-                    outcome: if p.succeeded {
-                        "succeeded".to_string()
-                    } else {
-                        "failed".to_string()
+        if self.cancel.is_cancelled() {
+            tracing::warn!("[orchestrate] run interrupted by shutdown signal; preserving partial state");
+        } else {
+            // Emit plan-completed server events.
+            for p in &plans {
+                self.emit_server_event(crate::serve::events::ServerEvent::PlanCompleted {
+                    plan_id: p.plan_id.clone(),
+                    success: p.succeeded,
+                });
+                self.emit_execution_event(
+                    &p.plan_id,
+                    crate::serve::events::ExecutionEvent::PlanCompleted {
+                        outcome: if p.succeeded {
+                            "succeeded".to_string()
+                        } else {
+                            "failed".to_string()
+                        },
+                        stats: serde_json::json!({
+                            "plan_id": &p.plan_id,
+                            "succeeded": p.succeeded,
+                            "agent_calls": p.agent_calls,
+                            "gate_results": &p.gate_results,
+                        }),
                     },
-                    stats: serde_json::json!({
-                        "plan_id": &p.plan_id,
-                        "succeeded": p.succeeded,
-                        "agent_calls": p.agent_calls,
-                        "gate_results": &p.gate_results,
-                    }),
-                },
-            );
-        }
-
-        // Increment plan completion metrics and log cost summaries.
-        for p in &plans {
-            let status = if p.succeeded { "succeeded" } else { "failed" };
-            self.metrics
-                .register_counter(
-                    "roko_plans_total",
-                    "",
-                    LabelSet::from_pairs(&[("status", status)]),
-                )
-                .inc();
-
-            // Log cost summary from plan_costs HashMap.
-            let plan_cost = self.plan_costs.get(&p.plan_id).copied().unwrap_or(0.0);
-            if plan_cost > 0.0 {
-                tracing::info!(
-                    plan_id = %p.plan_id,
-                    cost_usd = plan_cost,
-                    agent_calls = p.agent_calls,
-                    succeeded = p.succeeded,
-                    "plan completed"
                 );
+            }
+
+            // Increment plan completion metrics and log cost summaries.
+            for p in &plans {
+                let status = if p.succeeded { "succeeded" } else { "failed" };
+                self.metrics
+                    .register_counter(
+                        "roko_plans_total",
+                        "",
+                        LabelSet::from_pairs(&[("status", status)]),
+                    )
+                    .inc();
+
+                // Log cost summary from plan_costs HashMap.
+                let plan_cost = self.plan_costs.get(&p.plan_id).copied().unwrap_or(0.0);
+                if plan_cost > 0.0 {
+                    tracing::info!(
+                        plan_id = %p.plan_id,
+                        cost_usd = plan_cost,
+                        agent_calls = p.agent_calls,
+                        succeeded = p.succeeded,
+                        "plan completed"
+                    );
+                }
             }
         }
 
@@ -3208,8 +3354,10 @@ impl PlanRunner {
             "plan run complete"
         );
 
-        // Auto-dream consolidation at plan completion (§5D.05).
-        self.maybe_auto_dream().await;
+        if !self.cancel.is_cancelled() {
+            // Auto-dream consolidation at plan completion (§5D.05).
+            self.maybe_auto_dream().await;
+        }
 
         // Final save before returning.
         if let Err(e) = self.save_state() {
@@ -3323,6 +3471,79 @@ impl PlanRunner {
     /// trackers for task-level granularity.
     #[instrument(skip_all, fields(plan_dir = %path.display()))]
     pub async fn run_task_plans(&mut self, path: &Path) -> Result<OrchestrationReport> {
+        enum RunExit {
+            Completed(Result<OrchestrationReport>),
+            Signaled(Result<OrchestrationReport>),
+            SignalTimedOut,
+        }
+
+        let snapshot_path = executor_snapshot_path(&self.workdir);
+        let cancel = self.cancel.clone();
+        let outcome = {
+            let run = self.run_task_plans_inner(path);
+            tokio::pin!(run);
+
+            tokio::select! {
+                result = &mut run => RunExit::Completed(result),
+                signal = wait_for_shutdown_signal() => {
+                    let signal = match signal {
+                        Ok(signal) => signal,
+                        Err(err) => return Err(err),
+                    };
+                    tracing::warn!(
+                        signal,
+                        "[orchestrate] shutdown signal received, draining in-flight tasks"
+                    );
+
+                    // Stop accepting new work. The run loop observes this and exits
+                    // after the current in-flight task finishes or gets aborted.
+                    cancel.cancel();
+
+                    match tokio::time::timeout(
+                        Duration::from_secs(SHUTDOWN_DRAIN_GRACE_SECS),
+                        &mut run,
+                    )
+                    .await
+                    {
+                        Ok(result) => RunExit::Signaled(result),
+                        Err(_) => {
+                            tracing::warn!(
+                                "[orchestrate] shutdown drain timed out after {}s, killing remaining agents",
+                                SHUTDOWN_DRAIN_GRACE_SECS
+                            );
+                            RunExit::SignalTimedOut
+                        }
+                    }
+                }
+            }
+        };
+
+        match outcome {
+            RunExit::Completed(result) => result,
+            RunExit::Signaled(result) => {
+                self.save_state_to(&snapshot_path)?;
+                tracing::info!(
+                    "[orchestrate] checkpoint saved to {}",
+                    snapshot_path.display()
+                );
+                self.flush_logs().await?;
+                result
+            }
+            RunExit::SignalTimedOut => {
+                self.force_shutdown().await;
+                self.save_state_to(&snapshot_path)?;
+                tracing::info!(
+                    "[orchestrate] checkpoint saved to {}",
+                    snapshot_path.display()
+                );
+                self.flush_logs().await?;
+                Ok(self.current_report())
+            }
+        }
+    }
+
+    #[instrument(skip_all, fields(plan_dir = %path.display()))]
+    async fn run_task_plans_inner(&mut self, path: &Path) -> Result<OrchestrationReport> {
         let watcher_cancel = TokioCancellationToken::new();
         let watcher_task = WatcherRunner {
             conductor: Arc::clone(&self.conductor),
