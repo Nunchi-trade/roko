@@ -42,6 +42,7 @@
 //! be shared across async tasks via `Arc<LinUCBRouter>`.
 
 use parking_lot::Mutex;
+use crate::cost_table::CostTable;
 use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
 use roko_core::task::{TaskCategory, TaskComplexityBand};
 use serde::{Deserialize, Serialize};
@@ -209,6 +210,18 @@ pub fn compute_routing_reward(
     let nc = normalized_cost.clamp(0.0, 1.0);
     let nd = normalized_duration.clamp(0.0, 1.0);
     (1.0 - nd).mul_add(0.2, pr.mul_add(0.5, (1.0 - nc) * 0.3))
+}
+
+/// Normalize a model's blended cost against the routing ceiling.
+///
+/// Uses the cost table's blended per-million-token estimate so cost
+/// comparisons stay consistent across providers with different pricing
+/// structures and tokenizers.
+#[must_use]
+pub fn normalized_cost(model_slug: &str, cost_table: &CostTable) -> f64 {
+    let blended = cost_table.blended_cost_per_m(model_slug);
+    let max_blended = 75.0;
+    (blended / max_blended).min(1.0)
 }
 
 /// Compute the composite reward signal using observed latency and an SLA.
@@ -1073,6 +1086,33 @@ mod tests {
         assert!(
             (r - 0.8).abs() < 1e-10,
             "clamped reward should be 0.8, got {r}"
+        );
+    }
+
+    // ── Cost normalization uses blended pricing ───────────────────────
+
+    #[test]
+    fn normalized_cost_uses_blended_pricing() {
+        let table = CostTable {
+            models: HashMap::new(),
+        }
+        .with_defaults();
+
+        let glm_5_1 = normalized_cost("glm-5.1", &table);
+        let claude_opus = normalized_cost("claude-opus-4-6", &table);
+        let kimi_k2_5 = normalized_cost("kimi-k2.5", &table);
+
+        assert!(
+            (glm_5_1 - 0.0301).abs() < 0.001,
+            "glm-5.1 normalized cost should be close to 0.0301, got {glm_5_1}"
+        );
+        assert!(
+            (claude_opus - 0.4).abs() < 0.001,
+            "claude-opus normalized cost should be close to 0.4, got {claude_opus}"
+        );
+        assert!(
+            (kimi_k2_5 - 0.0157).abs() < 0.001,
+            "kimi-k2.5 normalized cost should be close to 0.0157, got {kimi_k2_5}"
         );
     }
 
