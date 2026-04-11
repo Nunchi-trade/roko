@@ -350,6 +350,13 @@ mod tests {
                 .collect();
             RenderedResults::JsonMessages(serde_json::json!(msgs))
         }
+
+        fn render_assistant_message(&self, response: &BackendResponse) -> Option<serde_json::Value> {
+            let BackendResponse::Json(ref v) = *response else {
+                return None;
+            };
+            v.get("assistant_message").cloned()
+        }
     }
 
     // ─── Mock handler ────────────────────────────────────────────────
@@ -518,6 +525,59 @@ mod tests {
                     serde_json::json!({"message": {"content": "final"}}),
                 ))
             }
+        }
+    }
+
+    /// Captures each request and emits three thinking tool-call turns before
+    /// returning a final answer.
+    struct ReasoningCaptureBackend {
+        call_count: AtomicUsize,
+        captured: parking_lot::Mutex<Vec<Vec<serde_json::Value>>>,
+    }
+
+    impl ReasoningCaptureBackend {
+        fn new() -> Self {
+            Self {
+                call_count: AtomicUsize::new(0),
+                captured: parking_lot::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmBackend for ReasoningCaptureBackend {
+        async fn send_turn(
+            &self,
+            messages: &[serde_json::Value],
+            _tools: &RenderedTools,
+        ) -> Result<BackendResponse, LlmError> {
+            self.captured.lock().push(messages.to_vec());
+
+            let turn = self.call_count.fetch_add(1, Ordering::SeqCst) + 1;
+            let response = match turn {
+                1..=3 => serde_json::json!({
+                    "assistant_message": {
+                        "role": "assistant",
+                        "content": "",
+                        "reasoning_content": format!("reasoning turn {turn}"),
+                        "tool_calls": [{
+                            "id": format!("call-{turn}"),
+                            "name": "echo",
+                            "arguments": { "turn": turn }
+                        }]
+                    },
+                    "tool_calls": [{
+                        "id": format!("call-{turn}"),
+                        "name": "echo",
+                        "arguments": { "turn": turn }
+                    }]
+                }),
+                _ => serde_json::json!({
+                    "message": { "content": "final" }
+                }),
+            };
+
+            Ok(BackendResponse::Json(response))
         }
     }
 
@@ -732,6 +792,34 @@ mod tests {
             .find(|m| m.get("tool_call_id").is_some())
             .expect("should have a tool-result message");
         assert_eq!(tool_msg["tool_call_id"], "call-42");
+    }
+
+    #[tokio::test]
+    async fn reasoning_preservation_across_loop_turns() {
+        let capturing = Arc::new(ReasoningCaptureBackend::new());
+        let backend = capturing.clone() as Arc<dyn LlmBackend>;
+        let tl = make_tool_loop(backend, 25);
+        let ctx = ToolContext::testing("/tmp");
+
+        let out = tl.run("system", "user", &test_tools(), &ctx).await;
+
+        assert_eq!(out.stop_reason, StopReason::Stop);
+        assert_eq!(out.iterations, 3);
+        assert_eq!(out.final_text, "final");
+
+        let captured = capturing.captured.lock();
+        assert_eq!(captured.len(), 4, "backend should be called four times");
+
+        let fourth_turn_msgs = &captured[3];
+        let reasoning_values: Vec<&str> = fourth_turn_msgs
+            .iter()
+            .filter(|message| message["role"] == "assistant")
+            .filter_map(|message| message["reasoning_content"].as_str())
+            .collect();
+        assert_eq!(
+            reasoning_values,
+            vec!["reasoning turn 1", "reasoning turn 2", "reasoning turn 3"]
+        );
     }
 
     #[tokio::test]
