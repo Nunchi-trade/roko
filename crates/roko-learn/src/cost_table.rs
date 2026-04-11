@@ -81,6 +81,33 @@ impl CostTable {
 
         Self { models: table }
     }
+
+    /// Fill in fallback pricing rows for known models without overriding config.
+    #[must_use]
+    pub fn with_defaults(mut self) -> Self {
+        let defaults = [
+            ("claude-opus-4-6", 15.00, 75.00, 3.75, 18.75, 1.0),
+            ("claude-sonnet-4-6", 3.00, 15.00, 0.30, 3.75, 1.0),
+            ("claude-haiku-4-5", 0.80, 4.00, 0.08, 1.00, 1.0),
+            ("glm-5.1", 1.40, 4.40, 0.26, 1.75, 1.05),
+            ("glm-5", 1.00, 3.20, 0.50, 1.25, 1.05),
+            ("kimi-k2.5", 0.60, 3.00, 0.10, 0.75, 0.98),
+            ("gpt-5.2", 2.00, 8.00, 0.50, 2.50, 1.0),
+            ("gpt-5.4", 3.00, 12.00, 0.75, 3.75, 1.0),
+        ];
+
+        for (slug, input, output, cache_r, cache_w, ratio) in defaults {
+            self.models.entry(slug.to_string()).or_insert(ModelPricing {
+                input_per_m: input,
+                output_per_m: output,
+                cache_read_per_m: cache_r,
+                cache_write_per_m: cache_w,
+                tokenizer_ratio: ratio,
+            });
+        }
+
+        self
+    }
 }
 
 #[cfg(test)]
@@ -169,5 +196,38 @@ mod tests {
         assert!((pricing.cache_read_per_m - 0.26).abs() < 1e-12);
         assert!((pricing.cache_write_per_m - 1.75).abs() < 1e-12);
         assert!((pricing.tokenizer_ratio - 1.05).abs() < 1e-12);
+    }
+
+    #[test]
+    fn cost_defaults() {
+        let mut models = HashMap::new();
+        models.insert(
+            "custom-model".into(),
+            ModelPricing {
+                input_per_m: 9.99,
+                output_per_m: 8.88,
+                cache_read_per_m: 7.77,
+                cache_write_per_m: 6.66,
+                tokenizer_ratio: 1.23,
+            },
+        );
+
+        let table = CostTable { models }.with_defaults();
+
+        assert!(table.models.len() >= 8);
+
+        let claude_opus = table.models.get("claude-opus-4-6").expect("claude-opus-4-6");
+        assert!((claude_opus.input_per_m - 15.00).abs() < 1e-12);
+        assert!((claude_opus.output_per_m - 75.00).abs() < 1e-12);
+        assert!((claude_opus.cache_read_per_m - 3.75).abs() < 1e-12);
+        assert!((claude_opus.cache_write_per_m - 18.75).abs() < 1e-12);
+        assert!((claude_opus.tokenizer_ratio - 1.0).abs() < 1e-12);
+
+        let custom = table.models.get("custom-model").expect("custom-model");
+        assert!((custom.input_per_m - 9.99).abs() < 1e-12);
+        assert!((custom.output_per_m - 8.88).abs() < 1e-12);
+        assert!((custom.cache_read_per_m - 7.77).abs() < 1e-12);
+        assert!((custom.cache_write_per_m - 6.66).abs() < 1e-12);
+        assert!((custom.tokenizer_ratio - 1.23).abs() < 1e-12);
     }
 }
