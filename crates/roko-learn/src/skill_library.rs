@@ -34,7 +34,10 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
+use roko_agent::{Agent, nl_to_format::NlToFormatConverter};
+use roko_core::{Body, Context, Kind, Signal};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -458,6 +461,132 @@ impl SkillExtractionRequest {
     }
 }
 
+/// Structured skill extracted from a successful episode before promotion into
+/// the persistent [`SkillLibrary`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SkillCandidate {
+    /// Stable candidate identifier.
+    #[serde(default)]
+    pub id: String,
+    /// Source episode identifier (`episode_id` when present, else `id`).
+    #[serde(default)]
+    pub source_episode_id: String,
+    /// Task identifier associated with the episode.
+    #[serde(default)]
+    pub task_id: String,
+    /// Short candidate title.
+    #[serde(default)]
+    pub title: String,
+    /// Task type or category where the skill applies.
+    #[serde(default)]
+    pub task_category: String,
+    /// Complexity band where the skill applies.
+    #[serde(default)]
+    pub complexity: String,
+    /// Files involved in the successful episode.
+    #[serde(default)]
+    pub files_involved: Vec<String>,
+    /// Short summary of the tool call sequence.
+    #[serde(default)]
+    pub tool_sequence_summary: String,
+    /// Natural-language applicability contract.
+    #[serde(default)]
+    pub precondition: String,
+    /// Natural-language success condition.
+    #[serde(default)]
+    pub postcondition: String,
+    /// Natural-language reusable skill description.
+    #[serde(default)]
+    pub skill_description: String,
+    /// Short summary of the successful output.
+    #[serde(default)]
+    pub output_summary: String,
+    /// Gate outcomes attached to the source episode.
+    #[serde(default)]
+    pub gate_results: Vec<SkillGateResult>,
+}
+
+#[derive(Debug, Serialize)]
+struct SkillCandidateEpisodeRecord {
+    source_episode_id: String,
+    task_id: String,
+    agent_id: String,
+    model: String,
+    task_category: String,
+    complexity: String,
+    files_involved: Vec<String>,
+    tool_sequence: Vec<String>,
+    gate_results: Vec<SkillGateResult>,
+    output_summary: String,
+    reasoning_summary: String,
+    duration_secs: f64,
+    turns: u64,
+    usage: crate::episode_logger::Usage,
+}
+
+impl SkillCandidateEpisodeRecord {
+    fn from_episode(episode: &crate::episode_logger::Episode) -> Self {
+        Self {
+            source_episode_id: episode_source_id(episode).to_string(),
+            task_id: episode.task_id.clone(),
+            agent_id: episode.agent_id.clone(),
+            model: episode_model(episode),
+            task_category: episode_task_category(episode),
+            complexity: episode_complexity(episode),
+            files_involved: episode_files(episode),
+            tool_sequence: episode_tool_sequence(episode),
+            gate_results: episode_gate_results(episode),
+            output_summary: episode_output_summary(episode),
+            reasoning_summary: episode.reasoning_summary.clone().unwrap_or_default(),
+            duration_secs: episode.duration_secs,
+            turns: episode.turns,
+            usage: episode.usage.clone(),
+        }
+    }
+}
+
+/// Extract candidate skills from successful episodes that passed their gates.
+///
+/// The judge agent receives one episode at a time and returns a structured
+/// summary capturing the precondition, postcondition, tool sequence, and
+/// reusable skill description. If the judge response is malformed, a
+/// deterministic fallback candidate is synthesized from the episode metadata.
+#[must_use]
+pub async fn extract_skill_candidates(
+    episodes: &[crate::episode_logger::Episode],
+    judge_agent: &dyn Agent,
+) -> Vec<SkillCandidate> {
+    let mut out = Vec::new();
+
+    for episode in episodes
+        .iter()
+        .filter(|episode| episode_is_skill_candidate(episode))
+    {
+        let prompt = build_skill_candidate_prompt(episode);
+        let input = Signal::builder(Kind::Prompt)
+            .body(Body::text(prompt))
+            .build();
+        let result = judge_agent.run(&input, &Context::now()).await;
+
+        let candidate = if result.success {
+            result
+                .output
+                .body
+                .as_text()
+                .ok()
+                .and_then(parse_skill_candidate_response)
+                .map(|candidate| normalize_skill_candidate(candidate, episode))
+                .unwrap_or_else(|| fallback_skill_candidate(episode))
+        } else {
+            fallback_skill_candidate(episode)
+        };
+
+        out.push(candidate);
+    }
+
+    out
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchSkillOutcome {
     Success,
@@ -529,6 +658,73 @@ impl PatternGenerator for TemplatePatternGenerator {
 /// Maximum pattern length in characters (~250 tokens at 3 chars/token).
 const MAX_PATTERN_CHARS: usize = 750;
 
+fn skill_candidate_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": [
+            "title",
+            "tool_sequence_summary",
+            "precondition",
+            "postcondition",
+            "skill_description"
+        ],
+        "properties": {
+            "id": { "type": "string" },
+            "source_episode_id": { "type": "string" },
+            "task_id": { "type": "string" },
+            "title": { "type": "string" },
+            "task_category": { "type": "string" },
+            "complexity": { "type": "string" },
+            "files_involved": {
+                "type": "array",
+                "items": { "type": "string" }
+            },
+            "tool_sequence_summary": { "type": "string" },
+            "precondition": { "type": "string" },
+            "postcondition": { "type": "string" },
+            "skill_description": { "type": "string" },
+            "output_summary": { "type": "string" },
+            "gate_results": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "gate": { "type": "string" },
+                        "passed": { "type": "boolean" },
+                        "score": { "type": "number" }
+                    }
+                }
+            }
+        }
+    })
+}
+
+fn build_skill_candidate_prompt(episode: &crate::episode_logger::Episode) -> String {
+    let record = SkillCandidateEpisodeRecord::from_episode(episode);
+    let record_json = serde_json::to_string_pretty(&record).unwrap_or_else(|_| "{}".to_string());
+    let extractor = NlToFormatConverter::new();
+
+    format!(
+        "You are Roko's skill extractor.\n\
+         Read one successful execution episode and extract a reusable skill candidate.\n\
+         Be concrete and conservative. Use only evidence present in the episode.\n\
+         Summarize the tool sequence, identify the precondition, identify the postcondition, and write a reusable natural-language skill description.\n\
+         Assume this is a cheap haiku-class summarization pass, so keep fields concise and specific.\n\n\
+         {}\n\n\
+         Episode:\n```json\n{}\n```\n",
+        extractor.extraction_prompt(&skill_candidate_schema()),
+        record_json
+    )
+}
+
+fn parse_skill_candidate_response(response: &str) -> Option<SkillCandidate> {
+    let extractor = NlToFormatConverter::new();
+    let extracted = extractor
+        .convert(response, &skill_candidate_schema())
+        .ok()?;
+    serde_json::from_value(extracted).ok()
+}
+
 /// Extract a string from `episode.extra[key]`, defaulting to `""`.
 fn extra_str(episode: &crate::episode_logger::Episode, key: &str) -> String {
     episode
@@ -551,6 +747,262 @@ fn extra_strings(episode: &crate::episode_logger::Episode, key: &str) -> Vec<Str
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn episode_source_id(episode: &crate::episode_logger::Episode) -> &str {
+    if episode.episode_id.trim().is_empty() {
+        &episode.id
+    } else {
+        &episode.episode_id
+    }
+}
+
+fn episode_gate_passed(episode: &crate::episode_logger::Episode) -> bool {
+    if let Some(passed) = episode.extra.get("gate_passed").and_then(Value::as_bool) {
+        return passed;
+    }
+
+    if !episode.gate_verdicts.is_empty() {
+        episode.gate_verdicts.iter().all(|verdict| verdict.passed)
+    } else {
+        episode.success
+    }
+}
+
+fn episode_is_skill_candidate(episode: &crate::episode_logger::Episode) -> bool {
+    episode.success && episode_gate_passed(episode)
+}
+
+fn episode_task_category(episode: &crate::episode_logger::Episode) -> String {
+    extra_str(episode, "task_category")
+}
+
+fn episode_complexity(episode: &crate::episode_logger::Episode) -> String {
+    extra_str(episode, "complexity_band")
+}
+
+fn episode_files(episode: &crate::episode_logger::Episode) -> Vec<String> {
+    dedup_strings(extra_strings(episode, "files"))
+}
+
+fn episode_model(episode: &crate::episode_logger::Episode) -> String {
+    let model = extra_str(episode, "model");
+    if model.is_empty() {
+        episode.model.clone()
+    } else {
+        model
+    }
+}
+
+fn episode_gate_results(episode: &crate::episode_logger::Episode) -> Vec<SkillGateResult> {
+    episode
+        .gate_verdicts
+        .iter()
+        .map(|verdict| {
+            SkillGateResult::new(
+                &verdict.gate,
+                verdict.passed,
+                f64::from(u8::from(verdict.passed)),
+            )
+        })
+        .collect()
+}
+
+fn episode_output_summary(episode: &crate::episode_logger::Episode) -> String {
+    if let Some(summary) = episode
+        .extra
+        .get("output_summary")
+        .and_then(Value::as_str)
+        .filter(|summary| !summary.trim().is_empty())
+    {
+        return summary.to_string();
+    }
+
+    if let Some(summary) = episode.reasoning_summary.as_deref()
+        && !summary.trim().is_empty()
+    {
+        return summary.to_string();
+    }
+
+    if !episode.task_id.trim().is_empty() {
+        return format!("Completed task {}", episode.task_id);
+    }
+
+    "Completed successfully".to_string()
+}
+
+fn episode_tool_sequence(episode: &crate::episode_logger::Episode) -> Vec<String> {
+    for key in ["tool_calls", "tool_sequence", "tools_used", "tools"] {
+        if let Some(arr) = episode.extra.get(key).and_then(Value::as_array) {
+            let tools: Vec<String> = arr.iter().filter_map(extract_tool_name).collect();
+            if !tools.is_empty() {
+                return tools;
+            }
+        }
+    }
+
+    episode
+        .external_actions
+        .iter()
+        .filter_map(extract_tool_name)
+        .collect()
+}
+
+fn extract_tool_name(value: &Value) -> Option<String> {
+    if let Some(name) = value.as_str().filter(|name| !name.trim().is_empty()) {
+        return Some(name.to_string());
+    }
+
+    let object = value.as_object()?;
+    for key in ["tool_name", "tool", "name", "action_type", "kind"] {
+        if let Some(name) = object.get(key).and_then(Value::as_str)
+            && !name.trim().is_empty()
+        {
+            return Some(name.to_string());
+        }
+    }
+
+    object
+        .get("function")
+        .and_then(Value::as_object)
+        .and_then(|function| function.get("name"))
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn summarize_tool_sequence(episode: &crate::episode_logger::Episode) -> String {
+    let tools = episode_tool_sequence(episode);
+    if tools.is_empty() {
+        "No tool sequence captured.".to_string()
+    } else {
+        tools.join(" -> ")
+    }
+}
+
+fn fallback_skill_candidate(episode: &crate::episode_logger::Episode) -> SkillCandidate {
+    let gate_results = episode_gate_results(episode);
+    let output_summary = episode_output_summary(episode);
+    let task_category = episode_task_category(episode);
+    let complexity = episode_complexity(episode);
+    let files_involved = episode_files(episode);
+    let tool_sequence_summary = summarize_tool_sequence(episode);
+    let precondition = build_precondition(&task_category, &complexity, &files_involved);
+    let postcondition = build_postcondition(&gate_results, &output_summary);
+    let title = if !task_category.is_empty() {
+        format!("{task_category} episode pattern")
+    } else {
+        "successful episode pattern".to_string()
+    };
+    let skill_description = format!(
+        "Use {} to complete the task and reach {}.",
+        tool_sequence_summary, postcondition
+    );
+
+    SkillCandidate {
+        id: format!("candidate_{}", episode_source_id(episode)),
+        source_episode_id: episode_source_id(episode).to_string(),
+        task_id: episode.task_id.clone(),
+        title,
+        task_category,
+        complexity,
+        files_involved,
+        tool_sequence_summary,
+        precondition,
+        postcondition,
+        skill_description,
+        output_summary,
+        gate_results,
+    }
+}
+
+fn normalize_skill_candidate(
+    mut candidate: SkillCandidate,
+    episode: &crate::episode_logger::Episode,
+) -> SkillCandidate {
+    let fallback = fallback_skill_candidate(episode);
+
+    if candidate.id.trim().is_empty() {
+        candidate.id = fallback.id;
+    }
+    if candidate.source_episode_id.trim().is_empty() {
+        candidate.source_episode_id = fallback.source_episode_id;
+    }
+    if candidate.task_id.trim().is_empty() {
+        candidate.task_id = fallback.task_id;
+    }
+    if candidate.title.trim().is_empty() {
+        candidate.title = fallback.title;
+    }
+    if candidate.task_category.trim().is_empty() {
+        candidate.task_category = fallback.task_category;
+    }
+    if candidate.complexity.trim().is_empty() {
+        candidate.complexity = fallback.complexity;
+    }
+    if candidate.files_involved.is_empty() {
+        candidate.files_involved = fallback.files_involved;
+    } else {
+        candidate.files_involved = dedup_strings(candidate.files_involved);
+    }
+    if candidate.tool_sequence_summary.trim().is_empty() {
+        candidate.tool_sequence_summary = fallback.tool_sequence_summary;
+    }
+    if candidate.precondition.trim().is_empty() {
+        candidate.precondition = fallback.precondition;
+    }
+    if candidate.postcondition.trim().is_empty() {
+        candidate.postcondition = fallback.postcondition;
+    }
+    if candidate.skill_description.trim().is_empty() {
+        candidate.skill_description = fallback.skill_description;
+    }
+    if candidate.output_summary.trim().is_empty() {
+        candidate.output_summary = fallback.output_summary;
+    }
+    if candidate.gate_results.is_empty() {
+        candidate.gate_results = fallback.gate_results;
+    }
+
+    candidate
+}
+
+fn build_precondition(task_category: &str, complexity: &str, files_involved: &[String]) -> String {
+    let mut parts = Vec::new();
+    if !task_category.is_empty() {
+        parts.push(format!("{task_category} task"));
+    }
+    if !complexity.is_empty() {
+        parts.push(format!("{complexity} complexity"));
+    }
+    if !files_involved.is_empty() {
+        parts.push(format!("touching {}", files_involved.join(", ")));
+    }
+
+    if parts.is_empty() {
+        "Apply when a similar successful task recurs.".to_string()
+    } else {
+        format!("Apply when the task is a {}.", parts.join(" with "))
+    }
+}
+
+fn build_postcondition(gate_results: &[SkillGateResult], output_summary: &str) -> String {
+    let gate_summary = if gate_results.is_empty() {
+        "completed successfully".to_string()
+    } else {
+        let passed = gate_results
+            .iter()
+            .filter(|result| result.passed)
+            .map(|result| result.gate.clone())
+            .collect::<Vec<_>>();
+        if passed.is_empty() {
+            "completed without a recorded passing gate".to_string()
+        } else {
+            format!("passed gates: {}", passed.join(", "))
+        }
+    };
+
+    format!("{gate_summary}; output: {output_summary}")
 }
 
 /// In-memory, JSON-backed registry of [`Skill`] records.
@@ -1251,6 +1703,7 @@ fn sanitize_component(value: &str) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use roko_agent::MockAgent;
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -1914,5 +2367,66 @@ mod tests {
         assert!(pattern.contains("Agent role:"));
         assert!(pattern.contains("Tags:"));
         assert!(pattern.contains("Approach summary:"));
+    }
+
+    #[tokio::test]
+    async fn skill_extraction_extracts_candidates_from_successful_gate_passed_episodes() {
+        let extractor = NlToFormatConverter::new();
+        let response = extractor.wrap(
+            r#"{
+                "title": "Rust compile-test repair",
+                "task_category": "implementation",
+                "complexity": "complex",
+                "files_involved": ["src/lib.rs", "src/parser.rs"],
+                "tool_sequence_summary": "Read src/lib.rs, Edit src/parser.rs, Bash cargo test -p roko-learn",
+                "precondition": "Implementation task touching Rust parser files with failing checks",
+                "postcondition": "Compile and test gates pass with parser changes applied",
+                "skill_description": "Inspect the affected Rust files, patch the parser, and rerun targeted tests until the gates pass.",
+                "output_summary": "Parser update landed and the targeted tests passed"
+            }"#,
+        );
+        let agent = MockAgent::reply(response);
+
+        let mut passing = make_episode(
+            "task-1",
+            true,
+            1,
+            "complex",
+            &["rust", "parser"],
+            "implementation",
+        );
+        passing.episode_id = "ep-success-1".into();
+        passing.reasoning_summary = Some("Patched the parser and reran tests".into());
+        passing.gate_verdicts = vec![
+            crate::episode_logger::GateVerdict::new("compile", true),
+            crate::episode_logger::GateVerdict::new("test", true),
+        ];
+        passing.extra.insert(
+            "tool_calls".into(),
+            serde_json::json!(["Read", "Edit", "Bash"]),
+        );
+        passing.extra.insert(
+            "files".into(),
+            serde_json::json!(["src/lib.rs", "src/parser.rs"]),
+        );
+
+        let mut failing = make_episode("task-2", false, 1, "complex", &["rust"], "implementation");
+        failing.episode_id = "ep-fail-1".into();
+        failing.gate_verdicts = vec![crate::episode_logger::GateVerdict::new("compile", false)];
+
+        let candidates = extract_skill_candidates(&[passing, failing], &agent).await;
+        assert_eq!(candidates.len(), 1);
+
+        let candidate = &candidates[0];
+        assert_eq!(candidate.source_episode_id, "ep-success-1");
+        assert_eq!(candidate.task_category, "implementation");
+        assert_eq!(candidate.complexity, "complex");
+        assert_eq!(
+            candidate.files_involved,
+            vec!["src/lib.rs".to_string(), "src/parser.rs".to_string()]
+        );
+        assert_eq!(candidate.gate_results.len(), 2);
+        assert!(candidate.gate_results.iter().all(|result| result.passed));
+        assert!(candidate.skill_description.contains("patch the parser"));
     }
 }
