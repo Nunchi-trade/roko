@@ -33,6 +33,7 @@ tracing = { workspace = true }
 libc = "0.2"
 
 [dev-dependencies]
+roko-learn = { path = "../roko-learn" }
 roko-std = { path = "../roko-std" }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tempfile = { workspace = true }
