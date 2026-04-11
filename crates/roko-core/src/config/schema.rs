@@ -3063,6 +3063,104 @@ threshold = "BLOCK_LOW_AND_ABOVE"
     }
 
     #[test]
+    fn gemini_example_config() {
+        let example = include_str!("../../../../examples/roko-gemini.toml");
+        let cfg = RokoConfig::from_toml(example).expect("roko-gemini example should parse");
+        assert_eq!(cfg.schema_version, CURRENT_SCHEMA_VERSION);
+
+        let provider = cfg.providers.get("gemini").expect("gemini provider");
+        assert_eq!(provider.kind, ProviderKind::GeminiApi);
+        assert_eq!(
+            provider.base_url.as_deref(),
+            Some("https://generativelanguage.googleapis.com")
+        );
+        assert_eq!(provider.api_key_env.as_deref(), Some("GEMINI_API_KEY"));
+
+        assert_eq!(cfg.agent.default_model, "gemini-2-5-flash");
+        assert_eq!(
+            cfg.agent.tier_models.get("mechanical").map(String::as_str),
+            Some("gemini-2-5-flash-lite")
+        );
+        assert_eq!(
+            cfg.agent
+                .tier_models
+                .get("architectural")
+                .map(String::as_str),
+            Some("gemini-3-1-pro")
+        );
+
+        assert_eq!(
+            cfg.gemini.default_model.as_deref(),
+            Some("gemini-2-5-flash")
+        );
+        assert_eq!(
+            cfg.gemini.grounding_model.as_deref(),
+            Some("gemini-3-flash")
+        );
+        assert_eq!(
+            cfg.gemini.code_exec_model.as_deref(),
+            Some("gemini-2-5-pro")
+        );
+        assert_eq!(
+            cfg.gemini.embed_model.as_deref(),
+            Some("gemini-embedding-2")
+        );
+        assert!(cfg.gemini.use_free_tier);
+        assert_eq!(cfg.gemini.thinking_level, "medium");
+        assert!(cfg.gemini.enable_context_caching);
+        assert_eq!(cfg.gemini.safety_settings.len(), 2);
+
+        let expected = [
+            ("gemini-2-5-flash-lite", "gemini-2.5-flash-lite"),
+            ("gemini-2-5-flash", "gemini-2.5-flash"),
+            ("gemini-2-5-pro", "gemini-2.5-pro"),
+            ("gemini-3-1-pro", "gemini-3.1-pro-preview"),
+            ("gemini-3-flash", "gemini-3-flash-preview"),
+            ("gemini-3-1-flash-lite", "gemini-3.1-flash-lite-preview"),
+            ("gemini-embedding-2", "gemini-embedding-2-preview"),
+        ];
+
+        for (model_key, slug) in expected {
+            let model = cfg.models.get(model_key).expect(model_key);
+            assert_eq!(model.provider, "gemini");
+            assert_eq!(model.slug, slug);
+
+            let resolved = crate::agent::resolve_model(&cfg, model_key);
+            assert_eq!(resolved.model_key, model_key);
+            assert_eq!(resolved.slug, slug);
+            assert_eq!(resolved.provider_kind, ProviderKind::GeminiApi);
+            assert!(resolved.provider_config.is_some());
+            assert!(resolved.profile.is_some());
+        }
+
+        let flash_lite = cfg
+            .models
+            .get("gemini-2-5-flash-lite")
+            .expect("flash-lite model");
+        assert_eq!(flash_lite.tool_format, "openai_json");
+        assert!(flash_lite.supports_caching);
+        assert!(!flash_lite.supports_grounding);
+        assert!(!flash_lite.supports_code_execution);
+
+        let pro = cfg.models.get("gemini-2-5-pro").expect("pro model");
+        assert_eq!(pro.tool_format, "gemini_native");
+        assert!(pro.supports_grounding);
+        assert!(pro.supports_code_execution);
+        assert_eq!(pro.cost_input_per_m_high, Some(2.50));
+        assert_eq!(pro.cost_output_per_m_high, Some(15.00));
+
+        let pro_31 = cfg.models.get("gemini-3-1-pro").expect("3.1 pro model");
+        assert_eq!(pro_31.thinking_level.as_deref(), Some("dynamic"));
+
+        let embed = cfg
+            .models
+            .get("gemini-embedding-2")
+            .expect("embedding model");
+        assert!(embed.is_embedding_model);
+        assert!(!embed.supports_tools);
+    }
+
+    #[test]
     fn parse_bool_env_variants() {
         assert!(parse_bool_env("true"));
         assert!(parse_bool_env("1"));
