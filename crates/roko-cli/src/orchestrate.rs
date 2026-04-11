@@ -17,6 +17,7 @@ use anyhow::{Context as _, Result, anyhow};
 use bardo_runtime::cancel::CancelToken;
 use bardo_runtime::process::ProcessSupervisor;
 use roko_agent::mcp::{McpConfig, McpServerConfig};
+use roko_agent::perplexity::PerplexitySearchClient;
 use roko_agent::provider::{AgentOptions, create_agent_for_model};
 use roko_agent::translate::{ClaudeTranslator, RenderedTools, Translator};
 use roko_agent::{Agent, AgentResult, ClaudeCliAgent, ExecAgent};
@@ -903,6 +904,42 @@ fn latest_efficiency_event(text: &str) -> Option<AgentEfficiencyEvent> {
     None
 }
 
+/// Enrich a task with search context from Perplexity Sonar before dispatch.
+///
+/// Runs a single `sonar` search query for tasks whose tier indicates they
+/// benefit from external best-practice documentation (`architectural` or
+/// `integrative`). Returns `None` for simple tasks or when the search fails.
+///
+/// The returned string is a markdown-formatted context block with the top 3
+/// search results, suitable for injection as a `PromptSection`.
+async fn enrich_task_context_with_search(
+    task: &crate::task_parser::TaskDef,
+    pplx_client: &PerplexitySearchClient,
+) -> Option<String> {
+    if !task.needs_external_context() {
+        return None;
+    }
+
+    let description = task.description.as_deref().unwrap_or(&task.title);
+    let query = format!("Rust {} {} best practices patterns", task.tier, description);
+
+    let results = pplx_client.search(&query).await.ok()?;
+
+    if results.results.is_empty() {
+        return None;
+    }
+
+    let context = results
+        .results
+        .iter()
+        .take(3)
+        .map(|r| format!("### {}\n{}\nSource: {}", r.title, r.content, r.url))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    Some(context)
+}
+
 // ─── PlanRunner ───────────────────────────────────────────────────────────
 
 /// The runtime harness that drives plan execution end-to-end.
@@ -990,6 +1027,12 @@ pub struct PlanRunner {
     state_hub_sender: Option<roko_core::StateHubSender>,
     /// Optional cloud execution state for code-implementer runs.
     cloud_execution: Option<CloudExecution>,
+    /// Optional Perplexity search client for pre-dispatch context enrichment.
+    ///
+    /// Present when `PERPLEXITY_API_KEY` is set at startup. Used to run a
+    /// single `sonar` search before dispatching complex tasks so the agent
+    /// receives grounded best-practice context.
+    search_client: Option<PerplexitySearchClient>,
 }
 
 /// Tracks per-task completion within a plan. Lives in PlanRunner (CLI crate),
@@ -1971,6 +2014,9 @@ impl PlanRunner {
             cloud_execution: None,
             playbook,
             knowledge_store,
+            search_client: std::env::var("PERPLEXITY_API_KEY")
+                .ok()
+                .map(PerplexitySearchClient::new),
         })
     }
 
@@ -2079,6 +2125,9 @@ impl PlanRunner {
             cloud_execution: None,
             playbook,
             knowledge_store,
+            search_client: std::env::var("PERPLEXITY_API_KEY")
+                .ok()
+                .map(PerplexitySearchClient::new),
         })
     }
 
@@ -2191,6 +2240,9 @@ impl PlanRunner {
             cloud_execution: None,
             playbook,
             knowledge_store,
+            search_client: std::env::var("PERPLEXITY_API_KEY")
+                .ok()
+                .map(PerplexitySearchClient::new),
         })
     }
 
