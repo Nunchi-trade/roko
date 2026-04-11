@@ -12,6 +12,8 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use roko_agent::perplexity::types::SearchOptions;
+use roko_core::config::schema::PerplexityConfig;
 
 fn research_dir(workdir: &Path) -> PathBuf {
     workdir.join(".roko").join("research")
@@ -212,6 +214,53 @@ pub fn build_research_prompt(
     prompt
 }
 
+/// Build a research prompt with Perplexity-aware instructions and populate
+/// [`SearchOptions`] from the provider config.
+///
+/// Differences from [`build_research_prompt`]:
+/// - Replaces `[AUTHOR-YEAR]` citation format with `[N]` bracket notation
+///   (Perplexity returns numbered citations automatically).
+/// - Removes the "verify papers exist" instruction — Perplexity grounds
+///   responses against live search so hallucinated citations are not an issue.
+pub fn build_research_prompt_perplexity(
+    workdir: &Path,
+    topic: &str,
+    context: &str,
+    mode: ResearchMode,
+    pplx_config: &PerplexityConfig,
+) -> (String, SearchOptions) {
+    let prompt = build_research_prompt(workdir, topic, context, mode);
+
+    // Replace [AUTHOR-YEAR] citation format everywhere with [N] bracket
+    // notation matching Perplexity's auto-numbered citations.
+    let prompt = prompt.replace("[AUTHOR-YEAR]", "[N]");
+    // Drop the "verify papers exist" instruction — Perplexity grounds
+    // responses against live search so hallucinated citations are not an issue.
+    let prompt = prompt.replace(
+        " Verify papers exist — do not hallucinate citations.",
+        " Perplexity citations are auto-verified from live search.",
+    );
+
+    let search_opts = SearchOptions {
+        search_mode: if pplx_config.academic_mode {
+            Some("academic".to_string())
+        } else {
+            None
+        },
+        search_recency_filter: Some(pplx_config.search_recency_filter.clone()),
+        search_domain_filter: if pplx_config.search_domain_filter.is_empty() {
+            None
+        } else {
+            Some(pplx_config.search_domain_filter.clone())
+        },
+        return_related_questions: Some(pplx_config.return_related_questions),
+        return_images: Some(pplx_config.return_images),
+        ..Default::default()
+    };
+
+    (prompt, search_opts)
+}
+
 /// Research mode determines what kind of output to produce.
 #[derive(Debug, Clone, Copy)]
 pub enum ResearchMode {
@@ -278,6 +327,49 @@ mod tests {
         assert!(prompt.contains("context engineering"));
         assert!(prompt.contains("arXiv"));
         assert!(prompt.contains("[AUTHOR-YEAR]"));
+    }
+
+    #[test]
+    fn research_prompt_perplexity() {
+        let cfg = PerplexityConfig {
+            academic_mode: true,
+            search_recency_filter: "month".to_string(),
+            search_domain_filter: vec!["arxiv.org".to_string()],
+            return_images: false,
+            return_related_questions: true,
+            ..Default::default()
+        };
+
+        let (prompt, opts) = build_research_prompt_perplexity(
+            Path::new("/test"),
+            "transformer architectures",
+            "",
+            ResearchMode::Topic,
+            &cfg,
+        );
+
+        // Perplexity-aware citation format is present.
+        assert!(prompt.contains("[N]"), "expected [N] bracket notation");
+        // "verify papers exist" instruction is removed.
+        assert!(
+            !prompt.to_lowercase().contains("verify papers exist"),
+            "should not contain verify papers exist"
+        );
+        // [AUTHOR-YEAR] format is removed.
+        assert!(
+            !prompt.contains("[AUTHOR-YEAR]"),
+            "should not contain [AUTHOR-YEAR]"
+        );
+
+        // SearchOptions are populated from config.
+        assert_eq!(opts.search_mode.as_deref(), Some("academic"));
+        assert_eq!(opts.search_recency_filter.as_deref(), Some("month"));
+        assert_eq!(
+            opts.search_domain_filter.as_deref(),
+            Some(["arxiv.org".to_string()].as_slice())
+        );
+        assert_eq!(opts.return_related_questions, Some(true));
+        assert_eq!(opts.return_images, Some(false));
     }
 
     #[test]
