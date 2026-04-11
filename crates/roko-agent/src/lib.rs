@@ -43,6 +43,7 @@ pub mod pointer;
 pub mod pool;
 pub mod process;
 pub mod provider;
+pub mod retry;
 pub mod safety;
 pub mod tool_loop;
 pub mod translate;
