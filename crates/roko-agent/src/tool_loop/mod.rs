@@ -8,6 +8,7 @@
 //! # Submodules
 //!
 //! - [`max_iter`] — iteration-cap configuration (§36.54).
+//! - [`compaction`] — gentle tool-result truncation (§36.58).
 //! - [`prune`] — context-growth guard (§36.55).
 //! - [`result_msg`] — tool-result message construction (§36.56).
 //! - [`checkpoint`] — resumable state (§36.57).
@@ -27,6 +28,7 @@ use crate::retry::RetryPolicy;
 use crate::translate::{BackendResponse, RenderedTools, Translator};
 
 pub mod checkpoint;
+pub mod compaction;
 pub mod max_iter;
 pub mod prune;
 pub mod result_msg;
@@ -318,10 +320,19 @@ impl ToolLoop {
             Some(model) => match self.check_context_overflow(messages, model) {
                 OverflowAction::Ok => {}
                 OverflowAction::CompactRecommended | OverflowAction::CompactRequired => {
-                    prune::prune_if_needed(messages, Self::compaction_target(Self::model_context_limit(model)));
+                    compaction::compact_tool_results(messages);
+                    prune::prune_if_needed(
+                        messages,
+                        Self::compaction_target(Self::model_context_limit(model)),
+                    );
                 }
             },
-            None => prune::prune_if_needed(messages, self.context_token_limit),
+            None => {
+                if prune::estimate_message_tokens(messages) > self.context_token_limit {
+                    compaction::compact_tool_results(messages);
+                }
+                prune::prune_if_needed(messages, self.context_token_limit);
+            }
         }
     }
 
@@ -1044,6 +1055,58 @@ mod tests {
                 <= ToolLoop::compaction_target(1_000),
             "expected second request to be compacted below the 80% target",
         );
+    }
+
+    #[test]
+    fn tool_result_compaction_runs_before_pruning() {
+        let backend = Arc::new(FinalAnswerBackend {
+            text: "unused".into(),
+        });
+        let mut messages = vec![
+            serde_json::json!({"role": "system", "content": "sys"}),
+            serde_json::json!({"role": "user", "content": "usr"}),
+            serde_json::json!({"role": "assistant", "tool_calls": [{"id": "old"}]}),
+            serde_json::json!({
+                "role": "tool",
+                "tool_call_id": "old",
+                "content": "a".repeat(900),
+            }),
+            serde_json::json!({"role": "assistant", "tool_calls": [{"id": "recent-1"}]}),
+            serde_json::json!({
+                "role": "tool",
+                "tool_call_id": "recent-1",
+                "content": "b".repeat(900),
+            }),
+            serde_json::json!({"role": "assistant", "tool_calls": [{"id": "recent-2"}]}),
+            serde_json::json!({
+                "role": "tool",
+                "tool_call_id": "recent-2",
+                "content": "c".repeat(900),
+            }),
+        ];
+        let mut compacted = messages.clone();
+        compaction::compact_tool_results(&mut compacted);
+
+        let before_tokens = prune::estimate_message_tokens(&messages);
+        let compacted_tokens = prune::estimate_message_tokens(&compacted);
+        assert!(compacted_tokens < before_tokens, "compaction should shrink old results");
+
+        let target = compacted_tokens + ((before_tokens - compacted_tokens) / 2).max(1);
+        let limit = (target * 100).div_ceil(80);
+        let tl = make_tool_loop(backend, 25).with_model_profile(test_model_profile(limit as u64));
+
+        tl.prune_context_if_needed(&mut messages);
+
+        assert_eq!(messages.len(), 8, "compaction should avoid dropping messages");
+        assert_eq!(messages[3]["tool_call_id"], "old");
+        assert!(
+            messages[3]["content"]
+                .as_str()
+                .expect("compacted old content")
+                .contains("[truncated, 900 chars total]"),
+        );
+        assert_eq!(messages[5]["content"], "b".repeat(900));
+        assert_eq!(messages[7]["content"], "c".repeat(900));
     }
 
     #[tokio::test]
