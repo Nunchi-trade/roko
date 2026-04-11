@@ -574,6 +574,57 @@ impl LinUCBRouter {
         ModelSpec::from_slug(candidate_slugs[0].clone())
     }
 
+    /// Compute raw LinUCB scores for a filtered candidate set.
+    ///
+    /// The returned scores use the same candidate filtering and per-arm feature
+    /// encoding as [`select_features_from_candidates_with_alpha_adjuster`].
+    #[must_use]
+    pub fn score_features_from_candidates_with_alpha_adjuster<F>(
+        &self,
+        ctx: &RoutingContext,
+        candidate_slugs: &[String],
+        mut alpha_for_slug: F,
+    ) -> Vec<(String, f64)>
+    where
+        F: FnMut(&str) -> f64,
+    {
+        if candidate_slugs.is_empty() {
+            return Vec::new();
+        }
+
+        let state = self.state.lock();
+
+        if state.total_observations < COLD_START_THRESHOLD {
+            let tier = complexity_to_tier(ctx.complexity);
+            let selected = pick_static_from_candidates(candidate_slugs, tier);
+            return candidate_slugs
+                .iter()
+                .map(|slug| {
+                    (
+                        slug.clone(),
+                        if slugs_match(slug, &selected) { 1.0 } else { 0.0 },
+                    )
+                })
+                .collect();
+        }
+
+        candidate_slugs
+            .iter()
+            .map(|candidate| {
+                let score = state
+                    .arms
+                    .iter()
+                    .find(|arm| slugs_match(&arm.slug, candidate))
+                    .map(|arm| {
+                        let x = ctx.to_features_for_model(Some(&arm.slug));
+                        linucb_score(arm, &x, alpha_for_slug(&arm.slug))
+                    })
+                    .unwrap_or(f64::NEG_INFINITY);
+                (candidate.clone(), score)
+            })
+            .collect()
+    }
+
     /// Update the arm's A matrix and b vector after observing a reward.
     ///
     /// `LinUCB` update rules:

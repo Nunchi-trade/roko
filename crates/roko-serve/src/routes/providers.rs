@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -12,8 +12,12 @@ use serde::{Deserialize, Serialize};
 use crate::error::ApiError;
 use crate::state::AppState;
 use roko_agent::provider::{AgentOptions, create_agent_for_model};
+use roko_core::agent::{AgentRole, ModelTier, resolve_model};
 use roko_core::config::schema::{ModelProfile, RokoConfig};
+use roko_core::task::{TaskCategory, TaskComplexityBand};
 use roko_core::{Body as SignalBody, Context, Kind, Signal};
+use roko_learn::cascade_router::CascadeRouter;
+use roko_learn::model_router::RoutingContext;
 use roko_learn::provider_health::{HealthState, ProviderStatus};
 
 const PROVIDER_TEST_PROMPT: &str = "Say hello.";
@@ -24,6 +28,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/providers/{id}/health", get(provider_health))
         .route("/providers/{id}/test", post(test_provider))
         .route("/models", get(list_models))
+        .route("/routing/explain", get(explain_routing))
 }
 
 /// `GET /api/providers` — list configured providers with health and model counts.
@@ -82,6 +87,152 @@ async fn list_models(State(state): State<Arc<AppState>>) -> Json<ModelsResponse>
     models.sort_by(|a, b| a.key.cmp(&b.key));
 
     Json(ModelsResponse { models })
+}
+
+/// `GET /api/routing/explain` — explain the current routing decision.
+async fn explain_routing(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<RoutingExplainParams>,
+) -> Result<Json<RoutingExplanation>, ApiError> {
+    let model = params
+        .model
+        .as_deref()
+        .ok_or_else(|| ApiError::bad_request("missing query parameter: model"))?;
+    let role = params
+        .role
+        .as_deref()
+        .ok_or_else(|| ApiError::bad_request("missing query parameter: role"))?;
+
+    let role = parse_agent_role(role)
+        .ok_or_else(|| ApiError::bad_request(format!("invalid role: {role}")))?;
+
+    let config = state.roko_config.read().await.clone();
+    let resolved = resolve_model(&config, model);
+    let complexity = params
+        .complexity
+        .as_deref()
+        .map(parse_complexity_band)
+        .transpose()?
+        .unwrap_or_else(|| default_complexity_for_role(role));
+
+    let effective_models = config.effective_models();
+    let model_catalog = build_model_catalog(&effective_models);
+    let mut model_slugs: Vec<String> = model_catalog.keys().cloned().collect();
+    if model_slugs.is_empty() {
+        model_slugs.push(resolved.slug.clone());
+    }
+    model_slugs.sort();
+
+    let routing_ctx = RoutingContext {
+        task_category: TaskCategory::Implementation,
+        complexity,
+        iteration: 1,
+        role,
+        crate_familiarity: 0.5,
+        has_prior_failure: false,
+        affect_confidence: 0.5,
+        thinking_level: None,
+        previous_model: Some(resolved.slug.clone()),
+        plan_context_tokens: None,
+    };
+
+    let cascade_path = state.workdir.join(".roko/learn/cascade-router.json");
+    let router = CascadeRouter::load_or_new(&cascade_path, model_slugs.clone());
+    let all_explanation = router.explain_routing(&routing_ctx, &model_slugs);
+
+    let mut health_by_provider: HashMap<String, ProviderStatus> = HashMap::new();
+    for provider in model_catalog.values().map(|entry| entry.provider.as_str()) {
+        health_by_provider
+            .entry(provider.to_owned())
+            .or_insert_with(|| state.provider_health.get(provider));
+    }
+
+    let available_candidates: Vec<String> = model_slugs
+        .iter()
+        .filter(|slug| {
+            model_catalog
+                .get(slug.as_str())
+                .map(|entry| provider_status_available(&health_by_provider[&entry.provider]))
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect();
+
+    let eligible_explanation = (!available_candidates.is_empty())
+        .then(|| router.explain_routing(&routing_ctx, &available_candidates));
+    let selected = eligible_explanation
+        .as_ref()
+        .map_or_else(|| all_explanation.selected_model.clone(), |explanation| {
+            explanation.selected_model.clone()
+        });
+    let selected_model = model_slugs
+        .iter()
+        .find(|slug| routing_slugs_match(slug, &selected))
+        .cloned()
+        .unwrap_or(selected);
+
+    let score_by_model: HashMap<_, _> = all_explanation
+        .candidates
+        .into_iter()
+        .map(|candidate| (candidate.model.clone(), candidate))
+        .collect();
+
+    let fallback_model = eligible_explanation
+        .as_ref()
+        .map_or_else(|| all_explanation.fallback_model.clone(), |explanation| {
+            explanation.fallback_model.clone()
+        });
+
+    let mut candidates: Vec<_> = model_slugs
+        .iter()
+        .map(|slug| {
+            let detail = score_by_model.get(slug).cloned();
+            let model_info = model_catalog.get(slug.as_str());
+            let provider = model_info
+                .map(|entry| entry.provider.clone())
+                .unwrap_or_else(|| resolved.profile.as_ref().map_or_else(
+                    || resolved.provider_kind.label().to_string(),
+                    |profile| profile.provider.clone(),
+                ));
+            let health = health_by_provider
+                .get(&provider)
+                .map(|status| provider_state_label(status.state).to_string())
+                .unwrap_or_else(|| "healthy".to_string());
+
+            RoutingCandidate {
+                model_key: model_info.and_then(|entry| entry.model_key.clone()),
+                model_slug: slug.clone(),
+                provider,
+                score: detail.as_ref().map_or(0.0, |candidate| candidate.score),
+                selected: routing_slugs_match(slug, &selected_model),
+                eligible: available_candidates.iter().any(|candidate| candidate == slug),
+                health,
+                cache_affinity: detail
+                    .as_ref()
+                    .is_some_and(|candidate| candidate.cache_affinity),
+                pareto_optimal: detail.and_then(|candidate| candidate.pareto_optimal),
+            }
+        })
+        .collect();
+
+    candidates.sort_by(|a, b| {
+        b.selected
+            .cmp(&a.selected)
+            .then_with(|| b.score.total_cmp(&a.score))
+            .then_with(|| a.model_slug.cmp(&b.model_slug))
+    });
+
+    Ok(Json(RoutingExplanation {
+        requested_model: model.to_string(),
+        resolved_model: resolved.slug,
+        role: role.label().to_string(),
+        complexity: complexity.label().to_string(),
+        stage: all_explanation.stage.label().to_string(),
+        selected_model,
+        fallback_model,
+        latency_sla_ms: all_explanation.latency_sla_ms,
+        candidates,
+    }))
 }
 
 /// `GET /api/providers/{id}/health` — detailed health for a specific provider.
@@ -200,6 +351,42 @@ struct ModelsResponse {
     models: Vec<ModelInfo>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+struct RoutingExplainParams {
+    model: Option<String>,
+    role: Option<String>,
+    complexity: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RoutingExplanation {
+    requested_model: String,
+    resolved_model: String,
+    role: String,
+    complexity: String,
+    stage: String,
+    selected_model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fallback_model: Option<String>,
+    latency_sla_ms: u64,
+    candidates: Vec<RoutingCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RoutingCandidate {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_key: Option<String>,
+    model_slug: String,
+    provider: String,
+    score: f64,
+    selected: bool,
+    eligible: bool,
+    health: String,
+    cache_affinity: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pareto_optimal: Option<bool>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProviderHealthResponse {
     provider_id: String,
@@ -268,6 +455,12 @@ struct ProviderHealthInfo {
     total_successes: u64,
 }
 
+#[derive(Debug, Clone)]
+struct ModelCatalogEntry {
+    model_key: Option<String>,
+    provider: String,
+}
+
 impl From<ProviderStatus> for ProviderHealthInfo {
     fn from(status: ProviderStatus) -> Self {
         Self {
@@ -284,6 +477,95 @@ fn provider_state_label(state: HealthState) -> &'static str {
         HealthState::Healthy => "healthy",
         HealthState::Unhealthy { .. } => "unhealthy",
         HealthState::Probing => "probing",
+    }
+}
+
+fn provider_status_available(status: &ProviderStatus) -> bool {
+    match status.state {
+        HealthState::Healthy => true,
+        HealthState::Unhealthy { recovery_at } => Instant::now() >= recovery_at,
+        HealthState::Probing => false,
+    }
+}
+
+fn parse_agent_role(raw: &str) -> Option<AgentRole> {
+    [
+        AgentRole::Conductor,
+        AgentRole::Strategist,
+        AgentRole::Implementer,
+        AgentRole::Architect,
+        AgentRole::Researcher,
+        AgentRole::Auditor,
+        AgentRole::QuickReviewer,
+        AgentRole::Scribe,
+        AgentRole::Critic,
+        AgentRole::AutoFixer,
+        AgentRole::Refactorer,
+        AgentRole::PrePlanner,
+        AgentRole::DocVerifier,
+        AgentRole::IntegrationTester,
+        AgentRole::MergeResolver,
+        AgentRole::TerminalValidator,
+        AgentRole::GolemLifecycleTester,
+        AgentRole::SpecDriftDetector,
+        AgentRole::RegressionDetector,
+        AgentRole::PerformanceSentinel,
+        AgentRole::CoverageTracker,
+        AgentRole::PlanLifecycleManager,
+        AgentRole::CrossSystemTester,
+        AgentRole::ErrorDiagnoser,
+        AgentRole::DependencyValidator,
+        AgentRole::PatternExtractor,
+        AgentRole::SnapshotComparator,
+        AgentRole::FullLoopValidator,
+    ]
+    .into_iter()
+    .find(|role| role.label() == raw)
+}
+
+fn parse_complexity_band(raw: &str) -> Result<TaskComplexityBand, ApiError> {
+    match raw {
+        "fast" | "mechanical" => Ok(TaskComplexityBand::Fast),
+        "complex" | "premium" | "architectural" => Ok(TaskComplexityBand::Complex),
+        "standard" | "focused" => Ok(TaskComplexityBand::Standard),
+        _ => Err(ApiError::bad_request(format!("invalid complexity: {raw}"))),
+    }
+}
+
+fn default_complexity_for_role(role: AgentRole) -> TaskComplexityBand {
+    match role.model_tier() {
+        ModelTier::Fast => TaskComplexityBand::Fast,
+        ModelTier::Premium => TaskComplexityBand::Complex,
+        ModelTier::Standard | _ => TaskComplexityBand::Standard,
+    }
+}
+
+fn build_model_catalog(models: &HashMap<String, ModelProfile>) -> HashMap<String, ModelCatalogEntry> {
+    let mut catalog = HashMap::new();
+    for (model_key, profile) in models {
+        catalog.entry(profile.slug.clone()).or_insert_with(|| ModelCatalogEntry {
+            model_key: Some(model_key.clone()),
+            provider: profile.provider.clone(),
+        });
+    }
+    catalog
+}
+
+fn routing_slugs_match(lhs: &str, rhs: &str) -> bool {
+    lhs == rhs || routing_slug_family(lhs).is_some_and(|family| routing_slug_family(rhs) == Some(family))
+}
+
+fn routing_slug_family(slug: &str) -> Option<&'static str> {
+    if slug.contains("haiku") {
+        Some("haiku")
+    } else if slug.contains("sonnet") {
+        Some("sonnet")
+    } else if slug.contains("opus") {
+        Some("opus")
+    } else if slug.contains("glm") {
+        Some("glm")
+    } else {
+        None
     }
 }
 
@@ -565,6 +847,188 @@ mod tests {
         assert!(model.supports_vision);
         assert_eq!(model.cost_input_per_m, Some(1.40));
         assert_eq!(model.cost_output_per_m, Some(4.40));
+    }
+
+    #[tokio::test]
+    async fn explain_routing_reports_scores_and_provider_health() {
+        let dir = tempdir().expect("tempdir");
+        let workdir = dir.path().to_path_buf();
+        std::fs::create_dir_all(workdir.join(".roko/learn")).expect("create learn dir");
+        std::fs::write(
+            workdir.join(".roko/learn/cascade-router.json"),
+            serde_json::json!({
+                "model_slugs": ["glm-5.1", "claude-sonnet-4-6"],
+                "confidence_stats": {
+                    "glm-5.1": { "trials": 80, "successes": 72 },
+                    "claude-sonnet-4-6": { "trials": 80, "successes": 60 }
+                },
+                "total_observations": 160
+            })
+            .to_string(),
+        )
+        .expect("write cascade snapshot");
+
+        let deploy_backend =
+            Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
+        let mut config = roko_core::config::schema::RokoConfig::default();
+        config.providers.insert(
+            "zai".into(),
+            roko_core::config::schema::ProviderConfig {
+                kind: roko_core::agent::ProviderKind::OpenAiCompat,
+                base_url: Some("https://api.z.ai/api/paas/v4".into()),
+                api_key_env: Some("ZAI_API_KEY".into()),
+                command: None,
+                args: None,
+                timeout_ms: Some(120_000),
+                ttft_timeout_ms: Some(15_000),
+                connect_timeout_ms: Some(5_000),
+                extra_headers: None,
+                max_concurrent: None,
+            },
+        );
+        config.providers.insert(
+            "anthropic".into(),
+            roko_core::config::schema::ProviderConfig {
+                kind: roko_core::agent::ProviderKind::AnthropicApi,
+                base_url: Some("https://api.anthropic.com".into()),
+                api_key_env: Some("ANTHROPIC_API_KEY".into()),
+                command: None,
+                args: None,
+                timeout_ms: Some(120_000),
+                ttft_timeout_ms: Some(15_000),
+                connect_timeout_ms: Some(5_000),
+                extra_headers: None,
+                max_concurrent: None,
+            },
+        );
+        config.models.insert(
+            "glm-5-1".into(),
+            roko_core::config::schema::ModelProfile {
+                provider: "zai".into(),
+                slug: "glm-5.1".into(),
+                context_window: 200_000,
+                max_output: None,
+                supports_tools: true,
+                supports_thinking: true,
+                supports_vision: false,
+                supports_web_search: false,
+                supports_mcp_tools: false,
+                supports_partial: false,
+                supports_grounding: false,
+                supports_code_execution: false,
+                supports_caching: false,
+                provider_routing: None,
+                tool_format: "openai_json".into(),
+                cost_input_per_m: Some(1.40),
+                cost_output_per_m: Some(4.40),
+                cost_input_per_m_high: None,
+                cost_output_per_m_high: None,
+                cost_cache_read_per_m: None,
+                cost_cache_write_per_m: None,
+                thinking_level: None,
+                max_tools: None,
+                tokenizer_ratio: None,
+                supports_search: false,
+                supports_citations: false,
+                supports_async: false,
+                is_embedding_model: false,
+                search_context_size: None,
+                cost_per_request: None,
+            },
+        );
+        config.models.insert(
+            "claude-sonnet-4-6".into(),
+            roko_core::config::schema::ModelProfile {
+                provider: "anthropic".into(),
+                slug: "claude-sonnet-4-6".into(),
+                context_window: 200_000,
+                max_output: None,
+                supports_tools: true,
+                supports_thinking: false,
+                supports_vision: false,
+                supports_web_search: false,
+                supports_mcp_tools: false,
+                supports_partial: false,
+                supports_grounding: false,
+                supports_code_execution: false,
+                supports_caching: false,
+                provider_routing: None,
+                tool_format: "anthropic_blocks".into(),
+                cost_input_per_m: None,
+                cost_output_per_m: None,
+                cost_input_per_m_high: None,
+                cost_output_per_m_high: None,
+                cost_cache_read_per_m: None,
+                cost_cache_write_per_m: None,
+                thinking_level: None,
+                max_tools: None,
+                tokenizer_ratio: None,
+                supports_search: false,
+                supports_citations: false,
+                supports_async: false,
+                is_embedding_model: false,
+                search_context_size: None,
+                cost_per_request: None,
+            },
+        );
+
+        let state = Arc::new(AppState::new(
+            workdir,
+            Arc::new(NoOpRuntime),
+            config,
+            deploy_backend,
+        ));
+        state.provider_health.record_failure("zai");
+        state.provider_health.record_failure("zai");
+        state.provider_health.record_failure("zai");
+
+        let app = routes().with_state(Arc::clone(&state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/routing/explain?model=glm-5-1&role=implementer")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let response: RoutingExplanation =
+            serde_json::from_slice(&body).expect("parse routing explanation");
+
+        assert_eq!(response.resolved_model, "glm-5.1");
+        assert_eq!(response.role, "implementer");
+        assert_eq!(response.complexity, "standard");
+        assert_eq!(response.stage, "confidence");
+        assert_eq!(response.selected_model, "claude-sonnet-4-6");
+        assert_eq!(response.candidates.len(), 2);
+
+        let glm = response
+            .candidates
+            .iter()
+            .find(|candidate| candidate.model_slug == "glm-5.1")
+            .expect("glm candidate");
+        assert_eq!(glm.provider, "zai");
+        assert!(!glm.selected);
+        assert!(!glm.eligible);
+        assert_eq!(glm.health, "unhealthy");
+        assert!(glm.cache_affinity);
+
+        let claude = response
+            .candidates
+            .iter()
+            .find(|candidate| candidate.model_slug == "claude-sonnet-4-6")
+            .expect("claude candidate");
+        assert_eq!(claude.provider, "anthropic");
+        assert!(claude.selected);
+        assert!(claude.eligible);
+        assert_eq!(claude.health, "healthy");
+        assert!(!claude.cache_affinity);
     }
 
     #[tokio::test]

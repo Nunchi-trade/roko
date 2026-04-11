@@ -102,6 +102,36 @@ pub struct CascadeSelection {
     pub stage: CascadeStage,
 }
 
+/// Explainable routing output for one cascade decision.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CascadeRoutingExplanation {
+    /// Which cascade stage produced the decision.
+    pub stage: CascadeStage,
+    /// Primary model selected by the router.
+    pub selected_model: String,
+    /// Fallback model, when one exists for the selected tier.
+    pub fallback_model: Option<String>,
+    /// Latency SLA associated with the selected tier.
+    pub latency_sla_ms: u64,
+    /// Candidate-level scoring details.
+    pub candidates: Vec<CascadeRoutingCandidate>,
+}
+
+/// Score and status for one routing candidate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CascadeRoutingCandidate {
+    /// Candidate model slug.
+    pub model: String,
+    /// Stage-specific numeric score.
+    pub score: f64,
+    /// Whether this candidate was selected.
+    pub selected: bool,
+    /// Whether cache affinity applies for this candidate.
+    pub cache_affinity: bool,
+    /// Whether the candidate is on the Pareto frontier, when known.
+    pub pareto_optimal: Option<bool>,
+}
+
 // ─── Confidence-stage stats ─────────────────────────────────────────────────
 
 /// Threshold for transitioning from Confidence to UCB stage.
@@ -916,6 +946,58 @@ impl CascadeRouter {
         }
     }
 
+    /// Explain a routing decision over the supplied candidate set.
+    #[must_use]
+    pub fn explain_routing(
+        &self,
+        ctx: &RoutingContext,
+        candidates: &[String],
+    ) -> CascadeRoutingExplanation {
+        let candidates = if candidates.is_empty() {
+            self.model_slugs.clone()
+        } else {
+            candidates.to_vec()
+        };
+
+        let route = match self.current_stage() {
+            CascadeStage::Static => self.route_static_filtered(ctx, &candidates),
+            CascadeStage::Confidence => self.route_confidence_filtered(ctx, &candidates),
+            CascadeStage::Ucb => self.route_ucb_filtered(ctx, &candidates),
+        };
+
+        let frontier = self.current_pareto_frontier();
+        let scores = self.stage_scores(ctx, &candidates, frontier.as_deref());
+        let score_map: HashMap<_, _> = scores.into_iter().collect();
+
+        let mut explained: Vec<_> = candidates
+            .into_iter()
+            .map(|slug| CascadeRoutingCandidate {
+                cache_affinity: ctx.previous_model.as_deref() == Some(slug.as_str()),
+                pareto_optimal: frontier
+                    .as_ref()
+                    .map(|frontier| frontier.iter().any(|frontier_slug| frontier_slug == &slug)),
+                score: score_map.get(&slug).copied().unwrap_or(0.0),
+                selected: slugs_match(&slug, &route.primary.slug),
+                model: slug,
+            })
+            .collect();
+
+        explained.sort_by(|a, b| {
+            b.selected
+                .cmp(&a.selected)
+                .then_with(|| b.score.total_cmp(&a.score))
+                .then_with(|| a.model.cmp(&b.model))
+        });
+
+        CascadeRoutingExplanation {
+            stage: route.stage,
+            selected_model: route.primary.slug,
+            fallback_model: route.fallback.map(|model| model.slug),
+            latency_sla_ms: route.latency_sla_ms,
+            candidates: explained,
+        }
+    }
+
     /// Record an observation (updates both confidence stats and `LinUCB`).
     pub fn record_observation(
         &self,
@@ -1600,6 +1682,71 @@ impl CascadeRouter {
         if state.bucket < bucket || state.frontier.is_empty() {
             state.frontier = frontier;
             state.bucket = bucket;
+        }
+    }
+
+    fn current_pareto_frontier(&self) -> Option<Vec<String>> {
+        self.refresh_pareto_frontier_if_needed();
+        let state = self.pareto_frontier.lock();
+        if state.bucket == 0 || state.frontier.is_empty() {
+            None
+        } else {
+            Some(state.frontier.clone())
+        }
+    }
+
+    fn stage_scores(
+        &self,
+        ctx: &RoutingContext,
+        candidates: &[String],
+        frontier: Option<&[String]>,
+    ) -> Vec<(String, f64)> {
+        match self.current_stage() {
+            CascadeStage::Static => {
+                let selected = self.route_static_filtered(ctx, candidates).primary.slug;
+                candidates
+                    .iter()
+                    .map(|slug| {
+                        (
+                            slug.clone(),
+                            if slugs_match(slug, &selected) { 1.0 } else { 0.0 },
+                        )
+                    })
+                    .collect()
+            }
+            CascadeStage::Confidence => {
+                let thinking_candidates = thinking_filtered_candidates(candidates, ctx);
+                let score_map: HashMap<_, _> = self
+                    .confidence_scores(&thinking_candidates, ctx)
+                    .into_iter()
+                    .collect();
+                candidates
+                    .iter()
+                    .map(|slug| (slug.clone(), score_map.get(slug).copied().unwrap_or(0.0)))
+                    .collect()
+            }
+            CascadeStage::Ucb => {
+                let thinking_candidates = thinking_filtered_candidates(candidates, ctx);
+                let base_alpha = self.linucb.current_alpha();
+                let frontier = frontier.map(|frontier| frontier.to_vec());
+                let score_map: HashMap<_, _> = self
+                    .linucb
+                    .score_features_from_candidates_with_alpha_adjuster(
+                        ctx,
+                        &thinking_candidates,
+                        |slug| {
+                            frontier.as_ref().map_or(base_alpha, |frontier| {
+                                pareto_adjusted_alpha(base_alpha, slug, frontier)
+                            })
+                        },
+                    )
+                    .into_iter()
+                    .collect();
+                candidates
+                    .iter()
+                    .map(|slug| (slug.clone(), score_map.get(slug).copied().unwrap_or(0.0)))
+                    .collect()
+            }
         }
     }
 
