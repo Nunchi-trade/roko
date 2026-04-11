@@ -27,6 +27,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::cfactor::{AgentDispatchBias, CFactor};
+use crate::pareto::{compute_pareto_frontier, ModelObservation};
 use crate::model_router::{COLD_START_THRESHOLD, CONTEXT_DIM, LinUCBRouter, RoutingContext};
 use crate::provider_health::ProviderHealthRegistry;
 
@@ -99,6 +100,8 @@ const HIGH_CFACTOR_THRESHOLD: f64 = 0.8;
 const LOW_CFACTOR_THRESHOLD: f64 = 0.4;
 /// Cold-start bonus for reusing the previous model.
 const CACHE_AFFINITY_BONUS: f64 = 0.15;
+/// Recompute the Pareto frontier after every 50 observations.
+const PARETO_RECOMPUTE_INTERVAL: u64 = 50;
 
 /// Per-model observation record for the confidence stage.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -283,10 +286,19 @@ pub struct CascadeRouter {
     linucb: LinUCBRouter,
     /// Per-model statistics for the confidence stage.
     confidence_stats: Mutex<HashMap<String, ModelStats>>,
+    /// Cached Pareto frontier used to down-weight dominated models during UCB.
+    pareto_frontier: Mutex<ParetoFrontierState>,
     /// Static role -> model table for stage 1.
     role_table: HashMap<AgentRole, String>,
     /// Ordered list of model slugs (arms available to the router).
     model_slugs: Vec<String>,
+}
+
+/// Cached Pareto frontier state.
+#[derive(Debug, Clone, Default)]
+struct ParetoFrontierState {
+    frontier: Vec<String>,
+    bucket: u64,
 }
 
 impl CascadeRouter {
@@ -303,6 +315,7 @@ impl CascadeRouter {
         Self {
             linucb: LinUCBRouter::new(model_slugs.clone()),
             confidence_stats: Mutex::new(HashMap::new()),
+            pareto_frontier: Mutex::new(ParetoFrontierState::default()),
             role_table: default_role_model_table(&model_slugs),
             model_slugs,
         }
@@ -750,7 +763,7 @@ impl CascadeRouter {
         cfactor: Option<&CFactor>,
         agent_id: Option<&str>,
     ) -> CascadeModel {
-        let model = self.linucb.select_model(ctx);
+        let model = self.select_ucb_model(ctx, &self.model_slugs);
         let selected = self.bias_model_for_cfactor(model, cfactor, agent_id);
         let tier = slug_to_tier(&selected.slug);
         let fallback = fallback_for_tier(tier).map(ModelSpec::from_slug);
@@ -764,7 +777,7 @@ impl CascadeRouter {
     }
 
     fn route_ucb_filtered(&self, ctx: &RoutingContext, candidates: &[String]) -> CascadeModel {
-        let model = self.linucb.select_features_from_candidates(ctx, candidates);
+        let model = self.select_ucb_model(ctx, candidates);
         let selected = model;
         let tier = slug_to_tier(&selected.slug);
         let fallback = fallback_for_tier(tier).map(ModelSpec::from_slug);
@@ -826,6 +839,91 @@ impl CascadeRouter {
         apply_cache_affinity(&mut scores, ctx.previous_model.as_deref());
         scores
     }
+
+    fn select_ucb_model(&self, ctx: &RoutingContext, candidates: &[String]) -> ModelSpec {
+        self.refresh_pareto_frontier_if_needed();
+
+        let frontier = {
+            let state = self.pareto_frontier.lock();
+            if state.bucket == 0 || state.frontier.is_empty() {
+                None
+            } else {
+                Some(state.frontier.clone())
+            }
+        };
+
+        if let Some(frontier) = frontier {
+            let base_alpha = self.linucb.current_alpha();
+            self.linucb
+                .select_features_from_candidates_with_alpha_adjuster(
+                    ctx,
+                    candidates,
+                    |slug| pareto_adjusted_alpha(base_alpha, slug, &frontier),
+                )
+        } else if candidates.len() == self.model_slugs.len() {
+            self.linucb.select_model(ctx)
+        } else {
+            self.linucb.select_features_from_candidates(ctx, candidates)
+        }
+    }
+
+    fn refresh_pareto_frontier_if_needed(&self) {
+        let total = self.total_observations();
+        if total < PARETO_RECOMPUTE_INTERVAL {
+            return;
+        }
+
+        let bucket = total / PARETO_RECOMPUTE_INTERVAL;
+        let needs_refresh = {
+            let state = self.pareto_frontier.lock();
+            state.bucket < bucket || state.frontier.is_empty()
+        };
+
+        if !needs_refresh {
+            return;
+        }
+
+        let frontier = self.recompute_pareto_frontier();
+        let mut state = self.pareto_frontier.lock();
+        if state.bucket < bucket || state.frontier.is_empty() {
+            state.frontier = frontier;
+            state.bucket = bucket;
+        }
+    }
+
+    fn recompute_pareto_frontier(&self) -> Vec<String> {
+        let stats = self.confidence_stats.lock();
+        let mut observations = HashMap::new();
+        let mut unobserved = Vec::new();
+
+        for slug in &self.model_slugs {
+            match stats.get(slug) {
+                Some(model_stats) if model_stats.trials > 0 => {
+                    observations.insert(
+                        slug.clone(),
+                        ModelObservation {
+                            pass_rate: model_stats.pass_rate(),
+                            cost_per_success: pareto_cost_proxy(slug) / model_stats.pass_rate().max(0.01),
+                            avg_latency_ms: pareto_latency_proxy(slug),
+                            observations: model_stats.trials,
+                        },
+                    );
+                }
+                _ => unobserved.push(slug.clone()),
+            }
+        }
+        drop(stats);
+
+        let mut frontier = if observations.is_empty() {
+            Vec::new()
+        } else {
+            compute_pareto_frontier(&observations)
+        };
+        frontier.extend(unobserved);
+        frontier.sort();
+        frontier.dedup();
+        frontier
+    }
 }
 
 fn choose_best_scored_slug(scores: Vec<(String, f64)>) -> String {
@@ -842,6 +940,32 @@ fn choose_best_scored_slug(scores: Vec<(String, f64)>) -> String {
     }
 
     best_slug
+}
+
+fn pareto_adjusted_alpha(base_alpha: f64, slug: &str, frontier: &[String]) -> f64 {
+    if frontier.iter().any(|frontier_slug| frontier_slug == slug) {
+        base_alpha
+    } else {
+        base_alpha * 0.1
+    }
+}
+
+fn pareto_cost_proxy(slug: &str) -> f64 {
+    match slug_family(slug) {
+        Some("haiku") => 1.0,
+        Some("sonnet") => 3.0,
+        Some("opus") => 9.0,
+        Some("kimi-k2") => 2.5,
+        _ => match slug_to_tier(slug) {
+            ModelTier::Fast => 1.0,
+            ModelTier::Premium => 9.0,
+            _ => 3.0,
+        },
+    }
+}
+
+fn pareto_latency_proxy(slug: &str) -> f64 {
+    default_latency_sla(slug_to_tier(slug)) as f64
 }
 
 /// Determine the cascade stage from observation count.
@@ -1382,5 +1506,47 @@ mod tests {
 
         let stats = cascade.confidence_snapshot();
         assert_eq!(stats.get("claude-sonnet-4-5"), Some(&(1, 1)));
+    }
+
+    #[test]
+    fn pareto_pruning_reduces_alpha_for_dominated_models() {
+        let frontier = vec!["claude-sonnet-4-5".to_string()];
+        let base_alpha = 0.8;
+
+        assert!((pareto_adjusted_alpha(base_alpha, "claude-sonnet-4-5", &frontier) - base_alpha).abs() < f64::EPSILON);
+        assert!(
+            (pareto_adjusted_alpha(base_alpha, "claude-haiku-3-5", &frontier) - base_alpha * 0.1).abs()
+                < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn pareto_frontier_refreshes_every_50_observations() {
+        let cascade = CascadeRouter::new(vec![
+            "claude-haiku-3-5".to_string(),
+            "claude-sonnet-4-5".to_string(),
+        ]);
+        let ctx = default_ctx();
+
+        for _ in 0..50 {
+            cascade.record_observation(&ctx, "claude-sonnet-4-5", 1.0, true);
+        }
+
+        assert_eq!(cascade.pareto_frontier.lock().bucket, 1);
+        let frontier = cascade.pareto_frontier.lock().frontier.clone();
+        assert!(frontier.contains(&"claude-haiku-3-5".to_string()));
+        assert!(frontier.contains(&"claude-sonnet-4-5".to_string()));
+
+        for _ in 0..50 {
+            cascade.record_observation(&ctx, "claude-haiku-3-5", 0.0, false);
+        }
+
+        assert_eq!(cascade.pareto_frontier.lock().bucket, 2);
+        let frontier = cascade.pareto_frontier.lock().frontier.clone();
+        assert!(frontier.contains(&"claude-sonnet-4-5".to_string()));
+        assert!(
+            !frontier.contains(&"claude-haiku-3-5".to_string()),
+            "dominated models should be pruned from the frontier after refresh"
+        );
     }
 }

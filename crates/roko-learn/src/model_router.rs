@@ -510,6 +510,27 @@ impl LinUCBRouter {
         ctx: &RoutingContext,
         candidate_slugs: &[String],
     ) -> ModelSpec {
+        let alpha = {
+            let state = self.state.lock();
+            alpha_for_observations(state.total_observations)
+        };
+        self.select_features_from_candidates_with_alpha_adjuster(ctx, candidate_slugs, |_| alpha)
+    }
+
+    /// Select the best model from a filtered candidate set using a custom
+    /// exploration parameter per arm.
+    ///
+    /// This preserves the existing LinUCB scoring logic while allowing the
+    /// caller to down-weight exploration for a subset of arms.
+    pub fn select_features_from_candidates_with_alpha_adjuster<F>(
+        &self,
+        ctx: &RoutingContext,
+        candidate_slugs: &[String],
+        mut alpha_for_slug: F,
+    ) -> ModelSpec
+    where
+        F: FnMut(&str) -> f64,
+    {
         if candidate_slugs.is_empty() {
             return self.select_model(ctx);
         }
@@ -523,7 +544,6 @@ impl LinUCBRouter {
             return ModelSpec::from_slug(slug);
         }
 
-        let alpha = alpha_for_observations(state.total_observations);
         let mut best_slug: Option<String> = None;
         let mut best_score = f64::NEG_INFINITY;
 
@@ -533,7 +553,7 @@ impl LinUCBRouter {
             }
 
             let x = ctx.to_features_for_model(Some(&arm.slug));
-            let score = linucb_score(arm, &x, alpha);
+            let score = linucb_score(arm, &x, alpha_for_slug(&arm.slug));
             if score > best_score {
                 best_score = score;
                 best_slug = Some(arm.slug.clone());
