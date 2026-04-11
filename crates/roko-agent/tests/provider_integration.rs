@@ -156,6 +156,62 @@ async fn glm_zai_direct() {
 }
 
 #[tokio::test]
+async fn glm_openrouter() {
+    let response = serde_json::json!({
+        "id": "chatcmpl-test",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "pong"},
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": 15,
+            "completion_tokens": 8,
+            "total_tokens": 23
+        }
+    })
+    .to_string();
+    let (poster, captured) = MockPoster::new(response);
+
+    let agent = CodexAgent::new("test-key", "z-ai/glm-5.1")
+        .with_base_url("https://openrouter.ai/api")
+        .with_http_poster(poster)
+        .with_name("glm-openrouter");
+
+    let result = agent
+        .run(&prompt("Reply with the single word pong."), &Context::now())
+        .await;
+    assert!(
+        result.success,
+        "{}",
+        result.output.body.as_text().unwrap_or("unknown")
+    );
+    assert_eq!(result.output.body.as_text().unwrap_or(""), "pong");
+    assert_eq!(result.usage.input_tokens, 15);
+    assert_eq!(result.usage.output_tokens, 8);
+
+    let request = captured
+        .lock()
+        .expect("capture lock")
+        .clone()
+        .expect("captured request");
+    assert_eq!(request.url, "https://openrouter.ai/api/v1/chat/completions");
+    assert_eq!(request.timeout_ms, 120_000);
+
+    let parsed: Value = serde_json::from_str(&request.body).expect("request json");
+    assert_eq!(parsed["model"], "z-ai/glm-5.1");
+    assert_eq!(parsed["messages"][0]["content"], "Reply with the single word pong.");
+    assert!(request
+        .headers
+        .iter()
+        .any(|(name, value)| name.eq_ignore_ascii_case("authorization") && value == "Bearer test-key"));
+    assert!(request
+        .headers
+        .iter()
+        .any(|(name, value)| name.eq_ignore_ascii_case("content-type") && value == "application/json"));
+}
+
+#[tokio::test]
 async fn kimi_moonshot_direct() {
     let response = serde_json::json!({
         "id": "chatcmpl-test",
