@@ -16,8 +16,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use roko_core::tool::{ToolCall, ToolContext, ToolDef};
+use tokio::sync::mpsc;
 
 use crate::dispatcher::ToolDispatcher;
+use crate::streaming::StreamChunk;
 use crate::translate::{BackendResponse, RenderedTools, Translator};
 use crate::usage::Usage;
 
@@ -54,6 +56,19 @@ pub trait LlmBackend: Send + Sync {
         messages: &[serde_json::Value],
         tools: &RenderedTools,
     ) -> Result<BackendResponse, LlmError>;
+
+    /// Send the current conversation state to the backend in streaming mode.
+    ///
+    /// Backends that do not implement streaming fall back to [`send_turn`](Self::send_turn).
+    async fn send_turn_streaming(
+        &self,
+        messages: &[serde_json::Value],
+        tools: &RenderedTools,
+        event_tx: mpsc::UnboundedSender<StreamChunk>,
+    ) -> Result<BackendResponse, LlmError> {
+        let _ = event_tx;
+        self.send_turn(messages, tools).await
+    }
 }
 
 /// Errors from an [`LlmBackend`].
@@ -154,8 +169,30 @@ impl ToolLoop {
         ctx: &ToolContext,
     ) -> ToolLoopOutput {
         let messages = result_msg::initial_messages(system, user);
-        self.run_inner(messages, 0, Vec::new(), Usage::default(), tools, ctx)
+        self.run_inner(messages, 0, Vec::new(), Usage::default(), tools, ctx, None)
             .await
+    }
+
+    /// Run a fresh tool loop and forward streaming chunks as each backend turn arrives.
+    pub async fn run_streaming(
+        &self,
+        system: &str,
+        user: &str,
+        tools: &[ToolDef],
+        ctx: &ToolContext,
+        event_tx: mpsc::UnboundedSender<StreamChunk>,
+    ) -> ToolLoopOutput {
+        let messages = result_msg::initial_messages(system, user);
+        self.run_inner(
+            messages,
+            0,
+            Vec::new(),
+            Usage::default(),
+            tools,
+            ctx,
+            Some(event_tx),
+        )
+        .await
     }
 
     /// Resume a tool loop from a previously saved [`Checkpoint`].
@@ -172,6 +209,7 @@ impl ToolLoop {
             Usage::default(),
             tools,
             ctx,
+            None,
         )
         .await
     }
@@ -185,6 +223,7 @@ impl ToolLoop {
         mut total_usage: Usage,
         tools: &[ToolDef],
         ctx: &ToolContext,
+        event_tx: Option<mpsc::UnboundedSender<StreamChunk>>,
     ) -> ToolLoopOutput {
         let rendered_tools = self.translator.render_tools(tools);
 
@@ -216,7 +255,14 @@ impl ToolLoop {
             }
 
             // Send current conversation to the backend.
-            let response = match self.backend.send_turn(&messages, &rendered_tools).await {
+            let response = match match &event_tx {
+                Some(event_tx) => {
+                    self.backend
+                        .send_turn_streaming(&messages, &rendered_tools, event_tx.clone())
+                        .await
+                }
+                None => self.backend.send_turn(&messages, &rendered_tools).await,
+            } {
                 Ok(r) => r,
                 Err(e) => {
                     let cp = Checkpoint::new(iterations, all_calls.clone(), messages);

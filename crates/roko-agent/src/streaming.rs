@@ -81,7 +81,13 @@ impl StreamAccumulator {
                 tool_call.arguments.push_str(&arguments_delta);
             }
             StreamChunk::Usage(usage) => self.usage = usage,
-            StreamChunk::Done(finish_reason) => self.finish_reason = finish_reason,
+            StreamChunk::Done(finish_reason) => {
+                let should_preserve_existing = matches!(finish_reason, FinishReason::Stop)
+                    && !matches!(self.finish_reason, FinishReason::Stop);
+                if !should_preserve_existing {
+                    self.finish_reason = finish_reason;
+                }
+            }
             StreamChunk::Error(_) => {}
         }
     }
@@ -177,7 +183,7 @@ pub fn parse_sse_line(line: &str) -> Option<StreamChunk> {
 
 #[cfg(test)]
 mod tests {
-    use super::{StreamChunk, parse_sse_line};
+    use super::{StreamAccumulator, StreamChunk, parse_sse_line};
     use crate::chat_types::FinishReason;
 
     #[test]
@@ -253,6 +259,16 @@ mod tests {
         let chunk = parse_sse_line("data: [DONE]");
 
         assert!(matches!(chunk, Some(StreamChunk::Done(FinishReason::Stop))));
+    }
+
+    #[test]
+    fn done_marker_does_not_override_tool_calls_finish_reason() {
+        let mut accumulator = StreamAccumulator::new();
+        accumulator.push(StreamChunk::Done(FinishReason::ToolCalls));
+        accumulator.push(StreamChunk::Done(FinishReason::Stop));
+
+        let response = accumulator.finalize();
+        assert_eq!(response.finish_reason, FinishReason::ToolCalls);
     }
 
     #[test]

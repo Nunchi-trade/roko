@@ -2,13 +2,18 @@
 //! for OpenAI-compatible chat-completions endpoints.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Map, Value};
+use tokio::sync::mpsc;
 
 use crate::http::{HttpPoster, ReqwestPoster};
+use crate::streaming::{StreamAccumulator, StreamChunk, parse_sse_line};
 use crate::tool_loop::{LlmBackend, LlmError};
+use crate::translate::FinishReason;
 use crate::translate::{BackendResponse, RenderedTools};
+use crate::usage::Usage;
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
@@ -100,15 +105,13 @@ impl OpenAiCompatLlmBackend {
         headers.extend(self.extra_headers.iter().cloned());
         headers
     }
-}
 
-#[async_trait]
-impl LlmBackend for OpenAiCompatLlmBackend {
-    async fn send_turn(
+    fn build_body(
         &self,
         messages: &[serde_json::Value],
         tools: &RenderedTools,
-    ) -> Result<BackendResponse, LlmError> {
+        stream: bool,
+    ) -> Result<Vec<u8>, LlmError> {
         let RenderedTools::JsonArray(tools) = tools else {
             return Err(LlmError::Backend("expected json tool array".into()));
         };
@@ -123,13 +126,59 @@ impl LlmBackend for OpenAiCompatLlmBackend {
             if let Some(max_tokens) = self.max_tokens {
                 body_obj.insert("max_tokens".to_string(), Value::from(max_tokens));
             }
+            if stream {
+                body_obj.insert("stream".to_string(), Value::Bool(true));
+            }
             for (key, value) in &self.extra_body_params {
                 body_obj.insert(key.clone(), value.clone());
             }
         }
 
-        let body_bytes =
-            serde_json::to_vec(&body).map_err(|e| LlmError::Backend(format!("serialize: {e}")))?;
+        serde_json::to_vec(&body).map_err(|e| LlmError::Backend(format!("serialize: {e}")))
+    }
+
+    fn push_stream_line(
+        line: &[u8],
+        accumulator: &mut StreamAccumulator,
+        event_tx: &mpsc::UnboundedSender<StreamChunk>,
+    ) {
+        let line = String::from_utf8_lossy(line);
+        let line = line.trim_end_matches(['\r', '\n']);
+        if let Some(chunk) = parse_sse_line(line) {
+            accumulator.push(chunk.clone());
+            let _ = event_tx.send(chunk);
+        }
+    }
+
+    fn stream_response_to_json(
+        response: crate::chat_types::ChatResponse,
+    ) -> Result<Value, LlmError> {
+        let message = response
+            .raw_assistant_message
+            .clone()
+            .unwrap_or_else(|| response.as_assistant_message());
+        let message = serde_json::to_value(message)
+            .map_err(|e| LlmError::Backend(format!("serialize streamed response: {e}")))?;
+
+        Ok(serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "message": message,
+                "finish_reason": finish_reason_to_wire(&response.finish_reason),
+            }],
+            "usage": usage_to_wire(&response.usage),
+        }))
+    }
+}
+
+#[async_trait]
+impl LlmBackend for OpenAiCompatLlmBackend {
+    async fn send_turn(
+        &self,
+        messages: &[serde_json::Value],
+        tools: &RenderedTools,
+    ) -> Result<BackendResponse, LlmError> {
+        let body_bytes = self.build_body(messages, tools, false)?;
 
         let raw = self
             .poster
@@ -147,6 +196,89 @@ impl LlmBackend for OpenAiCompatLlmBackend {
 
         Ok(BackendResponse::Json(json))
     }
+
+    async fn send_turn_streaming(
+        &self,
+        messages: &[serde_json::Value],
+        tools: &RenderedTools,
+        event_tx: mpsc::UnboundedSender<StreamChunk>,
+    ) -> Result<BackendResponse, LlmError> {
+        let body_bytes = self.build_body(messages, tools, true)?;
+
+        let mut req = reqwest::Client::new()
+            .post(self.endpoint())
+            .timeout(Duration::from_millis(self.timeout_ms));
+        for (key, value) in self.headers() {
+            req = req.header(key, value);
+        }
+
+        let response = req.body(body_bytes).send().await.map_err(|e| {
+            let message = format!("request failed: {e}");
+            let _ = event_tx.send(StreamChunk::Error(message.clone()));
+            LlmError::Network(message)
+        })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.map_err(|e| {
+                let message = format!("read body failed: {e}");
+                let _ = event_tx.send(StreamChunk::Error(message.clone()));
+                LlmError::Network(message)
+            })?;
+            let message = crate::http::HttpPostError::http(status.as_u16(), text).to_string();
+            let _ = event_tx.send(StreamChunk::Error(message.clone()));
+            return Err(LlmError::Network(message));
+        }
+
+        let mut response = response;
+        let mut pending = Vec::new();
+        let mut accumulator = StreamAccumulator::new();
+
+        loop {
+            let chunk = response.chunk().await.map_err(|e| {
+                let message = format!("read chunk failed: {e}");
+                let _ = event_tx.send(StreamChunk::Error(message.clone()));
+                LlmError::Network(message)
+            })?;
+            let Some(chunk) = chunk else {
+                break;
+            };
+
+            pending.extend_from_slice(&chunk);
+            while let Some(newline_idx) = pending.iter().position(|byte| *byte == b'\n') {
+                let line: Vec<u8> = pending.drain(..=newline_idx).collect();
+                Self::push_stream_line(&line, &mut accumulator, &event_tx);
+            }
+        }
+
+        if !pending.is_empty() {
+            Self::push_stream_line(&pending, &mut accumulator, &event_tx);
+        }
+
+        let json = Self::stream_response_to_json(accumulator.finalize())?;
+        Ok(BackendResponse::Json(json))
+    }
+}
+
+fn finish_reason_to_wire(finish_reason: &FinishReason) -> String {
+    match finish_reason {
+        FinishReason::Stop => "stop".to_string(),
+        FinishReason::Length => "length".to_string(),
+        FinishReason::ToolCalls => "tool_calls".to_string(),
+        FinishReason::ContentFilter => "content_filter".to_string(),
+        FinishReason::Error(reason) => reason.clone(),
+    }
+}
+
+fn usage_to_wire(usage: &Usage) -> Value {
+    serde_json::json!({
+        "prompt_tokens": usage.input_tokens,
+        "completion_tokens": usage.output_tokens,
+        "total_tokens": usage.input_tokens + usage.output_tokens,
+        "prompt_tokens_details": {
+            "cached_tokens": usage.cache_read_tokens,
+        },
+    })
 }
 
 impl std::fmt::Debug for OpenAiCompatLlmBackend {
@@ -164,7 +296,11 @@ impl std::fmt::Debug for OpenAiCompatLlmBackend {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
     use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::Duration as StdDuration;
 
     use crate::dispatcher::{HandlerResolver, ToolDispatcher};
     use crate::tool_loop::{StopReason, ToolLoop};
@@ -173,6 +309,7 @@ mod tests {
         ToolCall, ToolCategory, ToolConcurrency, ToolContext, ToolDef, ToolHandler, ToolPermission,
         ToolResult, VecToolRegistry,
     };
+    use tokio::time::{Duration, timeout};
 
     use crate::http::HttpPostError;
 
@@ -271,6 +408,47 @@ mod tests {
         let dispatcher = Arc::new(ToolDispatcher::new(registry, resolver));
         let translator: Arc<dyn Translator> = Arc::new(OpenAiTranslator);
         ToolLoop::new(translator, dispatcher, Arc::new(backend))
+    }
+
+    fn read_http_request(stream: &mut TcpStream) -> String {
+        stream
+            .set_read_timeout(Some(StdDuration::from_secs(2)))
+            .expect("set read timeout");
+
+        let mut buf = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        let header_end = loop {
+            let read = stream.read(&mut chunk).expect("read request bytes");
+            assert!(read > 0, "request closed before headers completed");
+            buf.extend_from_slice(&chunk[..read]);
+
+            if let Some(pos) = buf.windows(4).position(|window| window == b"\r\n\r\n") {
+                break pos + 4;
+            }
+        };
+
+        let headers = String::from_utf8_lossy(&buf[..header_end]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+
+        while buf.len() < header_end + content_length {
+            let read = stream.read(&mut chunk).expect("read request body");
+            assert!(read > 0, "request closed before body completed");
+            buf.extend_from_slice(&chunk[..read]);
+        }
+
+        String::from_utf8(buf).expect("request should be valid utf8")
+    }
+
+    fn sse_json_line(value: Value) -> String {
+        format!("data: {value}\n\n")
     }
 
     #[tokio::test]
@@ -417,6 +595,198 @@ mod tests {
             .expect("tool result message");
         assert_eq!(tool_message["tool_call_id"], "call-1");
         assert_eq!(tool_message["content"], "{\"value\":1}");
+    }
+
+    #[tokio::test]
+    async fn streaming_tool_loop_emits_chunks_and_matches_final_result() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("listener addr");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let requests_for_server = requests.clone();
+
+        let server = thread::spawn(move || {
+            let responses = [
+                vec![
+                    sse_json_line(serde_json::json!({
+                        "choices": [{
+                            "delta": {
+                                "reasoning_content": "Need to inspect the args. "
+                            }
+                        }]
+                    })),
+                    sse_json_line(serde_json::json!({
+                        "choices": [{
+                            "delta": {
+                                "tool_calls": [{
+                                    "index": 0,
+                                    "id": "call-1",
+                                    "function": {
+                                        "name": "echo",
+                                        "arguments": "{\"value\":"
+                                    }
+                                }]
+                            }
+                        }]
+                    })),
+                    sse_json_line(serde_json::json!({
+                        "choices": [{
+                            "delta": {
+                                "tool_calls": [{
+                                    "index": 0,
+                                    "function": {
+                                        "arguments": "1}"
+                                    }
+                                }]
+                            }
+                        }]
+                    })),
+                    sse_json_line(serde_json::json!({
+                        "choices": [{
+                            "delta": {},
+                            "finish_reason": "tool_calls"
+                        }]
+                    })),
+                    sse_json_line(serde_json::json!({
+                        "usage": {
+                            "prompt_tokens": 11,
+                            "completion_tokens": 7,
+                            "prompt_tokens_details": {
+                                "cached_tokens": 3
+                            }
+                        }
+                    })),
+                    "data: [DONE]\n\n".to_string(),
+                ],
+                vec![
+                    sse_json_line(serde_json::json!({
+                        "choices": [{
+                            "delta": {
+                                "content": "final "
+                            }
+                        }]
+                    })),
+                    sse_json_line(serde_json::json!({
+                        "choices": [{
+                            "delta": {
+                                "content": "answer"
+                            }
+                        }]
+                    })),
+                    sse_json_line(serde_json::json!({
+                        "choices": [{
+                            "delta": {},
+                            "finish_reason": "stop"
+                        }]
+                    })),
+                    sse_json_line(serde_json::json!({
+                        "usage": {
+                            "prompt_tokens": 9,
+                            "completion_tokens": 4
+                        }
+                    })),
+                    "data: [DONE]\n\n".to_string(),
+                ],
+            ];
+
+            for response in responses {
+                let (mut stream, _) = listener.accept().expect("accept request");
+                let request = read_http_request(&mut stream);
+                requests_for_server
+                    .lock()
+                    .expect("requests lock")
+                    .push(request);
+
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+                )
+                .expect("write response headers");
+                stream.flush().expect("flush response headers");
+
+                for chunk in response {
+                    stream
+                        .write_all(chunk.as_bytes())
+                        .expect("write response chunk");
+                    stream.flush().expect("flush response chunk");
+                    thread::sleep(StdDuration::from_millis(40));
+                }
+            }
+        });
+
+        let backend = OpenAiCompatLlmBackend::new("test-key", "glm-5.1")
+            .with_base_url(format!("http://{addr}"))
+            .with_timeout_ms(5_000);
+        let tool_loop = make_tool_loop(backend);
+        let tools = test_tools();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let run = tokio::spawn(async move {
+            let ctx = ToolContext::testing("/tmp");
+            tool_loop
+                .run_streaming(
+                    "system prompt",
+                    "call the tool, then finish",
+                    &tools,
+                    &ctx,
+                    event_tx,
+                )
+                .await
+        });
+
+        let first_chunk = timeout(Duration::from_millis(500), event_rx.recv())
+            .await
+            .expect("stream should emit before completion")
+            .expect("stream channel open");
+        assert!(matches!(first_chunk, StreamChunk::ReasoningDelta(_)));
+        assert!(
+            !run.is_finished(),
+            "streaming chunks should arrive before the tool loop finishes"
+        );
+
+        let result = run.await.expect("tool loop task");
+        let mut chunks = vec![first_chunk];
+        while let Some(chunk) = event_rx.recv().await {
+            chunks.push(chunk);
+        }
+
+        assert_eq!(result.stop_reason, StopReason::Stop);
+        assert_eq!(result.iterations, 1);
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].id, "call-1");
+        assert_eq!(result.tool_calls[0].name, "echo");
+        assert_eq!(result.final_text, "final answer");
+        assert_eq!(result.total_usage.input_tokens, 20);
+        assert_eq!(result.total_usage.output_tokens, 11);
+        assert_eq!(result.total_usage.cache_read_tokens, 3);
+
+        assert!(chunks.iter().any(|chunk| matches!(
+            chunk,
+            StreamChunk::ToolCallDelta {
+                index: 0,
+                id_delta: Some(id),
+                name_delta: Some(name),
+                arguments_delta,
+            } if id == "call-1" && name == "echo" && arguments_delta == "{\"value\":"
+        )));
+        assert!(chunks.iter().any(|chunk| {
+            matches!(chunk, StreamChunk::ContentDelta(content) if content == "final ")
+        }));
+        assert!(
+            chunks
+                .iter()
+                .any(|chunk| { matches!(chunk, StreamChunk::Done(FinishReason::ToolCalls)) })
+        );
+
+        let requests = requests.lock().expect("requests lock");
+        assert_eq!(requests.len(), 2, "expected two streamed HTTP turns");
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.contains("\"stream\":true"))
+        );
+        assert!(requests[1].contains("\"tool_call_id\":\"call-1\""));
+        assert!(requests[1].contains("\"arguments\":\"{\\\"value\\\":1}\""));
+
+        server.join().expect("server thread");
     }
 
     #[tokio::test]
