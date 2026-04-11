@@ -43,6 +43,8 @@ pub enum ProviderKind {
     CursorAcp,
     /// Perplexity Sonar HTTP API (OpenAI-compatible base, Sonar extensions).
     PerplexityApi,
+    /// Google Gemini API.
+    GeminiApi,
 }
 
 impl ProviderKind {
@@ -55,6 +57,7 @@ impl ProviderKind {
             Self::OpenAiCompat => "openai_compat",
             Self::CursorAcp => "cursor_acp",
             Self::PerplexityApi => "perplexity_api",
+            Self::GeminiApi => "gemini_api",
         }
     }
 }
@@ -874,6 +877,7 @@ mod tests {
             (ProviderKind::OpenAiCompat, "openai_compat"),
             (ProviderKind::CursorAcp, "cursor_acp"),
             (ProviderKind::PerplexityApi, "perplexity_api"),
+            (ProviderKind::GeminiApi, "gemini_api"),
         ];
 
         for (kind, label) in kinds {

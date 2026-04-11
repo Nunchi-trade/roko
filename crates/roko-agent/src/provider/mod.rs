@@ -76,6 +76,7 @@ pub fn adapter_for_kind(kind: ProviderKind) -> &'static dyn ProviderAdapter {
         ProviderKind::AnthropicApi => &ANTHROPIC_API_ADAPTER,
         ProviderKind::CursorAcp => &CURSOR_ACP_ADAPTER,
         ProviderKind::PerplexityApi => &PERPLEXITY_ADAPTER,
+        ProviderKind::GeminiApi => &OPENAI_COMPAT_ADAPTER,
     }
 }
 
@@ -335,6 +336,10 @@ mod tests {
         assert_eq!(
             adapter_for_kind(ProviderKind::PerplexityApi).kind(),
             ProviderKind::PerplexityApi
+        );
+        assert_eq!(
+            adapter_for_kind(ProviderKind::GeminiApi).kind(),
+            ProviderKind::OpenAiCompat
         );
     }
 
