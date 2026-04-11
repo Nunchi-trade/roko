@@ -128,8 +128,7 @@ mod tests {
         };
 
         let encoded = serde_json::to_string(&contract).expect("serialize contract");
-        let decoded: AgentContract =
-            serde_json::from_str(&encoded).expect("deserialize contract");
+        let decoded: AgentContract = serde_json::from_str(&encoded).expect("deserialize contract");
 
         assert_eq!(decoded.role, "implementer");
         assert_eq!(decoded.invariants.len(), 2);
@@ -138,7 +137,10 @@ mod tests {
             decoded.governance[1],
             GovernanceRule::ForbiddenTools(_)
         ));
-        assert!(matches!(decoded.recovery[0].action, RecoveryKind::Downgrade));
+        assert!(matches!(
+            decoded.recovery[0].action,
+            RecoveryKind::Downgrade
+        ));
     }
 
     #[test]

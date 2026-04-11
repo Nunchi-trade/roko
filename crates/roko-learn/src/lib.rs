@@ -31,6 +31,7 @@ pub mod context_pack_cache;
 pub mod cost_table;
 pub mod costs_db;
 pub mod costs_log;
+pub mod drift;
 pub mod efficiency;
 pub mod episode_logger;
 /// Cheap pre-processing of noisy gate failures into retry-ready diagnoses.
