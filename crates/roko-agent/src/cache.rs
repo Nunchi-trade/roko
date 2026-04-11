@@ -87,7 +87,7 @@ impl ResponseCache {
             let response = compute
                 .take()
                 .expect("response cache compute closure called once")()
-                .await;
+            .await;
 
             let mut cache = self.entries.lock().await;
             match &response {
@@ -174,12 +174,13 @@ mod tests {
         let calls = AtomicUsize::new(0);
         let prompt_hash = ContentHash::of(b"prompt");
 
-        cache.get_or_compute(prompt_hash, || async {
-            calls.fetch_add(1, Ordering::SeqCst);
-            Ok(BackendResponse::Text("cached".into()))
-        })
-        .await
-        .unwrap();
+        cache
+            .get_or_compute(prompt_hash, || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(BackendResponse::Text("cached".into()))
+            })
+            .await
+            .unwrap();
 
         sleep(Duration::from_millis(20)).await;
 

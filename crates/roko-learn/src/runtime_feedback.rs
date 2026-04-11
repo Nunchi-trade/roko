@@ -405,6 +405,24 @@ impl LearningRuntime {
         &self.provider_health
     }
 
+    /// Filter model slugs down to those whose providers are currently healthy.
+    ///
+    /// When every candidate resolves to an unhealthy provider, the original
+    /// `all_model_slugs` set is returned so routing can still make progress.
+    pub fn healthy_model_slugs<F>(&self, all_model_slugs: &[String], provider_of: F) -> Vec<String>
+    where
+        F: Fn(&str) -> String,
+    {
+        let healthy_models = self
+            .provider_health
+            .filter_arms(all_model_slugs, provider_of);
+        if healthy_models.is_empty() {
+            all_model_slugs.to_vec()
+        } else {
+            healthy_models
+        }
+    }
+
     /// Borrow skill library.
     #[must_use]
     pub const fn skill_library(&self) -> &SkillLibrary {
@@ -1697,5 +1715,67 @@ mod tests {
         let report = update.regression_report.expect("regression report");
         assert!(report.sufficient_data);
         assert!(!report.alerts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn health_filters_routing() {
+        let tmp = TempDir::new().unwrap();
+        let runtime = LearningRuntime::open_with_models(
+            LearningPaths::under(tmp.path()),
+            RegressionConfig::default(),
+            vec![
+                "moonshot-fast".to_string(),
+                "moonshot-premium".to_string(),
+                "anthropic-safe".to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+
+        for _ in 0..3 {
+            runtime.provider_health().record_failure("moonshot");
+        }
+
+        let all_model_slugs = runtime
+            .cascade_router()
+            .linucb()
+            .arm_stats()
+            .into_iter()
+            .map(|arm| arm.slug)
+            .collect::<Vec<_>>();
+        let healthy_models = runtime.healthy_model_slugs(&all_model_slugs, |model_slug| {
+            if model_slug.starts_with("moonshot") {
+                "moonshot".to_string()
+            } else {
+                "anthropic".to_string()
+            }
+        });
+
+        assert_eq!(healthy_models, vec!["anthropic-safe".to_string()]);
+
+        let ctx = RoutingContext {
+            task_category: TaskCategory::Implementation,
+            complexity: TaskComplexityBand::Standard,
+            iteration: 0,
+            role: AgentRole::Implementer,
+            crate_familiarity: 0.5,
+            has_prior_failure: false,
+            affect_confidence: 0.5,
+            thinking_level: None,
+            previous_model: None,
+            plan_context_tokens: None,
+        };
+        let selected = runtime
+            .cascade_router()
+            .select_for_frequency_among(
+                roko_core::OperatingFrequency::Theta,
+                Some(&ctx),
+                None,
+                Some("Implementer"),
+                &healthy_models,
+            )
+            .expect("theta should route to a healthy model");
+
+        assert_eq!(selected.slug, "anthropic-safe");
     }
 }

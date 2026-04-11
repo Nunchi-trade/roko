@@ -65,8 +65,8 @@ mod tests {
     use async_trait::async_trait;
     use serde_json::Value;
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     };
     use std::time::Duration;
     use tokio::sync::Notify;
@@ -127,7 +127,10 @@ mod tests {
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_millis(20)).await;
 
-        let response = call.await.expect("task should complete").expect("backend should succeed");
+        let response = call
+            .await
+            .expect("task should complete")
+            .expect("backend should succeed");
         assert!(matches!(response, BackendResponse::Text(ref text) if text == "primary"));
         assert_eq!(primary.calls(), 1);
         assert_eq!(backup.calls(), 0);
@@ -150,7 +153,10 @@ mod tests {
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_millis(10)).await;
 
-        let response = call.await.expect("task should complete").expect("backend should succeed");
+        let response = call
+            .await
+            .expect("task should complete")
+            .expect("backend should succeed");
         assert!(matches!(response, BackendResponse::Text(ref text) if text == "backup"));
         assert_eq!(primary.calls(), 1);
         assert_eq!(backup.calls(), 1);

@@ -839,6 +839,39 @@ impl CascadeRouter {
         }
     }
 
+    /// Select a model for a given operating frequency from a candidate subset.
+    ///
+    /// When `candidates` is empty, the full router arm set is used.
+    #[must_use]
+    pub fn select_for_frequency_among(
+        &self,
+        frequency: OperatingFrequency,
+        ctx: Option<&RoutingContext>,
+        cfactor: Option<&CFactor>,
+        agent_id: Option<&str>,
+        candidates: &[String],
+    ) -> Option<ModelSpec> {
+        let candidates = if candidates.is_empty() {
+            &self.model_slugs
+        } else {
+            candidates
+        };
+
+        match frequency {
+            OperatingFrequency::Gamma => None,
+            OperatingFrequency::Theta => ctx.map(|ctx| {
+                self.route_with_cfactor_among(ctx, candidates, cfactor, agent_id)
+                    .primary
+            }),
+            OperatingFrequency::Delta => Some(self.bias_model_for_cfactor_among(
+                self.strongest_model_among(candidates),
+                cfactor,
+                agent_id,
+                candidates,
+            )),
+        }
+    }
+
     /// Return the strongest model currently available to the router.
     ///
     /// Preference order is premium > standard > fast. Within the same tier,
@@ -877,6 +910,46 @@ impl CascadeRouter {
         let mut best_rank = model_tier_rank(slug_to_tier(&best_slug));
 
         for slug in self.model_slugs.iter().skip(1) {
+            let rank = model_tier_rank(slug_to_tier(slug));
+            if rank < best_rank {
+                best_rank = rank;
+                best_slug.clone_from(slug);
+            }
+        }
+
+        ModelSpec::from_slug(best_slug)
+    }
+
+    /// Return the strongest model from `candidates`.
+    #[must_use]
+    pub fn strongest_model_among(&self, candidates: &[String]) -> ModelSpec {
+        let mut best_slug = candidates
+            .first()
+            .cloned()
+            .unwrap_or_else(|| self.strongest_model().slug);
+        let mut best_rank = model_tier_rank(slug_to_tier(&best_slug));
+
+        for slug in candidates.iter().skip(1) {
+            let rank = model_tier_rank(slug_to_tier(slug));
+            if rank > best_rank {
+                best_rank = rank;
+                best_slug.clone_from(slug);
+            }
+        }
+
+        ModelSpec::from_slug(best_slug)
+    }
+
+    /// Return the cheapest model from `candidates`.
+    #[must_use]
+    pub fn cheapest_model_among(&self, candidates: &[String]) -> ModelSpec {
+        let mut best_slug = candidates
+            .first()
+            .cloned()
+            .unwrap_or_else(|| self.cheapest_model().slug);
+        let mut best_rank = model_tier_rank(slug_to_tier(&best_slug));
+
+        for slug in candidates.iter().skip(1) {
             let rank = model_tier_rank(slug_to_tier(slug));
             if rank < best_rank {
                 best_rank = rank;
@@ -943,6 +1016,30 @@ impl CascadeRouter {
             CascadeStage::Static => self.route_static(ctx, cfactor, agent_id),
             CascadeStage::Confidence => self.route_confidence(ctx, cfactor, agent_id),
             CascadeStage::Ucb => self.route_ucb(ctx, cfactor, agent_id),
+        }
+    }
+
+    /// Route a context through the cascade over a candidate subset,
+    /// optionally biasing by C-Factor.
+    pub fn route_with_cfactor_among(
+        &self,
+        ctx: &RoutingContext,
+        candidates: &[String],
+        cfactor: Option<&CFactor>,
+        agent_id: Option<&str>,
+    ) -> CascadeModel {
+        let candidates = if candidates.is_empty() {
+            &self.model_slugs
+        } else {
+            candidates
+        };
+
+        match self.current_stage() {
+            CascadeStage::Static => self.route_static_among(ctx, candidates, cfactor, agent_id),
+            CascadeStage::Confidence => {
+                self.route_confidence_among(ctx, candidates, cfactor, agent_id)
+            }
+            CascadeStage::Ucb => self.route_ucb_among(ctx, candidates, cfactor, agent_id),
         }
     }
 
@@ -1507,6 +1604,19 @@ impl CascadeRouter {
         }
     }
 
+    fn route_static_among(
+        &self,
+        ctx: &RoutingContext,
+        candidates: &[String],
+        cfactor: Option<&CFactor>,
+        agent_id: Option<&str>,
+    ) -> CascadeModel {
+        let mut route = self.route_static_filtered(ctx, candidates);
+        route.primary =
+            self.bias_model_for_cfactor_among(route.primary, cfactor, agent_id, candidates);
+        route
+    }
+
     fn route_confidence(
         &self,
         ctx: &RoutingContext,
@@ -1551,6 +1661,19 @@ impl CascadeRouter {
         }
     }
 
+    fn route_confidence_among(
+        &self,
+        ctx: &RoutingContext,
+        candidates: &[String],
+        cfactor: Option<&CFactor>,
+        agent_id: Option<&str>,
+    ) -> CascadeModel {
+        let mut route = self.route_confidence_filtered(ctx, candidates);
+        route.primary =
+            self.bias_model_for_cfactor_among(route.primary, cfactor, agent_id, candidates);
+        route
+    }
+
     fn route_ucb(
         &self,
         ctx: &RoutingContext,
@@ -1586,6 +1709,19 @@ impl CascadeRouter {
         }
     }
 
+    fn route_ucb_among(
+        &self,
+        ctx: &RoutingContext,
+        candidates: &[String],
+        cfactor: Option<&CFactor>,
+        agent_id: Option<&str>,
+    ) -> CascadeModel {
+        let mut route = self.route_ucb_filtered(ctx, candidates);
+        route.primary =
+            self.bias_model_for_cfactor_among(route.primary, cfactor, agent_id, candidates);
+        route
+    }
+
     /// Apply a C-Factor-based bias to a selected model.
     fn bias_model_for_cfactor(
         &self,
@@ -1609,6 +1745,34 @@ impl CascadeRouter {
             self.cheapest_model()
         } else if cfactor.overall < LOW_CFACTOR_THRESHOLD {
             self.strongest_model()
+        } else {
+            model
+        }
+    }
+
+    fn bias_model_for_cfactor_among(
+        &self,
+        model: ModelSpec,
+        cfactor: Option<&CFactor>,
+        agent_id: Option<&str>,
+        candidates: &[String],
+    ) -> ModelSpec {
+        let Some(cfactor) = cfactor else {
+            return model;
+        };
+
+        if let Some(agent_id) = agent_id {
+            match cfactor.dispatch_bias_for_agent(agent_id) {
+                AgentDispatchBias::PreferStronger => return self.strongest_model_among(candidates),
+                AgentDispatchBias::PreferCheaper => return self.cheapest_model_among(candidates),
+                AgentDispatchBias::Neutral => {}
+            }
+        }
+
+        if cfactor.overall > HIGH_CFACTOR_THRESHOLD {
+            self.cheapest_model_among(candidates)
+        } else if cfactor.overall < LOW_CFACTOR_THRESHOLD {
+            self.strongest_model_among(candidates)
         } else {
             model
         }

@@ -27,9 +27,9 @@ use crate::provider::ProviderError;
 use crate::retry::RetryPolicy;
 use crate::translate::{BackendResponse, RenderedTools, Translator};
 
-pub mod checkpoint;
 /// Composable backend wrappers used by the tool loop.
 pub mod backends;
+pub mod checkpoint;
 pub mod compaction;
 pub mod max_iter;
 pub mod prune;

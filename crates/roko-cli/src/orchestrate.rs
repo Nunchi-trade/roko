@@ -172,6 +172,29 @@ fn frequency_label(frequency: OperatingFrequency) -> &'static str {
     }
 }
 
+fn routing_model_provider_map(config: &RokoConfig) -> HashMap<String, String> {
+    let mut providers = HashMap::new();
+    for (model_key, profile) in config.effective_models() {
+        providers.insert(model_key, profile.provider.clone());
+        providers.entry(profile.slug).or_insert(profile.provider);
+    }
+    providers
+}
+
+fn provider_id_for_routing_model(
+    config: &RokoConfig,
+    model_providers: &HashMap<String, String>,
+    model: &str,
+) -> String {
+    model_providers.get(model).cloned().unwrap_or_else(|| {
+        let resolved = resolve_model(config, model);
+        resolved
+            .profile
+            .map(|profile| profile.provider)
+            .unwrap_or_else(|| resolved.provider_kind.label().to_owned())
+    })
+}
+
 // ─── ContextAttributionTracker ────────────────────────────────────────────
 
 /// Tracks per-(tier, source_type) context attribution rates.
@@ -7453,12 +7476,33 @@ impl PlanRunner {
                 .unwrap_or_else(|| "claude-opus-4-6".into());
             (text, model)
         };
+        let roko_config = match load_roko_config(&self.workdir) {
+            Ok(config) => config,
+            Err(err) => {
+                tracing::warn!(
+                    "[orchestrate] failed to load roko.toml for provider routing metadata: {err}"
+                );
+                RokoConfig::default()
+            }
+        };
+        let model_providers = routing_model_provider_map(&roko_config);
 
         // ── Adaptive model selection via CascadeRouter ───────────────
         if let Some(td) = task_def.as_ref() {
             let cascade_router = self.learning.cascade_router();
             let routing_ctx = cascade_routing_context(self, plan_id, task, role, Some(td));
             let agent_id = format!("{role:?}");
+            let all_model_slugs = cascade_router
+                .linucb()
+                .arm_stats()
+                .into_iter()
+                .map(|arm| arm.slug)
+                .collect::<Vec<_>>();
+            let healthy_models =
+                self.learning
+                    .healthy_model_slugs(&all_model_slugs, |model_slug| {
+                        provider_id_for_routing_model(&roko_config, &model_providers, model_slug)
+                    });
             let cfactor_snapshot = match self.learning.latest_cfactor().await {
                 Ok(snapshot) => snapshot,
                 Err(err) => {
@@ -7467,17 +7511,19 @@ impl PlanRunner {
                 }
             };
 
-            match cascade_router.select_for_frequency(
+            match cascade_router.select_for_frequency_among(
                 frequency,
                 Some(&routing_ctx),
                 cfactor_snapshot.as_ref(),
                 Some(agent_id.as_str()),
+                &healthy_models,
             ) {
                 Some(model) => {
                     tracing::info!(
-                        "[orchestrate] frequency={} model={} (selected via cascade)",
+                        "[orchestrate] frequency={} model={} healthy_candidates={} (selected via cascade)",
                         frequency_label(frequency),
-                        model.slug
+                        model.slug,
+                        healthy_models.len()
                     );
                     selected_model = model.slug;
                 }
@@ -7542,7 +7588,13 @@ impl PlanRunner {
         };
 
         // ── Provider health check ────────────────────────────────────
-        let selected_model = if !self.learning.provider_health().is_healthy(&selected_model) {
+        let selected_provider =
+            provider_id_for_routing_model(&roko_config, &model_providers, &selected_model);
+        let selected_model = if !self
+            .learning
+            .provider_health()
+            .is_healthy(&selected_provider)
+        {
             let fallback = self
                 .config
                 .agent
@@ -7551,6 +7603,7 @@ impl PlanRunner {
                 .unwrap_or_else(|| "claude-sonnet-4-6".into());
             tracing::warn!(
                 unhealthy_model = %selected_model,
+                unhealthy_provider = %selected_provider,
                 fallback_model = %fallback,
                 "model marked unhealthy by ProviderHealthTracker, falling back"
             );
