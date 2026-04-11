@@ -12,6 +12,11 @@
 //!    raw object. The translator stringifies on the way out and parses
 //!    strings on the way in.
 //!
+//! Kimi-K2.5 also returns non-standard tool-call IDs like
+//! `functions.Read:0`. We preserve those IDs verbatim here so
+//! [`Translator::render_results`] can echo the exact same `tool_call_id`
+//! back to the backend.
+//!
 //! Both the outbound tool spec and the tool-result messages re-use the
 //! same layout as the Ollama translator; only the inbound JSON pointer
 //! and the arguments decoding differ.
@@ -56,6 +61,9 @@ impl Translator for OpenAiTranslator {
 
         let mut out = Vec::with_capacity(arr.len());
         for call in arr {
+            // Preserve backend-issued IDs verbatim. Kimi uses IDs such as
+            // `functions.Read:0`, and the result message must echo the
+            // exact same value back to the provider.
             let id = call
                 .get("id")
                 .and_then(|v| v.as_str())
@@ -524,6 +532,40 @@ mod tests {
             .expect("parse should succeed");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].id, "call_abc_123");
+    }
+
+    #[test]
+    fn kimi_tool_call_ids_are_preserved() {
+        let resp = BackendResponse::Json(serde_json::json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "id": "functions.Read:0",
+                        "function": {
+                            "name": "Read",
+                            "arguments": "{\"path\":\"src/lib.rs\"}"
+                        }
+                    }]
+                }
+            }]
+        }));
+
+        let calls = OpenAiTranslator
+            .parse_calls(&resp)
+            .expect("parse should succeed");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "functions.Read:0");
+
+        let rendered = OpenAiTranslator.render_results(&[(
+            calls[0].clone(),
+            ok_text("file contents"),
+        )]);
+        let RenderedResults::JsonMessages(v) = rendered else {
+            panic!("expected JsonMessages");
+        };
+        let arr = v.as_array().expect("array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["tool_call_id"], "functions.Read:0");
     }
 
     #[test]
