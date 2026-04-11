@@ -3,7 +3,9 @@
 use std::collections::HashMap;
 
 use roko_core::tool::ToolCall;
-use roko_core::{ChatMessage, ToolCallFunction, ToolCallMessage, ToolDef};
+use roko_core::{
+    Body, ChatMessage, Kind, MessageContent, Signal, ToolCallFunction, ToolCallMessage, ToolDef,
+};
 
 use crate::usage::Usage;
 
@@ -20,6 +22,42 @@ pub struct ChatRequest {
     pub stop: Option<Vec<String>>,
     pub stream: bool,
     pub options: RequestOptions,
+}
+
+impl ChatRequest {
+    /// Build a canonical chat request from the orchestrator's signal format.
+    #[must_use]
+    pub fn from_signal(
+        signal: &Signal,
+        model_slug: &str,
+        system_prompt: Option<&str>,
+        tools: Vec<ToolDef>,
+        options: RequestOptions,
+    ) -> Self {
+        let mut messages = Vec::new();
+        if let Some(system_prompt) = system_prompt {
+            messages.push(ChatMessage::System {
+                content: system_prompt.to_string(),
+            });
+        }
+
+        messages.push(ChatMessage::User {
+            content: MessageContent::Text(signal.body.as_text().unwrap_or_default().to_string()),
+        });
+
+        Self {
+            messages,
+            model_slug: model_slug.to_string(),
+            tools,
+            tool_choice: ToolChoice::Auto,
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            stop: None,
+            stream: false,
+            options,
+        }
+    }
 }
 
 /// Provider-agnostic options plus adapter-specific passthrough fields.
@@ -121,5 +159,18 @@ impl ChatResponse {
             },
             partial: false,
         }
+    }
+
+    /// Convert the canonical chat response back into the orchestrator's signal format.
+    #[must_use]
+    pub fn to_signal(&self) -> Signal {
+        Signal::builder(Kind::AgentOutput)
+            .body(Body::text(&self.content))
+            .tag(
+                "model",
+                self.metadata.model_used.as_deref().unwrap_or("unknown"),
+            )
+            .tag("finish_reason", format!("{:?}", self.finish_reason))
+            .build()
     }
 }
