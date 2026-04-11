@@ -157,6 +157,102 @@ impl BackendResponse {
             }
         }
     }
+
+    /// Extract reasoning/thinking content from the response.
+    #[must_use]
+    pub fn extract_reasoning(&self) -> Option<String> {
+        match self {
+            Self::Json(v) => v
+                .pointer("/choices/0/message")
+                .and_then(extract_reasoning_from_value)
+                .or_else(|| v.pointer("/message").and_then(extract_reasoning_from_value))
+                .or_else(|| extract_reasoning_from_value(v)),
+            Self::StreamJson(events) => {
+                let mut buf = String::new();
+                for ev in events {
+                    if let Some(reasoning) = extract_reasoning_from_stream_event(ev) {
+                        buf.push_str(&reasoning);
+                    }
+                }
+                if buf.is_empty() { None } else { Some(buf) }
+            }
+            Self::Text(_) => None,
+        }
+    }
+}
+
+fn extract_reasoning_from_value(value: &serde_json::Value) -> Option<String> {
+    if let Some(reasoning) = value.get("reasoning_content").and_then(serde_json::Value::as_str) {
+        return Some(reasoning.to_string());
+    }
+
+    value
+        .get("content")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|blocks| extract_reasoning_from_blocks(blocks.as_slice()))
+}
+
+fn extract_reasoning_from_blocks(blocks: &[serde_json::Value]) -> Option<String> {
+    let mut buf = String::new();
+
+    for block in blocks {
+        if block.get("type").and_then(serde_json::Value::as_str) != Some("thinking") {
+            continue;
+        }
+
+        if let Some(reasoning) = block
+            .get("thinking")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| block.get("text").and_then(serde_json::Value::as_str))
+        {
+            buf.push_str(reasoning);
+        }
+    }
+
+    if buf.is_empty() { None } else { Some(buf) }
+}
+
+fn extract_reasoning_from_stream_event(event: &serde_json::Value) -> Option<String> {
+    if let Some(reasoning) = event
+        .pointer("/delta/reasoning_content")
+        .and_then(serde_json::Value::as_str)
+    {
+        return Some(reasoning.to_string());
+    }
+
+    if let Some(reasoning) = event.pointer("/delta/thinking").and_then(serde_json::Value::as_str)
+    {
+        return Some(reasoning.to_string());
+    }
+
+    if let Some(reasoning) = event
+        .pointer("/content_block/reasoning_content")
+        .and_then(serde_json::Value::as_str)
+    {
+        return Some(reasoning.to_string());
+    }
+
+    if let Some(block) = event.get("content_block")
+        && block.get("type").and_then(serde_json::Value::as_str) == Some("thinking")
+        && let Some(reasoning) = block
+            .get("thinking")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| block.get("text").and_then(serde_json::Value::as_str))
+    {
+        return Some(reasoning.to_string());
+    }
+
+    if let Some(delta) = event.get("delta")
+        && delta.get("type").and_then(serde_json::Value::as_str) == Some("thinking_delta")
+        && let Some(reasoning) = delta
+            .get("thinking")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| delta.get("text").and_then(serde_json::Value::as_str))
+    {
+        return Some(reasoning.to_string());
+    }
+
+    None
 }
 
 /// Errors a [`Translator`] may produce.
@@ -209,6 +305,45 @@ mod tests {
     fn backend_response_extract_text_empty_when_absent() {
         let r = BackendResponse::Json(serde_json::json!({}));
         assert_eq!(r.extract_text(), "");
+    }
+
+    #[test]
+    fn backend_response_extract_reasoning_from_openai_json() {
+        let r = BackendResponse::Json(serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "answer",
+                    "reasoning_content": "thinking"
+                }
+            }]
+        }));
+        assert_eq!(r.extract_reasoning(), Some("thinking".to_string()));
+    }
+
+    #[test]
+    fn backend_response_extract_reasoning_from_claude_json_blocks() {
+        let r = BackendResponse::Json(serde_json::json!({
+            "content": [
+                { "type": "text", "text": "answer" },
+                { "type": "thinking", "thinking": "hmm" }
+            ]
+        }));
+        assert_eq!(r.extract_reasoning(), Some("hmm".to_string()));
+    }
+
+    #[test]
+    fn backend_response_extract_reasoning_from_stream_json() {
+        let r = BackendResponse::StreamJson(vec![
+            serde_json::json!({
+                "type": "content_block_start",
+                "content_block": { "type": "thinking", "thinking": "step 1" }
+            }),
+            serde_json::json!({
+                "type": "content_block_delta",
+                "delta": { "type": "thinking_delta", "thinking": " step 2" }
+            }),
+        ]);
+        assert_eq!(r.extract_reasoning(), Some("step 1 step 2".to_string()));
     }
 
     #[test]
