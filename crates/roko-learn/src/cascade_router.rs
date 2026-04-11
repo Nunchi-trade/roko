@@ -28,6 +28,7 @@ use std::path::Path;
 
 use crate::cfactor::{AgentDispatchBias, CFactor};
 use crate::model_router::{COLD_START_THRESHOLD, CONTEXT_DIM, LinUCBRouter, RoutingContext};
+use crate::provider_health::ProviderHealthRegistry;
 
 // ─── CascadeStage ───────────────────────────────────────────────────────────
 
@@ -174,6 +175,23 @@ fn pick_static_slug(model_slugs: &[String], candidates: &[&str]) -> String {
         }
     }
     candidates[0].to_string()
+}
+
+fn pick_available_static_slug(model_slugs: &[String], candidates: &[&str]) -> String {
+    for candidate in candidates {
+        if let Some(slug) = model_slugs
+            .iter()
+            .find(|slug| slugs_match(slug, candidate))
+            .cloned()
+        {
+            return slug;
+        }
+    }
+
+    model_slugs
+        .first()
+        .cloned()
+        .unwrap_or_else(|| candidates[0].to_string())
 }
 
 /// Default latency SLA for a model tier (milliseconds).
@@ -401,6 +419,40 @@ impl CascadeRouter {
         self.route_with_cfactor(ctx, None, None)
     }
 
+    /// Route a context through the cascade, excluding models whose provider
+    /// is currently unavailable.
+    ///
+    /// Unknown providers are treated as available so unannotated models keep
+    /// participating in routing.
+    pub fn route_with_health(
+        &self,
+        ctx: &RoutingContext,
+        health: &ProviderHealthRegistry,
+        model_providers: &HashMap<String, String>,
+    ) -> CascadeModel {
+        let available: Vec<String> = self
+            .model_slugs
+            .iter()
+            .filter(|slug| {
+                model_providers
+                    .get(slug.as_str())
+                    .map(|provider_id| health.is_available(provider_id))
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect();
+
+        if available.is_empty() {
+            return self.route(ctx);
+        }
+
+        match self.current_stage() {
+            CascadeStage::Static => self.route_static_filtered(ctx, &available),
+            CascadeStage::Confidence => self.route_confidence_filtered(ctx, &available),
+            CascadeStage::Ucb => self.route_ucb_filtered(ctx, &available),
+        }
+    }
+
     /// Route a context through the cascade, optionally biasing by C-Factor.
     pub fn route_with_cfactor(
         &self,
@@ -604,6 +656,40 @@ impl CascadeRouter {
         }
     }
 
+    fn route_static_filtered(&self, ctx: &RoutingContext, candidates: &[String]) -> CascadeModel {
+        let slug = self
+            .role_table
+            .get(&ctx.role)
+            .cloned()
+            .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
+
+        let selected_slug = if candidates.iter().any(|candidate| slugs_match(candidate, &slug)) {
+            slug
+        } else {
+            let tier_candidates: &[&str] = match ctx.role.model_tier() {
+                ModelTier::Fast => &["claude-haiku-3-5"],
+                ModelTier::Premium => &["claude-opus-4"],
+                _ => &[
+                    "kimi-k2.5",
+                    "kimi-k2-thinking",
+                    "claude-sonnet-4-6",
+                    "claude-sonnet-4-5",
+                ],
+            };
+            pick_available_static_slug(candidates, tier_candidates)
+        };
+        let selected = ModelSpec::from_slug(selected_slug);
+        let tier = slug_to_tier(&selected.slug);
+        let fallback = fallback_for_tier(tier).map(ModelSpec::from_slug);
+
+        CascadeModel {
+            primary: selected,
+            fallback,
+            latency_sla_ms: default_latency_sla(tier),
+            stage: CascadeStage::Static,
+        }
+    }
+
     fn route_confidence(
         &self,
         ctx: &RoutingContext,
@@ -650,6 +736,45 @@ impl CascadeRouter {
         }
     }
 
+    fn route_confidence_filtered(
+        &self,
+        ctx: &RoutingContext,
+        candidates: &[String],
+    ) -> CascadeModel {
+        let stats = self.confidence_stats.lock();
+        let low_confidence = ctx.affect_confidence < LOW_AFFECT_CONFIDENCE_THRESHOLD;
+
+        let mut best_slug = candidates[0].clone();
+        let mut best_ucb = f64::NEG_INFINITY;
+
+        for slug in candidates {
+            let s = stats.get(slug).cloned().unwrap_or_default();
+            let tier_bonus = if low_confidence {
+                low_confidence_tier_bonus(slug_to_tier(slug))
+            } else {
+                0.0
+            };
+            let score = s.upper_bound() + tier_bonus;
+            if score > best_ucb {
+                best_ucb = score;
+                best_slug.clone_from(slug);
+            }
+        }
+
+        drop(stats);
+
+        let selected = ModelSpec::from_slug(best_slug);
+        let tier = slug_to_tier(&selected.slug);
+        let fallback = fallback_for_tier(tier).map(ModelSpec::from_slug);
+
+        CascadeModel {
+            primary: selected,
+            fallback,
+            latency_sla_ms: default_latency_sla(tier),
+            stage: CascadeStage::Confidence,
+        }
+    }
+
     fn route_ucb(
         &self,
         ctx: &RoutingContext,
@@ -658,6 +783,20 @@ impl CascadeRouter {
     ) -> CascadeModel {
         let model = self.linucb.select_model(ctx);
         let selected = self.bias_model_for_cfactor(model, cfactor, agent_id);
+        let tier = slug_to_tier(&selected.slug);
+        let fallback = fallback_for_tier(tier).map(ModelSpec::from_slug);
+
+        CascadeModel {
+            primary: selected,
+            fallback,
+            latency_sla_ms: default_latency_sla(tier),
+            stage: CascadeStage::Ucb,
+        }
+    }
+
+    fn route_ucb_filtered(&self, ctx: &RoutingContext, candidates: &[String]) -> CascadeModel {
+        let model = self.linucb.select_features_from_candidates(&ctx.to_features(), candidates);
+        let selected = model;
         let tier = slug_to_tier(&selected.slug);
         let fallback = fallback_for_tier(tier).map(ModelSpec::from_slug);
 
@@ -737,6 +876,8 @@ struct PersistedModelStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider_health::{ErrorClass, ProviderHealthRegistry};
+    use std::collections::HashMap;
     use roko_core::task::{TaskCategory, TaskComplexityBand};
 
     fn test_slugs() -> Vec<String> {
@@ -906,6 +1047,39 @@ mod tests {
                 .contains(&high_confidence.primary.slug.as_str()),
             "high confidence should allow cheaper model, got: {}",
             high_confidence.primary.slug
+        );
+    }
+
+    // ── Test 7c: health-aware routing skips unhealthy providers ─────────
+
+    #[test]
+    fn cascade_health_aware_excludes_unhealthy_provider_models() {
+        let cascade = CascadeRouter::new(vec![
+            "claude-sonnet-4-5".to_string(),
+            "claude-opus-4".to_string(),
+        ]);
+        let ctx = default_ctx();
+
+        // Push the router into UCB so the candidate-aware LinUCB path is exercised.
+        for _ in 0..200 {
+            cascade.record_observation(&ctx, "claude-sonnet-4-5", 1.0, true);
+        }
+        assert_eq!(cascade.current_stage(), CascadeStage::Ucb);
+        assert_eq!(cascade.route(&ctx).primary.slug, "claude-sonnet-4-5");
+
+        let health = ProviderHealthRegistry::new();
+        for _ in 0..3 {
+            health.record_failure("anthropic", ErrorClass::ServerError);
+        }
+
+        let mut model_providers = HashMap::new();
+        model_providers.insert("claude-sonnet-4-5".to_string(), "anthropic".to_string());
+        model_providers.insert("claude-opus-4".to_string(), "openai".to_string());
+
+        let routed = cascade.route_with_health(&ctx, &health, &model_providers);
+        assert_eq!(
+            routed.primary.slug, "claude-opus-4",
+            "unhealthy providers should be excluded from cascade selection"
         );
     }
 

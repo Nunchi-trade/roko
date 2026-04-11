@@ -431,6 +431,53 @@ impl LinUCBRouter {
         ModelSpec::from_slug(best_slug)
     }
 
+    /// Select the best model from a filtered candidate set.
+    ///
+    /// This preserves the existing LinUCB scoring logic while restricting the
+    /// eligible arms to `candidate_slugs`.
+    pub fn select_features_from_candidates(
+        &self,
+        x: &[f64],
+        candidate_slugs: &[String],
+    ) -> ModelSpec {
+        if candidate_slugs.is_empty() {
+            return self.select_features(x);
+        }
+
+        let state = self.state.lock();
+
+        // Cold start: use the filtered static table.
+        if state.total_observations < COLD_START_THRESHOLD {
+            let tier = context_vec_to_tier(x);
+            let slug = pick_static_from_candidates(candidate_slugs, tier);
+            return ModelSpec::from_slug(slug);
+        }
+
+        let alpha = alpha_for_observations(state.total_observations);
+        let mut best_slug: Option<String> = None;
+        let mut best_score = f64::NEG_INFINITY;
+
+        for arm in &state.arms {
+            if !candidate_slugs.iter().any(|candidate| slugs_match(&arm.slug, candidate)) {
+                continue;
+            }
+
+            let score = linucb_score(arm, x, alpha);
+            if score > best_score {
+                best_score = score;
+                best_slug = Some(arm.slug.clone());
+            }
+        }
+
+        if let Some(slug) = best_slug {
+            drop(state);
+            return ModelSpec::from_slug(slug);
+        }
+
+        drop(state);
+        ModelSpec::from_slug(candidate_slugs[0].clone())
+    }
+
     /// Update the arm's A matrix and b vector after observing a reward.
     ///
     /// `LinUCB` update rules:
@@ -631,6 +678,26 @@ fn default_static_table(model_slugs: &[String]) -> HashMap<ModelTier, String> {
         pick_static_slug(model_slugs, &["claude-opus-4"]),
     );
     table
+}
+
+fn pick_static_from_candidates(candidate_slugs: &[String], tier: ModelTier) -> String {
+    let candidates = match tier {
+        ModelTier::Fast => &["claude-haiku-3-5"][..],
+        ModelTier::Premium => &["claude-opus-4"][..],
+        _ => &["glm-5.1", "claude-sonnet-4-6", "claude-sonnet-4-5"][..],
+    };
+
+    for candidate in candidates {
+        if let Some(slug) = candidate_slugs
+            .iter()
+            .find(|slug| slugs_match(slug, candidate))
+            .cloned()
+        {
+            return slug;
+        }
+    }
+
+    candidate_slugs[0].clone()
 }
 
 fn pick_static_slug(model_slugs: &[String], candidates: &[&str]) -> String {

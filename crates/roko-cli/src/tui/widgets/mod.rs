@@ -1,15 +1,22 @@
 //! Reusable widgets for the dashboard TUI.
 
 pub mod agent_grid;
+pub mod agent_output;
+pub mod agent_pool;
 pub mod braille;
+pub mod command_output;
 pub mod error_digest;
 pub mod header_bar;
 pub mod phase_bar;
+pub mod phase_compact;
 pub mod plan_tree;
 pub mod scrollbar;
 pub mod status_bar;
+pub mod sys_metrics;
 pub mod task_progress;
 pub mod token_bar;
+pub mod token_sparkline;
+pub mod wave_progress;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
