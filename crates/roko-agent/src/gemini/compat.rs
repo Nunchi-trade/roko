@@ -6,6 +6,7 @@ use crate::provider::AgentOptions;
 use async_trait::async_trait;
 use roko_core::config::schema::ModelProfile;
 use roko_core::{Context, Signal};
+use serde_json::{Map, Value};
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 
@@ -50,10 +51,18 @@ impl GeminiCompatAgent {
         options: &AgentOptions,
     ) -> Self {
         let name = resolved_name(options, format!("gemini-compat:{}", model.slug));
+        let mut extra_body_params = Map::new();
+        if let Some(cached_content) = options.cached_content.as_deref() {
+            extra_body_params.insert(
+                "cached_content".to_string(),
+                Value::String(cached_content.to_string()),
+            );
+        }
         let inner = CodexAgent::new(api_key, &model.slug)
             .with_base_url(compat_base_url(&base_url))
             .with_timeout_ms(resolved_timeout_ms(options))
             .with_max_tokens(resolved_max_tokens(&model))
+            .with_extra_body_params(extra_body_params)
             .with_name(name);
         Self { inner }
     }
@@ -225,5 +234,45 @@ mod tests {
         assert!(request.starts_with("POST /v1beta/openai/v1/chat/completions HTTP/1.1"));
         assert!(request.contains("\"model\":\"gemini-2.5-flash-lite\""));
         assert!(request.contains("authorization: Bearer test-key"));
+    }
+
+    #[tokio::test]
+    async fn gemini_compat_agent_includes_cached_content_extra_body() {
+        let response = serde_json::json!({
+            "choices": [
+                {
+                    "message": {
+                        "content": "compat ok"
+                    }
+                }
+            ]
+        })
+        .to_string();
+
+        let (base_url, captured, handle) = spawn_chat_server(response);
+        let agent = GeminiCompatAgent::new(
+            "test-key".to_string(),
+            base_url,
+            base_model(),
+            &AgentOptions {
+                cached_content: Some("cachedContents/cache-123".to_string()),
+                ..Default::default()
+            },
+        );
+        let input = Signal::builder(Kind::Prompt)
+            .body(Body::text("Say hi"))
+            .build();
+
+        let result = agent.run(&input, &Context::now()).await;
+        handle.join().expect("server thread");
+
+        assert!(result.success);
+
+        let request = captured
+            .lock()
+            .expect("capture lock")
+            .clone()
+            .expect("captured request");
+        assert!(request.contains("\"cached_content\":\"cachedContents/cache-123\""));
     }
 }

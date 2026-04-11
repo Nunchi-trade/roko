@@ -139,6 +139,7 @@ pub trait ProviderAdapter: Send + Sync {
 pub struct AgentOptions {
     pub timeout_ms: Option<u64>,
     pub system_prompt: Option<String>,
+    pub cached_content: Option<String>,
     pub tools: Option<String>,
     pub mcp_config: Option<PathBuf>,
     pub env: Vec<(String, String)>,

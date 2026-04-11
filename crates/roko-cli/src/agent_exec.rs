@@ -66,6 +66,7 @@ pub async fn run_agent(opts: AgentExecOpts<'_>) -> Result<i32> {
         AgentOptions {
             timeout_ms: Some(600_000), // 10 min for plan generation / research tasks
             system_prompt: opts.system_prompt.map(str::to_string),
+            cached_content: None,
             tools: None,
             mcp_config: None,
             env: opts.env_vars.to_vec(),

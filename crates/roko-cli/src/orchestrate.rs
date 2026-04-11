@@ -16,6 +16,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context as _, Result, anyhow};
 use bardo_runtime::cancel::CancelToken;
 use bardo_runtime::process::ProcessSupervisor;
+use roko_agent::gemini::{Content, GeminiCacheClient, Part};
 use roko_agent::mcp::{McpConfig, McpServerConfig};
 use roko_agent::perplexity::PerplexitySearchClient;
 use roko_agent::provider::{AgentOptions, create_agent_for_model};
@@ -27,6 +28,7 @@ use roko_compose::{
 };
 use roko_conductor::diagnosis::DiagnosisEngine;
 use roko_conductor::{Conductor, ConductorDecision};
+use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::config::schema::RokoConfig;
 use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::obs::health::{AlwaysUpProbe, ProbeRegistry};
@@ -343,6 +345,68 @@ fn crate_name_for_path(path: &str) -> Option<String> {
         [first, ..] if *first == "Cargo.toml" => Some("workspace".to_string()),
         _ => None,
     }
+}
+
+fn crate_root_for_path(path: &str) -> Option<PathBuf> {
+    let normalized = path.replace('\\', "/");
+    let parts: Vec<&str> = normalized
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    match parts.as_slice() {
+        [first, second, ..] if *first == "crates" || *first == "apps" => {
+            Some(PathBuf::from(first).join(second))
+        }
+        [first, ..] if matches!(*first, "src" | "tests" | "benches" | "examples") => {
+            Some(PathBuf::new())
+        }
+        [first] if matches!(*first, "Cargo.toml" | "build.rs") => Some(PathBuf::new()),
+        _ => None,
+    }
+}
+
+fn collect_crate_source_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+
+    for entry in std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+        let entry = entry.with_context(|| format!("read entry in {}", dir.display()))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_crate_source_files(&path, files)?;
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+            files.push(path);
+        }
+    }
+
+    Ok(())
+}
+
+fn read_full_crate_source(crate_root: &Path) -> Result<String> {
+    let mut files = Vec::new();
+
+    for path in [crate_root.join("Cargo.toml"), crate_root.join("build.rs")] {
+        if path.is_file() {
+            files.push(path);
+        }
+    }
+    for dir in ["src", "tests", "benches", "examples"] {
+        collect_crate_source_files(&crate_root.join(dir), &mut files)?;
+    }
+
+    files.sort();
+    files.dedup();
+
+    let mut combined = String::new();
+    for path in files {
+        let contents =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let relative = path.strip_prefix(crate_root).unwrap_or(path.as_path());
+        combined.push_str(&format!("// FILE: {}\n{}\n\n", relative.display(), contents));
+    }
+
+    Ok(combined)
 }
 
 fn log_tasks_validation_issue(
@@ -988,6 +1052,8 @@ pub struct PlanRunner {
     cancel: CancelToken,
     /// Per-plan task tracking for granular Implementing → Gating progression.
     task_trackers: HashMap<String, TaskTracker>,
+    /// Explicit Gemini context caches keyed by plan id.
+    gemini_plan_caches: HashMap<String, GeminiPlanCache>,
     /// Conductor for anomaly detection between phases.
     conductor: Arc<Conductor>,
     /// Signals accumulated during the current plan run for conductor evaluation.
@@ -1063,6 +1129,12 @@ struct TaskTracker {
     last_skill_request: Option<SkillExtractionRequest>,
     /// Number of consecutive gate failures for this plan (for re-planning, §9).
     gate_failure_count: u32,
+}
+
+#[derive(Debug, Clone)]
+struct GeminiPlanCache {
+    model_slug: String,
+    cache_id: String,
 }
 
 /// Shared MCP server runtime state for a plan run.
@@ -1972,6 +2044,7 @@ impl PlanRunner {
             supervisor: ProcessSupervisor::new(cancel.clone()),
             cancel,
             task_trackers,
+            gemini_plan_caches: HashMap::new(),
             conductor: Arc::new(Conductor::new()),
             conductor_signals: Vec::new(),
             attribution_tracker: ContextAttributionTracker::load(
@@ -2083,6 +2156,7 @@ impl PlanRunner {
             supervisor: ProcessSupervisor::new(cancel.clone()),
             cancel,
             task_trackers,
+            gemini_plan_caches: HashMap::new(),
             conductor: Arc::new(Conductor::new()),
             conductor_signals: Vec::new(),
             attribution_tracker: ContextAttributionTracker::load(
@@ -2198,6 +2272,7 @@ impl PlanRunner {
             supervisor: ProcessSupervisor::new(cancel.clone()),
             cancel,
             task_trackers,
+            gemini_plan_caches: HashMap::new(),
             conductor: Arc::new(Conductor::new()),
             conductor_signals: Vec::new(),
             attribution_tracker: ContextAttributionTracker::load(
@@ -2714,6 +2789,122 @@ impl PlanRunner {
         }
 
         trackers
+    }
+
+    fn plan_crate_root(&self, plan_id: &str) -> Option<PathBuf> {
+        let tracker = self.task_trackers.get(plan_id)?;
+        let mut roots = tracker
+            .tasks_file
+            .tasks
+            .iter()
+            .flat_map(|task| task.files.iter())
+            .filter_map(|path| crate_root_for_path(path))
+            .collect::<Vec<_>>();
+        roots.sort();
+        roots.dedup();
+        (roots.len() == 1).then(|| self.workdir.join(&roots[0]))
+    }
+
+    async fn ensure_plan_gemini_cache(
+        &mut self,
+        plan_id: &str,
+        roko_config: &RokoConfig,
+        model_key: &str,
+    ) -> Result<Option<String>> {
+        if !roko_config.gemini.enable_context_caching {
+            return Ok(None);
+        }
+
+        let resolved = resolve_model(roko_config, model_key);
+        if resolved.provider_kind != ProviderKind::GeminiApi {
+            return Ok(None);
+        }
+
+        let Some(model) = resolved
+            .profile
+            .or_else(|| roko_config.effective_models().get(model_key).cloned())
+        else {
+            return Ok(None);
+        };
+
+        if !model.supports_caching {
+            return Ok(None);
+        }
+
+        if let Some(cache) = self.gemini_plan_caches.get(plan_id) {
+            if cache.model_slug == model.slug {
+                return Ok(Some(cache.cache_id.clone()));
+            }
+            return Ok(None);
+        }
+
+        let Some(provider) = resolved
+            .provider_config
+            .or_else(|| roko_config.effective_providers().get(&model.provider).cloned())
+        else {
+            return Ok(None);
+        };
+
+        let Some(crate_root) = self.plan_crate_root(plan_id) else {
+            tracing::debug!(
+                "[orchestrate] skipped Gemini context caching for {plan_id}: no single crate root"
+            );
+            return Ok(None);
+        };
+
+        let crate_source = match read_full_crate_source(&crate_root) {
+            Ok(source) if !source.trim().is_empty() => source,
+            Ok(_) => return Ok(None),
+            Err(error) => {
+                tracing::warn!(
+                    "[orchestrate] failed to read crate source for Gemini cache {}: {error}",
+                    crate_root.display()
+                );
+                return Ok(None);
+            }
+        };
+
+        let Some(api_key) = provider.resolve_api_key() else {
+            return Ok(None);
+        };
+        let base_url = provider
+            .base_url
+            .unwrap_or_else(|| "https://generativelanguage.googleapis.com".to_string());
+        let timeout_ms = provider.timeout_ms.unwrap_or(120_000);
+        let cache_client = GeminiCacheClient::new(api_key, base_url).with_timeout_ms(timeout_ms);
+
+        match cache_client
+            .create_cache(
+                &model.slug,
+                &[Content {
+                    role: "user".to_string(),
+                    parts: vec![Part::Text { text: crate_source }],
+                }],
+                3_600,
+            )
+            .await
+        {
+            Ok(cache_id) => {
+                tracing::info!(
+                    "[orchestrate] created Gemini context cache for {plan_id} using {}",
+                    model.slug
+                );
+                self.gemini_plan_caches.insert(
+                    plan_id.to_string(),
+                    GeminiPlanCache {
+                        model_slug: model.slug,
+                        cache_id: cache_id.clone(),
+                    },
+                );
+                Ok(Some(cache_id))
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "[orchestrate] failed to create Gemini context cache for {plan_id}: {error}"
+                );
+                Ok(None)
+            }
+        }
     }
 
     /// Extract completed task ids from legacy resume snapshots.
@@ -7381,6 +7572,9 @@ impl PlanRunner {
             )
             .entered();
             let roko_config = load_roko_config(&self.workdir)?;
+            let cached_content = self
+                .ensure_plan_gemini_cache(plan_id, &roko_config, &selected_model)
+                .await?;
             let task_read_args = task_def
                 .as_ref()
                 .map(task_read_cli_args)
@@ -7404,6 +7598,7 @@ impl PlanRunner {
                 AgentOptions {
                     timeout_ms: Some(self.effective_task_timeout_ms(task_def.as_ref())),
                     system_prompt: Some(role_instruction.clone()),
+                    cached_content,
                     tools: Some(task_allowed_tools_csv.clone()),
                     mcp_config: self.resolve_mcp_config_path().await,
                     env: self.config.agent.env.clone(),

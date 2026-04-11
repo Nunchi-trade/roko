@@ -43,6 +43,7 @@ pub struct GeminiNativeAgent {
     base_url: String,
     model: ModelProfile,
     thinking_level: Option<String>,
+    cached_content: Option<String>,
     enable_grounding: bool,
     enable_code_execution: bool,
     safety_settings: Vec<SafetySettingRequest>,
@@ -74,6 +75,7 @@ impl GeminiNativeAgent {
                 .effort
                 .clone()
                 .or_else(|| model.thinking_level.clone()),
+            cached_content: options.cached_content.clone(),
             enable_grounding: model.supports_grounding,
             enable_code_execution: model.supports_code_execution,
             safety_settings: Vec::new(),
@@ -135,7 +137,7 @@ impl GeminiNativeAgent {
             generation_config,
             safety_settings: (!self.safety_settings.is_empty())
                 .then_some(self.safety_settings.clone()),
-            cached_content: None,
+            cached_content: self.cached_content.clone(),
         }
     }
 
@@ -733,6 +735,7 @@ mod tests {
             "https://generativelanguage.googleapis.com".to_string(),
             base_model(),
             &AgentOptions {
+                cached_content: Some("cachedContents/cache-123".to_string()),
                 system_prompt: Some("system seed".to_string()),
                 timeout_ms: Some(9_999),
                 effort: Some("low".to_string()),
@@ -783,6 +786,7 @@ mod tests {
             body["contents"][0]["parts"][0]["text"],
             "inspect this crate"
         );
+        assert_eq!(body["cachedContent"], "cachedContents/cache-123");
         assert_eq!(
             body["generationConfig"]["thinkingConfig"]["thinkingLevel"],
             "low"

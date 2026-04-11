@@ -318,6 +318,7 @@ async fn dispatch_agent(
             AgentOptions {
                 timeout_ms: Some(config.agent.timeout_ms),
                 system_prompt: Some(system_prompt),
+                cached_content: None,
                 tools: Some(tools_csv),
                 mcp_config: config.agent.mcp_config.clone(),
                 env: config.agent.env.clone(),
@@ -378,6 +379,7 @@ async fn dispatch_agent(
             AgentOptions {
                 timeout_ms: Some(config.agent.timeout_ms),
                 system_prompt: None,
+                cached_content: None,
                 tools: None,
                 mcp_config: config.agent.mcp_config.clone(),
                 env: config.agent.env.clone(),

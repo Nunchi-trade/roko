@@ -1700,6 +1700,7 @@ fn build_agent(
         AgentOptions {
             timeout_ms: None,
             system_prompt: Some(system_prompt.to_string()),
+            cached_content: None,
             tools: Some(allowed_tools.to_string()),
             mcp_config: mcp_config.cloned(),
             env: Vec::new(),

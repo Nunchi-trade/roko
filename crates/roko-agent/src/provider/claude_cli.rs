@@ -189,6 +189,7 @@ printf '%s\n' '{{"type":"content_block_delta","delta":{{"text":"adapter-ok"}}}}'
         let options = AgentOptions {
             timeout_ms: Some(1_500),
             system_prompt: Some("system guidance".to_string()),
+            cached_content: None,
             tools: Some("Read,Edit".to_string()),
             mcp_config: Some(mcp_config_arg),
             env: vec![("CLAUDE_TEST_ENV".to_string(), "env-value".to_string())],
