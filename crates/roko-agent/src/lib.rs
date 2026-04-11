@@ -52,8 +52,8 @@ pub use agent::{Agent, AgentResult};
 pub use claude_cli_agent::ClaudeCliAgent;
 pub use exec::ExecAgent;
 pub use gemini::{
-    GeminiCompatAgent, GeminiEmbedAgent, GeminiMetadata, GeminiNativeAgent,
-    GenerateContentRequest, GenerateContentResponse, GroundingMetadata,
+    GeminiCompatAgent, GeminiEmbedAgent, GeminiMetadata, GeminiNativeAgent, GenerateContentRequest,
+    GenerateContentResponse, GroundingMetadata,
 };
 pub use mock::MockAgent;
 pub use multi_pool::MultiAgentPool;

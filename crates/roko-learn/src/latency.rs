@@ -61,6 +61,16 @@ impl LatencyStats {
         self.percentile(0.99)
     }
 
+    /// Recommended timeout = 2x the observed p95 latency, clamped to [5s, 300s].
+    pub fn adaptive_timeout_ms(&self) -> u64 {
+        if self.observations < 10 {
+            return 120_000;
+        }
+
+        let timeout = (self.p95_ms() * 2.0) as u64;
+        timeout.clamp(5_000, 300_000)
+    }
+
     fn percentile(&self, quantile: f64) -> f64 {
         if self.recent_latencies.is_empty() {
             return 0.0;
@@ -230,6 +240,44 @@ mod tests {
         assert_eq!(stats.recent_latencies.len(), 100);
         assert_close(stats.recent_latencies[0], 5.0);
         assert_close(stats.recent_latencies[99], 104.0);
+    }
+
+    #[test]
+    fn adaptive_timeout_uses_p95_with_bounds_and_fallback() {
+        let mut stats = LatencyStats::default();
+        for latency_ms in [
+            500.0, 750.0, 900.0, 1_100.0, 1_250.0, 1_500.0, 2_000.0, 2_500.0, 2_750.0,
+        ] {
+            stats.record(latency_ms, latency_ms, 1);
+        }
+        assert_eq!(stats.observations, 9);
+        assert_eq!(stats.adaptive_timeout_ms(), 120_000);
+
+        stats.record(3_000.0, 3_000.0, 1);
+        assert_close(stats.p95_ms(), 3_000.0);
+        assert_eq!(stats.adaptive_timeout_ms(), 6_000);
+
+        let mut slower_stats = LatencyStats::default();
+        for latency_ms in [
+            8_000.0, 10_000.0, 12_000.0, 15_000.0, 18_000.0, 20_000.0, 22_000.0, 25_000.0,
+            28_000.0, 30_000.0,
+        ] {
+            slower_stats.record(latency_ms, latency_ms, 1);
+        }
+        assert_close(slower_stats.p95_ms(), 30_000.0);
+        assert_eq!(slower_stats.adaptive_timeout_ms(), 60_000);
+
+        let mut fast_stats = LatencyStats::default();
+        for _ in 0..10 {
+            fast_stats.record(1_000.0, 1_000.0, 1);
+        }
+        assert_eq!(fast_stats.adaptive_timeout_ms(), 5_000);
+
+        let mut very_slow_stats = LatencyStats::default();
+        for _ in 0..10 {
+            very_slow_stats.record(200_000.0, 200_000.0, 1);
+        }
+        assert_eq!(very_slow_stats.adaptive_timeout_ms(), 300_000);
     }
 
     #[test]
