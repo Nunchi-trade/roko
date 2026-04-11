@@ -141,23 +141,39 @@ impl ModelStats {
 
 /// Build the default static role-to-model mapping.
 ///
-/// Fast-tier roles get haiku, Standard-tier roles get sonnet,
+/// Fast-tier roles get haiku, Standard-tier roles prefer Kimi or sonnet,
 /// Premium-tier roles get opus.
-fn default_role_model_table() -> HashMap<AgentRole, String> {
+fn default_role_model_table(model_slugs: &[String]) -> HashMap<AgentRole, String> {
     let mut table = HashMap::new();
     let all_roles: Vec<AgentRole> = std::iter::once(AgentRole::Conductor)
         .chain(AgentRole::ALL_AGENTS.iter().copied())
         .collect();
     for role in all_roles {
         let slug = match role.model_tier() {
-            ModelTier::Fast => "claude-haiku-3-5",
-            ModelTier::Premium => "claude-opus-4",
+            ModelTier::Fast => pick_static_slug(model_slugs, &["claude-haiku-3-5"]),
+            ModelTier::Premium => pick_static_slug(model_slugs, &["claude-opus-4"]),
             // Standard and forward-compat
-            _ => "claude-sonnet-4-5",
+            _ => pick_static_slug(
+                model_slugs,
+                &["kimi-k2.5", "kimi-k2-thinking", "claude-sonnet-4-6", "claude-sonnet-4-5"],
+            ),
         };
-        table.insert(role, slug.to_string());
+        table.insert(role, slug);
     }
     table
+}
+
+fn pick_static_slug(model_slugs: &[String], candidates: &[&str]) -> String {
+    for candidate in candidates {
+        if let Some(slug) = model_slugs
+            .iter()
+            .find(|slug| slugs_match(slug, candidate))
+            .cloned()
+        {
+            return slug;
+        }
+    }
+    candidates[0].to_string()
 }
 
 /// Default latency SLA for a model tier (milliseconds).
@@ -209,6 +225,24 @@ fn model_tier_rank(tier: ModelTier) -> u8 {
     }
 }
 
+fn slugs_match(lhs: &str, rhs: &str) -> bool {
+    lhs == rhs || slug_family(lhs).is_some_and(|family| slug_family(rhs) == Some(family))
+}
+
+fn slug_family(slug: &str) -> Option<&'static str> {
+    if slug.starts_with("kimi-k2") {
+        Some("kimi-k2")
+    } else if slug.contains("haiku") {
+        Some("haiku")
+    } else if slug.contains("sonnet") {
+        Some("sonnet")
+    } else if slug.contains("opus") {
+        Some("opus")
+    } else {
+        None
+    }
+}
+
 // ─── CascadeRouter ──────────────────────────────────────────────────────────
 
 /// Three-stage cascade router: Static -> Confidence -> UCB.
@@ -239,7 +273,7 @@ impl CascadeRouter {
         Self {
             linucb: LinUCBRouter::new(model_slugs.clone()),
             confidence_stats: Mutex::new(HashMap::new()),
-            role_table: default_role_model_table(),
+            role_table: default_role_model_table(&model_slugs),
             model_slugs,
         }
     }
@@ -1090,6 +1124,16 @@ mod tests {
         let result = cascade.route(&ctx);
 
         assert_eq!(result.primary.slug, "gpt-5");
+    }
+
+    #[test]
+    fn cascade_router_kimi_selects_kimi_in_static_stage() {
+        let cascade = CascadeRouter::new(vec!["kimi-k2.5".to_string()]);
+        let ctx = default_ctx();
+
+        let result = cascade.route(&ctx);
+        assert_eq!(result.stage, CascadeStage::Static);
+        assert_eq!(result.primary.slug, "kimi-k2.5");
     }
 
     // ── Test 18: UCB stage uses linucb selection ────────────────────────
