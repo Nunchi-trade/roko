@@ -27,6 +27,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::cfactor::{AgentDispatchBias, CFactor};
+use crate::model_experiment::ModelExperimentStore;
 use crate::model_router::{COLD_START_THRESHOLD, CONTEXT_DIM, LinUCBRouter, RoutingContext};
 use crate::pareto::{ModelObservation, compute_pareto_frontier};
 use crate::provider_health::ProviderHealthRegistry;
@@ -447,6 +448,27 @@ impl CascadeRouter {
     /// Route a context through the cascade, returning a recommendation.
     pub fn route(&self, ctx: &RoutingContext) -> CascadeModel {
         self.route_with_cfactor(ctx, None, None)
+    }
+
+    /// Route a context through the cascade, overriding selection when a model
+    /// experiment is active for the current role and task category.
+    pub fn route_with_experiments(
+        &self,
+        ctx: &RoutingContext,
+        experiments: &ModelExperimentStore,
+    ) -> CascadeModel {
+        if let Some(variant) =
+            experiments.assign_model(ctx.role.label(), ctx.task_category.label())
+        {
+            return CascadeModel {
+                primary: ModelSpec::from_slug(&variant.slug),
+                fallback: None,
+                latency_sla_ms: 30_000,
+                stage: CascadeStage::Static,
+            };
+        }
+
+        self.route(ctx)
     }
 
     /// Route a context through the cascade, excluding models whose provider
@@ -1014,6 +1036,8 @@ struct PersistedModelStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model_experiment::{ModelExperiment, ModelExperimentStore, ModelVariant};
+    use crate::prompt_experiment::ExperimentStatus;
     use crate::provider_health::{ErrorClass, ProviderHealthRegistry};
     use roko_core::task::{TaskCategory, TaskComplexityBand};
     use std::collections::HashMap;
@@ -1071,6 +1095,39 @@ mod tests {
 
         assert!(result.fallback.is_some());
         assert_eq!(result.fallback.as_ref().unwrap().slug, "claude-haiku-3-5");
+    }
+
+    #[test]
+    fn experiment_override_for_active_model_experiment() {
+        let cascade = CascadeRouter::new(test_slugs());
+        let ctx = default_ctx();
+
+        let mut store = ModelExperimentStore::default();
+        store.register(ModelExperiment {
+            experiment_id: "impl-model-ab".into(),
+            description: "Override implementer implementation routing".into(),
+            role: Some("implementer".into()),
+            task_category: Some("implementation".into()),
+            variants: vec![ModelVariant {
+                id: "override".into(),
+                model_key: "override-model".into(),
+                slug: "override-model-slug".into(),
+                provider: "test-provider".into(),
+            }],
+            stats: HashMap::new(),
+            status: ExperimentStatus::Running,
+            winner_id: None,
+            min_trials_per_variant: 1,
+            min_effect_size: 0.05,
+            created_at: "2026-04-11T00:00:00Z".into(),
+        });
+
+        let routed = cascade.route_with_experiments(&ctx, &store);
+
+        assert_eq!(routed.primary.slug, "override-model-slug");
+        assert_eq!(routed.fallback, None);
+        assert_eq!(routed.latency_sla_ms, 30_000);
+        assert_eq!(routed.stage, CascadeStage::Static);
     }
 
     // ── Test 4: fast tier has no fallback ────────────────────────────────
