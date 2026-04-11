@@ -15,7 +15,11 @@
 use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use roko_core::tool::{ToolCall, ToolContext, ToolDef};
+use roko_core::{
+    config::schema::ModelProfile,
+    tool::{ToolCall, ToolContext, ToolDef},
+};
+use serde_json::Value;
 
 use crate::dispatcher::ToolDispatcher;
 use crate::provider::ProviderError;
@@ -102,6 +106,13 @@ pub struct ToolLoopOutput {
     pub checkpoint: Option<Checkpoint>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OverflowAction {
+    Ok,
+    CompactRecommended,
+    CompactRequired,
+}
+
 // ─── ToolLoop ────────────────────────────────────────────────────────
 
 /// Multi-turn tool-calling loop (§36.f).
@@ -115,6 +126,7 @@ pub struct ToolLoop {
     backend: Arc<dyn LlmBackend>,
     max_iterations: usize,
     context_token_limit: usize,
+    model_profile: Option<ModelProfile>,
     retry_policy: RetryPolicy,
 }
 
@@ -132,6 +144,7 @@ impl ToolLoop {
             backend,
             max_iterations: DEFAULT_MAX_ITERATIONS,
             context_token_limit: DEFAULT_CONTEXT_TOKEN_LIMIT,
+            model_profile: None,
             retry_policy: RetryPolicy::default(),
         }
     }
@@ -147,6 +160,13 @@ impl ToolLoop {
     #[must_use]
     pub const fn with_context_token_limit(mut self, n: usize) -> Self {
         self.context_token_limit = n;
+        self
+    }
+
+    /// Configure the model profile used for context-overflow detection.
+    #[must_use]
+    pub fn with_model_profile(mut self, model_profile: ModelProfile) -> Self {
+        self.model_profile = Some(model_profile);
         self
     }
 
@@ -192,6 +212,8 @@ impl ToolLoop {
         let rendered_tools = self.translator.render_tools(tools);
 
         loop {
+            self.prune_context_if_needed(&mut messages);
+
             // §36.54 — iteration cap.
             if max_iter::is_exhausted(iterations, self.max_iterations) {
                 let cp = Checkpoint::new(iterations, all_calls.clone(), messages);
@@ -272,10 +294,46 @@ impl ToolLoop {
             result_msg::append_results(&mut messages, rendered_results);
 
             // §36.55 — context-growth guard.
-            prune::prune_if_needed(&mut messages, self.context_token_limit);
+            self.prune_context_if_needed(&mut messages);
 
             iterations += 1;
         }
+    }
+
+    fn check_context_overflow(&self, messages: &[Value], model: &ModelProfile) -> OverflowAction {
+        let estimated_tokens = prune::estimate_message_tokens(messages);
+        let limit = Self::model_context_limit(model);
+
+        if estimated_tokens > limit {
+            return OverflowAction::CompactRequired;
+        }
+        if estimated_tokens > Self::compaction_target(limit) {
+            return OverflowAction::CompactRecommended;
+        }
+        OverflowAction::Ok
+    }
+
+    fn prune_context_if_needed(&self, messages: &mut Vec<Value>) {
+        match self.model_profile.as_ref() {
+            Some(model) => match self.check_context_overflow(messages, model) {
+                OverflowAction::Ok => {}
+                OverflowAction::CompactRecommended | OverflowAction::CompactRequired => {
+                    prune::prune_if_needed(messages, Self::compaction_target(Self::model_context_limit(model)));
+                }
+            },
+            None => prune::prune_if_needed(messages, self.context_token_limit),
+        }
+    }
+
+    fn model_context_limit(model: &ModelProfile) -> usize {
+        usize::try_from(model.context_window)
+            .ok()
+            .filter(|limit| *limit > 0)
+            .unwrap_or(128_000)
+    }
+
+    const fn compaction_target(limit: usize) -> usize {
+        limit.saturating_mul(80) / 100
     }
 
     async fn send_turn_with_retry(
@@ -310,6 +368,13 @@ impl std::fmt::Debug for ToolLoop {
             .field("backend", &"Arc<dyn LlmBackend>")
             .field("max_iterations", &self.max_iterations)
             .field("context_token_limit", &self.context_token_limit)
+            .field(
+                "model_profile",
+                &self
+                    .model_profile
+                    .as_ref()
+                    .map(|model| (&model.provider, &model.slug, model.context_window)),
+            )
             .field("retry_policy", &self.retry_policy)
             .finish()
     }
@@ -600,6 +665,49 @@ mod tests {
         }
     }
 
+    /// Captures messages and returns large tool outputs on the first call.
+    struct OverflowCapturingBackend {
+        call_count: AtomicUsize,
+        captured: parking_lot::Mutex<Vec<Vec<serde_json::Value>>>,
+    }
+
+    impl OverflowCapturingBackend {
+        fn new() -> Self {
+            Self {
+                call_count: AtomicUsize::new(0),
+                captured: parking_lot::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmBackend for OverflowCapturingBackend {
+        async fn send_turn(
+            &self,
+            messages: &[serde_json::Value],
+            _tools: &RenderedTools,
+        ) -> Result<BackendResponse, LlmError> {
+            self.captured.lock().push(messages.to_vec());
+            let n = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                let tool_calls = (0..4)
+                    .map(|idx| {
+                        serde_json::json!({
+                            "id": format!("overflow-{idx}"),
+                            "name": "echo",
+                            "arguments": {"blob": "x".repeat(900)},
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                Ok(BackendResponse::Json(serde_json::json!({ "tool_calls": tool_calls })))
+            } else {
+                Ok(BackendResponse::Json(
+                    serde_json::json!({"message": {"content": "final after pruning"}}),
+                ))
+            }
+        }
+    }
+
     // ─── Helpers ─────────────────────────────────────────────────────
 
     fn test_tools() -> Vec<ToolDef> {
@@ -637,6 +745,56 @@ mod tests {
             max_delay_ms: 0,
             ..RetryPolicy::default()
         }
+    }
+
+    fn test_model_profile(context_window: u64) -> ModelProfile {
+        ModelProfile {
+            provider: "test-provider".to_string(),
+            slug: "test-model".to_string(),
+            context_window,
+            max_output: None,
+            supports_tools: true,
+            supports_thinking: false,
+            supports_vision: false,
+            supports_web_search: false,
+            supports_mcp_tools: false,
+            supports_partial: false,
+            supports_grounding: false,
+            supports_code_execution: false,
+            supports_caching: false,
+            provider_routing: None,
+            tool_format: "openai_json".to_string(),
+            cost_input_per_m: None,
+            cost_output_per_m: None,
+            cost_input_per_m_high: None,
+            cost_output_per_m_high: None,
+            cost_cache_read_per_m: None,
+            cost_cache_write_per_m: None,
+            thinking_level: None,
+            max_tools: None,
+            tokenizer_ratio: None,
+            supports_search: false,
+            supports_citations: false,
+            supports_async: false,
+            is_embedding_model: false,
+            search_context_size: None,
+            cost_per_request: None,
+        }
+    }
+
+    fn messages_for_estimated_tokens(target_tokens: usize) -> Vec<Value> {
+        let mut messages = vec![
+            serde_json::json!({"role": "system", "content": "sys"}),
+            serde_json::json!({"role": "user", "content": "usr"}),
+        ];
+        while prune::estimate_message_tokens(&messages) < target_tokens {
+            messages.push(serde_json::json!({
+                "role": "tool",
+                "tool_call_id": format!("c{}", messages.len()),
+                "content": "x".repeat(512),
+            }));
+        }
+        messages
     }
 
     // ─── Tests ───────────────────────────────────────────────────────
@@ -830,6 +988,62 @@ mod tests {
         assert!(msgs.len() >= 5, "should keep at least head + tail");
         assert_eq!(msgs[0]["role"], "system");
         assert_eq!(msgs[1]["role"], "user");
+    }
+
+    #[test]
+    fn context_overflow_detection_classifies_utilization_thresholds() {
+        let backend = Arc::new(FinalAnswerBackend {
+            text: "unused".into(),
+        });
+        let tl = make_tool_loop(backend, 25).with_model_profile(test_model_profile(2_000));
+
+        let ok_messages = messages_for_estimated_tokens(1_400);
+        assert_eq!(
+            tl.check_context_overflow(&ok_messages, tl.model_profile.as_ref().expect("model")),
+            OverflowAction::Ok
+        );
+
+        let recommended_messages = messages_for_estimated_tokens(1_700);
+        assert_eq!(
+            tl.check_context_overflow(
+                &recommended_messages,
+                tl.model_profile.as_ref().expect("model"),
+            ),
+            OverflowAction::CompactRecommended
+        );
+
+        let required_messages = messages_for_estimated_tokens(2_100);
+        assert_eq!(
+            tl.check_context_overflow(
+                &required_messages,
+                tl.model_profile.as_ref().expect("model"),
+            ),
+            OverflowAction::CompactRequired
+        );
+    }
+
+    #[tokio::test]
+    async fn context_overflow_detection_prunes_before_next_request() {
+        let backend = Arc::new(OverflowCapturingBackend::new());
+        let tl = make_tool_loop(backend.clone(), 25).with_model_profile(test_model_profile(1_000));
+        let ctx = ToolContext::testing("/tmp");
+
+        let out = tl.run("system", "user", &test_tools(), &ctx).await;
+
+        assert_eq!(out.stop_reason, StopReason::Stop);
+        assert_eq!(out.final_text, "final after pruning");
+
+        let captured = backend.captured.lock();
+        assert_eq!(captured.len(), 2, "backend should be called twice");
+        let second_call_messages = &captured[1];
+        assert_eq!(second_call_messages.len(), 5, "one old tool result should be pruned");
+        assert_eq!(second_call_messages[0]["role"], "system");
+        assert_eq!(second_call_messages[1]["role"], "user");
+        assert!(
+            prune::estimate_message_tokens(second_call_messages)
+                <= ToolLoop::compaction_target(1_000),
+            "expected second request to be compacted below the 80% target",
+        );
     }
 
     #[tokio::test]
