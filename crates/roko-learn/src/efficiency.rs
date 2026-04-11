@@ -381,6 +381,17 @@ pub struct RoleCostProfile {
     pub pass_rate: f64,
 }
 
+impl RoleCostProfile {
+    /// Cost of one successful task for this role.
+    #[must_use]
+    pub fn cost_per_successful_task(&self) -> f64 {
+        if self.pass_rate <= 0.0 {
+            return f64::INFINITY;
+        }
+        self.avg_cost_usd / self.pass_rate
+    }
+}
+
 /// Aggregate cost profile for a single operating frequency.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FrequencyCostProfile {
@@ -1006,6 +1017,25 @@ mod tests {
 
         let profiles = compute_role_profiles(&events);
         assert!((profiles[0].cost_per_pass).abs() < 1e-9);
+    }
+
+    #[test]
+    fn efficiency_role_profile_cost_per_successful_task() {
+        let events = vec![
+            make_test_event("Impl", 0.50, 1000, 200, 0, 10000, 10, 5, false, true),
+            make_test_event("Impl", 0.50, 1000, 200, 0, 10000, 10, 5, false, true),
+            make_test_event("Impl", 0.50, 1000, 200, 0, 10000, 10, 5, false, true),
+            make_test_event("Impl", 0.50, 1000, 200, 0, 10000, 10, 5, false, true),
+            make_test_event("Impl", 0.50, 1000, 200, 0, 10000, 10, 5, false, false),
+        ];
+
+        let profiles = compute_role_profiles(&events);
+        assert_eq!(profiles.len(), 1);
+
+        let p = &profiles[0];
+        assert!((p.avg_cost_usd - 0.50).abs() < 1e-9);
+        assert!((p.pass_rate - 0.80).abs() < 1e-9);
+        assert!((p.cost_per_successful_task() - 0.625).abs() < 1e-9);
     }
 
     #[test]
