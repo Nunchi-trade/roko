@@ -2,19 +2,27 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::extract::{Path, State};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
+use crate::error::ApiError;
 use crate::state::AppState;
+use roko_agent::provider::{AgentOptions, create_agent_for_model};
+use roko_core::config::schema::{ModelProfile, RokoConfig};
+use roko_core::{Body as SignalBody, Context, Kind, Signal};
 use roko_learn::provider_health::{HealthState, ProviderStatus};
+
+const PROVIDER_TEST_PROMPT: &str = "Say hello.";
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/providers", get(list_providers))
         .route("/providers/{id}/health", get(provider_health))
+        .route("/providers/{id}/test", post(test_provider))
         .route("/models", get(list_models))
 }
 
@@ -99,6 +107,89 @@ async fn provider_health(
     })
 }
 
+/// `POST /api/providers/{id}/test` — send a minimal live request through the provider.
+async fn test_provider(
+    State(state): State<Arc<AppState>>,
+    Path(provider_id): Path<String>,
+) -> Result<Json<ProviderTestResponse>, ApiError> {
+    let config = state.roko_config.read().await.clone();
+    let providers = config.effective_providers();
+    let Some(provider) = providers.get(&provider_id) else {
+        return Err(ApiError::not_found(format!(
+            "provider {provider_id} is not configured"
+        )));
+    };
+
+    let Some((model_key, model)) = select_test_model(&config, &provider_id) else {
+        return Err(ApiError::bad_request(format!(
+            "provider {provider_id} has no configured non-embedding models to test"
+        )));
+    };
+
+    let agent = create_agent_for_model(
+        &config,
+        &model_key,
+        AgentOptions {
+            timeout_ms: provider.timeout_ms,
+            name: format!("provider-test-{provider_id}"),
+            ..Default::default()
+        },
+    )
+    .map_err(|err| {
+        ApiError::bad_request(format!(
+            "failed to create test agent for provider {provider_id}: {err}"
+        ))
+    })?;
+
+    let started = Instant::now();
+    let result = agent
+        .run(&provider_test_prompt(), &Context::now())
+        .await;
+    let fallback_latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let latency_ms = result.usage.wall_ms.max(fallback_latency_ms);
+    let output = result
+        .output
+        .body
+        .as_text()
+        .ok()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned);
+
+    if result.success {
+        state.provider_health.record_success(&provider_id);
+    } else {
+        state.provider_health.record_failure(&provider_id);
+    }
+
+    // The probe is a single-shot request, so use the same end-to-end latency
+    // for both TTFT and total latency until streaming timings are available.
+    state.latency_registry.record(
+        &model.slug,
+        &provider_id,
+        latency_ms as f64,
+        latency_ms as f64,
+        u64::from(result.usage.output_tokens),
+    );
+
+    let response_text = result.success.then(|| output.clone()).flatten();
+    let error_text =
+        (!result.success).then(|| output.unwrap_or_else(|| "provider test failed".to_string()));
+
+    Ok(Json(ProviderTestResponse {
+        provider_id,
+        model_key,
+        model_slug: model.slug,
+        success: result.success,
+        latency_ms,
+        input_tokens: result.usage.input_tokens,
+        output_tokens: result.usage.output_tokens,
+        total_tokens: result.usage.total_tokens(),
+        response: response_text,
+        error: error_text,
+    }))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProvidersResponse {
     providers: Vec<ProviderInfo>,
@@ -124,6 +215,22 @@ struct ProviderHealthResponse {
     latency_p95_ms: f64,
     latency_p99_ms: f64,
     error_rate: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProviderTestResponse {
+    provider_id: String,
+    model_key: String,
+    model_slug: String,
+    success: bool,
+    latency_ms: u64,
+    input_tokens: u32,
+    output_tokens: u32,
+    total_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,10 +287,30 @@ fn provider_state_label(state: HealthState) -> &'static str {
     }
 }
 
+fn select_test_model(config: &RokoConfig, provider_id: &str) -> Option<(String, ModelProfile)> {
+    let mut models: Vec<_> = config
+        .effective_models()
+        .into_iter()
+        .filter(|(_, model)| model.provider == provider_id && !model.is_embedding_model)
+        .collect();
+    models.sort_by(|(left, _), (right, _)| left.cmp(right));
+    models.into_iter().next()
+}
+
+fn provider_test_prompt() -> Signal {
+    Signal::builder(Kind::Prompt)
+        .body(SignalBody::text(PROVIDER_TEST_PROMPT))
+        .build()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
 
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
@@ -192,6 +319,72 @@ mod tests {
 
     use crate::deploy::create_backend;
     use crate::runtime::NoOpRuntime;
+
+    fn spawn_http_server(
+        status_line: &str,
+        response: String,
+    ) -> (String, Arc<std::sync::Mutex<Option<String>>>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("server addr");
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let captured_request = Arc::clone(&captured);
+        let status_line = status_line.to_string();
+
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+
+            let mut buf = Vec::new();
+            let mut header_end = None;
+            let mut content_length = None;
+
+            loop {
+                let mut chunk = [0_u8; 1024];
+                let n = stream.read(&mut chunk).expect("read request");
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+
+                if header_end.is_none()
+                    && let Some(pos) = buf.windows(4).position(|window| window == b"\r\n\r\n")
+                {
+                    header_end = Some(pos + 4);
+                    let headers = String::from_utf8_lossy(&buf[..pos + 4]);
+                    content_length = headers.lines().find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    });
+                }
+
+                if let (Some(header_end), Some(content_length)) = (header_end, content_length)
+                    && buf.len() >= header_end + content_length
+                {
+                    break;
+                }
+            }
+
+            let header_end = header_end.expect("request headers");
+            let content_length = content_length.expect("content length");
+            let request = String::from_utf8_lossy(&buf[..header_end + content_length]).to_string();
+            *captured_request.lock().expect("capture lock") = Some(request);
+
+            let response_bytes = response.as_bytes();
+            let wire = format!(
+                "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_bytes.len(),
+                response
+            );
+            stream.write_all(wire.as_bytes()).expect("write response");
+            stream.flush().expect("flush response");
+        });
+
+        (format!("http://{}", addr), captured, handle)
+    }
 
     #[tokio::test]
     async fn list_providers_returns_configured_providers_with_health() {
@@ -447,5 +640,194 @@ mod tests {
         assert_eq!(response.latency_p95_ms, 300.0);
         assert_eq!(response.latency_p99_ms, 300.0);
         assert_eq!(response.error_rate, 0.75);
+    }
+
+    #[tokio::test]
+    async fn test_provider_sends_live_request_and_records_metrics() {
+        let response = serde_json::json!({
+            "id": "chatcmpl-test",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "hello"},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 9,
+                "completion_tokens": 4,
+                "total_tokens": 13
+            }
+        })
+        .to_string();
+        let (base_url, captured, handle) = spawn_http_server("HTTP/1.1 200 OK", response);
+
+        let dir = tempdir().expect("tempdir");
+        let workdir = dir.path().to_path_buf();
+        let deploy_backend =
+            Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
+        let mut config = roko_core::config::schema::RokoConfig::default();
+        config.providers.insert(
+            "zai".into(),
+            roko_core::config::schema::ProviderConfig {
+                kind: roko_core::agent::ProviderKind::OpenAiCompat,
+                base_url: Some(base_url),
+                api_key_env: Some("PATH".into()),
+                command: None,
+                args: None,
+                timeout_ms: Some(120_000),
+                ttft_timeout_ms: Some(15_000),
+                connect_timeout_ms: Some(5_000),
+                extra_headers: None,
+                max_concurrent: None,
+            },
+        );
+        config.models.insert(
+            "glm-5-1".into(),
+            roko_core::config::schema::ModelProfile {
+                provider: "zai".into(),
+                slug: "glm-5.1".into(),
+                context_window: 128_000,
+                max_output: None,
+                supports_tools: true,
+                supports_thinking: false,
+                supports_vision: false,
+                supports_web_search: false,
+                supports_mcp_tools: false,
+                supports_partial: false,
+                supports_grounding: false,
+                supports_code_execution: false,
+                supports_caching: false,
+                provider_routing: None,
+                tool_format: "openai_json".into(),
+                cost_input_per_m: None,
+                cost_output_per_m: None,
+                cost_input_per_m_high: None,
+                cost_output_per_m_high: None,
+                cost_cache_read_per_m: None,
+                cost_cache_write_per_m: None,
+                thinking_level: None,
+                max_tools: None,
+                tokenizer_ratio: None,
+                supports_search: false,
+                supports_citations: false,
+                supports_async: false,
+                is_embedding_model: false,
+                search_context_size: None,
+                cost_per_request: None,
+            },
+        );
+
+        let state = Arc::new(AppState::new(
+            workdir,
+            Arc::new(NoOpRuntime),
+            config,
+            deploy_backend,
+        ));
+
+        let app = routes().with_state(Arc::clone(&state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/providers/zai/test")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let response: ProviderTestResponse =
+            serde_json::from_slice(&body).expect("parse response");
+
+        assert_eq!(response.provider_id, "zai");
+        assert_eq!(response.model_key, "glm-5-1");
+        assert_eq!(response.model_slug, "glm-5.1");
+        assert!(response.success);
+        assert_eq!(response.input_tokens, 9);
+        assert_eq!(response.output_tokens, 4);
+        assert_eq!(response.total_tokens, 13);
+        assert_eq!(response.response.as_deref(), Some("hello"));
+        assert!(response.latency_ms > 0);
+
+        let health = state.provider_health.get("zai");
+        assert_eq!(health.total_attempts, 1);
+        assert_eq!(health.total_successes, 1);
+        assert_eq!(health.consecutive_failures, 0);
+
+        let latency = state
+            .latency_registry
+            .get("glm-5.1", "zai")
+            .expect("latency stats");
+        assert_eq!(latency.observations, 1);
+        assert_eq!(latency.recent_latencies.len(), 1);
+
+        let request = captured
+            .lock()
+            .expect("capture lock")
+            .clone()
+            .expect("captured request");
+        assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1\r\n"));
+        assert!(request.contains("\"content\":\"Say hello.\""));
+
+        handle.join().expect("server thread");
+    }
+
+    #[tokio::test]
+    async fn test_provider_requires_a_routable_model() {
+        let dir = tempdir().expect("tempdir");
+        let workdir = dir.path().to_path_buf();
+        let deploy_backend =
+            Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
+        let mut config = roko_core::config::schema::RokoConfig::default();
+        config.providers.insert(
+            "zai".into(),
+            roko_core::config::schema::ProviderConfig {
+                kind: roko_core::agent::ProviderKind::OpenAiCompat,
+                base_url: Some("https://api.z.ai/api/paas/v4".into()),
+                api_key_env: Some("ZAI_API_KEY".into()),
+                command: None,
+                args: None,
+                timeout_ms: Some(120_000),
+                ttft_timeout_ms: Some(15_000),
+                connect_timeout_ms: Some(5_000),
+                extra_headers: None,
+                max_concurrent: None,
+            },
+        );
+
+        let state = Arc::new(AppState::new(
+            workdir,
+            Arc::new(NoOpRuntime),
+            config,
+            deploy_backend,
+        ));
+
+        let app = routes().with_state(Arc::clone(&state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/providers/zai/test")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("parse response");
+        assert_eq!(payload["error"]["code"], "bad_request");
+        assert_eq!(
+            payload["error"]["message"],
+            "provider zai has no configured non-embedding models to test"
+        );
     }
 }
