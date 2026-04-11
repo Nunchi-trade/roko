@@ -181,8 +181,8 @@ pub(crate) fn parse_usage(response: &serde_json::Value) -> Usage {
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
     let cache_read_tokens = usage
-        .get("cached_tokens")
-        .or_else(|| usage.pointer("/prompt_tokens_details/cached_tokens"))
+        .pointer("/prompt_tokens_details/cached_tokens")
+        .or_else(|| usage.get("cached_tokens"))
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
 
@@ -742,7 +742,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_cached_tokens() {
+    fn kimi_cached_tokens() {
         let glm = serde_json::json!({
             "usage": {
                 "prompt_tokens": 1200,
