@@ -5298,12 +5298,14 @@ dependencies = [
 name = "roko-learn"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "bardo-primitives",
  "chrono",
  "globset",
  "parking_lot",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
+ "roko-agent",
  "roko-core",
  "roko-daimon",
  "roko-golem",

@@ -12,9 +12,11 @@ workspace = true
 
 [dependencies]
 roko-core = { path = "../roko-core" }
+roko-agent = { path = "../roko-agent" }
 roko-golem = { path = "../roko-golem" }
 roko-daimon = { path = "../roko-daimon" }
 bardo-primitives = { path = "../bardo-primitives" }
+async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

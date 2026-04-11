@@ -19,20 +19,31 @@
 //! The cascade wraps a [`LinUCBRouter`] and an additional
 //! [`parking_lot::Mutex`] for confidence-stage statistics.
 
+use async_trait::async_trait;
 use parking_lot::Mutex;
+use roko_agent::AgentResult;
 use roko_core::OperatingFrequency;
 use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
 use roko_core::task::{TaskCategory, TaskComplexityBand};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use crate::cfactor::{AgentDispatchBias, CFactor};
 use crate::costs_db::CostTable;
-use crate::model_router::{COLD_START_THRESHOLD, CONTEXT_DIM, LinUCBRouter, RoutingContext};
+use crate::model_router::{
+    COLD_START_THRESHOLD, CONTEXT_DIM, LinUCBRouter, RoutingContext, compute_routing_reward_v2,
+};
 use crate::pareto::{ModelObservation, compute_pareto_frontier};
 use crate::provider_health::ProviderHealthRegistry;
+
+/// Async runner used by free-tier Gemini shadow evaluation.
+#[async_trait]
+pub trait ShadowModelRunner: Send + Sync {
+    /// Run `prompt` against `model_slug` and return the resulting agent output.
+    async fn run_shadow(&self, prompt: &str, model_slug: &str) -> AgentResult;
+}
 
 // ─── CascadeStage ───────────────────────────────────────────────────────────
 
@@ -335,7 +346,10 @@ const fn default_latency_sla(tier: ModelTier) -> u64 {
 
 /// Map a model slug to an approximate tier for SLA purposes.
 fn slug_to_tier(slug: &str) -> ModelTier {
-    if slug.contains("gemini-2.5-flash-lite") || slug.contains("haiku") {
+    if slug.contains("gemini-2.5-flash-lite")
+        || slug.contains("gemini-3.1-flash-lite-preview")
+        || slug.contains("haiku")
+    {
         ModelTier::Fast
     } else if slug.contains("gemini-3.1-pro-preview")
         || slug.contains("opus")
@@ -482,6 +496,10 @@ fn slug_family(slug: &str) -> Option<&'static str> {
         Some("kimi-k2")
     } else if slug.contains("gemini-3.1-pro-preview") {
         Some("gemini-3.1-pro-preview")
+    } else if slug.contains("gemini-3.1-flash-lite-preview") {
+        Some("gemini-3.1-flash-lite-preview")
+    } else if slug.contains("gemini-3-flash-preview") {
+        Some("gemini-3-flash-preview")
     } else if slug.contains("gemini-2.5-pro") {
         Some("gemini-2.5-pro")
     } else if slug.contains("gemini-2.5-flash-lite") {
@@ -527,6 +545,8 @@ pub struct CascadeRouter {
     role_table: HashMap<AgentRole, String>,
     /// Ordered list of model slugs (arms available to the router).
     model_slugs: Vec<String>,
+    /// Optional free-tier Gemini runner used for shadow evaluation.
+    free_tier_shadow_runner: Option<Arc<dyn ShadowModelRunner>>,
 }
 
 /// Cached Pareto frontier state.
@@ -553,6 +573,7 @@ impl CascadeRouter {
             pareto_frontier: Mutex::new(ParetoFrontierState::default()),
             role_table: default_role_model_table(&model_slugs),
             model_slugs,
+            free_tier_shadow_runner: None,
         }
     }
 
@@ -567,6 +588,13 @@ impl CascadeRouter {
     #[must_use]
     pub fn with_linucb(mut self, linucb: LinUCBRouter) -> Self {
         self.linucb = linucb;
+        self
+    }
+
+    /// Enable free-tier Gemini shadow evaluation with the provided runner.
+    #[must_use]
+    pub fn with_free_tier_shadow_runner(mut self, runner: Arc<dyn ShadowModelRunner>) -> Self {
+        self.free_tier_shadow_runner = Some(runner);
         self
     }
 
@@ -789,6 +817,59 @@ impl CascadeRouter {
         let context = [0.0; CONTEXT_DIM];
         self.observe_internal(&context, model_idx, reward, success, None);
         true
+    }
+
+    /// Run a shadow evaluation against a free-tier Gemini model.
+    ///
+    /// The shadow result never affects the primary task outcome. When the
+    /// shadow response is judged good enough relative to the primary result,
+    /// the router records a successful zero-cost observation for `free_model`.
+    /// Callers are expected to schedule this work in parallel with the main
+    /// request lifecycle.
+    pub async fn shadow_evaluate(
+        &mut self,
+        prompt: &str,
+        primary_result: &AgentResult,
+        free_model: &str,
+    ) {
+        if !is_free_tier_gemini_model(free_model) {
+            return;
+        }
+
+        let Some(model_idx) = self.model_index_for_slug(free_model) else {
+            return;
+        };
+        let Some(runner) = self.free_tier_shadow_runner.clone() else {
+            return;
+        };
+
+        let prompt = prompt.trim();
+        if prompt.is_empty() {
+            return;
+        }
+
+        let shadow_result = runner.run_shadow(prompt, free_model).await;
+        let quality = shadow_quality_score(prompt, primary_result, &shadow_result);
+        let passed = quality >= 0.65;
+        let ctx = infer_shadow_routing_context(prompt, primary_result);
+        let reward = if passed {
+            compute_routing_reward_v2(
+                quality,
+                0.0,
+                shadow_result.usage.wall_ms as f64,
+                default_latency_sla(slug_to_tier(free_model)) as f64,
+            )
+        } else {
+            0.0
+        };
+
+        self.observe_internal(
+            &ctx.to_features_for_model(Some(free_model)),
+            model_idx,
+            reward,
+            passed,
+            None,
+        );
     }
 
     /// Record a successful observation from a raw 18-dim context vector.
@@ -1341,6 +1422,8 @@ fn pareto_adjusted_alpha(base_alpha: f64, slug: &str, frontier: &[String]) -> f6
 
 fn pareto_cost_proxy(slug: &str) -> f64 {
     match slug_family(slug) {
+        Some("gemini-3.1-flash-lite-preview") => 0.9,
+        Some("gemini-3-flash-preview") => 1.5,
         Some("haiku") => 1.0,
         Some("sonnet") => 3.0,
         Some("opus") => 9.0,
@@ -1355,6 +1438,206 @@ fn pareto_cost_proxy(slug: &str) -> f64 {
 
 fn pareto_latency_proxy(slug: &str) -> f64 {
     default_latency_sla(slug_to_tier(slug)) as f64
+}
+
+fn is_free_tier_gemini_model(slug: &str) -> bool {
+    let slug = slug.to_ascii_lowercase();
+    slug.contains("gemini-2.5-flash")
+        || slug.contains("gemini-2.5-flash-lite")
+        || slug.contains("gemini-3-flash-preview")
+        || slug.contains("gemini-3.1-flash-lite-preview")
+}
+
+fn infer_shadow_routing_context(prompt: &str, primary_result: &AgentResult) -> RoutingContext {
+    let lower = prompt.to_ascii_lowercase();
+    let task_category = infer_task_category(&lower);
+    let complexity = infer_task_complexity(prompt, &lower);
+    let role = infer_shadow_role(task_category, complexity, &lower);
+
+    RoutingContext {
+        task_category,
+        complexity,
+        iteration: 0,
+        role,
+        crate_familiarity: 0.5,
+        has_prior_failure: !primary_result.success,
+        affect_confidence: if primary_result.success { 0.7 } else { 0.3 },
+        thinking_level: None,
+        previous_model: primary_result.output.tag("model").map(str::to_string),
+        plan_context_tokens: Some((prompt.len() as u64).div_ceil(4)),
+    }
+}
+
+fn infer_task_category(lower_prompt: &str) -> TaskCategory {
+    if contains_any(
+        lower_prompt,
+        &["research", "investigate", "why", "citation", "source"],
+    ) {
+        TaskCategory::Research
+    } else if contains_any(
+        lower_prompt,
+        &["test", "verify", "assert", "failing", "regression"],
+    ) {
+        TaskCategory::Verification
+    } else if contains_any(
+        lower_prompt,
+        &["integrate", "integration", "wire up", "hook up", "connect"],
+    ) {
+        TaskCategory::Integration
+    } else if contains_any(lower_prompt, &["refactor", "cleanup", "rename", "extract"]) {
+        TaskCategory::Refactor
+    } else if contains_any(lower_prompt, &["doc", "readme", "documentation", "explain"]) {
+        TaskCategory::Docs
+    } else if contains_any(lower_prompt, &["ci", "cargo", "build", "deploy", "infra"]) {
+        TaskCategory::Infra
+    } else {
+        TaskCategory::Implementation
+    }
+}
+
+fn infer_task_complexity(prompt: &str, lower_prompt: &str) -> TaskComplexityBand {
+    let word_count = prompt.split_whitespace().count();
+
+    if contains_any(
+        lower_prompt,
+        &[
+            "architecture",
+            "cross-crate",
+            "multi-crate",
+            "end-to-end",
+            "system design",
+            "migration",
+        ],
+    ) || word_count > 250
+    {
+        TaskComplexityBand::Complex
+    } else if contains_any(
+        lower_prompt,
+        &[
+            "typo",
+            "format",
+            "lint",
+            "rename",
+            "small fix",
+            "single file",
+        ],
+    ) || word_count < 40
+    {
+        TaskComplexityBand::Fast
+    } else {
+        TaskComplexityBand::Standard
+    }
+}
+
+fn infer_shadow_role(
+    task_category: TaskCategory,
+    complexity: TaskComplexityBand,
+    lower_prompt: &str,
+) -> AgentRole {
+    match task_category {
+        TaskCategory::Research => AgentRole::Researcher,
+        TaskCategory::Docs => AgentRole::Scribe,
+        TaskCategory::Refactor => AgentRole::Refactorer,
+        TaskCategory::Integration => AgentRole::IntegrationTester,
+        TaskCategory::Verification => AgentRole::Auditor,
+        _ if complexity == TaskComplexityBand::Complex
+            || contains_any(lower_prompt, &["architecture", "design"]) =>
+        {
+            AgentRole::Architect
+        }
+        _ => AgentRole::Implementer,
+    }
+}
+
+fn shadow_quality_score(
+    prompt: &str,
+    primary_result: &AgentResult,
+    shadow_result: &AgentResult,
+) -> f64 {
+    if !shadow_result.success {
+        return 0.0;
+    }
+
+    let Some(shadow_text) = result_text(shadow_result) else {
+        return 0.0;
+    };
+
+    let prompt_requires_code = prompt_expects_code(prompt);
+    let shadow_has_code = output_contains_code(shadow_text);
+
+    let Some(primary_text) = result_text(primary_result) else {
+        let structure_score = if shadow_text.split_whitespace().count() >= 8 {
+            1.0_f64
+        } else {
+            0.5_f64
+        };
+        let code_score = if prompt_requires_code && !shadow_has_code {
+            0.0_f64
+        } else {
+            1.0_f64
+        };
+        return structure_score.mul_add(0.3, code_score * 0.7);
+    };
+
+    let primary_words = primary_text.split_whitespace().count().max(1);
+    let shadow_words = shadow_text.split_whitespace().count();
+    let length_score = (shadow_words as f64 / primary_words as f64).min(1.0);
+
+    let primary_has_code = output_contains_code(primary_text);
+    let code_score = if prompt_requires_code || primary_has_code {
+        if shadow_has_code { 1.0_f64 } else { 0.0_f64 }
+    } else {
+        1.0_f64
+    };
+
+    let primary_lines = primary_text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+    let shadow_lines = shadow_text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+    let structure_score = if primary_lines <= 1 {
+        1.0_f64
+    } else {
+        (shadow_lines as f64 / primary_lines as f64).min(1.0)
+    };
+
+    length_score.mul_add(0.6, code_score.mul_add(0.25, structure_score * 0.15))
+}
+
+fn result_text(result: &AgentResult) -> Option<&str> {
+    result
+        .output
+        .body
+        .as_text()
+        .ok()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+}
+
+fn prompt_expects_code(prompt: &str) -> bool {
+    let lower = prompt.to_ascii_lowercase();
+    contains_any(
+        &lower,
+        &[
+            "code", "rust", "function", "impl", "struct", "test", "fix", "patch", "refactor",
+        ],
+    )
+}
+
+fn output_contains_code(text: &str) -> bool {
+    text.contains("```")
+        || text.contains("fn ")
+        || text.contains("impl ")
+        || text.contains("struct ")
+        || text.contains("enum ")
+        || text.contains("let ")
+}
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
 }
 
 /// Determine the cascade stage from observation count.
@@ -1405,8 +1688,11 @@ struct PersistedModelStats {
 mod tests {
     use super::*;
     use crate::provider_health::{ErrorClass, ProviderHealthRegistry};
+    use async_trait::async_trait;
     use roko_core::task::{TaskCategory, TaskComplexityBand};
+    use roko_core::{Body, Kind, Signal};
     use std::collections::HashMap;
+    use std::sync::Arc;
     use tempfile::tempdir;
 
     fn test_slugs() -> Vec<String> {
@@ -1429,6 +1715,35 @@ mod tests {
             thinking_level: None,
             previous_model: None,
             plan_context_tokens: None,
+        }
+    }
+
+    struct StubShadowRunner {
+        result: AgentResult,
+    }
+
+    #[async_trait]
+    impl ShadowModelRunner for StubShadowRunner {
+        async fn run_shadow(&self, _prompt: &str, _model_slug: &str) -> AgentResult {
+            self.result.clone()
+        }
+    }
+
+    fn agent_result(text: &str, success: bool, model: &str, wall_ms: u64) -> AgentResult {
+        let output = Signal::builder(Kind::AgentOutput)
+            .body(Body::text(text))
+            .tag("model", model)
+            .build();
+
+        let usage = roko_agent::Usage {
+            wall_ms,
+            ..Default::default()
+        };
+
+        if success {
+            AgentResult::ok(output).with_usage(usage)
+        } else {
+            AgentResult::fail(output).with_usage(usage)
         }
     }
 
@@ -1977,6 +2292,136 @@ mod tests {
 
         let result = cascade.route(&ctx);
         assert_eq!(result.primary.slug, "gemini-2.5-flash-lite");
+    }
+
+    #[tokio::test]
+    async fn shadow_evaluate_records_observation_for_passing_free_model() {
+        let primary = agent_result(
+            "```rust\nfn answer() -> u32 { 42 }\n```",
+            true,
+            "gemini-2.5-pro",
+            900,
+        );
+        let shadow = agent_result(
+            "```rust\nfn answer() -> u32 { 42 }\n```",
+            true,
+            "gemini-2.5-flash-lite",
+            120,
+        );
+        let mut cascade = CascadeRouter::new(vec![
+            "gemini-2.5-pro".to_string(),
+            "gemini-2.5-flash-lite".to_string(),
+        ])
+        .with_free_tier_shadow_runner(Arc::new(StubShadowRunner { result: shadow }));
+
+        cascade
+            .shadow_evaluate(
+                "Implement a Rust function that returns 42 and include code.",
+                &primary,
+                "gemini-2.5-flash-lite",
+            )
+            .await;
+
+        let stats = cascade.observation_snapshot();
+        let flash_lite = stats
+            .get("gemini-2.5-flash-lite")
+            .expect("flash-lite stats");
+
+        assert_eq!(flash_lite.trials, 1);
+        assert_eq!(flash_lite.successes, 1);
+        assert_eq!(cascade.total_observations(), 1);
+    }
+
+    #[tokio::test]
+    async fn shadow_evaluate_records_failed_observation_when_shadow_output_is_weaker() {
+        let primary = agent_result(
+            "```rust\nfn answer() -> u32 { 42 }\n```\nAdd a unit test.",
+            true,
+            "gemini-2.5-pro",
+            900,
+        );
+        let weak_shadow = agent_result("done", true, "gemini-2.5-flash-lite", 120);
+        let mut cascade = CascadeRouter::new(vec![
+            "gemini-2.5-pro".to_string(),
+            "gemini-2.5-flash-lite".to_string(),
+        ])
+        .with_free_tier_shadow_runner(Arc::new(StubShadowRunner {
+            result: weak_shadow,
+        }));
+
+        cascade
+            .shadow_evaluate(
+                "Implement a Rust function and add tests for it.",
+                &primary,
+                "gemini-2.5-flash-lite",
+            )
+            .await;
+
+        let stats = cascade.observation_snapshot();
+        let flash_lite = stats
+            .get("gemini-2.5-flash-lite")
+            .expect("flash-lite stats");
+
+        assert_eq!(flash_lite.trials, 1);
+        assert_eq!(flash_lite.successes, 0);
+    }
+
+    #[tokio::test]
+    async fn shadow_evaluate_shifts_router_toward_free_model() {
+        let prompt = "Implement a Rust function that parses a config string into a struct.";
+        let primary = agent_result(
+            "```rust\nstruct Config { enabled: bool }\nfn parse_config(input: &str) -> Config { Config { enabled: input == \"on\" } }\n```",
+            true,
+            "gemini-2.5-pro",
+            900,
+        );
+        let shadow = agent_result(
+            "```rust\nstruct Config { enabled: bool }\nfn parse_config(input: &str) -> Config { Config { enabled: input.trim() == \"on\" } }\n```",
+            true,
+            "gemini-2.5-flash-lite",
+            110,
+        );
+        let ctx = infer_shadow_routing_context(prompt, &primary);
+        let mut route_ctx = ctx.clone();
+        route_ctx.previous_model = None;
+        let mut cascade = CascadeRouter::new(vec![
+            "gemini-2.5-pro".to_string(),
+            "gemini-2.5-flash-lite".to_string(),
+        ])
+        .with_free_tier_shadow_runner(Arc::new(StubShadowRunner { result: shadow }));
+
+        for _ in 0..34 {
+            cascade.record_observation(&ctx, "gemini-2.5-pro", 0.9, true);
+        }
+        for _ in 0..6 {
+            cascade.record_observation(&ctx, "gemini-2.5-pro", 0.0, false);
+        }
+        for _ in 0..5 {
+            cascade.record_observation(&ctx, "gemini-2.5-flash-lite", 0.8, true);
+        }
+        for _ in 0..5 {
+            cascade.record_observation(&ctx, "gemini-2.5-flash-lite", 0.0, false);
+        }
+
+        assert_eq!(cascade.current_stage(), CascadeStage::Confidence);
+        assert_eq!(cascade.route(&route_ctx).primary.slug, "gemini-2.5-pro");
+
+        for _ in 0..40 {
+            cascade
+                .shadow_evaluate(prompt, &primary, "gemini-2.5-flash-lite")
+                .await;
+        }
+
+        let stats = cascade.observation_snapshot();
+        let flash_lite = stats
+            .get("gemini-2.5-flash-lite")
+            .expect("flash-lite stats");
+        assert_eq!(flash_lite.trials, 50);
+        assert_eq!(flash_lite.successes, 45);
+        assert_eq!(
+            cascade.route(&route_ctx).primary.slug,
+            "gemini-2.5-flash-lite"
+        );
     }
 
     // ── Test 18: UCB stage uses linucb selection ────────────────────────
