@@ -67,3 +67,19 @@ supports_tools = true
 tool_format = "openai_json"
 cost_input_per_m = 15.00
 cost_output_per_m = 75.00
+
+# OpenRouter Multi-Model Exploration
+#
+# With this config, CascadeRouter can learn across 3 models through one endpoint:
+#   - kimi-k2-5-or   ($0.38/M input)  - cheapest, good for mechanical tasks
+#   - glm-5-1-or     ($1.26/M input)  - best SWE-Bench Pro, good for focused tasks
+#   - claude-opus-or ($15.00/M input) - premium, for architectural decisions
+#
+# The router starts with static tier assignments, then learns pass rates via
+# confidence intervals during the 50-199 observation window, and finally uses
+# LinUCB contextual bandit routing at 200+ observations.
+#
+# To watch router learning:
+#   cargo run -p roko-cli -- dashboard  (check routing page)
+#
+# Router state persists to `.roko/learn/cascade-router.json`
