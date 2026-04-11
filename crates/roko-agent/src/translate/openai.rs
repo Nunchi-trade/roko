@@ -16,7 +16,7 @@
 //! same layout as the Ollama translator; only the inbound JSON pointer
 //! and the arguments decoding differ.
 
-use roko_core::tool::{ToolCall, ToolDef, ToolFormat, ToolResult};
+use roko_core::tool::{ToolCall, ToolCategory, ToolDef, ToolFormat, ToolResult};
 
 use super::{BackendResponse, RenderedResults, RenderedTools, Translator, TranslatorError};
 
@@ -36,16 +36,7 @@ impl Translator for OpenAiTranslator {
     fn render_tools(&self, tools: &[ToolDef]) -> RenderedTools {
         let arr: Vec<serde_json::Value> = tools
             .iter()
-            .map(|t| {
-                serde_json::json!({
-                    "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.parameters.as_value(),
-                    }
-                })
-            })
+            .map(render_tool)
             .collect();
         RenderedTools::JsonArray(serde_json::Value::Array(arr))
     }
@@ -104,6 +95,48 @@ impl Translator for OpenAiTranslator {
     }
 }
 
+fn render_tool(t: &ToolDef) -> serde_json::Value {
+    match tool_kind(t) {
+        ToolKind::Function => serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": t.name,
+                "description": t.description,
+                "parameters": t.parameters.as_value(),
+            }
+        }),
+        ToolKind::WebSearch => serde_json::json!({
+            "type": "web_search",
+            "web_search": t.parameters.as_value(),
+        }),
+        ToolKind::Retrieval => serde_json::json!({
+            "type": "retrieval",
+            "retrieval": t.parameters.as_value(),
+        }),
+        ToolKind::McpTool => serde_json::json!({
+            "type": "mcp",
+            "mcp": t.parameters.as_value(),
+        }),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolKind {
+    Function,
+    WebSearch,
+    Retrieval,
+    McpTool,
+}
+
+fn tool_kind(tool: &ToolDef) -> ToolKind {
+    match tool.name.as_str() {
+        "web_search" => ToolKind::WebSearch,
+        "retrieval" => ToolKind::Retrieval,
+        _ if matches!(tool.category, ToolCategory::Mcp) => ToolKind::McpTool,
+        _ => ToolKind::Function,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,6 +187,35 @@ mod tests {
             panic!("expected JsonArray");
         };
         assert_eq!(v.as_array().map(Vec::len), Some(0));
+    }
+
+    #[test]
+    fn render_extended_tools_mixed_function_and_web_search() {
+        let tools = [
+            tool("read_file", "Read a file"),
+            ToolDef::new(
+                "web_search",
+                "Search the web",
+                ToolCategory::Network,
+                ToolPermission::networked(),
+            )
+            .with_parameters(ToolSchema::from_value(serde_json::json!({
+                "enable": true,
+                "search_engine": "bing"
+            }))),
+        ];
+
+        let rendered = OpenAiTranslator.render_tools(&tools);
+        let RenderedTools::JsonArray(v) = rendered else {
+            panic!("expected JsonArray");
+        };
+        let arr = v.as_array().expect("array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["type"], "function");
+        assert_eq!(arr[0]["function"]["name"], "read_file");
+        assert_eq!(arr[1]["type"], "web_search");
+        assert_eq!(arr[1]["web_search"]["enable"], true);
+        assert_eq!(arr[1]["web_search"]["search_engine"], "bing");
     }
 
     #[test]
