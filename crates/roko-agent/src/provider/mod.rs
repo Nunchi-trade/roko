@@ -347,7 +347,7 @@ mod tests {
         );
         assert_eq!(
             adapter_for_kind(ProviderKind::GeminiApi).kind(),
-            ProviderKind::OpenAiCompat
+            ProviderKind::GeminiApi
         );
     }
 
