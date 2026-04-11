@@ -2,72 +2,17 @@
 //!
 //! This task wires Gemini into the provider abstraction and selects the
 //! appropriate concrete agent shape based on model capabilities.
-//! The embedding agent remains a thin wrapper for now.
 
 use super::compat::GeminiCompatAgent;
+use super::embed::GeminiEmbedAgent;
 use super::native::GeminiNativeAgent;
-use crate::agent::{Agent, AgentResult};
-use crate::codex_agent::CodexAgent;
+use crate::agent::Agent;
 use crate::provider::{AgentCreationError, AgentOptions, ProviderAdapter, ProviderError};
-use async_trait::async_trait;
 use roko_core::agent::ProviderKind;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
-use roko_core::{Context, Signal};
 use serde_json::Value;
 
 const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com";
-
-fn compat_base_url(base_url: &str) -> String {
-    let trimmed = base_url.trim_end_matches('/');
-    format!("{trimmed}/v1beta/openai")
-}
-
-/// Embedding-only Gemini agent.
-///
-/// Stub implementation for adapter routing tests. A dedicated embeddings API
-/// implementation is added in the follow-on Gemini embedding task.
-pub struct GeminiEmbedAgent {
-    inner: CodexAgent,
-}
-
-impl GeminiEmbedAgent {
-    /// Construct a Gemini embedding agent stub.
-    #[must_use]
-    pub fn new(
-        api_key: impl Into<String>,
-        base_url: impl Into<String>,
-        model_slug: impl Into<String>,
-    ) -> Self {
-        let model_slug = model_slug.into();
-        let name = format!("gemini-embed:{model_slug}");
-        let inner = CodexAgent::new(api_key, &model_slug)
-            .with_base_url(compat_base_url(&base_url.into()))
-            .with_name(name);
-        Self { inner }
-    }
-
-    /// Override the display name used for logs and tests.
-    #[must_use]
-    pub fn with_name(mut self, name: impl Into<String>) -> Self {
-        self.inner = self.inner.with_name(name);
-        self
-    }
-}
-
-#[async_trait]
-impl Agent for GeminiEmbedAgent {
-    async fn run(&self, input: &Signal, ctx: &Context) -> AgentResult {
-        self.inner.run(input, ctx).await
-    }
-
-    fn name(&self) -> &str {
-        self.inner.name()
-    }
-
-    fn supports_streaming(&self) -> bool {
-        self.inner.supports_streaming()
-    }
-}
 
 /// Provider adapter for Gemini.
 pub struct GeminiAdapter;
@@ -102,12 +47,14 @@ impl ProviderAdapter for GeminiAdapter {
         };
 
         if model.is_embedding_model {
-            let agent = GeminiEmbedAgent::new(api_key, base_url, model.slug.clone());
-            return Ok(if options.name.is_empty() {
-                Box::new(agent)
-            } else {
-                Box::new(agent.with_name(options.name.clone()))
-            });
+            let mut agent = GeminiEmbedAgent::new(api_key, base_url, model.slug.clone());
+            if let Some(timeout_ms) = options.timeout_ms {
+                agent = agent.with_timeout_ms(timeout_ms);
+            }
+            if !options.name.is_empty() {
+                agent = agent.with_name(options.name.clone());
+            }
+            return Ok(Box::new(agent));
         }
 
         let needs_native = model.supports_grounding
