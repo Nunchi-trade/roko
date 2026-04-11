@@ -20,11 +20,13 @@ use roko_core::tool::{ToolCall, ToolContext, ToolDef};
 use crate::dispatcher::ToolDispatcher;
 use crate::translate::{BackendResponse, RenderedTools, Translator};
 
+pub mod agent_wrapper;
 pub mod checkpoint;
 pub mod max_iter;
 pub mod prune;
 pub mod result_msg;
 
+pub use agent_wrapper::ToolLoopAgent;
 pub use checkpoint::Checkpoint;
 pub use max_iter::DEFAULT_MAX_ITERATIONS;
 pub use prune::DEFAULT_CONTEXT_TOKEN_LIMIT;
@@ -351,7 +353,10 @@ mod tests {
             RenderedResults::JsonMessages(serde_json::json!(msgs))
         }
 
-        fn render_assistant_message(&self, response: &BackendResponse) -> Option<serde_json::Value> {
+        fn render_assistant_message(
+            &self,
+            response: &BackendResponse,
+        ) -> Option<serde_json::Value> {
             let BackendResponse::Json(ref v) = *response else {
                 return None;
             };
