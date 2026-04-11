@@ -190,6 +190,26 @@ pub fn compute_routing_reward(
     (1.0 - nd).mul_add(0.2, pr.mul_add(0.5, (1.0 - nc) * 0.3))
 }
 
+/// Compute the composite reward signal using observed latency and an SLA.
+///
+/// Faster models get a higher reward because the observed latency is normalized
+/// against the latency SLA before being fed into the same reward formula.
+#[must_use]
+pub fn compute_routing_reward_v2(
+    pass_rate: f64,
+    normalized_cost: f64,
+    observed_latency_ms: f64,
+    latency_sla_ms: f64,
+) -> f64 {
+    let normalized_duration = if latency_sla_ms > 0.0 {
+        (observed_latency_ms / latency_sla_ms).min(1.0)
+    } else {
+        1.0
+    };
+
+    compute_routing_reward(pass_rate, normalized_cost, normalized_duration)
+}
+
 // ─── Per-arm state ──────────────────────────────────────────────────────────
 
 /// Serializable state for one `LinUCB` arm.
@@ -977,6 +997,19 @@ mod tests {
         assert!(
             (r - 0.8).abs() < 1e-10,
             "clamped reward should be 0.8, got {r}"
+        );
+    }
+
+    // ── Latency-aware reward prefers faster models ─────────────────────
+
+    #[test]
+    fn routing_reward_v2_prefers_faster_models() {
+        let faster = compute_routing_reward_v2(1.0, 0.25, 5_000.0, 10_000.0);
+        let slower = compute_routing_reward_v2(1.0, 0.25, 9_500.0, 10_000.0);
+
+        assert!(
+            faster > slower,
+            "faster model should earn higher reward: {faster} vs {slower}"
         );
     }
 
