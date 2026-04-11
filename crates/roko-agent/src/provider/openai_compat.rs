@@ -174,7 +174,7 @@ fn inject_kimi_params(body: &mut Map<String, Value>, model: &ModelProfile) {
     );
 }
 
-fn resolve_api_key(provider: &ProviderConfig) -> Result<String, AgentCreationError> {
+pub(crate) fn resolve_api_key(provider: &ProviderConfig) -> Result<String, AgentCreationError> {
     provider
         .resolve_api_key()
         .or_else(|| {
@@ -200,19 +200,29 @@ fn base_url_for_codex(provider: &ProviderConfig) -> String {
         .to_string()
 }
 
-fn base_url_for_tool_loop(provider: &ProviderConfig) -> String {
+pub(crate) fn base_url_for_tool_loop(provider: &ProviderConfig) -> String {
     provider
         .base_url
         .clone()
         .unwrap_or_else(|| "https://api.openai.com/v1".to_string())
 }
 
-fn build_extra_body_params(provider: &ProviderConfig, model: &ModelProfile) -> Map<String, Value> {
+pub(crate) fn build_extra_body_params(
+    provider: &ProviderConfig,
+    model: &ModelProfile,
+) -> Map<String, Value> {
     let mut extra_body_params = Map::new();
     inject_glm_params(&mut extra_body_params, provider, model);
     inject_kimi_params(&mut extra_body_params, model);
     inject_provider_routing(&mut extra_body_params, provider, model);
     extra_body_params
+}
+
+pub(crate) fn max_tokens_for_model(model: &ModelProfile) -> u32 {
+    model
+        .max_output
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(DEFAULT_MAX_TOKENS)
 }
 
 fn parse_allowed_tools_csv(csv: Option<&str>) -> Option<HashSet<&str>> {
@@ -266,10 +276,7 @@ impl ProviderAdapter for OpenAiCompatAdapter {
             .timeout_ms
             .or(provider.timeout_ms)
             .unwrap_or(120_000);
-        let max_tokens = model
-            .max_output
-            .and_then(|value| u32::try_from(value).ok())
-            .unwrap_or(DEFAULT_MAX_TOKENS);
+        let max_tokens = max_tokens_for_model(model);
         let extra_headers = provider.extra_headers.clone().unwrap_or_default();
         let extra_body_params = build_extra_body_params(provider, model);
         let agent_name = default_agent_name(model, options);
