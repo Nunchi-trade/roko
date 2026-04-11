@@ -12,12 +12,14 @@
 //! - [`result_msg`] — tool-result message construction (§36.56).
 //! - [`checkpoint`] — resumable state (§36.57).
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use roko_core::tool::{ToolCall, ToolContext, ToolDef};
 
 use crate::dispatcher::ToolDispatcher;
+use crate::provider::ProviderError;
+use crate::retry::RetryPolicy;
 use crate::translate::{BackendResponse, RenderedTools, Translator};
 
 pub mod checkpoint;
@@ -62,6 +64,12 @@ pub enum LlmError {
     /// A network-level failure (DNS, timeout, connection reset).
     #[error("network error: {0}")]
     Network(String),
+    /// The backend returned a provider-classified error suitable for retry logic.
+    #[error("provider error: {0}")]
+    Provider(ProviderError),
+    /// Retry budget was exhausted before a successful backend response arrived.
+    #[error("retries exhausted")]
+    RetriesExhausted,
 }
 
 // ─── StopReason + Output ─────────────────────────────────────────────
@@ -107,6 +115,7 @@ pub struct ToolLoop {
     backend: Arc<dyn LlmBackend>,
     max_iterations: usize,
     context_token_limit: usize,
+    retry_policy: RetryPolicy,
 }
 
 impl ToolLoop {
@@ -123,6 +132,7 @@ impl ToolLoop {
             backend,
             max_iterations: DEFAULT_MAX_ITERATIONS,
             context_token_limit: DEFAULT_CONTEXT_TOKEN_LIMIT,
+            retry_policy: RetryPolicy::default(),
         }
     }
 
@@ -137,6 +147,13 @@ impl ToolLoop {
     #[must_use]
     pub const fn with_context_token_limit(mut self, n: usize) -> Self {
         self.context_token_limit = n;
+        self
+    }
+
+    /// Override the default retry policy used for provider-backed backend calls.
+    #[must_use]
+    pub fn with_retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
+        self.retry_policy = retry_policy;
         self
     }
 
@@ -200,7 +217,7 @@ impl ToolLoop {
             }
 
             // Send current conversation to the backend.
-            let response = match self.backend.send_turn(&messages, &rendered_tools).await {
+            let response = match self.send_turn_with_retry(&messages, &rendered_tools).await {
                 Ok(r) => r,
                 Err(e) => {
                     let cp = Checkpoint::new(iterations, all_calls.clone(), messages);
@@ -260,6 +277,29 @@ impl ToolLoop {
             iterations += 1;
         }
     }
+
+    async fn send_turn_with_retry(
+        &self,
+        messages: &[serde_json::Value],
+        tools: &RenderedTools,
+    ) -> Result<BackendResponse, LlmError> {
+        for attempt in 0..self.retry_policy.max_attempts {
+            match self.backend.send_turn(messages, tools).await {
+                Ok(response) => return Ok(response),
+                Err(LlmError::Provider(ref error))
+                    if self.retry_policy.should_retry(error, attempt) =>
+                {
+                    let delay = self
+                        .retry_policy
+                        .delay_with_retry_after(attempt, error.retry_after_ms());
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        Err(LlmError::RetriesExhausted)
+    }
 }
 
 impl std::fmt::Debug for ToolLoop {
@@ -270,6 +310,7 @@ impl std::fmt::Debug for ToolLoop {
             .field("backend", &"Arc<dyn LlmBackend>")
             .field("max_iterations", &self.max_iterations)
             .field("context_token_limit", &self.context_token_limit)
+            .field("retry_policy", &self.retry_policy)
             .finish()
     }
 }
@@ -500,6 +541,44 @@ mod tests {
         }
     }
 
+    struct RetryingBackend {
+        attempts: AtomicUsize,
+        failures_before_success: usize,
+        error: ProviderError,
+    }
+
+    impl RetryingBackend {
+        fn new(failures_before_success: usize, error: ProviderError) -> Self {
+            Self {
+                attempts: AtomicUsize::new(0),
+                failures_before_success,
+                error,
+            }
+        }
+
+        fn attempts(&self) -> usize {
+            self.attempts.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl LlmBackend for RetryingBackend {
+        async fn send_turn(
+            &self,
+            _messages: &[serde_json::Value],
+            _tools: &RenderedTools,
+        ) -> Result<BackendResponse, LlmError> {
+            let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
+            if attempt < self.failures_before_success {
+                Err(LlmError::Provider(self.error.clone()))
+            } else {
+                Ok(BackendResponse::Json(
+                    serde_json::json!({"message": {"content": "final after retry"}}),
+                ))
+            }
+        }
+    }
+
     #[async_trait]
     impl LlmBackend for CapturingBackend {
         async fn send_turn(
@@ -549,6 +628,15 @@ mod tests {
         let dispatcher = Arc::new(ToolDispatcher::new(registry, resolver));
         let translator: Arc<dyn Translator> = Arc::new(MockTranslator);
         ToolLoop::new(translator, dispatcher, backend).with_max_iterations(max_iterations)
+    }
+
+    fn test_retry_policy() -> RetryPolicy {
+        RetryPolicy {
+            max_attempts: 3,
+            base_delay_ms: 0,
+            max_delay_ms: 0,
+            ..RetryPolicy::default()
+        }
     }
 
     // ─── Tests ───────────────────────────────────────────────────────
@@ -668,6 +756,41 @@ mod tests {
         }
         assert_eq!(out.iterations, 0);
         assert!(out.checkpoint.is_some());
+    }
+
+    #[tokio::test]
+    async fn retry_with_jitter_retries_rate_limits_until_success() {
+        let backend = Arc::new(RetryingBackend::new(
+            2,
+            ProviderError::RateLimit {
+                retry_after_ms: None,
+            },
+        ));
+        let tl = make_tool_loop(backend.clone(), 25).with_retry_policy(test_retry_policy());
+        let ctx = ToolContext::testing("/tmp");
+
+        let out = tl.run("system", "user", &test_tools(), &ctx).await;
+
+        assert_eq!(out.stop_reason, StopReason::Stop);
+        assert_eq!(out.final_text, "final after retry");
+        assert_eq!(backend.attempts(), 3);
+    }
+
+    #[tokio::test]
+    async fn retry_with_jitter_does_not_retry_auth_failures() {
+        let backend = Arc::new(RetryingBackend::new(usize::MAX, ProviderError::AuthFailure));
+        let tl = make_tool_loop(backend.clone(), 25).with_retry_policy(test_retry_policy());
+        let ctx = ToolContext::testing("/tmp");
+
+        let out = tl.run("system", "user", &test_tools(), &ctx).await;
+
+        match &out.stop_reason {
+            StopReason::BackendError(msg) => {
+                assert!(msg.contains("authentication failed"), "msg={msg}");
+            }
+            other => panic!("expected BackendError, got {other:?}"),
+        }
+        assert_eq!(backend.attempts(), 1);
     }
 
     #[tokio::test]

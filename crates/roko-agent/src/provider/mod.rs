@@ -182,6 +182,16 @@ impl fmt::Display for ProviderError {
 
 impl std::error::Error for ProviderError {}
 
+impl ProviderError {
+    #[must_use]
+    pub const fn retry_after_ms(&self) -> Option<u64> {
+        match self {
+            Self::RateLimit { retry_after_ms } => *retry_after_ms,
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum AgentCreationError {
     #[error("Missing API key: env var {0} not set")]
