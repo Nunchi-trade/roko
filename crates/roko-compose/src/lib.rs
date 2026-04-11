@@ -30,6 +30,7 @@ pub mod symbol_resolver;
 pub mod system_prompt_builder;
 pub mod task_brief;
 pub mod templates;
+pub mod token_counter;
 
 pub use agents_md::AgentsMd;
 pub use budget::{AdjustedBudget, Complexity, adjusted_budget_for};
@@ -57,3 +58,4 @@ pub use templates::{
     QuickReviewerTemplate, Reviewer, ReviewerInput, ReviewerTemplate, RolePromptTemplate,
     ScribeInput, ScribeTemplate, budget_for, scribe::ScribeVariant,
 };
+pub use token_counter::TokenCounter;
