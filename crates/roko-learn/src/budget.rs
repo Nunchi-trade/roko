@@ -40,6 +40,25 @@ pub enum BudgetAction {
 }
 
 impl BudgetGuardrail {
+    /// Create a new guardrail with explicit limits.
+    #[must_use]
+    pub const fn new(
+        per_task_limit_usd: f64,
+        per_session_limit_usd: f64,
+        per_day_limit_usd: f64,
+        warn_at_percent: f64,
+    ) -> Self {
+        Self {
+            per_task_limit_usd,
+            per_session_limit_usd,
+            per_day_limit_usd,
+            warn_at_percent,
+            task_spent: 0.0,
+            session_spent: 0.0,
+            day_spent: 0.0,
+        }
+    }
+
     /// Record a cost against a budget level and return the resulting action.
     pub fn record_cost(&mut self, cost_usd: f64, level: &str) -> BudgetAction {
         match level {

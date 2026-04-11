@@ -50,6 +50,7 @@ use roko_gate::{
     payload::GatePayload, test_gate::TestGate,
 };
 use roko_learn::anomaly::AnomalyDetector;
+use roko_learn::budget::{BudgetAction, BudgetGuardrail};
 use roko_learn::costs_db::CostRecord;
 use roko_learn::efficiency::{AgentEfficiencyEvent, FleetCFactor, compute_fleet_cfactor};
 use roko_learn::episode_logger::{Episode, GateVerdict, Usage};
@@ -122,6 +123,13 @@ fn frequency_label(frequency: OperatingFrequency) -> &'static str {
         OperatingFrequency::Theta => "theta",
         OperatingFrequency::Delta => "delta",
     }
+}
+
+fn mechanical_tier_model(tier_models: &HashMap<String, String>) -> String {
+    tier_models
+        .get("mechanical")
+        .cloned()
+        .unwrap_or_else(|| "claude-haiku-4-5".into())
 }
 
 // ─── ContextAttributionTracker ────────────────────────────────────────────
@@ -7114,6 +7122,30 @@ impl PlanRunner {
             }
         }
 
+        // ── Budget guardrail before dispatch ───────────────────────
+        let mut budget = BudgetGuardrail::new(
+            self.config.budget.max_task_usd,
+            self.config.budget.max_session_usd,
+            self.config.budget.max_plan_usd,
+            f64::from(self.config.budget.warn_at_percent) / 100.0,
+        );
+        let last_cost_usd = self.task_spent(plan_id, task);
+        match budget.record_cost(last_cost_usd, "task") {
+            BudgetAction::Block => {
+                return Err(anyhow!(
+                    "task {plan_id}/{task} budget exhausted: ${last_cost_usd:.2} >= max_task_usd ${:.2}",
+                    self.config.budget.max_task_usd
+                ));
+            }
+            BudgetAction::RouteToCheaper => {
+                selected_model = mechanical_tier_model(&self.config.agent.tier_models);
+            }
+            BudgetAction::Warn { percent_used, .. } => {
+                tracing::warn!(pct = percent_used, "budget warning");
+            }
+            _ => {}
+        }
+
         // ── Dispatch-time skill hint from successful prior tasks ──────
         let task_files_for_skill_query = task_def
             .as_ref()
@@ -9635,6 +9667,16 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    #[test]
+    fn budget_enforcement_routes_to_mechanical_model() {
+        let mut guardrail = BudgetGuardrail::new(1.0, 50.0, 10.0, 0.8);
+        assert_eq!(guardrail.record_cost(0.81, "task"), BudgetAction::RouteToCheaper);
+
+        let mut tier_models = HashMap::new();
+        tier_models.insert("mechanical".to_string(), "claude-haiku-4-5".to_string());
+        assert_eq!(mechanical_tier_model(&tier_models), "claude-haiku-4-5");
+    }
 
     #[test]
     fn orchestration_report_all_succeeded() {
