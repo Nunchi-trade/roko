@@ -23,8 +23,9 @@ use std::sync::Arc;
 use crate::Agent;
 use crate::codex_agent::{CodexAgent, DEFAULT_MAX_TOKENS};
 use crate::dispatcher::{HandlerResolver, ToolDispatcher};
-use crate::openai_compat_backend::OpenAiCompatLlmBackend;
+use crate::http::ReqwestPoster;
 use crate::provider::{AgentCreationError, AgentOptions, ProviderAdapter, ProviderError};
+use crate::tool_loop::backends::create_backend;
 use crate::tool_loop::{ToolLoop, ToolLoopAgent};
 use crate::translate::{OpenAiTranslator, Translator};
 use roko_core::agent::ProviderKind;
@@ -288,14 +289,10 @@ impl ProviderAdapter for OpenAiCompatAdapter {
                 Arc::new(|name: &str| roko_std::tool::handlers::handler_for(name));
             let dispatcher = Arc::new(ToolDispatcher::new(registry, resolver));
             let translator: Arc<dyn Translator> = Arc::new(OpenAiTranslator);
-            let backend: Arc<dyn crate::tool_loop::LlmBackend> = Arc::new(
-                OpenAiCompatLlmBackend::new(api_key, model.slug.clone())
-                    .with_base_url(base_url_for_tool_loop(provider))
-                    .with_timeout_ms(timeout)
-                    .with_max_tokens(max_tokens)
-                    .with_extra_headers(extra_headers)
-                    .with_extra_body_params(extra_body_params),
-            );
+            let mut tool_loop_provider = provider.clone();
+            tool_loop_provider.timeout_ms = Some(timeout);
+            let poster = Arc::new(ReqwestPoster::new());
+            let backend = create_backend(&tool_loop_provider, model, poster)?;
 
             let tool_loop = ToolLoop::new(translator, dispatcher, backend)
                 .with_max_iterations(50)
@@ -431,6 +428,76 @@ mod tests {
             );
             stream.write_all(wire.as_bytes()).expect("write response");
             stream.flush().expect("flush response");
+        });
+
+        (format!("http://{}", addr), captured, handle)
+    }
+
+    fn spawn_chat_server_sequence(
+        responses: Vec<String>,
+    ) -> (String, Arc<Mutex<Vec<String>>>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("server addr");
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let captured_requests = Arc::clone(&captured);
+
+        let handle = thread::spawn(move || {
+            for response in responses {
+                let (mut stream, _) = listener.accept().expect("accept request");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .expect("set read timeout");
+
+                let mut buf = Vec::new();
+                let mut header_end = None;
+                let mut content_length = None;
+
+                loop {
+                    let mut chunk = [0_u8; 1024];
+                    let n = stream.read(&mut chunk).expect("read request");
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+
+                    if header_end.is_none()
+                        && let Some(pos) = buf.windows(4).position(|window| window == b"\r\n\r\n")
+                    {
+                        header_end = Some(pos + 4);
+                        let headers = String::from_utf8_lossy(&buf[..pos + 4]);
+                        content_length = headers.lines().find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        });
+                    }
+
+                    if let (Some(header_end), Some(content_length)) = (header_end, content_length)
+                        && buf.len() >= header_end + content_length
+                    {
+                        break;
+                    }
+                }
+
+                let header_end = header_end.expect("request headers");
+                let content_length = content_length.expect("content length");
+                let request =
+                    String::from_utf8_lossy(&buf[..header_end + content_length]).to_string();
+                captured_requests
+                    .lock()
+                    .expect("capture lock")
+                    .push(request);
+
+                let response_bytes = response.as_bytes();
+                let wire = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response_bytes.len(),
+                    response
+                );
+                stream.write_all(wire.as_bytes()).expect("write response");
+                stream.flush().expect("flush response");
+            }
         });
 
         (format!("http://{}", addr), captured, handle)
@@ -657,6 +724,123 @@ mod tests {
                 "type": "enabled"
             })
         );
+
+        handle.join().expect("server thread");
+    }
+
+    #[tokio::test]
+    async fn adapter_uses_tool_loop() {
+        let first_response = serde_json::json!({
+            "id": "chatcmpl-tool-1",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call-ls-1",
+                        "type": "function",
+                        "function": {
+                            "name": "ls",
+                            "arguments": "{\"path\":\".\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {
+                "prompt_tokens": 17,
+                "completion_tokens": 4,
+                "total_tokens": 21
+            }
+        })
+        .to_string();
+        let second_response = serde_json::json!({
+            "id": "chatcmpl-tool-2",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "tool-loop-ok"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 19,
+                "completion_tokens": 3,
+                "total_tokens": 22
+            }
+        })
+        .to_string();
+        let (base_url, captured, handle) =
+            spawn_chat_server_sequence(vec![first_response, second_response]);
+
+        let provider = ProviderConfig {
+            kind: ProviderKind::OpenAiCompat,
+            base_url: Some(format!("{base_url}/v1")),
+            api_key_env: Some("PATH".to_string()),
+            command: None,
+            args: None,
+            timeout_ms: Some(1_500),
+            extra_headers: None,
+            max_concurrent: None,
+        };
+        let model = ModelProfile {
+            provider: "zai".to_string(),
+            slug: "glm-5.1".to_string(),
+            context_window: 200_000,
+            max_output: Some(1_024),
+            supports_tools: true,
+            supports_thinking: true,
+            supports_vision: false,
+            supports_web_search: false,
+            supports_mcp_tools: false,
+            supports_partial: false,
+            provider_routing: None,
+            tool_format: "openai_json".to_string(),
+            cost_input_per_m: None,
+            cost_output_per_m: None,
+            cost_cache_read_per_m: None,
+            cost_cache_write_per_m: None,
+            max_tools: None,
+            tokenizer_ratio: None,
+        };
+
+        let agent = OpenAiCompatAdapter
+            .create_agent(&provider, &model, &AgentOptions::default())
+            .expect("create tool-loop agent");
+
+        let result = agent.run(&prompt("hello"), &Context::now()).await;
+        assert!(result.success);
+        assert_eq!(result.output.body.as_text().unwrap_or(""), "tool-loop-ok");
+
+        let requests = captured.lock().expect("capture lock").clone();
+        assert_eq!(requests.len(), 2, "tool loop should make two backend turns");
+
+        let first_body = requests[0].split("\r\n\r\n").nth(1).expect("first body");
+        let first_json: Value = serde_json::from_str(first_body).expect("first request json");
+        assert_eq!(first_json["model"], "glm-5.1");
+        assert_eq!(first_json["messages"][1]["content"], "hello");
+        assert!(
+            !first_json["tools"]
+                .as_array()
+                .expect("tools array")
+                .is_empty()
+        );
+
+        let second_body = requests[1].split("\r\n\r\n").nth(1).expect("second body");
+        let second_json: Value = serde_json::from_str(second_body).expect("second request json");
+        let messages = second_json["messages"]
+            .as_array()
+            .expect("second request messages");
+        assert!(messages.iter().any(|message| {
+            message.get("role").and_then(Value::as_str) == Some("assistant")
+                && message.get("tool_calls").is_some()
+        }));
+        assert!(messages.iter().any(|message| {
+            message.get("role").and_then(Value::as_str) == Some("tool")
+                && message.get("tool_call_id").and_then(Value::as_str) == Some("call-ls-1")
+        }));
 
         handle.join().expect("server thread");
     }
