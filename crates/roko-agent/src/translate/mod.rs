@@ -65,6 +65,7 @@ pub struct ResponseMetadata {
     pub model_used: Option<String>,
     pub cached_tokens: Option<u64>,
     pub content_filter: Option<serde_json::Value>,
+    pub web_search: Option<serde_json::Value>,
     pub provider_latency_ms: Option<u64>,
     pub raw_finish_reason: Option<String>,
 }

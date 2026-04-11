@@ -187,10 +187,14 @@ pub(crate) fn parse_glm_response(json: &serde_json::Value) -> (String, Option<St
 }
 
 #[must_use]
-pub(crate) fn parse_glm_metadata(json: &serde_json::Value) -> crate::translate::ResponseMetadata {
+pub fn parse_glm_metadata(json: &serde_json::Value) -> crate::translate::ResponseMetadata {
     crate::translate::ResponseMetadata {
         content_filter: json
             .get("content_filter")
+            .filter(|value| value.is_array())
+            .cloned(),
+        web_search: json
+            .get("web_search")
             .filter(|value| value.is_array())
             .cloned(),
         ..Default::default()

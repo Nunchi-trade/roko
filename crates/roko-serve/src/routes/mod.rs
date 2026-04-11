@@ -13,6 +13,7 @@ mod plans;
 mod prds;
 mod research;
 mod run;
+mod sse;
 mod status;
 mod subscriptions;
 mod templates;
@@ -45,7 +46,8 @@ pub fn build_router(
         .merge(agents::routes())
         .merge(learning::routes())
         .merge(config::routes())
-        .merge(deployments::routes());
+        .merge(deployments::routes())
+        .merge(sse::routes());
 
     let api = if api_auth.enabled {
         api.layer(axum::middleware::from_fn_with_state(

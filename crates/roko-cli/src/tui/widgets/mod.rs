@@ -1,5 +1,15 @@
 //! Reusable widgets for the dashboard TUI.
 
+pub mod agent_grid;
+pub mod error_digest;
+pub mod header_bar;
+pub mod phase_bar;
+pub mod plan_tree;
+pub mod scrollbar;
+pub mod status_bar;
+pub mod task_progress;
+pub mod token_bar;
+
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
