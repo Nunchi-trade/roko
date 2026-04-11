@@ -78,7 +78,8 @@ impl AffectState {
     }
 
     fn decay(&mut self, half_life_hours: f64, now: DateTime<Utc>) {
-        let elapsed_hours = now.signed_duration_since(self.updated_at).num_seconds() as f64 / 3600.0;
+        let elapsed_hours =
+            now.signed_duration_since(self.updated_at).num_seconds() as f64 / 3600.0;
         if elapsed_hours <= 0.0 {
             return;
         }
@@ -356,7 +357,13 @@ impl AffectEngine for DaimonState {
                 blocker_count,
             } => {
                 let blockers = blocker_count.max(1).min(5) as f64;
-                self.state.apply_delta(0.0, blockers * 0.05, -(blockers * 0.08), -0.02 * blockers, now);
+                self.state.apply_delta(
+                    0.0,
+                    blockers * 0.05,
+                    -(blockers * 0.08),
+                    -0.02 * blockers,
+                    now,
+                );
             }
             AffectEvent::TimePressure {
                 task_id: _,

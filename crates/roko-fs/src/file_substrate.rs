@@ -515,11 +515,9 @@ mod tests {
             assert!(stored.tags.contains_key(HDC_TAG));
             // Fingerprint is a base64-encoded 1280-byte vector.
             let encoded = stored.tags.get(HDC_TAG).unwrap();
-            let decoded = base64::Engine::decode(
-                &base64::engine::general_purpose::STANDARD,
-                encoded,
-            )
-            .expect("valid base64");
+            let decoded =
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
+                    .expect("valid base64");
             assert_eq!(decoded.len(), 1280);
         }
         #[cfg(not(feature = "hdc"))]

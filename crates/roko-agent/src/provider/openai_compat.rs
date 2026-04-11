@@ -1,6 +1,6 @@
+use crate::Agent;
 use crate::codex_agent::{CodexAgent, DEFAULT_MAX_TOKENS};
 use crate::provider::{AgentCreationError, AgentOptions, ProviderAdapter, ProviderError};
-use crate::Agent;
 use roko_core::agent::ProviderKind;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
 use serde_json::Value;
@@ -29,9 +29,7 @@ impl ProviderAdapter for OpenAiCompatAdapter {
                 }
             })
             .ok_or_else(|| {
-                AgentCreationError::MissingApiKey(
-                    provider.api_key_env.clone().unwrap_or_default(),
-                )
+                AgentCreationError::MissingApiKey(provider.api_key_env.clone().unwrap_or_default())
             })?;
 
         let base_url = provider
@@ -43,7 +41,10 @@ impl ProviderAdapter for OpenAiCompatAdapter {
             .unwrap_or(base_url.as_str())
             .to_string();
 
-        let timeout = options.timeout_ms.or(provider.timeout_ms).unwrap_or(120_000);
+        let timeout = options
+            .timeout_ms
+            .or(provider.timeout_ms)
+            .unwrap_or(120_000);
         let max_tokens = model
             .max_output
             .and_then(|value| u32::try_from(value).ok())
@@ -89,7 +90,9 @@ mod tests {
         Signal::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
-    fn spawn_chat_server(response: String) -> (String, Arc<Mutex<Option<String>>>, thread::JoinHandle<()>) {
+    fn spawn_chat_server(
+        response: String,
+    ) -> (String, Arc<Mutex<Option<String>>>, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
         let addr = listener.local_addr().expect("server addr");
         let captured = Arc::new(Mutex::new(None));

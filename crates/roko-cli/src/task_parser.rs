@@ -1693,7 +1693,10 @@ depends_on = []
 "#;
         let parsed: TasksFile = toml::from_str(toml).unwrap();
         let task = &parsed.tasks[0];
-        let denied = task.denied_tools.as_ref().expect("reviewer should have denied_tools");
+        let denied = task
+            .denied_tools
+            .as_ref()
+            .expect("reviewer should have denied_tools");
         assert!(denied.contains(&"write_file".to_string()));
         assert!(denied.contains(&"edit_file".to_string()));
         assert!(!denied.contains(&"bash".to_string()));
@@ -1714,7 +1717,10 @@ depends_on = []
 "#;
         let parsed: TasksFile = toml::from_str(toml).unwrap();
         let task = &parsed.tasks[0];
-        let denied = task.denied_tools.as_ref().expect("strategist should have denied_tools");
+        let denied = task
+            .denied_tools
+            .as_ref()
+            .expect("strategist should have denied_tools");
         assert!(denied.contains(&"write_file".to_string()));
         assert!(denied.contains(&"edit_file".to_string()));
         assert!(denied.contains(&"bash".to_string()));
@@ -1736,7 +1742,10 @@ depends_on = []
 "#;
         let parsed: TasksFile = toml::from_str(toml).unwrap();
         let task = &parsed.tasks[0];
-        let denied = task.denied_tools.as_ref().expect("scribe should have denied_tools");
+        let denied = task
+            .denied_tools
+            .as_ref()
+            .expect("scribe should have denied_tools");
         assert!(denied.contains(&"bash".to_string()));
         assert!(denied.contains(&"run_tests".to_string()));
         // Scribe CAN write files.
@@ -1780,9 +1789,11 @@ depends_on = []
 "#;
         let parsed: TasksFile = toml::from_str(toml).unwrap();
         let task = &parsed.tasks[0];
-        let denied = task.denied_tools.as_ref().expect("auditor should have denied_tools");
+        let denied = task
+            .denied_tools
+            .as_ref()
+            .expect("auditor should have denied_tools");
         assert!(denied.contains(&"write_file".to_string()));
         assert!(denied.contains(&"edit_file".to_string()));
     }
-
 }

@@ -795,8 +795,7 @@ fn entries_are_similar(existing: &KnowledgeEntry, new_entry: &KnowledgeEntry) ->
     }
 
     // Content keyword overlap: tokenize and intersect.
-    let existing_keywords: HashSet<String> =
-        tokenize(&existing.content).into_iter().collect();
+    let existing_keywords: HashSet<String> = tokenize(&existing.content).into_iter().collect();
     let new_keywords: HashSet<String> = tokenize(&new_entry.content).into_iter().collect();
     let keyword_overlap = existing_keywords.intersection(&new_keywords).count();
 
@@ -1117,7 +1116,10 @@ mod tests {
             .expect("add anti knowledge");
 
         let all = store.read_all().expect("read");
-        let original = all.iter().find(|entry| entry.id == "insight-1").expect("original");
+        let original = all
+            .iter()
+            .find(|entry| entry.id == "insight-1")
+            .expect("original");
         let anti = all.iter().find(|entry| entry.id == "anti-1").expect("anti");
 
         assert!((original.confidence - 0.5).abs() < f64::EPSILON);
@@ -1389,8 +1391,16 @@ mod tests {
         assert_eq!(confirmations.len(), 1);
         assert_eq!(confirmations[0].confirmed_entry_id, "k1");
         assert_eq!(confirmations[0].confirming_entry_id, "k2");
-        assert!(confirmations[0].source_episodes.contains(&"ep-a".to_owned()));
-        assert!(confirmations[0].source_episodes.contains(&"ep-b".to_owned()));
+        assert!(
+            confirmations[0]
+                .source_episodes
+                .contains(&"ep-a".to_owned())
+        );
+        assert!(
+            confirmations[0]
+                .source_episodes
+                .contains(&"ep-b".to_owned())
+        );
     }
 
     #[test]

@@ -156,11 +156,8 @@ pub const SCRIBE_TOOLS: [&str; 10] = [
 ];
 
 /// Scribe: read + write tools, but no shell execution.
-pub const SCRIBE_TOOL_PROFILE: RoleToolProfile = RoleToolProfile::allow_deny(
-    RoleToolProfileKind::Scribe,
-    &SCRIBE_TOOLS,
-    &EXEC_TOOLS,
-);
+pub const SCRIBE_TOOL_PROFILE: RoleToolProfile =
+    RoleToolProfile::allow_deny(RoleToolProfileKind::Scribe, &SCRIBE_TOOLS, &EXEC_TOOLS);
 
 /// All built-in profiles in declaration order.
 pub const ROLE_TOOL_PROFILES: [RoleToolProfile; 5] = [
@@ -233,10 +230,7 @@ mod tests {
 
     #[test]
     fn scribe_profile_allows_read_and_write_but_not_exec() {
-        assert_eq!(
-            SCRIBE_TOOL_PROFILE.allowed_tools,
-            Some(&SCRIBE_TOOLS[..])
-        );
+        assert_eq!(SCRIBE_TOOL_PROFILE.allowed_tools, Some(&SCRIBE_TOOLS[..]));
         assert_eq!(SCRIBE_TOOL_PROFILE.denied_tools, &EXEC_TOOLS);
         // Scribe can write files...
         let allowed: HashSet<&str> = SCRIBE_TOOLS.iter().copied().collect();

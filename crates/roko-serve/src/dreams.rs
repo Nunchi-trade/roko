@@ -281,10 +281,7 @@ fn apply_dream_affect_feedback(state: &AppState, report: &DreamCycleReport) {
     apply_dream_affect_feedback_to_engine(&mut engine, report);
 }
 
-fn apply_dream_affect_feedback_to_engine(
-    engine: &mut DaimonState,
-    report: &DreamCycleReport,
-) {
+fn apply_dream_affect_feedback_to_engine(engine: &mut DaimonState, report: &DreamCycleReport) {
     let mut failing_task_types: BTreeMap<String, usize> = BTreeMap::new();
     for cluster in &report.clusters {
         if cluster.key.outcome != DreamOutcome::Failure || cluster.failure_count <= 2 {

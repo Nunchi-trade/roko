@@ -1397,11 +1397,19 @@ mod tests {
         failure_ep.attach_metadata_fingerprint();
 
         let fp_success: HdcVector = serde_json::from_value(
-            success_ep.extra.get(METADATA_FINGERPRINT_KEY).cloned().unwrap(),
+            success_ep
+                .extra
+                .get(METADATA_FINGERPRINT_KEY)
+                .cloned()
+                .unwrap(),
         )
         .unwrap();
         let fp_failure: HdcVector = serde_json::from_value(
-            failure_ep.extra.get(METADATA_FINGERPRINT_KEY).cloned().unwrap(),
+            failure_ep
+                .extra
+                .get(METADATA_FINGERPRINT_KEY)
+                .cloned()
+                .unwrap(),
         )
         .unwrap();
         assert_ne!(fp_success, fp_failure);

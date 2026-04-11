@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use crate::agent::{AgentBackend, ProviderKind};
-use crate::tool::{profile_for_model, ToolFormat};
+use crate::tool::{ToolFormat, profile_for_model};
 use serde::{Deserialize, Serialize};
 
 /// Current schema version. Bump on incompatible changes.
@@ -480,9 +480,9 @@ impl RokoConfig {
 
     fn agent_env_value(&self, key: &str) -> Option<&str> {
         self.agent.env.as_ref().and_then(|entries| {
-            entries
-                .iter()
-                .find_map(|(entry_key, entry_value)| (entry_key == key).then_some(entry_value.as_str()))
+            entries.iter().find_map(|(entry_key, entry_value)| {
+                (entry_key == key).then_some(entry_value.as_str())
+            })
         })
     }
 
@@ -1889,7 +1889,10 @@ cost_cache_read_per_m = 0.10
 
         let zai = cfg.providers.get("zai").expect("zai provider");
         assert_eq!(zai.kind, ProviderKind::OpenAiCompat);
-        assert_eq!(zai.base_url.as_deref(), Some("https://api.z.ai/api/paas/v4"));
+        assert_eq!(
+            zai.base_url.as_deref(),
+            Some("https://api.z.ai/api/paas/v4")
+        );
         assert_eq!(zai.api_key_env.as_deref(), Some("ZAI_API_KEY"));
         assert_eq!(zai.timeout_ms, Some(180_000));
         assert_eq!(
@@ -2056,14 +2059,8 @@ api_key_env = "ZAI_API_KEY"
 
         let anthropic = providers.get("anthropic").expect("anthropic provider");
         assert_eq!(anthropic.kind, ProviderKind::AnthropicApi);
-        assert_eq!(
-            anthropic.base_url.as_deref(),
-            Some("http://127.0.0.1:4000")
-        );
-        assert_eq!(
-            anthropic.api_key_env.as_deref(),
-            Some("ANTHROPIC_API_KEY")
-        );
+        assert_eq!(anthropic.base_url.as_deref(), Some("http://127.0.0.1:4000"));
+        assert_eq!(anthropic.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY"));
     }
 
     #[test]
@@ -2084,7 +2081,10 @@ tool_format = "openai_json"
 
         let provider = cfg.providers.get("zai").expect("provider");
         assert_eq!(provider.kind, ProviderKind::OpenAiCompat);
-        assert_eq!(provider.base_url.as_deref(), Some("https://api.z.ai/api/paas/v4"));
+        assert_eq!(
+            provider.base_url.as_deref(),
+            Some("https://api.z.ai/api/paas/v4")
+        );
         assert_eq!(provider.api_key_env.as_deref(), Some("ZAI_API_KEY"));
 
         let model = cfg.models.get("glm-5-1").expect("model");
@@ -2131,7 +2131,11 @@ max_concurrent = 4
         assert_eq!(cfg.command.as_deref(), Some("claude"));
         assert_eq!(
             cfg.args.as_ref().expect("args"),
-            &vec!["--print".to_string(), "--output-format".to_string(), "stream-json".to_string()]
+            &vec![
+                "--print".to_string(),
+                "--output-format".to_string(),
+                "stream-json".to_string()
+            ]
         );
         assert_eq!(cfg.timeout_ms, Some(120000));
         assert_eq!(

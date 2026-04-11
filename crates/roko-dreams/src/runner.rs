@@ -15,7 +15,10 @@ use chrono::Utc;
 use roko_agent::{Agent, AgentResult, ClaudeCliAgent, ExecAgent};
 use roko_core::{Context as RokoContext, Signal};
 use roko_learn::{episode_logger::EpisodeLogger, playbook::PlaybookStore};
-use roko_neuro::{KnowledgeStore, tier_progression::{InsightRecord, TierProgression as NeuroTierProgression}};
+use roko_neuro::{
+    KnowledgeStore,
+    tier_progression::{InsightRecord, TierProgression as NeuroTierProgression},
+};
 use serde::{Deserialize, Serialize};
 
 use crate::cycle::{AgentDispatcher, DreamCycle, DreamCycleReport};
@@ -150,7 +153,8 @@ impl DreamRunner {
         let knowledge = Arc::new(KnowledgeStore::for_workdir(&self.workdir));
         let playbooks_root = self.workdir.join(".roko").join("learn").join("playbooks");
         let playbooks = Arc::new(PlaybookStore::new(playbooks_root));
-        let dispatcher: Arc<dyn AgentDispatcher> = Arc::new(self.config.agent.build_agent(&self.workdir));
+        let dispatcher: Arc<dyn AgentDispatcher> =
+            Arc::new(self.config.agent.build_agent(&self.workdir));
         let mut cycle = DreamCycle::new(episodes, knowledge, playbooks, dispatcher);
         cycle.run().await
     }
@@ -220,7 +224,8 @@ impl DreamEngine for DreamRunner {
         }
 
         let latest_episode = recent.iter().map(|episode| episode.timestamp).max()?;
-        let idle_threshold = Duration::from_secs(self.config.idle_threshold_mins.saturating_mul(60));
+        let idle_threshold =
+            Duration::from_secs(self.config.idle_threshold_mins.saturating_mul(60));
         let target_fire_at = latest_episode + chrono::Duration::from_std(idle_threshold).ok()?;
         let now = Utc::now();
         if target_fire_at <= now {

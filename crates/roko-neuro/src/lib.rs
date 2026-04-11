@@ -135,7 +135,9 @@ impl KnowledgeEntry {
             return None;
         }
 
-        Some(format!("Previous insight {refuted_id} was wrong because {evidence}."))
+        Some(format!(
+            "Previous insight {refuted_id} was wrong because {evidence}."
+        ))
     }
 }
 

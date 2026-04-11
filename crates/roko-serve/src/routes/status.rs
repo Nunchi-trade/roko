@@ -16,7 +16,7 @@ use crate::state::AppState;
 use roko_learn::cascade_router::CascadeStage;
 use roko_learn::cfactor::{AgentDispatchBias, CFactor, CFactorComponents};
 use roko_learn::efficiency::AgentEfficiencyEvent;
-use roko_learn::efficiency::{compute_fleet_cfactor, FleetCFactor};
+use roko_learn::efficiency::{FleetCFactor, compute_fleet_cfactor};
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
 use roko_learn::model_router::COLD_START_THRESHOLD;
 use roko_learn::prompt_experiment::{ExperimentStatus, ExperimentStore};
@@ -1814,7 +1814,9 @@ mod tests {
         .await
         .expect("write efficiency events");
 
-        let response = c_factor_metrics(State(state)).await.expect("c-factor metrics");
+        let response = c_factor_metrics(State(state))
+            .await
+            .expect("c-factor metrics");
         let body = response.0;
 
         assert_eq!(body["source"]["composite_history_count"], 2);

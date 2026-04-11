@@ -1472,9 +1472,7 @@ fn build_regression_entry(cluster: &DreamCluster, created_at: DateTime<Utc>) -> 
         }
     }
     let content = if kind == KnowledgeKind::AntiKnowledge {
-        format!(
-            "Previous insight {refuted_insight_id} was wrong because {evidence}"
-        )
+        format!("Previous insight {refuted_insight_id} was wrong because {evidence}")
     } else {
         format!(
             "Approach {} for plan {} and task type {} does not work because {}.",
@@ -1610,11 +1608,7 @@ fn generate_cross_domain_strategy_hypotheses(
             ];
             (content, confidence, eps, tags)
         } else {
-            let content = render_single_source_strategy_content(
-                target,
-                source_a,
-                source_a_score,
-            );
+            let content = render_single_source_strategy_content(target, source_a, source_a_score);
             let confidence = single_source_strategy_confidence(target, source_a_score);
             let mut eps: BTreeSet<String> = target.episode_ids.iter().cloned().collect();
             eps.extend(source_a.episode_ids.iter().cloned());

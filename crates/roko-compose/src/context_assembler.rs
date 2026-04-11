@@ -317,12 +317,7 @@ fn knowledge_chunk(entry: KnowledgeEntry, idx: usize) -> ContextChunk {
     let content = if let Some(warning) = entry.refutation_warning() {
         format!(
             "### Warning {:?}\nConfidence: {:.2}\nWeight: {:.2}\n{}\nTags: {}\n```\n{}\n```",
-            entry.kind,
-            confidence,
-            entry.confidence_weight,
-            warning,
-            tags,
-            entry.content,
+            entry.kind, confidence, entry.confidence_weight, warning, tags, entry.content,
         )
     } else {
         format!(

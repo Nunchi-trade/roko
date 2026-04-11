@@ -26,8 +26,8 @@ use roko_core::config::ServeDeployWebhookConfig;
 use roko_core::config::schema::RokoConfig;
 use roko_core::{ContentHash, Context, Kind, Query, Substrate};
 use roko_core::{Headlines, TaskMetric, compute_headlines};
-use roko_fs::{FileSubstrate, FsObservabilitySinks, RokoLayout};
 use roko_dreams::{DreamAgentConfig, DreamEngine, DreamLoopConfig, DreamRunner};
+use roko_fs::{FileSubstrate, FsObservabilitySinks, RokoLayout};
 use roko_learn::cfactor::{CFactor, trend_arrow as cfactor_trend_arrow};
 use roko_learn::efficiency::compute_role_profiles;
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
@@ -1717,10 +1717,7 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 if let Some(fleet) = &report.fleet_cfactor {
                     println!(
                         "fleet c-factor: {:.3} | plans={} | agents={} | turns={}",
-                        fleet.overall,
-                        fleet.plan_count,
-                        fleet.agent_count,
-                        fleet.observation_count
+                        fleet.overall, fleet.plan_count, fleet.agent_count, fleet.observation_count
                     );
                     println!(
                         "  multi_agent={:.3} pass={:.3} cost={:.3} speed={:.3} turn={:.3}",
@@ -2935,14 +2932,12 @@ async fn cmd_dream(cli: &Cli, cmd: DreamCmd) -> Result<i32> {
         DreamCmd::Report { workdir } => {
             let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
             let runner = build_dream_runner(cli, &workdir)?;
-            let report = runner
-                .latest_report()?
-                .ok_or_else(|| {
-                    anyhow!(
-                        "no dream report found in {}",
-                        workdir.join(".roko").join("dreams").display()
-                    )
-                })?;
+            let report = runner.latest_report()?.ok_or_else(|| {
+                anyhow!(
+                    "no dream report found in {}",
+                    workdir.join(".roko").join("dreams").display()
+                )
+            })?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
@@ -4222,9 +4217,8 @@ mod tests {
 
     #[test]
     fn build_log_scrubber_adds_env_redactions() {
-        let scrubber = build_log_scrubber(&[
-            ("MY_TOKEN".to_string(), "super-secret-42".to_string()),
-        ]);
+        let scrubber =
+            build_log_scrubber(&[("MY_TOKEN".to_string(), "super-secret-42".to_string())]);
         let output = scrubber.scrub("leaked super-secret-42 in logs");
         assert!(
             !output.contains("super-secret-42"),

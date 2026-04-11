@@ -609,9 +609,8 @@ pub fn compute_fleet_cfactor(events: &[AgentEfficiencyEvent]) -> FleetCFactor {
             if plan.distinct_agents.len() < 2 {
                 continue;
             }
-            let equality = turn_taking_equality_for_counts(
-                plan.agent_turn_counts.values().copied().collect(),
-            );
+            let equality =
+                turn_taking_equality_for_counts(plan.agent_turn_counts.values().copied().collect());
             total += equality;
             counted += 1.0;
         }
@@ -639,7 +638,10 @@ pub fn compute_fleet_cfactor(events: &[AgentEfficiencyEvent]) -> FleetCFactor {
         let baseline_plans: Vec<&(String, FleetPlanAggregate)> =
             plans.iter().take(baseline_plan_count).collect();
         let total_cost: f64 = baseline_plans.iter().map(|(_, plan)| plan.cost_usd).sum();
-        let total_duration: f64 = baseline_plans.iter().map(|(_, plan)| plan.duration_ms).sum();
+        let total_duration: f64 = baseline_plans
+            .iter()
+            .map(|(_, plan)| plan.duration_ms)
+            .sum();
         (
             total_cost / baseline_plan_count as f64,
             total_duration / baseline_plan_count as f64,
@@ -695,7 +697,10 @@ impl FleetPlanAggregate {
         self.duration_ms += event.wall_time_ms as f64;
         self.passed_gate |= event.gate_passed;
         self.distinct_agents.insert(event.agent_id.clone());
-        *self.agent_turn_counts.entry(event.agent_id.clone()).or_default() += 1;
+        *self
+            .agent_turn_counts
+            .entry(event.agent_id.clone())
+            .or_default() += 1;
     }
 }
 

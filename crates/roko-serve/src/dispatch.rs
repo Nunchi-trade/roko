@@ -269,7 +269,6 @@ impl TemplateAgentDispatcher {
             repo_listing: Vec::new(),
         }
     }
-
 }
 
 /// Start the subscription dispatch loop in the background.
@@ -1250,14 +1249,7 @@ pub async fn dispatch_loop(state: Arc<AppState>, dispatcher: Arc<dyn AgentDispat
                 let sub_for_task = sub.clone();
                 let repo_ctx = repo_ctx.clone();
                 tokio::spawn(async move {
-                    dispatch_agent(
-                        state,
-                        sub_for_task.clone(),
-                        signal,
-                        dispatcher,
-                        repo_ctx,
-                    )
-                    .await;
+                    dispatch_agent(state, sub_for_task.clone(), signal, dispatcher, repo_ctx).await;
                     sub_for_task.release_concurrency(&subscriptions);
                 });
             } else {
@@ -1814,8 +1806,13 @@ async fn append_dispatch_episode(
         .unwrap_or_else(|| state.workdir.clone());
     spawn_episode_distillation(distill_workdir, episode.clone());
 
-    if let Err(err) =
-        record_cascade_router_outcome_with_layout(state, template, outcome.result.success, repo_layout).await
+    if let Err(err) = record_cascade_router_outcome_with_layout(
+        state,
+        template,
+        outcome.result.success,
+        repo_layout,
+    )
+    .await
     {
         warn!(error = %err, template = %template.name, "failed to record cascade router outcome");
     }
@@ -1908,9 +1905,7 @@ async fn record_cascade_router_outcome_with_layout(
 
     let path = repo_layout
         .map(RokoLayout::cascade_router_path)
-        .unwrap_or_else(|| {
-            RokoLayout::for_project(&state.workdir).cascade_router_path()
-        });
+        .unwrap_or_else(|| RokoLayout::for_project(&state.workdir).cascade_router_path());
     record_cascade_router_observation_at(&path, model_slugs, &template.model, success)?;
     Ok(())
 }
@@ -1933,8 +1928,7 @@ fn record_cascade_router_observation_at(
 ) -> Result<bool> {
     // Ensure parent directory exists for per-repo paths.
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
 
     let cascade_router = CascadeRouter::load_or_new(path, model_slugs);
@@ -2351,8 +2345,7 @@ filter = { path = "src/*.rs" }
         let global_dir = tempfile::tempdir().expect("global tempdir");
         let repo_dir = tempfile::tempdir().expect("repo tempdir");
 
-        let mut dispatcher =
-            TemplateAgentDispatcher::new(global_dir.path().to_path_buf(), None);
+        let mut dispatcher = TemplateAgentDispatcher::new(global_dir.path().to_path_buf(), None);
         dispatcher.repo_workdir = Some(repo_dir.path().to_path_buf());
 
         // Verify the effective workdir resolves to repo_workdir.

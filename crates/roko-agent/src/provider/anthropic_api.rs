@@ -1,6 +1,6 @@
+use crate::Agent;
 use crate::claude_agent::{ClaudeAgent, DEFAULT_BASE_URL, DEFAULT_MAX_TOKENS};
 use crate::provider::{AgentCreationError, AgentOptions, ProviderAdapter, ProviderError};
-use crate::Agent;
 use roko_core::agent::ProviderKind;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
 use serde_json::Value;
@@ -35,14 +35,13 @@ impl ProviderAdapter for AnthropicApiAdapter {
             return Err(AgentCreationError::InvalidKind(provider.kind));
         }
 
-        let api_key = provider
-            .resolve_api_key()
-            .ok_or_else(|| {
-                AgentCreationError::MissingApiKey(
-                    provider.api_key_env.clone().unwrap_or_default(),
-                )
-            })?;
-        let timeout_ms = options.timeout_ms.or(provider.timeout_ms).unwrap_or(120_000);
+        let api_key = provider.resolve_api_key().ok_or_else(|| {
+            AgentCreationError::MissingApiKey(provider.api_key_env.clone().unwrap_or_default())
+        })?;
+        let timeout_ms = options
+            .timeout_ms
+            .or(provider.timeout_ms)
+            .unwrap_or(120_000);
         let max_tokens = model
             .max_output
             .and_then(|value| u32::try_from(value).ok())
@@ -224,7 +223,11 @@ mod tests {
         assert_eq!(agent.name(), "anthropic-agent");
 
         let result = agent.run(&prompt("hello"), &Context::now()).await;
-        assert!(result.success, "{}", result.output.body.as_text().unwrap_or("unknown"));
+        assert!(
+            result.success,
+            "{}",
+            result.output.body.as_text().unwrap_or("unknown")
+        );
         assert_eq!(result.output.body.as_text().unwrap_or(""), "anthropic-ok");
         assert_eq!(result.usage.input_tokens, 12);
         assert_eq!(result.usage.output_tokens, 34);

@@ -35,6 +35,8 @@ use roko_core::{
     AgentRole, Body, Budget, Composer, Context, Gate, Kind, OperatingFrequency, PhaseKind,
     Provenance, Signal, Substrate, Verdict,
 };
+use roko_daimon::{AffectEngine as _, AffectEvent, DaimonState, DispatchParams};
+use roko_dreams::{DreamAgentConfig, DreamLoopConfig, DreamRunner};
 use roko_fs::FileSubstrate;
 use roko_fs::RokoLayout;
 use roko_fs::observability::FsObservabilitySinks;
@@ -42,8 +44,6 @@ use roko_gate::{
     adaptive_threshold::AdaptiveThresholds, clippy_gate::ClippyGate, compile::CompileGate,
     payload::GatePayload, test_gate::TestGate,
 };
-use roko_daimon::{AffectEngine as _, AffectEvent, DaimonState, DispatchParams};
-use roko_dreams::{DreamAgentConfig, DreamLoopConfig, DreamRunner};
 use roko_learn::costs_db::CostRecord;
 use roko_learn::efficiency::{AgentEfficiencyEvent, FleetCFactor, compute_fleet_cfactor};
 use roko_learn::episode_logger::{Episode, GateVerdict, Usage};
@@ -818,7 +818,9 @@ fn render_skill_context(skill: &Skill) -> String {
 fn render_prior_experience(skills: &[Skill]) -> String {
     use std::fmt::Write as _;
 
-    let mut content = String::from("## Prior Experience\n\nThe following skills were successful in similar prior tasks:\n");
+    let mut content = String::from(
+        "## Prior Experience\n\nThe following skills were successful in similar prior tasks:\n",
+    );
     for (idx, skill) in skills.iter().enumerate() {
         let _ = write!(
             content,
@@ -1873,13 +1875,9 @@ impl PlanRunner {
         )
         .await
         .context("init playbook store")?;
-        let knowledge_store = KnowledgeStore::init(
-            &workdir
-                .join(".roko")
-                .join("neuro")
-                .join("knowledge.jsonl"),
-        )
-        .context("init knowledge store")?;
+        let knowledge_store =
+            KnowledgeStore::init(&workdir.join(".roko").join("neuro").join("knowledge.jsonl"))
+                .context("init knowledge store")?;
         let selected_mcp_servers = if any_task_without_mcp_list || requested_mcp_servers.is_empty()
         {
             None
@@ -1990,13 +1988,9 @@ impl PlanRunner {
         )
         .await
         .context("init playbook store")?;
-        let knowledge_store = KnowledgeStore::init(
-            &workdir
-                .join(".roko")
-                .join("neuro")
-                .join("knowledge.jsonl"),
-        )
-        .context("init knowledge store")?;
+        let knowledge_store =
+            KnowledgeStore::init(&workdir.join(".roko").join("neuro").join("knowledge.jsonl"))
+                .context("init knowledge store")?;
         let (mcp_clients, tool_registry, mcp_server_names, mcp_server_configs) =
             Self::setup_mcp(&config, workdir, None).await;
         let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
@@ -2105,13 +2099,9 @@ impl PlanRunner {
         )
         .await
         .context("init playbook store")?;
-        let knowledge_store = KnowledgeStore::init(
-            &workdir
-                .join(".roko")
-                .join("neuro")
-                .join("knowledge.jsonl"),
-        )
-        .context("init knowledge store")?;
+        let knowledge_store =
+            KnowledgeStore::init(&workdir.join(".roko").join("neuro").join("knowledge.jsonl"))
+                .context("init knowledge store")?;
         let (mcp_clients, tool_registry, mcp_server_names, mcp_server_configs) =
             Self::setup_mcp(&config, workdir, None).await;
         let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
@@ -2964,20 +2954,17 @@ impl PlanRunner {
         }
 
         let episodes_path = self.workdir.join(".roko").join("episodes.jsonl");
-        let episodes = match roko_learn::episode_logger::EpisodeLogger::read_all_lossy(
-            &episodes_path,
-        )
-        .await
-        {
-            Ok(eps) => eps,
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "[orchestrate] auto-dream: failed to read episodes, skipping"
-                );
-                return;
-            }
-        };
+        let episodes =
+            match roko_learn::episode_logger::EpisodeLogger::read_all_lossy(&episodes_path).await {
+                Ok(eps) => eps,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "[orchestrate] auto-dream: failed to read episodes, skipping"
+                    );
+                    return;
+                }
+            };
 
         // Determine a cutoff from the latest dream report so we only count
         // episodes that arrived after the previous consolidation.
@@ -4509,11 +4496,7 @@ impl PlanRunner {
         }
     }
 
-    fn build_knowledge_context(
-        &self,
-        task_text: &str,
-        task_tier: Option<&str>,
-    ) -> Option<String> {
+    fn build_knowledge_context(&self, task_text: &str, task_tier: Option<&str>) -> Option<String> {
         let query_limit = match task_tier.unwrap_or("focused") {
             "mechanical" => 3,
             "focused" => 5,
@@ -7058,7 +7041,8 @@ impl PlanRunner {
             selected_model
         };
 
-        let mut dispatch_params = DispatchParams::new(selected_model.clone(), frequency.turn_limit());
+        let mut dispatch_params =
+            DispatchParams::new(selected_model.clone(), frequency.turn_limit());
         dispatch_params.effort = self.config.agent.effort.clone();
         self.daimon.modulate(&mut dispatch_params);
         let selected_model = dispatch_params.model;
@@ -7230,7 +7214,11 @@ impl PlanRunner {
         }
 
         // ── Inject learned knowledge (skills, playbook rules, patterns) ──
-        let learned = self.build_learned_context(role, &task_text, task_def.as_ref().map(|td| td.tier.as_str()));
+        let learned = self.build_learned_context(
+            role,
+            &task_text,
+            task_def.as_ref().map(|td| td.tier.as_str()),
+        );
         if !learned.text.is_empty() {
             let learned_section = PromptSection::new("learned-context", &learned.text)
                 .with_priority(SectionPriority::Normal)

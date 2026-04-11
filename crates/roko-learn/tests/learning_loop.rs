@@ -4,7 +4,6 @@
 //! episode logging, bandit persistence, and provider health — work
 //! end-to-end across crate boundaries.
 
-
 use tempfile::TempDir;
 
 use roko_core::agent::AgentRole;

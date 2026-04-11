@@ -9,11 +9,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use roko_agent::dispatcher::{HandlerResolver, ToolDispatcher};
+use roko_agent::safety::SafetyLayer;
 use roko_agent::safety::bash::BashPolicy;
 use roko_agent::safety::git::GitPolicy;
 use roko_agent::safety::network::NetworkPolicy;
 use roko_agent::safety::rate_limit::{RateLimitPolicy, RateLimiter};
-use roko_agent::safety::SafetyLayer;
 use roko_core::tool::{
     ToolCall, ToolCategory, ToolConcurrency, ToolContext, ToolDef, ToolError, ToolHandler,
     ToolPermission, ToolResult, VecToolRegistry,

@@ -1,6 +1,6 @@
+use crate::Agent;
 use crate::cursor_agent::{CursorAgent, DEFAULT_BASE_URL};
 use crate::provider::{AgentCreationError, AgentOptions, ProviderAdapter, ProviderError};
-use crate::Agent;
 use roko_core::agent::ProviderKind;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
 use serde_json::Value;
@@ -35,14 +35,13 @@ impl ProviderAdapter for CursorAcpAdapter {
             return Err(AgentCreationError::InvalidKind(provider.kind));
         }
 
-        let api_key = provider
-            .resolve_api_key()
-            .ok_or_else(|| {
-                AgentCreationError::MissingApiKey(
-                    provider.api_key_env.clone().unwrap_or_default(),
-                )
-            })?;
-        let timeout_ms = options.timeout_ms.or(provider.timeout_ms).unwrap_or(120_000);
+        let api_key = provider.resolve_api_key().ok_or_else(|| {
+            AgentCreationError::MissingApiKey(provider.api_key_env.clone().unwrap_or_default())
+        })?;
+        let timeout_ms = options
+            .timeout_ms
+            .or(provider.timeout_ms)
+            .unwrap_or(120_000);
 
         let mut agent = CursorAgent::new(api_key, model.slug.clone())
             .with_base_url(Self::base_url(provider))
@@ -216,7 +215,11 @@ mod tests {
         assert!(agent.supports_streaming());
 
         let result = agent.run(&prompt("hello"), &Context::now()).await;
-        assert!(result.success, "{}", result.output.body.as_text().unwrap_or("unknown"));
+        assert!(
+            result.success,
+            "{}",
+            result.output.body.as_text().unwrap_or("unknown")
+        );
         assert_eq!(result.output.body.as_text().unwrap_or(""), "cursor-ok");
         assert_eq!(result.usage.input_tokens, 14);
         assert_eq!(result.usage.output_tokens, 29);

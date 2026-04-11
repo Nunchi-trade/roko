@@ -111,10 +111,10 @@ pub async fn scrub_secrets(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::header::CONTENT_TYPE;
-    use axum::http::StatusCode;
-    use axum::routing::get;
     use axum::Router;
+    use axum::http::StatusCode;
+    use axum::http::header::CONTENT_TYPE;
+    use axum::routing::get;
     use tower::ServiceExt;
 
     /// Build a test router that echoes the provided body, with the scrub
@@ -129,13 +129,9 @@ mod tests {
             ))
     }
 
-    fn test_app_json(
-        scrubber: Arc<LogScrubber>,
-        body: &'static str,
-    ) -> Router {
-        let handler = move || async move {
-            axum::Json(serde_json::Value::String(body.to_string()))
-        };
+    fn test_app_json(scrubber: Arc<LogScrubber>, body: &'static str) -> Router {
+        let handler =
+            move || async move { axum::Json(serde_json::Value::String(body.to_string())) };
         Router::new()
             .route("/test", get(handler))
             .layer(axum::middleware::from_fn_with_state(
@@ -149,15 +145,10 @@ mod tests {
         let scrubber = Arc::new(LogScrubber::new());
         let leaked = "your key is sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234567890 ok";
         let app = test_app(scrubber, leaked);
-        let req = Request::builder()
-            .uri("/test")
-            .body(Body::empty())
-            .unwrap();
+        let req = Request::builder().uri("/test").body(Body::empty()).unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 4096)
-            .await
-            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
         let text = String::from_utf8(body.to_vec()).unwrap();
         assert!(!text.contains("sk-ant-api03"));
         assert!(text.contains("[REDACTED"));
@@ -168,14 +159,9 @@ mod tests {
         let scrubber = Arc::new(LogScrubber::new());
         let clean = "all good, no secrets here";
         let app = test_app(scrubber, clean);
-        let req = Request::builder()
-            .uri("/test")
-            .body(Body::empty())
-            .unwrap();
+        let req = Request::builder().uri("/test").body(Body::empty()).unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        let body = axum::body::to_bytes(resp.into_body(), 4096)
-            .await
-            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
         assert_eq!(std::str::from_utf8(&body).unwrap(), clean);
     }
 
@@ -189,20 +175,16 @@ mod tests {
                 .body(Body::from(leaked))
                 .unwrap()
         };
-        let app = Router::new()
-            .route("/test", get(handler))
-            .layer(axum::middleware::from_fn_with_state(
-                scrubber,
-                scrub_secrets,
-            ));
-        let req = Request::builder()
-            .uri("/test")
-            .body(Body::empty())
-            .unwrap();
+        let app =
+            Router::new()
+                .route("/test", get(handler))
+                .layer(axum::middleware::from_fn_with_state(
+                    scrubber,
+                    scrub_secrets,
+                ));
+        let req = Request::builder().uri("/test").body(Body::empty()).unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        let body = axum::body::to_bytes(resp.into_body(), 4096)
-            .await
-            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
         // Binary/image content should NOT be scrubbed.
         assert_eq!(std::str::from_utf8(&body).unwrap(), leaked);
     }
@@ -212,14 +194,9 @@ mod tests {
         let scrubber = Arc::new(LogScrubber::new());
         let leaked = "token: ghp_ABCDEFGHIJKLMNOPqrstuvwxyz1234567890";
         let app = test_app_json(scrubber, leaked);
-        let req = Request::builder()
-            .uri("/test")
-            .body(Body::empty())
-            .unwrap();
+        let req = Request::builder().uri("/test").body(Body::empty()).unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        let body = axum::body::to_bytes(resp.into_body(), 4096)
-            .await
-            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
         let text = String::from_utf8(body.to_vec()).unwrap();
         assert!(!text.contains("ghp_"));
         assert!(text.contains("[REDACTED"));

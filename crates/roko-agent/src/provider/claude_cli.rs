@@ -1,6 +1,6 @@
+use crate::Agent;
 use crate::claude_cli_agent::{ClaudeCliAgent, build_settings_json};
 use crate::provider::{AgentCreationError, AgentOptions, ProviderAdapter, ProviderError};
-use crate::Agent;
 use roko_core::agent::ProviderKind;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
 use serde_json::Value;
@@ -32,7 +32,10 @@ impl ProviderAdapter for ClaudeCliAdapter {
             .ok_or_else(|| AgentCreationError::MissingConfig("providers.*.command".to_string()))?;
 
         let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let timeout_ms = options.timeout_ms.or(provider.timeout_ms).unwrap_or(120_000);
+        let timeout_ms = options
+            .timeout_ms
+            .or(provider.timeout_ms)
+            .unwrap_or(120_000);
 
         let mut agent = ClaudeCliAgent::new(command, current_dir, model.slug.clone())
             .with_timeout_ms(timeout_ms)
@@ -162,7 +165,10 @@ printf '%s\n' '{{"type":"content_block_delta","delta":{{"text":"adapter-ok"}}}}'
             base_url: None,
             api_key_env: None,
             command: Some(script.display().to_string()),
-            args: Some(vec!["--provider-flag".to_string(), "provider-value".to_string()]),
+            args: Some(vec![
+                "--provider-flag".to_string(),
+                "provider-value".to_string(),
+            ]),
             timeout_ms: Some(2_500),
             extra_headers: None,
             max_concurrent: None,
@@ -190,7 +196,11 @@ printf '%s\n' '{{"type":"content_block_delta","delta":{{"text":"adapter-ok"}}}}'
         assert_eq!(agent.name(), "claude-cli-adapter");
 
         let result = agent.run(&prompt("hello"), &Context::now()).await;
-        assert!(result.success, "{}", result.output.body.as_text().unwrap_or("unknown"));
+        assert!(
+            result.success,
+            "{}",
+            result.output.body.as_text().unwrap_or("unknown")
+        );
         assert_eq!(result.output.body.as_text().unwrap_or(""), "adapter-ok");
 
         let args_text = fs::read_to_string(&args_file).expect("read args");

@@ -876,9 +876,7 @@ mod tests {
     #[test]
     fn tools_list_contains_post_message() {
         let list = handle_tools_list();
-        let tools = list["tools"]
-            .as_array()
-            .expect("tools array");
+        let tools = list["tools"].as_array().expect("tools array");
         assert_eq!(tools.len(), 7);
         assert_eq!(tools[0]["name"], "slack.post_message");
         assert_eq!(

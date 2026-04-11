@@ -603,7 +603,8 @@ impl CascadeRouter {
 
         drop(stats);
 
-        let selected = self.bias_model_for_cfactor(ModelSpec::from_slug(&best_slug), cfactor, agent_id);
+        let selected =
+            self.bias_model_for_cfactor(ModelSpec::from_slug(&best_slug), cfactor, agent_id);
         let tier = slug_to_tier(&selected.slug);
         let fallback = fallback_for_tier(tier).map(ModelSpec::from_slug);
 
@@ -867,7 +868,8 @@ mod tests {
         let high_confidence = cascade.route(&ctx);
         // High confidence allows routing to cheaper models
         assert!(
-            ["claude-haiku-3-5", "claude-sonnet-4-5"].contains(&high_confidence.primary.slug.as_str()),
+            ["claude-haiku-3-5", "claude-sonnet-4-5"]
+                .contains(&high_confidence.primary.slug.as_str()),
             "high confidence should allow cheaper model, got: {}",
             high_confidence.primary.slug
         );

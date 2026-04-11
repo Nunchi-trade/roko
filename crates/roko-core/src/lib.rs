@@ -67,8 +67,8 @@ pub mod traits;
 pub mod verdict;
 
 pub use agent::{
-    AgentBackend, AgentRole, ModelSpec, ModelTier, ProviderKind, ReasoningEffort,
-    ToolPermissions, TurnBudget,
+    AgentBackend, AgentRole, ModelSpec, ModelTier, ProviderKind, ReasoningEffort, ToolPermissions,
+    TurnBudget,
 };
 pub use body::Body;
 pub use build::{BuildCommand, BuildSystem};

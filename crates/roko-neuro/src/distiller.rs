@@ -493,7 +493,10 @@ mod tests {
             r#"<|json|>{"entries":[{"kind":"insight","content":"shared insight","confidence":0.9,"tags":["shared"]}]}<|/json|>"#,
         );
         let distiller = Distiller::with_backend(backend);
-        let episodes = vec![episode("signal-a", "ep-a", true), episode("signal-b", "ep-b", true)];
+        let episodes = vec![
+            episode("signal-a", "ep-a", true),
+            episode("signal-b", "ep-b", true),
+        ];
 
         let entries = distiller.distill(&episodes).await.expect("distill");
         assert_eq!(entries.len(), 1);

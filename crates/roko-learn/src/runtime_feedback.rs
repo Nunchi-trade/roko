@@ -1165,11 +1165,7 @@ fn knowledge_integration_rate(
     let mut total_weight = 0.0;
 
     for record in records.iter().filter(|record| record.created_at >= cutoff) {
-        let mut source_ids = record
-            .source_episodes
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
+        let mut source_ids = record.source_episodes.iter().cloned().collect::<Vec<_>>();
         source_ids.sort();
         source_ids.dedup();
 
@@ -1188,8 +1184,12 @@ fn knowledge_integration_rate(
             .copied()
             .unwrap_or(record.created_at)
             .signed_duration_since(timestamps.first().copied().unwrap_or(record.created_at));
-        let span_hours = span.to_std().map(|duration| duration.as_secs_f64() / 3_600.0).unwrap_or(0.0);
-        let normalized_speed = ((confirmations as f64) / span_hours.max(1.0 / 60.0) / 4.0).clamp(0.0, 1.0);
+        let span_hours = span
+            .to_std()
+            .map(|duration| duration.as_secs_f64() / 3_600.0)
+            .unwrap_or(0.0);
+        let normalized_speed =
+            ((confirmations as f64) / span_hours.max(1.0 / 60.0) / 4.0).clamp(0.0, 1.0);
         let weight = confirmations as f64;
         weighted_speed_sum += normalized_speed * weight;
         total_weight += weight;
@@ -1231,11 +1231,7 @@ fn convergence_velocity_from_agreement(
     let mut total_weight = 0.0;
 
     for record in records.iter().filter(|record| record.created_at >= cutoff) {
-        let mut source_ids = record
-            .source_episodes
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
+        let mut source_ids = record.source_episodes.iter().cloned().collect::<Vec<_>>();
         source_ids.sort();
         source_ids.dedup();
 
@@ -1332,7 +1328,12 @@ mod tests {
         ep
     }
 
-    fn episode_with_agent(task_id: &str, minutes_ago: i64, success: bool, agent_id: &str) -> Episode {
+    fn episode_with_agent(
+        task_id: &str,
+        minutes_ago: i64,
+        success: bool,
+        agent_id: &str,
+    ) -> Episode {
         let mut ep = episode_at(task_id, minutes_ago, success);
         ep.agent_id = agent_id.to_string();
         ep
@@ -1491,7 +1492,8 @@ mod tests {
             },
         ];
 
-        let score = convergence_velocity_from_agreement(&records, &episodes, Duration::from_secs(60));
+        let score =
+            convergence_velocity_from_agreement(&records, &episodes, Duration::from_secs(60));
         assert!(score > 0.0);
         assert!(score <= 1.0);
     }

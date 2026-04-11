@@ -772,7 +772,10 @@ fn compute_agent_contributions(
 ) -> Vec<AgentCFactorContribution> {
     let mut agents: HashMap<String, Vec<&Episode>> = HashMap::new();
     for episode in filtered {
-        agents.entry(episode_agent_key(episode)).or_default().push(episode);
+        agents
+            .entry(episode_agent_key(episode))
+            .or_default()
+            .push(episode);
     }
 
     let mut contributions = Vec::with_capacity(agents.len());
@@ -1065,7 +1068,13 @@ mod tests {
         );
         episodes.push(knowledge_episode);
 
-        let cfactor = compute_cfactor(&episodes, Duration::from_secs(7 * 24 * 60 * 60), 0.0, 0.0, 0.0);
+        let cfactor = compute_cfactor(
+            &episodes,
+            Duration::from_secs(7 * 24 * 60 * 60),
+            0.0,
+            0.0,
+            0.0,
+        );
 
         assert_eq!(cfactor.episode_count, 14);
         // 11 of ~13 task episodes pass gates
@@ -1095,7 +1104,13 @@ mod tests {
         current.usage.output_tokens = 600;
         episodes.push(current);
 
-        let cfactor = compute_cfactor(&episodes, Duration::from_secs(7 * 24 * 60 * 60), 0.0, 0.0, 0.0);
+        let cfactor = compute_cfactor(
+            &episodes,
+            Duration::from_secs(7 * 24 * 60 * 60),
+            0.0,
+            0.0,
+            0.0,
+        );
         assert!((cfactor.components.information_flow_rate - 3.0).abs() < 1e-9);
     }
 
@@ -1105,16 +1120,18 @@ mod tests {
 
         let mut even_a = episode_at("task-even", 5, 10.0, 1_000, true);
         even_a.agent_id = "agent-a".to_string();
-        even_a
-            .extra
-            .insert("plan_id".to_string(), Value::String("plan-even".to_string()));
+        even_a.extra.insert(
+            "plan_id".to_string(),
+            Value::String("plan-even".to_string()),
+        );
         episodes.push(even_a);
 
         let mut even_b = episode_at("task-even", 4, 10.0, 1_000, true);
         even_b.agent_id = "agent-b".to_string();
-        even_b
-            .extra
-            .insert("plan_id".to_string(), Value::String("plan-even".to_string()));
+        even_b.extra.insert(
+            "plan_id".to_string(),
+            Value::String("plan-even".to_string()),
+        );
         episodes.push(even_b);
 
         let mut solo = episode_at("task-solo", 3, 10.0, 1_000, true);
@@ -1125,7 +1142,13 @@ mod tests {
         );
         episodes.push(solo);
 
-        let cfactor = compute_cfactor(&episodes, Duration::from_secs(7 * 24 * 60 * 60), 0.0, 0.0, 0.0);
+        let cfactor = compute_cfactor(
+            &episodes,
+            Duration::from_secs(7 * 24 * 60 * 60),
+            0.0,
+            0.0,
+            0.0,
+        );
         assert!((cfactor.components.turn_taking_equality - 0.5).abs() < 1e-9);
     }
 
@@ -1134,7 +1157,8 @@ mod tests {
         let mut episodes = Vec::new();
 
         for suffix in ["a", "b"] {
-            let mut implementation = episode_at(&format!("task-impl-{suffix}"), 5, 10.0, 1_000, true);
+            let mut implementation =
+                episode_at(&format!("task-impl-{suffix}"), 5, 10.0, 1_000, true);
             implementation.agent_template = "code-implementer".to_string();
             implementation.extra.insert(
                 "task_category".to_string(),
@@ -1151,7 +1175,13 @@ mod tests {
             episodes.push(docs);
         }
 
-        let cfactor = compute_cfactor(&episodes, Duration::from_secs(7 * 24 * 60 * 60), 0.0, 0.0, 0.0);
+        let cfactor = compute_cfactor(
+            &episodes,
+            Duration::from_secs(7 * 24 * 60 * 60),
+            0.0,
+            0.0,
+            0.0,
+        );
         assert!((cfactor.components.task_diversity_coverage - 1.0).abs() < 1e-9);
     }
 
@@ -1166,10 +1196,8 @@ mod tests {
 
         let mut bad = episode_at("task-bad", 4, 5.0, 1_000, false);
         bad.agent_id = "agent-bad".to_string();
-        bad.extra.insert(
-            "plan_id".to_string(),
-            Value::String("plan-bad".to_string()),
-        );
+        bad.extra
+            .insert("plan_id".to_string(), Value::String("plan-bad".to_string()));
 
         let cfactor = compute_cfactor(
             &[good, bad],

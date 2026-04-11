@@ -289,11 +289,9 @@ async fn persist_feedback_result(
     if let (Some(experiment_name), Some(variant_id)) =
         (experiment_name, episode_experiment_variant(episode))
     {
-        if let Err(err) = record_experiment_outcome(
-            &state.workdir,
-            &variant_id,
-            observation.success,
-        ) {
+        if let Err(err) =
+            record_experiment_outcome(&state.workdir, &variant_id, observation.success)
+        {
             warn!(
                 error = %err,
                 episode_id = %episode.episode_id,
@@ -367,11 +365,7 @@ fn sentiment_to_metric_value(sentiment: f64) -> f64 {
     ((sentiment.clamp(-1.0, 1.0) + 1.0) / 2.0).clamp(0.0, 1.0)
 }
 
-fn record_experiment_outcome(
-    workdir: &Path,
-    variant_id: &str,
-    success: bool,
-) -> Result<()> {
+fn record_experiment_outcome(workdir: &Path, variant_id: &str, success: bool) -> Result<()> {
     let path = workdir.join(".roko/learn/experiments.json");
     let mut store = ExperimentStore::load_or_new(&path);
     store.record_outcome(variant_id, success);
@@ -1092,7 +1086,9 @@ mod tests {
         record_experiment_outcome(&root, "variant-b", true).expect("record success outcome b");
 
         let reloaded = ExperimentStore::load_or_new(&path);
-        let experiment = reloaded.get("outcome-experiment").expect("experiment exists");
+        let experiment = reloaded
+            .get("outcome-experiment")
+            .expect("experiment exists");
         let stats_a = experiment.stats.get("variant-a").expect("variant-a stats");
         assert_eq!(stats_a.trials, 2);
         assert_eq!(stats_a.successes, 1);

@@ -613,9 +613,7 @@ mod tests {
         // normalizing consecutive newlines.  `build()` uses "\n\n" between
         // header and body while `build_sections()` sometimes uses "\n",
         // so we collapse runs of whitespace for the comparison.
-        let normalize = |s: &str| {
-            s.split_whitespace().collect::<Vec<_>>().join(" ")
-        };
+        let normalize = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
         let norm_text = normalize(&text);
         for section in &sections {
             let norm_section = normalize(&section.content);
