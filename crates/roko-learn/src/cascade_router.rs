@@ -97,6 +97,8 @@ const LOW_AFFECT_CONFIDENCE_THRESHOLD: f64 = 0.3;
 const HIGH_CFACTOR_THRESHOLD: f64 = 0.8;
 /// C-Factor below which the router biases toward stronger models.
 const LOW_CFACTOR_THRESHOLD: f64 = 0.4;
+/// Cold-start bonus for reusing the previous model.
+const CACHE_AFFINITY_BONUS: f64 = 0.15;
 
 /// Per-model observation record for the confidence stage.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -231,6 +233,16 @@ fn low_confidence_tier_bonus(tier: ModelTier) -> f64 {
         ModelTier::Standard => 0.05,
         ModelTier::Fast => 0.0,
         _ => 0.05,
+    }
+}
+
+fn apply_cache_affinity(scores: &mut [(String, f64)], previous_model: Option<&str>) {
+    if let Some(prev) = previous_model {
+        for (slug, score) in scores.iter_mut() {
+            if slug == prev {
+                *score += CACHE_AFFINITY_BONUS;
+            }
+        }
     }
 }
 
@@ -696,32 +708,8 @@ impl CascadeRouter {
         cfactor: Option<&CFactor>,
         agent_id: Option<&str>,
     ) -> CascadeModel {
-        let stats = self.confidence_stats.lock();
-        let low_confidence = ctx.affect_confidence < LOW_AFFECT_CONFIDENCE_THRESHOLD;
-
-        // Find the model with the highest upper confidence bound on pass rate.
-        let mut best_slug = self
-            .role_table
-            .get(&ctx.role)
-            .cloned()
-            .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
-        let mut best_ucb = f64::NEG_INFINITY;
-
-        for slug in &self.model_slugs {
-            let s = stats.get(slug).cloned().unwrap_or_default();
-            let tier_bonus = if low_confidence {
-                low_confidence_tier_bonus(slug_to_tier(slug))
-            } else {
-                0.0
-            };
-            let score = s.upper_bound() + tier_bonus;
-            if score > best_ucb {
-                best_ucb = score;
-                best_slug.clone_from(slug);
-            }
-        }
-
-        drop(stats);
+        let scores = self.confidence_scores(&self.model_slugs, ctx);
+        let best_slug = choose_best_scored_slug(scores);
 
         let selected =
             self.bias_model_for_cfactor(ModelSpec::from_slug(&best_slug), cfactor, agent_id);
@@ -741,27 +729,8 @@ impl CascadeRouter {
         ctx: &RoutingContext,
         candidates: &[String],
     ) -> CascadeModel {
-        let stats = self.confidence_stats.lock();
-        let low_confidence = ctx.affect_confidence < LOW_AFFECT_CONFIDENCE_THRESHOLD;
-
-        let mut best_slug = candidates[0].clone();
-        let mut best_ucb = f64::NEG_INFINITY;
-
-        for slug in candidates {
-            let s = stats.get(slug).cloned().unwrap_or_default();
-            let tier_bonus = if low_confidence {
-                low_confidence_tier_bonus(slug_to_tier(slug))
-            } else {
-                0.0
-            };
-            let score = s.upper_bound() + tier_bonus;
-            if score > best_ucb {
-                best_ucb = score;
-                best_slug.clone_from(slug);
-            }
-        }
-
-        drop(stats);
+        let scores = self.confidence_scores(candidates, ctx);
+        let best_slug = choose_best_scored_slug(scores);
 
         let selected = ModelSpec::from_slug(best_slug);
         let tier = slug_to_tier(&selected.slug);
@@ -835,6 +804,44 @@ impl CascadeRouter {
             model
         }
     }
+
+    fn confidence_scores(&self, candidates: &[String], ctx: &RoutingContext) -> Vec<(String, f64)> {
+        let stats = self.confidence_stats.lock();
+        let low_confidence = ctx.affect_confidence < LOW_AFFECT_CONFIDENCE_THRESHOLD;
+
+        let mut scores: Vec<(String, f64)> = candidates
+            .iter()
+            .map(|slug| {
+                let s = stats.get(slug).cloned().unwrap_or_default();
+                let tier_bonus = if low_confidence {
+                    low_confidence_tier_bonus(slug_to_tier(slug))
+                } else {
+                    0.0
+                };
+                (slug.clone(), s.upper_bound() + tier_bonus)
+            })
+            .collect();
+        drop(stats);
+
+        apply_cache_affinity(&mut scores, ctx.previous_model.as_deref());
+        scores
+    }
+}
+
+fn choose_best_scored_slug(scores: Vec<(String, f64)>) -> String {
+    let mut iter = scores.into_iter();
+    let Some((mut best_slug, mut best_score)) = iter.next() else {
+        unreachable!("CascadeRouter: confidence scoring requires at least one candidate");
+    };
+
+    for (slug, score) in iter {
+        if score > best_score {
+            best_score = score;
+            best_slug = slug;
+        }
+    }
+
+    best_slug
 }
 
 /// Determine the cascade stage from observation count.
@@ -1050,6 +1057,37 @@ mod tests {
             "high confidence should allow cheaper model, got: {}",
             high_confidence.primary.slug
         );
+    }
+
+    #[test]
+    fn cache_affinity_bonus() {
+        let cascade = CascadeRouter::new(vec![
+            "claude-sonnet-4-5".to_string(),
+            "claude-sonnet-4-6".to_string(),
+        ]);
+        let mut ctx = default_ctx();
+
+        for _ in 0..80 {
+            cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.8, true);
+        }
+        for _ in 0..10 {
+            cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.2, false);
+        }
+        for _ in 0..82 {
+            cascade.record_observation(&ctx, "claude-sonnet-4-6", 0.8, true);
+        }
+        for _ in 0..8 {
+            cascade.record_observation(&ctx, "claude-sonnet-4-6", 0.2, false);
+        }
+
+        assert_eq!(cascade.current_stage(), CascadeStage::Confidence);
+
+        let no_affinity = cascade.route(&ctx);
+        assert_eq!(no_affinity.primary.slug, "claude-sonnet-4-6");
+
+        ctx.previous_model = Some("claude-sonnet-4-5".to_string());
+        let with_affinity = cascade.route(&ctx);
+        assert_eq!(with_affinity.primary.slug, "claude-sonnet-4-5");
     }
 
     // ── Test 7c: health-aware routing skips unhealthy providers ─────────

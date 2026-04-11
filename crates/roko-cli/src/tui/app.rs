@@ -20,9 +20,8 @@ use crossterm::terminal::{
 };
 use futures::StreamExt;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Modifier;
-use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use serde_json::Value;
@@ -33,7 +32,6 @@ use super::layout::RootLayout;
 use super::mori_theme::MoriTheme;
 use super::pages::{PageId, PageRegistry};
 use super::tabs::Tab;
-use super::theme::{RosedustTheme, active_theme};
 use super::tui_state::{DetailSubTab, FocusZone};
 use super::widgets;
 
@@ -952,23 +950,6 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
-}
-
-fn help_lines() -> Vec<Line<'static>> {
-    let theme = Theme::from_env();
-    vec![
-        Line::from(Span::styled("dashboard keybindings", theme.accent_bold())),
-        Line::from(""),
-        Line::from("1-6      jump to dashboard pages 1 through 6"),
-        Line::from("Tab      next page"),
-        Line::from("Shift+Tab previous page"),
-        Line::from("q / Esc  quit"),
-        Line::from("Up/Down  scroll current page or selected list"),
-        Line::from("j / k    alternate scroll keys"),
-        Line::from("Enter    expand selected signal or gate failure"),
-        Line::from("r        refresh data from .roko/"),
-        Line::from("?        toggle this help overlay"),
-    ]
 }
 
 fn pretty_json(value: &Value) -> String {
