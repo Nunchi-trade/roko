@@ -19,6 +19,7 @@ use crate::agent::{Agent, AgentResult};
 #[cfg(test)]
 use crate::http::HttpPostError;
 use crate::http::{HttpPoster, ReqwestPoster};
+use crate::translate::openai::parse_usage;
 use crate::usage::Usage;
 use async_trait::async_trait;
 use roko_core::{Body, Context, Kind, Provenance, Signal};
@@ -219,17 +220,7 @@ impl Agent for OpenAiAgent {
         };
 
         // Pull usage if present.
-        let (input_tokens, output_tokens) = parsed.get("usage").map_or((0, 0), |u| {
-            let p = u.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
-            let c = u
-                .get("completion_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            (
-                u32::try_from(p).unwrap_or(u32::MAX),
-                u32::try_from(c).unwrap_or(u32::MAX),
-            )
-        });
+        let usage = parse_usage(&parsed);
 
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
@@ -241,8 +232,9 @@ impl Agent for OpenAiAgent {
             .build();
 
         AgentResult::ok(out_signal).with_usage(Usage {
-            input_tokens,
-            output_tokens,
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_read_tokens: usage.cache_read_tokens,
             wall_ms,
             ..Default::default()
         })

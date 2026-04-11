@@ -16,6 +16,7 @@
 //! same layout as the Ollama translator; only the inbound JSON pointer
 //! and the arguments decoding differ.
 
+use crate::usage::Usage;
 use roko_core::tool::{ToolCall, ToolCategory, ToolDef, ToolFormat, ToolResult};
 
 use super::{BackendResponse, RenderedResults, RenderedTools, Translator, TranslatorError};
@@ -134,6 +135,38 @@ fn tool_kind(tool: &ToolDef) -> ToolKind {
         "retrieval" => ToolKind::Retrieval,
         _ if matches!(tool.category, ToolCategory::Mcp) => ToolKind::McpTool,
         _ => ToolKind::Function,
+    }
+}
+
+/// Parse the OpenAI-compatible `usage` block into canonical [`Usage`].
+///
+/// GLM-5.1 reports cached tokens under `prompt_tokens_details.cached_tokens`,
+/// while Kimi-K2.5 uses a top-level `cached_tokens` field.
+#[must_use]
+pub(crate) fn parse_usage(response: &serde_json::Value) -> Usage {
+    let Some(usage) = response.get("usage") else {
+        return Usage::default();
+    };
+
+    let input_tokens = usage
+        .get("prompt_tokens")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let output_tokens = usage
+        .get("completion_tokens")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let cache_read_tokens = usage
+        .get("cached_tokens")
+        .or_else(|| usage.pointer("/prompt_tokens_details/cached_tokens"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+
+    Usage {
+        input_tokens: u32::try_from(input_tokens).unwrap_or(u32::MAX),
+        output_tokens: u32::try_from(output_tokens).unwrap_or(u32::MAX),
+        cache_read_tokens: u32::try_from(cache_read_tokens).unwrap_or(u32::MAX),
+        ..Default::default()
     }
 }
 
@@ -589,5 +622,26 @@ mod tests {
             .expect("parse should succeed");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].id, "first");
+    }
+
+    #[test]
+    fn parse_cached_tokens() {
+        let glm = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 1200,
+                "completion_tokens": 300,
+                "prompt_tokens_details": { "cached_tokens": 800 }
+            }
+        });
+        let kimi = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 1200,
+                "completion_tokens": 300,
+                "cached_tokens": 800
+            }
+        });
+
+        assert_eq!(parse_usage(&glm).cache_read_tokens, 800);
+        assert_eq!(parse_usage(&kimi).cache_read_tokens, 800);
     }
 }

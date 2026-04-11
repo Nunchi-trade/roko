@@ -48,6 +48,29 @@ struct ApiUsage {
     completion_tokens: u32,
     #[serde(default)]
     total_tokens: u32,
+    #[serde(default)]
+    cached_tokens: Option<u32>,
+    #[serde(default)]
+    prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+#[allow(clippy::struct_field_names)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct PromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: Option<u32>,
+}
+
+impl ApiUsage {
+    fn cache_read_tokens(&self) -> u32 {
+        self.cached_tokens
+            .or_else(|| {
+                self.prompt_tokens_details
+                    .as_ref()
+                    .and_then(|details| details.cached_tokens)
+            })
+            .unwrap_or(0)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -320,7 +343,7 @@ impl Agent for CodexAgent {
         let usage = Usage {
             input_tokens: parsed.usage.prompt_tokens,
             output_tokens: parsed.usage.completion_tokens,
-            cache_read_tokens: 0,
+            cache_read_tokens: parsed.usage.cache_read_tokens(),
             cache_create_tokens: 0,
             cost_usd: 0.0,
             wall_ms,
@@ -470,6 +493,50 @@ mod tests {
         assert_eq!(result.output.tag("stop_reason"), Some("stop"));
         assert_eq!(result.output.tag("response_id"), Some("chatcmpl-abc"));
         assert_eq!(poster.call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn parse_cached_tokens() {
+        let cases = [
+            serde_json::json!({
+                "id": "chatcmpl-abc",
+                "model": "gpt-5-codex",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hello world"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 12,
+                    "completion_tokens": 34,
+                    "total_tokens": 46,
+                    "prompt_tokens_details": { "cached_tokens": 8 }
+                }
+            }),
+            serde_json::json!({
+                "id": "chatcmpl-abc",
+                "model": "gpt-5-codex",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hello world"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 12,
+                    "completion_tokens": 34,
+                    "total_tokens": 46,
+                    "cached_tokens": 8
+                }
+            }),
+        ];
+
+        for response in cases {
+            let poster = MockPoster::ok(response.to_string());
+            let agent = agent_with(poster.clone());
+            let result = agent.run(&prompt("hi"), &Context::now()).await;
+            assert!(result.success);
+            assert_eq!(result.usage.cache_read_tokens, 8);
+        }
     }
 
     #[tokio::test]
