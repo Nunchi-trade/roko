@@ -87,9 +87,8 @@ pub fn normalize_finish_reason(raw: &str) -> FinishReason {
         "length" | "max_tokens" => FinishReason::Length,
         "tool_calls" | "tool_use" => FinishReason::ToolCalls,
         "content_filter" | "sensitive" => FinishReason::ContentFilter,
-        "network_error" | "model_context_window_exceeded" => {
-            FinishReason::Error(raw.to_string())
-        }
+        "network_error" => FinishReason::Error("network_error".into()),
+        "model_context_window_exceeded" => FinishReason::Error("context_overflow".into()),
         other => FinishReason::Error(other.to_string()),
     }
 }
@@ -415,7 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_finish_reason_maps_provider_variants() {
+    fn glm_finish_reasons() {
         assert_eq!(normalize_finish_reason("stop"), FinishReason::Stop);
         assert_eq!(normalize_finish_reason("end_turn"), FinishReason::Stop);
         assert_eq!(normalize_finish_reason("length"), FinishReason::Length);
@@ -430,7 +429,7 @@ mod tests {
         );
         assert_eq!(
             normalize_finish_reason("model_context_window_exceeded"),
-            FinishReason::Error("model_context_window_exceeded".into())
+            FinishReason::Error("context_overflow".into())
         );
         assert_eq!(
             normalize_finish_reason("something_else"),
