@@ -200,6 +200,8 @@ impl RokoConfig {
         let _ = writeln!(out, "# -- Model routing --");
         let _ = writeln!(out, "[routing]");
         let _ = writeln!(out, "mode = \"{}\"", cfg.routing.mode);
+        let _ = writeln!(out, "algorithm = \"{}\"", cfg.routing.algorithm.label());
+        let _ = writeln!(out, "discount_factor = {}", cfg.routing.discount_factor);
         let _ = writeln!(out, "fast_task_model = \"{}\"", cfg.routing.fast_task_model);
         let _ = writeln!(
             out,
@@ -1061,12 +1063,45 @@ impl Default for GatesConfig {
 
 // ---- [routing] -----------------------------------------------------------
 
+/// Routing algorithm for model selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RoutingAlgorithm {
+    /// Contextual bandit using upper-confidence bounds.
+    LinUcb,
+    /// Discounted Thompson sampling for non-stationary routing.
+    Thompson,
+}
+
+impl RoutingAlgorithm {
+    /// Stable config label used in TOML.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::LinUcb => "linucb",
+            Self::Thompson => "thompson",
+        }
+    }
+}
+
+impl Default for RoutingAlgorithm {
+    fn default() -> Self {
+        Self::LinUcb
+    }
+}
+
 /// Model routing configuration.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RoutingConfig {
     /// Routing mode (`"auto_override"`).
     #[serde(default = "default_routing_mode")]
     pub mode: String,
+    /// Online learning algorithm used by the router.
+    #[serde(default)]
+    pub algorithm: RoutingAlgorithm,
+    /// Discount factor for Thompson sampling in non-stationary environments.
+    #[serde(default = "default_routing_discount_factor")]
+    pub discount_factor: f64,
     /// Model for low-complexity tasks.
     #[serde(default = "default_fast_model")]
     pub fast_task_model: String,
@@ -1101,10 +1136,16 @@ fn default_context_strategy() -> String {
     "mcp_first".into()
 }
 
+const fn default_routing_discount_factor() -> f64 {
+    0.99
+}
+
 impl Default for RoutingConfig {
     fn default() -> Self {
         Self {
             mode: default_routing_mode(),
+            algorithm: RoutingAlgorithm::default(),
+            discount_factor: default_routing_discount_factor(),
             fast_task_model: default_fast_model(),
             standard_task_model: default_standard_model(),
             complex_task_model: default_complex_model(),
@@ -2398,6 +2439,29 @@ context_strategy = "inline_heavy"
         let cfg = RokoConfig::from_toml(toml).expect("parse");
         assert_eq!(cfg.routing.mode, "manual");
         assert_eq!(cfg.routing.context_strategy, "inline_heavy");
+    }
+
+    #[test]
+    fn routing_algorithm_config() {
+        let default_cfg = RokoConfig::from_toml("").expect("parse defaults");
+        assert_eq!(default_cfg.routing.algorithm, RoutingAlgorithm::LinUcb);
+        assert!((default_cfg.routing.discount_factor - 0.99).abs() < f64::EPSILON);
+
+        let thompson_toml = r#"
+[routing]
+algorithm = "thompson"
+discount_factor = 0.95
+"#;
+        let thompson_cfg = RokoConfig::from_toml(thompson_toml).expect("parse");
+        assert_eq!(thompson_cfg.routing.algorithm, RoutingAlgorithm::Thompson);
+        assert!((thompson_cfg.routing.discount_factor - 0.95).abs() < f64::EPSILON);
+
+        let linucb_toml = r#"
+[routing]
+algorithm = "linucb"
+"#;
+        let linucb_cfg = RokoConfig::from_toml(linucb_toml).expect("parse");
+        assert_eq!(linucb_cfg.routing.algorithm, RoutingAlgorithm::LinUcb);
     }
 
     #[test]

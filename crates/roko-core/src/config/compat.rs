@@ -190,6 +190,8 @@ fn convert_routing(m: &MoriConfig) -> RoutingConfig {
     let d = RoutingConfig::default();
     RoutingConfig {
         mode: m.routing_mode.clone().unwrap_or(d.mode),
+        algorithm: d.algorithm,
+        discount_factor: d.discount_factor,
         fast_task_model: m.fast_task_model.clone().unwrap_or(d.fast_task_model),
         standard_task_model: m
             .standard_task_model
