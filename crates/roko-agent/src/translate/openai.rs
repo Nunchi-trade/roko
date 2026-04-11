@@ -34,6 +34,16 @@ use super::{BackendResponse, RenderedResults, RenderedTools, Translator, Transla
 #[derive(Debug, Default, Clone, Copy)]
 pub struct OpenAiTranslator;
 
+/// Build a continuation message for Kimi's partial mode.
+#[must_use]
+pub fn build_partial_continuation(truncated_content: &str) -> serde_json::Value {
+    serde_json::json!({
+        "role": "assistant",
+        "content": truncated_content,
+        "partial": true
+    })
+}
+
 impl Translator for OpenAiTranslator {
     fn format(&self) -> ToolFormat {
         ToolFormat::OpenAiJson
@@ -750,6 +760,14 @@ mod tests {
 
         assert_eq!(parse_usage(&glm).cache_read_tokens, 800);
         assert_eq!(parse_usage(&kimi).cache_read_tokens, 800);
+    }
+
+    #[test]
+    fn kimi_partial_continuation() {
+        let continuation = build_partial_continuation("truncated...");
+        assert_eq!(continuation["role"], "assistant");
+        assert_eq!(continuation["content"], "truncated...");
+        assert_eq!(continuation["partial"], true);
     }
 
     #[test]
