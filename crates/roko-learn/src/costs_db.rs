@@ -141,7 +141,7 @@ impl CostTable {
         self.models.get(model)
     }
 
-    /// Build the default cost table with the GLM pricing rows.
+    /// Build the default cost table with the GLM and OpenRouter pricing rows.
     #[must_use]
     pub fn with_defaults() -> Self {
         let mut models = HashMap::new();
@@ -150,6 +150,14 @@ impl CostTable {
             ModelPricing {
                 input_per_m: 0.60,
                 output_per_m: 3.00,
+                cache_read_per_m: Some(0.10),
+            },
+        );
+        models.insert(
+            "moonshotai/kimi-k2.5".to_string(),
+            ModelPricing {
+                input_per_m: 0.38,
+                output_per_m: 1.72,
                 cache_read_per_m: Some(0.10),
             },
         );
@@ -170,6 +178,14 @@ impl CostTable {
             },
         );
         models.insert(
+            "z-ai/glm-5.1".to_string(),
+            ModelPricing {
+                input_per_m: 1.26,
+                output_per_m: 3.96,
+                cache_read_per_m: Some(0.26),
+            },
+        );
+        models.insert(
             "glm-5".to_string(),
             ModelPricing {
                 input_per_m: 1.00,
@@ -182,6 +198,14 @@ impl CostTable {
             ModelPricing {
                 input_per_m: 0.60,
                 output_per_m: 2.20,
+                cache_read_per_m: None,
+            },
+        );
+        models.insert(
+            "anthropic/claude-opus-4-6".to_string(),
+            ModelPricing {
+                input_per_m: 15.00,
+                output_per_m: 75.00,
                 cache_read_per_m: None,
             },
         );
@@ -468,6 +492,29 @@ mod tests {
         assert!((kimi_k2_thinking.input_per_m - 0.60).abs() < 1e-9);
         assert!((kimi_k2_thinking.output_per_m - 2.50).abs() < 1e-9);
         assert_eq!(kimi_k2_thinking.cache_read_per_m, Some(0.15));
+    }
+
+    #[test]
+    fn openrouter_cost_table() {
+        let table = CostTable::default();
+
+        let glm_5_1 = table
+            .lookup("z-ai/glm-5.1")
+            .expect("z-ai/glm-5.1 pricing");
+        assert!((glm_5_1.input_per_m - 1.26).abs() < 1e-9);
+        assert!((glm_5_1.output_per_m - 3.96).abs() < 1e-9);
+
+        let kimi_k2_5 = table
+            .lookup("moonshotai/kimi-k2.5")
+            .expect("moonshotai/kimi-k2.5 pricing");
+        assert!((kimi_k2_5.input_per_m - 0.38).abs() < 1e-9);
+        assert!((kimi_k2_5.output_per_m - 1.72).abs() < 1e-9);
+
+        let claude_opus = table
+            .lookup("anthropic/claude-opus-4-6")
+            .expect("anthropic/claude-opus-4-6 pricing");
+        assert!((claude_opus.input_per_m - 15.00).abs() < 1e-9);
+        assert!((claude_opus.output_per_m - 75.00).abs() < 1e-9);
     }
 
     #[test]

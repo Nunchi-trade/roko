@@ -849,6 +849,43 @@ impl DashboardData {
             });
         }
 
+        // Enrich from plan execution snapshot (has per-task phase data).
+        if let Some(exec) = &self.current_plan_execution {
+            // Update plan with execution-level counts.
+            if let Some(plan) = snapshot.plans.get_mut(&exec.plan_id) {
+                plan.tasks_total = exec.tasks_total;
+                plan.tasks_done = exec.tasks_done;
+                plan.tasks_failed = exec.tasks_total.saturating_sub(exec.tasks_done);
+                plan.active = true;
+                plan.phase = "executing".into();
+            }
+            // Add tasks from execution.
+            for row in &exec.tasks {
+                let key = format!("{}/{}", exec.plan_id, row.task_id);
+                if !snapshot.tasks.contains_key(&key) {
+                    let completed = row.phase == "done" || row.phase == "complete";
+                    snapshot.tasks.insert(
+                        key,
+                        TaskState {
+                            task_id: row.task_id.clone(),
+                            plan_id: exec.plan_id.clone(),
+                            phase: row.phase.clone(),
+                            outcome: if completed {
+                                Some("done".into())
+                            } else {
+                                None
+                            },
+                        },
+                    );
+                    if completed {
+                        snapshot.stats.tasks_completed += 1;
+                    } else if row.is_current {
+                        snapshot.stats.tasks_active += 1;
+                    }
+                }
+            }
+        }
+
         snapshot
     }
 }
