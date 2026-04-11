@@ -118,7 +118,10 @@ mod tests {
             provider: "zai".into(),
         });
 
-        let first_event = first.recv().await.expect("first subscriber should receive event");
+        let first_event = first
+            .recv()
+            .await
+            .expect("first subscriber should receive event");
         let second_event = second
             .recv()
             .await
