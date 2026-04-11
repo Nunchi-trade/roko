@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use roko_agent::perplexity::types::SearchOptions;
+use roko_agent::perplexity::types::{PerplexityMetadata, SearchOptions};
 use roko_core::config::schema::PerplexityConfig;
 
 fn research_dir(workdir: &Path) -> PathBuf {
@@ -23,6 +23,55 @@ fn research_dir(workdir: &Path) -> PathBuf {
 pub fn ensure_dirs(workdir: &Path) -> Result<()> {
     std::fs::create_dir_all(research_dir(workdir))?;
     Ok(())
+}
+
+/// Convert a Perplexity response + metadata into rich markdown and save it.
+///
+/// Writes a `# Research: <topic>` document with:
+/// - The model-generated `content`
+/// - A numbered `## Sources` section linking each citation to its title
+/// - A `## Search Context` section with full snippets for agent consumption
+pub fn save_research_with_citations(
+    workdir: &Path,
+    topic: &str,
+    content: &str,
+    metadata: &PerplexityMetadata,
+) -> Result<PathBuf> {
+    let mut doc = String::new();
+    writeln!(doc, "# Research: {topic}\n")?;
+    writeln!(
+        doc,
+        "> Generated via Perplexity Sonar — {}\n",
+        chrono::Local::now().format("%Y-%m-%d")
+    )?;
+    writeln!(doc, "{content}\n")?;
+
+    if !metadata.citations.is_empty() {
+        writeln!(doc, "\n## Sources\n")?;
+        for (i, url) in metadata.citations.iter().enumerate() {
+            let title = metadata
+                .search_results
+                .get(i)
+                .map(|r| r.title.as_str())
+                .unwrap_or("Source");
+            writeln!(doc, "{i}. [{title}]({url})")?;
+        }
+    }
+
+    if !metadata.search_results.is_empty() {
+        writeln!(doc, "\n## Search Context\n")?;
+        for result in &metadata.search_results {
+            writeln!(doc, "### [{}]({})", result.title, result.url)?;
+            if let Some(date) = &result.date {
+                writeln!(doc, "> Published: {date}")?;
+            }
+            writeln!(doc, "\n{}\n", result.content)?;
+        }
+    }
+
+    let path = research_dir(workdir).join(format!("{}.md", slug(topic)));
+    std::fs::write(&path, doc)?;
+    Ok(path)
 }
 
 /// The system prompt for research agents.
@@ -370,6 +419,63 @@ mod tests {
         );
         assert_eq!(opts.return_related_questions, Some(true));
         assert_eq!(opts.return_images, Some(false));
+    }
+
+    #[test]
+    fn save_research_citations() {
+        use roko_agent::perplexity::types::{Annotation, SearchResult};
+
+        let tmp = tempfile::tempdir().unwrap();
+        ensure_dirs(tmp.path()).unwrap();
+
+        let metadata = PerplexityMetadata {
+            citations: vec![
+                "https://example.com/paper1".to_string(),
+                "https://example.com/paper2".to_string(),
+            ],
+            search_results: vec![
+                SearchResult {
+                    url: "https://example.com/paper1".to_string(),
+                    title: "Attention Is All You Need".to_string(),
+                    content: "The dominant sequence transduction models...".to_string(),
+                    date: Some("2017-06-12".to_string()),
+                    last_updated: None,
+                },
+                SearchResult {
+                    url: "https://example.com/paper2".to_string(),
+                    title: "BERT".to_string(),
+                    content: "We introduce a new language model...".to_string(),
+                    date: None,
+                    last_updated: None,
+                },
+            ],
+            annotations: vec![Annotation {
+                start_index: 0,
+                end_index: 10,
+                title: "Attention Is All You Need".to_string(),
+                url: "https://example.com/paper1".to_string(),
+            }],
+            related_questions: vec![],
+        };
+
+        let path = save_research_with_citations(
+            tmp.path(),
+            "transformer architectures",
+            "Transformers are the dominant architecture.",
+            &metadata,
+        )
+        .unwrap();
+
+        let doc = std::fs::read_to_string(&path).unwrap();
+        assert!(doc.contains("# Research: transformer architectures"));
+        assert!(doc.contains("Perplexity Sonar"));
+        assert!(doc.contains("## Sources"));
+        assert!(doc.contains("[Attention Is All You Need](https://example.com/paper1)"));
+        assert!(doc.contains("[BERT](https://example.com/paper2)"));
+        assert!(doc.contains("## Search Context"));
+        assert!(doc.contains("> Published: 2017-06-12"));
+        assert!(doc.contains("The dominant sequence transduction models..."));
+        assert!(path.ends_with("transformer-architectures.md"));
     }
 
     #[test]
