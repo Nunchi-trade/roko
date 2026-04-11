@@ -17,6 +17,7 @@ use anyhow::{Context as _, Result, anyhow};
 use bardo_runtime::cancel::CancelToken;
 use bardo_runtime::process::ProcessSupervisor;
 use roko_agent::mcp::{McpConfig, McpServerConfig};
+use roko_agent::provider::{AgentOptions, create_agent_for_model};
 use roko_agent::translate::{ClaudeTranslator, RenderedTools, Translator};
 use roko_agent::{Agent, AgentResult, ClaudeCliAgent, ExecAgent};
 use roko_compose::{
@@ -25,6 +26,7 @@ use roko_compose::{
 };
 use roko_conductor::diagnosis::DiagnosisEngine;
 use roko_conductor::{Conductor, ConductorDecision};
+use roko_core::config::schema::RokoConfig;
 use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::obs::health::{AlwaysUpProbe, ProbeRegistry};
 use roko_core::obs::{LabelSet, MetricRegistry};
@@ -89,6 +91,17 @@ fn install_episode_distillation_hook(learning: &mut LearningRuntime, workdir: &P
     learning.set_episode_completion_hook(move |episode| {
         roko_neuro::spawn_episode_distillation(distillation_workdir.clone(), episode);
     });
+}
+
+fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
+    let path = workdir.join("roko.toml");
+    if !path.exists() {
+        return Ok(RokoConfig::default());
+    }
+
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    RokoConfig::from_toml(&text).with_context(|| format!("parse {}", path.display()))
 }
 
 fn frequency_label(frequency: OperatingFrequency) -> &'static str {
@@ -7296,32 +7309,41 @@ impl PlanRunner {
                 task_role = %task_role
             )
             .entered();
+            let roko_config = load_roko_config(&self.workdir)?;
             let task_read_args = task_def
                 .as_ref()
                 .map(task_read_cli_args)
                 .unwrap_or_default();
-            let mut agent =
-                ClaudeCliAgent::new(&self.config.agent.command, &exec_dir, &selected_model)
-                    .with_timeout_ms(self.effective_task_timeout_ms(task_def.as_ref()))
-                    .with_bare_mode(self.config.agent.bare_mode)
-                    .with_effort(dispatch_effort)
-                    .with_max_turns(dispatch_turn_limit)
-                    .with_system_prompt(role_instruction.clone())
-                    .with_extra_args(task_read_args)
-                    .with_tools(task_allowed_tools_csv)
-                    .with_settings_json(roko_agent::claude_cli_agent::build_settings_json())
-                    .with_dangerously_skip_permissions(claude_skip_permissions_for_role(role))
-                    .with_optional_resume(self.claude_resume_session.clone())
-                    .with_extra_args(self.config.agent.args.clone());
-            if let Some(mcp_path) = &self.config.agent.mcp_config {
-                agent = agent.with_mcp_config(mcp_path);
-            }
+            let mut extra_args = task_read_args;
+            extra_args.extend(self.config.agent.args.clone());
+            extra_args.push("--max-turns".to_string());
+            extra_args.push(dispatch_turn_limit.to_string());
             if let Some(fallback_model) = &self.config.agent.fallback_model {
-                agent = agent.with_fallback_model(fallback_model.clone());
+                extra_args.push("--fallback-model".to_string());
+                extra_args.push(fallback_model.clone());
             }
-            for (k, v) in &self.config.agent.env {
-                agent = agent.with_env_var(k, v);
+            if let Some(resume) = &self.claude_resume_session {
+                extra_args.push("--resume".to_string());
+                extra_args.push(resume.clone());
             }
+
+            let agent = create_agent_for_model(
+                &roko_config,
+                &selected_model,
+                AgentOptions {
+                    timeout_ms: Some(self.effective_task_timeout_ms(task_def.as_ref())),
+                    system_prompt: Some(role_instruction.clone()),
+                    tools: Some(task_allowed_tools_csv.clone()),
+                    mcp_config: self.resolve_mcp_config_path().await,
+                    env: self.config.agent.env.clone(),
+                    extra_args,
+                    effort: Some(dispatch_effort.clone()),
+                    bare_mode: self.config.agent.bare_mode,
+                    dangerously_skip_permissions: claude_skip_permissions_for_role(role),
+                    name: String::new(),
+                },
+            )
+            .map_err(|e| anyhow!("create agent for model {selected_model}: {e}"))?;
             agent.run(&prompt, &ctx).await
         } else {
             let task_role = task_def
