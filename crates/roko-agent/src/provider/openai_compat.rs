@@ -3,10 +3,36 @@ use crate::codex_agent::{CodexAgent, DEFAULT_MAX_TOKENS};
 use crate::provider::{AgentCreationError, AgentOptions, ProviderAdapter, ProviderError};
 use roko_core::agent::ProviderKind;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
-use serde_json::Value;
+use serde_json::{Map, Value, json};
 
 /// Adapter for OpenAI-compatible HTTP providers.
 pub struct OpenAiCompatAdapter;
+
+fn is_zai_provider(provider: &ProviderConfig, model: &ModelProfile) -> bool {
+    model.provider.eq_ignore_ascii_case("zai")
+        || provider.base_url.as_deref().is_some_and(|base_url| {
+            base_url.contains("z.ai") || base_url.contains("bigmodel.cn")
+        })
+}
+
+fn inject_glm_params(
+    body: &mut Map<String, Value>,
+    provider: &ProviderConfig,
+    model: &ModelProfile,
+) {
+    if !model.supports_thinking || !is_zai_provider(provider, model) {
+        return;
+    }
+
+    body.insert(
+        "thinking".to_string(),
+        json!({
+            "type": "enabled",
+            "clear_thinking": true,
+        }),
+    );
+    body.insert("tool_stream".to_string(), Value::Bool(true));
+}
 
 impl ProviderAdapter for OpenAiCompatAdapter {
     fn kind(&self) -> ProviderKind {
@@ -49,11 +75,14 @@ impl ProviderAdapter for OpenAiCompatAdapter {
             .max_output
             .and_then(|value| u32::try_from(value).ok())
             .unwrap_or(DEFAULT_MAX_TOKENS);
+        let mut extra_body_params = Map::new();
+        inject_glm_params(&mut extra_body_params, provider, model);
 
         let agent = CodexAgent::new(api_key, model.slug.clone())
             .with_base_url(base_url)
             .with_timeout_ms(timeout)
             .with_max_tokens(max_tokens)
+            .with_extra_body_params(extra_body_params)
             .with_name(options.name.clone());
 
         Ok(Box::new(agent))
@@ -155,7 +184,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn openai_compat_adapter_creates_agent_for_zai_provider_config() {
+    async fn glm_thinking_injection() {
         let response = serde_json::json!({
             "id": "chatcmpl-test",
             "choices": [{
@@ -233,6 +262,14 @@ mod tests {
         assert_eq!(parsed["model"], "glm-5.1");
         assert_eq!(parsed["max_tokens"], 1024);
         assert_eq!(parsed["messages"][0]["content"], "hello");
+        assert_eq!(
+            parsed["thinking"],
+            serde_json::json!({
+                "type": "enabled",
+                "clear_thinking": true
+            })
+        );
+        assert_eq!(parsed["tool_stream"], Value::Bool(true));
 
         handle.join().expect("server thread");
     }

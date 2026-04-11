@@ -24,6 +24,7 @@ use crate::usage::Usage;
 use async_trait::async_trait;
 use roko_core::{Body, Context, Kind, Provenance, Signal};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -112,6 +113,8 @@ struct ChatRequest<'a> {
     model: &'a str,
     max_tokens: u32,
     messages: Vec<RequestMessage<'a>>,
+    #[serde(flatten)]
+    extra_body_params: Map<String, Value>,
 }
 
 // ─── CodexAgent ────────────────────────────────────────────────────────────
@@ -137,6 +140,7 @@ pub struct CodexAgent {
     timeout_ms: u64,
     max_tokens: u32,
     extra_headers: Vec<(String, String)>,
+    extra_body_params: Map<String, Value>,
     poster: Arc<dyn HttpPoster>,
 }
 
@@ -166,6 +170,7 @@ impl CodexAgent {
             timeout_ms: 120_000,
             max_tokens: DEFAULT_MAX_TOKENS,
             extra_headers: Vec::new(),
+            extra_body_params: Map::new(),
             poster: Arc::new(ReqwestPoster::new()),
         }
     }
@@ -204,6 +209,13 @@ impl CodexAgent {
         let mut extra_headers: Vec<(String, String)> = extra_headers.into_iter().collect();
         extra_headers.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
         self.extra_headers = extra_headers;
+        self
+    }
+
+    /// Inject additional JSON fields into the outbound chat-completions body.
+    #[must_use]
+    pub fn with_extra_body_params(mut self, extra_body_params: Map<String, Value>) -> Self {
+        self.extra_body_params = extra_body_params;
         self
     }
 
@@ -290,6 +302,7 @@ impl Agent for CodexAgent {
                 role: "user",
                 content: &prompt_text,
             }],
+            extra_body_params: self.extra_body_params.clone(),
         };
         let body = match serde_json::to_vec(&req) {
             Ok(v) => v,

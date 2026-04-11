@@ -170,6 +170,16 @@ pub(crate) fn parse_usage(response: &serde_json::Value) -> Usage {
     }
 }
 
+#[must_use]
+pub(crate) fn parse_glm_response(json: &serde_json::Value) -> (String, Option<String>) {
+    let message = &json["choices"][0]["message"];
+    let content = message["content"].as_str().unwrap_or("").to_string();
+    let reasoning = message["reasoning_content"]
+        .as_str()
+        .map(|s| s.to_string());
+    (content, reasoning)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -643,5 +653,30 @@ mod tests {
 
         assert_eq!(parse_usage(&glm).cache_read_tokens, 800);
         assert_eq!(parse_usage(&kimi).cache_read_tokens, 800);
+    }
+
+    #[test]
+    fn glm_reasoning_parse() {
+        let raw = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "The answer is 42.",
+                    "reasoning_content": "Let me think step by step..."
+                }
+            }]
+        });
+
+        let (content, reasoning) = parse_glm_response(&raw);
+        let response = crate::translate::ChatResponse {
+            content,
+            reasoning,
+            ..Default::default()
+        };
+
+        assert_eq!(response.content, "The answer is 42.");
+        assert_eq!(
+            response.reasoning,
+            Some("Let me think step by step...".to_string())
+        );
     }
 }
