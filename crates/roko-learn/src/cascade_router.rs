@@ -237,8 +237,9 @@ struct PerplexityObservationTotals {
 
 /// Build the default static role-to-model mapping.
 ///
-/// Fast-tier roles get haiku, Standard-tier roles prefer Kimi or sonnet,
-/// Premium-tier roles get opus.
+/// Fast-tier roles prefer Gemini Flash-Lite, Standard-tier roles prefer
+/// Gemini Flash, and Premium-tier roles prefer Opus with Gemini Pro Preview
+/// as the premium fallback.
 fn default_role_model_table(model_slugs: &[String]) -> HashMap<AgentRole, String> {
     let mut table = HashMap::new();
 
@@ -250,6 +251,8 @@ fn default_role_model_table(model_slugs: &[String]) -> HashMap<AgentRole, String
             &[
                 "sonar-pro",
                 "sonar",
+                "gemini-2.5-flash",
+                "gemini-2.5-pro",
                 "kimi-k2.5",
                 "claude-sonnet-4-6",
                 "claude-sonnet-4-5",
@@ -265,12 +268,19 @@ fn default_role_model_table(model_slugs: &[String]) -> HashMap<AgentRole, String
             continue;
         }
         let slug = match role.model_tier() {
-            ModelTier::Fast => pick_static_slug(model_slugs, &["claude-haiku-3-5"]),
-            ModelTier::Premium => pick_static_slug(model_slugs, &["claude-opus-4"]),
+            ModelTier::Fast => {
+                pick_static_slug(model_slugs, &["gemini-2.5-flash-lite", "claude-haiku-3-5"])
+            }
+            ModelTier::Premium => pick_static_slug(
+                model_slugs,
+                &["claude-opus-4", "gemini-3.1-pro-preview", "gemini-2.5-pro"],
+            ),
             // Standard and forward-compat
             _ => pick_static_slug(
                 model_slugs,
                 &[
+                    "gemini-2.5-flash",
+                    "gemini-2.5-pro",
                     "kimi-k2.5",
                     "kimi-k2-thinking",
                     "claude-sonnet-4-6",
@@ -325,9 +335,12 @@ const fn default_latency_sla(tier: ModelTier) -> u64 {
 
 /// Map a model slug to an approximate tier for SLA purposes.
 fn slug_to_tier(slug: &str) -> ModelTier {
-    if slug.contains("haiku") {
+    if slug.contains("gemini-2.5-flash-lite") || slug.contains("haiku") {
         ModelTier::Fast
-    } else if slug.contains("opus") || slug.contains("premium") {
+    } else if slug.contains("gemini-3.1-pro-preview")
+        || slug.contains("opus")
+        || slug.contains("premium")
+    {
         ModelTier::Premium
     } else {
         ModelTier::Standard
@@ -379,6 +392,14 @@ fn slugs_match(lhs: &str, rhs: &str) -> bool {
 fn slug_family(slug: &str) -> Option<&'static str> {
     if slug.starts_with("kimi-k2") {
         Some("kimi-k2")
+    } else if slug.contains("gemini-3.1-pro-preview") {
+        Some("gemini-3.1-pro-preview")
+    } else if slug.contains("gemini-2.5-pro") {
+        Some("gemini-2.5-pro")
+    } else if slug.contains("gemini-2.5-flash-lite") {
+        Some("gemini-2.5-flash-lite")
+    } else if slug.contains("gemini-2.5-flash") {
+        Some("gemini-2.5-flash")
     } else if slug.contains("haiku") {
         Some("haiku")
     } else if slug.contains("sonnet") {
@@ -914,9 +935,13 @@ impl CascadeRouter {
             slug
         } else {
             let tier_candidates: &[&str] = match ctx.role.model_tier() {
-                ModelTier::Fast => &["claude-haiku-3-5"],
-                ModelTier::Premium => &["claude-opus-4"],
+                ModelTier::Fast => &["gemini-2.5-flash-lite", "claude-haiku-3-5"],
+                ModelTier::Premium => {
+                    &["claude-opus-4", "gemini-3.1-pro-preview", "gemini-2.5-pro"]
+                }
                 _ => &[
+                    "gemini-2.5-flash",
+                    "gemini-2.5-pro",
                     "kimi-k2.5",
                     "kimi-k2-thinking",
                     "claude-sonnet-4-6",
@@ -1710,6 +1735,76 @@ mod tests {
         let result = cascade.route(&ctx);
         assert_eq!(result.stage, CascadeStage::Static);
         assert_eq!(result.primary.slug, "kimi-k2.5");
+    }
+
+    #[test]
+    fn cascade_gemini_routes_configured_fast_standard_and_premium_models() {
+        let cascade = CascadeRouter::new(vec![
+            "gemini-2.5-flash-lite".to_string(),
+            "gemini-2.5-flash".to_string(),
+            "gemini-2.5-pro".to_string(),
+            "gemini-3.1-pro-preview".to_string(),
+        ]);
+        let mut ctx = default_ctx();
+
+        ctx.role = AgentRole::Conductor;
+        let fast = cascade.route(&ctx);
+        assert_eq!(fast.primary.slug, "gemini-2.5-flash-lite");
+        assert!(fast.fallback.is_none());
+
+        ctx.role = AgentRole::Implementer;
+        let standard = cascade.route(&ctx);
+        assert_eq!(standard.primary.slug, "gemini-2.5-flash");
+        assert_eq!(
+            standard.fallback.as_ref().expect("standard fallback").slug,
+            "claude-haiku-3-5"
+        );
+
+        ctx.role = AgentRole::Architect;
+        let premium = cascade.route(&ctx);
+        assert_eq!(premium.primary.slug, "gemini-3.1-pro-preview");
+        assert_eq!(
+            premium.fallback.as_ref().expect("premium fallback").slug,
+            "claude-sonnet-4-5"
+        );
+    }
+
+    #[test]
+    fn cascade_gemini_prefers_opus_for_premium_when_available() {
+        let cascade = CascadeRouter::new(vec![
+            "gemini-2.5-flash-lite".to_string(),
+            "gemini-2.5-flash".to_string(),
+            "gemini-2.5-pro".to_string(),
+            "gemini-3.1-pro-preview".to_string(),
+            "claude-opus-4".to_string(),
+        ]);
+        let mut ctx = default_ctx();
+        ctx.role = AgentRole::Architect;
+
+        let result = cascade.route(&ctx);
+        assert_eq!(result.primary.slug, "claude-opus-4");
+    }
+
+    #[test]
+    fn cascade_gemini_matches_openrouter_slug_families() {
+        let cascade = CascadeRouter::new(vec![
+            "google/gemini-2.5-flash-lite".to_string(),
+            "google/gemini-2.5-flash".to_string(),
+            "google/gemini-3.1-pro-preview".to_string(),
+        ]);
+        let mut ctx = default_ctx();
+
+        ctx.role = AgentRole::Conductor;
+        assert_eq!(cascade.route(&ctx).primary.slug, "google/gemini-2.5-flash-lite");
+
+        ctx.role = AgentRole::Implementer;
+        assert_eq!(cascade.route(&ctx).primary.slug, "google/gemini-2.5-flash");
+
+        ctx.role = AgentRole::Architect;
+        assert_eq!(
+            cascade.route(&ctx).primary.slug,
+            "google/gemini-3.1-pro-preview"
+        );
     }
 
     // ── Test 18: UCB stage uses linucb selection ────────────────────────
