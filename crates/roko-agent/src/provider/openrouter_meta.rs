@@ -148,6 +148,9 @@ impl OpenRouterModel {
                 &supported_parameters,
                 &["partial", "continuation"],
             ),
+            supports_grounding: false,
+            supports_code_execution: false,
+            supports_caching: false,
             provider_routing: None,
             tool_format: "openai_json".to_string(),
             cost_input_per_m: pricing
@@ -158,6 +161,8 @@ impl OpenRouterModel {
                 .as_ref()
                 .and_then(|value| value.completion.as_ref())
                 .and_then(|value| value.per_million()),
+            cost_input_per_m_high: None,
+            cost_output_per_m_high: None,
             cost_cache_read_per_m: pricing
                 .as_ref()
                 .and_then(|value| value.input_cache_read.as_ref())
@@ -166,6 +171,7 @@ impl OpenRouterModel {
                 .as_ref()
                 .and_then(|value| value.input_cache_write.as_ref())
                 .and_then(|value| value.per_million()),
+            thinking_level: None,
             max_tools: None,
             tokenizer_ratio: None,
             supports_search: false,

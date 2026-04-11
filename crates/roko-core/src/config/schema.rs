@@ -474,12 +474,18 @@ impl RokoConfig {
             supports_web_search: false,
             supports_mcp_tools: false,
             supports_partial: false,
+            supports_grounding: false,
+            supports_code_execution: false,
+            supports_caching: false,
             provider_routing: None,
             tool_format: tool_profile.preferred.as_str().to_owned(),
             cost_input_per_m: None,
             cost_output_per_m: None,
+            cost_input_per_m_high: None,
+            cost_output_per_m_high: None,
             cost_cache_read_per_m: None,
             cost_cache_write_per_m: None,
+            thinking_level: None,
             max_tools: Some(u32::from(tool_profile.max_tools_before_degrade)),
             tokenizer_ratio: None,
             supports_search: false,
@@ -851,6 +857,15 @@ pub struct ModelProfile {
     /// Whether the model supports partial continuation.
     #[serde(default)]
     pub supports_partial: bool,
+    /// Whether the model supports Google Search grounding.
+    #[serde(default)]
+    pub supports_grounding: bool,
+    /// Whether the model supports built-in code execution.
+    #[serde(default)]
+    pub supports_code_execution: bool,
+    /// Whether the model supports provider-side context caching.
+    #[serde(default)]
+    pub supports_caching: bool,
     /// OpenRouter-specific routing overrides for this model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_routing: Option<ProviderRouting>,
@@ -863,12 +878,21 @@ pub struct ModelProfile {
     /// Output token cost per million tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_output_per_m: Option<f64>,
+    /// Input token cost per million tokens for the high-context pricing tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_input_per_m_high: Option<f64>,
+    /// Output token cost per million tokens for the high-context pricing tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_output_per_m_high: Option<f64>,
     /// Cache read cost per million tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_cache_read_per_m: Option<f64>,
     /// Cache write cost per million tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_cache_write_per_m: Option<f64>,
+    /// Provider-specific reasoning depth label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<String>,
     /// Maximum number of tools before behavior degrades.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tools: Option<u32>,
@@ -2330,11 +2354,17 @@ slug = "claude-opus-4-6"
         assert!(!cfg.supports_web_search);
         assert!(!cfg.supports_mcp_tools);
         assert!(!cfg.supports_partial);
+        assert!(!cfg.supports_grounding);
+        assert!(!cfg.supports_code_execution);
+        assert!(!cfg.supports_caching);
         assert_eq!(cfg.tool_format, "openai_json");
         assert_eq!(cfg.cost_input_per_m, None);
         assert_eq!(cfg.cost_output_per_m, None);
+        assert_eq!(cfg.cost_input_per_m_high, None);
+        assert_eq!(cfg.cost_output_per_m_high, None);
         assert_eq!(cfg.cost_cache_read_per_m, None);
         assert_eq!(cfg.cost_cache_write_per_m, None);
+        assert_eq!(cfg.thinking_level, None);
         assert_eq!(cfg.max_tools, None);
         assert_eq!(cfg.tokenizer_ratio, None);
         assert_eq!(cfg.provider_routing, None);
