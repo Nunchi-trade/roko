@@ -22,6 +22,8 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
+
 // ─── ProviderKind (which protocol family to use) ─────────────────────────
 
 /// Which protocol family a provider belongs to.
@@ -132,6 +134,16 @@ fn is_cursor_slug(slug: &str) -> bool {
         || slug.ends_with("-xhigh-fast")
 }
 
+fn provider_kind_from_backend(backend: AgentBackend) -> ProviderKind {
+    match backend {
+        AgentBackend::Claude => ProviderKind::ClaudeCli,
+        AgentBackend::Codex | AgentBackend::OpenAi | AgentBackend::Ollama => {
+            ProviderKind::OpenAiCompat
+        }
+        AgentBackend::Cursor => ProviderKind::CursorAcp,
+    }
+}
+
 // ─── ModelSpec (slug + inferred backend) ──────────────────────────────────
 
 /// Reasoning effort hint passed to capable backends (Codex, Claude).
@@ -196,6 +208,57 @@ impl ModelSpec {
             .replace("composer-", "cx-")
             .replace("claude-", "cl-")
             .replace("gpt-", "")
+    }
+}
+
+/// Fully resolved model lookup result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResolvedModel {
+    /// The key used to resolve the model.
+    pub model_key: String,
+    /// The API model ID sent to the backend.
+    pub slug: String,
+    /// Protocol family for the resolved provider.
+    pub provider_kind: ProviderKind,
+    /// Provider-specific config, if the config registry has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_config: Option<ProviderConfig>,
+    /// Model-specific config, if the config registry has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<ModelProfile>,
+    /// Legacy backend inference for backwards compatibility.
+    pub backend: AgentBackend,
+}
+
+/// Resolve a model key against config, falling back to the legacy slug heuristic.
+#[must_use]
+pub fn resolve_model(config: &RokoConfig, model_key: &str) -> ResolvedModel {
+    if let Some(profile) = config.models.get(model_key) {
+        let provider_config = config.providers.get(&profile.provider).cloned();
+        let backend = AgentBackend::from_model(&profile.slug);
+        let provider_kind = provider_config
+            .as_ref()
+            .map(|provider| provider.kind)
+            .unwrap_or_else(|| provider_kind_from_backend(backend));
+
+        return ResolvedModel {
+            model_key: model_key.to_owned(),
+            slug: profile.slug.clone(),
+            provider_kind,
+            provider_config,
+            profile: Some(profile.clone()),
+            backend,
+        };
+    }
+
+    let backend = AgentBackend::from_model(model_key);
+    ResolvedModel {
+        model_key: model_key.to_owned(),
+        slug: model_key.trim().to_owned(),
+        provider_kind: provider_kind_from_backend(backend),
+        provider_config: None,
+        profile: None,
+        backend,
     }
 }
 
@@ -720,6 +783,7 @@ impl std::fmt::Display for AgentRole {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
 
     #[test]
     fn backend_from_claude_slug() {
@@ -889,6 +953,67 @@ mod tests {
         );
         assert_eq!(ModelSpec::from_slug("composer-1").short(), "cx-1");
         assert_eq!(ModelSpec::from_slug("gpt-5-high").short(), "5-high");
+    }
+
+    #[test]
+    fn resolve_model_uses_config_lookup() {
+        let mut config = RokoConfig::default();
+        config.providers.insert(
+            "zai".to_owned(),
+            ProviderConfig {
+                kind: ProviderKind::OpenAiCompat,
+                base_url: Some("https://api.z.ai/api/paas/v4".to_owned()),
+                api_key_env: Some("ZAI_API_KEY".to_owned()),
+                command: None,
+                args: None,
+                timeout_ms: Some(120_000),
+                extra_headers: None,
+                max_concurrent: Some(8),
+            },
+        );
+        config.models.insert(
+            "glm-5-1".to_owned(),
+            ModelProfile {
+                provider: "zai".to_owned(),
+                slug: "glm-5.1".to_owned(),
+                context_window: 200_000,
+                max_output: Some(131_072),
+                supports_tools: true,
+                supports_thinking: true,
+                supports_vision: false,
+                supports_web_search: false,
+                supports_mcp_tools: true,
+                supports_partial: false,
+                tool_format: "openai_json".to_owned(),
+                cost_input_per_m: Some(1.4),
+                cost_output_per_m: Some(4.4),
+                cost_cache_read_per_m: None,
+                cost_cache_write_per_m: None,
+                max_tools: None,
+                tokenizer_ratio: None,
+            },
+        );
+
+        let resolved = resolve_model(&config, "glm-5-1");
+        assert_eq!(resolved.model_key, "glm-5-1");
+        assert_eq!(resolved.slug, "glm-5.1");
+        assert_eq!(resolved.provider_kind, ProviderKind::OpenAiCompat);
+        assert_eq!(resolved.backend, AgentBackend::Codex);
+        assert!(resolved.provider_config.is_some());
+        assert!(resolved.profile.is_some());
+    }
+
+    #[test]
+    fn resolve_model_falls_back_to_legacy_backend() {
+        let config = RokoConfig::default();
+
+        let resolved = resolve_model(&config, "claude-sonnet-4-6");
+        assert_eq!(resolved.model_key, "claude-sonnet-4-6");
+        assert_eq!(resolved.slug, "claude-sonnet-4-6");
+        assert_eq!(resolved.provider_kind, ProviderKind::ClaudeCli);
+        assert_eq!(resolved.backend, AgentBackend::Claude);
+        assert!(resolved.provider_config.is_none());
+        assert!(resolved.profile.is_none());
     }
 
     #[test]
