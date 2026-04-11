@@ -7,6 +7,8 @@ use std::path::PathBuf;
 
 pub mod openai_compat;
 pub mod claude_cli;
+/// Anthropic Messages API adapter.
+pub mod anthropic_api;
 
 /// Adapter for a protocol family. Creates Agent instances configured for a
 /// specific provider and model.
