@@ -1,3 +1,22 @@
+//! OpenAI-compatible provider adapter.
+//!
+//! Kimi-K2.5 is an OpenAI-compatible backend with a few non-standard
+//! constraints that the request builder and response history plumbing must
+//! respect:
+//!
+//! - Images must be sent as base64 `data:image/...;base64,...` payloads.
+//!   Plain image URLs are not accepted.
+//! - When thinking is enabled, Kimi fixes `temperature = 1.0`, `top_p = 0.95`,
+//!   and `n = 1`.
+//! - With thinking enabled, `tool_choice` is limited to `"auto"` or `"none"`.
+//! - The built-in `$web_search` tool is incompatible with thinking mode.
+//! - Tool-call IDs are returned in `functions.<name>:<idx>` form and must be
+//!   preserved exactly when dispatching tool results.
+//! - A single request may include at most 128 tools.
+//! - Requests have a 2-hour timeout budget.
+//! - `reasoning_content` must be carried forward in conversation history when
+//!   building the next turn.
+
 use crate::Agent;
 use crate::codex_agent::{CodexAgent, DEFAULT_MAX_TOKENS};
 use crate::provider::{AgentCreationError, AgentOptions, ProviderAdapter, ProviderError};
