@@ -10,7 +10,10 @@
 //!   avoid obviously wasted retries
 
 use crate::model_router::ThompsonArm;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io;
+use std::path::Path;
 
 const CONTEXT_DIM: usize = 19;
 const WEIGHT_LEARNING_RATE: f64 = 0.35;
@@ -110,6 +113,13 @@ pub struct ConductorBandit {
     context_dim: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ConductorBanditSnapshot {
+    arms: HashMap<String, ThompsonArm>,
+    arm_weights: HashMap<String, Vec<f64>>,
+    context_dim: usize,
+}
+
 impl ConductorBandit {
     /// Create a fresh conductor policy with one Thompson arm per action.
     #[must_use]
@@ -128,6 +138,65 @@ impl ConductorBandit {
             arm_weights,
             context_dim: CONTEXT_DIM,
         }
+    }
+
+    /// Load a persisted conductor policy or return a fresh policy when the
+    /// snapshot is missing or invalid.
+    #[must_use]
+    pub fn load_or_new(path: &Path) -> Self {
+        let Some(snapshot) = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|contents| serde_json::from_str::<ConductorBanditSnapshot>(&contents).ok())
+        else {
+            return Self::new();
+        };
+
+        let mut bandit = Self::new();
+        bandit.context_dim = snapshot.context_dim.max(CONTEXT_DIM);
+
+        for (label, arm) in snapshot.arms {
+            if let Some(action) = ConductorAction::from_label(&label) {
+                bandit.arms.insert(action, arm);
+            }
+        }
+
+        for (label, weights) in snapshot.arm_weights {
+            if let Some(action) = ConductorAction::from_label(&label) {
+                let mut resized = weights;
+                resized.resize(bandit.context_dim, 0.0);
+                bandit.arm_weights.insert(action, resized);
+            }
+        }
+
+        bandit
+    }
+
+    /// Persist the current conductor policy as JSON.
+    pub fn save(&self, path: &Path) -> io::Result<()> {
+        let snapshot = ConductorBanditSnapshot {
+            arms: self
+                .arms
+                .iter()
+                .map(|(action, arm)| (action.label().to_string(), arm.clone()))
+                .collect(),
+            arm_weights: self
+                .arm_weights
+                .iter()
+                .map(|(action, weights)| (action.label().to_string(), weights.clone()))
+                .collect(),
+            context_dim: self.context_dim,
+        };
+        let json = serde_json::to_string_pretty(&snapshot)
+            .map_err(|err| io::Error::other(format!("serialize conductor snapshot: {err}")))?;
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, json)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
     }
 
     /// Choose the highest-scoring intervention for the current state.
@@ -307,6 +376,19 @@ impl ConductorAction {
             Self::SwitchModel => "switch_model",
             Self::Restart => "restart",
             Self::Abort => "abort",
+        }
+    }
+
+    fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "continue" => Some(Self::Continue),
+            "inject_error_digest" => Some(Self::InjectHint(HintType::ErrorDigest)),
+            "inject_skill_suggestion" => Some(Self::InjectHint(HintType::SkillSuggestion)),
+            "inject_simplify_approach" => Some(Self::InjectHint(HintType::SimplifyApproach)),
+            "switch_model" => Some(Self::SwitchModel),
+            "restart" => Some(Self::Restart),
+            "abort" => Some(Self::Abort),
+            _ => None,
         }
     }
 }

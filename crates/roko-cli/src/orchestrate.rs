@@ -27,7 +27,7 @@ use roko_compose::{
     ContextProvider, Placement, PlanArtifacts, PromptComposer, PromptSection, RoleSystemPromptSpec,
     SectionPriority, TaskContext,
 };
-use roko_conductor::diagnosis::DiagnosisEngine;
+use roko_conductor::diagnosis::{DiagnosisEngine, ErrorCategory};
 use roko_conductor::{Conductor, ConductorDecision};
 use roko_core::agent::resolve_model;
 use roko_core::config::schema::RokoConfig;
@@ -52,6 +52,10 @@ use roko_gate::{
 };
 use roko_learn::anomaly::AnomalyDetector;
 use roko_learn::budget::{BudgetAction, BudgetGuardrail};
+use roko_learn::conductor::{
+    ConductorAction as RetryConductorAction, ConductorBandit,
+    ConductorState as RetryConductorState, ErrorPattern as RetryErrorPattern, HintType,
+};
 use roko_learn::costs_db::CostRecord;
 use roko_learn::efficiency::{AgentEfficiencyEvent, FleetCFactor, compute_fleet_cfactor};
 use roko_learn::episode_logger::{Episode, GateVerdict, Usage};
@@ -107,6 +111,10 @@ fn latency_registry_path(workdir: &Path) -> PathBuf {
         .join(".roko")
         .join("learn")
         .join("latency-stats.json")
+}
+
+fn conductor_policy_path(workdir: &Path) -> PathBuf {
+    workdir.join(".roko").join("learn").join("conductor.json")
 }
 
 #[derive(Debug, Clone)]
@@ -1101,6 +1109,8 @@ pub struct PlanRunner {
     conductor: Arc<Conductor>,
     /// Signals accumulated during the current plan run for conductor evaluation.
     conductor_signals: Vec<Signal>,
+    /// Learned intervention policy for failed task dispatch / verification retries.
+    retry_conductor: ConductorBandit,
     /// Context attribution tracker for per-(tier, source_type) demotion decisions.
     attribution_tracker: ContextAttributionTracker,
     /// Rolling EMA of reference rates per (task_tier, context_source_type).
@@ -2083,6 +2093,7 @@ impl PlanRunner {
             task_trackers,
             conductor: Arc::new(Conductor::new()),
             conductor_signals: Vec::new(),
+            retry_conductor: ConductorBandit::load_or_new(&conductor_policy_path(workdir)),
             attribution_tracker: ContextAttributionTracker::load(
                 &workdir.join(".roko").join("context-attribution.jsonl"),
             ),
@@ -2194,6 +2205,7 @@ impl PlanRunner {
             task_trackers,
             conductor: Arc::new(Conductor::new()),
             conductor_signals: Vec::new(),
+            retry_conductor: ConductorBandit::load_or_new(&conductor_policy_path(workdir)),
             attribution_tracker: ContextAttributionTracker::load(
                 &workdir.join(".roko").join("context-attribution.jsonl"),
             ),
@@ -2309,6 +2321,7 @@ impl PlanRunner {
             task_trackers,
             conductor: Arc::new(Conductor::new()),
             conductor_signals: Vec::new(),
+            retry_conductor: ConductorBandit::load_or_new(&conductor_policy_path(workdir)),
             attribution_tracker: ContextAttributionTracker::load(
                 &workdir.join(".roko").join("context-attribution.jsonl"),
             ),
@@ -4050,7 +4063,7 @@ impl PlanRunner {
     async fn handle_implementing_single(&mut self, plan_id: &str, task_id: &str) {
         tracing::info!("[orchestrate] Implementing {plan_id}: dispatching task {task_id}");
 
-        let task_phase = self
+        let task_def = self
             .task_trackers
             .get(plan_id)
             .and_then(|tracker| {
@@ -4060,6 +4073,9 @@ impl PlanRunner {
                     .iter()
                     .find(|task| task.id == task_id)
             })
+            .cloned();
+        let task_phase = task_def
+            .as_ref()
             .map(|task| task.status.as_str())
             .unwrap_or("unknown");
         let _span = info_span!("task", plan_id = %plan_id, task_id = %task_id, phase = %task_phase)
@@ -4073,8 +4089,21 @@ impl PlanRunner {
         let wt_id = format!("{plan_id}-{task_id}");
         let started = std::time::Instant::now();
         let max_retries = 2u32;
+        let max_dispatches = max_retries + 1;
         let mut succeeded = false;
         let mut budget_aborted = false;
+        let mut total_dispatches = 0u32;
+        let mut retry_iteration = 0u32;
+        let mut consecutive_failures = 0u32;
+        let task_complexity = task_def
+            .as_ref()
+            .map(|task| task.tier.clone())
+            .unwrap_or_else(|| "focused".to_string());
+        let base_retry_model = self.task_retry_model(plan_id, task_id);
+        let mut retry_model = base_retry_model.clone();
+        let mut retry_prompt_override: Option<String> = None;
+        let mut pending_feedback: Option<(RetryConductorState, RetryConductorAction)> = None;
+        let mut terminal_error: Option<anyhow::Error> = None;
         let exec_dir = match self.task_exec_dir(plan_id, task_id).await {
             Ok(dir) => dir,
             Err(e) => {
@@ -4095,26 +4124,36 @@ impl PlanRunner {
             }
         };
 
-        for attempt in 0..=max_retries {
-            if attempt > 0 {
+        while total_dispatches < max_dispatches {
+            if total_dispatches > 0 {
                 tracing::info!(
-                    "[orchestrate] Retry {attempt}/{max_retries} for {plan_id}/{task_id}"
+                    "[orchestrate] Retry {}/{} for {plan_id}/{task_id} (model={retry_model})",
+                    total_dispatches,
+                    max_retries
                 );
             }
+
+            let prompt_override = retry_prompt_override.take();
+            let model_override = prompt_override.as_ref().map(|_| retry_model.clone());
+            total_dispatches += 1;
 
             match self
                 .dispatch_agent_with(
                     plan_id,
                     AgentRole::Implementer,
                     task_id,
-                    None,
-                    None,
+                    prompt_override,
+                    model_override,
                     Some(exec_dir.clone()),
                     None,
                 )
                 .await
             {
                 Ok(result) => {
+                    if let Some((state, action)) = pending_feedback.take() {
+                        self.retry_conductor.record_outcome(&state, action, true);
+                        self.persist_retry_conductor();
+                    }
                     match self
                         .record_task_success(plan_id, task_id, &result, &started)
                         .await
@@ -4187,16 +4226,115 @@ impl PlanRunner {
                     break;
                 }
                 Err(e) => {
+                    if let Some((state, action)) = pending_feedback.take() {
+                        self.retry_conductor.record_outcome(&state, action, false);
+                        self.persist_retry_conductor();
+                    }
+
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    let failure_gate = Self::retry_failure_gate(&e);
+                    let failure_context = format!("{e:#}");
+                    let state = RetryConductorState {
+                        iteration: retry_iteration.saturating_add(1),
+                        consecutive_failures,
+                        error_pattern: Self::retry_error_pattern(&e),
+                        elapsed_ms: u64::try_from(started.elapsed().as_millis())
+                            .unwrap_or(u64::MAX),
+                        cost_so_far_usd: self.task_spent(plan_id, task_id),
+                        model_tier: Self::retry_model_tier_label(&retry_model),
+                        task_complexity: task_complexity.clone(),
+                    };
+                    let action = self.retry_conductor.select_action(&state);
                     tracing::error!(
                         "[orchestrate] task {task_id} failed (attempt {}): {e}",
-                        attempt + 1
+                        total_dispatches
                     );
-                    if attempt == max_retries {
-                        self.record_task_failure(plan_id, task_id, None, None, &e, &started, None)
-                            .await;
+
+                    tracing::info!(
+                        plan_id = %plan_id,
+                        task_id = %task_id,
+                        ?action,
+                        iteration = state.iteration,
+                        consecutive_failures = state.consecutive_failures,
+                        error_pattern = ?state.error_pattern,
+                        "[orchestrate] conductor selected retry action"
+                    );
+
+                    if matches!(action, RetryConductorAction::Abort)
+                        || total_dispatches >= max_dispatches
+                    {
+                        self.retry_conductor.record_outcome(&state, action, false);
+                        self.persist_retry_conductor();
+                        terminal_error = Some(e);
+                        break;
+                    }
+
+                    match action {
+                        RetryConductorAction::Continue => {
+                            retry_prompt_override = (retry_model != base_retry_model).then(|| {
+                                self.build_conductor_retry_prompt(
+                                    plan_id,
+                                    task_id,
+                                    task_def.as_ref(),
+                                    &failure_context,
+                                    failure_gate.as_deref(),
+                                    None,
+                                )
+                            });
+                            retry_iteration = retry_iteration.saturating_add(1);
+                            pending_feedback = Some((state, action));
+                        }
+                        RetryConductorAction::InjectHint(hint) => {
+                            retry_prompt_override = Some(self.build_conductor_retry_prompt(
+                                plan_id,
+                                task_id,
+                                task_def.as_ref(),
+                                &failure_context,
+                                failure_gate.as_deref(),
+                                Some(hint),
+                            ));
+                            retry_iteration = retry_iteration.saturating_add(1);
+                            pending_feedback = Some((state, action));
+                        }
+                        RetryConductorAction::SwitchModel => {
+                            retry_model = self.next_tier_model_slug(&retry_model);
+                            retry_prompt_override = Some(self.build_conductor_retry_prompt(
+                                plan_id,
+                                task_id,
+                                task_def.as_ref(),
+                                &failure_context,
+                                failure_gate.as_deref(),
+                                None,
+                            ));
+                            retry_iteration = retry_iteration.saturating_add(1);
+                            pending_feedback = Some((state, action));
+                        }
+                        RetryConductorAction::Restart => {
+                            retry_model = base_retry_model.clone();
+                            retry_prompt_override = None;
+                            retry_iteration = 0;
+                            consecutive_failures = 0;
+                            pending_feedback = Some((state, action));
+                        }
+                        RetryConductorAction::Abort => {
+                            unreachable!("abort handled above");
+                        }
                     }
                 }
             }
+        }
+
+        if let Some(error) = terminal_error.as_ref() {
+            self.record_task_failure(
+                plan_id,
+                task_id,
+                None,
+                Some(retry_model.as_str()),
+                error,
+                &started,
+                None,
+            )
+            .await;
         }
 
         if self.cloud_execution.is_none() {
@@ -4535,6 +4673,189 @@ impl PlanRunner {
             .model
             .clone()
             .unwrap_or_else(|| "claude-sonnet-4-6".into())
+    }
+
+    fn task_retry_model(&self, plan_id: &str, task_id: &str) -> String {
+        self.task_trackers
+            .get(plan_id)
+            .and_then(|tracker| {
+                tracker
+                    .tasks_file
+                    .tasks
+                    .iter()
+                    .find(|task| task.id == task_id)
+            })
+            .map(|task| {
+                task.effective_model(
+                    self.config
+                        .agent
+                        .model
+                        .as_deref()
+                        .unwrap_or("claude-sonnet-4-6"),
+                    Some(&self.config.agent.tier_models),
+                )
+            })
+            .unwrap_or_else(|| self.effective_model())
+    }
+
+    fn retry_model_tier_label(model_slug: &str) -> String {
+        if model_slug.contains("haiku") || model_slug.contains("mini") {
+            "fast".to_string()
+        } else if model_slug.contains("opus") || model_slug.contains("gpt-5") {
+            "premium".to_string()
+        } else {
+            "standard".to_string()
+        }
+    }
+
+    fn retry_failure_gate(error: &anyhow::Error) -> Option<String> {
+        error
+            .chain()
+            .find_map(|cause| cause.to_string().strip_prefix("gate=").map(str::to_owned))
+            .or_else(|| {
+                let chain = format!("{error:#}");
+                chain
+                    .lines()
+                    .find_map(|line| line.trim().strip_prefix("gate="))
+                    .map(str::trim)
+                    .filter(|gate| !gate.is_empty())
+                    .map(ToOwned::to_owned)
+            })
+    }
+
+    fn retry_error_pattern(error: &anyhow::Error) -> RetryErrorPattern {
+        let gate = Self::retry_failure_gate(error);
+        if gate
+            .as_deref()
+            .is_some_and(|gate| matches!(gate, "compile" | "clippy"))
+        {
+            return RetryErrorPattern::Compile;
+        }
+        if gate
+            .as_deref()
+            .is_some_and(|gate| matches!(gate, "test" | "integration"))
+        {
+            return RetryErrorPattern::Test;
+        }
+
+        let chain = format!("{error:#}");
+        if chain.contains(GHOST_TURN_SIGNAL_KIND) {
+            return RetryErrorPattern::LoopDetected;
+        }
+        if chain.to_ascii_lowercase().contains("tool") {
+            return RetryErrorPattern::ToolCall;
+        }
+
+        let diagnosis = DiagnosisEngine::default().diagnose(&chain);
+        diagnosis
+            .first()
+            .map(|match_| match match_.category {
+                ErrorCategory::CompileError
+                | ErrorCategory::ClippyWarning
+                | ErrorCategory::DependencyError
+                | ErrorCategory::TypeMismatch
+                | ErrorCategory::BorrowCheckerError
+                | ErrorCategory::LifetimeError
+                | ErrorCategory::ImportError => RetryErrorPattern::Compile,
+                ErrorCategory::TestFailure => RetryErrorPattern::Test,
+                ErrorCategory::TimeoutError => RetryErrorPattern::Timeout,
+                ErrorCategory::LlmRateLimit => RetryErrorPattern::RateLimit,
+                ErrorCategory::LlmContextOverflow => RetryErrorPattern::ContextOverflow,
+                ErrorCategory::LlmRefusal => RetryErrorPattern::Refusal,
+                ErrorCategory::LoopDetected => RetryErrorPattern::LoopDetected,
+                ErrorCategory::GitConflict
+                | ErrorCategory::MissingFile
+                | ErrorCategory::PermissionDenied
+                | ErrorCategory::NetworkError
+                | ErrorCategory::OomError
+                | ErrorCategory::DiskFull
+                | ErrorCategory::ProcessCrash => RetryErrorPattern::Infrastructure,
+                _ => RetryErrorPattern::Unknown,
+            })
+            .unwrap_or(RetryErrorPattern::Unknown)
+    }
+
+    fn build_conductor_retry_hint(
+        &self,
+        plan_id: &str,
+        task_id: &str,
+        task_def: Option<&crate::task_parser::TaskDef>,
+        hint: HintType,
+        error_output: &str,
+    ) -> String {
+        match hint {
+            HintType::ErrorDigest => format!(
+                "## Retry Guidance\n\nUse the failing gate output below as the primary constraint and fix the concrete issue before making broader changes.\n\n```text\n{}\n```",
+                truncate_output(error_output)
+            ),
+            HintType::SkillSuggestion => {
+                let task_files = task_def.map(|task| task.files.clone()).unwrap_or_default();
+                let task_tier = task_def.map(|task| task.tier.as_str()).unwrap_or("");
+                let task_text = task_def
+                    .map(|task| task.build_prompt(plan_id, &self.workdir))
+                    .unwrap_or_else(|| format!("Plan: {plan_id}\nTask ID: {task_id}\n"));
+                let symbols = extract_task_symbols(&task_text);
+                let skills: Vec<_> = self
+                    .skill_library
+                    .query(&task_files, task_tier, &symbols)
+                    .into_iter()
+                    .filter(|skill| skill.success_rate > 0.5)
+                    .take(1)
+                    .collect();
+
+                if skills.is_empty() {
+                    "## Retry Guidance\n\nReuse the simplest prior-success pattern available in this area instead of inventing a new approach.".to_string()
+                } else {
+                    format!(
+                        "## Retry Guidance\n\nApply the strongest matching prior skill before changing other parts of the codebase.\n\n{}",
+                        render_prior_experience(&skills)
+                    )
+                }
+            }
+            HintType::SimplifyApproach => "## Retry Guidance\n\nTake the smallest path that makes the failing verification pass. Avoid refactors, new abstractions, and unrelated cleanup on this retry.".to_string(),
+        }
+    }
+
+    fn build_conductor_retry_prompt(
+        &self,
+        plan_id: &str,
+        task_id: &str,
+        task_def: Option<&crate::task_parser::TaskDef>,
+        error_output: &str,
+        gate: Option<&str>,
+        hint: Option<HintType>,
+    ) -> String {
+        let gate = gate.unwrap_or("verify");
+        let base_prompt = task_def
+            .map(|task| task.build_prompt(plan_id, &self.workdir))
+            .unwrap_or_else(|| {
+                format!("Plan: {plan_id}\nTask: {task_id}\n\nImplement the task described above.")
+            });
+        let prompt = task_def
+            .map(|task| task.build_fix_prompt(&base_prompt, gate, error_output))
+            .unwrap_or_else(|| {
+                format!(
+                    "{base_prompt}\n\n---\n\n## Verification Failed\n\nPhase: {gate}\n\nError output:\n```text\n{}\n```",
+                    truncate_output(error_output)
+                )
+            });
+
+        match hint {
+            Some(hint) => format!(
+                "{prompt}\n\n---\n\n{}",
+                self.build_conductor_retry_hint(plan_id, task_id, task_def, hint, error_output)
+            ),
+            None => prompt,
+        }
+    }
+
+    fn persist_retry_conductor(&self) {
+        if let Err(err) = self
+            .retry_conductor
+            .save(&conductor_policy_path(&self.workdir))
+        {
+            tracing::warn!("[orchestrate] failed to persist conductor policy: {err}");
+        }
     }
 
     /// Resolve the runtime provider id for a model slug using `roko.toml`.
@@ -9906,6 +10227,62 @@ mod tests {
             Some(roko_learn::anomaly::Anomaly::PromptLoop { repeated_count })
                 if repeated_count >= 5
         ));
+    }
+
+    #[test]
+    fn conductor_wiring_persists_learned_switch_model_policy() {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = conductor_policy_path(tmp.path());
+        let state = RetryConductorState {
+            iteration: 2,
+            consecutive_failures: 2,
+            error_pattern: RetryErrorPattern::Compile,
+            elapsed_ms: 45_000,
+            cost_so_far_usd: 0.08,
+            model_tier: "fast".to_string(),
+            task_complexity: "architectural".to_string(),
+        };
+        let mut bandit = ConductorBandit::new();
+
+        for _ in 0..64 {
+            bandit.record_outcome(&state, RetryConductorAction::Continue, false);
+            bandit.record_outcome(&state, RetryConductorAction::SwitchModel, true);
+        }
+
+        bandit.save(&path).expect("save conductor policy");
+        let reloaded = ConductorBandit::load_or_new(&path);
+
+        let mut switch_model_count = 0;
+        for _ in 0..32 {
+            if reloaded.select_action(&state) == RetryConductorAction::SwitchModel {
+                switch_model_count += 1;
+            }
+        }
+
+        assert!(
+            switch_model_count >= 24,
+            "expected persisted policy to prefer switch_model, got {switch_model_count}/32"
+        );
+    }
+
+    #[test]
+    fn conductor_wiring_maps_compile_gate_failures_to_compile_pattern() {
+        let error = with_task_failure_context(
+            anyhow!("verify failed for T1: cargo check -p roko-cli"),
+            "T1",
+            "ready",
+            "compile",
+            None,
+        );
+
+        assert_eq!(
+            PlanRunner::retry_failure_gate(&error).as_deref(),
+            Some("compile")
+        );
+        assert_eq!(
+            PlanRunner::retry_error_pattern(&error),
+            RetryErrorPattern::Compile
+        );
     }
 
     #[test]
