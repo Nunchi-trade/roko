@@ -60,6 +60,6 @@ pub use openai_compat_backend::OpenAiCompatLlmBackend;
 pub use pool::{AgentInstanceId, AgentPool};
 pub use provider::{ProviderAdapter, adapter_for_kind, create_agent_for_model};
 pub use safety::SafetyLayer;
-pub use streaming::StreamChunk;
+pub use streaming::{StreamAccumulator, StreamChunk};
 pub use tool_loop::ToolLoopAgent;
 pub use usage::Usage;

@@ -1,8 +1,9 @@
 //! Typed streaming events for provider adapters and tool loops.
 
-use crate::chat_types::FinishReason;
+use crate::chat_types::{ChatResponse, FinishReason};
 use crate::translate::{normalize_finish_reason, openai::parse_usage};
 use crate::usage::Usage;
+use roko_core::tool::ToolCall;
 use serde_json::Value;
 
 /// Incremental stream events normalized across GLM and Kimi responses.
@@ -29,6 +30,96 @@ pub enum StreamChunk {
     Done(FinishReason),
     /// Terminal provider or transport error surfaced as a stream event.
     Error(String),
+}
+
+/// Incrementally reconstruct a canonical [`ChatResponse`] from stream chunks.
+#[derive(Debug, Clone, Default)]
+pub struct StreamAccumulator {
+    reasoning: String,
+    content: String,
+    tool_calls: Vec<PartialToolCall>,
+    usage: Usage,
+    finish_reason: FinishReason,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PartialToolCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+impl StreamAccumulator {
+    /// Create an empty accumulator.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Incorporate one streamed chunk into the in-progress response.
+    pub fn push(&mut self, chunk: StreamChunk) {
+        match chunk {
+            StreamChunk::ReasoningDelta(delta) => self.reasoning.push_str(&delta),
+            StreamChunk::ContentDelta(delta) => self.content.push_str(&delta),
+            StreamChunk::ToolCallDelta {
+                index,
+                id_delta,
+                name_delta,
+                arguments_delta,
+            } => {
+                while self.tool_calls.len() <= index {
+                    self.tool_calls.push(PartialToolCall::default());
+                }
+
+                let tool_call = &mut self.tool_calls[index];
+                if let Some(id) = id_delta {
+                    tool_call.id = id;
+                }
+                if let Some(name) = name_delta {
+                    tool_call.name = name;
+                }
+                tool_call.arguments.push_str(&arguments_delta);
+            }
+            StreamChunk::Usage(usage) => self.usage = usage,
+            StreamChunk::Done(finish_reason) => self.finish_reason = finish_reason,
+            StreamChunk::Error(_) => {}
+        }
+    }
+
+    /// Convert the accumulated stream state into a canonical response.
+    #[must_use]
+    pub fn finalize(self) -> ChatResponse {
+        let tool_calls = self
+            .tool_calls
+            .into_iter()
+            .filter(|tool_call| {
+                !(tool_call.id.is_empty()
+                    && tool_call.name.is_empty()
+                    && tool_call.arguments.trim().is_empty())
+            })
+            .map(|tool_call| {
+                let arguments = if tool_call.arguments.trim().is_empty() {
+                    serde_json::json!({})
+                } else {
+                    serde_json::from_str(&tool_call.arguments)
+                        .unwrap_or_else(|_| Value::String(tool_call.arguments))
+                };
+
+                ToolCall::new(tool_call.id, tool_call.name, arguments)
+            })
+            .collect();
+
+        let mut response = ChatResponse {
+            content: self.content,
+            reasoning: (!self.reasoning.is_empty()).then_some(self.reasoning),
+            tool_calls,
+            usage: self.usage,
+            finish_reason: self.finish_reason,
+            ..Default::default()
+        };
+        response.raw_assistant_message = Some(response.as_assistant_message());
+        response
+    }
 }
 
 /// Parse a single OpenAI-compatible SSE line into a canonical stream chunk.
@@ -103,9 +194,8 @@ mod tests {
 
     #[test]
     fn sse_parser_reads_content_delta() {
-        let chunk = parse_sse_line(
-            r#"data: {"choices":[{"delta":{"content":"I can answer now."}}]}"#,
-        );
+        let chunk =
+            parse_sse_line(r#"data: {"choices":[{"delta":{"content":"I can answer now."}}]}"#);
 
         assert!(matches!(
             chunk,
