@@ -1,3 +1,44 @@
+//! Provider routing and agent construction.
+//!
+//! This module is the migration layer between the older "pick a concrete
+//! [`Agent`](crate::Agent) and construct it directly" style and the newer
+//! provider-aware factory flow.
+//!
+//! ## Relationship to `Agent`
+//!
+//! The concrete backends in this crate, such as `ClaudeCliAgent`,
+//! `CodexAgent`, `CursorAgent`, and `OllamaAgent`, still implement
+//! [`Agent`](crate::Agent). The provider layer does not replace that trait.
+//! Instead, it chooses and configures one of those implementations from
+//! `RokoConfig` plus a model key, then returns `Box<dyn Agent>` to the
+//! existing runtime.
+//!
+//! ## When to use `create_agent_for_model`
+//!
+//! Use [`create_agent_for_model`] when you want config-driven resolution:
+//! the caller has a `RokoConfig`, a model key, and wants Roko to resolve the
+//! provider, model slug, timeout, and other provider settings in one place.
+//! This is the right entry point for CLI/runtime code that should follow the
+//! configured routing rules.
+//!
+//! Construct a concrete agent directly when you already know the exact
+//! backend you want, such as in a test, a focused integration, or a
+//! backend-specific utility that intentionally bypasses model resolution.
+//!
+//! ## Adding a new provider
+//!
+//! There are two supported paths:
+//!
+//! - If the provider needs new runtime behavior, implement
+//!   [`ProviderAdapter`] for it and register the adapter in
+//!   [`adapter_for_kind`].
+//! - If the provider is already covered by an existing adapter, add a
+//!   matching `providers.*` entry and point one or more `models.*` entries at
+//!   it in `roko.toml`.
+//!
+//! In both cases, the goal is the same: keep provider-specific wiring out of
+//! the call sites and centralize it in this module.
+
 use crate::Agent;
 use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::config::schema::RokoConfig;
