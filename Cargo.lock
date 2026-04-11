@@ -5124,6 +5124,7 @@ dependencies = [
  "async-trait",
  "bardo-primitives",
  "chrono",
+ "roko-agent",
  "roko-core",
  "roko-learn",
  "roko-neuro",

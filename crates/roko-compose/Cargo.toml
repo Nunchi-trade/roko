@@ -11,6 +11,7 @@ description = "Composer implementations for Roko: prompt assembly with token bud
 workspace = true
 
 [dependencies]
+roko-agent = { path = "../roko-agent" }
 roko-core = { path = "../roko-core" }
 roko-learn = { path = "../roko-learn" }
 roko-neuro = { path = "../roko-neuro" }
