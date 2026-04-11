@@ -33,6 +33,8 @@ pub mod costs_db;
 pub mod costs_log;
 pub mod efficiency;
 pub mod episode_logger;
+/// Cheap pre-processing of noisy gate failures into retry-ready diagnoses.
+pub mod error_enrichment;
 pub mod hdc_clustering;
 /// Rolling latency EMAs and percentiles for routing feedback.
 pub mod latency;
