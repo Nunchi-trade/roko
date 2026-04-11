@@ -89,6 +89,22 @@ impl ProviderAdapter for OpenAiCompatAdapter {
     }
 
     fn classify_error(&self, status: u16, body: &Value) -> ProviderError {
+        if let Some(code) = body.pointer("/error/code").and_then(Value::as_str) {
+            return match code {
+                "1302" => ProviderError::RateLimit {
+                    retry_after_ms: Some(5_000),
+                },
+                "1303" | "1304" | "1305" => ProviderError::RateLimit {
+                    retry_after_ms: Some(60_000),
+                },
+                "1301" => ProviderError::ContentPolicy,
+                "1000" | "1001" | "1002" | "1003" | "1004" => ProviderError::AuthFailure,
+                "1211" => ProviderError::ModelNotFound,
+                "1261" => ProviderError::ContextOverflow,
+                _ => ProviderError::Other(format!("Z.AI error {code}")),
+            };
+        }
+
         match status {
             429 => ProviderError::RateLimit {
                 retry_after_ms: body
@@ -287,6 +303,23 @@ mod tests {
         assert!(matches!(
             adapter.classify_error(401, &Value::Null),
             ProviderError::AuthFailure
+        ));
+    }
+
+    #[test]
+    fn zai_error_classify_maps_business_codes() {
+        let adapter = OpenAiCompatAdapter;
+
+        match adapter.classify_error(429, &serde_json::json!({ "error": { "code": "1302" } })) {
+            ProviderError::RateLimit {
+                retry_after_ms: Some(ms),
+            } => assert_eq!(ms, 5_000),
+            other => panic!("unexpected Z.AI classification: {other:?}"),
+        }
+
+        assert!(matches!(
+            adapter.classify_error(400, &serde_json::json!({ "error": { "code": "1261" } })),
+            ProviderError::ContextOverflow
         ));
     }
 }
