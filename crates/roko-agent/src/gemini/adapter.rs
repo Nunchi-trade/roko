@@ -4,9 +4,10 @@
 //! appropriate concrete agent shape based on model capabilities.
 //! The embedding agent remains a thin wrapper for now.
 
+use super::compat::GeminiCompatAgent;
 use super::native::GeminiNativeAgent;
 use crate::agent::{Agent, AgentResult};
-use crate::codex_agent::{CodexAgent, DEFAULT_MAX_TOKENS};
+use crate::codex_agent::CodexAgent;
 use crate::provider::{AgentCreationError, AgentOptions, ProviderAdapter, ProviderError};
 use async_trait::async_trait;
 use roko_core::agent::ProviderKind;
@@ -15,30 +16,10 @@ use roko_core::{Context, Signal};
 use serde_json::Value;
 
 const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com";
-const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 
 fn compat_base_url(base_url: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');
     format!("{trimmed}/v1beta/openai")
-}
-
-fn resolved_timeout_ms(options: &AgentOptions) -> u64 {
-    options.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS)
-}
-
-fn resolved_max_tokens(model: &ModelProfile) -> u32 {
-    model
-        .max_output
-        .and_then(|value| u32::try_from(value).ok())
-        .unwrap_or(DEFAULT_MAX_TOKENS)
-}
-
-fn resolved_name(options: &AgentOptions, default_name: String) -> String {
-    if options.name.is_empty() {
-        default_name
-    } else {
-        options.name.clone()
-    }
 }
 
 /// Embedding-only Gemini agent.
@@ -75,47 +56,6 @@ impl GeminiEmbedAgent {
 
 #[async_trait]
 impl Agent for GeminiEmbedAgent {
-    async fn run(&self, input: &Signal, ctx: &Context) -> AgentResult {
-        self.inner.run(input, ctx).await
-    }
-
-    fn name(&self) -> &str {
-        self.inner.name()
-    }
-
-    fn supports_streaming(&self) -> bool {
-        self.inner.supports_streaming()
-    }
-}
-
-/// Gemini OpenAI-compatible agent.
-///
-/// Used for models that do not require native Gemini-only features.
-pub struct GeminiCompatAgent {
-    inner: CodexAgent,
-}
-
-impl GeminiCompatAgent {
-    /// Construct a Gemini OpenAI-compatible agent.
-    #[must_use]
-    pub fn new(
-        api_key: String,
-        base_url: String,
-        model: ModelProfile,
-        options: &AgentOptions,
-    ) -> Self {
-        let name = resolved_name(options, format!("gemini-compat:{}", model.slug));
-        let inner = CodexAgent::new(api_key, &model.slug)
-            .with_base_url(compat_base_url(&base_url))
-            .with_timeout_ms(resolved_timeout_ms(options))
-            .with_max_tokens(resolved_max_tokens(&model))
-            .with_name(name);
-        Self { inner }
-    }
-}
-
-#[async_trait]
-impl Agent for GeminiCompatAgent {
     async fn run(&self, input: &Signal, ctx: &Context) -> AgentResult {
         self.inner.run(input, ctx).await
     }
