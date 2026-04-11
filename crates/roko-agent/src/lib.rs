@@ -28,6 +28,7 @@ pub mod cursor_agent;
 pub mod dispatcher;
 pub mod exec;
 pub mod format;
+pub mod gemini;
 pub mod http;
 pub mod mcp;
 pub mod mock;
