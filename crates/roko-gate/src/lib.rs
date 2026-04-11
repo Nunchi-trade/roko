@@ -17,6 +17,7 @@
 pub mod adaptive_threshold;
 
 pub mod artifact_store;
+pub mod fact_check;
 pub mod clippy_gate;
 pub mod compile;
 pub mod diff_gate;
@@ -42,6 +43,7 @@ pub use diff_gate::{DiffAnalysis, DiffGate, DiffPayload, analyze_diff};
 pub use env_builder::{GateEnv, GateEnvBuilder, build_for_rung};
 pub use feedback::{GateFeedback, Severity, feedback_for_agent};
 pub use payload::{BuildSystem, GatePayload, TestSelector};
+pub use fact_check::{FactCheckGate, SearchHit, SearchOracle};
 pub use ratchet::GateRatchet;
 pub use shell::ShellGate;
 pub use test_gate::{TestGate, parse_test_counts};
