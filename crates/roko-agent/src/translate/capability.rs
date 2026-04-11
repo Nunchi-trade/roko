@@ -20,6 +20,7 @@
 
 use std::sync::Arc;
 
+use roko_core::config::schema::ModelProfile;
 use roko_core::tool::{ToolFormat, format::profile_for_model};
 
 use super::{ClaudeTranslator, OllamaTranslator, ReActTranslator, Translator};
@@ -29,6 +30,7 @@ use super::{ClaudeTranslator, OllamaTranslator, ReActTranslator, Translator};
 /// Derived from [`roko_core::tool::format::profile_for_model`]. Used by
 /// [`translator_for`] to pick the right translator for a model slug and
 /// by the multi-turn loop to cap tool counts before degrading.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 pub struct ModelCapabilities {
     /// Whether the model supports any native tool-calling format.
@@ -39,6 +41,18 @@ pub struct ModelCapabilities {
     pub tool_format: ToolFormat,
     /// Tool-count ceiling before the model starts misbehaving.
     pub max_tools_before_degrade: u8,
+    /// Whether the model supports thinking / reasoning content.
+    pub supports_thinking: bool,
+    /// Whether the model supports vision inputs.
+    pub supports_vision: bool,
+    /// Whether the model supports built-in web search.
+    pub supports_web_search: bool,
+    /// Whether the model supports native MCP tools.
+    pub supports_mcp_tools: bool,
+    /// Whether the model supports partial continuation.
+    pub supports_partial: bool,
+    /// Whether the model supports streaming tool events.
+    pub supports_tool_streaming: bool,
 }
 
 /// Return the capability snapshot for a model slug.
@@ -53,6 +67,50 @@ pub fn capabilities_for(slug: &str) -> ModelCapabilities {
         supports_parallel_tool_calls: profile.parallel_safe,
         tool_format: profile.preferred.clone(),
         max_tools_before_degrade: profile.max_tools_before_degrade,
+        supports_thinking: false,
+        supports_vision: false,
+        supports_web_search: false,
+        supports_mcp_tools: false,
+        supports_partial: false,
+        supports_tool_streaming: false,
+    }
+}
+
+/// Project a full model profile into translator-facing capabilities.
+#[must_use]
+pub fn capabilities_from_profile(profile: &ModelProfile) -> ModelCapabilities {
+    let tool_profile = profile_for_model(&profile.slug);
+    let tool_format = tool_format_from_str(&profile.tool_format);
+    let max_tools_before_degrade = profile
+        .max_tools
+        .and_then(|value| u8::try_from(value).ok())
+        .unwrap_or(tool_profile.max_tools_before_degrade);
+    ModelCapabilities {
+        supports_tools: profile.supports_tools,
+        supports_parallel_tool_calls: tool_profile.parallel_safe,
+        tool_format,
+        max_tools_before_degrade,
+        supports_thinking: profile.supports_thinking,
+        supports_vision: profile.supports_vision,
+        supports_web_search: profile.supports_web_search,
+        supports_mcp_tools: profile.supports_mcp_tools,
+        supports_partial: profile.supports_partial,
+        supports_tool_streaming: false,
+    }
+}
+
+fn tool_format_from_str(tool_format: &str) -> ToolFormat {
+    match tool_format.trim() {
+        "openai_json" => ToolFormat::OpenAiJson,
+        "anthropic_blocks" => ToolFormat::AnthropicBlocks,
+        "hermes_json" => ToolFormat::HermesJson,
+        "gemma4_tokens" => ToolFormat::Gemma4Tokens,
+        "mistral_tokens" => ToolFormat::MistralTokens,
+        "pythonic" => ToolFormat::Pythonic,
+        "qwen_xml" => ToolFormat::QwenXml,
+        "react_text" => ToolFormat::ReActText,
+        "json_mode" => ToolFormat::JsonMode,
+        other => ToolFormat::Custom(other.to_string()),
     }
 }
 
@@ -165,6 +223,41 @@ mod tests {
                 "tool_format mismatch for {slug}"
             );
         }
+    }
+
+    #[test]
+    fn capabilities_from_profile_maps_all_fields() {
+        let profile = ModelProfile {
+            provider: "zai".to_string(),
+            slug: "gpt-5".to_string(),
+            context_window: 200_000,
+            max_output: Some(131_072),
+            supports_tools: true,
+            supports_thinking: true,
+            supports_vision: true,
+            supports_web_search: true,
+            supports_mcp_tools: true,
+            supports_partial: true,
+            tool_format: "openai_json".to_string(),
+            cost_input_per_m: Some(1.40),
+            cost_output_per_m: Some(4.40),
+            cost_cache_read_per_m: None,
+            cost_cache_write_per_m: None,
+            max_tools: Some(32),
+            tokenizer_ratio: Some(1.0),
+        };
+
+        let caps = capabilities_from_profile(&profile);
+        assert!(caps.supports_tools);
+        assert!(caps.supports_parallel_tool_calls);
+        assert_eq!(caps.tool_format, ToolFormat::OpenAiJson);
+        assert_eq!(caps.max_tools_before_degrade, 32);
+        assert!(caps.supports_thinking);
+        assert!(caps.supports_vision);
+        assert!(caps.supports_web_search);
+        assert!(caps.supports_mcp_tools);
+        assert!(caps.supports_partial);
+        assert!(!caps.supports_tool_streaming);
     }
 
     #[test]

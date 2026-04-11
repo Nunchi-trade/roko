@@ -42,7 +42,7 @@ pub mod ollama;
 pub mod openai;
 pub mod react;
 
-pub use capability::{ModelCapabilities, capabilities_for, translator_for};
+pub use capability::{ModelCapabilities, capabilities_for, capabilities_from_profile, translator_for};
 pub use claude::ClaudeTranslator;
 pub use ollama::OllamaTranslator;
 pub use openai::OpenAiTranslator;
