@@ -332,6 +332,10 @@ mod tests {
             adapter_for_kind(ProviderKind::CursorAcp).kind(),
             ProviderKind::CursorAcp
         );
+        assert_eq!(
+            adapter_for_kind(ProviderKind::PerplexityApi).kind(),
+            ProviderKind::PerplexityApi
+        );
     }
 
     #[tokio::test]
