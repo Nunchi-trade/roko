@@ -10,6 +10,7 @@
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
 use roko_agent::gemini::GroundingMetadata;
@@ -330,20 +331,85 @@ pub fn build_research_prompt_gemini(
 /// Extract `(title, url)` citation pairs from Gemini grounding metadata.
 #[must_use]
 pub fn grounding_to_citations(meta: &GroundingMetadata) -> Vec<(String, String)> {
+    grounding_citation_numbers(meta).0
+}
+
+fn grounding_citation_numbers(meta: &GroundingMetadata) -> (Vec<(String, String)>, Vec<Option<usize>>) {
     let mut citations = Vec::new();
+    let mut chunk_numbers = Vec::new();
 
     if let Some(chunks) = &meta.grounding_chunks {
         for chunk in chunks {
-            if let Some(web) = &chunk.web {
-                let citation = (web.title.clone(), web.uri.clone());
-                if !citations.contains(&citation) {
+            let Some(web) = &chunk.web else {
+                chunk_numbers.push(None);
+                continue;
+            };
+
+            let citation = (web.title.clone(), web.uri.clone());
+            let index = citations
+                .iter()
+                .position(|existing| existing == &citation)
+                .unwrap_or_else(|| {
                     citations.push(citation);
-                }
+                    citations.len() - 1
+                });
+            chunk_numbers.push(Some(index + 1));
+        }
+    }
+
+    (citations, chunk_numbers)
+}
+
+fn format_citation_markers(numbers: impl IntoIterator<Item = usize>) -> String {
+    numbers
+        .into_iter()
+        .map(|number| format!("[{number}]"))
+        .collect()
+}
+
+/// Insert numbered `[N]` citation markers into Gemini grounded text.
+#[must_use]
+pub fn grounding_to_inline_citations(text: &str, meta: &GroundingMetadata) -> String {
+    let (_, chunk_numbers) = grounding_citation_numbers(meta);
+    let Some(supports) = meta.grounding_supports.as_ref() else {
+        return text.to_string();
+    };
+
+    let char_len = text.chars().count();
+    let mut insertions = BTreeMap::<usize, BTreeSet<usize>>::new();
+    for support in supports {
+        if support.segment.end_index > char_len {
+            continue;
+        }
+
+        let refs = insertions.entry(support.segment.end_index).or_default();
+        for chunk_index in &support.grounding_chunk_indices {
+            if let Some(Some(number)) = chunk_numbers.get(*chunk_index) {
+                refs.insert(*number);
             }
         }
     }
 
-    citations
+    if insertions.is_empty() {
+        return text.to_string();
+    }
+
+    let mut cited = String::new();
+    if let Some(numbers) = insertions.get(&0) {
+        cited.push_str(&format_citation_markers(numbers.iter().copied()));
+    }
+
+    for (i, ch) in text.chars().enumerate() {
+        cited.push(ch);
+        if let Some(numbers) = insertions.get(&(i + 1)) {
+            if !cited.chars().last().is_some_and(char::is_whitespace) {
+                cited.push(' ');
+            }
+            cited.push_str(&format_citation_markers(numbers.iter().copied()));
+        }
+    }
+
+    cited
 }
 
 /// Convert Gemini grounding metadata into the same markdown research shape
@@ -355,15 +421,16 @@ pub fn save_research_with_grounding(
     metadata: &GroundingMetadata,
 ) -> Result<PathBuf> {
     let mut doc = String::new();
+    let cited_content = grounding_to_inline_citations(content, metadata);
     writeln!(doc, "# Research: {topic}\n")?;
     writeln!(
         doc,
         "> Generated via Gemini Google Search grounding — {}\n",
         chrono::Local::now().format("%Y-%m-%d")
     )?;
-    writeln!(doc, "{content}\n")?;
+    writeln!(doc, "{cited_content}\n")?;
 
-    let citations = grounding_to_citations(metadata);
+    let (citations, chunk_numbers) = grounding_citation_numbers(metadata);
     if !citations.is_empty() {
         writeln!(doc, "\n## Sources\n")?;
         for (i, (title, url)) in citations.iter().enumerate() {
@@ -401,15 +468,18 @@ pub fn save_research_with_grounding(
                 let refs = support
                     .grounding_chunk_indices
                     .iter()
-                    .map(|index| (index + 1).to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                    .filter_map(|index| chunk_numbers.get(*index).and_then(|number| *number))
+                    .collect::<BTreeSet<_>>();
                 let segment = support.segment.text.trim();
 
                 if refs.is_empty() {
                     writeln!(doc, "- {segment}")?;
                 } else {
-                    writeln!(doc, "- {segment} [{refs}]")?;
+                    writeln!(
+                        doc,
+                        "- {segment} {}",
+                        format_citation_markers(refs.into_iter())
+                    )?;
                 }
             }
         }
@@ -762,6 +832,95 @@ mod tests {
         assert!(doc.contains("## Search Context"));
         assert!(doc.contains("Rust async runtimes benchmark"));
         assert!(doc.contains("Tokio remains the dominant runtime. [1]"));
+    }
+
+    #[test]
+    fn grounding_to_citations_extracts_unique_sources() {
+        use roko_agent::gemini::{GroundingChunk, GroundingMetadata, WebChunk};
+
+        let metadata = GroundingMetadata {
+            web_search_queries: None,
+            grounding_chunks: Some(vec![
+                GroundingChunk {
+                    web: Some(WebChunk {
+                        uri: "https://tokio.rs".to_string(),
+                        title: "Tokio".to_string(),
+                    }),
+                },
+                GroundingChunk {
+                    web: Some(WebChunk {
+                        uri: "https://tokio.rs".to_string(),
+                        title: "Tokio".to_string(),
+                    }),
+                },
+                GroundingChunk { web: None },
+            ]),
+            grounding_supports: None,
+            search_entry_point: None,
+        };
+
+        assert_eq!(
+            grounding_to_citations(&metadata),
+            vec![("Tokio".to_string(), "https://tokio.rs".to_string())]
+        );
+    }
+
+    #[test]
+    fn grounding_to_citations_inlines_grounding_supports() {
+        use roko_agent::gemini::{
+            GroundingChunk, GroundingMetadata, GroundingSupport, TextSegment, WebChunk,
+        };
+
+        let text = "Tokio remains dominant. async-std trails.";
+        let metadata = GroundingMetadata {
+            web_search_queries: None,
+            grounding_chunks: Some(vec![
+                GroundingChunk {
+                    web: Some(WebChunk {
+                        uri: "https://tokio.rs".to_string(),
+                        title: "Tokio".to_string(),
+                    }),
+                },
+                GroundingChunk {
+                    web: Some(WebChunk {
+                        uri: "https://docs.rs/async-std".to_string(),
+                        title: "async-std".to_string(),
+                    }),
+                },
+                GroundingChunk {
+                    web: Some(WebChunk {
+                        uri: "https://tokio.rs".to_string(),
+                        title: "Tokio".to_string(),
+                    }),
+                },
+            ]),
+            grounding_supports: Some(vec![
+                GroundingSupport {
+                    segment: TextSegment {
+                        start_index: 0,
+                        end_index: 23,
+                        text: "Tokio remains dominant.".to_string(),
+                    },
+                    grounding_chunk_indices: vec![0],
+                    confidence_scores: Some(vec![0.97]),
+                },
+                GroundingSupport {
+                    segment: TextSegment {
+                        start_index: 24,
+                        end_index: 41,
+                        text: "async-std trails.".to_string(),
+                    },
+                    grounding_chunk_indices: vec![1, 2],
+                    confidence_scores: Some(vec![0.81, 0.78]),
+                },
+            ]),
+            search_entry_point: None,
+        };
+
+        assert_eq!(
+            grounding_to_inline_citations(text, &metadata),
+            "Tokio remains dominant. [1] async-std trails. [1][2]"
+        );
     }
 
     #[test]
