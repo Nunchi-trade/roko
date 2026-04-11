@@ -440,6 +440,27 @@ fn parse_bool_env(s: &str) -> bool {
     )
 }
 
+#[cfg(test)]
+fn run_resolve_api_key_child(test_name: &str, api_key_env: &str, expected: Option<&str>) {
+    let exe = std::env::current_exe().expect("current exe");
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg(test_name)
+        .arg("--exact")
+        .arg("--nocapture")
+        .env("ROKO_RESOLVE_API_KEY_CHILD", "1")
+        .env("ROKO_API_KEY_ENV_NAME", api_key_env);
+
+    if let Some(value) = expected {
+        cmd.env(api_key_env, value)
+            .env("ROKO_EXPECT_API_KEY", value);
+    } else {
+        cmd.env_remove(api_key_env);
+    }
+
+    let status = cmd.status().expect("spawn child test");
+    assert!(status.success(), "child test {test_name} failed");
+}
+
 fn deserialize_glob_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: serde::de::Deserializer<'de>,
@@ -514,6 +535,16 @@ pub struct ProviderConfig {
     /// Maximum concurrent requests allowed for this provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrent: Option<u32>,
+}
+
+impl ProviderConfig {
+    /// Resolve the API key from the environment variable named in `api_key_env`.
+    #[must_use]
+    pub fn resolve_api_key(&self) -> Option<String> {
+        self.api_key_env
+            .as_ref()
+            .and_then(|env_name| std::env::var(env_name).ok())
+    }
 }
 
 /// A single model entry from `[models.*]`.
@@ -1593,6 +1624,63 @@ max_concurrent = 4
         let text = toml::to_string(&cfg).expect("serialize");
         let back = toml::from_str::<ProviderConfig>(&text).expect("reparse");
         assert_eq!(cfg, back);
+    }
+
+    #[test]
+    fn resolve_api_key_returns_env_value() {
+        run_resolve_api_key_child(
+            "resolve_api_key_child_present",
+            "ZAI_API_KEY",
+            Some("test123"),
+        );
+    }
+
+    #[test]
+    fn resolve_api_key_returns_none_when_env_missing() {
+        run_resolve_api_key_child("resolve_api_key_child_missing", "ZAI_API_KEY", None);
+    }
+
+    #[test]
+    fn resolve_api_key_child_present() {
+        if std::env::var_os("ROKO_RESOLVE_API_KEY_CHILD").is_none() {
+            return;
+        }
+
+        let api_key_env = std::env::var("ROKO_API_KEY_ENV_NAME").expect("api key env name");
+        let expected = std::env::var("ROKO_EXPECT_API_KEY").expect("expected api key");
+        let cfg = ProviderConfig {
+            kind: ProviderKind::OpenAiCompat,
+            base_url: None,
+            api_key_env: Some(api_key_env),
+            command: None,
+            args: None,
+            timeout_ms: None,
+            extra_headers: None,
+            max_concurrent: None,
+        };
+
+        assert_eq!(cfg.resolve_api_key().as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn resolve_api_key_child_missing() {
+        if std::env::var_os("ROKO_RESOLVE_API_KEY_CHILD").is_none() {
+            return;
+        }
+
+        let api_key_env = std::env::var("ROKO_API_KEY_ENV_NAME").expect("api key env name");
+        let cfg = ProviderConfig {
+            kind: ProviderKind::OpenAiCompat,
+            base_url: None,
+            api_key_env: Some(api_key_env),
+            command: None,
+            args: None,
+            timeout_ms: None,
+            extra_headers: None,
+            max_concurrent: None,
+        };
+
+        assert_eq!(cfg.resolve_api_key(), None);
     }
 
     #[test]
