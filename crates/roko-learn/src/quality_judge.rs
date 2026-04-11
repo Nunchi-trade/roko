@@ -14,12 +14,7 @@ use roko_core::{Body, Context, Kind, Signal};
 /// rubric. If the agent call fails, the output is not readable as text, or the
 /// response cannot be parsed as a float, this returns `0.0`.
 #[must_use]
-pub async fn judge_quality(
-    agent: &dyn Agent,
-    prompt: &str,
-    response: &str,
-    rubric: &str,
-) -> f64 {
+pub async fn judge_quality(agent: &dyn Agent, prompt: &str, response: &str, rubric: &str) -> f64 {
     let judge_prompt = format!(
         "Rate the quality of this response on a scale of 0.0 to 1.0.\n\
          Rubric: {rubric}\n\

@@ -224,34 +224,36 @@ fn spawn_save_worker(
     stats: Arc<Mutex<HashMap<(String, String), LatencyStats>>>,
 ) -> (Sender<PersistCommand>, JoinHandle<()>) {
     let (tx, rx) = mpsc::channel();
-    let handle = thread::spawn(move || loop {
-        match rx.recv() {
-            Ok(PersistCommand::Dirty) => loop {
-                match rx.recv_timeout(LATENCY_SAVE_DEBOUNCE) {
-                    Ok(PersistCommand::Dirty) => continue,
-                    Ok(PersistCommand::FlushAndStop) => {
-                        let snapshot = snapshot_from_stats(&stats);
-                        let _ = save_snapshot(&path, &snapshot);
-                        return;
+    let handle = thread::spawn(move || {
+        loop {
+            match rx.recv() {
+                Ok(PersistCommand::Dirty) => loop {
+                    match rx.recv_timeout(LATENCY_SAVE_DEBOUNCE) {
+                        Ok(PersistCommand::Dirty) => continue,
+                        Ok(PersistCommand::FlushAndStop) => {
+                            let snapshot = snapshot_from_stats(&stats);
+                            let _ = save_snapshot(&path, &snapshot);
+                            return;
+                        }
+                        Err(RecvTimeoutError::Timeout) => {
+                            let snapshot = snapshot_from_stats(&stats);
+                            let _ = save_snapshot(&path, &snapshot);
+                            break;
+                        }
+                        Err(RecvTimeoutError::Disconnected) => {
+                            let snapshot = snapshot_from_stats(&stats);
+                            let _ = save_snapshot(&path, &snapshot);
+                            return;
+                        }
                     }
-                    Err(RecvTimeoutError::Timeout) => {
-                        let snapshot = snapshot_from_stats(&stats);
-                        let _ = save_snapshot(&path, &snapshot);
-                        break;
-                    }
-                    Err(RecvTimeoutError::Disconnected) => {
-                        let snapshot = snapshot_from_stats(&stats);
-                        let _ = save_snapshot(&path, &snapshot);
-                        return;
-                    }
+                },
+                Ok(PersistCommand::FlushAndStop) => {
+                    let snapshot = snapshot_from_stats(&stats);
+                    let _ = save_snapshot(&path, &snapshot);
+                    return;
                 }
-            },
-            Ok(PersistCommand::FlushAndStop) => {
-                let snapshot = snapshot_from_stats(&stats);
-                let _ = save_snapshot(&path, &snapshot);
-                return;
+                Err(_) => return,
             }
-            Err(_) => return,
         }
     });
     (tx, handle)
@@ -305,8 +307,8 @@ fn unique_tmp_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{LatencyRegistry, LatencyStats};
-    use tempfile::tempdir;
     use std::time::Duration;
+    use tempfile::tempdir;
 
     fn assert_close(actual: f64, expected: f64) {
         assert!(

@@ -7,12 +7,12 @@
 //! real agents, gates, and git, then feeds results back as events.
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::hash::{Hash, Hasher};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow};
@@ -28,8 +28,8 @@ use roko_compose::{
 };
 use roko_conductor::diagnosis::DiagnosisEngine;
 use roko_conductor::{Conductor, ConductorDecision};
-use roko_core::config::schema::RokoConfig;
 use roko_core::agent::resolve_model;
+use roko_core::config::schema::RokoConfig;
 use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::obs::health::{AlwaysUpProbe, ProbeRegistry};
 use roko_core::obs::{LabelSet, MetricRegistry};
@@ -92,7 +92,10 @@ fn daimon_state_path(workdir: &Path) -> PathBuf {
 }
 
 fn latency_registry_path(workdir: &Path) -> PathBuf {
-    workdir.join(".roko").join("learn").join("latency-stats.json")
+    workdir
+        .join(".roko")
+        .join("learn")
+        .join("latency-stats.json")
 }
 
 fn install_episode_distillation_hook(learning: &mut LearningRuntime, workdir: &Path) {
@@ -4463,7 +4466,10 @@ impl PlanRunner {
             );
         }
 
-        if let Some(anomaly) = self.anomaly_detector.check_cost(f64::from(result.usage.cost_usd)) {
+        if let Some(anomaly) = self
+            .anomaly_detector
+            .check_cost(f64::from(result.usage.cost_usd))
+        {
             tracing::warn!(
                 model = %model,
                 provider = %provider_id,
@@ -7161,7 +7167,11 @@ impl PlanRunner {
 
         // ── Provider health check ────────────────────────────────────
         let selected_provider = self.provider_id_for_model(&selected_model);
-        let selected_model = if !self.learning.provider_health().is_healthy(&selected_provider) {
+        let selected_model = if !self
+            .learning
+            .provider_health()
+            .is_healthy(&selected_provider)
+        {
             let fallback = self
                 .config
                 .agent

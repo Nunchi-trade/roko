@@ -30,8 +30,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -311,42 +311,44 @@ fn spawn_save_worker(
     providers: Arc<Mutex<HashMap<String, ProviderHealth>>>,
 ) -> (Sender<PersistCommand>, JoinHandle<()>) {
     let (tx, rx) = mpsc::channel();
-    let handle = thread::spawn(move || loop {
-        match rx.recv() {
-            Ok(PersistCommand::Dirty) => loop {
-                match rx.recv_timeout(HEALTH_SAVE_DEBOUNCE) {
-                    Ok(PersistCommand::Dirty) => continue,
-                    Ok(PersistCommand::FlushAndStop) => {
-                        let snapshot = ProviderHealthRegistrySnapshot {
-                            providers: providers.lock().clone(),
-                        };
-                        let _ = save_snapshot(&path, &snapshot);
-                        return;
+    let handle = thread::spawn(move || {
+        loop {
+            match rx.recv() {
+                Ok(PersistCommand::Dirty) => loop {
+                    match rx.recv_timeout(HEALTH_SAVE_DEBOUNCE) {
+                        Ok(PersistCommand::Dirty) => continue,
+                        Ok(PersistCommand::FlushAndStop) => {
+                            let snapshot = ProviderHealthRegistrySnapshot {
+                                providers: providers.lock().clone(),
+                            };
+                            let _ = save_snapshot(&path, &snapshot);
+                            return;
+                        }
+                        Err(RecvTimeoutError::Timeout) => {
+                            let snapshot = ProviderHealthRegistrySnapshot {
+                                providers: providers.lock().clone(),
+                            };
+                            let _ = save_snapshot(&path, &snapshot);
+                            break;
+                        }
+                        Err(RecvTimeoutError::Disconnected) => {
+                            let snapshot = ProviderHealthRegistrySnapshot {
+                                providers: providers.lock().clone(),
+                            };
+                            let _ = save_snapshot(&path, &snapshot);
+                            return;
+                        }
                     }
-                    Err(RecvTimeoutError::Timeout) => {
-                        let snapshot = ProviderHealthRegistrySnapshot {
-                            providers: providers.lock().clone(),
-                        };
-                        let _ = save_snapshot(&path, &snapshot);
-                        break;
-                    }
-                    Err(RecvTimeoutError::Disconnected) => {
-                        let snapshot = ProviderHealthRegistrySnapshot {
-                            providers: providers.lock().clone(),
-                        };
-                        let _ = save_snapshot(&path, &snapshot);
-                        return;
-                    }
+                },
+                Ok(PersistCommand::FlushAndStop) => {
+                    let snapshot = ProviderHealthRegistrySnapshot {
+                        providers: providers.lock().clone(),
+                    };
+                    let _ = save_snapshot(&path, &snapshot);
+                    return;
                 }
-            },
-            Ok(PersistCommand::FlushAndStop) => {
-                let snapshot = ProviderHealthRegistrySnapshot {
-                    providers: providers.lock().clone(),
-                };
-                let _ = save_snapshot(&path, &snapshot);
-                return;
+                Err(_) => return,
             }
-            Err(_) => return,
         }
     });
     (tx, handle)

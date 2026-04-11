@@ -413,7 +413,10 @@ mod tests {
             RetryAction::WaitAndRetry { delay_ms: 5_000 }
         );
         assert_eq!(should_retry(&ProviderError::AuthFailure), RetryAction::Skip);
-        assert_eq!(should_retry(&ProviderError::Timeout), RetryAction::TryFallback);
+        assert_eq!(
+            should_retry(&ProviderError::Timeout),
+            RetryAction::TryFallback
+        );
         assert_eq!(
             should_retry(&ProviderError::ServerError(503)),
             RetryAction::TryFallback
