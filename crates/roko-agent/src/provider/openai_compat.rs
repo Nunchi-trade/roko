@@ -34,6 +34,23 @@ fn inject_glm_params(
     body.insert("tool_stream".to_string(), Value::Bool(true));
 }
 
+fn is_kimi_model(model: &ModelProfile) -> bool {
+    model.slug.starts_with("kimi-")
+}
+
+fn inject_kimi_params(body: &mut Map<String, Value>, model: &ModelProfile) {
+    if !model.supports_thinking || !is_kimi_model(model) {
+        return;
+    }
+
+    body.insert(
+        "thinking".to_string(),
+        json!({
+            "type": "enabled",
+        }),
+    );
+}
+
 impl ProviderAdapter for OpenAiCompatAdapter {
     fn kind(&self) -> ProviderKind {
         ProviderKind::OpenAiCompat
@@ -77,6 +94,7 @@ impl ProviderAdapter for OpenAiCompatAdapter {
             .unwrap_or(DEFAULT_MAX_TOKENS);
         let mut extra_body_params = Map::new();
         inject_glm_params(&mut extra_body_params, provider, model);
+        inject_kimi_params(&mut extra_body_params, model);
 
         let agent = CodexAgent::new(api_key, model.slug.clone())
             .with_base_url(base_url)
@@ -286,6 +304,93 @@ mod tests {
             })
         );
         assert_eq!(parsed["tool_stream"], Value::Bool(true));
+
+        handle.join().expect("server thread");
+    }
+
+    #[tokio::test]
+    async fn kimi_thinking_injection() {
+        let response = serde_json::json!({
+            "id": "chatcmpl-test",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "kimi-ok"},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 13,
+                "completion_tokens": 8,
+                "total_tokens": 21
+            }
+        })
+        .to_string();
+        let (base_url, captured, handle) = spawn_chat_server(response);
+
+        let provider = ProviderConfig {
+            kind: ProviderKind::OpenAiCompat,
+            base_url: Some(format!("{base_url}/v1")),
+            api_key_env: Some("PATH".to_string()),
+            command: None,
+            args: None,
+            timeout_ms: Some(1_500),
+            extra_headers: None,
+            max_concurrent: None,
+        };
+        let model = ModelProfile {
+            provider: "moonshot".to_string(),
+            slug: "kimi-k2.5".to_string(),
+            context_window: 256_000,
+            max_output: Some(65_535),
+            supports_tools: true,
+            supports_thinking: true,
+            supports_vision: true,
+            supports_web_search: false,
+            supports_mcp_tools: false,
+            supports_partial: true,
+            tool_format: "openai_json".to_string(),
+            cost_input_per_m: None,
+            cost_output_per_m: None,
+            cost_cache_read_per_m: None,
+            cost_cache_write_per_m: None,
+            max_tools: Some(128),
+            tokenizer_ratio: None,
+        };
+        let options = AgentOptions {
+            timeout_ms: Some(2_500),
+            name: "kimi-agent".to_string(),
+            ..Default::default()
+        };
+
+        let adapter = OpenAiCompatAdapter;
+        assert_eq!(adapter.kind(), ProviderKind::OpenAiCompat);
+
+        let agent = adapter
+            .create_agent(&provider, &model, &options)
+            .expect("create agent");
+        assert_eq!(agent.name(), "kimi-agent");
+
+        let result = agent.run(&prompt("hello"), &Context::now()).await;
+        assert!(result.success);
+        assert_eq!(result.output.body.as_text().unwrap_or(""), "kimi-ok");
+
+        let request = captured
+            .lock()
+            .expect("capture lock")
+            .take()
+            .expect("captured request");
+        assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1"));
+
+        let body = request.split("\r\n\r\n").nth(1).expect("request body");
+        let parsed: Value = serde_json::from_str(body).expect("json request body");
+        assert_eq!(parsed["model"], "kimi-k2.5");
+        assert_eq!(parsed["max_tokens"], 65535);
+        assert_eq!(parsed["messages"][0]["content"], "hello");
+        assert_eq!(
+            parsed["thinking"],
+            serde_json::json!({
+                "type": "enabled"
+            })
+        );
 
         handle.join().expect("server thread");
     }
