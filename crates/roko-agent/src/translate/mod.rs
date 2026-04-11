@@ -18,6 +18,7 @@
 //! # Submodules
 //!
 //! - [`claude`] — Claude CLI (`--tools=...` flag + stream-json `tool_use` blocks)
+//! - [`gemini`] — Gemini native `functionDeclarations` / `functionCall` / `functionResponse`
 //! - [`ollama`] — OpenAI-compatible JSON over `/api/chat`
 //! - [`openai`] — `/v1/chat/completions` (mostly same wire as Ollama)
 //! - [`react`] — prompt-level `ReAct` fallback for models without native tools
@@ -38,6 +39,7 @@ use roko_core::tool::{ToolCall, ToolDef, ToolFormat, ToolResult};
 
 pub mod capability;
 pub mod claude;
+pub mod gemini;
 pub mod ollama;
 pub mod openai;
 pub mod react;
@@ -46,6 +48,7 @@ pub use capability::{
     ModelCapabilities, capabilities_for, capabilities_from_profile, translator_for,
 };
 pub use claude::ClaudeTranslator;
+pub use gemini::GeminiTranslator;
 pub use ollama::OllamaTranslator;
 pub use openai::OpenAiTranslator;
 pub use react::ReActTranslator;
@@ -190,6 +193,7 @@ impl BackendResponse {
                     v.pointer("/choices/0/message/content")
                         .and_then(|x| x.as_str())
                 })
+                .or_else(|| extract_gemini_text(v))
                 .unwrap_or("")
                 .to_string(),
             Self::StreamJson(events) => {
@@ -243,6 +247,19 @@ fn extract_reasoning_from_value(value: &serde_json::Value) -> Option<String> {
         .get("content")
         .and_then(serde_json::Value::as_array)
         .and_then(|blocks| extract_reasoning_from_blocks(blocks.as_slice()))
+}
+
+fn extract_gemini_text(value: &serde_json::Value) -> Option<&str> {
+    value
+        .pointer("/candidates/0/content/parts")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|parts| {
+            parts.iter().find_map(|part| {
+                part.get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|text| !text.is_empty())
+            })
+        })
 }
 
 fn extract_reasoning_from_blocks(blocks: &[serde_json::Value]) -> Option<String> {
@@ -343,6 +360,21 @@ mod tests {
     fn backend_response_extract_text_from_openai_json() {
         let r = BackendResponse::Json(serde_json::json!({
             "choices": [{"message": {"content": "done"}}]
+        }));
+        assert_eq!(r.extract_text(), "done");
+    }
+
+    #[test]
+    fn backend_response_extract_text_from_gemini_json() {
+        let r = BackendResponse::Json(serde_json::json!({
+            "candidates": [{
+                "content": {
+                    "parts": [
+                        { "functionCall": { "name": "read_file", "args": { "path": "x" } } },
+                        { "text": "done" }
+                    ]
+                }
+            }]
         }));
         assert_eq!(r.extract_text(), "done");
     }
