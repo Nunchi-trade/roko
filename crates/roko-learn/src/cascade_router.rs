@@ -334,6 +334,11 @@ impl CascadeRouter {
         self
     }
 
+    /// Update the Stage 1 static role-to-model mapping for one role.
+    pub fn set_static_role_model(&mut self, role: AgentRole, model_slug: impl Into<String>) {
+        self.role_table.insert(role, model_slug.into());
+    }
+
     /// Override the `LinUCB` router (builder pattern, for injecting pre-trained state).
     #[must_use]
     pub fn with_linucb(mut self, linucb: LinUCBRouter) -> Self {
@@ -611,6 +616,7 @@ impl CascadeRouter {
                 })
                 .collect(),
             total_observations: self.linucb.total_observations(),
+            role_table: self.role_table.clone(),
         };
         let json = serde_json::to_string_pretty(&snapshot)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -639,9 +645,14 @@ impl CascadeRouter {
             .and_then(|s| serde_json::from_str::<CascadeSnapshot>(&s).ok());
 
         match snapshot {
-            Some(snap) => {
+            Some(CascadeSnapshot {
+                model_slugs: persisted_model_slugs,
+                confidence_stats,
+                total_observations,
+                role_table,
+            }) => {
                 // Merge model sets: union of persisted + provided.
-                let mut slugs: Vec<String> = snap.model_slugs;
+                let mut slugs: Vec<String> = persisted_model_slugs;
                 for s in &model_slugs {
                     if !slugs.contains(s) {
                         slugs.push(s.clone());
@@ -651,10 +662,10 @@ impl CascadeRouter {
                     slugs = model_slugs;
                 }
                 assert!(!slugs.is_empty(), "CascadeRouter: need at least one model");
-                let router = Self::new(slugs);
+                let mut router = Self::new(slugs);
                 // Restore confidence stats.
                 let mut stats = router.confidence_stats.lock();
-                for (model, persisted) in &snap.confidence_stats {
+                for (model, persisted) in &confidence_stats {
                     stats.insert(
                         model.clone(),
                         ModelStats {
@@ -668,12 +679,17 @@ impl CascadeRouter {
                 // Restore total observation count so the cascade stage is correct.
                 // If the snapshot predates the `total_observations` field (default 0),
                 // recompute from the sum of per-model trials.
-                let total = if snap.total_observations > 0 {
-                    snap.total_observations
+                let total = if total_observations > 0 {
+                    total_observations
                 } else {
-                    snap.confidence_stats.values().map(|s| s.trials).sum()
+                    confidence_stats.values().map(|s| s.trials).sum()
                 };
                 router.linucb.set_total_observations(total);
+                if !role_table.is_empty() {
+                    for (role, slug) in role_table {
+                        router.role_table.insert(role, slug);
+                    }
+                }
 
                 router
             }
@@ -1021,6 +1037,8 @@ struct CascadeSnapshot {
     /// from the sum of per-model trials.
     #[serde(default)]
     total_observations: u64,
+    #[serde(default)]
+    role_table: HashMap<AgentRole, String>,
 }
 
 /// Serializable form of per-model confidence stats.

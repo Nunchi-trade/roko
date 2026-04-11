@@ -3,7 +3,9 @@
 //! This module defines the data model for model experiments. The execution
 //! logic, assignment strategy, and persistence are added in later tasks.
 
+use crate::cascade_router::CascadeRouter;
 use crate::prompt_experiment::ExperimentStatus;
+use roko_core::agent::AgentRole;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -145,7 +147,7 @@ impl ModelExperiment {
         cost_usd: f64,
         tokens: u64,
         duration_ms: u64,
-    ) {
+    ) -> bool {
         let stats = self.stats.entry(variant_id.to_string()).or_default();
         stats.trials += 1;
         if success {
@@ -160,8 +162,11 @@ impl ModelExperiment {
             if let Some(winner_id) = self.check_conclusion() {
                 self.status = ExperimentStatus::Concluded;
                 self.winner_id = Some(winner_id);
+                return true;
             }
         }
+
+        false
     }
 
     /// Check whether the experiment has enough evidence to conclude.
@@ -225,6 +230,7 @@ impl ModelExperimentStore {
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, &json)?;
         std::fs::rename(&tmp, path)?;
+        self.sync_cascade_router(path)?;
         Ok(())
     }
 
@@ -291,8 +297,18 @@ impl ModelExperimentStore {
         tokens: u64,
         duration: u64,
     ) {
-        if let Some(experiment) = self.experiments.get_mut(experiment_id) {
-            experiment.record_outcome(variant_id, success, cost, tokens, duration);
+        let concluded = if let Some(experiment) = self.experiments.get_mut(experiment_id) {
+            if experiment.record_outcome(variant_id, success, cost, tokens, duration) {
+                Some(experiment.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(experiment) = concluded.as_ref() {
+            self.on_conclusion(experiment);
         }
     }
 
@@ -321,6 +337,115 @@ impl ModelExperimentStore {
     pub fn iter(&self) -> impl Iterator<Item = &ModelExperiment> {
         self.experiments.values()
     }
+
+    fn on_conclusion(&self, experiment: &ModelExperiment) {
+        if let Some(ref winner_id) = experiment.winner_id {
+            tracing::info!(
+                experiment = %experiment.experiment_id,
+                winner = %winner_id,
+                "model experiment concluded"
+            );
+        }
+    }
+
+    fn sync_cascade_router(&self, experiment_store_path: &Path) -> Result<(), std::io::Error> {
+        let mut role_winners: HashMap<AgentRole, (String, String, String)> = HashMap::new();
+
+        for experiment in self.experiments.values() {
+            if experiment.status != ExperimentStatus::Concluded {
+                continue;
+            }
+
+            let Some(role_raw) = experiment.role.as_deref() else {
+                continue;
+            };
+            let Some(role) = parse_agent_role(role_raw) else {
+                tracing::warn!(
+                    experiment = %experiment.experiment_id,
+                    role = role_raw,
+                    "skipping concluded model experiment with unrecognized role"
+                );
+                continue;
+            };
+            let Some(winner_id) = experiment.winner_id.as_deref() else {
+                continue;
+            };
+            let Some(winner) = experiment
+                .variants
+                .iter()
+                .find(|variant| variant.id == winner_id)
+            else {
+                tracing::warn!(
+                    experiment = %experiment.experiment_id,
+                    winner = winner_id,
+                    "skipping concluded model experiment with missing winner variant"
+                );
+                continue;
+            };
+
+            let should_replace = role_winners
+                .get(&role)
+                .map(|(created_at, _, _)| experiment.created_at >= *created_at)
+                .unwrap_or(true);
+            if should_replace {
+                role_winners.insert(
+                    role,
+                    (
+                        experiment.created_at.clone(),
+                        winner.slug.clone(),
+                        experiment.experiment_id.clone(),
+                    ),
+                );
+            }
+        }
+
+        if role_winners.is_empty() {
+            return Ok(());
+        }
+
+        let mut model_slugs: Vec<String> = self
+            .experiments
+            .values()
+            .flat_map(|experiment| {
+                experiment
+                    .variants
+                    .iter()
+                    .map(|variant| variant.slug.clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        model_slugs.sort();
+        model_slugs.dedup();
+
+        let router_path = experiment_store_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("cascade-router.json");
+        let mut router = CascadeRouter::load_or_new(&router_path, model_slugs);
+
+        for (role, (_, slug, experiment_id)) in role_winners {
+            router.set_static_role_model(role, slug.clone());
+            tracing::info!(
+                experiment = %experiment_id,
+                role = role.label(),
+                winner_model = %slug,
+                cascade_router = %router_path.display(),
+                "updated cascade router static role mapping from concluded experiment"
+            );
+        }
+
+        router.save(&router_path)
+    }
+}
+
+fn parse_agent_role(raw: &str) -> Option<AgentRole> {
+    if let Ok(role) = serde_json::from_str::<AgentRole>(&format!("\"{raw}\"")) {
+        return Some(role);
+    }
+
+    std::iter::once(AgentRole::Conductor)
+        .chain(AgentRole::ALL_AGENTS.iter().copied())
+        .find(|role| raw == format!("{role:?}"))
 }
 
 impl Default for ModelExperimentStore {
@@ -334,6 +459,10 @@ impl Default for ModelExperimentStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cascade_router::{CascadeRouter, CascadeStage};
+    use crate::model_router::RoutingContext;
+    use roko_core::agent::AgentRole;
+    use roko_core::task::{TaskCategory, TaskComplexityBand};
 
     fn make_variants() -> Vec<ModelVariant> {
         vec![
@@ -567,5 +696,54 @@ mod tests {
         assert_eq!(experiment.stats["b"].trials, 1);
         assert_eq!(experiment.stats["b"].successes, 0);
         assert_eq!(store.running_count(), 0);
+    }
+
+    #[test]
+    fn experiment_conclusion_updates_static_role_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("model-experiments.json");
+        let router_path = dir.path().join("cascade-router.json");
+        let router = CascadeRouter::new(vec![
+            "claude-haiku-3-5".to_string(),
+            "claude-sonnet-4-5".to_string(),
+            "model-a".to_string(),
+            "model-b".to_string(),
+        ]);
+        router.save(&router_path).unwrap();
+
+        let mut store = ModelExperimentStore::default();
+        store.register(make_experiment(
+            "glm-vs-kimi",
+            Some("implementer"),
+            Some("implementation"),
+        ));
+
+        store.record_outcome("glm-vs-kimi", "a", true, 1.25, 120, 900);
+        store.record_outcome("glm-vs-kimi", "b", false, 2.50, 240, 1_800);
+        store.save(&store_path).unwrap();
+
+        let reloaded = CascadeRouter::load_or_new(
+            &router_path,
+            vec![
+                "claude-haiku-3-5".to_string(),
+                "claude-sonnet-4-5".to_string(),
+                "model-a".to_string(),
+                "model-b".to_string(),
+            ],
+        );
+        let routed = reloaded.route(&RoutingContext {
+            task_category: TaskCategory::Implementation,
+            complexity: TaskComplexityBand::Standard,
+            iteration: 0,
+            role: AgentRole::Implementer,
+            crate_familiarity: 0.5,
+            has_prior_failure: false,
+            affect_confidence: 0.5,
+            previous_model: None,
+            plan_context_tokens: None,
+        });
+
+        assert_eq!(routed.stage, CascadeStage::Static);
+        assert_eq!(routed.primary.slug, "model-a");
     }
 }
