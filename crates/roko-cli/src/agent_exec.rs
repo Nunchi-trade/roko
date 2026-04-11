@@ -7,8 +7,10 @@
 
 use std::path::Path;
 
-use anyhow::Result;
-use roko_agent::{Agent, ClaudeCliAgent};
+use anyhow::{Context as _, Result};
+use roko_agent::provider::{AgentOptions, create_agent_for_model};
+use roko_core::agent::ProviderKind;
+use roko_core::agent::resolve_model;
 use roko_core::{Body, Context, Kind, Signal};
 
 /// Options for agent execution.
@@ -35,20 +37,46 @@ pub struct AgentExecOpts<'a> {
 /// settings hooks, MCP discovery, resume session threading, and stderr
 /// filtering.
 pub async fn run_agent(opts: AgentExecOpts<'_>) -> Result<i32> {
-    let model = opts.model.unwrap_or("claude-opus-4-6");
-    let mut agent = ClaudeCliAgent::new("claude", opts.workdir, model)
-        .with_dangerously_skip_permissions(true)
-        .with_timeout_ms(600_000) // 10 min for plan generation / research tasks
-        .with_effort(opts.effort.unwrap_or("medium"));
-    if let Some(system_prompt) = opts.system_prompt {
-        agent = agent.with_system_prompt(system_prompt);
+    let mut routing_config = roko_core::config::load_config(opts.workdir)
+        .with_context(|| format!("load routing config from {}", opts.workdir.display()))?;
+    routing_config.apply_process_env();
+    let routing_enabled = !routing_config.providers.is_empty() || !routing_config.models.is_empty();
+    let model = opts
+        .model
+        .map(str::to_string)
+        .or_else(|| model_from_config(opts.workdir))
+        .unwrap_or_else(|| {
+            if routing_enabled {
+                routing_config.agent.default_model.clone()
+            } else {
+                "claude-opus-4-6".to_string()
+            }
+        });
+    let resolved = resolve_model(&routing_config, &model);
+    let mut extra_args = Vec::new();
+    if resolved.provider_kind == ProviderKind::ClaudeCli
+        && let Some(session_id) = opts.resume_session
+    {
+        extra_args.push("--resume".to_string());
+        extra_args.push(session_id.to_string());
     }
-    if let Some(session_id) = opts.resume_session {
-        agent = agent.with_optional_resume(Some(session_id.to_string()));
-    }
-    for (key, value) in opts.env_vars {
-        agent = agent.with_env_var(key, value);
-    }
+    let agent = create_agent_for_model(
+        &routing_config,
+        &model,
+        AgentOptions {
+            timeout_ms: Some(600_000), // 10 min for plan generation / research tasks
+            system_prompt: opts.system_prompt.map(str::to_string),
+            tools: None,
+            mcp_config: None,
+            env: opts.env_vars.to_vec(),
+            extra_args,
+            effort: Some(opts.effort.unwrap_or("medium").to_string()),
+            bare_mode: true,
+            dangerously_skip_permissions: true,
+            name: format!("{}:{model}", resolved.provider_kind.label()),
+        },
+    )
+    .with_context(|| format!("create agent for model {model}"))?;
 
     let prompt = Signal::builder(Kind::Prompt)
         .body(Body::text(opts.prompt))
