@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -147,6 +148,64 @@ impl Default for RegressionConfig {
     }
 }
 
+/// Cadence controls for learning subsystems that should not all react on the
+/// same episode boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpdateFrequency {
+    /// Cascade router observation cadence.
+    pub router_every_n_episodes: u32,
+    /// Reserved for orchestrator-managed adaptive gate threshold batching.
+    pub gate_thresholds_every_n: u32,
+    /// Prompt experiment outcome cadence.
+    pub experiments_every_n: u32,
+    /// Skill extraction cadence.
+    pub skill_mining_every_n: u32,
+    /// Pattern miner ingestion cadence.
+    pub pattern_discovery_every_n: u32,
+    /// Cross-episode consolidation cadence.
+    pub distiller_every_n: u32,
+}
+
+impl UpdateFrequency {
+    fn due(episode_count: u64, every_n: u32) -> bool {
+        let cadence = u64::from(every_n.max(1));
+        episode_count % cadence == 0
+    }
+
+    fn router_due(self, episode_count: u64) -> bool {
+        Self::due(episode_count, self.router_every_n_episodes)
+    }
+
+    fn experiments_due(self, episode_count: u64) -> bool {
+        Self::due(episode_count, self.experiments_every_n)
+    }
+
+    fn skill_mining_due(self, episode_count: u64) -> bool {
+        Self::due(episode_count, self.skill_mining_every_n)
+    }
+
+    fn pattern_discovery_due(self, episode_count: u64) -> bool {
+        Self::due(episode_count, self.pattern_discovery_every_n)
+    }
+
+    fn distiller_due(self, episode_count: u64) -> bool {
+        Self::due(episode_count, self.distiller_every_n)
+    }
+}
+
+impl Default for UpdateFrequency {
+    fn default() -> Self {
+        Self {
+            router_every_n_episodes: 1,
+            gate_thresholds_every_n: 5,
+            experiments_every_n: 1,
+            skill_mining_every_n: 10,
+            pattern_discovery_every_n: 20,
+            distiller_every_n: 50,
+        }
+    }
+}
+
 /// Input payload for one completed runtime run.
 #[derive(Debug, Clone)]
 pub struct CompletedRunInput {
@@ -255,6 +314,8 @@ pub enum LearningRuntimeError {
 pub struct LearningRuntime {
     paths: LearningPaths,
     episode_logger: EpisodeLogger,
+    update_frequency: UpdateFrequency,
+    episode_count: AtomicU64,
     affect_engine: parking_lot::Mutex<DaimonState>,
     costs_log: CostsLog,
     costs_db: CostsDb,
@@ -294,6 +355,7 @@ impl LearningRuntime {
         let costs_db = CostsDb::new();
         let existing_costs = costs_log.read_all().await?;
         costs_db.insert_batch(existing_costs);
+        let episode_count = count_episode_records(&paths.episodes_jsonl).await?;
 
         let skill_library = SkillLibrary::new(&paths.skills_json).await?;
         let playbook_store = PlaybookStore::new(&paths.playbooks_dir);
@@ -315,6 +377,8 @@ impl LearningRuntime {
         Ok(Self {
             paths,
             episode_logger,
+            update_frequency: UpdateFrequency::default(),
+            episode_count: AtomicU64::new(episode_count),
             affect_engine: parking_lot::Mutex::new(DaimonState::load_or_new(&affect_path)),
             costs_log,
             costs_db,
@@ -355,6 +419,7 @@ impl LearningRuntime {
         let costs_db = CostsDb::new();
         let existing_costs = costs_log.read_all().await?;
         costs_db.insert_batch(existing_costs);
+        let episode_count = count_episode_records(&paths.episodes_jsonl).await?;
 
         let skill_library = SkillLibrary::new(&paths.skills_json).await?;
         let playbook_store = PlaybookStore::new(&paths.playbooks_dir);
@@ -370,6 +435,8 @@ impl LearningRuntime {
         Ok(Self {
             paths,
             episode_logger,
+            update_frequency: UpdateFrequency::default(),
+            episode_count: AtomicU64::new(episode_count),
             affect_engine: parking_lot::Mutex::new(DaimonState::load_or_new(&affect_path)),
             costs_log,
             costs_db,
@@ -401,6 +468,17 @@ impl LearningRuntime {
     #[must_use]
     pub const fn paths(&self) -> &LearningPaths {
         &self.paths
+    }
+
+    /// Borrow the configured subsystem update cadences.
+    #[must_use]
+    pub const fn update_frequency(&self) -> &UpdateFrequency {
+        &self.update_frequency
+    }
+
+    /// Override the subsystem update cadences for this runtime.
+    pub fn set_update_frequency(&mut self, update_frequency: UpdateFrequency) {
+        self.update_frequency = update_frequency;
     }
 
     /// Borrow in-memory costs DB.
@@ -641,6 +719,7 @@ impl LearningRuntime {
         if let Some(hook) = &self.episode_completion_hook {
             hook(input.episode.clone());
         }
+        let episode_count = self.episode_count.fetch_add(1, Ordering::Relaxed) + 1;
 
         if input.playbook_id.is_none() {
             input.playbook_id = extra_string(&input.episode, "playbook_id");
@@ -704,7 +783,9 @@ impl LearningRuntime {
         }
 
         let generator = TemplatePatternGenerator;
-        if let Some(skill) = self.skill_library.extract(&input.episode, &generator).await {
+        if self.update_frequency.skill_mining_due(episode_count)
+            && let Some(skill) = self.skill_library.extract(&input.episode, &generator).await
+        {
             update.extracted_skill_id = Some(skill.name);
         }
 
@@ -719,17 +800,22 @@ impl LearningRuntime {
                 compute_regression_report(&metrics_snapshot, &self.regression);
         }
 
-        self.append_cfactor_snapshot().await?;
+        if self.update_frequency.distiller_due(episode_count) {
+            self.append_cfactor_snapshot().await?;
+        }
 
         // ── Pattern mining ──────────────────────────────────────────────
         let actions = EpisodeActions::from_episode(&input.episode);
-        if !actions.actions.is_empty() {
+        if self.update_frequency.pattern_discovery_due(episode_count) && !actions.actions.is_empty()
+        {
             self.pattern_miner.lock().ingest_episode(&actions);
             update.patterns_ingested = true;
         }
 
         // ── Cascade router observation ─────────────────────────────────
-        update.router_updated = self.update_cascade_router(&input.episode);
+        if self.update_frequency.router_due(episode_count) {
+            update.router_updated = self.update_cascade_router(&input.episode);
+        }
 
         // Persist immediately so the router state file always reflects the
         // latest observation count and confidence stats.
@@ -740,7 +826,9 @@ impl LearningRuntime {
         }
 
         // ── Prompt experiment outcome ────────────────────────────────────
-        if let Some(ref variant_id) = input.experiment_variant_id {
+        if self.update_frequency.experiments_due(episode_count)
+            && let Some(ref variant_id) = input.experiment_variant_id
+        {
             let mut store = self.experiment_store.lock();
             let was_running = store
                 .iter()
@@ -1091,6 +1179,22 @@ async fn load_task_metrics(path: &Path) -> io::Result<Vec<TaskMetric>> {
         }
     }
     Ok(out)
+}
+
+async fn count_episode_records(path: &Path) -> io::Result<u64> {
+    let file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(err) => return Err(err),
+    };
+    let mut lines = BufReader::new(file).lines();
+    let mut count = 0_u64;
+    while let Some(line) = lines.next_line().await? {
+        if !line.trim().is_empty() {
+            count = count.saturating_add(1);
+        }
+    }
+    Ok(count)
 }
 
 /// Append one `TaskMetric` line to `path`.
@@ -1569,10 +1673,34 @@ mod tests {
         m
     }
 
+    fn sample_pattern_episode(success: bool, suffix: &str) -> Episode {
+        let mut ep = sample_episode(success);
+        ep.id = format!("episode-{suffix}");
+        ep.episode_id = format!("episode-{suffix}");
+        ep.task_id = format!("task-{suffix}");
+        ep.gate_verdicts = vec![
+            crate::episode_logger::GateVerdict::new("read", true),
+            crate::episode_logger::GateVerdict::new("edit", true),
+            crate::episode_logger::GateVerdict::new("test", true),
+        ];
+        ep.extra.insert(
+            "task_tags".to_string(),
+            serde_json::json!(["rust", format!("tag-{suffix}")]),
+        );
+        ep.extra.insert(
+            "files".to_string(),
+            serde_json::json!([format!("crates/roko-cli/src/{suffix}.rs")]),
+        );
+        ep
+    }
+
     #[tokio::test]
     async fn completed_run_updates_episode_cost_provider_and_skill() {
         let tmp = TempDir::new().unwrap();
-        let runtime = LearningRuntime::open_under(tmp.path()).await.unwrap();
+        let mut runtime = LearningRuntime::open_under(tmp.path()).await.unwrap();
+        let mut freq = *runtime.update_frequency();
+        freq.skill_mining_every_n = 1;
+        runtime.set_update_frequency(freq);
 
         let input = CompletedRunInput::from_episode(sample_episode(true));
         let update = runtime.record_completed_run(input).await.unwrap();
@@ -1599,7 +1727,10 @@ mod tests {
     #[tokio::test]
     async fn completed_runs_append_cfactor_history() {
         let tmp = TempDir::new().unwrap();
-        let runtime = LearningRuntime::open_under(tmp.path()).await.unwrap();
+        let mut runtime = LearningRuntime::open_under(tmp.path()).await.unwrap();
+        let mut freq = *runtime.update_frequency();
+        freq.distiller_every_n = 1;
+        runtime.set_update_frequency(freq);
 
         runtime
             .record_completed_run(CompletedRunInput::from_episode(sample_episode(true)))
@@ -1619,6 +1750,143 @@ mod tests {
         assert_eq!(snapshots.len(), 2);
         assert_eq!(snapshots[0].episode_count, 1);
         assert_eq!(snapshots[1].episode_count, 2);
+    }
+
+    #[tokio::test]
+    async fn update_frequency_separation() {
+        let tmp = TempDir::new().unwrap();
+        let mut runtime = LearningRuntime::open_with_models(
+            LearningPaths::under(tmp.path()),
+            RegressionConfig::default(),
+            vec!["claude-opus-4-6".to_string()],
+        )
+        .await
+        .unwrap();
+        runtime.set_update_frequency(UpdateFrequency {
+            router_every_n_episodes: 2,
+            gate_thresholds_every_n: 5,
+            experiments_every_n: 3,
+            skill_mining_every_n: 2,
+            pattern_discovery_every_n: 3,
+            distiller_every_n: 4,
+        });
+
+        let mut experiment = PromptExperiment::new(
+            "cadence-exp",
+            "model-routing",
+            vec![PromptVariant {
+                id: "cadence".to_string(),
+                name: "Cadence".to_string(),
+                section_name: "model-routing".to_string(),
+                content: String::new(),
+                slug: Some("claude-opus-4-6".to_string()),
+                active: true,
+            }],
+        );
+        experiment.min_trials_per_variant = 100;
+        runtime.experiment_store().lock().register(experiment);
+
+        let update = runtime
+            .record_completed_run(CompletedRunInput {
+                experiment_variant_id: Some("cadence".to_string()),
+                ..CompletedRunInput::from_episode(sample_pattern_episode(true, "one"))
+            })
+            .await
+            .unwrap();
+        assert!(!update.router_updated);
+        assert!(update.extracted_skill_id.is_none());
+        assert!(!update.patterns_ingested);
+        assert_eq!(runtime.cascade_router().total_observations(), 0);
+        assert_eq!(runtime.skill_library().len(), 0);
+        assert_eq!(runtime.pattern_miner().lock().total_episodes(), 0);
+        assert!(!runtime.paths().cfactor_jsonl.exists());
+        assert_eq!(
+            runtime
+                .experiment_store()
+                .lock()
+                .get("cadence-exp")
+                .and_then(|exp| exp.stats.get("cadence"))
+                .map(|stats| stats.trials),
+            Some(0)
+        );
+
+        let update = runtime
+            .record_completed_run(CompletedRunInput {
+                experiment_variant_id: Some("cadence".to_string()),
+                ..CompletedRunInput::from_episode(sample_pattern_episode(true, "two"))
+            })
+            .await
+            .unwrap();
+        assert!(update.router_updated);
+        assert!(update.extracted_skill_id.is_some());
+        assert!(!update.patterns_ingested);
+        assert_eq!(runtime.cascade_router().total_observations(), 1);
+        assert_eq!(runtime.skill_library().len(), 1);
+        assert_eq!(runtime.pattern_miner().lock().total_episodes(), 0);
+        assert!(!runtime.paths().cfactor_jsonl.exists());
+        assert_eq!(
+            runtime
+                .experiment_store()
+                .lock()
+                .get("cadence-exp")
+                .and_then(|exp| exp.stats.get("cadence"))
+                .map(|stats| stats.trials),
+            Some(0)
+        );
+
+        let update = runtime
+            .record_completed_run(CompletedRunInput {
+                experiment_variant_id: Some("cadence".to_string()),
+                ..CompletedRunInput::from_episode(sample_pattern_episode(true, "three"))
+            })
+            .await
+            .unwrap();
+        assert!(!update.router_updated);
+        assert!(update.extracted_skill_id.is_none());
+        assert!(update.patterns_ingested);
+        assert_eq!(runtime.cascade_router().total_observations(), 1);
+        assert_eq!(runtime.skill_library().len(), 1);
+        assert_eq!(runtime.pattern_miner().lock().total_episodes(), 1);
+        assert!(!runtime.paths().cfactor_jsonl.exists());
+        assert_eq!(
+            runtime
+                .experiment_store()
+                .lock()
+                .get("cadence-exp")
+                .and_then(|exp| exp.stats.get("cadence"))
+                .map(|stats| stats.trials),
+            Some(1)
+        );
+
+        let update = runtime
+            .record_completed_run(CompletedRunInput {
+                experiment_variant_id: Some("cadence".to_string()),
+                ..CompletedRunInput::from_episode(sample_pattern_episode(true, "four"))
+            })
+            .await
+            .unwrap();
+        assert!(update.router_updated);
+        assert!(update.extracted_skill_id.is_some());
+        assert!(!update.patterns_ingested);
+        assert_eq!(runtime.cascade_router().total_observations(), 2);
+        assert_eq!(runtime.skill_library().len(), 2);
+        assert_eq!(runtime.pattern_miner().lock().total_episodes(), 1);
+        let cfactor_jsonl = std::fs::read_to_string(&runtime.paths().cfactor_jsonl).unwrap();
+        let snapshots: Vec<crate::cfactor::CFactor> = cfactor_jsonl
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("valid c-factor snapshot"))
+            .collect();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].episode_count, 4);
+        assert_eq!(
+            runtime
+                .experiment_store()
+                .lock()
+                .get("cadence-exp")
+                .and_then(|exp| exp.stats.get("cadence"))
+                .map(|stats| stats.trials),
+            Some(1)
+        );
     }
 
     #[test]
