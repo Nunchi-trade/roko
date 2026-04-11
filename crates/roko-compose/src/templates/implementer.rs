@@ -67,7 +67,7 @@ impl RolePromptTemplate for ImplementerTemplate {
         sections.push(
             PromptSection::new("agents_instructions", &input.agents_md)
                 .with_priority(SectionPriority::Critical)
-                .with_cache_layer(CacheLayer::System)
+                .with_cache_layer(CacheLayer::Role)
                 .with_placement(Placement::Start),
         );
 
@@ -75,7 +75,7 @@ impl RolePromptTemplate for ImplementerTemplate {
         sections.push(
             PromptSection::new("plan_spec", truncate(&input.plan.content, 50_000))
                 .with_priority(SectionPriority::Critical)
-                .with_cache_layer(CacheLayer::Session)
+                .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Start)
                 .with_hard_cap(50_000),
         );
@@ -84,7 +84,7 @@ impl RolePromptTemplate for ImplementerTemplate {
         sections.push(
             PromptSection::new("brief", &input.brief)
                 .with_priority(SectionPriority::High)
-                .with_cache_layer(CacheLayer::Session)
+                .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Start),
         );
 
@@ -92,7 +92,7 @@ impl RolePromptTemplate for ImplementerTemplate {
         sections.push(
             PromptSection::new("tasks", &input.tasks)
                 .with_priority(SectionPriority::High)
-                .with_cache_layer(CacheLayer::Task)
+                .with_cache_layer(CacheLayer::Plan)
                 .with_placement(Placement::Middle),
         );
 
@@ -100,7 +100,7 @@ impl RolePromptTemplate for ImplementerTemplate {
         sections.push(
             PromptSection::new("workspace_map", truncate(&input.workspace_map, 20_000))
                 .with_priority(SectionPriority::High)
-                .with_cache_layer(CacheLayer::Session)
+                .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Middle)
                 .with_hard_cap(20_000),
         );
@@ -109,7 +109,7 @@ impl RolePromptTemplate for ImplementerTemplate {
         sections.push(
             PromptSection::new("preflight", truncate(&input.preflight, 5_000))
                 .with_priority(SectionPriority::Normal)
-                .with_cache_layer(CacheLayer::Session)
+                .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Middle)
                 .with_hard_cap(5_000),
         );
@@ -118,7 +118,7 @@ impl RolePromptTemplate for ImplementerTemplate {
         sections.push(
             PromptSection::new("registry", truncate(&input.registry_snapshot, 8_000))
                 .with_priority(SectionPriority::Normal)
-                .with_cache_layer(CacheLayer::Dynamic)
+                .with_cache_layer(CacheLayer::Volatile)
                 .with_placement(Placement::Middle)
                 .with_hard_cap(8_000),
         );
@@ -128,7 +128,7 @@ impl RolePromptTemplate for ImplementerTemplate {
             sections.push(
                 PromptSection::new("prev_reviews", truncate(reviews, 15_000))
                     .with_priority(SectionPriority::High)
-                    .with_cache_layer(CacheLayer::Dynamic)
+                    .with_cache_layer(CacheLayer::Volatile)
                     .with_placement(Placement::End)
                     .with_hard_cap(15_000),
             );
@@ -139,7 +139,7 @@ impl RolePromptTemplate for ImplementerTemplate {
             sections.push(
                 PromptSection::new("verify_chain", truncate(chain, 4_000))
                     .with_priority(SectionPriority::High)
-                    .with_cache_layer(CacheLayer::Session)
+                    .with_cache_layer(CacheLayer::Workspace)
                     .with_placement(Placement::End)
                     .with_hard_cap(4_000),
             );
@@ -150,7 +150,7 @@ impl RolePromptTemplate for ImplementerTemplate {
             sections.push(
                 PromptSection::new("invariants", truncate(inv, 4_000))
                     .with_priority(SectionPriority::High)
-                    .with_cache_layer(CacheLayer::Session)
+                    .with_cache_layer(CacheLayer::Workspace)
                     .with_placement(Placement::End)
                     .with_hard_cap(4_000),
             );
@@ -163,7 +163,7 @@ impl RolePromptTemplate for ImplementerTemplate {
                 sections.push(
                     PromptSection::new("enhanced_sections", text)
                         .with_priority(SectionPriority::High)
-                        .with_cache_layer(CacheLayer::Task)
+                        .with_cache_layer(CacheLayer::Plan)
                         .with_placement(Placement::End),
                 );
             }
@@ -240,10 +240,10 @@ mod tests {
         assert_eq!(sections[1].priority, SectionPriority::Critical); // plan_spec
 
         // Cache layers match spec
-        assert_eq!(sections[0].cache_layer, CacheLayer::System);
-        assert_eq!(sections[1].cache_layer, CacheLayer::Session);
-        assert_eq!(sections[3].cache_layer, CacheLayer::Task); // tasks
-        assert_eq!(sections[6].cache_layer, CacheLayer::Dynamic); // registry
+        assert_eq!(sections[0].cache_layer, CacheLayer::Role);
+        assert_eq!(sections[1].cache_layer, CacheLayer::Workspace);
+        assert_eq!(sections[3].cache_layer, CacheLayer::Plan); // tasks
+        assert_eq!(sections[6].cache_layer, CacheLayer::Volatile); // registry
 
         // Hard caps match Mori
         assert_eq!(sections[1].hard_cap, Some(50_000)); // plan_spec

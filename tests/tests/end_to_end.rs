@@ -96,7 +96,7 @@ async fn coding_agent_full_loop() {
     // 2. Seed prompt sections. Each section is its own signal.
     let role = PromptSection::new("role", "You are a Rust implementer agent.")
         .with_priority(SectionPriority::Critical)
-        .with_cache_layer(CacheLayer::System)
+        .with_cache_layer(CacheLayer::Role)
         .with_placement(Placement::Start)
         .into_signal()
         .unwrap();
@@ -105,13 +105,13 @@ async fn coding_agent_full_loop() {
         "Implement a function `greet()` that returns \"hi\".",
     )
     .with_priority(SectionPriority::Critical)
-    .with_cache_layer(CacheLayer::Task)
+    .with_cache_layer(CacheLayer::Plan)
     .with_placement(Placement::End)
     .into_signal()
     .unwrap();
     let hint = PromptSection::new("hint", "Prefer minimal diffs, use &'static str.")
         .with_priority(SectionPriority::Normal)
-        .with_cache_layer(CacheLayer::Session)
+        .with_cache_layer(CacheLayer::Workspace)
         .with_placement(Placement::Middle)
         .into_signal()
         .unwrap();

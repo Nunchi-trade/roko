@@ -265,7 +265,7 @@ impl SystemPromptBuilder {
         sections.push(
             PromptSection::new("role_identity", &self.role_identity)
                 .with_priority(self.effective_priority("role_identity", SectionPriority::Critical))
-                .with_cache_layer(CacheLayer::System)
+                .with_cache_layer(CacheLayer::Role)
                 .with_placement(Placement::Start),
         );
 
@@ -277,7 +277,7 @@ impl SystemPromptBuilder {
                         .with_priority(
                             self.effective_priority("conventions", SectionPriority::High),
                         )
-                        .with_cache_layer(CacheLayer::System)
+                        .with_cache_layer(CacheLayer::Role)
                         .with_placement(Placement::Start),
                 );
             }
@@ -291,7 +291,7 @@ impl SystemPromptBuilder {
                         .with_priority(
                             self.effective_priority("tool_instructions", SectionPriority::Normal),
                         )
-                        .with_cache_layer(CacheLayer::System)
+                        .with_cache_layer(CacheLayer::Role)
                         .with_placement(Placement::Middle),
                 );
             }
@@ -305,7 +305,7 @@ impl SystemPromptBuilder {
                         .with_priority(
                             self.effective_priority("domain_context", SectionPriority::High),
                         )
-                        .with_cache_layer(CacheLayer::Session)
+                        .with_cache_layer(CacheLayer::Workspace)
                         .with_placement(Placement::Middle),
                 );
             }
@@ -319,7 +319,7 @@ impl SystemPromptBuilder {
                         .with_priority(
                             self.effective_priority("context_layer", SectionPriority::High),
                         )
-                        .with_cache_layer(CacheLayer::Session)
+                        .with_cache_layer(CacheLayer::Workspace)
                         .with_placement(Placement::Middle),
                 );
             }
@@ -336,7 +336,7 @@ impl SystemPromptBuilder {
             sections.push(
                 PromptSection::new("anti_patterns", format!("Do NOT:\n{anti_text}"))
                     .with_priority(self.effective_priority("anti_patterns", SectionPriority::High))
-                    .with_cache_layer(CacheLayer::Session)
+                    .with_cache_layer(CacheLayer::Workspace)
                     .with_placement(Placement::End),
             );
         }
@@ -348,7 +348,7 @@ impl SystemPromptBuilder {
                     .with_priority(
                         self.effective_priority("affect_guidance", SectionPriority::Normal),
                     )
-                    .with_cache_layer(CacheLayer::Dynamic)
+                    .with_cache_layer(CacheLayer::Volatile)
                     .with_placement(Placement::End),
             );
         }
@@ -361,7 +361,7 @@ impl SystemPromptBuilder {
                         .with_priority(
                             self.effective_priority("task_context", SectionPriority::Critical),
                         )
-                        .with_cache_layer(CacheLayer::Task)
+                        .with_cache_layer(CacheLayer::Plan)
                         .with_placement(Placement::End),
                 );
             }
@@ -585,41 +585,41 @@ mod tests {
         // Layer 1: role_identity
         assert_eq!(sections[0].name, "role_identity");
         assert_eq!(sections[0].priority, SectionPriority::Critical);
-        assert_eq!(sections[0].cache_layer, CacheLayer::System);
+        assert_eq!(sections[0].cache_layer, CacheLayer::Role);
         assert_eq!(sections[0].placement, Placement::Start);
 
         // Layer 2: conventions
         assert_eq!(sections[1].name, "conventions");
         assert_eq!(sections[1].priority, SectionPriority::High);
-        assert_eq!(sections[1].cache_layer, CacheLayer::System);
+        assert_eq!(sections[1].cache_layer, CacheLayer::Role);
 
         // Layer 5: tool_instructions (before domain in output order)
         assert_eq!(sections[2].name, "tool_instructions");
-        assert_eq!(sections[2].cache_layer, CacheLayer::System);
+        assert_eq!(sections[2].cache_layer, CacheLayer::Role);
 
         // Layer 3: domain_context
         assert_eq!(sections[3].name, "domain_context");
-        assert_eq!(sections[3].cache_layer, CacheLayer::Session);
+        assert_eq!(sections[3].cache_layer, CacheLayer::Workspace);
 
         // Layer 3b: context_layer
         assert_eq!(sections[4].name, "context_layer");
-        assert_eq!(sections[4].cache_layer, CacheLayer::Session);
+        assert_eq!(sections[4].cache_layer, CacheLayer::Workspace);
 
         // Layer 6: anti_patterns
         assert_eq!(sections[5].name, "anti_patterns");
-        assert_eq!(sections[5].cache_layer, CacheLayer::Session);
+        assert_eq!(sections[5].cache_layer, CacheLayer::Workspace);
         assert_eq!(sections[5].placement, Placement::End);
 
         // Layer 7: affect_guidance
         assert_eq!(sections[6].name, "affect_guidance");
         assert_eq!(sections[6].priority, SectionPriority::Normal);
-        assert_eq!(sections[6].cache_layer, CacheLayer::Dynamic);
+        assert_eq!(sections[6].cache_layer, CacheLayer::Volatile);
         assert_eq!(sections[6].placement, Placement::End);
 
         // Layer 4: task_context
         assert_eq!(sections[7].name, "task_context");
         assert_eq!(sections[7].priority, SectionPriority::Critical);
-        assert_eq!(sections[7].cache_layer, CacheLayer::Task);
+        assert_eq!(sections[7].cache_layer, CacheLayer::Plan);
         assert_eq!(sections[7].placement, Placement::End);
     }
 

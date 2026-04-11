@@ -37,20 +37,20 @@ pub enum SectionPriority {
 
 /// Which cache layer this section belongs to, in an LLM prefix-cache model.
 ///
-/// Sections with `CacheLayer::Static` should be identical across runs so
-/// prefix caching wins; `CacheLayer::Dynamic` sections change per-request.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Stable layers must come before volatile layers so the model can reuse
+/// the longest possible KV-cache prefix across related turns.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheLayer {
-    /// Role definition, coding standards — stable across runs (cache-win).
-    System = 0,
-    /// Per-plan / per-session content (workspace map, recent learnings).
-    Session = 1,
-    /// Per-task content (the actual task, dynamic context).
+    /// System prompt, role instructions, tool definitions.
+    Role = 0,
+    /// Workspace map, cross-plan context, durable project context.
+    Workspace = 1,
+    /// Plan/task brief content that is stable within a plan.
     #[default]
-    Task = 2,
-    /// Per-iteration (error digest, last attempt).
-    Dynamic = 3,
+    Plan = 2,
+    /// Turn-local content such as review feedback or error output.
+    Volatile = 3,
 }
 
 /// Where in the final prompt the section should be placed.
@@ -91,14 +91,14 @@ pub struct PromptSection {
 }
 
 impl PromptSection {
-    /// Create a new section with defaults (Normal priority, Task cache layer, Middle placement).
+    /// Create a new section with defaults (Normal priority, Plan cache layer, Middle placement).
     #[must_use]
     pub fn new(name: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             content: content.into(),
             priority: SectionPriority::Normal,
-            cache_layer: CacheLayer::Task,
+            cache_layer: CacheLayer::Plan,
             placement: Placement::Middle,
             hard_cap: None,
         }
@@ -205,10 +205,10 @@ const fn priority_tag(p: SectionPriority) -> &'static str {
 
 const fn cache_tag(l: CacheLayer) -> &'static str {
     match l {
-        CacheLayer::System => "system",
-        CacheLayer::Session => "session",
-        CacheLayer::Task => "task",
-        CacheLayer::Dynamic => "dynamic",
+        CacheLayer::Role => "role",
+        CacheLayer::Workspace => "workspace",
+        CacheLayer::Plan => "plan",
+        CacheLayer::Volatile => "volatile",
     }
 }
 
@@ -300,11 +300,11 @@ impl Composer for PromptComposer {
             }
         }
 
-        // Sort optional sections: cache_layer ASC (cache-wins first), then priority DESC.
+        // Sort optional sections: cache_layer ASC (stable layers first), then priority DESC.
         let mut optional = optional;
         optional.sort_by(|a, b| {
-            (a.0.cache_layer as u8)
-                .cmp(&(b.0.cache_layer as u8))
+            a.0.cache_layer
+                .cmp(&b.0.cache_layer)
                 .then_with(|| (b.0.priority as u8).cmp(&(a.0.priority as u8)))
         });
 
@@ -338,7 +338,7 @@ impl Composer for PromptComposer {
         kept.sort_by(|a, b| {
             placement_order(a.0.placement)
                 .cmp(&placement_order(b.0.placement))
-                .then_with(|| (a.0.cache_layer as u8).cmp(&(b.0.cache_layer as u8)))
+                .then_with(|| a.0.cache_layer.cmp(&b.0.cache_layer))
         });
 
         // Concatenate.
@@ -507,11 +507,29 @@ mod tests {
     fn section_roundtrips_signal() {
         let s = PromptSection::new("role", "you are an agent")
             .with_priority(SectionPriority::Critical)
-            .with_cache_layer(CacheLayer::System)
+            .with_cache_layer(CacheLayer::Role)
             .with_placement(Placement::Start);
         let sig = s.clone().into_signal().unwrap();
         let decoded = PromptSection::from_signal(&sig).unwrap();
         assert_eq!(decoded, s);
+    }
+
+    #[test]
+    fn cache_layer_ordering() {
+        assert!(CacheLayer::Role < CacheLayer::Workspace);
+        assert!(CacheLayer::Workspace < CacheLayer::Plan);
+        assert!(CacheLayer::Plan < CacheLayer::Volatile);
+
+        let mut sections = vec![
+            PromptSection::new("volatile", "v").with_cache_layer(CacheLayer::Volatile),
+            PromptSection::new("plan", "p").with_cache_layer(CacheLayer::Plan),
+            PromptSection::new("role", "r").with_cache_layer(CacheLayer::Role),
+            PromptSection::new("workspace", "w").with_cache_layer(CacheLayer::Workspace),
+        ];
+        sections.sort_by_key(|section| section.cache_layer);
+
+        let ordered: Vec<_> = sections.into_iter().map(|section| section.name).collect();
+        assert_eq!(ordered, vec!["role", "workspace", "plan", "volatile"]);
     }
 
     #[test]

@@ -4,11 +4,11 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use roko_agent::OpenAiCompatLlmBackend;
+use roko_agent::Usage;
 use roko_agent::dispatcher::ToolDispatcher;
 use roko_agent::tool_loop::{StopReason, ToolLoop};
 use roko_agent::translate::{OpenAiTranslator, Translator};
-use roko_agent::OpenAiCompatLlmBackend;
-use roko_agent::Usage;
 use roko_core::tool::{ToolContext, ToolDef};
 use roko_std::tool::builtin::read_file;
 use roko_std::tool::handlers::handler_for;
@@ -101,9 +101,12 @@ async fn tool_loop_glm_e2e() {
     tokio::fs::create_dir_all(&src_dir)
         .await
         .expect("create src dir");
-    tokio::fs::write(src_dir.join("lib.rs"), "pub fn answer() -> u32 {\n    42\n}\n")
-        .await
-        .expect("seed src/lib.rs");
+    tokio::fs::write(
+        src_dir.join("lib.rs"),
+        "pub fn answer() -> u32 {\n    42\n}\n",
+    )
+    .await
+    .expect("seed src/lib.rs");
 
     let first_response = serde_json::json!({
         "id": "chatcmpl-glm-1",

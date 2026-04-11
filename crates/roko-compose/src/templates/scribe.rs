@@ -114,7 +114,7 @@ impl RolePromptTemplate for ScribeTemplate {
         sections.push(
             PromptSection::new("agents_instructions", &input.agents_md)
                 .with_priority(SectionPriority::Critical)
-                .with_cache_layer(CacheLayer::System)
+                .with_cache_layer(CacheLayer::Role)
                 .with_placement(Placement::Start),
         );
 
@@ -122,7 +122,7 @@ impl RolePromptTemplate for ScribeTemplate {
         sections.push(
             PromptSection::new("plan_spec", truncate(&input.plan.content, 50_000))
                 .with_priority(SectionPriority::Critical)
-                .with_cache_layer(CacheLayer::Session)
+                .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Start)
                 .with_hard_cap(50_000),
         );
@@ -131,7 +131,7 @@ impl RolePromptTemplate for ScribeTemplate {
         sections.push(
             PromptSection::new("prd2_extract", truncate(&input.prd2_extract, 16_000))
                 .with_priority(SectionPriority::High)
-                .with_cache_layer(CacheLayer::Session)
+                .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Middle)
                 .with_hard_cap(16_000),
         );
@@ -140,7 +140,7 @@ impl RolePromptTemplate for ScribeTemplate {
         sections.push(
             PromptSection::new("brief", &input.brief)
                 .with_priority(SectionPriority::High)
-                .with_cache_layer(CacheLayer::Session)
+                .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Middle),
         );
 
@@ -150,7 +150,7 @@ impl RolePromptTemplate for ScribeTemplate {
             sections.push(
                 PromptSection::new("file_context", text)
                     .with_priority(SectionPriority::High)
-                    .with_cache_layer(CacheLayer::Task)
+                    .with_cache_layer(CacheLayer::Plan)
                     .with_placement(Placement::End),
             );
         }
@@ -161,7 +161,7 @@ impl RolePromptTemplate for ScribeTemplate {
                 sections.push(
                     PromptSection::new("critic_feedback", feedback.as_str())
                         .with_priority(SectionPriority::High)
-                        .with_cache_layer(CacheLayer::Dynamic)
+                        .with_cache_layer(CacheLayer::Volatile)
                         .with_placement(Placement::End),
                 );
             }
@@ -173,7 +173,7 @@ impl RolePromptTemplate for ScribeTemplate {
                 sections.push(
                     PromptSection::new("prior_docs", docs.as_str())
                         .with_priority(SectionPriority::High)
-                        .with_cache_layer(CacheLayer::Task)
+                        .with_cache_layer(CacheLayer::Plan)
                         .with_placement(Placement::End),
                 );
             }
@@ -269,10 +269,10 @@ mod tests {
         );
 
         // Cache layers
-        assert_eq!(sections[0].cache_layer, CacheLayer::System);
-        assert_eq!(sections[1].cache_layer, CacheLayer::Session);
-        assert_eq!(sections[2].cache_layer, CacheLayer::Session);
-        assert_eq!(sections[4].cache_layer, CacheLayer::Task);
+        assert_eq!(sections[0].cache_layer, CacheLayer::Role);
+        assert_eq!(sections[1].cache_layer, CacheLayer::Workspace);
+        assert_eq!(sections[2].cache_layer, CacheLayer::Workspace);
+        assert_eq!(sections[4].cache_layer, CacheLayer::Plan);
 
         // Hard caps — scribe gets 16k for prd2
         assert_eq!(sections[1].hard_cap, Some(50_000));
