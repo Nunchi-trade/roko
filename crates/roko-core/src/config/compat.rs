@@ -113,6 +113,8 @@ fn convert(m: &MoriConfig) -> RokoConfig {
         webhooks: WebhooksConfig {
             github: GithubWebhookConfig::default(),
         },
+        providers: HashMap::new(),
+        models: HashMap::new(),
         subscriptions: Vec::new(),
         server: ServerConfig::default(),
         deploy: DeployConfig::default(),

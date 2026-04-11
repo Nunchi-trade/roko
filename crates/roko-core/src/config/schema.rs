@@ -49,6 +49,14 @@ pub struct RokoConfig {
     #[serde(default)]
     pub agent: AgentConfig,
 
+    /// Provider registry keyed by provider name.
+    #[serde(default)]
+    pub providers: HashMap<String, ProviderConfig>,
+
+    /// Model registry keyed by model name.
+    #[serde(default)]
+    pub models: HashMap<String, ModelProfile>,
+
     /// Verification gates.
     #[serde(default)]
     pub gates: GatesConfig,
@@ -113,6 +121,8 @@ impl Default for RokoConfig {
             project: ProjectConfig::default(),
             prd: PrdConfig::default(),
             agent: AgentConfig::default(),
+            providers: HashMap::new(),
+            models: HashMap::new(),
             gates: GatesConfig::default(),
             routing: RoutingConfig::default(),
             budget: BudgetConfig::default(),
@@ -1506,6 +1516,46 @@ fresh_base_branch = "develop"
         assert_eq!(cfg.project.name, "my-dapp");
         assert_eq!(cfg.project.root, "/home/user/code");
         assert_eq!(cfg.project.fresh_base_branch, "develop");
+    }
+
+    #[test]
+    fn config_load() {
+        let toml = r#"
+[agent]
+default_model = "claude-sonnet-4-6"
+"#;
+        let cfg = RokoConfig::from_toml(toml).expect("parse");
+        assert_eq!(cfg.agent.default_model, "claude-sonnet-4-6");
+        assert!(cfg.providers.is_empty());
+        assert!(cfg.models.is_empty());
+    }
+
+    #[test]
+    fn config_providers() {
+        let toml = r#"
+[providers.zai]
+kind = "openai_compat"
+base_url = "https://api.z.ai/api/paas/v4"
+api_key_env = "ZAI_API_KEY"
+
+[models.glm-5-1]
+provider = "zai"
+slug = "glm-5.1"
+supports_thinking = true
+tool_format = "openai_json"
+"#;
+        let cfg = RokoConfig::from_toml(toml).expect("parse");
+
+        let provider = cfg.providers.get("zai").expect("provider");
+        assert_eq!(provider.kind, ProviderKind::OpenAiCompat);
+        assert_eq!(provider.base_url.as_deref(), Some("https://api.z.ai/api/paas/v4"));
+        assert_eq!(provider.api_key_env.as_deref(), Some("ZAI_API_KEY"));
+
+        let model = cfg.models.get("glm-5-1").expect("model");
+        assert_eq!(model.provider, "zai");
+        assert_eq!(model.slug, "glm-5.1");
+        assert!(model.supports_thinking);
+        assert_eq!(model.tool_format, "openai_json");
     }
 
     #[test]
