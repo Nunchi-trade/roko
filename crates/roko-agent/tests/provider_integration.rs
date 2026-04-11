@@ -155,6 +155,62 @@ async fn glm_zai_direct() {
         .any(|(name, value)| name.eq_ignore_ascii_case("content-type") && value == "application/json"));
 }
 
+#[tokio::test]
+async fn kimi_moonshot_direct() {
+    let response = serde_json::json!({
+        "id": "chatcmpl-test",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "pong"},
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": 13,
+            "completion_tokens": 9,
+            "total_tokens": 22
+        }
+    })
+    .to_string();
+    let (poster, captured) = MockPoster::new(response);
+
+    let agent = CodexAgent::new("test-key", "kimi-k2.5")
+        .with_base_url("https://api.moonshot.ai")
+        .with_http_poster(poster)
+        .with_name("kimi-moonshot-direct");
+
+    let result = agent
+        .run(&prompt("Reply with the single word pong."), &Context::now())
+        .await;
+    assert!(
+        result.success,
+        "{}",
+        result.output.body.as_text().unwrap_or("unknown")
+    );
+    assert_eq!(result.output.body.as_text().unwrap_or(""), "pong");
+    assert_eq!(result.usage.input_tokens, 13);
+    assert_eq!(result.usage.output_tokens, 9);
+
+    let request = captured
+        .lock()
+        .expect("capture lock")
+        .clone()
+        .expect("captured request");
+    assert_eq!(request.url, "https://api.moonshot.ai/v1/chat/completions");
+    assert_eq!(request.timeout_ms, 120_000);
+
+    let parsed: Value = serde_json::from_str(&request.body).expect("request json");
+    assert_eq!(parsed["model"], "kimi-k2.5");
+    assert_eq!(parsed["messages"][0]["content"], "Reply with the single word pong.");
+    assert!(request
+        .headers
+        .iter()
+        .any(|(name, value)| name.eq_ignore_ascii_case("authorization") && value == "Bearer test-key"));
+    assert!(request
+        .headers
+        .iter()
+        .any(|(name, value)| name.eq_ignore_ascii_case("content-type") && value == "application/json"));
+}
+
 #[cfg(feature = "integration")]
 mod live {
     use super::*;
