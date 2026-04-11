@@ -18,9 +18,7 @@ const TOOL_RESULT_PREVIEW_CHARS: usize = 200;
 /// replaced with a short preview and a total character count.
 pub fn compact_tool_results(messages: &mut Vec<Value>) {
     let groups = tool_result_groups(messages);
-    let compact_until = groups
-        .len()
-        .saturating_sub(RECENT_TOOL_GROUPS_TO_KEEP);
+    let compact_until = groups.len().saturating_sub(RECENT_TOOL_GROUPS_TO_KEEP);
 
     for (start, end) in groups.into_iter().take(compact_until) {
         for message in &mut messages[start..end] {

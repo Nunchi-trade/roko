@@ -710,7 +710,9 @@ mod tests {
                         })
                     })
                     .collect::<Vec<_>>();
-                Ok(BackendResponse::Json(serde_json::json!({ "tool_calls": tool_calls })))
+                Ok(BackendResponse::Json(
+                    serde_json::json!({ "tool_calls": tool_calls }),
+                ))
             } else {
                 Ok(BackendResponse::Json(
                     serde_json::json!({"message": {"content": "final after pruning"}}),
@@ -1047,7 +1049,11 @@ mod tests {
         let captured = backend.captured.lock();
         assert_eq!(captured.len(), 2, "backend should be called twice");
         let second_call_messages = &captured[1];
-        assert_eq!(second_call_messages.len(), 5, "one old tool result should be pruned");
+        assert_eq!(
+            second_call_messages.len(),
+            5,
+            "one old tool result should be pruned"
+        );
         assert_eq!(second_call_messages[0]["role"], "system");
         assert_eq!(second_call_messages[1]["role"], "user");
         assert!(
@@ -1089,7 +1095,10 @@ mod tests {
 
         let before_tokens = prune::estimate_message_tokens(&messages);
         let compacted_tokens = prune::estimate_message_tokens(&compacted);
-        assert!(compacted_tokens < before_tokens, "compaction should shrink old results");
+        assert!(
+            compacted_tokens < before_tokens,
+            "compaction should shrink old results"
+        );
 
         let target = compacted_tokens + ((before_tokens - compacted_tokens) / 2).max(1);
         let limit = (target * 100).div_ceil(80);
@@ -1097,7 +1106,11 @@ mod tests {
 
         tl.prune_context_if_needed(&mut messages);
 
-        assert_eq!(messages.len(), 8, "compaction should avoid dropping messages");
+        assert_eq!(
+            messages.len(),
+            8,
+            "compaction should avoid dropping messages"
+        );
         assert_eq!(messages[3]["tool_call_id"], "old");
         assert!(
             messages[3]["content"]

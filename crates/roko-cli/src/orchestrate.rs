@@ -68,8 +68,8 @@ use roko_orchestrator::{
 use roko_std::NoOpScorer;
 use roko_std::StaticToolRegistry;
 use serde::{Deserialize, Serialize};
-use tokio::signal;
 use tokio::io::AsyncWriteExt;
+use tokio::signal;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken as TokioCancellationToken;
 use tracing::{Instrument, info_span, instrument};
@@ -97,6 +97,20 @@ fn state_dir(workdir: &Path) -> PathBuf {
 
 fn executor_snapshot_path(workdir: &Path) -> PathBuf {
     state_dir(workdir).join("executor.json")
+}
+
+fn save_snapshot_atomic(snapshot: &ExecutorSnapshot, path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create snapshot dir {}", parent.display()))?;
+    }
+    let tmp_path = path.with_extension("json.tmp");
+    let json = snapshot.to_json().map_err(|e| anyhow!("snapshot: {e}"))?;
+    std::fs::write(&tmp_path, &json)
+        .with_context(|| format!("write snapshot tmp {}", tmp_path.display()))?;
+    std::fs::rename(&tmp_path, path)
+        .with_context(|| format!("rename snapshot {}", path.display()))?;
+    Ok(())
 }
 
 async fn wait_for_shutdown_signal() -> Result<&'static str> {
@@ -2708,12 +2722,13 @@ impl PlanRunner {
         std::fs::create_dir_all(&state_dir).map_err(|e| anyhow!("create state dir: {e}"))?;
 
         // Executor snapshot — atomic write.
-        let exec_json = self.snapshot()?;
         let exec_path = state_dir.join("executor.json");
-        let exec_tmp = state_dir.join("executor.json.tmp");
-        std::fs::write(&exec_tmp, &exec_json).map_err(|e| anyhow!("write executor tmp: {e}"))?;
-        std::fs::rename(&exec_tmp, &exec_path)
-            .map_err(|e| anyhow!("rename executor snapshot: {e}"))?;
+        #[allow(clippy::cast_possible_truncation)]
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        let exec_snapshot = self.executor.snapshot(ts);
+        save_snapshot_atomic(&exec_snapshot, &exec_path)?;
 
         // Event log snapshot — atomic write.
         let log_json = self.event_log_snapshot()?;
@@ -2752,16 +2767,12 @@ impl PlanRunner {
             return Ok(());
         }
 
-        let snapshot_json = self.snapshot()?;
-        if let Some(parent) = snapshot_path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create snapshot dir {}", parent.display()))?;
-        }
-        let tmp_path = snapshot_path.with_extension("json.tmp");
-        std::fs::write(&tmp_path, snapshot_json)
-            .with_context(|| format!("write snapshot tmp {}", tmp_path.display()))?;
-        std::fs::rename(&tmp_path, snapshot_path)
-            .with_context(|| format!("rename snapshot {}", snapshot_path.display()))?;
+        #[allow(clippy::cast_possible_truncation)]
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        let snapshot = self.executor.snapshot(ts);
+        save_snapshot_atomic(&snapshot, snapshot_path)?;
         Ok(())
     }
 
@@ -3194,7 +3205,9 @@ impl PlanRunner {
 
             for action in actions {
                 if self.cancel.is_cancelled() {
-                    tracing::warn!("[orchestrate] shutdown requested; leaving remaining actions queued");
+                    tracing::warn!(
+                        "[orchestrate] shutdown requested; leaving remaining actions queued"
+                    );
                     break;
                 }
                 self.dispatch_action(action).await;
@@ -3235,7 +3248,9 @@ impl PlanRunner {
             .collect();
 
         if self.cancel.is_cancelled() {
-            tracing::warn!("[orchestrate] run interrupted by shutdown signal; preserving partial state");
+            tracing::warn!(
+                "[orchestrate] run interrupted by shutdown signal; preserving partial state"
+            );
         } else {
             // Emit plan-completed server events.
             for p in &plans {
@@ -10456,6 +10471,24 @@ files = ["crates/roko-cli/src/orchestrate.rs"]
 
         let reloaded = CrateFamiliarityTracker::load(&path);
         assert!((reloaded.score_for_task(Some(&task)) - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn atomic_checkpoint_preserves_existing_snapshot_on_tmp_write_failure() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("executor.json");
+
+        let original = ExecutorSnapshot::new(1);
+        save_snapshot_atomic(&original, &path).unwrap();
+        let original_json = std::fs::read_to_string(&path).unwrap();
+
+        let tmp_path = path.with_extension("json.tmp");
+        std::fs::create_dir(&tmp_path).unwrap();
+
+        let replacement = ExecutorSnapshot::new(2);
+        let err = save_snapshot_atomic(&replacement, &path).unwrap_err();
+        assert!(err.to_string().contains("write snapshot tmp"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original_json);
     }
 
     #[test]
