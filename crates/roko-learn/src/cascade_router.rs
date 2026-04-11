@@ -26,8 +26,10 @@ use roko_core::task::TaskCategory;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use crate::cfactor::{AgentDispatchBias, CFactor};
+use crate::costs_db::CostTable;
 use crate::model_router::{COLD_START_THRESHOLD, CONTEXT_DIM, LinUCBRouter, RoutingContext};
 use crate::pareto::{ModelObservation, compute_pareto_frontier};
 use crate::provider_health::ProviderHealthRegistry;
@@ -111,6 +113,14 @@ struct ModelStats {
     trials: u64,
     /// Number of successes (gate passes).
     successes: u64,
+    /// Total citations observed across Perplexity responses.
+    total_citations: u64,
+    /// Total Perplexity search latency observed in milliseconds.
+    total_search_latency_ms: u64,
+    /// Total observed cost in USD (token cost + per-request fee).
+    total_cost_usd: f64,
+    /// Number of Perplexity requests contributing metadata.
+    perplexity_requests: u64,
 }
 
 impl ModelStats {
@@ -142,6 +152,85 @@ impl ModelStats {
     fn upper_bound(&self) -> f64 {
         (self.pass_rate() + self.confidence_width()).min(1.0)
     }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn avg_citations_per_response(&self) -> f64 {
+        if self.perplexity_requests == 0 {
+            0.0
+        } else {
+            self.total_citations as f64 / self.perplexity_requests as f64
+        }
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn avg_search_latency_ms(&self) -> f64 {
+        if self.perplexity_requests == 0 {
+            0.0
+        } else {
+            self.total_search_latency_ms as f64 / self.perplexity_requests as f64
+        }
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn avg_cost_usd(&self) -> f64 {
+        if self.perplexity_requests == 0 {
+            0.0
+        } else {
+            self.total_cost_usd / self.perplexity_requests as f64
+        }
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn cost_per_success(&self) -> Option<f64> {
+        if self.successes == 0 {
+            None
+        } else {
+            Some(self.total_cost_usd / self.successes as f64)
+        }
+    }
+}
+
+/// Per-request Perplexity metadata captured by the cascade learning loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PerplexityObservation {
+    /// Number of citations returned with the response.
+    pub citation_count: u64,
+    /// Search-side latency in milliseconds.
+    pub search_latency_ms: u64,
+    /// Input tokens billed for the request.
+    pub input_tokens: u64,
+    /// Output tokens billed for the request.
+    pub output_tokens: u64,
+}
+
+/// Public snapshot of the richer per-model observation state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CascadeObservationStats {
+    /// Number of trials recorded for the model.
+    pub trials: u64,
+    /// Number of successful trials.
+    pub successes: u64,
+    /// Total citations observed across Perplexity responses.
+    pub total_citations: u64,
+    /// Average citations per Perplexity response.
+    pub avg_citations_per_response: f64,
+    /// Total Perplexity search latency in milliseconds.
+    pub total_search_latency_ms: u64,
+    /// Average Perplexity search latency in milliseconds.
+    pub avg_search_latency_ms: f64,
+    /// Total observed cost in USD, including request fee.
+    pub total_cost_usd: f64,
+    /// Average observed cost in USD, including request fee.
+    pub avg_cost_usd: f64,
+    /// Number of Perplexity requests contributing observation metadata.
+    pub perplexity_requests: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PerplexityObservationTotals {
+    citation_count: u64,
+    search_latency_ms: u64,
+    total_cost_usd: f64,
 }
 
 // ─── Static role -> model table ─────────────────────────────────────────────
@@ -299,6 +388,18 @@ fn slug_family(slug: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+fn default_cost_table() -> &'static CostTable {
+    static COST_TABLE: OnceLock<CostTable> = OnceLock::new();
+    COST_TABLE.get_or_init(CostTable::default)
+}
+
+fn estimate_total_cost_usd(model_slug: &str, input_tokens: u64, output_tokens: u64) -> f64 {
+    default_cost_table()
+        .lookup(model_slug)
+        .map(|pricing| pricing.estimate_total(input_tokens, output_tokens))
+        .unwrap_or(0.0)
 }
 
 // ─── CascadeRouter ──────────────────────────────────────────────────────────
@@ -528,7 +629,42 @@ impl CascadeRouter {
         let Some(model_idx) = self.model_index_for_slug(model_slug) else {
             return;
         };
-        self.observe_internal(&ctx.to_features(), model_idx, reward, success);
+        self.observe_internal(&ctx.to_features(), model_idx, reward, success, None);
+    }
+
+    /// Record an observation enriched with Perplexity search metadata.
+    ///
+    /// The request cost is estimated from the existing [`CostTable`] using the
+    /// model's token pricing plus any configured per-request fee.
+    pub fn record_perplexity_observation(
+        &self,
+        ctx: &RoutingContext,
+        model_slug: &str,
+        reward: f64,
+        success: bool,
+        observation: PerplexityObservation,
+    ) -> bool {
+        let Some(model_idx) = self.model_index_for_slug(model_slug) else {
+            return false;
+        };
+
+        let perplexity = PerplexityObservationTotals {
+            citation_count: observation.citation_count,
+            search_latency_ms: observation.search_latency_ms,
+            total_cost_usd: estimate_total_cost_usd(
+                model_slug,
+                observation.input_tokens,
+                observation.output_tokens,
+            ),
+        };
+        self.observe_internal(
+            &ctx.to_features(),
+            model_idx,
+            reward,
+            success,
+            Some(perplexity),
+        );
+        true
     }
 
     /// Record a binary outcome for `model_slug` without a full routing context.
@@ -542,7 +678,7 @@ impl CascadeRouter {
 
         let reward = if success { 1.0 } else { 0.0 };
         let context = [0.0; CONTEXT_DIM];
-        self.observe_internal(&context, model_idx, reward, success);
+        self.observe_internal(&context, model_idx, reward, success, None);
         true
     }
 
@@ -551,10 +687,17 @@ impl CascadeRouter {
     /// This is the success-path entry point used by orchestration when the
     /// caller already has the model index in the router's arm list.
     pub fn observe(&self, context_vec: Vec<f64>, model_idx: usize, reward: f64) {
-        self.observe_internal(&context_vec, model_idx, reward, true);
+        self.observe_internal(&context_vec, model_idx, reward, true, None);
     }
 
-    fn observe_internal(&self, context_vec: &[f64], model_idx: usize, reward: f64, success: bool) {
+    fn observe_internal(
+        &self,
+        context_vec: &[f64],
+        model_idx: usize,
+        reward: f64,
+        success: bool,
+        perplexity: Option<PerplexityObservationTotals>,
+    ) {
         let Some(slug) = self.model_slugs.get(model_idx) else {
             return;
         };
@@ -565,6 +708,12 @@ impl CascadeRouter {
         entry.trials += 1;
         if success {
             entry.successes += 1;
+        }
+        if let Some(perplexity) = perplexity {
+            entry.total_citations += perplexity.citation_count;
+            entry.total_search_latency_ms += perplexity.search_latency_ms;
+            entry.total_cost_usd += perplexity.total_cost_usd;
+            entry.perplexity_requests += 1;
         }
         drop(stats);
 
@@ -583,6 +732,30 @@ impl CascadeRouter {
             .lock()
             .iter()
             .map(|(k, v)| (k.clone(), (v.trials, v.successes)))
+            .collect()
+    }
+
+    /// Snapshot of richer per-model observations used by learning loops.
+    pub fn observation_snapshot(&self) -> HashMap<String, CascadeObservationStats> {
+        self.confidence_stats
+            .lock()
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    CascadeObservationStats {
+                        trials: v.trials,
+                        successes: v.successes,
+                        total_citations: v.total_citations,
+                        avg_citations_per_response: v.avg_citations_per_response(),
+                        total_search_latency_ms: v.total_search_latency_ms,
+                        avg_search_latency_ms: v.avg_search_latency_ms(),
+                        total_cost_usd: v.total_cost_usd,
+                        avg_cost_usd: v.avg_cost_usd(),
+                        perplexity_requests: v.perplexity_requests,
+                    },
+                )
+            })
             .collect()
     }
 
@@ -605,6 +778,10 @@ impl CascadeRouter {
                         PersistedModelStats {
                             trials: v.trials,
                             successes: v.successes,
+                            total_citations: v.total_citations,
+                            total_search_latency_ms: v.total_search_latency_ms,
+                            total_cost_usd: v.total_cost_usd,
+                            perplexity_requests: v.perplexity_requests,
                         },
                     )
                 })
@@ -659,6 +836,10 @@ impl CascadeRouter {
                         ModelStats {
                             trials: persisted.trials,
                             successes: persisted.successes,
+                            total_citations: persisted.total_citations,
+                            total_search_latency_ms: persisted.total_search_latency_ms,
+                            total_cost_usd: persisted.total_cost_usd,
+                            perplexity_requests: persisted.perplexity_requests,
                         },
                     );
                 }
@@ -942,9 +1123,14 @@ impl CascadeRouter {
                         slug.clone(),
                         ModelObservation {
                             pass_rate: model_stats.pass_rate(),
-                            cost_per_success: pareto_cost_proxy(slug)
-                                / model_stats.pass_rate().max(0.01),
-                            avg_latency_ms: pareto_latency_proxy(slug),
+                            cost_per_success: model_stats.cost_per_success().unwrap_or_else(|| {
+                                pareto_cost_proxy(slug) / model_stats.pass_rate().max(0.01)
+                            }),
+                            avg_latency_ms: if model_stats.perplexity_requests > 0 {
+                                model_stats.avg_search_latency_ms()
+                            } else {
+                                pareto_latency_proxy(slug)
+                            },
                             observations: model_stats.trials,
                         },
                     );
@@ -1040,6 +1226,14 @@ struct CascadeSnapshot {
 struct PersistedModelStats {
     trials: u64,
     successes: u64,
+    #[serde(default)]
+    total_citations: u64,
+    #[serde(default)]
+    total_search_latency_ms: u64,
+    #[serde(default)]
+    total_cost_usd: f64,
+    #[serde(default)]
+    perplexity_requests: u64,
 }
 
 // ─── Tests ────────────────────────────────────────��─────────────────────────
@@ -1050,6 +1244,7 @@ mod tests {
     use crate::provider_health::{ErrorClass, ProviderHealthRegistry};
     use roko_core::task::{TaskCategory, TaskComplexityBand};
     use std::collections::HashMap;
+    use tempfile::tempdir;
 
     fn test_slugs() -> Vec<String> {
         vec![
@@ -1454,14 +1649,17 @@ mod tests {
         let s10 = ModelStats {
             trials: 10,
             successes: 7,
+            ..ModelStats::default()
         };
         let s100 = ModelStats {
             trials: 100,
             successes: 70,
+            ..ModelStats::default()
         };
         let s1000 = ModelStats {
             trials: 1000,
             successes: 700,
+            ..ModelStats::default()
         };
 
         assert!(s10.confidence_width() > s100.confidence_width());
@@ -1546,6 +1744,81 @@ mod tests {
 
         let stats = cascade.confidence_snapshot();
         assert_eq!(stats.get("claude-sonnet-4-5"), Some(&(1, 1)));
+    }
+
+    #[test]
+    fn perplexity_observations_include_citations_latency_and_total_cost() {
+        let cascade = CascadeRouter::new(vec![
+            "sonar-pro".to_string(),
+            "claude-sonnet-4-5".to_string(),
+        ]);
+        let mut ctx = default_ctx();
+        ctx.role = AgentRole::Researcher;
+        ctx.task_category = TaskCategory::Research;
+
+        assert!(cascade.record_perplexity_observation(
+            &ctx,
+            "sonar-pro",
+            0.95,
+            true,
+            PerplexityObservation {
+                citation_count: 6,
+                search_latency_ms: 1_200,
+                input_tokens: 1_000,
+                output_tokens: 500,
+            },
+        ));
+
+        let stats = cascade.observation_snapshot();
+        let sonar = stats.get("sonar-pro").expect("sonar-pro stats");
+
+        assert_eq!(sonar.trials, 1);
+        assert_eq!(sonar.successes, 1);
+        assert_eq!(sonar.total_citations, 6);
+        assert!((sonar.avg_citations_per_response - 6.0).abs() < 1e-9);
+        assert_eq!(sonar.total_search_latency_ms, 1_200);
+        assert!((sonar.avg_search_latency_ms - 1_200.0).abs() < 1e-9);
+        assert_eq!(sonar.perplexity_requests, 1);
+        assert!((sonar.total_cost_usd - 0.0245).abs() < 1e-9);
+        assert!((sonar.avg_cost_usd - 0.0245).abs() < 1e-9);
+    }
+
+    #[test]
+    fn perplexity_observations_persist_across_save_and_load() {
+        let cascade =
+            CascadeRouter::new(vec!["sonar".to_string(), "claude-sonnet-4-5".to_string()]);
+        let mut ctx = default_ctx();
+        ctx.role = AgentRole::Researcher;
+        ctx.task_category = TaskCategory::Research;
+
+        assert!(cascade.record_perplexity_observation(
+            &ctx,
+            "sonar",
+            0.9,
+            true,
+            PerplexityObservation {
+                citation_count: 3,
+                search_latency_ms: 900,
+                input_tokens: 2_000,
+                output_tokens: 1_000,
+            },
+        ));
+
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("cascade-router.json");
+        cascade.save(&path).expect("save cascade router");
+
+        let reloaded = CascadeRouter::load_or_new(
+            &path,
+            vec!["sonar".to_string(), "claude-sonnet-4-5".to_string()],
+        );
+        let stats = reloaded.observation_snapshot();
+        let sonar = stats.get("sonar").expect("sonar stats");
+
+        assert_eq!(sonar.total_citations, 3);
+        assert_eq!(sonar.total_search_latency_ms, 900);
+        assert_eq!(sonar.perplexity_requests, 1);
+        assert!((sonar.total_cost_usd - 0.008).abs() < 1e-9);
     }
 
     // ── cascade_perplexity: Researcher routes to sonar-pro ───────────────

@@ -441,7 +441,9 @@ mod tests {
     async fn perplexity_chat_agent_citations_preserved_in_pplx_meta_tag() {
         let (mock, _) = MockPoster::ok(canned_with_citations("answer with citations"));
         let agent = agent_with(Box::new(mock));
-        let result = agent.run(&prompt("research question"), &Context::now()).await;
+        let result = agent
+            .run(&prompt("research question"), &Context::now())
+            .await;
         assert!(result.success);
 
         let meta_json = result
@@ -464,18 +466,14 @@ mod tests {
         let result = agent.run(&prompt("q"), &Context::now()).await;
         assert!(result.success);
 
-        let meta: PerplexityMetadata = serde_json::from_str(
-            result.output.tag("pplx_meta").expect("pplx_meta tag"),
-        )
-        .expect("valid JSON");
+        let meta: PerplexityMetadata =
+            serde_json::from_str(result.output.tag("pplx_meta").expect("pplx_meta tag"))
+                .expect("valid JSON");
 
         assert_eq!(meta.search_results.len(), 1);
         assert_eq!(meta.search_results[0].title, "Paper Title");
         assert_eq!(meta.search_results[0].url, "https://example.com/paper");
-        assert_eq!(
-            meta.search_results[0].date,
-            Some("2024-01-01".to_string())
-        );
+        assert_eq!(meta.search_results[0].date, Some("2024-01-01".to_string()));
         assert!(meta.search_results[0].last_updated.is_none());
     }
 
@@ -486,10 +484,9 @@ mod tests {
         let result = agent.run(&prompt("q"), &Context::now()).await;
         assert!(result.success);
 
-        let meta: PerplexityMetadata = serde_json::from_str(
-            result.output.tag("pplx_meta").expect("pplx_meta tag"),
-        )
-        .expect("valid JSON");
+        let meta: PerplexityMetadata =
+            serde_json::from_str(result.output.tag("pplx_meta").expect("pplx_meta tag"))
+                .expect("valid JSON");
 
         assert_eq!(meta.annotations.len(), 1);
         assert_eq!(meta.annotations[0].start_index, 0);
@@ -504,10 +501,9 @@ mod tests {
         let result = agent.run(&prompt("q"), &Context::now()).await;
         assert!(result.success);
 
-        let meta: PerplexityMetadata = serde_json::from_str(
-            result.output.tag("pplx_meta").expect("pplx_meta tag"),
-        )
-        .expect("valid JSON");
+        let meta: PerplexityMetadata =
+            serde_json::from_str(result.output.tag("pplx_meta").expect("pplx_meta tag"))
+                .expect("valid JSON");
 
         assert!(meta.citations.is_empty());
         assert!(meta.search_results.is_empty());
@@ -628,14 +624,7 @@ mod tests {
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(!result.success);
         assert_eq!(result.output.tag("failed"), Some("true"));
-        assert!(
-            result
-                .output
-                .body
-                .as_text()
-                .expect("text")
-                .contains("401")
-        );
+        assert!(result.output.body.as_text().expect("text").contains("401"));
     }
 
     #[tokio::test]

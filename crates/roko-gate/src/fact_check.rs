@@ -292,7 +292,10 @@ mod tests {
     #[async_trait]
     impl SearchOracle for SelectiveOracle {
         async fn search(&self, query: &str) -> Result<Vec<SearchHit>, String> {
-            if query.to_lowercase().contains(&self.match_keyword.to_lowercase()) {
+            if query
+                .to_lowercase()
+                .contains(&self.match_keyword.to_lowercase())
+            {
                 Ok(vec![SearchHit {
                     content: self.hit_content.clone(),
                 }])
@@ -399,7 +402,9 @@ mod tests {
         let oracle = ConstOracle::empty();
         let gate = FactCheckGate::new(oracle, 0.7);
         // Short sentences that don't pass the claim filter.
-        let v = gate.verify(&text_signal("Hi. Yes. OK."), &Context::at(0)).await;
+        let v = gate
+            .verify(&text_signal("Hi. Yes. OK."), &Context::at(0))
+            .await;
         assert!(v.passed);
         assert!((v.score - 1.0).abs() < 1e-6);
     }

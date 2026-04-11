@@ -153,7 +153,12 @@ impl PerplexitySearchClient {
 
         let response_text = self
             .poster
-            .post_json(&self.endpoint(), &self.headers(), &body_bytes, self.timeout_ms)
+            .post_json(
+                &self.endpoint(),
+                &self.headers(),
+                &body_bytes,
+                self.timeout_ms,
+            )
             .await
             .map_err(|e| SearchError::Http(e.to_string()))?;
 
@@ -371,8 +376,14 @@ mod tests {
     #[tokio::test]
     async fn perplexity_search_batch_returns_one_response_per_query() {
         let body = canned_batch(&[
-            ("rust traits", &[("https://a.com", "Traits", "Trait info...")]),
-            ("rust lifetimes", &[("https://b.com", "Lifetimes", "Lifetime info...")]),
+            (
+                "rust traits",
+                &[("https://a.com", "Traits", "Trait info...")],
+            ),
+            (
+                "rust lifetimes",
+                &[("https://b.com", "Lifetimes", "Lifetime info...")],
+            ),
         ]);
         let (mock, _) = MockPoster::ok(body);
         let client = client_with(Box::new(mock));
@@ -425,7 +436,10 @@ mod tests {
                 ..Default::default()
             })
             .collect();
-        let err = client.search_batch(&queries).await.expect_err("should fail");
+        let err = client
+            .search_batch(&queries)
+            .await
+            .expect_err("should fail");
         assert!(matches!(err, SearchError::TooManyQueries(6)));
         assert!(err.to_string().contains("6"));
     }

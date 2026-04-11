@@ -2811,7 +2811,10 @@ return_images = true
 return_related_questions = false
 "#;
         let cfg = RokoConfig::from_toml(toml).expect("parse");
-        assert_eq!(cfg.perplexity.default_search_model.as_deref(), Some("sonar"));
+        assert_eq!(
+            cfg.perplexity.default_search_model.as_deref(),
+            Some("sonar")
+        );
         assert_eq!(
             cfg.perplexity.default_research_model.as_deref(),
             Some("sonar-deep-research")
@@ -2833,16 +2836,19 @@ return_related_questions = false
         assert_eq!(cfg.schema_version, CURRENT_SCHEMA_VERSION);
 
         // Perplexity provider
-        let pplx = cfg.providers.get("perplexity").expect("perplexity provider");
+        let pplx = cfg
+            .providers
+            .get("perplexity")
+            .expect("perplexity provider");
         assert_eq!(pplx.kind, ProviderKind::PerplexityApi);
-        assert_eq!(
-            pplx.base_url.as_deref(),
-            Some("https://api.perplexity.ai")
-        );
+        assert_eq!(pplx.base_url.as_deref(), Some("https://api.perplexity.ai"));
         assert_eq!(pplx.api_key_env.as_deref(), Some("PERPLEXITY_API_KEY"));
 
         // Claude CLI provider
-        let claude = cfg.providers.get("claude_cli").expect("claude_cli provider");
+        let claude = cfg
+            .providers
+            .get("claude_cli")
+            .expect("claude_cli provider");
         assert_eq!(claude.kind, ProviderKind::ClaudeCli);
 
         // Sonar models resolve to the perplexity provider
@@ -2866,7 +2872,10 @@ return_related_questions = false
         assert!(claude_opus.supports_tools);
 
         // sonar-deep-research has async support
-        let deep = cfg.models.get("sonar-deep-research").expect("sonar-deep-research");
+        let deep = cfg
+            .models
+            .get("sonar-deep-research")
+            .expect("sonar-deep-research");
         assert!(deep.supports_async);
 
         // Perplexity search config

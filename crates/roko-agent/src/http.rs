@@ -89,7 +89,9 @@ pub trait HttpPoster: Send + Sync {
         timeout_ms: u64,
     ) -> Result<String, HttpPostError> {
         let _ = (url, headers, timeout_ms);
-        Err(HttpPostError::transport("get_json not supported by this poster"))
+        Err(HttpPostError::transport(
+            "get_json not supported by this poster",
+        ))
     }
 }
 

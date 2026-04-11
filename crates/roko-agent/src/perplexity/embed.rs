@@ -232,8 +232,12 @@ mod tests {
     }
 
     fn agent_with(poster: Box<dyn HttpPoster>) -> PerplexityEmbedAgent {
-        PerplexityEmbedAgent::new("pplx-key", "https://api.perplexity.ai/v1", "pplx-embed-v1-4b")
-            .with_poster(poster)
+        PerplexityEmbedAgent::new(
+            "pplx-key",
+            "https://api.perplexity.ai/v1",
+            "pplx-embed-v1-4b",
+        )
+        .with_poster(poster)
     }
 
     fn canned_embeddings(vecs: &[Vec<f32>]) -> String {

@@ -102,8 +102,7 @@ impl PerplexityDeepResearchAgent {
             "model": self.model_slug,
             "messages": [{ "role": "user", "content": prompt }]
         });
-        let body_bytes =
-            serde_json::to_vec(&body).map_err(|e| format!("serialize failed: {e}"))?;
+        let body_bytes = serde_json::to_vec(&body).map_err(|e| format!("serialize failed: {e}"))?;
 
         let response_text = self
             .poster
@@ -111,8 +110,8 @@ impl PerplexityDeepResearchAgent {
             .await
             .map_err(|e| format!("submit http error: {e}"))?;
 
-        let parsed: Value =
-            serde_json::from_str(&response_text).map_err(|e| format!("submit malformed json: {e}"))?;
+        let parsed: Value = serde_json::from_str(&response_text)
+            .map_err(|e| format!("submit malformed json: {e}"))?;
 
         if let Some(err) = parsed.get("error") {
             let msg = err
@@ -140,8 +139,8 @@ impl PerplexityDeepResearchAgent {
             .await
             .map_err(|e| format!("poll http error: {e}"))?;
 
-        let parsed: Value =
-            serde_json::from_str(&response_text).map_err(|e| format!("poll malformed json: {e}"))?;
+        let parsed: Value = serde_json::from_str(&response_text)
+            .map_err(|e| format!("poll malformed json: {e}"))?;
 
         if let Some(err) = parsed.get("error") {
             let msg = err
@@ -151,7 +150,10 @@ impl PerplexityDeepResearchAgent {
             return Err(format!("api error: {msg}"));
         }
 
-        let status = parsed.get("status").and_then(Value::as_str).unwrap_or("unknown");
+        let status = parsed
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
 
         match status {
             "completed" => {
@@ -389,7 +391,9 @@ mod tests {
             vec![Ok(submit_ok("req-001"))],
             vec![Ok(poll_completed("deep research result"))],
         );
-        let result = agent_with(mock).run(&prompt("research question"), &Context::now()).await;
+        let result = agent_with(mock)
+            .run(&prompt("research question"), &Context::now())
+            .await;
         assert!(result.success);
         assert_eq!(
             result.output.body.as_text().expect("text body"),
@@ -409,7 +413,9 @@ mod tests {
                 Ok(poll_completed("answer after waiting")),
             ],
         );
-        let result = agent_with(mock).run(&prompt("complex question"), &Context::now()).await;
+        let result = agent_with(mock)
+            .run(&prompt("complex question"), &Context::now())
+            .await;
         assert!(result.success);
         assert_eq!(
             result.output.body.as_text().expect("text body"),
@@ -427,7 +433,10 @@ mod tests {
         assert!(!result.success);
         assert_eq!(result.output.tag("failed"), Some("true"));
         let body = result.output.body.as_text().expect("text body");
-        assert!(body.contains("research job timed out internally"), "got: {body}");
+        assert!(
+            body.contains("research job timed out internally"),
+            "got: {body}"
+        );
     }
 
     #[tokio::test]
@@ -454,10 +463,7 @@ mod tests {
 
     #[tokio::test]
     async fn deep_research_polling_submit_http_error_is_failure() {
-        let mock = SequentialMock::new(
-            vec![Err(HttpPostError::http(401, "unauthorized"))],
-            vec![],
-        );
+        let mock = SequentialMock::new(vec![Err(HttpPostError::http(401, "unauthorized"))], vec![]);
         let result = agent_with(mock).run(&prompt("q"), &Context::now()).await;
         assert!(!result.success);
         let body = result.output.body.as_text().expect("text body");
@@ -466,10 +472,7 @@ mod tests {
 
     #[tokio::test]
     async fn deep_research_polling_submit_missing_request_id_is_failure() {
-        let mock = SequentialMock::new(
-            vec![Ok(r#"{"status": "accepted"}"#.to_string())],
-            vec![],
-        );
+        let mock = SequentialMock::new(vec![Ok(r#"{"status": "accepted"}"#.to_string())], vec![]);
         let result = agent_with(mock).run(&prompt("q"), &Context::now()).await;
         assert!(!result.success);
         let body = result.output.body.as_text().expect("text body");
@@ -509,10 +512,9 @@ mod tests {
         let result = agent_with(mock).run(&prompt("q"), &Context::now()).await;
         assert!(result.success);
 
-        let meta: PerplexityMetadata = serde_json::from_str(
-            result.output.tag("pplx_meta").expect("pplx_meta tag"),
-        )
-        .expect("valid JSON");
+        let meta: PerplexityMetadata =
+            serde_json::from_str(result.output.tag("pplx_meta").expect("pplx_meta tag"))
+                .expect("valid JSON");
         assert_eq!(meta.citations.len(), 2);
         assert_eq!(meta.citations[0], "https://example.com/paper1");
     }

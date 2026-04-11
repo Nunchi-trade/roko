@@ -1947,7 +1947,9 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
 
 async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
     use roko_cli::agent_exec::{AgentExecOpts, load_gateway_env, model_from_config, run_agent};
-    use roko_cli::research::{ResearchMode, build_research_prompt, build_research_prompt_perplexity};
+    use roko_cli::research::{
+        ResearchMode, build_research_prompt, build_research_prompt_perplexity,
+    };
 
     let workdir = resolve_workdir(cli);
     roko_cli::research::ensure_dirs(&workdir)?;
@@ -1971,8 +1973,8 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 use roko_agent::perplexity::types::PerplexityMetadata;
                 use roko_core::Body;
 
-                let api_key = std::env::var("PERPLEXITY_API_KEY")
-                    .context("PERPLEXITY_API_KEY not set")?;
+                let api_key =
+                    std::env::var("PERPLEXITY_API_KEY").context("PERPLEXITY_API_KEY not set")?;
                 let model_slug = config
                     .perplexity
                     .default_research_model
@@ -2062,8 +2064,8 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 use roko_agent::perplexity::types::PerplexityMetadata;
                 use roko_core::Body;
 
-                let api_key = std::env::var("PERPLEXITY_API_KEY")
-                    .context("PERPLEXITY_API_KEY not set")?;
+                let api_key =
+                    std::env::var("PERPLEXITY_API_KEY").context("PERPLEXITY_API_KEY not set")?;
                 let (combined_prompt, search_opts) = build_research_prompt_perplexity(
                     &workdir,
                     &topic,
@@ -2294,8 +2296,8 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 anyhow::bail!("provide a search query");
             }
 
-            let api_key = std::env::var("PERPLEXITY_API_KEY")
-                .context("PERPLEXITY_API_KEY not set")?;
+            let api_key =
+                std::env::var("PERPLEXITY_API_KEY").context("PERPLEXITY_API_KEY not set")?;
 
             let date_range = recency.as_deref().map(|r| {
                 let now = chrono::Local::now();

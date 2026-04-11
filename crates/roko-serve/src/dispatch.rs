@@ -9,9 +9,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicUsize, Ordering},
-    OnceLock,
 };
 use std::time::{Duration, Instant};
 
@@ -33,8 +32,8 @@ use roko_core::tool::role_allowlist::role_allowlist;
 use roko_core::{Body, Context as RokoContext, Kind, Provenance, Signal};
 use roko_core::{ContentHash, Verdict};
 use roko_daimon::{AffectEngine as _, AffectEvent};
-use roko_learn::cascade_router::CascadeRouter;
 use roko_learn::anomaly::{Anomaly, AnomalyDetector};
+use roko_learn::cascade_router::CascadeRouter;
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage as EpisodeUsage};
 use roko_learn::prompt_experiment::ExperimentStore;
@@ -434,10 +433,11 @@ async fn run_anomaly_preflight(
     .await?;
 
     let prompt_hash = prompt_hash_u64(dispatch_signal);
-    if let Some(Anomaly::PromptLoop { repeated_count }) = with_dispatch_anomaly_session(
-        session_root,
-        |session| session.detector.check_prompt(prompt_hash),
-    ) {
+    if let Some(Anomaly::PromptLoop { repeated_count }) =
+        with_dispatch_anomaly_session(session_root, |session| {
+            session.detector.check_prompt(prompt_hash)
+        })
+    {
         return Err(anyhow::anyhow!(
             "prompt loop detected after {} identical prompts",
             repeated_count
@@ -445,10 +445,11 @@ async fn run_anomaly_preflight(
     }
 
     let budget_limit = f64::from(effective_config.budget.max_plan_usd);
-    if let Some(Anomaly::BudgetExhausted { used, limit }) = with_dispatch_anomaly_session(
-        session_root,
-        |session| session.detector.check_budget(budget_limit),
-    ) {
+    if let Some(Anomaly::BudgetExhausted { used, limit }) =
+        with_dispatch_anomaly_session(session_root, |session| {
+            session.detector.check_budget(budget_limit)
+        })
+    {
         let _ = (used, limit);
         return Err(anyhow::anyhow!(
             "session budget exhausted: ${used:.2} >= ${limit:.2}"

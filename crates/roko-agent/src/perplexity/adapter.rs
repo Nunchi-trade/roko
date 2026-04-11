@@ -329,8 +329,7 @@ mod tests {
 
     #[test]
     fn perplexity_adapter_classify_rate_limit_with_retry_after() {
-        let err = PerplexityAdapter
-            .classify_error(429, &serde_json::json!({ "retry_after": 10 }));
+        let err = PerplexityAdapter.classify_error(429, &serde_json::json!({ "retry_after": 10 }));
         match err {
             ProviderError::RateLimit {
                 retry_after_ms: Some(ms),
@@ -341,8 +340,7 @@ mod tests {
 
     #[test]
     fn perplexity_adapter_classify_rate_limit_no_retry_after() {
-        let err =
-            PerplexityAdapter.classify_error(429, &serde_json::Value::Null);
+        let err = PerplexityAdapter.classify_error(429, &serde_json::Value::Null);
         assert!(matches!(
             err,
             ProviderError::RateLimit {

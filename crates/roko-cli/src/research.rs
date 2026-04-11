@@ -652,7 +652,11 @@ mod tests {
         let file = PathBuf::from("/test/research.md");
 
         // Three entries with 2D mock embeddings.
-        index.add(file.clone(), "chunk about agents".to_string(), vec![1.0, 0.0]);
+        index.add(
+            file.clone(),
+            "chunk about agents".to_string(),
+            vec![1.0, 0.0],
+        );
         index.add(
             file.clone(),
             "chunk about models".to_string(),
@@ -696,7 +700,10 @@ mod tests {
         // With max_tokens=3 (~12 chars), each paragraph forces a new chunk.
         let content = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph.";
         let chunks = chunk_markdown(content, 3);
-        assert!(chunks.len() >= 2, "expected multiple chunks, got {chunks:?}");
+        assert!(
+            chunks.len() >= 2,
+            "expected multiple chunks, got {chunks:?}"
+        );
         let all = chunks.join(" ");
         assert!(all.contains("First paragraph"));
         assert!(all.contains("Second paragraph"));
