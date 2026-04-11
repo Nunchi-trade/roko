@@ -37,6 +37,7 @@ pub mod ollama;
 pub mod ollama_agent;
 pub mod ollama_backend;
 pub mod openai_agent;
+pub mod perplexity;
 pub mod pointer;
 pub mod pool;
 pub mod process;
