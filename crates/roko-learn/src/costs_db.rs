@@ -123,6 +123,10 @@ pub struct ModelPricing {
     pub input_per_m: f64,
     /// Output token cost per 1M tokens, in USD.
     pub output_per_m: f64,
+    /// Input token cost per 1M tokens for requests above 200K input tokens, in USD.
+    pub input_per_m_high: Option<f64>,
+    /// Output token cost per 1M tokens for requests above 200K input tokens, in USD.
+    pub output_per_m_high: Option<f64>,
     /// Cached input token cost per 1M tokens, in USD.
     pub cache_read_per_m: Option<f64>,
     /// Cache write cost per 1M tokens, in USD.
@@ -138,8 +142,18 @@ impl ModelPricing {
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn estimate_total(&self, input_tokens: u64, output_tokens: u64) -> f64 {
-        let token_cost = (input_tokens as f64 / 1_000_000.0) * self.input_per_m
-            + (output_tokens as f64 / 1_000_000.0) * self.output_per_m;
+        let input_rate = if input_tokens > 200_000 {
+            self.input_per_m_high.unwrap_or(self.input_per_m)
+        } else {
+            self.input_per_m
+        };
+        let output_rate = if input_tokens > 200_000 {
+            self.output_per_m_high.unwrap_or(self.output_per_m)
+        } else {
+            self.output_per_m
+        };
+        let token_cost = (input_tokens as f64 / 1_000_000.0) * input_rate
+            + (output_tokens as f64 / 1_000_000.0) * output_rate;
         token_cost + self.per_request.unwrap_or(0.0)
     }
 }
@@ -167,6 +181,8 @@ impl CostTable {
             ModelPricing {
                 input_per_m: 0.60,
                 output_per_m: 3.00,
+                input_per_m_high: None,
+                output_per_m_high: None,
                 cache_read_per_m: Some(0.10),
                 cache_write_per_m: None,
                 per_request: None,
@@ -177,6 +193,8 @@ impl CostTable {
             ModelPricing {
                 input_per_m: 0.38,
                 output_per_m: 1.72,
+                input_per_m_high: None,
+                output_per_m_high: None,
                 cache_read_per_m: Some(0.10),
                 cache_write_per_m: None,
                 per_request: None,
@@ -187,6 +205,8 @@ impl CostTable {
             ModelPricing {
                 input_per_m: 0.60,
                 output_per_m: 2.50,
+                input_per_m_high: None,
+                output_per_m_high: None,
                 cache_read_per_m: Some(0.15),
                 cache_write_per_m: None,
                 per_request: None,
@@ -197,6 +217,8 @@ impl CostTable {
             ModelPricing {
                 input_per_m: 1.40,
                 output_per_m: 4.40,
+                input_per_m_high: None,
+                output_per_m_high: None,
                 cache_read_per_m: Some(0.26),
                 cache_write_per_m: None,
                 per_request: None,
@@ -207,6 +229,8 @@ impl CostTable {
             ModelPricing {
                 input_per_m: 1.26,
                 output_per_m: 3.96,
+                input_per_m_high: None,
+                output_per_m_high: None,
                 cache_read_per_m: Some(0.26),
                 cache_write_per_m: None,
                 per_request: None,
@@ -217,6 +241,8 @@ impl CostTable {
             ModelPricing {
                 input_per_m: 1.00,
                 output_per_m: 3.20,
+                input_per_m_high: None,
+                output_per_m_high: None,
                 cache_read_per_m: None,
                 cache_write_per_m: None,
                 per_request: None,
@@ -227,6 +253,8 @@ impl CostTable {
             ModelPricing {
                 input_per_m: 0.60,
                 output_per_m: 2.20,
+                input_per_m_high: None,
+                output_per_m_high: None,
                 cache_read_per_m: None,
                 cache_write_per_m: None,
                 per_request: None,
@@ -237,6 +265,80 @@ impl CostTable {
             ModelPricing {
                 input_per_m: 15.00,
                 output_per_m: 75.00,
+                input_per_m_high: None,
+                output_per_m_high: None,
+                cache_read_per_m: None,
+                cache_write_per_m: None,
+                per_request: None,
+            },
+        );
+        models.insert(
+            "gemini-2.5-pro".to_string(),
+            ModelPricing {
+                input_per_m: 1.25,
+                output_per_m: 10.00,
+                input_per_m_high: Some(2.50),
+                output_per_m_high: Some(15.00),
+                cache_read_per_m: None,
+                cache_write_per_m: None,
+                per_request: None,
+            },
+        );
+        models.insert(
+            "gemini-2.5-flash".to_string(),
+            ModelPricing {
+                input_per_m: 0.30,
+                output_per_m: 2.50,
+                input_per_m_high: None,
+                output_per_m_high: None,
+                cache_read_per_m: None,
+                cache_write_per_m: None,
+                per_request: None,
+            },
+        );
+        models.insert(
+            "gemini-2.5-flash-lite".to_string(),
+            ModelPricing {
+                input_per_m: 0.10,
+                output_per_m: 0.40,
+                input_per_m_high: None,
+                output_per_m_high: None,
+                cache_read_per_m: None,
+                cache_write_per_m: None,
+                per_request: None,
+            },
+        );
+        models.insert(
+            "gemini-3.1-pro-preview".to_string(),
+            ModelPricing {
+                input_per_m: 2.00,
+                output_per_m: 12.00,
+                input_per_m_high: Some(4.00),
+                output_per_m_high: Some(18.00),
+                cache_read_per_m: None,
+                cache_write_per_m: None,
+                per_request: None,
+            },
+        );
+        models.insert(
+            "gemini-3-flash-preview".to_string(),
+            ModelPricing {
+                input_per_m: 0.50,
+                output_per_m: 3.00,
+                input_per_m_high: None,
+                output_per_m_high: None,
+                cache_read_per_m: None,
+                cache_write_per_m: None,
+                per_request: None,
+            },
+        );
+        models.insert(
+            "gemini-3.1-flash-lite-preview".to_string(),
+            ModelPricing {
+                input_per_m: 0.25,
+                output_per_m: 1.50,
+                input_per_m_high: None,
+                output_per_m_high: None,
                 cache_read_per_m: None,
                 cache_write_per_m: None,
                 per_request: None,
@@ -249,6 +351,8 @@ impl CostTable {
             ModelPricing {
                 input_per_m: 1.00,
                 output_per_m: 1.00,
+                input_per_m_high: None,
+                output_per_m_high: None,
                 cache_read_per_m: None,
                 cache_write_per_m: None,
                 per_request: Some(0.005),
@@ -259,6 +363,8 @@ impl CostTable {
             ModelPricing {
                 input_per_m: 3.00,
                 output_per_m: 15.00,
+                input_per_m_high: None,
+                output_per_m_high: None,
                 cache_read_per_m: None,
                 cache_write_per_m: None,
                 per_request: Some(0.014),
@@ -269,6 +375,8 @@ impl CostTable {
             ModelPricing {
                 input_per_m: 1.00,
                 output_per_m: 5.00,
+                input_per_m_high: None,
+                output_per_m_high: None,
                 cache_read_per_m: None,
                 cache_write_per_m: None,
                 per_request: Some(0.005),
@@ -279,6 +387,8 @@ impl CostTable {
             ModelPricing {
                 input_per_m: 2.00,
                 output_per_m: 8.00,
+                input_per_m_high: None,
+                output_per_m_high: None,
                 cache_read_per_m: None,
                 cache_write_per_m: None,
                 per_request: Some(0.008),
@@ -289,6 +399,8 @@ impl CostTable {
             ModelPricing {
                 input_per_m: 2.00,
                 output_per_m: 8.00,
+                input_per_m_high: None,
+                output_per_m_high: None,
                 cache_read_per_m: None,
                 cache_write_per_m: None,
                 per_request: Some(0.005),
@@ -598,6 +710,27 @@ mod tests {
             .expect("anthropic/claude-opus-4-6 pricing");
         assert!((claude_opus.input_per_m - 15.00).abs() < 1e-9);
         assert!((claude_opus.output_per_m - 75.00).abs() < 1e-9);
+    }
+
+    #[test]
+    fn gemini_cost_table() {
+        let table = CostTable::default();
+
+        let gemini_pro = table
+            .lookup("gemini-2.5-pro")
+            .expect("gemini-2.5-pro pricing");
+        assert!((gemini_pro.input_per_m - 1.25).abs() < 1e-9);
+        assert!((gemini_pro.output_per_m - 10.00).abs() < 1e-9);
+        assert_eq!(gemini_pro.input_per_m_high, Some(2.50));
+        assert_eq!(gemini_pro.output_per_m_high, Some(15.00));
+
+        let gemini_flash = table
+            .lookup("gemini-2.5-flash")
+            .expect("gemini-2.5-flash pricing");
+        assert!((gemini_flash.input_per_m - 0.30).abs() < 1e-9);
+        assert!((gemini_flash.output_per_m - 2.50).abs() < 1e-9);
+        assert_eq!(gemini_flash.input_per_m_high, None);
+        assert_eq!(gemini_flash.output_per_m_high, None);
     }
 
     #[test]
@@ -911,6 +1044,20 @@ mod tests {
         assert_eq!(glm_5.per_request, None);
         let glm_total = glm_5.estimate_total(1_000_000, 1_000_000);
         assert!((glm_total - 4.20).abs() < 1e-9);
+    }
+
+    #[test]
+    fn gemini_tiered_cost() {
+        let table = CostTable::default();
+        let gemini_pro = table
+            .lookup("gemini-2.5-pro")
+            .expect("gemini-2.5-pro pricing");
+
+        let low_tier_total = gemini_pro.estimate_total(200_000, 50_000);
+        assert!((low_tier_total - 0.75).abs() < 1e-9);
+
+        let high_tier_total = gemini_pro.estimate_total(300_000, 50_000);
+        assert!((high_tier_total - 1.50).abs() < 1e-9);
     }
 
     #[test]
