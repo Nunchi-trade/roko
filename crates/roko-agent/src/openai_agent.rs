@@ -23,6 +23,7 @@ use crate::usage::Usage;
 use async_trait::async_trait;
 use roko_core::{Body, Context, Kind, Provenance, Signal};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::time::Instant;
 
 /// Default `OpenAI` base URL.
@@ -49,6 +50,7 @@ pub struct OpenAiAgent {
     base_url: String,
     timeout_ms: u64,
     name: String,
+    extra_headers: Vec<(String, String)>,
     poster: Box<dyn HttpPoster>,
 }
 
@@ -64,6 +66,7 @@ impl OpenAiAgent {
             base_url: DEFAULT_BASE_URL.to_string(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             name,
+            extra_headers: Vec::new(),
             poster: Box::new(ReqwestPoster::new()),
         }
     }
@@ -82,6 +85,15 @@ impl OpenAiAgent {
         self
     }
 
+    /// Inject additional HTTP headers on every request.
+    #[must_use]
+    pub fn with_extra_headers(mut self, extra_headers: HashMap<String, String>) -> Self {
+        let mut extra_headers: Vec<(String, String)> = extra_headers.into_iter().collect();
+        extra_headers.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        self.extra_headers = extra_headers;
+        self
+    }
+
     /// Internal constructor used by tests to inject a mock poster.
     #[cfg(test)]
     fn with_poster(mut self, poster: Box<dyn HttpPoster>) -> Self {
@@ -92,6 +104,18 @@ impl OpenAiAgent {
     fn endpoint(&self) -> String {
         let trimmed = self.base_url.trim_end_matches('/');
         format!("{trimmed}/chat/completions")
+    }
+
+    fn headers(&self) -> Vec<(String, String)> {
+        let mut headers = vec![
+            (
+                "Authorization".to_string(),
+                format!("Bearer {}", self.api_key),
+            ),
+            ("Content-Type".to_string(), "application/json".to_string()),
+        ];
+        headers.extend(self.extra_headers.iter().cloned());
+        headers
     }
 
     fn failure(&self, input: &Signal, reason: String, started: &Instant) -> AgentResult {
@@ -144,13 +168,7 @@ impl Agent for OpenAiAgent {
         };
 
         let url = self.endpoint();
-        let headers = vec![
-            (
-                "Authorization".to_string(),
-                format!("Bearer {}", self.api_key),
-            ),
-            ("Content-Type".to_string(), "application/json".to_string()),
-        ];
+        let headers = self.headers();
 
         // POST via the injected http poster; the poster enforces the timeout.
         let response_text = match self
@@ -545,6 +563,27 @@ mod tests {
                 .as_text()
                 .expect("text body")
                 .contains("timed out")
+        );
+    }
+
+    #[tokio::test]
+    async fn extra_headers_are_included_in_request() {
+        let (mock, captured) = MockPoster::ok(canned_ok("ok", 1, 1));
+        let mut extra_headers = HashMap::new();
+        extra_headers.insert("HTTP-Referer".to_string(), "roko-agent".to_string());
+        extra_headers.insert("X-Title".to_string(), "roko".to_string());
+
+        let agent = OpenAiAgent::new("sk-x", "m")
+            .with_extra_headers(extra_headers)
+            .with_poster(Box::new(mock));
+        let _ = agent.run(&prompt("x"), &Context::now()).await;
+        let c = captured.lock().expect("lock").clone().expect("captured");
+        let header_map: std::collections::HashMap<String, String> = c.headers.into_iter().collect();
+        assert_eq!(header_map.get("HTTP-Referer"), Some(&"roko-agent".to_string()));
+        assert_eq!(header_map.get("X-Title"), Some(&"roko".to_string()));
+        assert_eq!(
+            header_map.get("Authorization"),
+            Some(&"Bearer sk-x".to_string())
         );
     }
 
