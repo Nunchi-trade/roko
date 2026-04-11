@@ -68,7 +68,10 @@ impl Spinner {
     #[must_use]
     pub fn braille() -> Self {
         Self {
-            frames: &["\u{2800}", "\u{2801}", "\u{2803}", "\u{2807}", "\u{280f}", "\u{281f}", "\u{283f}", "\u{287f}"],
+            frames: &[
+                "\u{2800}", "\u{2801}", "\u{2803}", "\u{2807}", "\u{280f}", "\u{281f}", "\u{283f}",
+                "\u{287f}",
+            ],
             start: Instant::now(),
             interval: Duration::from_millis(100),
         }
@@ -109,7 +112,7 @@ mod tests {
         let s = Spinner::dots();
         let f = s.frame();
         assert!(
-            [".","..","...",".."].contains(&f),
+            [".", "..", "...", ".."].contains(&f),
             "unexpected frame: {f}"
         );
     }

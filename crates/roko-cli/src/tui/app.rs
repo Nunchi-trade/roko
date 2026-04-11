@@ -13,9 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEvent, KeyEventKind,
-};
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEvent, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -110,7 +108,9 @@ pub async fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut Ap
 pub async fn run_async(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut App,
-    mut snapshot_rx: Option<tokio::sync::watch::Receiver<roko_core::dashboard_snapshot::DashboardSnapshot>>,
+    mut snapshot_rx: Option<
+        tokio::sync::watch::Receiver<roko_core::dashboard_snapshot::DashboardSnapshot>,
+    >,
 ) -> Result<()> {
     use crossterm::event::EventStream;
 

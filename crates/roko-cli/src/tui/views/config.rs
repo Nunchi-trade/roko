@@ -2,11 +2,11 @@
 //!
 //! Shows the current snapshot stats as a summary panel.
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use ratatui::Frame;
 
 use roko_core::dashboard_snapshot::DashboardSnapshot;
 

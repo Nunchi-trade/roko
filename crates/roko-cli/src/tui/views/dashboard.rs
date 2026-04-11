@@ -3,11 +3,11 @@
 //! Left panel shows the plan list with phase and progress; the right panel
 //! shows task detail for the selected plan.
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Gauge, List, ListItem, Paragraph, Row, Table, Wrap};
-use ratatui::Frame;
 
 use roko_core::dashboard_snapshot::DashboardSnapshot;
 
@@ -67,10 +67,7 @@ fn render_plan_list(
         .map(|(i, plan)| {
             let marker = if plan.active { ">" } else { " " };
             let progress = if plan.tasks_total > 0 {
-                format!(
-                    "{}/{} done",
-                    plan.tasks_done, plan.tasks_total
-                )
+                format!("{}/{} done", plan.tasks_done, plan.tasks_total)
             } else {
                 String::from("no tasks")
             };
@@ -208,7 +205,12 @@ fn gate_lines(snapshot: &DashboardSnapshot, plan_id: &str, theme: &Theme) -> Vec
                 theme.danger()
             };
             Line::from(Span::styled(
-                format!("[{icon}] {} / {} : {}", g.task_id, g.gate, if g.passed { "pass" } else { "fail" }),
+                format!(
+                    "[{icon}] {} / {} : {}",
+                    g.task_id,
+                    g.gate,
+                    if g.passed { "pass" } else { "fail" }
+                ),
                 style,
             ))
         })

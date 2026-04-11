@@ -2,11 +2,11 @@
 //!
 //! Displays a navigable table of gate verdicts with pass/fail indicators.
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::Modifier;
 use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap};
-use ratatui::Frame;
 
 use roko_core::dashboard_snapshot::DashboardSnapshot;
 

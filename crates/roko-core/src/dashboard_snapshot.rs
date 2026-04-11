@@ -21,14 +21,9 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DashboardEvent {
     /// A plan execution started.
-    PlanStarted {
-        plan_id: String,
-    },
+    PlanStarted { plan_id: String },
     /// A plan execution completed.
-    PlanCompleted {
-        plan_id: String,
-        success: bool,
-    },
+    PlanCompleted { plan_id: String, success: bool },
     /// A task started executing.
     TaskStarted {
         plan_id: String,
@@ -49,15 +44,9 @@ pub enum DashboardEvent {
         new_phase: String,
     },
     /// An agent was spawned.
-    AgentSpawned {
-        agent_id: String,
-        role: String,
-    },
+    AgentSpawned { agent_id: String, role: String },
     /// Incremental agent output.
-    AgentOutput {
-        agent_id: String,
-        content: String,
-    },
+    AgentOutput { agent_id: String, content: String },
     /// A gate check completed.
     GateResult {
         plan_id: String,
@@ -79,9 +68,7 @@ pub enum DashboardEvent {
         value: f64,
     },
     /// An error occurred.
-    Error {
-        message: String,
-    },
+    Error { message: String },
 }
 
 // ---------------------------------------------------------------------------

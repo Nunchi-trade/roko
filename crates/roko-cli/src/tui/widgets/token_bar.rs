@@ -1,9 +1,9 @@
 //! Token/output usage bar widget.
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, Gauge};
-use ratatui::Frame;
 
 use roko_core::dashboard_snapshot::AgentState;
 
@@ -23,15 +23,14 @@ const MAX_BYTES: usize = 10 * 1024 * 1024;
 /// │ [=================        ] 1.7 MB / 10 MB │
 /// └────────────────────────────────────────────┘
 /// ```
-pub fn render_token_bar(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    agents: &[AgentState],
-    theme: &Theme,
-) {
+pub fn render_token_bar(frame: &mut Frame<'_>, area: Rect, agents: &[AgentState], theme: &Theme) {
     let total_bytes: usize = agents.iter().map(|a| a.output_bytes).sum();
     let ratio = (total_bytes as f64 / MAX_BYTES as f64).min(1.0);
-    let label = format!("{} / {} total output", fmt_bytes(total_bytes), fmt_bytes(MAX_BYTES));
+    let label = format!(
+        "{} / {} total output",
+        fmt_bytes(total_bytes),
+        fmt_bytes(MAX_BYTES)
+    );
 
     let gauge = Gauge::default()
         .ratio(ratio)
@@ -66,8 +65,8 @@ fn fmt_bytes(bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     #[test]
     fn token_bar_renders_without_panic() {

@@ -138,7 +138,10 @@ mod tests {
 
     #[test]
     fn non_rgb_passthrough() {
-        assert_eq!(gradient(Color::White, Color::Rgb(0, 0, 0), 0.5), Color::White);
+        assert_eq!(
+            gradient(Color::White, Color::Rgb(0, 0, 0), 0.5),
+            Color::White
+        );
         assert_eq!(darken(Color::Red, 0.5), Color::Red);
         assert_eq!(lighten(Color::Blue, 0.5), Color::Blue);
     }

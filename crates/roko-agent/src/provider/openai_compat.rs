@@ -11,9 +11,10 @@ pub struct OpenAiCompatAdapter;
 
 fn is_zai_provider(provider: &ProviderConfig, model: &ModelProfile) -> bool {
     model.provider.eq_ignore_ascii_case("zai")
-        || provider.base_url.as_deref().is_some_and(|base_url| {
-            base_url.contains("z.ai") || base_url.contains("bigmodel.cn")
-        })
+        || provider
+            .base_url
+            .as_deref()
+            .is_some_and(|base_url| base_url.contains("z.ai") || base_url.contains("bigmodel.cn"))
 }
 
 fn inject_glm_params(
@@ -57,12 +58,8 @@ impl ChatMessage {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[allow(dead_code)]
 pub(crate) enum ContentBlock {
-    Text {
-        text: String,
-    },
-    ImageUrl {
-        image_url: ImageUrlBlock,
-    },
+    Text { text: String },
+    ImageUrl { image_url: ImageUrlBlock },
 }
 
 #[allow(dead_code)]

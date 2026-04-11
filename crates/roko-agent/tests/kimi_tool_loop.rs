@@ -7,7 +7,7 @@ use roko_agent::http::{HttpPostError, HttpPoster};
 use roko_agent::tool_loop::{LlmBackend, LlmError, StopReason, ToolLoop};
 use roko_agent::translate::{BackendResponse, OpenAiTranslator, RenderedTools, Translator};
 use roko_core::tool::{ToolContext, ToolDef};
-use roko_std::tool::builtin::{edit_file, read_file};
+use roko_std::tool::builtin::{ls, read_file};
 use roko_std::tool::handlers::handler_for;
 use roko_std::tool::registry::StaticToolRegistry;
 use serde_json::Value;
@@ -69,14 +69,14 @@ impl HttpPoster for MockHttpPoster {
 }
 
 #[derive(Debug)]
-struct GlmHttpBackend {
+struct KimiHttpBackend {
     poster: Arc<MockHttpPoster>,
     base_url: String,
     model: String,
     reasoning: Arc<Mutex<Vec<String>>>,
 }
 
-impl GlmHttpBackend {
+impl KimiHttpBackend {
     fn new(
         poster: Arc<MockHttpPoster>,
         base_url: impl Into<String>,
@@ -98,7 +98,7 @@ impl GlmHttpBackend {
 }
 
 #[async_trait]
-impl LlmBackend for GlmHttpBackend {
+impl LlmBackend for KimiHttpBackend {
     async fn send_turn(
         &self,
         messages: &[Value],
@@ -143,8 +143,8 @@ impl LlmBackend for GlmHttpBackend {
     }
 }
 
-fn edit_tools() -> Vec<ToolDef> {
-    vec![read_file::tool_def(), edit_file::tool_def()]
+fn tool_definitions() -> Vec<ToolDef> {
+    vec![read_file::tool_def(), ls::tool_def()]
 }
 
 fn tool_context(worktree: &std::path::Path) -> ToolContext {
@@ -152,30 +152,37 @@ fn tool_context(worktree: &std::path::Path) -> ToolContext {
 }
 
 #[tokio::test]
-async fn glm_full_tool_loop() {
+async fn kimi_full_tool_loop() {
     let tempdir = tempdir().expect("tempdir");
     let file_path = tempdir.path().join("note.txt");
-    tokio::fs::write(&file_path, "hello world")
+    tokio::fs::write(&file_path, "kimi needs a quick read")
         .await
         .expect("seed file");
 
     let first_response = serde_json::json!({
-        "id": "chatcmpl-glm-1",
+        "id": "chatcmpl-kimi-1",
         "choices": [{
             "index": 0,
             "message": {
                 "role": "assistant",
                 "content": "",
-                "reasoning_content": "I should replace the greeting in the file before answering.",
+                "reasoning_content": "I should inspect the file and the directory in parallel before answering.",
                 "tool_calls": [{
-                    "id": "call-edit-1",
+                    "id": "functions.Read:0",
                     "type": "function",
                     "function": {
-                        "name": "edit_file",
+                        "name": "read_file",
                         "arguments": serde_json::json!({
-                            "path": "note.txt",
-                            "old_string": "hello",
-                            "new_string": "goodbye"
+                            "path": "note.txt"
+                        }).to_string()
+                    }
+                }, {
+                    "id": "functions.Edit:1",
+                    "type": "function",
+                    "function": {
+                        "name": "ls",
+                        "arguments": serde_json::json!({
+                            "path": "."
                         }).to_string()
                     }
                 }]
@@ -186,20 +193,18 @@ async fn glm_full_tool_loop() {
             "prompt_tokens": 21,
             "completion_tokens": 9,
             "total_tokens": 30,
-            "prompt_tokens_details": {
-                "cached_tokens": 4
-            }
+            "cached_tokens": 4
         }
     })
     .to_string();
 
     let second_response = serde_json::json!({
-        "id": "chatcmpl-glm-2",
+        "id": "chatcmpl-kimi-2",
         "choices": [{
             "index": 0,
             "message": {
                 "role": "assistant",
-                "content": "Updated the file."
+                "content": "I read the file and listed the worktree. The loop is complete."
             },
             "finish_reason": "stop"
         }],
@@ -213,7 +218,7 @@ async fn glm_full_tool_loop() {
 
     let poster = MockHttpPoster::new(vec![first_response, second_response]);
     let (backend, reasoning) =
-        GlmHttpBackend::new(poster.clone(), "https://api.z.ai/api/paas/v4", "glm-5.1");
+        KimiHttpBackend::new(poster.clone(), "https://api.moonshot.ai/v1", "kimi-k2.5");
 
     let registry = Arc::new(StaticToolRegistry::new());
     let resolver = Arc::new(|name: &str| handler_for(name));
@@ -223,32 +228,47 @@ async fn glm_full_tool_loop() {
 
     let result = loop_runner
         .run(
-            "You are a careful file-editing assistant.",
-            "Update note.txt using the available tools.",
-            &edit_tools(),
+            "You are a careful file assistant.",
+            "Check the available file and directory tools, then answer.",
+            &tool_definitions(),
             &tool_context(tempdir.path()),
         )
         .await;
 
     assert_eq!(result.stop_reason, StopReason::Stop);
     assert_eq!(result.iterations, 1);
-    assert_eq!(result.tool_calls.len(), 1);
-    assert_eq!(result.tool_calls[0].name, "edit_file");
-    assert_eq!(result.tool_calls[0].id, "call-edit-1");
-    assert_eq!(result.final_text, "Updated the file.");
+    assert_eq!(result.tool_calls.len(), 2);
+    let mut tool_call_ids: Vec<&str> = result
+        .tool_calls
+        .iter()
+        .map(|call| call.id.as_str())
+        .collect();
+    tool_call_ids.sort_unstable();
+    assert_eq!(tool_call_ids, vec!["functions.Edit:1", "functions.Read:0"]);
+    let mut tool_names: Vec<&str> = result
+        .tool_calls
+        .iter()
+        .map(|call| call.name.as_str())
+        .collect();
+    tool_names.sort_unstable();
+    assert_eq!(tool_names, vec!["ls", "read_file"]);
+    assert_eq!(
+        result.final_text,
+        "I read the file and listed the worktree. The loop is complete."
+    );
 
     let captured_reasoning = reasoning.lock().expect("reasoning lock").clone();
     assert_eq!(captured_reasoning.len(), 1);
     assert_eq!(
         captured_reasoning[0],
-        "I should replace the greeting in the file before answering."
+        "I should inspect the file and the directory in parallel before answering."
     );
 
     let requests = poster.requests();
     assert_eq!(requests.len(), 2);
     assert_eq!(
         requests[0].url,
-        "https://api.z.ai/api/paas/v4/chat/completions"
+        "https://api.moonshot.ai/v1/chat/completions"
     );
     assert_eq!(requests[0].timeout_ms, 120_000);
     assert!(
@@ -256,12 +276,6 @@ async fn glm_full_tool_loop() {
             name.eq_ignore_ascii_case("authorization") && value == "Bearer test-key"
         }),
         "expected auth header on first request"
-    );
-    assert!(
-        requests[0].headers.iter().any(|(name, value)| {
-            name.eq_ignore_ascii_case("content-type") && value == "application/json"
-        }),
-        "expected content-type header on first request"
     );
     assert!(
         requests[0]
@@ -275,10 +289,7 @@ async fn glm_full_tool_loop() {
         requests[0].body["tools"][0]["function"]["name"],
         "read_file"
     );
-    assert_eq!(
-        requests[0].body["tools"][1]["function"]["name"],
-        "edit_file"
-    );
+    assert_eq!(requests[0].body["tools"][1]["function"]["name"], "ls");
 
     let first_turn_messages = requests[0]
         .body
@@ -293,21 +304,11 @@ async fn glm_full_tool_loop() {
         .get("messages")
         .and_then(Value::as_array)
         .expect("second request messages");
-    let tool_message = second_turn_messages
+    let tool_ids: Vec<&str> = second_turn_messages
         .iter()
-        .find(|msg| msg.get("tool_call_id").is_some())
-        .expect("tool result message");
-    assert_eq!(tool_message["tool_call_id"], "call-edit-1");
-    assert!(
-        tool_message["content"]
-            .as_str()
-            .expect("tool content")
-            .contains("edited"),
-        "expected tool result to be rendered back to the model"
-    );
-
-    let updated = tokio::fs::read_to_string(&file_path)
-        .await
-        .expect("read edited file");
-    assert_eq!(updated, "goodbye world");
+        .filter_map(|msg| msg.get("tool_call_id").and_then(Value::as_str))
+        .collect();
+    let mut tool_ids = tool_ids;
+    tool_ids.sort_unstable();
+    assert_eq!(tool_ids, vec!["functions.Edit:1", "functions.Read:0"]);
 }

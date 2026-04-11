@@ -52,7 +52,7 @@ pub use exec::ExecAgent;
 pub use mock::MockAgent;
 pub use multi_pool::MultiAgentPool;
 pub use ollama_backend::OllamaLlmBackend;
-pub use provider::{adapter_for_kind, create_agent_for_model, ProviderAdapter};
 pub use pool::{AgentInstanceId, AgentPool};
+pub use provider::{ProviderAdapter, adapter_for_kind, create_agent_for_model};
 pub use safety::SafetyLayer;
 pub use usage::Usage;

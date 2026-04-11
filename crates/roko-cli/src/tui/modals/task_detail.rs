@@ -3,11 +3,11 @@
 //! Displays task details, phase, outcome, and related gate verdicts in a
 //! bordered scrollable overlay.
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
-use ratatui::Frame;
 
 use roko_core::dashboard_snapshot::{GateVerdict, TaskState};
 
@@ -55,10 +55,7 @@ pub fn render_task_detail_modal(
     let header_lines = vec![
         Line::from(vec![
             Span::styled("Task ID:  ", theme.muted()),
-            Span::styled(
-                &task.task_id,
-                theme.text().add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(&task.task_id, theme.text().add_modifier(Modifier::BOLD)),
         ]),
         Line::from(vec![
             Span::styled("Plan:     ", theme.muted()),
@@ -104,10 +101,7 @@ pub fn render_task_detail_modal(
         let failed_count = task_gates.len() - passed_count;
 
         lines.push(Line::from(vec![
-            Span::styled(
-                format!("  {passed_count} passed"),
-                theme.success(),
-            ),
+            Span::styled(format!("  {passed_count} passed"), theme.success()),
             Span::styled("  /  ", theme.muted()),
             Span::styled(
                 format!("{failed_count} failed"),
@@ -154,10 +148,7 @@ fn format_ts(ts_millis: u64) -> String {
     use std::time::{Duration, UNIX_EPOCH};
 
     let dt = UNIX_EPOCH + Duration::from_millis(ts_millis);
-    let secs = dt
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let secs = dt.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
 
     let hours = (secs / 3600) % 24;
     let minutes = (secs / 60) % 60;

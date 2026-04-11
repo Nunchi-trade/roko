@@ -119,7 +119,11 @@ impl Widget for SemanticBar {
         }
 
         let filled_width = (self.ratio * area.width as f64).round() as u16;
-        let bar_color = self.theme.progress_style(self.ratio).fg.unwrap_or(self.theme.fg);
+        let bar_color = self
+            .theme
+            .progress_style(self.ratio)
+            .fg
+            .unwrap_or(self.theme.fg);
 
         for y in area.top()..area.bottom() {
             for x in area.left()..area.right() {

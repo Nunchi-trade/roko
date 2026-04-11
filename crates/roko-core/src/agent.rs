@@ -830,11 +830,26 @@ mod tests {
 
     #[test]
     fn backend_to_provider_kind() {
-        assert_eq!(ProviderKind::from(AgentBackend::Claude), ProviderKind::ClaudeCli);
-        assert_eq!(ProviderKind::from(AgentBackend::Codex), ProviderKind::OpenAiCompat);
-        assert_eq!(ProviderKind::from(AgentBackend::OpenAi), ProviderKind::OpenAiCompat);
-        assert_eq!(ProviderKind::from(AgentBackend::Cursor), ProviderKind::CursorAcp);
-        assert_eq!(ProviderKind::from(AgentBackend::Ollama), ProviderKind::OpenAiCompat);
+        assert_eq!(
+            ProviderKind::from(AgentBackend::Claude),
+            ProviderKind::ClaudeCli
+        );
+        assert_eq!(
+            ProviderKind::from(AgentBackend::Codex),
+            ProviderKind::OpenAiCompat
+        );
+        assert_eq!(
+            ProviderKind::from(AgentBackend::OpenAi),
+            ProviderKind::OpenAiCompat
+        );
+        assert_eq!(
+            ProviderKind::from(AgentBackend::Cursor),
+            ProviderKind::CursorAcp
+        );
+        assert_eq!(
+            ProviderKind::from(AgentBackend::Ollama),
+            ProviderKind::OpenAiCompat
+        );
     }
 
     #[test]

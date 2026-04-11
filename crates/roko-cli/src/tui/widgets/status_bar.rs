@@ -1,9 +1,9 @@
 //! Bottom status bar widget showing keybind hints and event count.
 
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use ratatui::Frame;
 
 use super::super::dashboard::Theme;
 
@@ -28,12 +28,7 @@ const KEYBINDS: &[(&str, &str)] = &[
 /// ```text
 /// q:quit Tab:next ?:help Enter:detail r:refresh       42 events  12:34:56
 /// ```
-pub fn render_status_bar(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    event_count: u64,
-    theme: &Theme,
-) {
+pub fn render_status_bar(frame: &mut Frame<'_>, area: Rect, event_count: u64, theme: &Theme) {
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
@@ -71,8 +66,8 @@ pub fn render_status_bar(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     #[test]
     fn status_bar_renders_without_panic() {

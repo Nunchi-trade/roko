@@ -571,7 +571,10 @@ mod tests {
         let _ = agent.run(&prompt("x"), &Context::now()).await;
         let c = captured.lock().expect("lock").clone().expect("captured");
         let header_map: std::collections::HashMap<String, String> = c.headers.into_iter().collect();
-        assert_eq!(header_map.get("HTTP-Referer"), Some(&"roko-agent".to_string()));
+        assert_eq!(
+            header_map.get("HTTP-Referer"),
+            Some(&"roko-agent".to_string())
+        );
         assert_eq!(header_map.get("X-Title"), Some(&"roko".to_string()));
         assert_eq!(
             header_map.get("Authorization"),

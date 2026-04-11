@@ -3,11 +3,11 @@
 //! Displays plan details, task list, progress, and gate verdicts in a
 //! bordered overlay.
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Gauge, Paragraph, Row, Table, Wrap};
-use ratatui::Frame;
 
 use roko_core::dashboard_snapshot::{GateVerdict, PlanState, TaskState};
 

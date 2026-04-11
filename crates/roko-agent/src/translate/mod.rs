@@ -42,7 +42,9 @@ pub mod ollama;
 pub mod openai;
 pub mod react;
 
-pub use capability::{ModelCapabilities, capabilities_for, capabilities_from_profile, translator_for};
+pub use capability::{
+    ModelCapabilities, capabilities_for, capabilities_from_profile, translator_for,
+};
 pub use claude::ClaudeTranslator;
 pub use ollama::OllamaTranslator;
 pub use openai::OpenAiTranslator;
@@ -229,7 +231,10 @@ impl BackendResponse {
 }
 
 fn extract_reasoning_from_value(value: &serde_json::Value) -> Option<String> {
-    if let Some(reasoning) = value.get("reasoning_content").and_then(serde_json::Value::as_str) {
+    if let Some(reasoning) = value
+        .get("reasoning_content")
+        .and_then(serde_json::Value::as_str)
+    {
         return Some(reasoning.to_string());
     }
 
@@ -267,7 +272,9 @@ fn extract_reasoning_from_stream_event(event: &serde_json::Value) -> Option<Stri
         return Some(reasoning.to_string());
     }
 
-    if let Some(reasoning) = event.pointer("/delta/thinking").and_then(serde_json::Value::as_str)
+    if let Some(reasoning) = event
+        .pointer("/delta/thinking")
+        .and_then(serde_json::Value::as_str)
     {
         return Some(reasoning.to_string());
     }
@@ -411,7 +418,10 @@ mod tests {
         assert_eq!(FinishReason::Length, FinishReason::Length);
         assert_eq!(FinishReason::ToolCalls, FinishReason::ToolCalls);
         assert_eq!(FinishReason::ContentFilter, FinishReason::ContentFilter);
-        assert_eq!(FinishReason::Error("boom".into()), FinishReason::Error("boom".into()));
+        assert_eq!(
+            FinishReason::Error("boom".into()),
+            FinishReason::Error("boom".into())
+        );
     }
 
     #[test]
@@ -420,10 +430,19 @@ mod tests {
         assert_eq!(normalize_finish_reason("end_turn"), FinishReason::Stop);
         assert_eq!(normalize_finish_reason("length"), FinishReason::Length);
         assert_eq!(normalize_finish_reason("max_tokens"), FinishReason::Length);
-        assert_eq!(normalize_finish_reason("tool_calls"), FinishReason::ToolCalls);
+        assert_eq!(
+            normalize_finish_reason("tool_calls"),
+            FinishReason::ToolCalls
+        );
         assert_eq!(normalize_finish_reason("tool_use"), FinishReason::ToolCalls);
-        assert_eq!(normalize_finish_reason("content_filter"), FinishReason::ContentFilter);
-        assert_eq!(normalize_finish_reason("sensitive"), FinishReason::ContentFilter);
+        assert_eq!(
+            normalize_finish_reason("content_filter"),
+            FinishReason::ContentFilter
+        );
+        assert_eq!(
+            normalize_finish_reason("sensitive"),
+            FinishReason::ContentFilter
+        );
         assert_eq!(
             normalize_finish_reason("network_error"),
             FinishReason::Error("network_error".into())

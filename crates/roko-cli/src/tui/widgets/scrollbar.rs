@@ -1,9 +1,9 @@
 //! Scrollbar overlay for long lists.
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
-use ratatui::Frame;
 
 use super::super::dashboard::Theme;
 
@@ -44,8 +44,8 @@ pub fn render_scrollbar(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     #[test]
     fn scrollbar_hidden_when_fits() {

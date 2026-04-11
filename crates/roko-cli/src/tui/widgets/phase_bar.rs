@@ -1,10 +1,10 @@
 //! Phase indicator bar showing the current plan phase.
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use ratatui::Frame;
 
 use super::super::dashboard::Theme;
 
@@ -12,7 +12,14 @@ use super::super::dashboard::Theme;
 // Known phases (in execution order)
 // ---------------------------------------------------------------------------
 
-const PHASES: &[&str] = &["compose", "dispatch", "execute", "gate", "persist", "completed"];
+const PHASES: &[&str] = &[
+    "compose",
+    "dispatch",
+    "execute",
+    "gate",
+    "persist",
+    "completed",
+];
 
 // ---------------------------------------------------------------------------
 // Public render entry-point
@@ -25,12 +32,7 @@ const PHASES: &[&str] = &["compose", "dispatch", "execute", "gate", "persist", "
 /// ```text
 ///  compose > dispatch > execute > [gate] > persist > completed
 /// ```
-pub fn render_phase_bar(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    phase: &str,
-    theme: &Theme,
-) {
+pub fn render_phase_bar(frame: &mut Frame<'_>, area: Rect, phase: &str, theme: &Theme) {
     let lower = phase.to_lowercase();
 
     let spans: Vec<Span<'_>> = PHASES
@@ -64,8 +66,8 @@ pub fn render_phase_bar(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     #[test]
     fn phase_bar_renders_without_panic() {

@@ -1,9 +1,9 @@
 //! Agent status grid widget.
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
-use ratatui::Frame;
 
 use roko_core::dashboard_snapshot::AgentState;
 
@@ -45,12 +45,7 @@ fn fmt_bytes(bytes: usize) -> String {
 /// [*] reviewer  4.1 KB
 /// [ ] planner   0 B
 /// ```
-pub fn render_agent_grid(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    agents: &[AgentState],
-    theme: &Theme,
-) {
+pub fn render_agent_grid(frame: &mut Frame<'_>, area: Rect, agents: &[AgentState], theme: &Theme) {
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_style(theme.muted())
@@ -89,8 +84,8 @@ pub fn render_agent_grid(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     #[test]
     fn agent_grid_renders_without_panic() {

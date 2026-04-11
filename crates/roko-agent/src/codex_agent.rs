@@ -754,8 +754,12 @@ mod tests {
             .with_extra_headers(extra_headers);
         let _ = agent.run(&prompt("x"), &Context::now()).await;
         let call = poster.last_call().expect("call recorded");
-        let header_map: std::collections::HashMap<String, String> = call.headers.into_iter().collect();
-        assert_eq!(header_map.get("HTTP-Referer"), Some(&"roko-agent".to_string()));
+        let header_map: std::collections::HashMap<String, String> =
+            call.headers.into_iter().collect();
+        assert_eq!(
+            header_map.get("HTTP-Referer"),
+            Some(&"roko-agent".to_string())
+        );
         assert_eq!(header_map.get("X-Title"), Some(&"roko".to_string()));
         assert_eq!(
             header_map.get("authorization"),

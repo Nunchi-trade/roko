@@ -50,10 +50,7 @@ impl Translator for OpenAiTranslator {
     }
 
     fn render_tools(&self, tools: &[ToolDef]) -> RenderedTools {
-        let arr: Vec<serde_json::Value> = tools
-            .iter()
-            .map(render_tool)
-            .collect();
+        let arr: Vec<serde_json::Value> = tools.iter().map(render_tool).collect();
         RenderedTools::JsonArray(serde_json::Value::Array(arr))
     }
 
@@ -111,6 +108,13 @@ impl Translator for OpenAiTranslator {
             })
             .collect();
         RenderedResults::JsonMessages(serde_json::Value::Array(msgs))
+    }
+
+    fn render_assistant_message(&self, response: &BackendResponse) -> Option<serde_json::Value> {
+        let BackendResponse::Json(json) = response else {
+            return None;
+        };
+        json.pointer("/choices/0/message").cloned()
     }
 }
 
@@ -198,9 +202,7 @@ pub(crate) fn parse_usage(response: &serde_json::Value) -> Usage {
 pub(crate) fn parse_glm_response(json: &serde_json::Value) -> (String, Option<String>) {
     let message = &json["choices"][0]["message"];
     let content = message["content"].as_str().unwrap_or("").to_string();
-    let reasoning = message["reasoning_content"]
-        .as_str()
-        .map(|s| s.to_string());
+    let reasoning = message["reasoning_content"].as_str().map(|s| s.to_string());
     (content, reasoning)
 }
 
@@ -566,10 +568,8 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].id, "functions.Read:0");
 
-        let rendered = OpenAiTranslator.render_results(&[(
-            calls[0].clone(),
-            ok_text("file contents"),
-        )]);
+        let rendered =
+            OpenAiTranslator.render_results(&[(calls[0].clone(), ok_text("file contents"))]);
         let RenderedResults::JsonMessages(v) = rendered else {
             panic!("expected JsonMessages");
         };
@@ -817,9 +817,12 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(response.metadata.content_filter, Some(serde_json::json!([
-            { "role": "user", "level": 2 },
-            { "role": "assistant", "level": 0 }
-        ])));
+        assert_eq!(
+            response.metadata.content_filter,
+            Some(serde_json::json!([
+                { "role": "user", "level": 2 },
+                { "role": "assistant", "level": 0 }
+            ]))
+        );
     }
 }

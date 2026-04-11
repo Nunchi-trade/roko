@@ -1145,10 +1145,8 @@ mod tests {
 
     #[test]
     fn cascade_router_glm_selects_glm_when_present() {
-        let router = LinUCBRouter::new(vec![
-            "claude-sonnet-4-6".to_string(),
-            "glm-5.1".to_string(),
-        ]);
+        let router =
+            LinUCBRouter::new(vec!["claude-sonnet-4-6".to_string(), "glm-5.1".to_string()]);
         let ctx = default_ctx();
 
         let model = router.select_model(&ctx);

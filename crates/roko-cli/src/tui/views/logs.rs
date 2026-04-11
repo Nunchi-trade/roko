@@ -2,10 +2,10 @@
 //!
 //! Displays recent errors and gate verdicts in chronological order.
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use ratatui::Frame;
 
 use roko_core::dashboard_snapshot::DashboardSnapshot;
 
@@ -88,10 +88,7 @@ fn format_ts(ts_millis: u64) -> String {
     use std::time::{Duration, UNIX_EPOCH};
 
     let dt = UNIX_EPOCH + Duration::from_millis(ts_millis);
-    let secs = dt
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let secs = dt.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
 
     // HH:MM:SS UTC.
     let hours = (secs / 3600) % 24;

@@ -2,11 +2,11 @@
 //!
 //! Displays a table of all agents with role, active status, and output size.
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::Modifier;
 use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap};
-use ratatui::Frame;
 
 use roko_core::dashboard_snapshot::DashboardSnapshot;
 

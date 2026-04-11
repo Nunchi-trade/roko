@@ -1,9 +1,9 @@
 //! Error digest widget showing gate failures and recent errors.
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
-use ratatui::Frame;
 
 use roko_core::dashboard_snapshot::{ErrorEntry, GateVerdict, SnapshotStats};
 
@@ -74,10 +74,7 @@ fn render_gate_summary(
         "No gates evaluated".to_string()
     } else {
         let pct = (stats.gates_passed as f64 / total as f64 * 100.0).round();
-        format!(
-            "Gates: {}/{} passed ({pct}%)",
-            stats.gates_passed, total
-        )
+        format!("Gates: {}/{} passed ({pct}%)", stats.gates_passed, total)
     };
 
     let ratio_style = if stats.gates_failed > 0 {
@@ -89,17 +86,15 @@ fn render_gate_summary(
     };
 
     // Show the last few failed gates inline.
-    let recent_failures: Vec<&GateVerdict> = gates.iter().rev().filter(|g| !g.passed).take(3).collect();
+    let recent_failures: Vec<&GateVerdict> =
+        gates.iter().rev().filter(|g| !g.passed).take(3).collect();
 
     let mut lines = vec![Line::from(Span::styled(ratio_text, ratio_style))];
 
     for gv in &recent_failures {
         lines.push(Line::from(vec![
             Span::styled("\u{2718} ", theme.danger()),
-            Span::styled(
-                format!("{}/{} ", gv.plan_id, gv.task_id),
-                theme.text(),
-            ),
+            Span::styled(format!("{}/{} ", gv.plan_id, gv.task_id), theme.text()),
             Span::styled(&gv.gate, theme.muted()),
         ]));
     }
@@ -109,12 +104,7 @@ fn render_gate_summary(
 }
 
 /// Render the scrollable error list.
-fn render_error_list(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    errors: &[ErrorEntry],
-    theme: &Theme,
-) {
+fn render_error_list(frame: &mut Frame<'_>, area: Rect, errors: &[ErrorEntry], theme: &Theme) {
     if errors.is_empty() {
         let empty = Paragraph::new("No errors").style(theme.muted());
         frame.render_widget(empty, area);
@@ -147,8 +137,8 @@ fn render_error_list(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     #[test]
     fn error_digest_renders_without_panic() {
@@ -207,14 +197,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                render_error_digest(
-                    frame,
-                    area,
-                    &[],
-                    &[],
-                    &SnapshotStats::default(),
-                    &theme,
-                );
+                render_error_digest(frame, area, &[], &[], &SnapshotStats::default(), &theme);
             })
             .unwrap();
     }

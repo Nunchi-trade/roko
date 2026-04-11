@@ -6,10 +6,10 @@
 use std::convert::Infallible;
 use std::sync::Arc;
 
+use axum::Router;
 use axum::extract::State;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::get;
-use axum::Router;
 use futures::stream::{self, Stream};
 use tokio::sync::broadcast;
 use tracing::warn;
@@ -31,9 +31,7 @@ async fn sse_handler(
             match rx.recv().await {
                 Ok(envelope) => {
                     let data = serde_json::to_string(&envelope.payload).unwrap_or_default();
-                    let event = Event::default()
-                        .data(data)
-                        .id(envelope.seq.to_string());
+                    let event = Event::default().data(data).id(envelope.seq.to_string());
                     return Some((Ok(event), rx));
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {

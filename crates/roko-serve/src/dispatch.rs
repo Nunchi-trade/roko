@@ -1355,11 +1355,8 @@ async fn dispatch_template(
             Some(config) => config,
             None => state.roko_config.read().await.clone(),
         };
-        let mut repo_dispatcher = TemplateAgentDispatcher::new(
-            state.workdir.clone(),
-            None,
-            roko_config,
-        );
+        let mut repo_dispatcher =
+            TemplateAgentDispatcher::new(state.workdir.clone(), None, roko_config);
         repo_dispatcher.repo_workdir = Some(ctx.repo_workdir.clone());
         repo_dispatcher.repo_listing = repo_listing;
         Arc::new(repo_dispatcher)

@@ -105,6 +105,8 @@ pub use task::{
 // Note: tool::FailureKind (for tool-call failures) is NOT re-exported here to avoid
 // collision with phase::FailureKind (for PlanPhase failures); reach it via
 // `roko_core::tool::FailureKind`.
+pub use dashboard_snapshot::{DashboardEvent, DashboardSnapshot};
+pub use state_hub::{SharedStateHub, StateHub, StateHubSender, shared_state_hub};
 pub use tool::{
     ArmEntry, Artifact, AuditSink, BanditKey, CancelSource, CancelToken, EpsilonGreedyBandit,
     FailureTrace, FormatBandit, KeywordOverlapScorer, MemoryPointer, MetricsKey, MetricsSink,
@@ -114,7 +116,5 @@ pub use tool::{
     ToolTraceEvent, TraceBuilder, TraceId, TraceSink, TraceStep, VecToolRegistry, compute_reward,
     galileo_tsq, profile_for_model,
 };
-pub use dashboard_snapshot::{DashboardEvent, DashboardSnapshot};
-pub use state_hub::{SharedStateHub, StateHub, StateHubSender, shared_state_hub};
 pub use traits::{Composer, Gate, Policy, Router, Scorer, Substrate};
 pub use verdict::{Outcome, Selection, TestCount, Verdict};

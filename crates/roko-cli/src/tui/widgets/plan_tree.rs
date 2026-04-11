@@ -1,10 +1,10 @@
 //! Collapsible plan tree widget with inline progress indicators.
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
-use ratatui::Frame;
 
 use roko_core::dashboard_snapshot::PlanState;
 
@@ -64,14 +64,12 @@ pub fn render_plan_tree(
     theme: &Theme,
 ) {
     if plans.is_empty() {
-        let empty = Paragraph::new("No plans")
-            .style(theme.muted())
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(theme.muted())
-                    .title(Span::styled("Plans", theme.accent())),
-            );
+        let empty = Paragraph::new("No plans").style(theme.muted()).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(theme.muted())
+                .title(Span::styled("Plans", theme.accent())),
+        );
         frame.render_widget(empty, area);
         return;
     }
@@ -130,8 +128,8 @@ pub fn render_plan_tree(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     fn sample_plans() -> Vec<PlanState> {
         vec![

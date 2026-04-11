@@ -59,17 +59,17 @@ impl RosedustTheme {
             lavender: Color::Rgb(160, 140, 196),
             coral: Color::Rgb(196, 122, 92),
 
-            success: Color::Rgb(93, 184, 163),   // teal
-            warning: Color::Rgb(212, 168, 87),    // gold
-            danger: Color::Rgb(196, 92, 80),      // warm red
-            info: Color::Rgb(107, 143, 189),       // blue
+            success: Color::Rgb(93, 184, 163), // teal
+            warning: Color::Rgb(212, 168, 87), // gold
+            danger: Color::Rgb(196, 92, 80),   // warm red
+            info: Color::Rgb(107, 143, 189),   // blue
 
             border: Color::Rgb(58, 51, 69),
             border_active: Color::Rgb(212, 119, 140), // rose
             selection_bg: Color::Rgb(45, 40, 56),
-            selection_fg: Color::Rgb(232, 223, 213),   // fg
+            selection_fg: Color::Rgb(232, 223, 213), // fg
             header_bg: Color::Rgb(30, 25, 40),
-            status_bg: Color::Rgb(34, 29, 42),        // bg_alt
+            status_bg: Color::Rgb(34, 29, 42), // bg_alt
         }
     }
 
@@ -133,19 +133,25 @@ impl RosedustTheme {
     /// Success state.
     #[must_use]
     pub fn success_style(&self) -> Style {
-        Style::default().fg(self.success).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(self.success)
+            .add_modifier(Modifier::BOLD)
     }
 
     /// Warning state.
     #[must_use]
     pub fn warning_style(&self) -> Style {
-        Style::default().fg(self.warning).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(self.warning)
+            .add_modifier(Modifier::BOLD)
     }
 
     /// Danger / error state.
     #[must_use]
     pub fn danger_style(&self) -> Style {
-        Style::default().fg(self.danger).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(self.danger)
+            .add_modifier(Modifier::BOLD)
     }
 
     /// Informational state.

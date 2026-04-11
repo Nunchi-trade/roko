@@ -1,8 +1,8 @@
+use roko_agent::Usage;
 use roko_agent::translate::{
     BackendResponse, ChatResponse, FinishReason, OpenAiTranslator, Translator,
     normalize_finish_reason,
 };
-use roko_agent::Usage;
 use serde_json::Value;
 
 fn extract_cache_read_tokens(response: &Value) -> u32 {

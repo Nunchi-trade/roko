@@ -1,9 +1,9 @@
 //! Task checklist widget with overall progress bar.
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, Paragraph};
-use ratatui::Frame;
 
 use roko_core::dashboard_snapshot::{SnapshotStats, TaskState};
 
@@ -115,8 +115,8 @@ pub fn render_task_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     fn sample_tasks() -> Vec<TaskState> {
         vec![
