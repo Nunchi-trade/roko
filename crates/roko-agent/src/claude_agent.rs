@@ -15,10 +15,12 @@ use crate::agent::{Agent, AgentResult};
 #[cfg(test)]
 use crate::http::HttpPostError;
 use crate::http::{HttpPoster, ReqwestPoster};
+use crate::translate::claude::{inject_cache_markers, inject_cache_markers_into_content};
 use crate::usage::Usage;
 use async_trait::async_trait;
 use roko_core::{Body, Context, Kind, Provenance, Signal};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -120,25 +122,6 @@ struct MessagesResponse {
     model: Option<String>,
     #[serde(default)]
     id: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct RequestMessage<'a> {
-    role: &'a str,
-    content: &'a str,
-}
-
-#[derive(Debug, Serialize)]
-struct MessagesRequest<'a> {
-    model: &'a str,
-    max_tokens: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<AnthropicTool>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_choice: Option<ToolChoice>,
-    messages: Vec<RequestMessage<'a>>,
 }
 
 // ─── ClaudeAgent ───────────────────────────────────────────────────────────
@@ -298,6 +281,34 @@ impl ClaudeAgent {
         ]
     }
 
+    fn request_body(&self, prompt_text: &str) -> Result<Value, serde_json::Error> {
+        let mut messages = vec![json!({
+            "role": "user",
+            "content": prompt_text,
+        })];
+        inject_cache_markers(&mut messages);
+
+        let mut body = json!({
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "messages": messages,
+        });
+
+        if let Some(system_prompt) = &self.system_prompt {
+            let mut system = Value::String(system_prompt.clone());
+            let _ = inject_cache_markers_into_content(&mut system);
+            body["system"] = system;
+        }
+        if let Some(tools) = &self.tools {
+            body["tools"] = serde_json::to_value(tools)?;
+        }
+        if let Some(tool_choice) = &self.tool_choice {
+            body["tool_choice"] = serde_json::to_value(tool_choice)?;
+        }
+
+        Ok(body)
+    }
+
     fn fail(&self, input: &Signal, reason: &str, started: Instant) -> AgentResult {
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let output = input
@@ -333,18 +344,13 @@ impl Agent for ClaudeAgent {
             },
         };
 
-        let req = MessagesRequest {
-            model: &self.model,
-            max_tokens: self.max_tokens,
-            system: self.system_prompt.clone(),
-            tools: self.tools.clone(),
-            tool_choice: self.tool_choice.clone(),
-            messages: vec![RequestMessage {
-                role: "user",
-                content: &prompt_text,
-            }],
+        let request_body = match self.request_body(&prompt_text) {
+            Ok(body) => body,
+            Err(e) => {
+                return self.fail(input, &format!("serialize request failed: {e}"), started);
+            }
         };
-        let body = match serde_json::to_string(&req) {
+        let body = match serde_json::to_string(&request_body) {
             Ok(s) => s,
             Err(e) => {
                 return self.fail(input, &format!("serialize request failed: {e}"), started);
@@ -854,6 +860,57 @@ mod tests {
         assert_eq!(v["max_tokens"], 256);
         assert_eq!(v["messages"][0]["role"], "user");
         assert_eq!(v["messages"][0]["content"], "hello there");
+    }
+
+    #[tokio::test]
+    async fn anthropic_cache_markers_convert_system_prompt_boundaries() {
+        let body = serde_json::json!({
+            "content": [{"type": "text", "text": "ok"}],
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        })
+        .to_string();
+        let poster = MockPoster::ok(body);
+        let agent = ClaudeAgent::new("k", "my-model")
+            .with_http_poster(poster.clone())
+            .with_system_prompt(
+                "Role instructions\n\n<!-- cache:system -->\n\nWorkspace context\n\n<!-- cache:session -->\n\nTurn-local instructions",
+            );
+
+        let _ = agent.run(&prompt("hello there"), &Context::now()).await;
+
+        let call = poster.last_call().expect("call recorded");
+        let v: serde_json::Value =
+            serde_json::from_slice(&call.body).expect("request body is valid JSON");
+        let system = v["system"].as_array().expect("system blocks");
+        assert_eq!(system.len(), 3);
+        assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(system[1]["cache_control"]["type"], "ephemeral");
+        assert!(system[2].get("cache_control").is_none());
+    }
+
+    #[tokio::test]
+    async fn anthropic_cache_markers_convert_message_boundaries() {
+        let body = serde_json::json!({
+            "content": [{"type": "text", "text": "ok"}],
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        })
+        .to_string();
+        let poster = MockPoster::ok(body);
+        let agent = ClaudeAgent::new("k", "my-model").with_http_poster(poster.clone());
+        let _ = agent
+            .run(
+                &prompt("Shared prefix\n\n<!-- cache:system -->\n\nFresh tail"),
+                &Context::now(),
+            )
+            .await;
+
+        let call = poster.last_call().expect("call recorded");
+        let v: serde_json::Value =
+            serde_json::from_slice(&call.body).expect("request body is valid JSON");
+        let message_blocks = v["messages"][0]["content"].as_array().expect("message blocks");
+        assert_eq!(message_blocks.len(), 2);
+        assert_eq!(message_blocks[0]["cache_control"]["type"], "ephemeral");
+        assert!(message_blocks[1].get("cache_control").is_none());
     }
 
     #[tokio::test]
