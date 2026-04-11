@@ -58,6 +58,15 @@ pub struct ToolCallMeta {
     pub result_tokens: u64,
     /// Whether the tool call succeeded.
     pub succeeded: bool,
+    /// Whether this call contributed useful progress toward the final solution.
+    #[serde(default)]
+    pub advanced_task: bool,
+    /// Whether this call was later determined to be unnecessary.
+    #[serde(default)]
+    pub was_redundant: bool,
+    /// Failure category for the call, when one was identified.
+    #[serde(default)]
+    pub error_category: Option<String>,
 }
 
 // ─── AgentEfficiencyEvent ───────────────────────────────────────────────────
@@ -1097,10 +1106,47 @@ mod tests {
             duration_ms: 150,
             result_tokens: 800,
             succeeded: true,
+            advanced_task: true,
+            was_redundant: false,
+            error_category: None,
         };
         let json = serde_json::to_string(&t).expect("serialize");
         let t2: ToolCallMeta = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(t, t2);
+    }
+
+    #[test]
+    fn tool_call_reward_roundtrip_preserves_reward_indicators() {
+        let meta = ToolCallMeta {
+            tool_name: "Bash".into(),
+            duration_ms: 875,
+            result_tokens: 120,
+            succeeded: false,
+            advanced_task: false,
+            was_redundant: true,
+            error_category: Some("timeout".into()),
+        };
+
+        let json = serde_json::to_string(&meta).expect("serialize");
+        let restored: ToolCallMeta = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored, meta);
+    }
+
+    #[test]
+    fn tool_call_reward_defaults_for_legacy_payloads() {
+        let json = r#"{
+            "tool_name":"Read",
+            "duration_ms":150,
+            "result_tokens":800,
+            "succeeded":true
+        }"#;
+
+        let restored: ToolCallMeta = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(restored.tool_name, "Read");
+        assert!(restored.succeeded);
+        assert!(!restored.advanced_task);
+        assert!(!restored.was_redundant);
+        assert_eq!(restored.error_category, None);
     }
 
     #[test]

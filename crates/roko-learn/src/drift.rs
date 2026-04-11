@@ -308,6 +308,9 @@ mod tests {
                     duration_ms: 20,
                     result_tokens: 40,
                     succeeded: true,
+                    advanced_task: true,
+                    was_redundant: false,
+                    error_category: None,
                 })
                 .collect(),
             wall_time_ms: 1_000,
