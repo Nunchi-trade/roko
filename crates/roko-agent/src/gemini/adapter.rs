@@ -2,9 +2,9 @@
 //!
 //! This task wires Gemini into the provider abstraction and selects the
 //! appropriate concrete agent shape based on model capabilities.
-//! The native/embedding agents remain thin wrappers for now; dedicated
-//! implementations land in follow-on Gemini tasks.
+//! The embedding agent remains a thin wrapper for now.
 
+use super::native::GeminiNativeAgent;
 use crate::agent::{Agent, AgentResult};
 use crate::codex_agent::{CodexAgent, DEFAULT_MAX_TOKENS};
 use crate::provider::{AgentCreationError, AgentOptions, ProviderAdapter, ProviderError};
@@ -116,48 +116,6 @@ impl GeminiCompatAgent {
 
 #[async_trait]
 impl Agent for GeminiCompatAgent {
-    async fn run(&self, input: &Signal, ctx: &Context) -> AgentResult {
-        self.inner.run(input, ctx).await
-    }
-
-    fn name(&self) -> &str {
-        self.inner.name()
-    }
-
-    fn supports_streaming(&self) -> bool {
-        self.inner.supports_streaming()
-    }
-}
-
-/// Gemini native-feature agent.
-///
-/// Stub implementation for adapter routing tests. The true native
-/// `generateContent` path is implemented in the follow-on Gemini native task.
-pub struct GeminiNativeAgent {
-    inner: CodexAgent,
-}
-
-impl GeminiNativeAgent {
-    /// Construct a Gemini native-feature agent stub.
-    #[must_use]
-    pub fn new(
-        api_key: String,
-        base_url: String,
-        model: ModelProfile,
-        options: &AgentOptions,
-    ) -> Self {
-        let name = resolved_name(options, format!("gemini-native:{}", model.slug));
-        let inner = CodexAgent::new(api_key, &model.slug)
-            .with_base_url(compat_base_url(&base_url))
-            .with_timeout_ms(resolved_timeout_ms(options))
-            .with_max_tokens(resolved_max_tokens(&model))
-            .with_name(name);
-        Self { inner }
-    }
-}
-
-#[async_trait]
-impl Agent for GeminiNativeAgent {
     async fn run(&self, input: &Signal, ctx: &Context) -> AgentResult {
         self.inner.run(input, ctx).await
     }

@@ -40,6 +40,7 @@
 //! the call sites and centralize it in this module.
 
 use crate::Agent;
+use crate::gemini::GeminiAdapter;
 use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::config::schema::RokoConfig;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
@@ -66,6 +67,7 @@ static CLAUDE_CLI_ADAPTER: ClaudeCliAdapter = ClaudeCliAdapter;
 static CURSOR_ACP_ADAPTER: CursorAcpAdapter = CursorAcpAdapter;
 static OPENAI_COMPAT_ADAPTER: OpenAiCompatAdapter = OpenAiCompatAdapter;
 static PERPLEXITY_ADAPTER: PerplexityAdapter = PerplexityAdapter;
+static GEMINI_ADAPTER: GeminiAdapter = GeminiAdapter;
 
 /// Return the static adapter for a provider kind.
 #[must_use]
@@ -76,7 +78,7 @@ pub fn adapter_for_kind(kind: ProviderKind) -> &'static dyn ProviderAdapter {
         ProviderKind::AnthropicApi => &ANTHROPIC_API_ADAPTER,
         ProviderKind::CursorAcp => &CURSOR_ACP_ADAPTER,
         ProviderKind::PerplexityApi => &PERPLEXITY_ADAPTER,
-        ProviderKind::GeminiApi => &OPENAI_COMPAT_ADAPTER,
+        ProviderKind::GeminiApi => &GEMINI_ADAPTER,
     }
 }
 

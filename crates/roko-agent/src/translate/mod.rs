@@ -68,6 +68,7 @@ pub struct ResponseMetadata {
     pub cached_tokens: Option<u64>,
     pub content_filter: Option<serde_json::Value>,
     pub web_search: Option<serde_json::Value>,
+    pub extra: Option<serde_json::Value>,
     pub provider_latency_ms: Option<u64>,
     pub raw_finish_reason: Option<String>,
 }
@@ -412,6 +413,7 @@ mod tests {
         assert_eq!(response.metadata.model_used, None);
         assert_eq!(response.metadata.cached_tokens, None);
         assert_eq!(response.metadata.content_filter, None);
+        assert_eq!(response.metadata.extra, None);
         assert_eq!(response.metadata.provider_latency_ms, None);
         assert_eq!(response.metadata.raw_finish_reason, None);
 
