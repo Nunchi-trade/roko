@@ -13,6 +13,7 @@
 //! - [`context_pack_cache`] — cached composed prompts keyed by task fingerprint
 //! - [`pattern_discovery`] — mining episodes for recurring shapes
 //! - [`provider_health`] — per-provider circuit breaker for LLM routing
+//! - [`latency`] — rolling latency EMAs and percentiles for routing feedback
 
 #![deny(missing_docs)]
 #![allow(clippy::module_name_repetitions)]
@@ -27,6 +28,8 @@ pub mod costs_log;
 pub mod efficiency;
 pub mod episode_logger;
 pub mod hdc_clustering;
+/// Rolling latency EMAs and percentiles for routing feedback.
+pub mod latency;
 pub mod model_router;
 pub mod pattern_discovery;
 pub mod playbook;

@@ -11,7 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use super::super::mori_theme::{MoriTheme, gradient_ocean};
-use super::super::tui_state::{PlanEntry, TuiState, Wave};
+use super::super::tui_state::{PlanEntry, TuiState};
 
 // ---------------------------------------------------------------------------
 // Fixed column widths (chars)
@@ -857,6 +857,8 @@ mod tests {
     use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    use crate::tui::tui_state::Wave;
 
     fn sample_state() -> TuiState {
         use crate::tui::dashboard::DashboardData;

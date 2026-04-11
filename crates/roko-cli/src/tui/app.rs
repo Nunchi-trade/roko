@@ -322,34 +322,47 @@ impl App {
         }
     }
 
-    /// New ROSEDUST rendering pipeline: RootLayout + header + views + status.
+    /// New ROSEDUST rendering pipeline: Mori-accurate header + dashboard + status.
     fn draw_new(&self, frame: &mut Frame<'_>) {
         let rosedust = active_theme();
         let theme = rosedust.to_legacy_theme();
         let root = RootLayout::compute(frame.area());
 
-        // Get a snapshot: prefer live from StateHub, fall back to empty default.
+        // Build TuiState from App's data for Mori-accurate widgets.
+        let mut tui_state = super::tui_state::TuiState::from_dashboard_data(&self.data);
+        if let Some(snap) = &self.live_snapshot {
+            tui_state.update_from_snapshot(snap);
+        }
+        // Sync selection state from App
+        tui_state.selected_plan = self.plan_selection;
+
+        // Get a snapshot for legacy views
         let default_snap = roko_core::dashboard_snapshot::DashboardSnapshot::default();
         let snapshot = self.live_snapshot.as_ref().unwrap_or(&default_snap);
 
-        // Header: render tab bar with active tab indicator.
-        {
-            let mut spans = vec![Span::styled("roko ", rosedust.accent_bold())];
-            for tab in Tab::all() {
-                let style = if *tab == self.active_tab {
-                    rosedust.accent_bold()
-                } else {
-                    rosedust.muted()
-                };
-                spans.push(Span::raw(" "));
-                spans.push(Span::styled(
-                    format!("{}:{}", tab.fkey(), tab.label()),
-                    style,
-                ));
+        // Header: Mori-accurate header bar on F1:Dashboard, legacy tab bar on others.
+        match self.active_tab {
+            Tab::Dashboard => {
+                super::widgets::header_bar::render_header_bar(frame, root.header, &tui_state);
             }
-            let header_line = Line::from(spans);
-            let header = Paragraph::new(header_line).style(rosedust.header());
-            frame.render_widget(header, root.header);
+            _ => {
+                let mut spans = vec![Span::styled("roko ", rosedust.accent_bold())];
+                for tab in Tab::all() {
+                    let style = if *tab == self.active_tab {
+                        rosedust.accent_bold()
+                    } else {
+                        rosedust.muted()
+                    };
+                    spans.push(Span::raw(" "));
+                    spans.push(Span::styled(
+                        format!("{}:{}", tab.fkey(), tab.label()),
+                        style,
+                    ));
+                }
+                let header_line = Line::from(spans);
+                let header = Paragraph::new(header_line).style(rosedust.header());
+                frame.render_widget(header, root.header);
+            }
         }
 
         // Content: dispatch to the active tab's view.
@@ -357,13 +370,8 @@ impl App {
             let scroll = self.tab_scroll.get(&self.active_tab).copied().unwrap_or(0);
             match self.active_tab {
                 Tab::Dashboard => {
-                    super::views::dashboard::render_dashboard_view(
-                        frame,
-                        root.content,
-                        snapshot,
-                        self.plan_selection,
-                        &theme,
-                    );
+                    // Mori-accurate dashboard view
+                    super::views::mori_dashboard::render(frame, root.content, &tui_state);
                 }
                 Tab::Plans => {
                     super::views::plans::render_plans_view(
@@ -406,11 +414,16 @@ impl App {
             }
         }
 
-        // Status bar.
-        {
-            let hints = "q:quit  Tab:next  F1-F6:tabs  ?:help  Enter:detail  r:refresh";
-            let status = Paragraph::new(hints).style(rosedust.status());
-            frame.render_widget(status, root.status);
+        // Status bar: Mori-accurate on F1:Dashboard, legacy on others.
+        match self.active_tab {
+            Tab::Dashboard => {
+                super::widgets::status_bar::render_status_bar(frame, root.status, &tui_state);
+            }
+            _ => {
+                let hints = "q:quit  Tab:next  F1-F6:tabs  ?:help  Enter:detail  r:refresh";
+                let status = Paragraph::new(hints).style(rosedust.status());
+                frame.render_widget(status, root.status);
+            }
         }
 
         // Overlay (help / detail).

@@ -382,7 +382,7 @@ fn pulse_rose(heartbeat: f64) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::super::tui_state::TuiState;
+    use super::super::super::tui_state::{TaskRow, TaskRowStatus, TuiState};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
