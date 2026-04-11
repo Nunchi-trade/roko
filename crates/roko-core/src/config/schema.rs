@@ -3161,6 +3161,117 @@ threshold = "BLOCK_LOW_AND_ABOVE"
     }
 
     #[test]
+    fn multi_provider_config() {
+        let example = include_str!("../../../../examples/roko-multi-provider.toml");
+        let cfg = RokoConfig::from_toml(example).expect("roko-multi-provider example should parse");
+        assert_eq!(cfg.schema_version, CURRENT_SCHEMA_VERSION);
+
+        let claude = cfg
+            .providers
+            .get("claude_cli")
+            .expect("claude_cli provider");
+        assert_eq!(claude.kind, ProviderKind::ClaudeCli);
+        assert_eq!(claude.command.as_deref(), Some("claude"));
+
+        let gemini = cfg.providers.get("gemini").expect("gemini provider");
+        assert_eq!(gemini.kind, ProviderKind::GeminiApi);
+        assert_eq!(
+            gemini.base_url.as_deref(),
+            Some("https://generativelanguage.googleapis.com")
+        );
+        assert_eq!(gemini.api_key_env.as_deref(), Some("GEMINI_API_KEY"));
+
+        let perplexity = cfg
+            .providers
+            .get("perplexity")
+            .expect("perplexity provider");
+        assert_eq!(perplexity.kind, ProviderKind::PerplexityApi);
+        assert_eq!(
+            perplexity.base_url.as_deref(),
+            Some("https://api.perplexity.ai")
+        );
+        assert_eq!(
+            perplexity.api_key_env.as_deref(),
+            Some("PERPLEXITY_API_KEY")
+        );
+
+        assert_eq!(cfg.agent.default_model, "claude-opus");
+        assert_eq!(
+            cfg.agent.tier_models.get("mechanical").map(String::as_str),
+            Some("gemini-2-5-flash-lite")
+        );
+        assert_eq!(
+            cfg.agent.tier_models.get("focused").map(String::as_str),
+            Some("gemini-2-5-flash")
+        );
+        assert_eq!(
+            cfg.agent.tier_models.get("integrative").map(String::as_str),
+            Some("claude-opus")
+        );
+        assert_eq!(
+            cfg.agent
+                .tier_models
+                .get("architectural")
+                .map(String::as_str),
+            Some("claude-opus")
+        );
+
+        let researcher = cfg.agent.roles.get("researcher").expect("researcher role");
+        assert_eq!(researcher.model.as_deref(), Some("sonar-pro"));
+        let fact_checker = cfg
+            .agent
+            .roles
+            .get("fact_checker")
+            .expect("fact_checker role");
+        assert_eq!(fact_checker.model.as_deref(), Some("sonar"));
+
+        let expected = [
+            ("claude-opus", ProviderKind::ClaudeCli, "claude-opus-4-6"),
+            (
+                "gemini-2-5-flash-lite",
+                ProviderKind::GeminiApi,
+                "gemini-2.5-flash-lite",
+            ),
+            (
+                "gemini-2-5-flash",
+                ProviderKind::GeminiApi,
+                "gemini-2.5-flash",
+            ),
+            ("sonar-pro", ProviderKind::PerplexityApi, "sonar-pro"),
+            ("sonar", ProviderKind::PerplexityApi, "sonar"),
+        ];
+
+        for (model_key, provider_kind, slug) in expected {
+            let resolved = crate::agent::resolve_model(&cfg, model_key);
+            assert_eq!(resolved.model_key, model_key);
+            assert_eq!(resolved.slug, slug);
+            assert_eq!(resolved.provider_kind, provider_kind);
+            assert!(resolved.provider_config.is_some());
+            assert!(resolved.profile.is_some());
+        }
+
+        assert_eq!(
+            cfg.gemini.default_model.as_deref(),
+            Some("gemini-2-5-flash")
+        );
+        assert_eq!(
+            cfg.gemini.grounding_model.as_deref(),
+            Some("gemini-2-5-flash")
+        );
+        assert_eq!(cfg.gemini.thinking_level, "medium");
+        assert!(cfg.gemini.use_free_tier);
+
+        assert_eq!(
+            cfg.perplexity.default_search_model.as_deref(),
+            Some("sonar")
+        );
+        assert_eq!(
+            cfg.perplexity.default_research_model.as_deref(),
+            Some("sonar-pro")
+        );
+    }
+
+    #[test]
     fn parse_bool_env_variants() {
         assert!(parse_bool_env("true"));
         assert!(parse_bool_env("1"));

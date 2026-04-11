@@ -1,0 +1,141 @@
+schema_version = 2
+
+[project]
+name = "roko-multi-provider"
+root = "."
+fresh_base_branch = "main"
+
+# Multi-provider routing:
+# - Claude Opus for premium coding and architecture
+# - Gemini for cheap reasoning, grounding, and everyday execution
+# - Perplexity for web-grounded research and fact-checking
+[agent]
+default_model = "claude-opus"
+effort = "high"
+bare_mode = true
+timeout_ms = 300000
+
+[agent.tier_models]
+mechanical = "gemini-2-5-flash-lite"
+focused = "gemini-2-5-flash"
+integrative = "claude-opus"
+architectural = "claude-opus"
+
+[agent.roles.researcher]
+model = "sonar-pro"
+
+[agent.roles.fact_checker]
+model = "sonar"
+
+[gates]
+clippy_enabled = true
+skip_tests = false
+max_iterations = 3
+
+[providers.claude_cli]
+kind = "claude_cli"
+command = "claude"
+args = ["--print", "--output-format", "stream-json"]
+
+[providers.gemini]
+kind = "gemini_api"
+base_url = "https://generativelanguage.googleapis.com"
+api_key_env = "GEMINI_API_KEY"
+timeout_ms = 120000
+
+[providers.perplexity]
+kind = "perplexity_api"
+base_url = "https://api.perplexity.ai"
+api_key_env = "PERPLEXITY_API_KEY"
+timeout_ms = 120000
+
+# Premium coding / architecture
+[models.claude-opus]
+provider = "claude_cli"
+slug = "claude-opus-4-6"
+context_window = 200000
+max_output = 32768
+supports_tools = true
+tool_format = "anthropic_blocks"
+cost_input_per_m = 15.00
+cost_output_per_m = 75.00
+
+# Cheapest mechanical tier
+[models.gemini-2-5-flash-lite]
+provider = "gemini"
+slug = "gemini-2.5-flash-lite"
+context_window = 1048576
+max_output = 65536
+supports_tools = true
+supports_caching = true
+tool_format = "openai_json"
+cost_input_per_m = 0.10
+cost_output_per_m = 0.40
+
+# Cheap focused tier with native grounding support
+[models.gemini-2-5-flash]
+provider = "gemini"
+slug = "gemini-2.5-flash"
+context_window = 1048576
+max_output = 65536
+supports_tools = true
+supports_thinking = true
+supports_grounding = true
+supports_code_execution = true
+supports_vision = true
+supports_caching = true
+tool_format = "gemini_native"
+cost_input_per_m = 0.30
+cost_output_per_m = 2.50
+
+# Research and fact-checking
+[models.sonar-pro]
+provider = "perplexity"
+slug = "sonar-pro"
+context_window = 200000
+max_output = 16384
+supports_tools = false
+supports_search = true
+supports_citations = true
+search_context_size = "high"
+tool_format = "openai_json"
+cost_input_per_m = 3.00
+cost_output_per_m = 15.00
+cost_per_request = 0.014
+
+[models.sonar]
+provider = "perplexity"
+slug = "sonar"
+context_window = 127000
+max_output = 16384
+supports_tools = false
+supports_search = true
+supports_citations = true
+search_context_size = "medium"
+tool_format = "openai_json"
+cost_input_per_m = 1.00
+cost_output_per_m = 1.00
+cost_per_request = 0.005
+
+[gemini]
+default_model = "gemini-2-5-flash"
+grounding_model = "gemini-2-5-flash"
+use_free_tier = true
+thinking_level = "medium"
+
+[perplexity]
+default_search_model = "sonar"
+default_research_model = "sonar-pro"
+academic_mode = true
+search_recency_filter = "year"
+return_related_questions = true
+
+# Tier intent:
+#   mechanical    -> gemini-2-5-flash-lite
+#   focused       -> gemini-2-5-flash
+#   integrative   -> claude-opus
+#   architectural -> claude-opus
+#
+# Role overrides:
+#   researcher    -> sonar-pro
+#   fact_checker  -> sonar
