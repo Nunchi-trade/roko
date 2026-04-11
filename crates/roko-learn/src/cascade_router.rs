@@ -733,7 +733,7 @@ pub struct CascadeRouter {
     /// Cached Pareto frontier used to down-weight dominated models during UCB.
     pareto_frontier: Mutex<ParetoFrontierState>,
     /// Static role -> model table for stage 1.
-    role_table: HashMap<AgentRole, String>,
+    role_table: Mutex<HashMap<AgentRole, String>>,
     /// Ordered list of model slugs (arms available to the router).
     model_slugs: Vec<String>,
     /// Optional free-tier Gemini runner used for shadow evaluation.
@@ -762,7 +762,7 @@ impl CascadeRouter {
             linucb: LinUCBRouter::new(model_slugs.clone()),
             confidence_stats: Mutex::new(HashMap::new()),
             pareto_frontier: Mutex::new(ParetoFrontierState::default()),
-            role_table: default_role_model_table(&model_slugs),
+            role_table: Mutex::new(default_role_model_table(&model_slugs)),
             model_slugs,
             free_tier_shadow_runner: None,
         }
@@ -771,8 +771,22 @@ impl CascadeRouter {
     /// Override the static role table (builder pattern).
     #[must_use]
     pub fn with_role_table(mut self, table: HashMap<AgentRole, String>) -> Self {
-        self.role_table = table;
+        self.role_table = Mutex::new(table);
         self
+    }
+
+    /// Update the static role -> model table used during the cold-start stage.
+    pub fn update_static_table(&self, role: AgentRole, model_slug: impl Into<String>) -> bool {
+        let model_slug = model_slug.into();
+        let mut role_table = self.role_table.lock();
+        if role_table
+            .get(&role)
+            .is_some_and(|current| current == &model_slug)
+        {
+            return false;
+        }
+        role_table.insert(role, model_slug);
+        true
     }
 
     /// Override the `LinUCB` router (builder pattern, for injecting pre-trained state).
@@ -1362,6 +1376,7 @@ impl CascadeRouter {
     pub fn save(&self, path: &Path) -> Result<(), std::io::Error> {
         let snapshot = CascadeSnapshot {
             model_slugs: self.model_slugs.clone(),
+            role_table: self.role_table.lock().clone(),
             confidence_stats: self
                 .confidence_stats
                 .lock()
@@ -1432,6 +1447,12 @@ impl CascadeRouter {
                 }
                 assert!(!slugs.is_empty(), "CascadeRouter: need at least one model");
                 let router = Self::new(slugs);
+                if !snap.role_table.is_empty() {
+                    let mut role_table = router.role_table.lock();
+                    for (role, slug) in snap.role_table {
+                        role_table.insert(role, slug);
+                    }
+                }
                 // Restore confidence stats.
                 let mut stats = router.confidence_stats.lock();
                 for (model, persisted) in &snap.confidence_stats {
@@ -1519,12 +1540,14 @@ impl CascadeRouter {
                 .cloned()
                 .unwrap_or_else(|| {
                     self.role_table
+                        .lock()
                         .get(&ctx.role)
                         .cloned()
                         .unwrap_or_else(|| "claude-sonnet-4-5".to_string())
                 })
         } else {
             self.role_table
+                .lock()
                 .get(&ctx.role)
                 .cloned()
                 .unwrap_or_else(|| "claude-sonnet-4-5".to_string())
@@ -1566,6 +1589,7 @@ impl CascadeRouter {
 
         let slug = self
             .role_table
+            .lock()
             .get(&ctx.role)
             .cloned()
             .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
@@ -2220,6 +2244,8 @@ const fn stage_for_observations(obs: u64) -> CascadeStage {
 #[derive(Serialize, Deserialize)]
 struct CascadeSnapshot {
     model_slugs: Vec<String>,
+    #[serde(default)]
+    role_table: HashMap<AgentRole, String>,
     confidence_stats: HashMap<String, PersistedModelStats>,
     /// Total observations across all models (used to restore cascade stage).
     ///

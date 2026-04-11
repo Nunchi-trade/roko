@@ -33,7 +33,7 @@ use crate::pattern_discovery::{
 };
 use crate::playbook::PlaybookStore;
 use crate::playbook_rules::PlaybookRules;
-use crate::prompt_experiment::ExperimentStore;
+use crate::prompt_experiment::{ExperimentStatus, ExperimentStore, PromptExperiment};
 use crate::provider_health::ProviderHealthTracker;
 use crate::regression::{RegressionReport, RegressionThresholds, detect_regressions};
 use crate::skill_library::{SkillLibrary, SkillLibraryError, TemplatePatternGenerator};
@@ -742,9 +742,22 @@ impl LearningRuntime {
         // ── Prompt experiment outcome ────────────────────────────────────
         if let Some(ref variant_id) = input.experiment_variant_id {
             let mut store = self.experiment_store.lock();
+            let was_running = store
+                .iter()
+                .find(|experiment| experiment.stats.contains_key(variant_id))
+                .is_some_and(|experiment| experiment.status == ExperimentStatus::Running);
             store.record_outcome(variant_id, input.episode.success);
+            let static_table_updated = was_running
+                && store
+                    .iter()
+                    .find(|experiment| experiment.stats.contains_key(variant_id))
+                    .is_some_and(|experiment| self.on_experiment_concluded(experiment));
             if let Err(e) = store.save(&self.paths.experiments_json) {
                 eprintln!("[learn] experiment store save failed: {e}");
+            }
+            drop(store);
+            if static_table_updated && let Err(e) = self.save_cascade_router() {
+                eprintln!("[learn] cascade router save failed after experiment conclusion: {e}");
             }
         }
 
@@ -849,6 +862,34 @@ impl LearningRuntime {
         );
         self.cascade_router
             .record_observation(&ctx, &slug, reward, episode.success);
+        true
+    }
+
+    /// Promote a concluded model experiment winner into the router's static table.
+    fn on_experiment_concluded(&self, experiment: &PromptExperiment) -> bool {
+        let (Some(winner_id), Some(role_raw)) =
+            (experiment.winner_id.as_deref(), experiment.role.as_deref())
+        else {
+            return false;
+        };
+        let Some(role) = parse_agent_role(role_raw) else {
+            return false;
+        };
+        let Some(winner_slug) = experiment
+            .variants
+            .iter()
+            .find(|variant| variant.id == winner_id)
+            .and_then(|variant| variant.slug.as_deref())
+        else {
+            return false;
+        };
+        if !self.cascade_router.update_static_table(role, winner_slug) {
+            return false;
+        }
+        eprintln!(
+            "[learn] experiment concluded — updated static routing table: experiment={} winner={} role={}",
+            experiment.experiment_id, winner_slug, role_raw
+        );
         true
     }
 
@@ -1448,6 +1489,7 @@ fn convergence_velocity_from_agreement(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prompt_experiment::{PromptExperiment, PromptVariant};
     use chrono::Utc;
     use roko_core::metric::{ConfigHash, TaskMetric};
     use tempfile::TempDir;
@@ -1755,6 +1797,114 @@ mod tests {
             sonnet.get("successes").and_then(serde_json::Value::as_u64),
             Some(1),
             "persisted router should reflect the successful observation"
+        );
+    }
+
+    #[tokio::test]
+    async fn experiment_updates_static_table() {
+        let tmp = TempDir::new().unwrap();
+        let learn_root = tmp.path().join(".roko").join("learn");
+        let paths = LearningPaths::under(&learn_root);
+        let runtime = LearningRuntime::open_with_models(
+            paths.clone(),
+            RegressionConfig::default(),
+            vec![
+                "claude-sonnet-4-20250514".to_string(),
+                "claude-haiku-4-5-20251001".to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let mut experiment = PromptExperiment::new(
+            "model-routing-exp",
+            "model-routing",
+            vec![
+                PromptVariant {
+                    id: "sonnet".to_string(),
+                    name: "Sonnet".to_string(),
+                    section_name: "model-routing".to_string(),
+                    content: String::new(),
+                    slug: Some("claude-sonnet-4-20250514".to_string()),
+                    active: true,
+                },
+                PromptVariant {
+                    id: "haiku".to_string(),
+                    name: "Haiku".to_string(),
+                    section_name: "model-routing".to_string(),
+                    content: String::new(),
+                    slug: Some("claude-haiku-4-5-20251001".to_string()),
+                    active: true,
+                },
+            ],
+        );
+        experiment.role = Some("implementer".to_string());
+        experiment.min_trials_per_variant = 1;
+        experiment.min_effect_size = 0.5;
+        runtime.experiment_store().lock().register(experiment);
+
+        let mut before_ctx = RoutingContext {
+            task_category: TaskCategory::Implementation,
+            complexity: TaskComplexityBand::Standard,
+            iteration: 0,
+            role: AgentRole::Implementer,
+            crate_familiarity: 0.5,
+            has_prior_failure: false,
+            affect_confidence: 0.5,
+            thinking_level: None,
+            previous_model: None,
+            plan_context_tokens: None,
+        };
+        assert_eq!(
+            runtime.cascade_router().route(&before_ctx).primary.slug,
+            "claude-sonnet-4-20250514"
+        );
+
+        let mut losing_episode = sample_episode(false);
+        losing_episode.extra.insert(
+            "model".to_string(),
+            serde_json::json!("claude-sonnet-4-20250514"),
+        );
+        runtime
+            .record_completed_run(CompletedRunInput {
+                experiment_variant_id: Some("sonnet".to_string()),
+                ..CompletedRunInput::from_episode(losing_episode)
+            })
+            .await
+            .unwrap();
+
+        let mut winning_episode = sample_episode(true);
+        winning_episode.extra.insert(
+            "model".to_string(),
+            serde_json::json!("claude-haiku-4-5-20251001"),
+        );
+        runtime
+            .record_completed_run(CompletedRunInput {
+                experiment_variant_id: Some("haiku".to_string()),
+                ..CompletedRunInput::from_episode(winning_episode)
+            })
+            .await
+            .unwrap();
+
+        before_ctx.iteration = 1;
+        assert_eq!(
+            runtime.cascade_router().route(&before_ctx).primary.slug,
+            "claude-haiku-4-5-20251001"
+        );
+
+        let reloaded = LearningRuntime::open_with_models(
+            paths,
+            RegressionConfig::default(),
+            vec![
+                "claude-sonnet-4-20250514".to_string(),
+                "claude-haiku-4-5-20251001".to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reloaded.cascade_router().route(&before_ctx).primary.slug,
+            "claude-haiku-4-5-20251001"
         );
     }
 

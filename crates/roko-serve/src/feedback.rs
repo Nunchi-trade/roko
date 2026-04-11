@@ -1035,6 +1035,7 @@ mod tests {
                 name: "Variant A".into(),
                 section_name: "template-section".into(),
                 content: "Use the short form.".into(),
+                slug: None,
                 active: true,
             }],
         ));
@@ -1068,6 +1069,7 @@ mod tests {
                     name: "Variant A".into(),
                     section_name: "outcome-section".into(),
                     content: "Be concise.".into(),
+                    slug: None,
                     active: true,
                 },
                 PromptVariant {
@@ -1075,6 +1077,7 @@ mod tests {
                     name: "Variant B".into(),
                     section_name: "outcome-section".into(),
                     content: "Be thorough.".into(),
+                    slug: None,
                     active: true,
                 },
             ],
