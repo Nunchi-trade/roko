@@ -216,7 +216,10 @@ mod tests {
 
         assert!(table.models.len() >= 8);
 
-        let claude_opus = table.models.get("claude-opus-4-6").expect("claude-opus-4-6");
+        let claude_opus = table
+            .models
+            .get("claude-opus-4-6")
+            .expect("claude-opus-4-6");
         assert!((claude_opus.input_per_m - 15.00).abs() < 1e-12);
         assert!((claude_opus.output_per_m - 75.00).abs() < 1e-12);
         assert!((claude_opus.cache_read_per_m - 3.75).abs() < 1e-12);

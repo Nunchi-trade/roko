@@ -41,8 +41,8 @@
 //! All mutable state is behind a [`parking_lot::Mutex`] so the router can
 //! be shared across async tasks via `Arc<LinUCBRouter>`.
 
-use parking_lot::Mutex;
 use crate::cost_table::CostTable;
+use parking_lot::Mutex;
 use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
 use roko_core::task::{TaskCategory, TaskComplexityBand};
 use serde::{Deserialize, Serialize};

@@ -300,6 +300,11 @@ impl DashboardScaffold {
         if let Some(page) = self.page(self.active_page) {
             let _ = writeln!(out, "{}", page.render_summary_line(true));
         }
+        if let Some(section) =
+            model_cost_comparison_section_snapshot(&self.snapshot.efficiency_events)
+        {
+            out.push_str(&section);
+        }
         out.push_str("pages:\n");
         out.push_str(&self.render_page_index_text());
         out
@@ -3327,6 +3332,10 @@ impl DashboardSnapshot {
             format_series(&trends.first_try_rate)
         );
 
+        if let Some(section) = model_cost_comparison_section_snapshot(&self.efficiency_events) {
+            out.push_str(&section);
+        }
+
         Some(out)
     }
 
@@ -3687,6 +3696,22 @@ struct LearningTrendSeriesSnapshot {
     first_try_rate: Vec<u64>,
 }
 
+#[derive(Debug, Clone)]
+struct LearningModelCostComparisonRowSnapshot {
+    model: String,
+    pass_rate: f64,
+    avg_cost_usd: f64,
+    cost_per_success_usd: Option<f64>,
+    observations: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LearningModelCostComparisonAggregateSnapshot {
+    observations: u64,
+    successes: u64,
+    cost_usd: f64,
+}
+
 #[derive(Debug, Clone, Default)]
 struct LearningTaskAggregateSnapshot {
     cost_usd: f64,
@@ -3979,6 +4004,119 @@ fn learning_trend_series_snapshot(events: &[AgentEfficiencyEvent]) -> LearningTr
     }
 }
 
+fn learning_model_cost_comparison_rows_snapshot(
+    events: &[AgentEfficiencyEvent],
+) -> Vec<LearningModelCostComparisonRowSnapshot> {
+    let today = Utc::now().date_naive();
+    let mut by_model: BTreeMap<String, LearningModelCostComparisonAggregateSnapshot> =
+        BTreeMap::new();
+
+    for event in events {
+        let Some(timestamp) = parse_efficiency_timestamp(&event.timestamp) else {
+            continue;
+        };
+        let age = today
+            .signed_duration_since(timestamp.date_naive())
+            .num_days();
+        if !(0..7).contains(&age) {
+            continue;
+        }
+
+        let model = if event.model.trim().is_empty() {
+            event.model_used.trim()
+        } else {
+            event.model.trim()
+        };
+        if model.is_empty() {
+            continue;
+        }
+
+        let entry = by_model.entry(model.to_string()).or_default();
+        entry.observations += 1;
+        entry.successes += if event.gate_passed { 1 } else { 0 };
+        entry.cost_usd += event.cost_usd;
+    }
+
+    let mut rows = by_model
+        .into_iter()
+        .map(|(model, aggregate)| {
+            let observations = aggregate.observations;
+            let pass_rate = if observations == 0 {
+                0.0
+            } else {
+                aggregate.successes as f64 / observations as f64
+            };
+            let avg_cost_usd = if observations == 0 {
+                0.0
+            } else {
+                aggregate.cost_usd / observations as f64
+            };
+            let cost_per_success_usd = if aggregate.successes == 0 {
+                None
+            } else {
+                Some(aggregate.cost_usd / aggregate.successes as f64)
+            };
+
+            LearningModelCostComparisonRowSnapshot {
+                model,
+                pass_rate,
+                avg_cost_usd,
+                cost_per_success_usd,
+                observations,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    rows.sort_by(|a, b| {
+        a.cost_per_success_usd
+            .unwrap_or(f64::INFINITY)
+            .partial_cmp(&b.cost_per_success_usd.unwrap_or(f64::INFINITY))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.model.cmp(&b.model))
+    });
+
+    rows
+}
+
+fn model_cost_comparison_section_snapshot(events: &[AgentEfficiencyEvent]) -> Option<String> {
+    let rows = learning_model_cost_comparison_rows_snapshot(events);
+
+    let mut out = String::new();
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Model Cost Comparison (last 7 days)");
+    if rows.len() < 2 {
+        let _ = writeln!(
+            out,
+            "  {}",
+            if rows.is_empty() {
+                "no recent model observations"
+            } else {
+                "need observations from at least two models"
+            }
+        );
+        return Some(out);
+    }
+
+    let _ = writeln!(
+        out,
+        "  {:<20}  {:>7}  {:>9}  {:>11}  {:>12}",
+        "Model", "Pass %", "Avg Cost", "$/Success", "Observations"
+    );
+    for row in rows {
+        let _ = writeln!(
+            out,
+            "  {:<20}  {:>7}  {:>9}  {:>11}  {:>12}",
+            truncate_str(&row.model, 20),
+            format!("{:.0}%", row.pass_rate * 100.0),
+            format_usd_2(row.avg_cost_usd),
+            format_cost_per_success(row.cost_per_success_usd),
+            row.observations
+        );
+    }
+
+    Some(out)
+}
+
 impl LearningTaskAggregateSnapshot {
     fn record(&mut self, event: &AgentEfficiencyEvent) {
         self.cost_usd += event.cost_usd;
@@ -4260,6 +4398,16 @@ fn format_usd(value: f64) -> String {
     format!("${value:.4}")
 }
 
+fn format_usd_2(value: f64) -> String {
+    format!("${value:.2}")
+}
+
+fn format_cost_per_success(value: Option<f64>) -> String {
+    value
+        .map(format_usd_2)
+        .unwrap_or_else(|| String::from("n/a"))
+}
+
 fn format_ms(value: f64) -> String {
     format!("{value:.0} ms")
 }
@@ -4442,6 +4590,75 @@ mod tests {
         assert!(rendered.contains("active=health"));
         assert!(rendered.contains("active page:"));
         assert!(rendered.contains("* Health [health] efficiency"));
+    }
+
+    #[test]
+    fn overview_and_learning_pages_render_model_cost_comparison() {
+        let tmpdir = tempdir().expect("tempdir");
+        let memory_dir = tmpdir.path().join(MEMORY_DIR);
+        let learn_dir = tmpdir.path().join(LEARN_DIR);
+        fs::create_dir_all(&memory_dir).expect("memory dir");
+        fs::create_dir_all(&learn_dir).expect("learn dir");
+        fs::write(memory_dir.join(EPISODES_FILE), "").expect("empty episodes");
+
+        fn timestamp_days_ago(days: i64) -> String {
+            (Utc::now() - chrono::Duration::days(days)).to_rfc3339()
+        }
+
+        write_jsonl(
+            &learn_dir.join(EFFICIENCY_FILE),
+            &[
+                serde_json::to_string(&sample_efficiency_event(
+                    "agent-a",
+                    "task-1",
+                    "Implementer",
+                    "kimi-k2.5",
+                    120,
+                    40,
+                    0.12,
+                    &timestamp_days_ago(1),
+                ))
+                .expect("event json"),
+                serde_json::to_string(&sample_efficiency_event(
+                    "agent-b",
+                    "task-2",
+                    "Implementer",
+                    "glm-5.1",
+                    220,
+                    60,
+                    0.44,
+                    &timestamp_days_ago(2),
+                ))
+                .expect("event json"),
+                serde_json::to_string(&sample_efficiency_event(
+                    "agent-c",
+                    "task-old",
+                    "Reviewer",
+                    "claude-opus-4-6",
+                    500,
+                    100,
+                    1.25,
+                    &timestamp_days_ago(10),
+                ))
+                .expect("event json"),
+            ],
+        );
+
+        let dashboard = DashboardScaffold::new_in(tmpdir.path());
+        let overview = dashboard.render_overview_text();
+        let learning = dashboard
+            .render_page_text(PageId::Learning)
+            .expect("learning page should render");
+
+        assert!(overview.contains("Model Cost Comparison (last 7 days)"));
+        assert!(overview.contains("kimi-k2.5"));
+        assert!(overview.contains("glm-5.1"));
+        assert!(!overview.contains("claude-opus-4-6"));
+
+        assert!(learning.contains("Model Cost Comparison (last 7 days)"));
+        assert!(learning.contains("kimi-k2.5"));
+        assert!(learning.contains("glm-5.1"));
+        assert!(!learning.contains("claude-opus-4-6"));
     }
 
     #[test]

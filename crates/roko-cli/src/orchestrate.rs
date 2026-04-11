@@ -9671,7 +9671,10 @@ mod tests {
     #[test]
     fn budget_enforcement_routes_to_mechanical_model() {
         let mut guardrail = BudgetGuardrail::new(1.0, 50.0, 10.0, 0.8);
-        assert_eq!(guardrail.record_cost(0.81, "task"), BudgetAction::RouteToCheaper);
+        assert_eq!(
+            guardrail.record_cost(0.81, "task"),
+            BudgetAction::RouteToCheaper
+        );
 
         let mut tier_models = HashMap::new();
         tier_models.insert("mechanical".to_string(), "claude-haiku-4-5".to_string());

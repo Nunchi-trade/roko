@@ -144,10 +144,16 @@ mod tests {
         }
 
         let mut budget = guardrail();
-        assert_eq!(budget.record_cost(81.0, "task"), BudgetAction::RouteToCheaper);
+        assert_eq!(
+            budget.record_cost(81.0, "task"),
+            BudgetAction::RouteToCheaper
+        );
 
         let mut budget = guardrail();
-        assert_eq!(budget.record_cost(96.0, "task"), BudgetAction::BlockNewSessions);
+        assert_eq!(
+            budget.record_cost(96.0, "task"),
+            BudgetAction::BlockNewSessions
+        );
 
         let mut budget = guardrail();
         assert_eq!(budget.record_cost(100.0, "task"), BudgetAction::Block);
