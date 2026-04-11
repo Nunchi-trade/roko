@@ -21,6 +21,7 @@ use roko_core::config::schema::RokoConfig;
 use roko_core::obs::LogScrubber;
 use roko_core::{Signal, Substrate};
 use roko_daimon::DaimonState;
+use roko_learn::provider_health::ProviderHealthTracker;
 
 use crate::deploy::{DeployBackend, Deployment};
 use crate::dispatch::SubscriptionRegistry;
@@ -139,6 +140,8 @@ pub struct AppState {
     pub runtime: Arc<dyn CliRuntime>,
     /// Full `roko.toml` schema configuration.
     pub roko_config: RwLock<RokoConfig>,
+    /// In-memory provider health tracker exposed via serve APIs.
+    pub provider_health: ProviderHealthTracker,
     /// Active one-shot runs.
     pub active_runs: RwLock<HashMap<String, RunHandle>>,
     /// Active plan executions.
@@ -189,6 +192,7 @@ impl AppState {
             subscriptions,
             runtime,
             roko_config: RwLock::new(roko_config),
+            provider_health: ProviderHealthTracker::new(),
             active_runs: RwLock::new(HashMap::new()),
             active_plans: RwLock::new(HashMap::new()),
             operations: RwLock::new(HashMap::new()),

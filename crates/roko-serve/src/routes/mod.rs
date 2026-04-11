@@ -11,6 +11,7 @@ mod learning;
 mod middleware;
 mod plans;
 mod prds;
+mod providers;
 mod research;
 mod run;
 mod sse;
@@ -47,6 +48,7 @@ pub fn build_router(
         .merge(learning::routes())
         .merge(config::routes())
         .merge(deployments::routes())
+        .merge(providers::routes())
         .merge(sse::routes());
 
     let api = if api_auth.enabled {
