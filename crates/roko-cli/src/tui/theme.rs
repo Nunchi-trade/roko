@@ -243,6 +243,29 @@ impl Default for RosedustTheme {
     }
 }
 
+impl RosedustTheme {
+    /// Convert to the legacy `Theme` type used by views and widgets.
+    ///
+    /// This bridges the new ROSEDUST palette to code that still accepts
+    /// `&dashboard::Theme`. Method names match 1:1.
+    #[must_use]
+    pub fn to_legacy_theme(&self) -> super::dashboard::Theme {
+        super::dashboard::Theme {
+            foreground: self.fg,
+            muted: self.fg_muted,
+            background: self.bg,
+            accent: self.rose,
+            accent_foreground: self.bg,
+            success: self.success,
+            warning: self.warning,
+            danger: self.danger,
+            info: self.info,
+            selection_background: self.selection_bg,
+            selection_foreground: self.selection_fg,
+        }
+    }
+}
+
 /// Return the active theme, respecting `NO_COLOR`.
 #[must_use]
 pub fn active_theme() -> RosedustTheme {

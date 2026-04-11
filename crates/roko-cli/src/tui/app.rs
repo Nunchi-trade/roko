@@ -29,17 +29,24 @@ use serde_json::Value;
 
 use super::dashboard::{DashboardData, DashboardScaffold, Theme};
 use super::event::{Event, EventHandler};
+use super::layout::RootLayout;
 use super::pages::{PageId, PageRegistry};
+use super::tabs::Tab;
+use super::theme::{RosedustTheme, active_theme};
 use super::widgets;
 
 /// Interactive dashboard shell backed by the existing snapshot renderer.
 #[derive(Debug)]
 pub struct App {
     workdir: PathBuf,
-    /// Currently selected dashboard page.
+    /// Currently selected dashboard page (legacy system).
     pub current_page: PageId,
+    /// Active tab in the new Tab system.
+    pub active_tab: Tab,
     /// Shared dashboard data model, refreshed on tick.
     pub data: DashboardData,
+    /// Live snapshot from StateHub (if connected).
+    pub live_snapshot: Option<roko_core::dashboard_snapshot::DashboardSnapshot>,
     /// Static page scaffold used by the current renderer.
     scaffold: DashboardScaffold,
     /// Whether the event loop should keep running.
@@ -48,12 +55,18 @@ pub struct App {
     pub last_refresh: Instant,
     /// Per-page scroll position.
     pub scroll_offset: HashMap<PageId, u16>,
+    /// Per-tab scroll offset for new views.
+    pub tab_scroll: HashMap<Tab, u16>,
+    /// Selected plan index (for dashboard/plans views).
+    pub plan_selection: usize,
     /// Selected signal row on the Signals page.
     pub signal_selection: usize,
     /// Selected gate-failure row on the Gate Results page.
     pub gate_failure_selection: usize,
     /// Active overlay, if any.
     overlay: Option<OverlayState>,
+    /// Whether to use the new ROSEDUST rendering pipeline.
+    pub use_new_renderer: bool,
 }
 
 type TuiTerminal = Terminal<CrosstermBackend<Stdout>>;
@@ -157,8 +170,10 @@ pub async fn run_async(
                 }
             } => {
                 if result.is_ok() {
-                    // Snapshot changed — the next render tick will pick it up.
-                    // We could also force an immediate redraw here.
+                    // Snapshot changed — update the app's live snapshot.
+                    if let Some(rx) = snapshot_rx.as_ref() {
+                        app.live_snapshot = Some(rx.borrow().clone());
+                    }
                 }
             }
         }
@@ -190,14 +205,19 @@ impl App {
         Self {
             workdir,
             current_page: scaffold.active_page(),
+            active_tab: Tab::Dashboard,
             data,
+            live_snapshot: None,
             scaffold,
             running: true,
             last_refresh: Instant::now(),
             scroll_offset: HashMap::new(),
+            tab_scroll: HashMap::new(),
+            plan_selection: 0,
             signal_selection: 0,
             gate_failure_selection: 0,
             overlay: None,
+            use_new_renderer: true,
         }
     }
 
@@ -290,6 +310,112 @@ impl App {
     }
 
     fn draw(&self, frame: &mut Frame<'_>) {
+        if self.use_new_renderer {
+            self.draw_new(frame);
+        } else {
+            self.draw_legacy(frame);
+        }
+    }
+
+    /// New ROSEDUST rendering pipeline: RootLayout + header + views + status.
+    fn draw_new(&self, frame: &mut Frame<'_>) {
+        let rosedust = active_theme();
+        let theme = rosedust.to_legacy_theme();
+        let root = RootLayout::compute(frame.area());
+
+        // Get a snapshot: prefer live from StateHub, fall back to empty default.
+        let default_snap = roko_core::dashboard_snapshot::DashboardSnapshot::default();
+        let snapshot = self.live_snapshot.as_ref().unwrap_or(&default_snap);
+
+        // Header: render tab bar with active tab indicator.
+        {
+            let mut spans = vec![Span::styled("roko ", rosedust.accent_bold())];
+            for tab in Tab::all() {
+                let style = if *tab == self.active_tab {
+                    rosedust.accent_bold()
+                } else {
+                    rosedust.muted()
+                };
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(
+                    format!("{}:{}", tab.fkey(), tab.label()),
+                    style,
+                ));
+            }
+            let header_line = Line::from(spans);
+            let header = Paragraph::new(header_line).style(rosedust.header());
+            frame.render_widget(header, root.header);
+        }
+
+        // Content: dispatch to the active tab's view.
+        {
+            let scroll = self.tab_scroll.get(&self.active_tab).copied().unwrap_or(0);
+            match self.active_tab {
+                Tab::Dashboard => {
+                    super::views::dashboard::render_dashboard_view(
+                        frame,
+                        root.content,
+                        snapshot,
+                        self.plan_selection,
+                        &theme,
+                    );
+                }
+                Tab::Plans => {
+                    super::views::plans::render_plans_view(
+                        frame,
+                        root.content,
+                        snapshot,
+                        self.plan_selection,
+                        scroll,
+                        &theme,
+                    );
+                }
+                Tab::Agents => {
+                    super::views::agents::render_agents_view(
+                        frame,
+                        root.content,
+                        snapshot,
+                        &theme,
+                    );
+                }
+                Tab::Logs => {
+                    super::views::logs::render_logs_view(
+                        frame, root.content, snapshot, scroll, &theme,
+                    );
+                }
+                Tab::Signals => {
+                    super::views::signals::render_signals_view(
+                        frame,
+                        root.content,
+                        snapshot,
+                        self.signal_selection,
+                        scroll,
+                        &theme,
+                    );
+                }
+                Tab::Config => {
+                    super::views::config::render_config_view(
+                        frame, root.content, snapshot, &theme,
+                    );
+                }
+            }
+        }
+
+        // Status bar.
+        {
+            let hints = "q:quit  Tab:next  F1-F6:tabs  ?:help  Enter:detail  r:refresh";
+            let status = Paragraph::new(hints).style(rosedust.status());
+            frame.render_widget(status, root.status);
+        }
+
+        // Overlay (help / detail).
+        if let Some(overlay) = &self.overlay {
+            self.render_overlay(frame, overlay);
+        }
+    }
+
+    /// Legacy rendering pipeline (old widgets::render_dashboard).
+    fn draw_legacy(&self, frame: &mut Frame<'_>) {
         let pages = self.pages();
         widgets::render_dashboard(
             frame,
@@ -318,6 +444,8 @@ impl App {
             KeyCode::Char('?') => self.toggle_help_overlay(),
             KeyCode::Enter => self.toggle_detail_overlay(),
             KeyCode::Tab | KeyCode::BackTab => self.select_next_page_by_key(key.code),
+            // F1-F6: switch tabs in new renderer
+            KeyCode::F(n @ 1..=6) => self.select_tab_by_fkey(n),
             KeyCode::Char('1') => self.select_page_by_slot(0),
             KeyCode::Char('2') => self.select_page_by_slot(1),
             KeyCode::Char('3') => self.select_page_by_slot(2),
@@ -332,6 +460,12 @@ impl App {
             KeyCode::PageDown => self.adjust_scroll(8),
             KeyCode::Home => self.set_scroll(0),
             _ => {}
+        }
+    }
+
+    fn select_tab_by_fkey(&mut self, n: u8) {
+        if let Some(tab) = Tab::from_index((n - 1) as usize) {
+            self.active_tab = tab;
         }
     }
 
@@ -397,12 +531,22 @@ impl App {
     }
 
     fn select_next_page(&mut self) {
+        // Also cycle tabs in new renderer.
+        let all = Tab::all();
+        if let Some(idx) = all.iter().position(|t| *t == self.active_tab) {
+            self.active_tab = all[(idx + 1) % all.len()];
+        }
         let pages = self.pages();
         self.current_page = pages.next(self.current_page);
         let _ = self.scaffold.set_active_page(self.current_page);
     }
 
     fn select_previous_page(&mut self) {
+        // Also cycle tabs in new renderer.
+        let all = Tab::all();
+        if let Some(idx) = all.iter().position(|t| *t == self.active_tab) {
+            self.active_tab = all[(idx + all.len() - 1) % all.len()];
+        }
         let pages = self.pages();
         self.current_page = pages.previous(self.current_page);
         let _ = self.scaffold.set_active_page(self.current_page);
@@ -657,18 +801,7 @@ impl App {
 }
 
 fn render_page(frame: &mut Frame<'_>, app: &App) {
-    let pages = app.pages();
-    widgets::render_dashboard(
-        frame,
-        &app.scaffold,
-        &app.data,
-        &pages,
-        app.current_page,
-        app.scroll_for(app.current_page),
-        app.signal_selection,
-        app.gate_failure_selection,
-        &Theme::from_env(),
-    );
+    app.draw(frame);
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) {

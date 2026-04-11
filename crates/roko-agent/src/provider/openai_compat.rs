@@ -36,6 +36,10 @@ fn is_zai_provider(provider: &ProviderConfig, model: &ModelProfile) -> bool {
             .is_some_and(|base_url| base_url.contains("z.ai") || base_url.contains("bigmodel.cn"))
 }
 
+fn is_openrouter(base_url: &str) -> bool {
+    base_url.contains("openrouter.ai")
+}
+
 fn inject_glm_params(
     body: &mut Map<String, Value>,
     provider: &ProviderConfig,
@@ -53,6 +57,27 @@ fn inject_glm_params(
         }),
     );
     body.insert("tool_stream".to_string(), Value::Bool(true));
+}
+
+fn inject_provider_routing(
+    body: &mut Map<String, Value>,
+    provider: &ProviderConfig,
+    model: &ModelProfile,
+) {
+    let Some(base_url) = provider.base_url.as_deref() else {
+        return;
+    };
+    if !is_openrouter(base_url) {
+        return;
+    }
+
+    let Some(routing) = model.provider_routing.as_ref() else {
+        return;
+    };
+
+    if let Ok(value) = serde_json::to_value(routing) {
+        body.insert("provider".to_string(), value);
+    }
 }
 
 fn is_kimi_model(model: &ModelProfile) -> bool {
@@ -184,6 +209,7 @@ impl ProviderAdapter for OpenAiCompatAdapter {
         let mut extra_body_params = Map::new();
         inject_glm_params(&mut extra_body_params, provider, model);
         inject_kimi_params(&mut extra_body_params, model);
+        inject_provider_routing(&mut extra_body_params, provider, model);
 
         let agent = CodexAgent::new(api_key, model.slug.clone())
             .with_base_url(base_url)
@@ -231,6 +257,7 @@ impl ProviderAdapter for OpenAiCompatAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http::{HttpPostError, HttpPoster};
     use roko_core::{Body, Context, Kind, Signal};
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -304,6 +331,51 @@ mod tests {
         });
 
         (format!("http://{}", addr), captured, handle)
+    }
+
+    #[derive(Debug, Clone)]
+    struct RecordedRequest {
+        url: String,
+        headers: Vec<(String, String)>,
+        body: String,
+        timeout_ms: u64,
+    }
+
+    #[derive(Debug)]
+    struct MockPoster {
+        response: String,
+        captured: Arc<Mutex<Option<RecordedRequest>>>,
+    }
+
+    impl MockPoster {
+        fn new(response: impl Into<String>) -> (Arc<Self>, Arc<Mutex<Option<RecordedRequest>>>) {
+            let captured = Arc::new(Mutex::new(None));
+            let poster = Arc::new(Self {
+                response: response.into(),
+                captured: Arc::clone(&captured),
+            });
+            (poster, captured)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl HttpPoster for MockPoster {
+        async fn post_json(
+            &self,
+            url: &str,
+            headers: &[(String, String)],
+            body: &[u8],
+            timeout_ms: u64,
+        ) -> Result<String, HttpPostError> {
+            let request = RecordedRequest {
+                url: url.to_string(),
+                headers: headers.to_vec(),
+                body: String::from_utf8(body.to_vec()).expect("request body is utf8"),
+                timeout_ms,
+            };
+            *self.captured.lock().expect("capture lock") = Some(request);
+            Ok(self.response.clone())
+        }
     }
 
     #[tokio::test]
@@ -484,6 +556,116 @@ mod tests {
         );
 
         handle.join().expect("server thread");
+    }
+
+    #[tokio::test]
+    async fn openrouter_routing_injection() {
+        let response = serde_json::json!({
+            "id": "chatcmpl-test",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "openrouter-ok"},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 9,
+                "completion_tokens": 4,
+                "total_tokens": 13
+            }
+        })
+        .to_string();
+        let (poster, captured) = MockPoster::new(response);
+
+        let provider = ProviderConfig {
+            kind: ProviderKind::OpenAiCompat,
+            base_url: Some("https://openrouter.ai/api/v1".to_string()),
+            api_key_env: Some("PATH".to_string()),
+            command: None,
+            args: None,
+            timeout_ms: Some(1_500),
+            extra_headers: None,
+            max_concurrent: None,
+        };
+        let model = ModelProfile {
+            provider: "openrouter".to_string(),
+            slug: "z-ai/glm-5.1".to_string(),
+            context_window: 200_000,
+            max_output: Some(1_024),
+            supports_tools: true,
+            supports_thinking: true,
+            supports_vision: false,
+            supports_web_search: false,
+            supports_mcp_tools: false,
+            supports_partial: false,
+            provider_routing: Some(roko_core::config::schema::ProviderRouting {
+                sort: Some("price".to_string()),
+                order: Some(vec!["z-ai".to_string(), "moonshotai".to_string()]),
+                allow_fallbacks: Some(true),
+                max_price: Some(0.0025),
+                require_parameters: Some(vec!["temperature".to_string()]),
+            }),
+            tool_format: "openai_json".to_string(),
+            cost_input_per_m: None,
+            cost_output_per_m: None,
+            cost_cache_read_per_m: None,
+            cost_cache_write_per_m: None,
+            max_tools: None,
+            tokenizer_ratio: None,
+        };
+        let options = AgentOptions {
+            timeout_ms: Some(2_500),
+            name: "openrouter-agent".to_string(),
+            ..Default::default()
+        };
+
+        let mut extra_body_params = Map::new();
+        inject_provider_routing(&mut extra_body_params, &provider, &model);
+
+        let agent = CodexAgent::new("test-key", model.slug.clone())
+            .with_base_url("https://openrouter.ai/api")
+            .with_http_poster(poster)
+            .with_extra_body_params(extra_body_params)
+            .with_name(options.name.clone());
+
+        let result = agent.run(&prompt("hello"), &Context::now()).await;
+        assert!(result.success);
+        assert_eq!(result.output.body.as_text().unwrap_or(""), "openrouter-ok");
+
+        let request = captured
+            .lock()
+            .expect("capture lock")
+            .clone()
+            .expect("captured request");
+        assert_eq!(
+            request.url,
+            "https://openrouter.ai/api/v1/chat/completions"
+        );
+        assert_eq!(request.timeout_ms, 120_000);
+        assert!(
+            request
+                .headers
+                .iter()
+                .any(|(name, value)| name.eq_ignore_ascii_case("authorization")
+                    && value == "Bearer test-key")
+        );
+        assert!(
+            request
+                .headers
+                .iter()
+                .any(|(name, value)| name.eq_ignore_ascii_case("content-type")
+                    && value == "application/json")
+        );
+        let parsed: Value = serde_json::from_str(&request.body).expect("json request body");
+        assert_eq!(
+            parsed["provider"],
+            serde_json::json!({
+                "sort": "price",
+                "order": ["z-ai", "moonshotai"],
+                "allow_fallbacks": true,
+                "max_price": 0.0025,
+                "require_parameters": ["temperature"]
+            })
+        );
     }
 
     #[test]
