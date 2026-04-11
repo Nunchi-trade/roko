@@ -3,6 +3,7 @@ use crate::codex_agent::{CodexAgent, DEFAULT_MAX_TOKENS};
 use crate::provider::{AgentCreationError, AgentOptions, ProviderAdapter, ProviderError};
 use roko_core::agent::ProviderKind;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 /// Adapter for OpenAI-compatible HTTP providers.
@@ -36,6 +37,78 @@ fn inject_glm_params(
 
 fn is_kimi_model(model: &ModelProfile) -> bool {
     model.slug.starts_with("kimi-")
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[allow(dead_code)]
+pub(crate) struct ChatMessage {
+    #[serde(default)]
+    content: Vec<ContentBlock>,
+}
+
+#[allow(dead_code)]
+impl ChatMessage {
+    fn content_blocks(&self) -> Option<&[ContentBlock]> {
+        (!self.content.is_empty()).then_some(self.content.as_slice())
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[allow(dead_code)]
+pub(crate) enum ContentBlock {
+    Text {
+        text: String,
+    },
+    ImageUrl {
+        image_url: ImageUrlBlock,
+    },
+}
+
+#[allow(dead_code)]
+impl ContentBlock {
+    fn is_image_url(&self) -> bool {
+        matches!(self, Self::ImageUrl { .. })
+    }
+
+    fn is_base64(&self) -> bool {
+        matches!(
+            self,
+            Self::ImageUrl { image_url }
+                if image_url.url.starts_with("data:image/")
+                    && image_url.url.contains(";base64,")
+        )
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[allow(dead_code)]
+pub(crate) struct ImageUrlBlock {
+    url: String,
+}
+
+#[allow(dead_code)]
+fn validate_vision_input(
+    messages: &[ChatMessage],
+    model: &ModelProfile,
+) -> Result<(), AgentCreationError> {
+    if !model.supports_vision {
+        return Ok(());
+    }
+
+    for msg in messages {
+        if let Some(content_blocks) = msg.content_blocks() {
+            for block in content_blocks {
+                if block.is_image_url() && !block.is_base64() {
+                    return Err(AgentCreationError::MissingConfig(
+                        "Kimi requires base64-encoded images, not URLs".into(),
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn inject_kimi_params(body: &mut Map<String, Value>, model: &ModelProfile) {
@@ -393,6 +466,65 @@ mod tests {
         );
 
         handle.join().expect("server thread");
+    }
+
+    #[test]
+    fn kimi_vision_base64_only() {
+        let model = ModelProfile {
+            provider: "moonshot".to_string(),
+            slug: "kimi-k2.5".to_string(),
+            context_window: 256_000,
+            max_output: Some(65_535),
+            supports_tools: true,
+            supports_thinking: true,
+            supports_vision: true,
+            supports_web_search: false,
+            supports_mcp_tools: false,
+            supports_partial: true,
+            tool_format: "openai_json".to_string(),
+            cost_input_per_m: None,
+            cost_output_per_m: None,
+            cost_cache_read_per_m: None,
+            cost_cache_write_per_m: None,
+            max_tools: Some(128),
+            tokenizer_ratio: None,
+        };
+
+        let base64_message = ChatMessage {
+            content: vec![ContentBlock::ImageUrl {
+                image_url: ImageUrlBlock {
+                    url: "data:image/png;base64,iVBORw0KGgo=".to_string(),
+                },
+            }],
+        };
+        assert!(validate_vision_input(&[base64_message], &model).is_ok());
+
+        let url_message = ChatMessage {
+            content: vec![ContentBlock::ImageUrl {
+                image_url: ImageUrlBlock {
+                    url: "https://example.com/image.png".to_string(),
+                },
+            }],
+        };
+        let err = validate_vision_input(&[url_message], &model).expect_err("expected error");
+        assert!(matches!(
+            err,
+            AgentCreationError::MissingConfig(message)
+                if message == "Kimi requires base64-encoded images, not URLs"
+        ));
+
+        let non_vision_model = ModelProfile {
+            supports_vision: false,
+            ..model
+        };
+        let accepted_for_other_provider = ChatMessage {
+            content: vec![ContentBlock::ImageUrl {
+                image_url: ImageUrlBlock {
+                    url: "https://example.com/image.png".to_string(),
+                },
+            }],
+        };
+        assert!(validate_vision_input(&[accepted_for_other_provider], &non_vision_model).is_ok());
     }
 
     #[test]
