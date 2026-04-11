@@ -55,6 +55,7 @@ use roko_learn::costs_db::CostRecord;
 use roko_learn::efficiency::{AgentEfficiencyEvent, FleetCFactor, compute_fleet_cfactor};
 use roko_learn::episode_logger::{Episode, GateVerdict, Usage};
 use roko_learn::latency::LatencyRegistry;
+use roko_learn::model_experiment::ModelExperimentStore;
 use roko_learn::playbook::{Playbook, PlaybookStore};
 use roko_learn::runtime_feedback::{
     CompletedRunInput, LearningRuntime, LearningUpdate, read_efficiency_events,
@@ -87,6 +88,13 @@ const WATCHER_INTERVAL_SECS: u64 = 30;
 const WATCHER_SIGNAL_TAIL: usize = 200;
 const EFFICIENCY_SIGNAL_TAIL: usize = 256;
 const GHOST_TURN_SIGNAL_KIND: &str = "conductor.ghost_turn";
+
+fn model_experiments_path(workdir: &Path) -> PathBuf {
+    workdir
+        .join(".roko")
+        .join("learn")
+        .join("model-experiments.json")
+}
 
 fn daimon_state_path(workdir: &Path) -> PathBuf {
     workdir.join(".roko").join("daimon").join("affect.json")
@@ -583,6 +591,12 @@ struct LearnedContext {
     matched_rule_id: Option<String>,
     /// The assigned prompt experiment variant ID (if any) for outcome tracking.
     experiment_variant_id: Option<String>,
+}
+
+struct SelectedModelExperiment {
+    experiment_id: String,
+    variant_id: String,
+    model_slug: String,
 }
 
 /// Background checker that tails `.roko/signals.jsonl` and periodically
@@ -4425,6 +4439,32 @@ impl PlanRunner {
             .unwrap_or_else(|| resolved.slug.clone())
     }
 
+    fn record_model_experiment_outcome(
+        &self,
+        selected_experiment: Option<&SelectedModelExperiment>,
+        gate_passed: bool,
+        result: &AgentResult,
+    ) -> Result<()> {
+        let Some(selected_experiment) = selected_experiment else {
+            return Ok(());
+        };
+
+        let experiment_path = model_experiments_path(&self.workdir);
+        let mut experiment_store = ModelExperimentStore::load_or_new(&experiment_path);
+        experiment_store.record_outcome(
+            &selected_experiment.experiment_id,
+            &selected_experiment.variant_id,
+            gate_passed,
+            f64::from(result.usage.cost_usd),
+            u64::from(result.usage.input_tokens) + u64::from(result.usage.output_tokens),
+            result.usage.wall_ms,
+        );
+        experiment_store
+            .save(&experiment_path)
+            .with_context(|| format!("save model experiments to {}", experiment_path.display()))
+            .map_err(Into::into)
+    }
+
     /// Record post-turn latency and anomaly feedback before any later early return.
     fn record_turn_learning_feedback(
         &mut self,
@@ -7087,6 +7127,7 @@ impl PlanRunner {
         };
 
         // ── Adaptive model selection via CascadeRouter ───────────────
+        let mut selected_model_experiment = None;
         if let Some(td) = task_def.as_ref() {
             let cascade_router = self.learning.cascade_router();
             let routing_ctx = cascade_routing_context(self, plan_id, task, role, Some(td));
@@ -7099,25 +7140,45 @@ impl PlanRunner {
                 }
             };
 
-            match cascade_router.select_for_frequency(
-                frequency,
-                Some(&routing_ctx),
-                cfactor_snapshot.as_ref(),
-                Some(agent_id.as_str()),
+            let experiment_store =
+                ModelExperimentStore::load_or_new(&model_experiments_path(&self.workdir));
+            if let Some((experiment_id, variant)) = experiment_store.assign_model_with_experiment(
+                routing_ctx.role.label(),
+                routing_ctx.task_category.label(),
             ) {
-                Some(model) => {
-                    tracing::info!(
-                        "[orchestrate] frequency={} model={} (selected via cascade)",
-                        frequency_label(frequency),
-                        model.slug
-                    );
-                    selected_model = model.slug;
-                }
-                None => {
-                    tracing::info!(
-                        "[orchestrate] frequency={} (reactive; bypassing model selection)",
-                        frequency_label(frequency)
-                    );
+                tracing::info!(
+                    experiment_id = %experiment_id,
+                    variant_id = %variant.id,
+                    model = %variant.slug,
+                    "[orchestrate] model experiment override selected variant"
+                );
+                selected_model_experiment = Some(SelectedModelExperiment {
+                    experiment_id,
+                    variant_id: variant.id.clone(),
+                    model_slug: variant.slug.clone(),
+                });
+                selected_model = variant.slug;
+            } else {
+                match cascade_router.select_for_frequency(
+                    frequency,
+                    Some(&routing_ctx),
+                    cfactor_snapshot.as_ref(),
+                    Some(agent_id.as_str()),
+                ) {
+                    Some(model) => {
+                        tracing::info!(
+                            "[orchestrate] frequency={} model={} (selected via cascade)",
+                            frequency_label(frequency),
+                            model.slug
+                        );
+                        selected_model = model.slug;
+                    }
+                    None => {
+                        tracing::info!(
+                            "[orchestrate] frequency={} (reactive; bypassing model selection)",
+                            frequency_label(frequency)
+                        );
+                    }
                 }
             }
         }
@@ -7227,6 +7288,16 @@ impl PlanRunner {
         let selected_model = dispatch_params.model;
         let dispatch_turn_limit = dispatch_params.turn_limit;
         let dispatch_effort = dispatch_params.effort.clone();
+        if selected_model_experiment
+            .as_ref()
+            .is_some_and(|selection| selection.model_slug != selected_model)
+        {
+            tracing::info!(
+                actual_model = %selected_model,
+                "[orchestrate] clearing model experiment assignment after downstream model override"
+            );
+            selected_model_experiment = None;
+        }
 
         // ── Build context via tiered ContextProvider ───────────────
         let context_sections = if let Some(ref td) = task_def {
@@ -7687,6 +7758,11 @@ impl PlanRunner {
         }
 
         if !result.success {
+            self.record_model_experiment_outcome(
+                selected_model_experiment.as_ref(),
+                false,
+                &result,
+            )?;
             self.observe_cascade_router(plan_id, task, task_def.as_ref(), &selected_model, 0.0);
             let task_phase = task_def
                 .as_ref()
@@ -7886,7 +7962,23 @@ impl PlanRunner {
         .await;
 
         self.release_task_mcp_servers(&mcp_lease).await;
-        post_result?;
+        match post_result {
+            Ok(()) => {
+                self.record_model_experiment_outcome(
+                    selected_model_experiment.as_ref(),
+                    true,
+                    &result,
+                )?;
+            }
+            Err(err) => {
+                self.record_model_experiment_outcome(
+                    selected_model_experiment.as_ref(),
+                    false,
+                    &result,
+                )?;
+                return Err(err);
+            }
+        }
 
         Ok(result)
     }

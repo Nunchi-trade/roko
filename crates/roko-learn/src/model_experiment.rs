@@ -251,20 +251,34 @@ impl ModelExperimentStore {
         })
     }
 
+    fn applicable_experiment(&self, role: &str, category: &str) -> Option<&ModelExperiment> {
+        self.experiments
+            .values()
+            .find(|experiment| {
+                experiment.status == ExperimentStatus::Running
+                    && experiment.role.as_deref() == Some(role)
+                    && experiment.task_category.as_deref() == Some(category)
+            })
+            .or_else(|| self.active_for_role(role))
+            .or_else(|| self.active_for_category(category))
+    }
+
     /// Assign a model variant for the current role/category, if an active
     /// experiment applies.
     pub fn assign_model(&self, role: &str, category: &str) -> Option<ModelVariant> {
-        let experiment = self.experiments.values().find(|experiment| {
-            experiment.status == ExperimentStatus::Running
-                && experiment.role.as_deref() == Some(role)
-                && experiment.task_category.as_deref() == Some(category)
-        });
+        self.assign_model_with_experiment(role, category)
+            .map(|(_, variant)| variant)
+    }
 
-        let experiment = experiment
-            .or_else(|| self.active_for_role(role))
-            .or_else(|| self.active_for_category(category))?;
-
-        experiment.assign_variant().cloned()
+    /// Assign a model variant and return the owning experiment id.
+    pub fn assign_model_with_experiment(
+        &self,
+        role: &str,
+        category: &str,
+    ) -> Option<(String, ModelVariant)> {
+        let experiment = self.applicable_experiment(role, category)?;
+        let variant = experiment.assign_variant()?.clone();
+        Some((experiment.experiment_id.clone(), variant))
     }
 
     /// Record an outcome for a variant within a specific experiment.
