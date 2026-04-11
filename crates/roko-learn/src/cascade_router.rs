@@ -496,7 +496,7 @@ impl CascadeRouter {
         true
     }
 
-    /// Record a successful observation from a raw 17-dim context vector.
+    /// Record a successful observation from a raw 18-dim context vector.
     ///
     /// This is the success-path entry point used by orchestration when the
     /// caller already has the model index in the router's arm list.
@@ -795,7 +795,7 @@ impl CascadeRouter {
     }
 
     fn route_ucb_filtered(&self, ctx: &RoutingContext, candidates: &[String]) -> CascadeModel {
-        let model = self.linucb.select_features_from_candidates(&ctx.to_features(), candidates);
+        let model = self.linucb.select_features_from_candidates(ctx, candidates);
         let selected = model;
         let tier = slug_to_tier(&selected.slug);
         let fallback = fallback_for_tier(tier).map(ModelSpec::from_slug);
@@ -897,6 +897,8 @@ mod tests {
             crate_familiarity: 0.5,
             has_prior_failure: false,
             affect_confidence: 0.5,
+            previous_model: None,
+            plan_context_tokens: None,
         }
     }
 

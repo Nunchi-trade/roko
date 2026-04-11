@@ -22,8 +22,9 @@
 //!   (`success_count / total_count`, clamped to `[0.0, 1.0]`)
 //! - Has prior failure (0.0 or 1.0)
 //! - Bias term (always 1.0)
+//! - Cache affinity to the previous model (1.0 when the candidate matches)
 //!
-//! Total dimension: 8 + 1 + 1 + 4 + 1 + 1 + 1 = 17.
+//! Total dimension: 8 + 1 + 1 + 4 + 1 + 1 + 1 + 1 = 18.
 //!
 //! # Cold start
 //!
@@ -50,7 +51,7 @@ use std::path::{Path, PathBuf};
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 /// Dimensionality of the context vector.
-pub const CONTEXT_DIM: usize = 17;
+pub const CONTEXT_DIM: usize = 18;
 
 /// Minimum observations before `LinUCB` is used (below this, static routing).
 pub const COLD_START_THRESHOLD: u64 = 50;
@@ -85,12 +86,22 @@ pub struct RoutingContext {
     pub has_prior_failure: bool,
     /// Affect-derived confidence hint in `[0.0, 1.0]`.
     pub affect_confidence: f64,
+    /// Model used for the previous task in the same plan.
+    pub previous_model: Option<String>,
+    /// Estimated shared prefix size for cached context reuse.
+    pub plan_context_tokens: Option<u64>,
 }
 
 impl RoutingContext {
     /// Encode into a fixed-length feature vector of dimension [`CONTEXT_DIM`].
     #[must_use]
     pub fn to_features(&self) -> Vec<f64> {
+        self.to_features_for_model(self.previous_model.as_deref())
+    }
+
+    /// Encode into a fixed-length feature vector for a specific candidate model.
+    #[must_use]
+    pub fn to_features_for_model(&self, candidate_model: Option<&str>) -> Vec<f64> {
         let mut x = vec![0.0; CONTEXT_DIM];
         let mut idx = 0;
 
@@ -122,6 +133,16 @@ impl RoutingContext {
 
         // Bias term
         x[idx] = 1.0;
+        idx += 1;
+
+        // Cache affinity bonus for reusing the same model as the previous task.
+        x[idx] = if candidate_model.is_some_and(|candidate| {
+            self.previous_model.as_deref() == Some(candidate)
+        }) {
+            1.0
+        } else {
+            0.0
+        };
 
         x
     }
@@ -412,10 +433,39 @@ impl LinUCBRouter {
     /// If `total_observations < COLD_START_THRESHOLD`, returns the static
     /// fallback model for the context's complexity band tier.
     pub fn select_model(&self, ctx: &RoutingContext) -> ModelSpec {
-        self.select_features(&ctx.to_features())
+        let state = self.state.lock();
+
+        // Cold start: use static routing.
+        if state.total_observations < COLD_START_THRESHOLD {
+            let tier = complexity_to_tier(ctx.complexity);
+            drop(state);
+            let slug = self
+                .static_table
+                .get(&tier)
+                .cloned()
+                .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
+            return ModelSpec::from_slug(slug);
+        }
+
+        let alpha = alpha_for_observations(state.total_observations);
+
+        let mut best_slug = state.arms[0].slug.clone();
+        let mut best_score = f64::NEG_INFINITY;
+
+        for arm in &state.arms {
+            let x = ctx.to_features_for_model(Some(&arm.slug));
+            let score = linucb_score(arm, &x, alpha);
+            if score > best_score {
+                best_score = score;
+                best_slug.clone_from(&arm.slug);
+            }
+        }
+
+        drop(state);
+        ModelSpec::from_slug(best_slug)
     }
 
-    /// Select the best model for a raw 17-dim context vector.
+    /// Select the best model for a raw 18-dim context vector.
     ///
     /// This is the lower-level entry point used by the cascade router when it
     /// already has the encoded feature vector.
@@ -457,18 +507,18 @@ impl LinUCBRouter {
     /// eligible arms to `candidate_slugs`.
     pub fn select_features_from_candidates(
         &self,
-        x: &[f64],
+        ctx: &RoutingContext,
         candidate_slugs: &[String],
     ) -> ModelSpec {
         if candidate_slugs.is_empty() {
-            return self.select_features(x);
+            return self.select_model(ctx);
         }
 
         let state = self.state.lock();
 
         // Cold start: use the filtered static table.
         if state.total_observations < COLD_START_THRESHOLD {
-            let tier = context_vec_to_tier(x);
+            let tier = complexity_to_tier(ctx.complexity);
             let slug = pick_static_from_candidates(candidate_slugs, tier);
             return ModelSpec::from_slug(slug);
         }
@@ -482,7 +532,8 @@ impl LinUCBRouter {
                 continue;
             }
 
-            let score = linucb_score(arm, x, alpha);
+            let x = ctx.to_features_for_model(Some(&arm.slug));
+            let score = linucb_score(arm, &x, alpha);
             if score > best_score {
                 best_score = score;
                 best_slug = Some(arm.slug.clone());
@@ -504,7 +555,7 @@ impl LinUCBRouter {
     /// - `A_a = A_a + x * x^T`
     /// - `b_a = b_a + reward * x`
     pub fn update(&self, ctx: &RoutingContext, model_slug: &str, reward: f64) {
-        let x = ctx.to_features();
+        let x = ctx.to_features_for_model(Some(model_slug));
         let Some(model_idx) = self.model_index(model_slug) else {
             return;
         };
@@ -795,6 +846,8 @@ mod tests {
             crate_familiarity: 0.5,
             has_prior_failure: false,
             affect_confidence: 0.5,
+            previous_model: None,
+            plan_context_tokens: None,
         }
     }
 
@@ -896,7 +949,7 @@ mod tests {
     fn bias_term_always_one() {
         let ctx = default_ctx();
         let features = ctx.to_features();
-        assert!((features[CONTEXT_DIM - 1] - 1.0).abs() < f64::EPSILON);
+        assert!((features[16] - 1.0).abs() < f64::EPSILON);
     }
 
     // ── Test 8: cold start returns static model ─────────────────────────
@@ -1226,7 +1279,25 @@ mod tests {
         assert!((ctx.to_features()[fail_idx] - 1.0).abs() < f64::EPSILON);
     }
 
-    // ── Test 25: custom static table ────────────────────────────────────
+    // ── Test 25: cache affinity feature ────────────────────────────────
+
+    #[test]
+    fn cache_affinity_feature() {
+        let mut ctx = default_ctx();
+        ctx.previous_model = Some("claude-sonnet-4-5".to_string());
+
+        let features = ctx.to_features();
+        assert_eq!(features.len(), CONTEXT_DIM);
+        assert!((features[17] - 1.0).abs() < f64::EPSILON);
+
+        let same = ctx.to_features_for_model(Some("claude-sonnet-4-5"));
+        assert!((same[17] - 1.0).abs() < f64::EPSILON);
+
+        let different = ctx.to_features_for_model(Some("claude-opus-4"));
+        assert!((different[17] - 0.0).abs() < f64::EPSILON);
+    }
+
+    // ── Test 26: custom static table ────────────────────────────────────
 
     #[test]
     fn custom_static_table_used_in_cold_start() {
@@ -1257,7 +1328,7 @@ mod tests {
         );
     }
 
-    // ── Test 26: exploration bonus decreases over time ───────────────────
+    // ── Test 27: exploration bonus decreases over time ───────────────────
 
     #[test]
     fn exploration_bonus_decreases_with_observations() {
@@ -1278,7 +1349,7 @@ mod tests {
         );
     }
 
-    // ── Test 27: alpha at specific observation counts ────────────────────
+    // ── Test 28: alpha at specific observation counts ────────────────────
 
     #[test]
     fn alpha_at_specific_counts() {
@@ -1296,7 +1367,7 @@ mod tests {
         assert!((a1000 - ALPHA_MIN).abs() < 0.001);
     }
 
-    // ── Test 28: mat_vec_mul correctness ────────────────────────────────
+    // ── Test 29: mat_vec_mul correctness ────────────────────────────────
 
     #[test]
     fn mat_vec_mul_works() {

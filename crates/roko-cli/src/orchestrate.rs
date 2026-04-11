@@ -1084,6 +1084,8 @@ fn cascade_routing_context(
         crate_familiarity,
         has_prior_failure,
         affect_confidence,
+        previous_model: None,
+        plan_context_tokens: None,
     }
 }
 

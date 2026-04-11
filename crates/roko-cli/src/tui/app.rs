@@ -30,13 +30,14 @@ use serde_json::Value;
 use super::dashboard::{DashboardData, DashboardScaffold, Theme};
 use super::event::{Event, EventHandler};
 use super::layout::RootLayout;
+use super::mori_theme::MoriTheme;
 use super::pages::{PageId, PageRegistry};
 use super::tabs::Tab;
 use super::theme::{RosedustTheme, active_theme};
+use super::tui_state::{DetailSubTab, FocusZone};
 use super::widgets;
 
 /// Interactive dashboard shell backed by the existing snapshot renderer.
-#[derive(Debug)]
 pub struct App {
     workdir: PathBuf,
     /// Currently selected dashboard page (legacy system).
@@ -67,6 +68,12 @@ pub struct App {
     overlay: Option<OverlayState>,
     /// Whether to use the new ROSEDUST rendering pipeline.
     pub use_new_renderer: bool,
+    /// Persistent TUI state — survives across frames, drives all Mori widgets.
+    pub tui_state: super::tui_state::TuiState,
+    /// System info collector (reused across ticks to avoid re-allocation).
+    sys: sysinfo::System,
+    /// Last time sysinfo was collected.
+    last_sysinfo: Instant,
 }
 
 type TuiTerminal = Terminal<CrosstermBackend<Stdout>>;
@@ -144,6 +151,19 @@ pub async fn run_async(
                 if snapshot_rx.is_none() {
                     app.refresh_snapshot_if_needed();
                 }
+                // Advance atmosphere animation every frame.
+                app.tui_state.tick();
+                // Collect sysinfo every 500ms.
+                if app.last_sysinfo.elapsed() >= Duration::from_millis(500) {
+                    app.sys.refresh_cpu_usage();
+                    app.sys.refresh_memory();
+                    app.tui_state.update_sys_metrics(
+                        app.sys.global_cpu_usage(),
+                        app.sys.used_memory(),
+                        app.sys.total_memory(),
+                    );
+                    app.last_sysinfo = Instant::now();
+                }
                 terminal
                     .draw(|f| render_page(f, app))
                     .context("async TUI render")?;
@@ -207,6 +227,24 @@ impl App {
         }
         let data = DashboardData::load_best_effort(&workdir);
         let live_snapshot = Some(data.to_core_snapshot());
+
+        let mut tui_state = super::tui_state::TuiState::from_dashboard_data(&data);
+        if let Some(snap) = &live_snapshot {
+            tui_state.update_from_snapshot(snap);
+        }
+        // Seed git info
+        Self::populate_git_info(&workdir, &mut tui_state);
+
+        // Initial sysinfo collection
+        let mut sys = sysinfo::System::new();
+        sys.refresh_cpu_usage();
+        sys.refresh_memory();
+        tui_state.update_sys_metrics(
+            sys.global_cpu_usage(),
+            sys.used_memory(),
+            sys.total_memory(),
+        );
+
         Self {
             workdir,
             current_page: scaffold.active_page(),
@@ -223,6 +261,39 @@ impl App {
             gate_failure_selection: 0,
             overlay: None,
             use_new_renderer: true,
+            tui_state,
+            sys,
+            last_sysinfo: Instant::now(),
+        }
+    }
+
+    fn populate_git_info(workdir: &Path, state: &mut super::tui_state::TuiState) {
+        if let Ok(out) = std::process::Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .current_dir(workdir)
+            .output()
+        {
+            if out.status.success() {
+                state.git_branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            }
+        }
+        if let Ok(out) = std::process::Command::new("git")
+            .args(["rev-parse", "--short", "HEAD"])
+            .current_dir(workdir)
+            .output()
+        {
+            if out.status.success() {
+                state.git_commit_short = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            }
+        }
+        if let Ok(out) = std::process::Command::new("git")
+            .args(["log", "-1", "--format=%cr"])
+            .current_dir(workdir)
+            .output()
+        {
+            if out.status.success() {
+                state.git_age = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            }
         }
     }
 
@@ -303,8 +374,24 @@ impl App {
             match events.next().context("poll TUI event")? {
                 Event::Key(key) => self.handle_key(key),
                 Event::Resize(_, _) => {}
-                Event::Tick => self.refresh_snapshot_if_needed(),
+                Event::Tick => {
+                    self.refresh_snapshot_if_needed();
+                    // Collect sysinfo every 500ms.
+                    if self.last_sysinfo.elapsed() >= Duration::from_millis(500) {
+                        self.sys.refresh_cpu_usage();
+                        self.sys.refresh_memory();
+                        self.tui_state.update_sys_metrics(
+                            self.sys.global_cpu_usage(),
+                            self.sys.used_memory(),
+                            self.sys.total_memory(),
+                        );
+                        self.last_sysinfo = Instant::now();
+                    }
+                }
             }
+
+            // Advance atmosphere animation every frame.
+            self.tui_state.tick();
 
             terminal
                 .draw(|frame| self.draw(frame))
@@ -324,107 +411,40 @@ impl App {
 
     /// New ROSEDUST rendering pipeline: Mori-accurate header + dashboard + status.
     fn draw_new(&self, frame: &mut Frame<'_>) {
-        let rosedust = active_theme();
-        let theme = rosedust.to_legacy_theme();
         let root = RootLayout::compute(frame.area());
 
-        // Build TuiState from App's data for Mori-accurate widgets.
-        let mut tui_state = super::tui_state::TuiState::from_dashboard_data(&self.data);
-        if let Some(snap) = &self.live_snapshot {
-            tui_state.update_from_snapshot(snap);
-        }
-        // Sync selection state from App
-        tui_state.selected_plan = self.plan_selection;
+        // Clear frame with VOID background.
+        let bg = ratatui::widgets::Block::default()
+            .style(ratatui::style::Style::default().bg(MoriTheme::VOID));
+        frame.render_widget(bg, frame.area());
 
-        // Get a snapshot for legacy views
-        let default_snap = roko_core::dashboard_snapshot::DashboardSnapshot::default();
-        let snapshot = self.live_snapshot.as_ref().unwrap_or(&default_snap);
-
-        // Header: Mori-accurate header bar on F1:Dashboard, legacy tab bar on others.
-        match self.active_tab {
-            Tab::Dashboard => {
-                super::widgets::header_bar::render_header_bar(frame, root.header, &tui_state);
-            }
-            _ => {
-                let mut spans = vec![Span::styled("roko ", rosedust.accent_bold())];
-                for tab in Tab::all() {
-                    let style = if *tab == self.active_tab {
-                        rosedust.accent_bold()
-                    } else {
-                        rosedust.muted()
-                    };
-                    spans.push(Span::raw(" "));
-                    spans.push(Span::styled(
-                        format!("{}:{}", tab.fkey(), tab.label()),
-                        style,
-                    ));
-                }
-                let header_line = Line::from(spans);
-                let header = Paragraph::new(header_line).style(rosedust.header());
-                frame.render_widget(header, root.header);
-            }
-        }
+        // Mori header bar on ALL tabs.
+        super::widgets::header_bar::render_header_bar(frame, root.header, &self.tui_state);
 
         // Content: dispatch to the active tab's view.
-        {
-            let scroll = self.tab_scroll.get(&self.active_tab).copied().unwrap_or(0);
-            match self.active_tab {
-                Tab::Dashboard => {
-                    // Mori-accurate dashboard view
-                    super::views::mori_dashboard::render(frame, root.content, &tui_state);
-                }
-                Tab::Plans => {
-                    super::views::plans::render_plans_view(
-                        frame,
-                        root.content,
-                        snapshot,
-                        self.plan_selection,
-                        scroll,
-                        &theme,
-                    );
-                }
-                Tab::Agents => {
-                    super::views::agents::render_agents_view(
-                        frame,
-                        root.content,
-                        snapshot,
-                        &theme,
-                    );
-                }
-                Tab::Logs => {
-                    super::views::logs::render_logs_view(
-                        frame, root.content, snapshot, scroll, &theme,
-                    );
-                }
-                Tab::Signals => {
-                    super::views::signals::render_signals_view(
-                        frame,
-                        root.content,
-                        snapshot,
-                        self.signal_selection,
-                        scroll,
-                        &theme,
-                    );
-                }
-                Tab::Config => {
-                    super::views::config::render_config_view(
-                        frame, root.content, snapshot, &theme,
-                    );
-                }
+        match self.active_tab {
+            Tab::Dashboard => {
+                super::views::mori_dashboard::render(frame, root.content, &self.tui_state);
+            }
+            Tab::Plans => {
+                super::views::plans::render_plans_view(frame, root.content, &self.tui_state);
+            }
+            Tab::Agents => {
+                super::views::agents::render_agents_view(frame, root.content, &self.tui_state);
+            }
+            Tab::Logs => {
+                super::views::logs::render_logs_view(frame, root.content, &self.tui_state);
+            }
+            Tab::Signals => {
+                super::views::signals::render_signals_view(frame, root.content, &self.tui_state);
+            }
+            Tab::Config => {
+                super::views::config::render_config_view(frame, root.content, &self.tui_state);
             }
         }
 
-        // Status bar: Mori-accurate on F1:Dashboard, legacy on others.
-        match self.active_tab {
-            Tab::Dashboard => {
-                super::widgets::status_bar::render_status_bar(frame, root.status, &tui_state);
-            }
-            _ => {
-                let hints = "q:quit  Tab:next  F1-F6:tabs  ?:help  Enter:detail  r:refresh";
-                let status = Paragraph::new(hints).style(rosedust.status());
-                frame.render_widget(status, root.status);
-            }
-        }
+        // Mori status bar on ALL tabs.
+        super::widgets::status_bar::render_status_bar(frame, root.status, &self.tui_state);
 
         // Overlay (help / detail).
         if let Some(overlay) = &self.overlay {
@@ -461,8 +481,22 @@ impl App {
             KeyCode::Char('r') => self.refresh_snapshot(),
             KeyCode::Char('?') => self.toggle_help_overlay(),
             KeyCode::Enter => self.toggle_detail_overlay(),
+
+            // Sub-tab switching (only on Dashboard tab)
+            KeyCode::Char(ch @ ('a' | 'o' | 'd' | 'e' | 'g'))
+                if self.active_tab == Tab::Dashboard =>
+            {
+                if let Some(sub) = DetailSubTab::from_key(ch) {
+                    self.tui_state.detail_sub_tab = sub;
+                }
+            }
+
+            // Tab/BackTab: on Dashboard, cycle focus panels; otherwise cycle pages
+            KeyCode::Tab if self.active_tab == Tab::Dashboard => self.cycle_focus_forward(),
+            KeyCode::BackTab if self.active_tab == Tab::Dashboard => self.cycle_focus_backward(),
             KeyCode::Tab | KeyCode::BackTab => self.select_next_page_by_key(key.code),
-            // F1-F6: switch tabs in new renderer
+
+            // F1-F6: switch tabs
             KeyCode::F(n @ 1..=6) => self.select_tab_by_fkey(n),
             KeyCode::Char('1') => self.select_page_by_slot(0),
             KeyCode::Char('2') => self.select_page_by_slot(1),
@@ -481,9 +515,33 @@ impl App {
         }
     }
 
+    fn cycle_focus_forward(&mut self) {
+        self.tui_state.focus = match self.tui_state.focus {
+            FocusZone::PlanTree => FocusZone::TaskProgress,
+            FocusZone::TaskProgress => FocusZone::AgentOutput,
+            FocusZone::AgentOutput => FocusZone::PlanTree,
+            FocusZone::PhaseCompact => FocusZone::TaskProgress,
+            FocusZone::CommandOutput => FocusZone::PlanTree,
+        };
+    }
+
+    fn cycle_focus_backward(&mut self) {
+        self.tui_state.focus = match self.tui_state.focus {
+            FocusZone::PlanTree => FocusZone::AgentOutput,
+            FocusZone::TaskProgress => FocusZone::PlanTree,
+            FocusZone::AgentOutput => FocusZone::TaskProgress,
+            FocusZone::PhaseCompact => FocusZone::PlanTree,
+            FocusZone::CommandOutput => FocusZone::AgentOutput,
+        };
+    }
+
     fn select_tab_by_fkey(&mut self, n: u8) {
         if let Some(tab) = Tab::from_index((n - 1) as usize) {
             self.active_tab = tab;
+            // Sync tui_state::Tab for header/status bar F-key highlighting
+            if let Some(tui_tab) = super::tui_state::Tab::from_index((n - 1) as usize) {
+                self.tui_state.active_tab = tui_tab;
+            }
         }
     }
 
@@ -552,7 +610,11 @@ impl App {
         // Also cycle tabs in new renderer.
         let all = Tab::all();
         if let Some(idx) = all.iter().position(|t| *t == self.active_tab) {
-            self.active_tab = all[(idx + 1) % all.len()];
+            let next_idx = (idx + 1) % all.len();
+            self.active_tab = all[next_idx];
+            if let Some(tui_tab) = super::tui_state::Tab::from_index(next_idx) {
+                self.tui_state.active_tab = tui_tab;
+            }
         }
         let pages = self.pages();
         self.current_page = pages.next(self.current_page);
@@ -563,7 +625,11 @@ impl App {
         // Also cycle tabs in new renderer.
         let all = Tab::all();
         if let Some(idx) = all.iter().position(|t| *t == self.active_tab) {
-            self.active_tab = all[(idx + all.len() - 1) % all.len()];
+            let prev_idx = (idx + all.len() - 1) % all.len();
+            self.active_tab = all[prev_idx];
+            if let Some(tui_tab) = super::tui_state::Tab::from_index(prev_idx) {
+                self.tui_state.active_tab = tui_tab;
+            }
         }
         let pages = self.pages();
         self.current_page = pages.previous(self.current_page);
@@ -596,6 +662,12 @@ impl App {
         if self.pages().scaffold(self.current_page).is_none() {
             self.current_page = self.scaffold.active_page();
         }
+        // Sync tui_state from refreshed data (preserves UI state like focus, atmosphere)
+        self.tui_state.sync_from_data(&self.data);
+        if let Some(snap) = &self.live_snapshot {
+            self.tui_state.update_from_snapshot(snap);
+        }
+        self.tui_state.selected_plan = self.plan_selection;
     }
 
     fn refresh_snapshot_if_needed(&mut self) {
@@ -623,6 +695,23 @@ impl App {
     }
 
     fn adjust_vertical(&mut self, delta: i16) {
+        // On Dashboard tab, j/k adjusts selected plan in the plan tree
+        if self.active_tab == Tab::Dashboard
+            && self.tui_state.focus == FocusZone::PlanTree
+        {
+            let len = self.tui_state.plans.len();
+            if len == 0 {
+                self.plan_selection = 0;
+                self.tui_state.selected_plan = 0;
+                return;
+            }
+            let current = self.plan_selection as i32;
+            let next = (current + delta as i32).max(0).min((len - 1) as i32) as usize;
+            self.plan_selection = next;
+            self.tui_state.selected_plan = next;
+            return;
+        }
+
         if self.current_page == PageId::Signals {
             let len = self.data.recent_signals.len();
             if len == 0 {
@@ -763,35 +852,27 @@ impl App {
     }
 
     fn render_overlay(&self, frame: &mut Frame<'_>, overlay: &OverlayState) {
-        let theme = Theme::from_env();
         let area = centered_rect(86, 84, frame.area());
-        frame.render_widget(Clear, area);
 
         match overlay {
             OverlayState::Help => {
-                let lines = help_lines();
-                let block = Block::default()
-                    .borders(Borders::ALL)
-                    .title("help")
-                    .border_style(theme.accent());
-                let inner = block.inner(area);
-                frame.render_widget(block, area);
-                let paragraph = Paragraph::new(lines)
-                    .alignment(Alignment::Left)
-                    .style(theme.text())
-                    .wrap(Wrap { trim: false });
-                frame.render_widget(paragraph, inner);
+                super::modals::help::render_help_modal(frame, area);
             }
             OverlayState::Detail(detail) => {
+                frame.render_widget(Clear, area);
                 let block = Block::default()
                     .borders(Borders::ALL)
                     .title(detail.title.as_str())
-                    .border_style(theme.warning());
+                    .border_style(ratatui::style::Style::default().fg(MoriTheme::WARNING));
                 let inner = block.inner(area);
                 frame.render_widget(block, area);
 
                 let body = Paragraph::new(detail.body.as_str())
-                    .style(theme.text().add_modifier(Modifier::BOLD))
+                    .style(
+                        ratatui::style::Style::default()
+                            .fg(MoriTheme::TEXT)
+                            .add_modifier(Modifier::BOLD),
+                    )
                     .wrap(Wrap { trim: false })
                     .scroll((detail.scroll, 0));
                 frame.render_widget(body, inner);

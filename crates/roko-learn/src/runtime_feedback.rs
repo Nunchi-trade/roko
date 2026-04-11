@@ -740,6 +740,8 @@ impl LearningRuntime {
             crate_familiarity,
             has_prior_failure: !episode.success,
             affect_confidence: extra_f64(episode, "affect_confidence").unwrap_or(0.5),
+            previous_model: None,
+            plan_context_tokens: None,
         };
         if episode
             .extra
@@ -1516,6 +1518,8 @@ mod tests {
             crate_familiarity: 0.5,
             has_prior_failure: false,
             affect_confidence: 0.5,
+            previous_model: None,
+            plan_context_tokens: None,
         };
         for _ in 0..60 {
             router.record_observation(&ctx, "claude-sonnet-4-20250514", 0.9, true);

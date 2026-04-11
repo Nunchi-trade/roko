@@ -4,79 +4,72 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
-use ratatui::style::Modifier;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap};
 
-use roko_core::dashboard_snapshot::DashboardSnapshot;
-
-use crate::tui::dashboard::Theme;
+use super::super::mori_theme::MoriTheme;
+use super::super::tui_state::TuiState;
 
 /// Render the gate verdict signal view.
-pub fn render_signals_view(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    snapshot: &DashboardSnapshot,
-    selected: usize,
-    scroll: u16,
-    theme: &Theme,
-) {
+pub fn render_signals_view(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Gate Signals ")
-        .border_style(theme.accent());
+        .title(Span::styled(
+            " Gate Signals ",
+            MoriTheme::focused_title_style(),
+        ))
+        .border_style(MoriTheme::focused_border_style());
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if snapshot.gates.is_empty() {
+    let live_gates = &state.live.gates;
+    let persisted = &state.gate_results;
+
+    if live_gates.is_empty() && persisted.is_empty() {
         let empty = Paragraph::new("No gate verdicts recorded.")
-            .style(theme.muted())
+            .style(Style::default().fg(MoriTheme::FG_DIM))
             .wrap(Wrap { trim: false });
         frame.render_widget(empty, inner);
         return;
     }
 
+    let header_style = Style::default()
+        .fg(MoriTheme::ROSE_BRIGHT)
+        .add_modifier(Modifier::BOLD);
+
     let header = Row::new(vec![
-        Cell::from(" ").style(theme.accent()),
-        Cell::from("Plan").style(theme.accent().add_modifier(Modifier::BOLD)),
-        Cell::from("Task").style(theme.accent().add_modifier(Modifier::BOLD)),
-        Cell::from("Gate").style(theme.accent().add_modifier(Modifier::BOLD)),
-        Cell::from("Result").style(theme.accent().add_modifier(Modifier::BOLD)),
+        Cell::from(" ").style(header_style),
+        Cell::from("Plan").style(header_style),
+        Cell::from("Task").style(header_style),
+        Cell::from("Gate").style(header_style),
+        Cell::from("Result").style(header_style),
     ]);
 
-    // Show most recent first.
-    let gates: Vec<_> = snapshot.gates.iter().rev().collect();
+    // Use output_scroll as the scroll offset; selected_agent as row selection index.
+    let scroll = state.output_scroll;
+    let selected = state.selected_agent;
 
-    let rows: Vec<Row> = gates
-        .iter()
-        .enumerate()
-        .skip(scroll as usize)
-        .map(|(i, g)| {
-            let is_selected = i == selected;
-            let icon = if g.passed { "+" } else { "x" };
-            let result_str = if g.passed { "pass" } else { "FAIL" };
-            let result_style = if g.passed {
-                theme.success()
-            } else {
-                theme.danger()
-            };
-
-            let row_style = if is_selected {
-                theme.selection()
-            } else {
-                theme.text()
-            };
-
-            Row::new(vec![
-                Cell::from(icon).style(result_style),
-                Cell::from(g.plan_id.as_str()).style(row_style),
-                Cell::from(g.task_id.as_str()).style(row_style),
-                Cell::from(g.gate.as_str()).style(row_style),
-                Cell::from(result_str).style(result_style),
-            ])
-        })
-        .collect();
+    let rows: Vec<Row> = if !live_gates.is_empty() {
+        // Live gates: most recent first
+        live_gates
+            .iter()
+            .rev()
+            .enumerate()
+            .skip(scroll)
+            .map(|(i, g)| gate_row(g.passed, &g.plan_id, &g.task_id, &g.gate, i == selected))
+            .collect()
+    } else {
+        // Persisted gate results when no live data
+        persisted
+            .iter()
+            .rev()
+            .enumerate()
+            .skip(scroll)
+            .map(|(i, g)| gate_row(g.passed, &g.plan_id, &g.task_id, &g.gate, i == selected))
+            .collect()
+    };
 
     let table = Table::new(
         rows,
@@ -92,4 +85,34 @@ pub fn render_signals_view(
     .column_spacing(1);
 
     frame.render_widget(table, inner);
+}
+
+fn gate_row<'a>(
+    passed: bool,
+    plan_id: &'a str,
+    task_id: &'a str,
+    gate: &'a str,
+    is_selected: bool,
+) -> Row<'a> {
+    let (icon, result_str) = if passed { ("✓", "pass") } else { ("✗", "FAIL") };
+
+    let result_style = if passed {
+        Style::default().fg(MoriTheme::SAGE)
+    } else {
+        Style::default().fg(MoriTheme::EMBER)
+    };
+
+    let row_style = if is_selected {
+        MoriTheme::selected_style()
+    } else {
+        Style::default().fg(MoriTheme::FG)
+    };
+
+    Row::new(vec![
+        Cell::from(icon).style(result_style),
+        Cell::from(plan_id).style(row_style),
+        Cell::from(task_id).style(row_style),
+        Cell::from(gate).style(row_style),
+        Cell::from(result_str).style(result_style),
+    ])
 }
