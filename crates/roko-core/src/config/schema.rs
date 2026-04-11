@@ -457,21 +457,22 @@ impl RokoConfig {
             _ => default_context_window(),
         };
 
-        ModelProfile {
-            provider: provider.to_owned(),
-            slug: slug.to_owned(),
-            context_window,
-            max_output: None,
-            supports_tools: tool_profile.supports_tools,
-            supports_thinking: false,
-            supports_vision: false,
-            supports_web_search: false,
-            supports_mcp_tools: false,
-            supports_partial: false,
-            tool_format: tool_profile.preferred.as_str().to_owned(),
-            cost_input_per_m: None,
-            cost_output_per_m: None,
-            cost_cache_read_per_m: None,
+            ModelProfile {
+                provider: provider.to_owned(),
+                slug: slug.to_owned(),
+                context_window,
+                max_output: None,
+                supports_tools: tool_profile.supports_tools,
+                supports_thinking: false,
+                supports_vision: false,
+                supports_web_search: false,
+                supports_mcp_tools: false,
+                supports_partial: false,
+                provider_routing: None,
+                tool_format: tool_profile.preferred.as_str().to_owned(),
+                cost_input_per_m: None,
+                cost_output_per_m: None,
+                cost_cache_read_per_m: None,
             cost_cache_write_per_m: None,
             max_tools: Some(u32::from(tool_profile.max_tools_before_degrade)),
             tokenizer_ratio: None,
@@ -788,6 +789,25 @@ impl ProviderConfig {
 /// supports_tools = true
 /// tool_format = "anthropic_blocks"
 /// ```
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProviderRouting {
+    /// OpenRouter sort mode (`price`, `throughput`, `latency`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<String>,
+    /// Explicit provider order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<Vec<String>>,
+    /// Whether OpenRouter may fall back to alternate providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_fallbacks: Option<bool>,
+    /// Maximum cost per token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_price: Option<f64>,
+    /// Required provider parameters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_parameters: Option<Vec<String>>,
+}
+
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModelProfile {
@@ -819,6 +839,9 @@ pub struct ModelProfile {
     /// Whether the model supports partial continuation.
     #[serde(default)]
     pub supports_partial: bool,
+    /// OpenRouter-specific routing overrides for this model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_routing: Option<ProviderRouting>,
     /// Wire format used for tools.
     #[serde(default = "default_tool_format")]
     pub tool_format: String,
@@ -2234,10 +2257,41 @@ slug = "claude-opus-4-6"
         assert_eq!(cfg.cost_cache_write_per_m, None);
         assert_eq!(cfg.max_tools, None);
         assert_eq!(cfg.tokenizer_ratio, None);
+        assert_eq!(cfg.provider_routing, None);
 
         let text = toml::to_string(&cfg).expect("serialize");
         let back = toml::from_str::<ModelProfile>(&text).expect("reparse");
         assert_eq!(cfg, back);
+    }
+
+    #[test]
+    fn provider_routing_serializes_to_expected_json() {
+        let routing = ProviderRouting {
+            sort: Some("price".to_string()),
+            order: Some(vec!["anthropic".to_string(), "openai".to_string()]),
+            allow_fallbacks: Some(true),
+            max_price: Some(0.42),
+            require_parameters: Some(vec!["thinking".to_string()]),
+        };
+
+        let json = serde_json::to_value(&routing).expect("serialize");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "sort": "price",
+                "order": ["anthropic", "openai"],
+                "allow_fallbacks": true,
+                "max_price": 0.42,
+                "require_parameters": ["thinking"]
+            })
+        );
+
+        let sparse = ProviderRouting {
+            sort: Some("latency".to_string()),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&sparse).expect("serialize sparse");
+        assert_eq!(json, serde_json::json!({ "sort": "latency" }));
     }
 
     #[test]

@@ -1020,6 +1020,7 @@ mod tests {
                 supports_web_search: false,
                 supports_mcp_tools: true,
                 supports_partial: false,
+                provider_routing: None,
                 tool_format: "openai_json".to_owned(),
                 cost_input_per_m: Some(1.4),
                 cost_output_per_m: Some(4.4),
