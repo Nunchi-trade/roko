@@ -121,6 +121,7 @@ fn render_tool(t: &ToolDef) -> serde_json::Value {
         }),
         ToolKind::McpTool => serde_json::json!({
             "type": "mcp",
+            // GLM expects the native MCP envelope here, not a function schema.
             "mcp": t.parameters.as_value(),
         }),
     }
@@ -273,6 +274,42 @@ mod tests {
         assert_eq!(arr[1]["web_search"]["search_engine"], "search_std");
         assert_eq!(arr[1]["web_search"]["count"], 10);
         assert_eq!(arr[1]["web_search"]["content_size"], "high");
+    }
+
+    #[test]
+    fn glm_mcp_tool_render() {
+        let tools = [ToolDef::new(
+            "zread",
+            "Search docs",
+            ToolCategory::Mcp,
+            ToolPermission::networked(),
+        )
+        .with_parameters(ToolSchema::from_value(serde_json::json!({
+            "server_label": "zread",
+            "server_url": "https://api.z.ai/api/mcp/zread/mcp",
+            "transport_type": "http",
+            "allowed_tools": ["search_doc", "read_file"],
+            "headers": {
+                "Authorization": "Bearer KEY"
+            }
+        })))];
+
+        let rendered = OpenAiTranslator.render_tools(&tools);
+        let RenderedTools::JsonArray(v) = rendered else {
+            panic!("expected JsonArray");
+        };
+        let arr = v.as_array().expect("array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["type"], "mcp");
+        assert_eq!(arr[0]["mcp"]["server_label"], "zread");
+        assert_eq!(
+            arr[0]["mcp"]["server_url"],
+            "https://api.z.ai/api/mcp/zread/mcp"
+        );
+        assert_eq!(arr[0]["mcp"]["transport_type"], "http");
+        assert_eq!(arr[0]["mcp"]["allowed_tools"][0], "search_doc");
+        assert_eq!(arr[0]["mcp"]["allowed_tools"][1], "read_file");
+        assert_eq!(arr[0]["mcp"]["headers"]["Authorization"], "Bearer KEY");
     }
 
     #[test]
