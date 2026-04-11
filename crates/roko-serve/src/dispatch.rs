@@ -19,10 +19,9 @@ use async_trait::async_trait;
 use chrono::Utc;
 use parking_lot::{Mutex, RwLock};
 use regex::Regex;
-use roko_agent::{
-    Agent, AgentResult, ClaudeCliAgent,
-    mcp::{McpConfig, McpServerConfig, find_mcp_config},
-};
+use roko_agent::mcp::{McpConfig, McpServerConfig, find_mcp_config};
+use roko_agent::provider::{AgentOptions, create_agent_for_model};
+use roko_agent::{Agent, AgentResult};
 use roko_compose::SystemPromptBuilder;
 use roko_core::OperatingFrequency;
 use roko_core::agent::AgentRole;
@@ -163,6 +162,8 @@ fn resolve_repo_context(state: &AppState, signal: &Signal) -> Option<RepoContext
 pub struct TemplateAgentDispatcher {
     workdir: PathBuf,
     base_mcp_config: Option<PathBuf>,
+    /// Full config used to resolve providers and models for dispatch.
+    roko_config: RokoConfig,
     /// Optional per-repo working directory override. When set, the agent
     /// process runs in this directory instead of the global `workdir`.
     repo_workdir: Option<PathBuf>,
@@ -261,10 +262,15 @@ impl EfficiencyTracker {
 impl TemplateAgentDispatcher {
     /// Create a dispatcher rooted at `workdir`.
     #[must_use]
-    pub fn new(workdir: PathBuf, base_mcp_config: Option<PathBuf>) -> Self {
+    pub fn new(
+        workdir: PathBuf,
+        base_mcp_config: Option<PathBuf>,
+        roko_config: RokoConfig,
+    ) -> Self {
         Self {
             workdir,
             base_mcp_config,
+            roko_config,
             repo_workdir: None,
             repo_listing: Vec::new(),
         }
@@ -275,7 +281,12 @@ impl TemplateAgentDispatcher {
 #[must_use]
 pub fn start_dispatch_loop(state: Arc<AppState>) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let dispatcher = Arc::new(TemplateAgentDispatcher::new(state.workdir.clone(), None));
+        let roko_config = state.roko_config.read().await.clone();
+        let dispatcher = Arc::new(TemplateAgentDispatcher::new(
+            state.workdir.clone(),
+            None,
+            roko_config,
+        ));
         dispatch_loop(state, dispatcher).await;
     })
 }
@@ -307,11 +318,11 @@ impl AgentDispatcher for TemplateAgentDispatcher {
             &template,
         )?;
         let agent = build_agent(
+            &self.roko_config,
             &template,
             &system_prompt,
             &allowed_tools,
             mcp_config.as_ref(),
-            effective_workdir,
         )?;
         let ctx = dispatch_context(&template, &signal);
         let mut result = agent.run(&signal, &ctx).await;
@@ -1339,7 +1350,15 @@ async fn dispatch_template(
     // so the agent runs in the repo's directory with cross-repo context.
     let effective_dispatcher: Arc<dyn AgentDispatcher> = if let Some(ctx) = repo_ctx {
         let repo_listing = state.runtime.list_repos();
-        let mut repo_dispatcher = TemplateAgentDispatcher::new(state.workdir.clone(), None);
+        let roko_config = match ctx.repo_config.clone() {
+            Some(config) => config,
+            None => state.roko_config.read().await.clone(),
+        };
+        let mut repo_dispatcher = TemplateAgentDispatcher::new(
+            state.workdir.clone(),
+            None,
+            roko_config,
+        );
         repo_dispatcher.repo_workdir = Some(ctx.repo_workdir.clone());
         repo_dispatcher.repo_listing = repo_listing;
         Arc::new(repo_dispatcher)
@@ -1419,21 +1438,29 @@ async fn dispatch_template(
 }
 
 fn build_agent(
+    roko_config: &RokoConfig,
     template: &AgentTemplate,
     system_prompt: &str,
     allowed_tools: &str,
     mcp_config: Option<&PathBuf>,
-    workdir: &Path,
 ) -> Result<Box<dyn Agent>> {
-    let mut agent = ClaudeCliAgent::new("claude", workdir, template.model.clone())
-        .with_system_prompt(system_prompt.to_string())
-        .with_allowed_tools(allowed_tools.to_string())
-        .with_max_turns(template.max_turns)
-        .with_timeout_ms(120_000);
-    if let Some(path) = mcp_config {
-        agent = agent.with_mcp_config(path);
-    }
-    Ok(Box::new(agent))
+    create_agent_for_model(
+        roko_config,
+        &template.model,
+        AgentOptions {
+            timeout_ms: None,
+            system_prompt: Some(system_prompt.to_string()),
+            tools: Some(allowed_tools.to_string()),
+            mcp_config: mcp_config.cloned(),
+            env: Vec::new(),
+            extra_args: Vec::new(),
+            effort: None,
+            bare_mode: roko_config.agent.bare_mode,
+            dangerously_skip_permissions: true,
+            name: String::new(),
+        },
+    )
+    .with_context(|| format!("create agent for template '{}'", template.name))
 }
 
 fn build_template_system_prompt(
@@ -2345,7 +2372,11 @@ filter = { path = "src/*.rs" }
         let global_dir = tempfile::tempdir().expect("global tempdir");
         let repo_dir = tempfile::tempdir().expect("repo tempdir");
 
-        let mut dispatcher = TemplateAgentDispatcher::new(global_dir.path().to_path_buf(), None);
+        let mut dispatcher = TemplateAgentDispatcher::new(
+            global_dir.path().to_path_buf(),
+            None,
+            RokoConfig::default(),
+        );
         dispatcher.repo_workdir = Some(repo_dir.path().to_path_buf());
 
         // Verify the effective workdir resolves to repo_workdir.

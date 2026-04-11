@@ -130,9 +130,11 @@ impl ServerBuilder {
             self.state
                 .get_or_insert_with(|| Arc::new(build_app_state(workdir, runtime, roko_config))),
         );
+        let dispatcher_roko_config = state.roko_config.read().await.clone();
         let dispatcher = Arc::new(dispatch::TemplateAgentDispatcher::new(
             state.workdir.clone(),
             None,
+            dispatcher_roko_config,
         ));
         tokio::spawn(dispatch::dispatch_loop(Arc::clone(&state), dispatcher));
         start_builtin_event_sources(Arc::clone(&state), self.config.roko_config.clone());
