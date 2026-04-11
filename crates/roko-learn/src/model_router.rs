@@ -45,6 +45,7 @@ use crate::cost_table::CostTable;
 use parking_lot::Mutex;
 use rand::Rng;
 use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
+pub use roko_core::config::schema::RewardWeights;
 use roko_core::task::{TaskCategory, TaskComplexityBand};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -209,10 +210,29 @@ pub fn compute_routing_reward(
     normalized_cost: f64,
     normalized_duration: f64,
 ) -> f64 {
+    compute_routing_reward_with_weights(
+        pass_rate,
+        normalized_cost,
+        normalized_duration,
+        &RewardWeights::default(),
+    )
+}
+
+/// Compute the scalarized routing reward using explicit reward weights.
+#[must_use]
+pub fn compute_routing_reward_with_weights(
+    pass_rate: f64,
+    normalized_cost: f64,
+    normalized_duration: f64,
+    weights: &RewardWeights,
+) -> f64 {
     let pr = pass_rate.clamp(0.0, 1.0);
     let nc = normalized_cost.clamp(0.0, 1.0);
     let nd = normalized_duration.clamp(0.0, 1.0);
-    (1.0 - nd).mul_add(0.2, pr.mul_add(0.5, (1.0 - nc) * 0.3))
+    (1.0 - nd).mul_add(
+        weights.latency,
+        pr.mul_add(weights.quality, (1.0 - nc) * weights.cost),
+    )
 }
 
 /// Normalize a model's blended cost against the routing ceiling.
@@ -238,16 +258,80 @@ pub fn compute_routing_reward_v2(
     observed_latency_ms: f64,
     latency_sla_ms: f64,
 ) -> f64 {
+    compute_routing_reward_v2_with_weights(
+        pass_rate,
+        normalized_cost,
+        observed_latency_ms,
+        latency_sla_ms,
+        &RewardWeights::default(),
+    )
+}
+
+/// Compute the scalarized reward using observed latency and explicit weights.
+#[must_use]
+pub fn compute_routing_reward_v2_with_weights(
+    pass_rate: f64,
+    normalized_cost: f64,
+    observed_latency_ms: f64,
+    latency_sla_ms: f64,
+    weights: &RewardWeights,
+) -> f64 {
     let normalized_duration = if latency_sla_ms > 0.0 {
         (observed_latency_ms / latency_sla_ms).min(1.0)
     } else {
         1.0
     };
 
-    compute_routing_reward(pass_rate, normalized_cost, normalized_duration)
+    compute_routing_reward_with_weights(pass_rate, normalized_cost, normalized_duration, weights)
 }
 
 // ─── Per-arm state ──────────────────────────────────────────────────────────
+
+/// Per-arm reward vector statistics for multi-objective routing.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MultiObjectiveStats {
+    /// Sum of observed quality rewards.
+    pub quality_sum: f64,
+    /// Sum of squared quality rewards.
+    pub quality_sq_sum: f64,
+    /// Sum of observed normalized costs.
+    pub cost_sum: f64,
+    /// Sum of squared normalized costs.
+    pub cost_sq_sum: f64,
+    /// Sum of observed normalized latencies.
+    pub latency_sum: f64,
+    /// Sum of squared normalized latencies.
+    pub latency_sq_sum: f64,
+    /// Number of multi-objective observations recorded.
+    pub observations: u64,
+}
+
+impl MultiObjectiveStats {
+    /// Record one quality / cost / latency observation.
+    pub fn observe(&mut self, quality: f64, cost: f64, latency: f64) {
+        let quality = quality.clamp(0.0, 1.0);
+        let cost = cost.clamp(0.0, 1.0);
+        let latency = latency.clamp(0.0, 1.0);
+
+        self.quality_sum += quality;
+        self.quality_sq_sum += quality * quality;
+        self.cost_sum += cost;
+        self.cost_sq_sum += cost * cost;
+        self.latency_sum += latency;
+        self.latency_sq_sum += latency * latency;
+        self.observations += 1;
+    }
+
+    /// Convert the accumulated vector into a scalar reward using `weights`.
+    #[must_use]
+    pub fn scalarize(&self, weights: &RewardWeights) -> f64 {
+        let observations = self.observations.max(1) as f64;
+        let q = self.quality_sum / observations;
+        let c = 1.0 - (self.cost_sum / observations);
+        let l = 1.0 - (self.latency_sum / observations);
+        q * weights.quality + c * weights.cost + l * weights.latency
+    }
+}
 
 /// Serializable state for one `LinUCB` arm.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -260,6 +344,9 @@ pub struct ArmState {
     pub b_vector: Vec<f64>,
     /// Number of observations for this arm.
     pub observations: u64,
+    /// Multi-objective reward history for this arm.
+    #[serde(default)]
+    pub reward_stats: MultiObjectiveStats,
 }
 
 impl ArmState {
@@ -274,6 +361,7 @@ impl ArmState {
             a_matrix: a,
             b_vector: vec![0.0; dim],
             observations: 0,
+            reward_stats: MultiObjectiveStats::default(),
         }
     }
 }
@@ -718,6 +806,30 @@ impl LinUCBRouter {
         self.update_features(&x, model_idx, reward);
     }
 
+    /// Update the router with explicit multi-objective reward components.
+    pub fn update_with_metrics(
+        &self,
+        ctx: &RoutingContext,
+        model_slug: &str,
+        quality: f64,
+        normalized_cost: f64,
+        normalized_latency: f64,
+        weights: &RewardWeights,
+    ) {
+        let x = ctx.to_features_for_model(Some(model_slug));
+        let Some(model_idx) = self.model_index(model_slug) else {
+            return;
+        };
+        self.update_features_multi_objective(
+            &x,
+            model_idx,
+            quality,
+            normalized_cost,
+            normalized_latency,
+            weights,
+        );
+    }
+
     /// Update the arm identified by `model_idx` with a precomputed feature vector.
     ///
     /// This is the lower-level observation entry point used by the cascade router
@@ -727,6 +839,40 @@ impl LinUCBRouter {
     /// saved to disk after each update. Save errors are silently ignored so
     /// that a filesystem hiccup never breaks the update flow.
     pub fn update_features(&self, x: &[f64], model_idx: usize, reward: f64) {
+        self.update_features_internal(x, model_idx, reward, None);
+    }
+
+    /// Update the router and track the underlying reward vector.
+    pub fn update_features_multi_objective(
+        &self,
+        x: &[f64],
+        model_idx: usize,
+        quality: f64,
+        normalized_cost: f64,
+        normalized_latency: f64,
+        weights: &RewardWeights,
+    ) {
+        let reward = compute_routing_reward_with_weights(
+            quality,
+            normalized_cost,
+            normalized_latency,
+            weights,
+        );
+        self.update_features_internal(
+            x,
+            model_idx,
+            reward,
+            Some((quality, normalized_cost, normalized_latency)),
+        );
+    }
+
+    fn update_features_internal(
+        &self,
+        x: &[f64],
+        model_idx: usize,
+        reward: f64,
+        reward_vector: Option<(f64, f64, f64)>,
+    ) {
         if x.len() != CONTEXT_DIM {
             return;
         }
@@ -746,6 +892,9 @@ impl LinUCBRouter {
             // b = b + reward * x
             for (bi, xi) in arm.b_vector.iter_mut().zip(x) {
                 *bi += reward * xi;
+            }
+            if let Some((quality, cost, latency)) = reward_vector {
+                arm.reward_stats.observe(quality, cost, latency);
             }
             arm.observations += 1;
             state.total_observations += 1;
@@ -1211,6 +1360,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn multi_objective_routing_default_weights_match_legacy_formula() {
+        let legacy = compute_routing_reward(0.75, 0.2, 0.4);
+        let weighted =
+            compute_routing_reward_with_weights(0.75, 0.2, 0.4, &RewardWeights::default());
+        assert!(
+            (legacy - weighted).abs() < 1e-12,
+            "default weights should preserve legacy reward, got {legacy} vs {weighted}"
+        );
+    }
+
+    #[test]
+    fn multi_objective_routing_scalarize_respects_weights() {
+        let mut stats = MultiObjectiveStats::default();
+        stats.observe(0.9, 0.2, 0.4);
+        stats.observe(0.7, 0.4, 0.6);
+
+        let cost_sensitive = RewardWeights {
+            quality: 0.3,
+            cost: 0.6,
+            latency: 0.1,
+        };
+        let quality_sensitive = RewardWeights {
+            quality: 0.8,
+            cost: 0.1,
+            latency: 0.1,
+        };
+
+        let cost_score = stats.scalarize(&cost_sensitive);
+        let quality_score = stats.scalarize(&quality_sensitive);
+
+        assert!(
+            cost_score < quality_score,
+            "quality-sensitive weights should favor this arm more: {cost_score} vs {quality_score}"
+        );
+    }
+
     // ── Cost normalization uses blended pricing ───────────────────────
 
     #[test]
@@ -1269,6 +1455,36 @@ mod tests {
             .find(|a| a.slug == "claude-sonnet-4-5")
             .unwrap();
         assert_eq!(sonnet.observations, 2);
+    }
+
+    #[test]
+    fn multi_objective_routing_tracks_per_arm_reward_vectors() {
+        let router = LinUCBRouter::new(test_slugs());
+        let ctx = default_ctx();
+        let weights = RewardWeights {
+            quality: 0.3,
+            cost: 0.6,
+            latency: 0.1,
+        };
+
+        router.update_with_metrics(&ctx, "claude-sonnet-4-5", 1.0, 0.2, 0.4, &weights);
+        router.update_with_metrics(&ctx, "claude-sonnet-4-5", 0.8, 0.3, 0.5, &weights);
+
+        let stats = router.arm_stats();
+        let sonnet = stats
+            .iter()
+            .find(|a| a.slug == "claude-sonnet-4-5")
+            .unwrap();
+
+        assert_eq!(sonnet.observations, 2);
+        assert_eq!(sonnet.reward_stats.observations, 2);
+        assert!((sonnet.reward_stats.quality_sum - 1.8).abs() < 1e-10);
+        assert!((sonnet.reward_stats.cost_sum - 0.5).abs() < 1e-10);
+        assert!((sonnet.reward_stats.latency_sum - 0.9).abs() < 1e-10);
+        assert!(
+            sonnet.reward_stats.scalarize(&weights) > 0.0,
+            "scalarized multi-objective reward should stay positive"
+        );
     }
 
     // ── Test 16: update modifies A and b ────────────────────────────────

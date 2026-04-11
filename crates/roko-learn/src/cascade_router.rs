@@ -22,6 +22,7 @@
 use parking_lot::Mutex;
 use roko_core::OperatingFrequency;
 use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
+use roko_core::config::schema::RewardWeights;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -558,6 +559,36 @@ impl CascadeRouter {
     /// caller already has the model index in the router's arm list.
     pub fn observe(&self, context_vec: Vec<f64>, model_idx: usize, reward: f64) {
         self.observe_internal(&context_vec, model_idx, reward, true);
+    }
+
+    /// Record a successful multi-objective observation from a raw context vector.
+    pub fn observe_multi_objective(
+        &self,
+        context_vec: Vec<f64>,
+        model_idx: usize,
+        quality: f64,
+        normalized_cost: f64,
+        normalized_latency: f64,
+        weights: &RewardWeights,
+    ) {
+        let Some(slug) = self.model_slugs.get(model_idx) else {
+            return;
+        };
+
+        let mut stats = self.confidence_stats.lock();
+        let entry = stats.entry(slug.clone()).or_default();
+        entry.trials += 1;
+        entry.successes += 1;
+        drop(stats);
+
+        self.linucb.update_features_multi_objective(
+            &context_vec,
+            model_idx,
+            quality,
+            normalized_cost,
+            normalized_latency,
+            weights,
+        );
     }
 
     fn observe_internal(&self, context_vec: &[f64], model_idx: usize, reward: f64, success: bool) {

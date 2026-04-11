@@ -198,6 +198,7 @@ fn convert_routing(m: &MoriConfig) -> RoutingConfig {
             .clone()
             .unwrap_or(d.standard_task_model),
         complex_task_model: m.complex_task_model.clone().unwrap_or(d.complex_task_model),
+        weights: d.weights,
         context_strategy: m.context_strategy.clone().unwrap_or(d.context_strategy),
     }
 }

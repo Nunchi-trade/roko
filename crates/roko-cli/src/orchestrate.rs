@@ -4750,7 +4750,8 @@ impl PlanRunner {
         // ── Observe cascade router for bandit learning (§9) ─────────
         if result.success {
             use roko_core::TaskComplexityBand;
-            use roko_learn::model_router::{CONTEXT_DIM, compute_routing_reward};
+            use roko_core::config::schema::RewardWeights;
+            use roko_learn::model_router::CONTEXT_DIM;
 
             let model = self.effective_model();
             if let Some(model_idx) = self.learning.cascade_router().model_index_for_slug(&model) {
@@ -4814,11 +4815,18 @@ impl PlanRunner {
                         0.0
                     }
                 };
-                let reward = compute_routing_reward(1.0, normalized_cost, normalized_duration);
+                let reward_weights = load_roko_config(&self.workdir)
+                    .map(|cfg| cfg.routing.weights.for_tier(task_tier))
+                    .unwrap_or_else(|_| RewardWeights::default());
 
-                self.learning
-                    .cascade_router()
-                    .observe(context_vec, model_idx, reward);
+                self.learning.cascade_router().observe_multi_objective(
+                    context_vec,
+                    model_idx,
+                    1.0,
+                    normalized_cost,
+                    normalized_duration,
+                    &reward_weights,
+                );
                 cascade_router_observed = true;
             } else {
                 tracing::debug!(

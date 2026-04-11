@@ -213,6 +213,15 @@ impl RokoConfig {
             "complex_task_model = \"{}\"\n",
             cfg.routing.complex_task_model
         );
+        let _ = writeln!(out, "[routing.weights]");
+        let _ = writeln!(out, "quality = {}", cfg.routing.weights.default.quality);
+        let _ = writeln!(out, "cost = {}", cfg.routing.weights.default.cost);
+        let _ = writeln!(out, "latency = {}\n", cfg.routing.weights.default.latency);
+        let mechanical = cfg.routing.weights.for_tier("mechanical");
+        let _ = writeln!(out, "[routing.weights.mechanical]");
+        let _ = writeln!(out, "quality = {}", mechanical.quality);
+        let _ = writeln!(out, "cost = {}", mechanical.cost);
+        let _ = writeln!(out, "latency = {}\n", mechanical.latency);
     }
 
     fn write_example_budget(out: &mut String, cfg: &Self) {
@@ -1090,6 +1099,88 @@ impl Default for RoutingAlgorithm {
     }
 }
 
+/// Reward weights used to scalarize quality, cost, and latency signals.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RewardWeights {
+    /// Relative weight for quality / success.
+    #[serde(default = "default_reward_weight_quality")]
+    pub quality: f64,
+    /// Relative weight for low cost.
+    #[serde(default = "default_reward_weight_cost")]
+    pub cost: f64,
+    /// Relative weight for low latency.
+    #[serde(default = "default_reward_weight_latency")]
+    pub latency: f64,
+}
+
+const fn default_reward_weight_quality() -> f64 {
+    0.5
+}
+
+const fn default_reward_weight_cost() -> f64 {
+    0.3
+}
+
+const fn default_reward_weight_latency() -> f64 {
+    0.2
+}
+
+impl Default for RewardWeights {
+    fn default() -> Self {
+        Self {
+            quality: default_reward_weight_quality(),
+            cost: default_reward_weight_cost(),
+            latency: default_reward_weight_latency(),
+        }
+    }
+}
+
+/// Per-tier reward-weight overrides for routing.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RoutingRewardWeightsConfig {
+    /// Default weights used when a tier has no explicit override.
+    #[serde(flatten)]
+    pub default: RewardWeights,
+    /// Optional override for mechanical tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mechanical: Option<RewardWeights>,
+    /// Optional override for focused tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focused: Option<RewardWeights>,
+    /// Optional override for integrative tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integrative: Option<RewardWeights>,
+    /// Optional override for architectural tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub architectural: Option<RewardWeights>,
+}
+
+impl RoutingRewardWeightsConfig {
+    /// Resolve the effective weights for a task tier.
+    #[must_use]
+    pub fn for_tier(&self, tier: &str) -> RewardWeights {
+        match tier {
+            "mechanical" => self.mechanical.unwrap_or(self.default),
+            "focused" => self.focused.unwrap_or(self.default),
+            "integrative" => self.integrative.unwrap_or(self.default),
+            "architectural" => self.architectural.unwrap_or(self.default),
+            _ => self.default,
+        }
+    }
+}
+
+impl Default for RoutingRewardWeightsConfig {
+    fn default() -> Self {
+        Self {
+            default: RewardWeights::default(),
+            mechanical: None,
+            focused: None,
+            integrative: None,
+            architectural: None,
+        }
+    }
+}
+
 /// Model routing configuration.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RoutingConfig {
@@ -1111,6 +1202,9 @@ pub struct RoutingConfig {
     /// Model for high-complexity / retry tasks.
     #[serde(default = "default_complex_model")]
     pub complex_task_model: String,
+    /// Reward scalarization weights with optional per-tier overrides.
+    #[serde(default)]
+    pub weights: RoutingRewardWeightsConfig,
     /// Context strategy (`"mcp_first"`, `"hybrid"`, `"inline_heavy"`).
     #[serde(default = "default_context_strategy")]
     pub context_strategy: String,
@@ -1149,6 +1243,7 @@ impl Default for RoutingConfig {
             fast_task_model: default_fast_model(),
             standard_task_model: default_standard_model(),
             complex_task_model: default_complex_model(),
+            weights: RoutingRewardWeightsConfig::default(),
             context_strategy: default_context_strategy(),
         }
     }
@@ -2446,6 +2541,10 @@ context_strategy = "inline_heavy"
         let default_cfg = RokoConfig::from_toml("").expect("parse defaults");
         assert_eq!(default_cfg.routing.algorithm, RoutingAlgorithm::LinUcb);
         assert!((default_cfg.routing.discount_factor - 0.99).abs() < f64::EPSILON);
+        assert_eq!(
+            default_cfg.routing.weights.default,
+            RewardWeights::default()
+        );
 
         let thompson_toml = r#"
 [routing]
@@ -2462,6 +2561,56 @@ algorithm = "linucb"
 "#;
         let linucb_cfg = RokoConfig::from_toml(linucb_toml).expect("parse");
         assert_eq!(linucb_cfg.routing.algorithm, RoutingAlgorithm::LinUcb);
+    }
+
+    #[test]
+    fn routing_reward_weights_config() {
+        let toml = r#"
+[routing.weights]
+quality = 0.5
+cost = 0.3
+latency = 0.2
+
+[routing.weights.mechanical]
+quality = 0.3
+cost = 0.6
+latency = 0.1
+
+[routing.weights.architectural]
+quality = 0.8
+cost = 0.1
+latency = 0.1
+"#;
+        let cfg = RokoConfig::from_toml(toml).expect("parse");
+
+        assert_eq!(
+            cfg.routing.weights.default,
+            RewardWeights {
+                quality: 0.5,
+                cost: 0.3,
+                latency: 0.2,
+            }
+        );
+        assert_eq!(
+            cfg.routing.weights.for_tier("mechanical"),
+            RewardWeights {
+                quality: 0.3,
+                cost: 0.6,
+                latency: 0.1,
+            }
+        );
+        assert_eq!(
+            cfg.routing.weights.for_tier("architectural"),
+            RewardWeights {
+                quality: 0.8,
+                cost: 0.1,
+                latency: 0.1,
+            }
+        );
+        assert_eq!(
+            cfg.routing.weights.for_tier("focused"),
+            RewardWeights::default()
+        );
     }
 
     #[test]
