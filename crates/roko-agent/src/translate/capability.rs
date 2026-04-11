@@ -61,6 +61,21 @@ pub struct ModelCapabilities {
 /// profile into a smaller, translator-facing shape.
 #[must_use]
 pub fn capabilities_for(slug: &str) -> ModelCapabilities {
+    if slug.starts_with("glm-5") || slug == "glm-5.1" {
+        return ModelCapabilities {
+            supports_tools: true,
+            supports_parallel_tool_calls: true,
+            tool_format: ToolFormat::OpenAiJson,
+            max_tools_before_degrade: 128,
+            supports_thinking: true,
+            supports_vision: false,
+            supports_web_search: true,
+            supports_mcp_tools: true,
+            supports_partial: false,
+            supports_tool_streaming: true,
+        };
+    }
+
     let profile = profile_for_model(slug);
     ModelCapabilities {
         supports_tools: profile.supports_tools,
@@ -184,6 +199,19 @@ mod tests {
         let caps = capabilities_for("gpt-4.1");
         assert_eq!(caps.tool_format, ToolFormat::OpenAiJson);
         assert!(caps.supports_tools);
+    }
+
+    #[test]
+    fn glm_capabilities_for_glm_51_returns_expected_profile() {
+        let caps = capabilities_for("glm-5.1");
+        assert!(caps.supports_tools);
+        assert!(caps.supports_parallel_tool_calls);
+        assert_eq!(caps.tool_format, ToolFormat::OpenAiJson);
+        assert_eq!(caps.max_tools_before_degrade, 128);
+        assert!(caps.supports_thinking);
+        assert!(caps.supports_web_search);
+        assert!(caps.supports_mcp_tools);
+        assert!(caps.supports_tool_streaming);
     }
 
     #[test]
