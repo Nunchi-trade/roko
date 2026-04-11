@@ -146,6 +146,22 @@ impl CostTable {
     pub fn with_defaults() -> Self {
         let mut models = HashMap::new();
         models.insert(
+            "kimi-k2.5".to_string(),
+            ModelPricing {
+                input_per_m: 0.60,
+                output_per_m: 3.00,
+                cache_read_per_m: Some(0.10),
+            },
+        );
+        models.insert(
+            "kimi-k2-thinking".to_string(),
+            ModelPricing {
+                input_per_m: 0.60,
+                output_per_m: 2.50,
+                cache_read_per_m: Some(0.15),
+            },
+        );
+        models.insert(
             "glm-5.1".to_string(),
             ModelPricing {
                 input_per_m: 1.40,
@@ -435,6 +451,23 @@ mod tests {
         assert!((glm_4_7.input_per_m - 0.60).abs() < 1e-9);
         assert!((glm_4_7.output_per_m - 2.20).abs() < 1e-9);
         assert_eq!(glm_4_7.cache_read_per_m, None);
+    }
+
+    #[test]
+    fn kimi_cost_table() {
+        let table = CostTable::default();
+
+        let kimi_k2_5 = table.lookup("kimi-k2.5").expect("kimi-k2.5 pricing");
+        assert!((kimi_k2_5.input_per_m - 0.60).abs() < 1e-9);
+        assert!((kimi_k2_5.output_per_m - 3.00).abs() < 1e-9);
+        assert_eq!(kimi_k2_5.cache_read_per_m, Some(0.10));
+
+        let kimi_k2_thinking = table
+            .lookup("kimi-k2-thinking")
+            .expect("kimi-k2-thinking pricing");
+        assert!((kimi_k2_thinking.input_per_m - 0.60).abs() < 1e-9);
+        assert!((kimi_k2_thinking.output_per_m - 2.50).abs() < 1e-9);
+        assert_eq!(kimi_k2_thinking.cache_read_per_m, Some(0.15));
     }
 
     #[test]
