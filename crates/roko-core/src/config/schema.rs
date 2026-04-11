@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use crate::agent::{AgentBackend, ProviderKind};
 use crate::tool::{ToolFormat, profile_for_model};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Current schema version. Bump on incompatible changes.
 pub const CURRENT_SCHEMA_VERSION: u32 = 2;
@@ -65,6 +65,10 @@ pub struct RokoConfig {
     /// Model routing configuration.
     #[serde(default)]
     pub routing: RoutingConfig,
+
+    /// Complexity-to-pipeline mapping for orchestration stages.
+    #[serde(default)]
+    pub pipeline: PipelineConfig,
 
     /// Spend / token budgets.
     #[serde(default)]
@@ -126,6 +130,7 @@ impl Default for RokoConfig {
             models: HashMap::new(),
             gates: GatesConfig::default(),
             routing: RoutingConfig::default(),
+            pipeline: PipelineConfig::default(),
             budget: BudgetConfig::default(),
             conductor: ConductorConfig::default(),
             watcher: WatcherConfig::default(),
@@ -222,6 +227,50 @@ impl RokoConfig {
         let _ = writeln!(out, "quality = {}", mechanical.quality);
         let _ = writeln!(out, "cost = {}", mechanical.cost);
         let _ = writeln!(out, "latency = {}\n", mechanical.latency);
+    }
+
+    fn write_example_pipeline(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "# -- Complexity-to-pipeline mapping --");
+
+        let mechanical = cfg.pipeline.mechanical;
+        let _ = writeln!(out, "[pipeline.mechanical]");
+        let _ = writeln!(out, "strategist = {}", mechanical.strategist);
+        let _ = writeln!(out, "reviewers = {}", mechanical.reviewers);
+        let _ = writeln!(
+            out,
+            "reviewer_mode = \"{}\"",
+            mechanical.reviewer_mode.label()
+        );
+        let _ = writeln!(out, "max_iterations = {}\n", mechanical.max_iterations);
+
+        let focused = cfg.pipeline.focused;
+        let _ = writeln!(out, "[pipeline.focused]");
+        let _ = writeln!(out, "strategist = {}", focused.strategist);
+        let _ = writeln!(out, "reviewers = {}", focused.reviewers);
+        let _ = writeln!(out, "reviewer_mode = \"{}\"", focused.reviewer_mode.label());
+        let _ = writeln!(out, "max_iterations = {}\n", focused.max_iterations);
+
+        let integrative = cfg.pipeline.integrative;
+        let _ = writeln!(out, "[pipeline.integrative]");
+        let _ = writeln!(out, "strategist = {}", integrative.strategist);
+        let _ = writeln!(out, "reviewers = {}", integrative.reviewers);
+        let _ = writeln!(
+            out,
+            "reviewer_mode = \"{}\"",
+            integrative.reviewer_mode.label()
+        );
+        let _ = writeln!(out, "max_iterations = {}\n", integrative.max_iterations);
+
+        let architectural = cfg.pipeline.architectural;
+        let _ = writeln!(out, "[pipeline.architectural]");
+        let _ = writeln!(out, "strategist = {}", architectural.strategist);
+        let _ = writeln!(out, "reviewers = {}", architectural.reviewers);
+        let _ = writeln!(
+            out,
+            "reviewer_mode = \"{}\"",
+            architectural.reviewer_mode.label()
+        );
+        let _ = writeln!(out, "max_iterations = {}\n", architectural.max_iterations);
     }
 
     fn write_example_budget(out: &mut String, cfg: &Self) {
@@ -590,6 +639,7 @@ impl RokoConfig {
         Self::write_example_agent(&mut out, &cfg);
         Self::write_example_gates(&mut out, &cfg);
         Self::write_example_routing(&mut out, &cfg);
+        Self::write_example_pipeline(&mut out, &cfg);
         Self::write_example_budget(&mut out, &cfg);
         Self::write_example_conductor(&mut out, &cfg);
         Self::write_example_learning(&mut out, &cfg);
@@ -1066,6 +1116,242 @@ impl Default for GatesConfig {
             clippy_enabled: default_true(),
             skip_tests: false,
             max_iterations: default_max_iterations(),
+        }
+    }
+}
+
+// ---- [pipeline] ---------------------------------------------------------
+
+/// Reviewer composition for a pipeline band.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PipelineReviewerMode {
+    /// Single quick-pass reviewer.
+    Quick,
+    /// Full review suite (architect, auditor, scribe).
+    Full,
+}
+
+impl PipelineReviewerMode {
+    /// Stable config label used in TOML.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Quick => "quick",
+            Self::Full => "full",
+        }
+    }
+}
+
+impl Default for PipelineReviewerMode {
+    fn default() -> Self {
+        Self::Quick
+    }
+}
+
+/// Effective pipeline settings for one complexity band.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PipelineBandConfig {
+    /// Whether the strategist stage runs before implementation.
+    #[serde(default)]
+    pub strategist: bool,
+    /// Whether reviewer agents run after implementation.
+    #[serde(default)]
+    pub reviewers: bool,
+    /// Which reviewer composition to use when reviewers are enabled.
+    #[serde(default)]
+    pub reviewer_mode: PipelineReviewerMode,
+    /// Maximum implementation-review iterations before stopping.
+    #[serde(default = "default_pipeline_band_iterations")]
+    pub max_iterations: u32,
+}
+
+const fn default_pipeline_band_iterations() -> u32 {
+    1
+}
+
+impl PipelineBandConfig {
+    /// Defaults for the `mechanical` tier.
+    #[must_use]
+    pub const fn mechanical() -> Self {
+        Self {
+            strategist: false,
+            reviewers: false,
+            reviewer_mode: PipelineReviewerMode::Quick,
+            max_iterations: 1,
+        }
+    }
+
+    /// Defaults for the `focused` tier.
+    #[must_use]
+    pub const fn focused() -> Self {
+        Self {
+            strategist: false,
+            reviewers: false,
+            reviewer_mode: PipelineReviewerMode::Quick,
+            max_iterations: 2,
+        }
+    }
+
+    /// Defaults for the `integrative` tier.
+    #[must_use]
+    pub const fn integrative() -> Self {
+        Self {
+            strategist: true,
+            reviewers: true,
+            reviewer_mode: PipelineReviewerMode::Quick,
+            max_iterations: 2,
+        }
+    }
+
+    /// Defaults for the `architectural` tier.
+    #[must_use]
+    pub const fn architectural() -> Self {
+        Self {
+            strategist: true,
+            reviewers: true,
+            reviewer_mode: PipelineReviewerMode::Full,
+            max_iterations: 3,
+        }
+    }
+}
+
+impl Default for PipelineBandConfig {
+    fn default() -> Self {
+        Self::mechanical()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+struct PipelineBandConfigOverride {
+    #[serde(default)]
+    strategist: Option<bool>,
+    #[serde(default)]
+    reviewers: Option<bool>,
+    #[serde(default)]
+    reviewer_mode: Option<PipelineReviewerMode>,
+    #[serde(default)]
+    max_iterations: Option<u32>,
+}
+
+impl PipelineBandConfigOverride {
+    fn resolve(self, defaults: PipelineBandConfig) -> PipelineBandConfig {
+        PipelineBandConfig {
+            strategist: self.strategist.unwrap_or(defaults.strategist),
+            reviewers: self.reviewers.unwrap_or(defaults.reviewers),
+            reviewer_mode: self.reviewer_mode.unwrap_or(defaults.reviewer_mode),
+            max_iterations: self.max_iterations.unwrap_or(defaults.max_iterations),
+        }
+    }
+}
+
+fn deserialize_pipeline_band_with_defaults<'de, D>(
+    deserializer: D,
+    defaults: PipelineBandConfig,
+) -> Result<PipelineBandConfig, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let override_cfg = PipelineBandConfigOverride::deserialize(deserializer)?;
+    Ok(override_cfg.resolve(defaults))
+}
+
+fn default_mechanical_pipeline() -> PipelineBandConfig {
+    PipelineBandConfig::mechanical()
+}
+
+fn deserialize_mechanical_pipeline<'de, D>(deserializer: D) -> Result<PipelineBandConfig, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_pipeline_band_with_defaults(deserializer, PipelineBandConfig::mechanical())
+}
+
+fn default_focused_pipeline() -> PipelineBandConfig {
+    PipelineBandConfig::focused()
+}
+
+fn deserialize_focused_pipeline<'de, D>(deserializer: D) -> Result<PipelineBandConfig, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_pipeline_band_with_defaults(deserializer, PipelineBandConfig::focused())
+}
+
+fn default_integrative_pipeline() -> PipelineBandConfig {
+    PipelineBandConfig::integrative()
+}
+
+fn deserialize_integrative_pipeline<'de, D>(deserializer: D) -> Result<PipelineBandConfig, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_pipeline_band_with_defaults(deserializer, PipelineBandConfig::integrative())
+}
+
+fn default_architectural_pipeline() -> PipelineBandConfig {
+    PipelineBandConfig::architectural()
+}
+
+fn deserialize_architectural_pipeline<'de, D>(
+    deserializer: D,
+) -> Result<PipelineBandConfig, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_pipeline_band_with_defaults(deserializer, PipelineBandConfig::architectural())
+}
+
+/// Complexity-to-pipeline mapping.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PipelineConfig {
+    /// Mechanical tasks: skip strategist and reviewers.
+    #[serde(
+        default = "default_mechanical_pipeline",
+        deserialize_with = "deserialize_mechanical_pipeline"
+    )]
+    pub mechanical: PipelineBandConfig,
+    /// Focused tasks: implement directly, allow one extra loop.
+    #[serde(
+        default = "default_focused_pipeline",
+        deserialize_with = "deserialize_focused_pipeline"
+    )]
+    pub focused: PipelineBandConfig,
+    /// Integrative tasks: strategist plus a quick reviewer.
+    #[serde(
+        default = "default_integrative_pipeline",
+        deserialize_with = "deserialize_integrative_pipeline"
+    )]
+    pub integrative: PipelineBandConfig,
+    /// Architectural tasks: strategist plus the full reviewer suite.
+    #[serde(
+        default = "default_architectural_pipeline",
+        deserialize_with = "deserialize_architectural_pipeline"
+    )]
+    pub architectural: PipelineBandConfig,
+}
+
+impl PipelineConfig {
+    /// Resolve the pipeline settings for a named complexity tier.
+    #[must_use]
+    pub fn for_tier(&self, tier: &str) -> PipelineBandConfig {
+        match tier {
+            "mechanical" => self.mechanical,
+            "focused" => self.focused,
+            "integrative" => self.integrative,
+            "architectural" => self.architectural,
+            _ => self.focused,
+        }
+    }
+}
+
+impl Default for PipelineConfig {
+    fn default() -> Self {
+        Self {
+            mechanical: PipelineBandConfig::mechanical(),
+            focused: PipelineBandConfig::focused(),
+            integrative: PipelineBandConfig::integrative(),
+            architectural: PipelineBandConfig::architectural(),
         }
     }
 }
@@ -2564,6 +2850,81 @@ algorithm = "linucb"
     }
 
     #[test]
+    fn pipeline_config_parses_complexity_mapping() {
+        let default_cfg = RokoConfig::from_toml("").expect("parse defaults");
+        assert_eq!(
+            default_cfg.pipeline.mechanical,
+            PipelineBandConfig::mechanical()
+        );
+        assert_eq!(default_cfg.pipeline.focused, PipelineBandConfig::focused());
+        assert_eq!(
+            default_cfg.pipeline.integrative,
+            PipelineBandConfig::integrative()
+        );
+        assert_eq!(
+            default_cfg.pipeline.architectural,
+            PipelineBandConfig::architectural()
+        );
+
+        let toml = r#"
+[pipeline.mechanical]
+strategist = false
+reviewers = false
+max_iterations = 1
+
+[pipeline.focused]
+strategist = false
+reviewers = false
+max_iterations = 2
+
+[pipeline.integrative]
+strategist = true
+reviewers = true
+reviewer_mode = "quick"
+max_iterations = 2
+
+[pipeline.architectural]
+strategist = true
+reviewers = true
+reviewer_mode = "full"
+max_iterations = 3
+"#;
+        let cfg = RokoConfig::from_toml(toml).expect("parse");
+
+        assert_eq!(cfg.pipeline.mechanical, PipelineBandConfig::mechanical());
+        assert_eq!(cfg.pipeline.focused, PipelineBandConfig::focused());
+        assert_eq!(cfg.pipeline.integrative, PipelineBandConfig::integrative());
+        assert_eq!(
+            cfg.pipeline.architectural,
+            PipelineBandConfig::architectural()
+        );
+
+        let mechanical = cfg.pipeline.for_tier("mechanical");
+        assert!(!mechanical.strategist);
+        assert!(!mechanical.reviewers);
+        assert_eq!(mechanical.max_iterations, 1);
+    }
+
+    #[test]
+    fn pipeline_config_partial_override_keeps_band_defaults() {
+        let toml = r#"
+[pipeline.architectural]
+max_iterations = 4
+"#;
+        let cfg = RokoConfig::from_toml(toml).expect("parse");
+
+        assert_eq!(
+            cfg.pipeline.architectural,
+            PipelineBandConfig {
+                strategist: true,
+                reviewers: true,
+                reviewer_mode: PipelineReviewerMode::Full,
+                max_iterations: 4,
+            }
+        );
+    }
+
+    #[test]
     fn routing_reward_weights_config() {
         let toml = r#"
 [routing.weights]
@@ -2843,6 +3204,7 @@ port = 3000
         assert!(example.contains("[agent]"));
         assert!(example.contains("[gates]"));
         assert!(example.contains("[routing]"));
+        assert!(example.contains("[pipeline.mechanical]"));
         assert!(example.contains("[budget]"));
         assert!(example.contains("[conductor]"));
         assert!(example.contains("[learning]"));
