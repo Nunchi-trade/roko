@@ -213,7 +213,38 @@ impl App {
         self.current_page
     }
 
-    /// Run the terminal UI until the user quits.
+    /// Run the terminal UI with 60fps async rendering via StateHub.
+    ///
+    /// If `state_hub` is `Some`, the TUI reads from the watch channel for
+    /// real-time updates. If `None`, it loads a one-time disk snapshot.
+    pub async fn run_with_state_hub(
+        mut self,
+        state_hub: Option<roko_core::SharedStateHub>,
+    ) -> Result<()> {
+        let previous_hook: Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync + 'static> =
+            Arc::from(std::panic::take_hook());
+        let panic_hook = Arc::clone(&previous_hook);
+        let _restore_hook = PanicHookRestoreGuard(previous_hook);
+
+        std::panic::set_hook(Box::new(move |panic_info| {
+            let _ = Self::cleanup_terminal();
+            panic_hook(panic_info);
+        }));
+
+        let mut terminal = Self::enter_terminal()?;
+        let snapshot_rx = state_hub.map(|hub| hub.snapshot());
+        let result = run_async(&mut terminal, &mut self, snapshot_rx).await;
+        let cleanup = Self::leave_terminal();
+
+        match (result, cleanup) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(err), Ok(())) => Err(err),
+            (Ok(()), Err(err)) => Err(err),
+            (Err(err), Err(_cleanup_err)) => Err(err),
+        }
+    }
+
+    /// Run the terminal UI until the user quits (sync polling fallback).
     pub fn run(mut self) -> Result<()> {
         let previous_hook: Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync + 'static> =
             Arc::from(std::panic::take_hook());

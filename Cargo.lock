@@ -5019,6 +5019,7 @@ dependencies = [
  "regex",
  "reqwest 0.12.28",
  "roko-core",
+ "roko-std",
  "serde",
  "serde_json",
  "tempfile",
