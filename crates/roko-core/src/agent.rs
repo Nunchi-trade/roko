@@ -102,7 +102,7 @@ impl AgentBackend {
     /// Rules (derived from `apps/mori/src/agent/roles.rs::from_model`):
     /// - `claude-*` → Claude
     /// - `composer-*`, `cursor-*`, `sonnet-*`, `opus-*`, `haiku-*`,
-    ///   `gemini-*`, `kimi-*`, `auto`, `*-high`, `*-xhigh-fast` → Cursor
+    ///   `gemini-*`, `auto`, `*-high`, `*-xhigh-fast` → Cursor
     /// - `ollama/*` or `llama*` → Ollama
     /// - everything else → Codex (default GPT routing)
     #[must_use]
@@ -139,7 +139,6 @@ fn is_cursor_slug(slug: &str) -> bool {
         || slug.starts_with("opus-")
         || slug.starts_with("haiku-")
         || slug.starts_with("gemini-")
-        || slug.starts_with("kimi-")
         || slug == "gpt-5.2"
         || slug.ends_with("-high")
         || slug.ends_with("-xhigh-fast")
@@ -822,7 +821,9 @@ mod tests {
     }
 
     #[test]
-    fn glm_backend_routing() {
+    fn kimi_not_cursor() {
+        assert!(!is_cursor_slug("kimi-k2.5"));
+        assert_eq!(AgentBackend::from_model("kimi-k2.5"), AgentBackend::Codex);
         assert!(!is_cursor_slug("glm-5.1"));
         assert_eq!(AgentBackend::from_model("glm-5.1"), AgentBackend::Codex);
     }
