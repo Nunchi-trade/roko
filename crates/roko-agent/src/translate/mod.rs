@@ -33,6 +33,7 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+use crate::usage::Usage;
 use roko_core::tool::{ToolCall, ToolDef, ToolFormat, ToolResult};
 
 pub mod capability;
@@ -46,6 +47,37 @@ pub use claude::ClaudeTranslator;
 pub use ollama::OllamaTranslator;
 pub use openai::OpenAiTranslator;
 pub use react::ReActTranslator;
+
+/// Canonical response from any provider, after adapter parsing.
+#[derive(Debug, Clone, Default)]
+pub struct ChatResponse {
+    pub content: String,
+    pub reasoning: Option<String>,
+    pub tool_calls: Vec<ToolCall>,
+    pub usage: Usage,
+    pub finish_reason: FinishReason,
+    pub metadata: ResponseMetadata,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ResponseMetadata {
+    pub response_id: Option<String>,
+    pub model_used: Option<String>,
+    pub cached_tokens: Option<u64>,
+    pub content_filter: Option<serde_json::Value>,
+    pub provider_latency_ms: Option<u64>,
+    pub raw_finish_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum FinishReason {
+    #[default]
+    Stop,
+    Length,
+    ToolCalls,
+    ContentFilter,
+    Error(String),
+}
 
 /// Bidirectional bridge between canonical tools and a backend's wire format.
 ///
@@ -344,6 +376,27 @@ mod tests {
             }),
         ]);
         assert_eq!(r.extract_reasoning(), Some("step 1 step 2".to_string()));
+    }
+
+    #[test]
+    fn chat_response_defaults_and_variants() {
+        let response = ChatResponse::default();
+        assert_eq!(response.content, "");
+        assert_eq!(response.reasoning, None);
+        assert!(response.tool_calls.is_empty());
+        assert_eq!(response.usage, Usage::default());
+        assert!(matches!(response.finish_reason, FinishReason::Stop));
+        assert_eq!(response.metadata.response_id, None);
+        assert_eq!(response.metadata.model_used, None);
+        assert_eq!(response.metadata.cached_tokens, None);
+        assert_eq!(response.metadata.content_filter, None);
+        assert_eq!(response.metadata.provider_latency_ms, None);
+        assert_eq!(response.metadata.raw_finish_reason, None);
+
+        assert_eq!(FinishReason::Length, FinishReason::Length);
+        assert_eq!(FinishReason::ToolCalls, FinishReason::ToolCalls);
+        assert_eq!(FinishReason::ContentFilter, FinishReason::ContentFilter);
+        assert_eq!(FinishReason::Error("boom".into()), FinishReason::Error("boom".into()));
     }
 
     #[test]
