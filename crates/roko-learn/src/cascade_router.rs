@@ -21,7 +21,7 @@
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use roko_agent::AgentResult;
+use roko_agent::{AgentResult, gemini::GeminiMetadata};
 use roko_core::OperatingFrequency;
 use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
 use roko_core::task::{TaskCategory, TaskComplexityBand};
@@ -132,6 +132,22 @@ struct ModelStats {
     total_cost_usd: f64,
     /// Number of Perplexity requests contributing metadata.
     perplexity_requests: u64,
+    /// Total Gemini thinking tokens observed across responses.
+    total_gemini_thinking_tokens: u64,
+    /// Total Gemini cached tokens observed across responses.
+    total_gemini_cached_tokens: u64,
+    /// Total Gemini grounding queries executed across responses.
+    total_gemini_grounding_queries: u64,
+    /// Number of successful Gemini code-execution outcomes.
+    gemini_code_execution_successes: u64,
+    /// Number of failed Gemini code-execution outcomes.
+    gemini_code_execution_failures: u64,
+    /// Number of Gemini responses routed in the ≤200K context pricing tier.
+    gemini_context_window_le_200k_requests: u64,
+    /// Number of Gemini responses routed in the >200K context pricing tier.
+    gemini_context_window_gt_200k_requests: u64,
+    /// Number of Gemini requests contributing observation metadata.
+    gemini_requests: u64,
 }
 
 impl ModelStats {
@@ -199,6 +215,43 @@ impl ModelStats {
             Some(self.total_cost_usd / self.successes as f64)
         }
     }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn avg_gemini_thinking_tokens_per_response(&self) -> f64 {
+        if self.gemini_requests == 0 {
+            0.0
+        } else {
+            self.total_gemini_thinking_tokens as f64 / self.gemini_requests as f64
+        }
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn avg_gemini_cached_tokens_per_response(&self) -> f64 {
+        if self.gemini_requests == 0 {
+            0.0
+        } else {
+            self.total_gemini_cached_tokens as f64 / self.gemini_requests as f64
+        }
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn avg_gemini_grounding_queries_per_response(&self) -> f64 {
+        if self.gemini_requests == 0 {
+            0.0
+        } else {
+            self.total_gemini_grounding_queries as f64 / self.gemini_requests as f64
+        }
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn gemini_code_execution_success_rate(&self) -> f64 {
+        let attempts = self.gemini_code_execution_successes + self.gemini_code_execution_failures;
+        if attempts == 0 {
+            0.0
+        } else {
+            self.gemini_code_execution_successes as f64 / attempts as f64
+        }
+    }
 }
 
 /// Per-request Perplexity metadata captured by the cascade learning loop.
@@ -212,6 +265,80 @@ pub struct PerplexityObservation {
     pub input_tokens: u64,
     /// Output tokens billed for the request.
     pub output_tokens: u64,
+}
+
+/// Gemini pricing tier used for a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GeminiContextTier {
+    /// Request stayed within Gemini's ≤200K pricing tier.
+    UpTo200k,
+    /// Request crossed into Gemini's >200K pricing tier.
+    Over200k,
+}
+
+impl GeminiContextTier {
+    /// Infer the pricing tier from the billed prompt tokens.
+    #[must_use]
+    pub const fn for_input_tokens(input_tokens: u64) -> Self {
+        if input_tokens > 200_000 {
+            Self::Over200k
+        } else {
+            Self::UpTo200k
+        }
+    }
+}
+
+/// Per-request Gemini metadata captured by the cascade learning loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GeminiObservation {
+    /// Prompt tokens billed for the request.
+    pub input_tokens: u64,
+    /// Output tokens billed for the request.
+    pub output_tokens: u64,
+    /// Thinking tokens consumed by the model, if reported.
+    pub thinking_tokens: Option<u64>,
+    /// Cached prompt tokens read by the request, if any.
+    pub cached_tokens: Option<u64>,
+    /// Number of grounding queries executed through Google Search.
+    pub grounding_query_count: u64,
+    /// Count of successful code-execution results returned by Gemini.
+    pub code_execution_success_count: u64,
+    /// Count of failed code-execution results returned by Gemini.
+    pub code_execution_failure_count: u64,
+    /// Gemini input-context pricing tier.
+    pub context_tier: GeminiContextTier,
+}
+
+impl GeminiObservation {
+    /// Build a router observation from Gemini adapter metadata.
+    #[must_use]
+    pub fn from_metadata(metadata: &GeminiMetadata, input_tokens: u64, output_tokens: u64) -> Self {
+        let (code_execution_success_count, code_execution_failure_count) = metadata
+            .code_execution_results
+            .iter()
+            .fold((0_u64, 0_u64), |(successes, failures), result| {
+                if result.outcome.eq_ignore_ascii_case("OUTCOME_OK") {
+                    (successes + 1, failures)
+                } else {
+                    (successes, failures + 1)
+                }
+            });
+
+        Self {
+            input_tokens,
+            output_tokens,
+            thinking_tokens: metadata.thinking_tokens,
+            cached_tokens: metadata.cached_tokens,
+            grounding_query_count: metadata
+                .grounding_metadata
+                .as_ref()
+                .and_then(|grounding| grounding.web_search_queries.as_ref())
+                .map_or(0, |queries| queries.len() as u64),
+            code_execution_success_count,
+            code_execution_failure_count,
+            context_tier: GeminiContextTier::for_input_tokens(input_tokens),
+        }
+    }
 }
 
 /// Public snapshot of the richer per-model observation state.
@@ -235,6 +362,30 @@ pub struct CascadeObservationStats {
     pub avg_cost_usd: f64,
     /// Number of Perplexity requests contributing observation metadata.
     pub perplexity_requests: u64,
+    /// Total Gemini thinking tokens observed across responses.
+    pub total_gemini_thinking_tokens: u64,
+    /// Average Gemini thinking tokens per response.
+    pub avg_gemini_thinking_tokens_per_response: f64,
+    /// Total Gemini cached tokens observed across responses.
+    pub total_gemini_cached_tokens: u64,
+    /// Average Gemini cached tokens per response.
+    pub avg_gemini_cached_tokens_per_response: f64,
+    /// Total Gemini grounding queries executed across responses.
+    pub total_gemini_grounding_queries: u64,
+    /// Average Gemini grounding queries per response.
+    pub avg_gemini_grounding_queries_per_response: f64,
+    /// Number of successful Gemini code-execution outcomes.
+    pub gemini_code_execution_successes: u64,
+    /// Number of failed Gemini code-execution outcomes.
+    pub gemini_code_execution_failures: u64,
+    /// Success rate across Gemini code-execution outcomes.
+    pub gemini_code_execution_success_rate: f64,
+    /// Number of Gemini requests contributing observation metadata.
+    pub gemini_requests: u64,
+    /// Gemini requests routed in the ≤200K context tier.
+    pub gemini_context_window_le_200k_requests: u64,
+    /// Gemini requests routed in the >200K context tier.
+    pub gemini_context_window_gt_200k_requests: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -242,6 +393,16 @@ struct PerplexityObservationTotals {
     citation_count: u64,
     search_latency_ms: u64,
     total_cost_usd: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GeminiObservationTotals {
+    thinking_tokens: u64,
+    cached_tokens: u64,
+    grounding_query_count: u64,
+    code_execution_success_count: u64,
+    code_execution_failure_count: u64,
+    context_tier: GeminiContextTier,
 }
 
 // ─── Static role -> model table ─────────────────────────────────────────────
@@ -766,7 +927,7 @@ impl CascadeRouter {
         let Some(model_idx) = self.model_index_for_slug(model_slug) else {
             return;
         };
-        self.observe_internal(&ctx.to_features(), model_idx, reward, success, None);
+        self.observe_internal(&ctx.to_features(), model_idx, reward, success, None, None);
     }
 
     /// Record an observation enriched with Perplexity search metadata.
@@ -800,6 +961,39 @@ impl CascadeRouter {
             reward,
             success,
             Some(perplexity),
+            None,
+        );
+        true
+    }
+
+    /// Record an observation enriched with Gemini-native metadata.
+    pub fn record_gemini_observation(
+        &self,
+        ctx: &RoutingContext,
+        model_slug: &str,
+        reward: f64,
+        success: bool,
+        observation: GeminiObservation,
+    ) -> bool {
+        let Some(model_idx) = self.model_index_for_slug(model_slug) else {
+            return false;
+        };
+
+        let gemini = GeminiObservationTotals {
+            thinking_tokens: observation.thinking_tokens.unwrap_or(0),
+            cached_tokens: observation.cached_tokens.unwrap_or(0),
+            grounding_query_count: observation.grounding_query_count,
+            code_execution_success_count: observation.code_execution_success_count,
+            code_execution_failure_count: observation.code_execution_failure_count,
+            context_tier: observation.context_tier,
+        };
+        self.observe_internal(
+            &ctx.to_features(),
+            model_idx,
+            reward,
+            success,
+            None,
+            Some(gemini),
         );
         true
     }
@@ -815,7 +1009,7 @@ impl CascadeRouter {
 
         let reward = if success { 1.0 } else { 0.0 };
         let context = [0.0; CONTEXT_DIM];
-        self.observe_internal(&context, model_idx, reward, success, None);
+        self.observe_internal(&context, model_idx, reward, success, None, None);
         true
     }
 
@@ -869,6 +1063,7 @@ impl CascadeRouter {
             reward,
             passed,
             None,
+            None,
         );
     }
 
@@ -877,7 +1072,7 @@ impl CascadeRouter {
     /// This is the success-path entry point used by orchestration when the
     /// caller already has the model index in the router's arm list.
     pub fn observe(&self, context_vec: Vec<f64>, model_idx: usize, reward: f64) {
-        self.observe_internal(&context_vec, model_idx, reward, true, None);
+        self.observe_internal(&context_vec, model_idx, reward, true, None, None);
     }
 
     fn observe_internal(
@@ -887,6 +1082,7 @@ impl CascadeRouter {
         reward: f64,
         success: bool,
         perplexity: Option<PerplexityObservationTotals>,
+        gemini: Option<GeminiObservationTotals>,
     ) {
         let Some(slug) = self.model_slugs.get(model_idx) else {
             return;
@@ -904,6 +1100,18 @@ impl CascadeRouter {
             entry.total_search_latency_ms += perplexity.search_latency_ms;
             entry.total_cost_usd += perplexity.total_cost_usd;
             entry.perplexity_requests += 1;
+        }
+        if let Some(gemini) = gemini {
+            entry.total_gemini_thinking_tokens += gemini.thinking_tokens;
+            entry.total_gemini_cached_tokens += gemini.cached_tokens;
+            entry.total_gemini_grounding_queries += gemini.grounding_query_count;
+            entry.gemini_code_execution_successes += gemini.code_execution_success_count;
+            entry.gemini_code_execution_failures += gemini.code_execution_failure_count;
+            entry.gemini_requests += 1;
+            match gemini.context_tier {
+                GeminiContextTier::UpTo200k => entry.gemini_context_window_le_200k_requests += 1,
+                GeminiContextTier::Over200k => entry.gemini_context_window_gt_200k_requests += 1,
+            }
         }
         drop(stats);
 
@@ -943,6 +1151,23 @@ impl CascadeRouter {
                         total_cost_usd: v.total_cost_usd,
                         avg_cost_usd: v.avg_cost_usd(),
                         perplexity_requests: v.perplexity_requests,
+                        total_gemini_thinking_tokens: v.total_gemini_thinking_tokens,
+                        avg_gemini_thinking_tokens_per_response: v
+                            .avg_gemini_thinking_tokens_per_response(),
+                        total_gemini_cached_tokens: v.total_gemini_cached_tokens,
+                        avg_gemini_cached_tokens_per_response: v
+                            .avg_gemini_cached_tokens_per_response(),
+                        total_gemini_grounding_queries: v.total_gemini_grounding_queries,
+                        avg_gemini_grounding_queries_per_response: v
+                            .avg_gemini_grounding_queries_per_response(),
+                        gemini_code_execution_successes: v.gemini_code_execution_successes,
+                        gemini_code_execution_failures: v.gemini_code_execution_failures,
+                        gemini_code_execution_success_rate: v.gemini_code_execution_success_rate(),
+                        gemini_requests: v.gemini_requests,
+                        gemini_context_window_le_200k_requests: v
+                            .gemini_context_window_le_200k_requests,
+                        gemini_context_window_gt_200k_requests: v
+                            .gemini_context_window_gt_200k_requests,
                     },
                 )
             })
@@ -972,6 +1197,16 @@ impl CascadeRouter {
                             total_search_latency_ms: v.total_search_latency_ms,
                             total_cost_usd: v.total_cost_usd,
                             perplexity_requests: v.perplexity_requests,
+                            total_gemini_thinking_tokens: v.total_gemini_thinking_tokens,
+                            total_gemini_cached_tokens: v.total_gemini_cached_tokens,
+                            total_gemini_grounding_queries: v.total_gemini_grounding_queries,
+                            gemini_code_execution_successes: v.gemini_code_execution_successes,
+                            gemini_code_execution_failures: v.gemini_code_execution_failures,
+                            gemini_context_window_le_200k_requests: v
+                                .gemini_context_window_le_200k_requests,
+                            gemini_context_window_gt_200k_requests: v
+                                .gemini_context_window_gt_200k_requests,
+                            gemini_requests: v.gemini_requests,
                         },
                     )
                 })
@@ -1030,6 +1265,19 @@ impl CascadeRouter {
                             total_search_latency_ms: persisted.total_search_latency_ms,
                             total_cost_usd: persisted.total_cost_usd,
                             perplexity_requests: persisted.perplexity_requests,
+                            total_gemini_thinking_tokens: persisted.total_gemini_thinking_tokens,
+                            total_gemini_cached_tokens: persisted.total_gemini_cached_tokens,
+                            total_gemini_grounding_queries: persisted
+                                .total_gemini_grounding_queries,
+                            gemini_code_execution_successes: persisted
+                                .gemini_code_execution_successes,
+                            gemini_code_execution_failures: persisted
+                                .gemini_code_execution_failures,
+                            gemini_context_window_le_200k_requests: persisted
+                                .gemini_context_window_le_200k_requests,
+                            gemini_context_window_gt_200k_requests: persisted
+                                .gemini_context_window_gt_200k_requests,
+                            gemini_requests: persisted.gemini_requests,
                         },
                     );
                 }
@@ -1680,6 +1928,22 @@ struct PersistedModelStats {
     total_cost_usd: f64,
     #[serde(default)]
     perplexity_requests: u64,
+    #[serde(default)]
+    total_gemini_thinking_tokens: u64,
+    #[serde(default)]
+    total_gemini_cached_tokens: u64,
+    #[serde(default)]
+    total_gemini_grounding_queries: u64,
+    #[serde(default)]
+    gemini_code_execution_successes: u64,
+    #[serde(default)]
+    gemini_code_execution_failures: u64,
+    #[serde(default)]
+    gemini_context_window_le_200k_requests: u64,
+    #[serde(default)]
+    gemini_context_window_gt_200k_requests: u64,
+    #[serde(default)]
+    gemini_requests: u64,
 }
 
 // ─── Tests ────────────────────────────────────────��─────────────────────────
@@ -1689,6 +1953,7 @@ mod tests {
     use super::*;
     use crate::provider_health::{ErrorClass, ProviderHealthRegistry};
     use async_trait::async_trait;
+    use roko_agent::gemini::{CodeExecutionResultPart, GroundingMetadata};
     use roko_core::task::{TaskCategory, TaskComplexityBand};
     use roko_core::{Body, Kind, Signal};
     use std::collections::HashMap;
@@ -2422,6 +2687,153 @@ mod tests {
             cascade.route(&route_ctx).primary.slug,
             "gemini-2.5-flash-lite"
         );
+    }
+
+    #[test]
+    fn gemini_observations_include_quality_and_cost_signals() {
+        let cascade = CascadeRouter::new(vec![
+            "gemini-2.5-pro".to_string(),
+            "claude-sonnet-4-5".to_string(),
+        ]);
+        let ctx = default_ctx();
+
+        assert!(cascade.record_gemini_observation(
+            &ctx,
+            "gemini-2.5-pro",
+            0.92,
+            true,
+            GeminiObservation {
+                input_tokens: 250_000,
+                output_tokens: 1_024,
+                thinking_tokens: Some(64),
+                cached_tokens: Some(512),
+                grounding_query_count: 3,
+                code_execution_success_count: 2,
+                code_execution_failure_count: 1,
+                context_tier: GeminiContextTier::Over200k,
+            },
+        ));
+
+        let stats = cascade.observation_snapshot();
+        let gemini = stats.get("gemini-2.5-pro").expect("gemini stats");
+
+        assert_eq!(gemini.trials, 1);
+        assert_eq!(gemini.successes, 1);
+        assert_eq!(gemini.gemini_requests, 1);
+        assert_eq!(gemini.total_gemini_thinking_tokens, 64);
+        assert!((gemini.avg_gemini_thinking_tokens_per_response - 64.0).abs() < 1e-9);
+        assert_eq!(gemini.total_gemini_cached_tokens, 512);
+        assert!((gemini.avg_gemini_cached_tokens_per_response - 512.0).abs() < 1e-9);
+        assert_eq!(gemini.total_gemini_grounding_queries, 3);
+        assert!((gemini.avg_gemini_grounding_queries_per_response - 3.0).abs() < 1e-9);
+        assert_eq!(gemini.gemini_code_execution_successes, 2);
+        assert_eq!(gemini.gemini_code_execution_failures, 1);
+        assert!((gemini.gemini_code_execution_success_rate - (2.0 / 3.0)).abs() < 1e-9);
+        assert_eq!(gemini.gemini_context_window_le_200k_requests, 0);
+        assert_eq!(gemini.gemini_context_window_gt_200k_requests, 1);
+    }
+
+    #[test]
+    fn gemini_observations_from_metadata_extract_router_signals() {
+        let metadata = GeminiMetadata {
+            grounding_metadata: Some(GroundingMetadata {
+                web_search_queries: Some(vec![
+                    "Rust cargo metadata".to_string(),
+                    "Rust cargo workspace".to_string(),
+                ]),
+                grounding_chunks: None,
+                grounding_supports: None,
+                search_entry_point: None,
+            }),
+            code_execution_results: vec![
+                CodeExecutionResultPart {
+                    outcome: "OUTCOME_OK".to_string(),
+                    output: "passed".to_string(),
+                },
+                CodeExecutionResultPart {
+                    outcome: "OUTCOME_ERROR".to_string(),
+                    output: "failed".to_string(),
+                },
+            ],
+            thinking_tokens: Some(11),
+            cached_tokens: Some(80),
+            safety_ratings: Vec::new(),
+        };
+
+        let observation = GeminiObservation::from_metadata(&metadata, 240_000, 512);
+
+        assert_eq!(observation.thinking_tokens, Some(11));
+        assert_eq!(observation.cached_tokens, Some(80));
+        assert_eq!(observation.grounding_query_count, 2);
+        assert_eq!(observation.code_execution_success_count, 1);
+        assert_eq!(observation.code_execution_failure_count, 1);
+        assert_eq!(observation.context_tier, GeminiContextTier::Over200k);
+    }
+
+    #[test]
+    fn gemini_observations_persist_across_save_and_load() {
+        let cascade = CascadeRouter::new(vec![
+            "gemini-2.5-flash".to_string(),
+            "claude-sonnet-4-5".to_string(),
+        ]);
+        let ctx = default_ctx();
+
+        assert!(cascade.record_gemini_observation(
+            &ctx,
+            "gemini-2.5-flash",
+            0.8,
+            true,
+            GeminiObservation {
+                input_tokens: 120_000,
+                output_tokens: 600,
+                thinking_tokens: Some(21),
+                cached_tokens: Some(144),
+                grounding_query_count: 1,
+                code_execution_success_count: 1,
+                code_execution_failure_count: 0,
+                context_tier: GeminiContextTier::UpTo200k,
+            },
+        ));
+        assert!(cascade.record_gemini_observation(
+            &ctx,
+            "gemini-2.5-flash",
+            0.0,
+            false,
+            GeminiObservation {
+                input_tokens: 260_000,
+                output_tokens: 700,
+                thinking_tokens: Some(34),
+                cached_tokens: Some(32),
+                grounding_query_count: 4,
+                code_execution_success_count: 0,
+                code_execution_failure_count: 2,
+                context_tier: GeminiContextTier::Over200k,
+            },
+        ));
+
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("cascade-router.json");
+        cascade.save(&path).expect("save cascade router");
+
+        let reloaded = CascadeRouter::load_or_new(
+            &path,
+            vec![
+                "gemini-2.5-flash".to_string(),
+                "claude-sonnet-4-5".to_string(),
+            ],
+        );
+        let stats = reloaded.observation_snapshot();
+        let gemini = stats.get("gemini-2.5-flash").expect("gemini stats");
+
+        assert_eq!(gemini.gemini_requests, 2);
+        assert_eq!(gemini.total_gemini_thinking_tokens, 55);
+        assert_eq!(gemini.total_gemini_cached_tokens, 176);
+        assert_eq!(gemini.total_gemini_grounding_queries, 5);
+        assert_eq!(gemini.gemini_code_execution_successes, 1);
+        assert_eq!(gemini.gemini_code_execution_failures, 2);
+        assert!((gemini.gemini_code_execution_success_rate - (1.0 / 3.0)).abs() < 1e-9);
+        assert_eq!(gemini.gemini_context_window_le_200k_requests, 1);
+        assert_eq!(gemini.gemini_context_window_gt_200k_requests, 1);
     }
 
     // ── Test 18: UCB stage uses linucb selection ────────────────────────

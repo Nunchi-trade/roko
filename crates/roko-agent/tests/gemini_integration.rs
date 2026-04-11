@@ -268,7 +268,9 @@ async fn gemini_native_generate_content_with_function_calling() {
         &AgentOptions::default(),
     );
 
-    let result = agent.run(&prompt("Inspect src/lib.rs"), &Context::now()).await;
+    let result = agent
+        .run(&prompt("Inspect src/lib.rs"), &Context::now())
+        .await;
     assert!(result.success);
     assert_eq!(
         result.output.body.as_text().expect("output text"),
@@ -348,7 +350,9 @@ async fn gemini_native_generate_content_with_google_search_grounding() {
         &AgentOptions::default(),
     );
 
-    let result = agent.run(&prompt("What changed in Rust 2024?"), &Context::now()).await;
+    let result = agent
+        .run(&prompt("What changed in Rust 2024?"), &Context::now())
+        .await;
     assert!(result.success);
     let metadata: GeminiMetadata =
         serde_json::from_str(result.output.tag("gemini_meta").expect("gemini_meta"))
@@ -435,7 +439,10 @@ async fn gemini_native_generate_content_with_code_execution() {
 
     let result = agent.run(&prompt("Verify 2 + 2"), &Context::now()).await;
     assert!(result.success);
-    assert_eq!(result.output.body.as_text().expect("output text"), "Validated.");
+    assert_eq!(
+        result.output.body.as_text().expect("output text"),
+        "Validated."
+    );
 
     let metadata: GeminiMetadata =
         serde_json::from_str(result.output.tag("gemini_meta").expect("gemini_meta"))
@@ -540,14 +547,16 @@ async fn gemini_openai_compat_path_for_flash_lite() {
 
     let result = agent.run(&prompt("Say hi"), &Context::now()).await;
     assert!(result.success);
-    assert_eq!(result.output.body.as_text().expect("output text"), "compat ok");
+    assert_eq!(
+        result.output.body.as_text().expect("output text"),
+        "compat ok"
+    );
 
     let requests = server.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].path, "/v1beta/openai/v1/chat/completions");
     assert!(
-        header(&requests[0], "authorization")
-            .is_some_and(|value| value.starts_with("Bearer "))
+        header(&requests[0], "authorization").is_some_and(|value| value.starts_with("Bearer "))
     );
     let request_body: Value = serde_json::from_str(&requests[0].body).expect("request body json");
     assert_eq!(request_body["model"], "gemini-2.5-flash-lite");
