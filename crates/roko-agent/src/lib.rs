@@ -21,6 +21,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod agent;
+pub mod chat_types;
 pub mod claude_agent;
 pub mod claude_cli_agent;
 pub mod codex_agent;
@@ -47,6 +48,7 @@ pub mod translate;
 pub mod usage;
 
 pub use agent::{Agent, AgentResult};
+pub use chat_types::{ChatRequest, RequestOptions, ResponseFormat, ToolChoice};
 pub use claude_cli_agent::ClaudeCliAgent;
 pub use exec::ExecAgent;
 pub use mock::MockAgent;
