@@ -12,3 +12,4 @@ pub use chat::PerplexityChatAgent;
 pub use deep_research::PerplexityDeepResearchAgent;
 pub use embed::{EmbedError, PerplexityEmbedAgent};
 pub use search::{PerplexitySearchClient, SearchError, SearchQuery, SearchResponse};
+pub use types::{Annotation, PerplexityMetadata, SearchOptions, SearchResult};
