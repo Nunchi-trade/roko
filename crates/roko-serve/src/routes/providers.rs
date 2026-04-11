@@ -22,13 +22,27 @@ use roko_learn::provider_health::{HealthState, ProviderStatus};
 
 const PROVIDER_TEST_PROMPT: &str = "Say hello.";
 
+pub fn router() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/", get(list_providers))
+        .route("/{id}/health", get(provider_health))
+        .route("/{id}/test", post(test_provider))
+}
+
+pub fn models_router() -> Router<Arc<AppState>> {
+    Router::new().route("/", get(list_models))
+}
+
+pub fn routing_router() -> Router<Arc<AppState>> {
+    Router::new().route("/explain", get(explain_routing))
+}
+
+#[cfg(test)]
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/providers", get(list_providers))
-        .route("/providers/{id}/health", get(provider_health))
-        .route("/providers/{id}/test", post(test_provider))
-        .route("/models", get(list_models))
-        .route("/routing/explain", get(explain_routing))
+        .nest("/providers", router())
+        .nest("/models", models_router())
+        .nest("/routing", routing_router())
 }
 
 /// `GET /api/providers` — list configured providers with health and model counts.
@@ -160,11 +174,10 @@ async fn explain_routing(
 
     let eligible_explanation = (!available_candidates.is_empty())
         .then(|| router.explain_routing(&routing_ctx, &available_candidates));
-    let selected = eligible_explanation
-        .as_ref()
-        .map_or_else(|| all_explanation.selected_model.clone(), |explanation| {
-            explanation.selected_model.clone()
-        });
+    let selected = eligible_explanation.as_ref().map_or_else(
+        || all_explanation.selected_model.clone(),
+        |explanation| explanation.selected_model.clone(),
+    );
     let selected_model = model_slugs
         .iter()
         .find(|slug| routing_slugs_match(slug, &selected))
@@ -177,11 +190,10 @@ async fn explain_routing(
         .map(|candidate| (candidate.model.clone(), candidate))
         .collect();
 
-    let fallback_model = eligible_explanation
-        .as_ref()
-        .map_or_else(|| all_explanation.fallback_model.clone(), |explanation| {
-            explanation.fallback_model.clone()
-        });
+    let fallback_model = eligible_explanation.as_ref().map_or_else(
+        || all_explanation.fallback_model.clone(),
+        |explanation| explanation.fallback_model.clone(),
+    );
 
     let mut candidates: Vec<_> = model_slugs
         .iter()
@@ -190,10 +202,12 @@ async fn explain_routing(
             let model_info = model_catalog.get(slug.as_str());
             let provider = model_info
                 .map(|entry| entry.provider.clone())
-                .unwrap_or_else(|| resolved.profile.as_ref().map_or_else(
-                    || resolved.provider_kind.label().to_string(),
-                    |profile| profile.provider.clone(),
-                ));
+                .unwrap_or_else(|| {
+                    resolved.profile.as_ref().map_or_else(
+                        || resolved.provider_kind.label().to_string(),
+                        |profile| profile.provider.clone(),
+                    )
+                });
             let health = health_by_provider
                 .get(&provider)
                 .map(|status| provider_state_label(status.state).to_string())
@@ -205,7 +219,9 @@ async fn explain_routing(
                 provider,
                 score: detail.as_ref().map_or(0.0, |candidate| candidate.score),
                 selected: routing_slugs_match(slug, &selected_model),
-                eligible: available_candidates.iter().any(|candidate| candidate == slug),
+                eligible: available_candidates
+                    .iter()
+                    .any(|candidate| candidate == slug),
                 health,
                 cache_affinity: detail
                     .as_ref()
@@ -293,9 +309,7 @@ async fn test_provider(
     })?;
 
     let started = Instant::now();
-    let result = agent
-        .run(&provider_test_prompt(), &Context::now())
-        .await;
+    let result = agent.run(&provider_test_prompt(), &Context::now()).await;
     let fallback_latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let latency_ms = result.usage.wall_ms.max(fallback_latency_ms);
     let output = result
@@ -540,19 +554,24 @@ fn default_complexity_for_role(role: AgentRole) -> TaskComplexityBand {
     }
 }
 
-fn build_model_catalog(models: &HashMap<String, ModelProfile>) -> HashMap<String, ModelCatalogEntry> {
+fn build_model_catalog(
+    models: &HashMap<String, ModelProfile>,
+) -> HashMap<String, ModelCatalogEntry> {
     let mut catalog = HashMap::new();
     for (model_key, profile) in models {
-        catalog.entry(profile.slug.clone()).or_insert_with(|| ModelCatalogEntry {
-            model_key: Some(model_key.clone()),
-            provider: profile.provider.clone(),
-        });
+        catalog
+            .entry(profile.slug.clone())
+            .or_insert_with(|| ModelCatalogEntry {
+                model_key: Some(model_key.clone()),
+                provider: profile.provider.clone(),
+            });
     }
     catalog
 }
 
 fn routing_slugs_match(lhs: &str, rhs: &str) -> bool {
-    lhs == rhs || routing_slug_family(lhs).is_some_and(|family| routing_slug_family(rhs) == Some(family))
+    lhs == rhs
+        || routing_slug_family(lhs).is_some_and(|family| routing_slug_family(rhs) == Some(family))
 }
 
 fn routing_slug_family(slug: &str) -> Option<&'static str> {
@@ -605,7 +624,11 @@ mod tests {
     fn spawn_http_server(
         status_line: &str,
         response: String,
-    ) -> (String, Arc<std::sync::Mutex<Option<String>>>, thread::JoinHandle<()>) {
+    ) -> (
+        String,
+        Arc<std::sync::Mutex<Option<String>>>,
+        thread::JoinHandle<()>,
+    ) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
         let addr = listener.local_addr().expect("server addr");
         let captured = Arc::new(std::sync::Mutex::new(None));
@@ -1204,8 +1227,7 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("body bytes");
-        let response: ProviderTestResponse =
-            serde_json::from_slice(&body).expect("parse response");
+        let response: ProviderTestResponse = serde_json::from_slice(&body).expect("parse response");
 
         assert_eq!(response.provider_id, "zai");
         assert_eq!(response.model_key, "glm-5-1");

@@ -602,7 +602,11 @@ impl LinUCBRouter {
                 .map(|slug| {
                     (
                         slug.clone(),
-                        if slugs_match(slug, &selected) { 1.0 } else { 0.0 },
+                        if slugs_match(slug, &selected) {
+                            1.0
+                        } else {
+                            0.0
+                        },
                     )
                 })
                 .collect();

@@ -48,7 +48,9 @@ pub fn build_router(
         .merge(learning::routes())
         .merge(config::routes())
         .merge(deployments::routes())
-        .merge(providers::routes())
+        .nest("/providers", providers::router())
+        .nest("/models", providers::models_router())
+        .nest("/routing", providers::routing_router())
         .merge(sse::routes());
 
     let api = if api_auth.enabled {
