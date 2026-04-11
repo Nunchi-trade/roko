@@ -24,8 +24,71 @@
 //! tracker is an in-memory runtime component only.
 
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
+
+// ─── Serializable health snapshot types ────────────────────────────────────
+
+/// Serialized circuit state for persisted provider-health snapshots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CircuitState {
+    /// Normal operation.
+    Closed,
+    /// Requests are blocked while the provider cools down.
+    Open,
+    /// One probe request is allowed after cooldown expires.
+    HalfOpen,
+}
+
+/// Classified error category used to pick cooldown durations later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ErrorClass {
+    /// Provider returned a rate limit response.
+    RateLimit,
+    /// Provider returned an authentication or authorization failure.
+    AuthFailure,
+    /// Request timed out before completing.
+    Timeout,
+    /// Provider returned a 5xx or other transient server error.
+    ServerError,
+    /// Request was blocked by content policy.
+    ContentPolicy,
+    /// Context exceeded the provider's maximum window.
+    ContextOverflow,
+    /// Fallback classification when the exact class is unknown.
+    Unknown,
+}
+
+/// Timestamped failure entry for the rolling failure window.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailureRecord {
+    /// Failure timestamp in unix milliseconds.
+    pub timestamp_ms: i64,
+    /// Classified failure type.
+    pub error_class: ErrorClass,
+}
+
+/// Serializable per-provider health snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderHealth {
+    /// Stable provider identifier.
+    pub provider_id: String,
+    /// Snapshot circuit state.
+    pub state: CircuitState,
+    /// Consecutive failures seen most recently.
+    pub consecutive_failures: u32,
+    /// Lifetime request count.
+    pub total_requests: u64,
+    /// Lifetime failure count.
+    pub total_failures: u64,
+    /// Timestamp of the most recent failure, in unix milliseconds.
+    pub last_failure_at: Option<i64>,
+    /// Timestamp when the provider may be retried, in unix milliseconds.
+    pub cooldown_until: Option<i64>,
+    /// Rolling window of recent failures.
+    pub failure_window: Vec<FailureRecord>,
+}
 
 // ─── HealthState ─────────────────────────────────────────────────────────────
 
@@ -450,5 +513,39 @@ mod tests {
         assert_eq!(snap.len(), 1);
         assert_eq!(snap[0].total_attempts, 100);
         assert_eq!(snap[0].total_successes, 50);
+    }
+
+    /// Serializable snapshot types round-trip through JSON.
+    #[test]
+    fn provider_health_types() {
+        let health = ProviderHealth {
+            provider_id: "anthropic".to_owned(),
+            state: CircuitState::HalfOpen,
+            consecutive_failures: 3,
+            total_requests: 42,
+            total_failures: 7,
+            last_failure_at: Some(1_725_000_000_000),
+            cooldown_until: Some(1_725_000_030_000),
+            failure_window: vec![
+                FailureRecord {
+                    timestamp_ms: 1_725_000_000_000,
+                    error_class: ErrorClass::RateLimit,
+                },
+                FailureRecord {
+                    timestamp_ms: 1_725_000_010_000,
+                    error_class: ErrorClass::Timeout,
+                },
+            ],
+        };
+
+        let json = serde_json::to_string(&health).expect("serialize provider health");
+        let decoded: ProviderHealth =
+            serde_json::from_str(&json).expect("deserialize provider health");
+        assert_eq!(decoded, health);
+
+        let state_json = serde_json::to_string(&CircuitState::Open).expect("serialize state");
+        let decoded_state: CircuitState =
+            serde_json::from_str(&state_json).expect("deserialize state");
+        assert_eq!(decoded_state, CircuitState::Open);
     }
 }
