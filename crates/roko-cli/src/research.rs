@@ -8,9 +8,9 @@
 //!
 //! Research artifacts live in `.roko/research/` as markdown files.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
 use roko_agent::gemini::GroundingMetadata;
@@ -334,7 +334,9 @@ pub fn grounding_to_citations(meta: &GroundingMetadata) -> Vec<(String, String)>
     grounding_citation_numbers(meta).0
 }
 
-fn grounding_citation_numbers(meta: &GroundingMetadata) -> (Vec<(String, String)>, Vec<Option<usize>>) {
+fn grounding_citation_numbers(
+    meta: &GroundingMetadata,
+) -> (Vec<(String, String)>, Vec<Option<usize>>) {
     let mut citations = Vec::new();
     let mut chunk_numbers = Vec::new();
 
