@@ -2,15 +2,18 @@
 //!
 //! See [`roko_cli`] for the lib-side description. The binary exposes
 //! subcommands (`init`, `run`, `status`, `replay`, `dream`, `config`, `inject`,
-//! `plan`, `research`, `neuro`, `subscription`, `event-sources`) plus top-level flags for mode selection (`--headless`,
+//! `plan`, `research`, `neuro`, `subscription`, `event-sources`, `experiment`) plus top-level flags for mode selection (`--headless`,
 //! `--role`, `--model`, `--effort`, `--json`, `--log-format`, `--quiet`,
 //! `--resume`, `--repo`, `--no-replan`, and a positional `[prompt]` for
 //! one-shot mode).
 
 #![allow(clippy::too_many_lines)]
 
+mod commands;
+
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::{Parser, Subcommand, ValueEnum};
+use commands::experiment::{ExperimentCmd, dispatch_experiment};
 use octocrab::Octocrab;
 use octocrab::models::hooks::{Config as HookConfig, ContentType, Hook};
 use octocrab::models::webhook_events::WebhookEventType;
@@ -244,6 +247,11 @@ enum Command {
     EventSources {
         #[command(subcommand)]
         cmd: EventSourcesCmd,
+    },
+    /// Manage model experiments.
+    Experiment {
+        #[command(subcommand)]
+        cmd: ExperimentCmd,
     },
     /// Manage cloud deployment targets.
     Deploy {
@@ -841,6 +849,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             let _ = roko_cli::index::rebuild_all(&std::env::current_dir().unwrap_or_default());
             result
         }
+        Command::Experiment { cmd } => dispatch_experiment(cli, cmd),
         Command::Deploy { cmd } => cmd_deploy(cli, cmd).await,
         Command::Daemon { cmd } => cmd_daemon(cli, cmd).await,
         Command::Dashboard {
@@ -3931,6 +3940,31 @@ mod tests {
             cli.command,
             Some(Command::Neuro {
                 cmd: NeuroCmd::Gc { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_parses_experiment_model_create_subcommand() {
+        let cli = Cli::try_parse_from([
+            "roko",
+            "experiment",
+            "model",
+            "create",
+            "--id",
+            "glm-vs-kimi-impl",
+            "--role",
+            "implementer",
+            "--variant",
+            "glm-5-1:glm-5.1:zai",
+            "--variant",
+            "kimi-k2-5:kimi-k2.5:moonshot",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Experiment {
+                cmd: ExperimentCmd::Model { .. }
             })
         ));
     }

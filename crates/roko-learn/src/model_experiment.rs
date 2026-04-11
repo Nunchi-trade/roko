@@ -290,12 +290,22 @@ impl ModelExperimentStore {
             .count()
     }
 
+    /// Look up an experiment by id.
+    pub fn get(&self, experiment_id: &str) -> Option<&ModelExperiment> {
+        self.experiments.get(experiment_id)
+    }
+
     /// All concluded experiments.
     pub fn concluded_experiments(&self) -> Vec<&ModelExperiment> {
         self.experiments
             .values()
             .filter(|experiment| experiment.status == ExperimentStatus::Concluded)
             .collect()
+    }
+
+    /// Iterate over all experiments.
+    pub fn iter(&self) -> impl Iterator<Item = &ModelExperiment> {
+        self.experiments.values()
     }
 }
 
