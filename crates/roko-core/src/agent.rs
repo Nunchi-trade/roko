@@ -120,6 +120,17 @@ impl AgentBackend {
     }
 }
 
+impl From<AgentBackend> for ProviderKind {
+    fn from(backend: AgentBackend) -> Self {
+        match backend {
+            AgentBackend::Claude => ProviderKind::ClaudeCli,
+            AgentBackend::Codex | AgentBackend::OpenAi => ProviderKind::OpenAiCompat,
+            AgentBackend::Cursor => ProviderKind::CursorAcp,
+            AgentBackend::Ollama => ProviderKind::OpenAiCompat,
+        }
+    }
+}
+
 fn is_cursor_slug(slug: &str) -> bool {
     slug.starts_with("composer-")
         || slug.starts_with("cursor-")
@@ -135,13 +146,7 @@ fn is_cursor_slug(slug: &str) -> bool {
 }
 
 fn provider_kind_from_backend(backend: AgentBackend) -> ProviderKind {
-    match backend {
-        AgentBackend::Claude => ProviderKind::ClaudeCli,
-        AgentBackend::Codex | AgentBackend::OpenAi | AgentBackend::Ollama => {
-            ProviderKind::OpenAiCompat
-        }
-        AgentBackend::Cursor => ProviderKind::CursorAcp,
-    }
+    backend.into()
 }
 
 // ─── ModelSpec (slug + inferred backend) ──────────────────────────────────
@@ -814,6 +819,15 @@ mod tests {
     fn backend_from_codex_slug() {
         assert_eq!(AgentBackend::from_model("gpt-5"), AgentBackend::Codex);
         assert_eq!(AgentBackend::from_model("o3-mini"), AgentBackend::Codex);
+    }
+
+    #[test]
+    fn backend_to_provider_kind() {
+        assert_eq!(ProviderKind::from(AgentBackend::Claude), ProviderKind::ClaudeCli);
+        assert_eq!(ProviderKind::from(AgentBackend::Codex), ProviderKind::OpenAiCompat);
+        assert_eq!(ProviderKind::from(AgentBackend::OpenAi), ProviderKind::OpenAiCompat);
+        assert_eq!(ProviderKind::from(AgentBackend::Cursor), ProviderKind::CursorAcp);
+        assert_eq!(ProviderKind::from(AgentBackend::Ollama), ProviderKind::OpenAiCompat);
     }
 
     #[test]
