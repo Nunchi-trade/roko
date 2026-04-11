@@ -19,6 +19,7 @@ use roko_core::tool::{ToolCall, ToolContext, ToolDef};
 
 use crate::dispatcher::ToolDispatcher;
 use crate::translate::{BackendResponse, RenderedTools, Translator};
+use crate::usage::Usage;
 
 pub mod agent_wrapper;
 pub mod checkpoint;
@@ -90,6 +91,8 @@ pub struct ToolLoopOutput {
     pub iterations: usize,
     /// All tool calls dispatched across every iteration.
     pub tool_calls: Vec<ToolCall>,
+    /// Aggregated usage across every backend turn in the loop.
+    pub total_usage: Usage,
     /// Why the loop stopped.
     pub stop_reason: StopReason,
     /// Resumable snapshot — populated when `stop_reason != Stop`.
@@ -151,7 +154,8 @@ impl ToolLoop {
         ctx: &ToolContext,
     ) -> ToolLoopOutput {
         let messages = result_msg::initial_messages(system, user);
-        self.run_inner(messages, 0, Vec::new(), tools, ctx).await
+        self.run_inner(messages, 0, Vec::new(), Usage::default(), tools, ctx)
+            .await
     }
 
     /// Resume a tool loop from a previously saved [`Checkpoint`].
@@ -161,8 +165,15 @@ impl ToolLoop {
         tools: &[ToolDef],
         ctx: &ToolContext,
     ) -> ToolLoopOutput {
-        self.run_inner(cp.messages, cp.iterations, cp.tool_calls, tools, ctx)
-            .await
+        self.run_inner(
+            cp.messages,
+            cp.iterations,
+            cp.tool_calls,
+            Usage::default(),
+            tools,
+            ctx,
+        )
+        .await
     }
 
     /// Core loop shared by [`run`](Self::run) and [`resume`](Self::resume).
@@ -171,6 +182,7 @@ impl ToolLoop {
         mut messages: Vec<serde_json::Value>,
         mut iterations: usize,
         mut all_calls: Vec<ToolCall>,
+        mut total_usage: Usage,
         tools: &[ToolDef],
         ctx: &ToolContext,
     ) -> ToolLoopOutput {
@@ -184,6 +196,7 @@ impl ToolLoop {
                     final_text: String::new(),
                     iterations,
                     tool_calls: all_calls,
+                    total_usage,
                     stop_reason: StopReason::MaxIterations,
                     checkpoint: Some(cp),
                 };
@@ -196,6 +209,7 @@ impl ToolLoop {
                     final_text: String::new(),
                     iterations,
                     tool_calls: all_calls,
+                    total_usage,
                     stop_reason: StopReason::Cancelled,
                     checkpoint: Some(cp),
                 };
@@ -210,11 +224,13 @@ impl ToolLoop {
                         final_text: String::new(),
                         iterations,
                         tool_calls: all_calls,
+                        total_usage,
                         stop_reason: StopReason::BackendError(e.to_string()),
                         checkpoint: Some(cp),
                     };
                 }
             };
+            total_usage.add(&response.extract_usage());
 
             // Parse tool calls from the response.
             let calls = match self.translator.parse_calls(&response) {
@@ -225,6 +241,7 @@ impl ToolLoop {
                         final_text: String::new(),
                         iterations,
                         tool_calls: all_calls,
+                        total_usage,
                         stop_reason: StopReason::BackendError(format!("parse: {e}")),
                         checkpoint: Some(cp),
                     };
@@ -238,6 +255,7 @@ impl ToolLoop {
                     final_text,
                     iterations,
                     tool_calls: all_calls,
+                    total_usage,
                     stop_reason: StopReason::Stop,
                     checkpoint: None,
                 };

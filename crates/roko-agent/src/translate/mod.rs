@@ -34,6 +34,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub use crate::chat_types::{ChatResponse, FinishReason, ResponseMetadata, SessionState};
+use crate::usage::Usage;
 use roko_core::tool::{ToolCall, ToolDef, ToolFormat, ToolResult};
 
 pub mod capability;
@@ -196,6 +197,15 @@ impl BackendResponse {
             Self::Text(_) => None,
         }
     }
+
+    /// Extract token usage metadata when the backend reports it.
+    #[must_use]
+    pub fn extract_usage(&self) -> Usage {
+        match self {
+            Self::Json(v) => openai::parse_usage(v),
+            Self::StreamJson(_) | Self::Text(_) => Usage::default(),
+        }
+    }
 }
 
 fn extract_reasoning_from_value(value: &serde_json::Value) -> Option<String> {
@@ -291,7 +301,6 @@ pub enum TranslatorError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Usage;
 
     #[test]
     fn backend_response_extract_text_from_text() {
@@ -367,6 +376,28 @@ mod tests {
             }),
         ]);
         assert_eq!(r.extract_reasoning(), Some("step 1 step 2".to_string()));
+    }
+
+    #[test]
+    fn backend_response_extract_usage_from_openai_json() {
+        let r = BackendResponse::Json(serde_json::json!({
+            "usage": {
+                "prompt_tokens": 12,
+                "completion_tokens": 5,
+                "prompt_tokens_details": {
+                    "cached_tokens": 3
+                }
+            }
+        }));
+        assert_eq!(
+            r.extract_usage(),
+            Usage {
+                input_tokens: 12,
+                output_tokens: 5,
+                cache_read_tokens: 3,
+                ..Default::default()
+            }
+        );
     }
 
     #[test]

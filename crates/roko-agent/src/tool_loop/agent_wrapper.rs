@@ -91,22 +91,26 @@ impl Agent for ToolLoopAgent {
                 &output.final_text,
                 "stop",
                 output.iterations,
-            )),
+            ))
+            .with_usage(output.total_usage),
             StopReason::MaxIterations => AgentResult::fail(Self::output_signal(
                 &format!("Max iterations ({}) reached", output.iterations),
                 "max_iterations",
                 output.iterations,
-            )),
+            ))
+            .with_usage(output.total_usage),
             StopReason::Cancelled => AgentResult::fail(Self::output_signal(
                 "Tool loop cancelled",
                 "cancelled",
                 output.iterations,
-            )),
+            ))
+            .with_usage(output.total_usage),
             StopReason::BackendError(err) => AgentResult::fail(Self::output_signal(
                 &err,
                 "backend_error",
                 output.iterations,
-            )),
+            ))
+            .with_usage(output.total_usage),
         }
     }
 
