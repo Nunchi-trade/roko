@@ -43,6 +43,7 @@
 
 use crate::cost_table::CostTable;
 use parking_lot::Mutex;
+use rand::Rng;
 use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
 use roko_core::task::{TaskCategory, TaskComplexityBand};
 use serde::{Deserialize, Serialize};
@@ -67,6 +68,8 @@ const ALPHA_MAX: f64 = 1.0;
 /// `exp(-200/60) ~ 0.036`, giving alpha ~ 0.084,
 /// and it effectively converges to `ALPHA_MIN`.
 const ALPHA_TAU: f64 = 60.0;
+/// Default discount factor for Thompson sampling in non-stationary environments.
+const THOMPSON_DEFAULT_DISCOUNT: f64 = 0.99;
 
 // ─── RoutingContext ─────────────────────────────────────────────────────────
 
@@ -275,6 +278,69 @@ impl ArmState {
     }
 }
 
+/// Serializable state for one Thompson-sampling arm.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThompsonArm {
+    /// Model slug this arm represents.
+    pub slug: String,
+    /// Success count plus Beta prior.
+    pub alpha: f64,
+    /// Failure count plus Beta prior.
+    pub beta: f64,
+    /// Running reward sum for future continuous Thompson variants.
+    pub sum_reward: f64,
+    /// Running squared reward sum for future continuous Thompson variants.
+    pub sum_reward_sq: f64,
+    /// Number of observations recorded for this arm.
+    pub observations: u64,
+    /// Discount factor applied before each update for non-stationarity.
+    pub discount: f64,
+}
+
+impl ThompsonArm {
+    /// Create a fresh Thompson arm with Beta(1, 1) priors.
+    #[must_use]
+    pub fn new(slug: impl Into<String>) -> Self {
+        Self {
+            slug: slug.into(),
+            alpha: 1.0,
+            beta: 1.0,
+            sum_reward: 0.0,
+            sum_reward_sq: 0.0,
+            observations: 0,
+            discount: THOMPSON_DEFAULT_DISCOUNT,
+        }
+    }
+
+    /// Sample a Bernoulli success rate from the arm's Beta posterior.
+    #[must_use]
+    pub fn sample(&self) -> f64 {
+        let mut rng = rand::thread_rng();
+        self.sample_with_rng(&mut rng)
+    }
+
+    /// Update the posterior with a new reward and success outcome.
+    pub fn update(&mut self, reward: f64, success: bool) {
+        self.alpha = 1.0 + self.discount * (self.alpha - 1.0);
+        self.beta = 1.0 + self.discount * (self.beta - 1.0);
+
+        if success {
+            self.alpha += 1.0;
+        } else {
+            self.beta += 1.0;
+        }
+
+        self.sum_reward += reward;
+        self.sum_reward_sq += reward * reward;
+        self.observations += 1;
+    }
+
+    #[must_use]
+    fn sample_with_rng<R: Rng + ?Sized>(&self, rng: &mut R) -> f64 {
+        sample_beta(self.alpha, self.beta, rng).clamp(0.0, 1.0)
+    }
+}
+
 // ─── Simple matrix operations ───────────────────────────────────────────────
 
 /// Multiply a matrix A (n x n) by a vector x (n x 1), returning n x 1.
@@ -287,6 +353,60 @@ fn mat_vec_mul(a: &[Vec<f64>], x: &[f64]) -> Vec<f64> {
 /// Dot product of two vectors.
 fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(ai, bi)| ai * bi).sum()
+}
+
+fn sample_beta<R: Rng + ?Sized>(alpha: f64, beta: f64, rng: &mut R) -> f64 {
+    let x = sample_gamma(alpha.max(f64::MIN_POSITIVE), rng);
+    let y = sample_gamma(beta.max(f64::MIN_POSITIVE), rng);
+    let total = x + y;
+    if total <= 0.0 { 0.5 } else { x / total }
+}
+
+fn sample_gamma<R: Rng + ?Sized>(shape: f64, rng: &mut R) -> f64 {
+    if shape <= 0.0 {
+        return 0.0;
+    }
+
+    if shape < 1.0 {
+        let u = sample_open_unit(rng);
+        return sample_gamma(shape + 1.0, rng) * u.powf(1.0 / shape);
+    }
+
+    if (shape - 1.0).abs() < f64::EPSILON {
+        return -sample_open_unit(rng).ln();
+    }
+
+    let d = shape - (1.0 / 3.0);
+    let c = (1.0 / (9.0 * d)).sqrt();
+
+    loop {
+        let x = sample_standard_normal(rng);
+        let v = 1.0 + c * x;
+        if v <= 0.0 {
+            continue;
+        }
+
+        let v_cubed = v * v * v;
+        let u = sample_open_unit(rng);
+
+        if u < 1.0 - 0.0331 * x.powi(4) {
+            return d * v_cubed;
+        }
+
+        if u.ln() < 0.5 * x * x + d * (1.0 - v_cubed + v_cubed.ln()) {
+            return d * v_cubed;
+        }
+    }
+}
+
+fn sample_standard_normal<R: Rng + ?Sized>(rng: &mut R) -> f64 {
+    let u1 = sample_open_unit(rng);
+    let u2 = sample_open_unit(rng);
+    (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+}
+
+fn sample_open_unit<R: Rng + ?Sized>(rng: &mut R) -> f64 {
+    rng.gen_range(f64::MIN_POSITIVE..1.0)
 }
 
 /// Compute the inverse of a positive-definite matrix using Cholesky decomposition.
@@ -864,6 +984,8 @@ fn slug_family(slug: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
 
     fn test_slugs() -> Vec<String> {
         vec![
@@ -1468,5 +1590,104 @@ mod tests {
             }
             assert!((arm.b_vector[i]).abs() < f64::EPSILON);
         }
+    }
+
+    #[test]
+    fn thompson_arm_sample_beta_in_unit_interval() {
+        let arm = ThompsonArm {
+            slug: "test".to_string(),
+            alpha: 3.0,
+            beta: 2.0,
+            sum_reward: 0.0,
+            sum_reward_sq: 0.0,
+            observations: 0,
+            discount: THOMPSON_DEFAULT_DISCOUNT,
+        };
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+
+        for _ in 0..256 {
+            let sample = arm.sample_with_rng(&mut rng);
+            assert!(
+                (0.0..=1.0).contains(&sample),
+                "beta sample should stay in [0, 1], got {sample}"
+            );
+        }
+    }
+
+    #[test]
+    fn thompson_arm_posterior_shifts_toward_more_successes() {
+        let success_arm = ThompsonArm {
+            slug: "success".to_string(),
+            alpha: 9.0,
+            beta: 2.0,
+            sum_reward: 0.0,
+            sum_reward_sq: 0.0,
+            observations: 0,
+            discount: THOMPSON_DEFAULT_DISCOUNT,
+        };
+        let failure_arm = ThompsonArm {
+            slug: "failure".to_string(),
+            alpha: 2.0,
+            beta: 9.0,
+            sum_reward: 0.0,
+            sum_reward_sq: 0.0,
+            observations: 0,
+            discount: THOMPSON_DEFAULT_DISCOUNT,
+        };
+        let mut success_rng = ChaCha8Rng::seed_from_u64(11);
+        let mut failure_rng = ChaCha8Rng::seed_from_u64(29);
+
+        #[allow(clippy::cast_precision_loss)]
+        let success_mean = (0..1024)
+            .map(|_| success_arm.sample_with_rng(&mut success_rng))
+            .sum::<f64>()
+            / 1024.0;
+        #[allow(clippy::cast_precision_loss)]
+        let failure_mean = (0..1024)
+            .map(|_| failure_arm.sample_with_rng(&mut failure_rng))
+            .sum::<f64>()
+            / 1024.0;
+
+        assert!(
+            success_mean > failure_mean,
+            "posterior with more successes should sample higher on average: {success_mean} vs {failure_mean}"
+        );
+        assert!(
+            success_mean > 0.5,
+            "success-heavy posterior should skew above 0.5"
+        );
+        assert!(
+            failure_mean < 0.5,
+            "failure-heavy posterior should skew below 0.5"
+        );
+    }
+
+    #[test]
+    fn thompson_arm_update_applies_discount_and_accumulates_reward() {
+        let mut arm = ThompsonArm {
+            slug: "test".to_string(),
+            alpha: 5.0,
+            beta: 3.0,
+            sum_reward: 1.5,
+            sum_reward_sq: 1.25,
+            observations: 4,
+            discount: 0.99,
+        };
+
+        arm.update(0.8, true);
+
+        assert!((arm.alpha - 5.96).abs() < 1e-10, "alpha = {}", arm.alpha);
+        assert!((arm.beta - 2.98).abs() < 1e-10, "beta = {}", arm.beta);
+        assert!(
+            (arm.sum_reward - 2.3).abs() < 1e-10,
+            "sum_reward = {}",
+            arm.sum_reward
+        );
+        assert!(
+            (arm.sum_reward_sq - 1.89).abs() < 1e-10,
+            "sum_reward_sq = {}",
+            arm.sum_reward_sq
+        );
+        assert_eq!(arm.observations, 5);
     }
 }
