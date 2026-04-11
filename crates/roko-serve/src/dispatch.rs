@@ -5,12 +5,13 @@
 //! while enforcing per-subscription concurrency, cooldown, and dedup
 //! constraints.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
+    OnceLock,
 };
 use std::time::{Duration, Instant};
 
@@ -33,6 +34,7 @@ use roko_core::{Body, Context as RokoContext, Kind, Provenance, Signal};
 use roko_core::{ContentHash, Verdict};
 use roko_daimon::{AffectEngine as _, AffectEvent};
 use roko_learn::cascade_router::CascadeRouter;
+use roko_learn::anomaly::{Anomaly, AnomalyDetector};
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage as EpisodeUsage};
 use roko_learn::prompt_experiment::ExperimentStore;
@@ -176,7 +178,32 @@ struct DispatchOutcome {
     result: AgentResult,
     gate_verdicts: Vec<GateVerdict>,
     success: bool,
+    model_used: String,
 }
+
+#[derive(Debug)]
+struct QueuedAnomaly {
+    anomaly: Anomaly,
+    model_slug: String,
+}
+
+#[derive(Debug)]
+struct DispatchAnomalySession {
+    detector: AnomalyDetector,
+    pending: VecDeque<QueuedAnomaly>,
+}
+
+impl DispatchAnomalySession {
+    fn new() -> Self {
+        Self {
+            detector: AnomalyDetector::new(Utc::now().timestamp_millis()),
+            pending: VecDeque::new(),
+        }
+    }
+}
+
+static DISPATCH_ANOMALY_SESSIONS: OnceLock<Mutex<HashMap<PathBuf, DispatchAnomalySession>>> =
+    OnceLock::new();
 
 #[derive(Debug, Clone)]
 struct EfficiencyTracker {
@@ -257,6 +284,203 @@ impl EfficiencyTracker {
             .with_context(|| format!("open {}", self.path.display()))?;
         file.write_all(line.as_bytes()).await?;
         Ok(())
+    }
+}
+
+fn dispatch_anomaly_sessions() -> &'static Mutex<HashMap<PathBuf, DispatchAnomalySession>> {
+    DISPATCH_ANOMALY_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn with_dispatch_anomaly_session<T>(
+    session_root: &Path,
+    f: impl FnOnce(&mut DispatchAnomalySession) -> T,
+) -> T {
+    let sessions = dispatch_anomaly_sessions();
+    let mut sessions = sessions.lock();
+    let session = sessions
+        .entry(session_root.to_path_buf())
+        .or_insert_with(DispatchAnomalySession::new);
+    f(session)
+}
+
+fn drain_pending_anomalies(session_root: &Path) -> Vec<QueuedAnomaly> {
+    with_dispatch_anomaly_session(session_root, |session| session.pending.drain(..).collect())
+}
+
+fn queue_pending_anomaly(session_root: &Path, anomaly: Anomaly, model_slug: String) {
+    with_dispatch_anomaly_session(session_root, |session| {
+        session.pending.push_back(QueuedAnomaly {
+            anomaly,
+            model_slug,
+        });
+    });
+}
+
+fn prompt_hash_u64(signal: &Signal) -> u64 {
+    let hash = signal.content_hash();
+    let bytes: [u8; 8] = hash.0[..8].try_into().expect("content hash prefix");
+    u64::from_be_bytes(bytes)
+}
+
+fn downgrade_model_slug(current: &str, config: &RokoConfig) -> Option<String> {
+    if let Some(fallback) = config.agent.fallback_model.as_ref()
+        && !fallback.trim().is_empty()
+        && fallback != current
+    {
+        return Some(fallback.clone());
+    }
+
+    if current.contains("opus") {
+        return Some(current.replacen("opus", "sonnet", 1));
+    }
+    if current.contains("sonnet") {
+        return Some(current.replacen("sonnet", "haiku", 1));
+    }
+    if current.contains("gpt-5-pro") {
+        return Some(current.replacen("gpt-5-pro", "gpt-5", 1));
+    }
+    if current.contains("gpt-5") && !current.contains("mini") {
+        return Some(current.replacen("gpt-5", "gpt-5-mini", 1));
+    }
+    None
+}
+
+async fn apply_pending_anomalies(
+    state: &Arc<AppState>,
+    template: &AgentTemplate,
+    session_root: &Path,
+    repo_layout: Option<&RokoLayout>,
+    routed_model: &mut String,
+    config: &RokoConfig,
+) -> Result<()> {
+    let pending = drain_pending_anomalies(session_root);
+    for queued in pending {
+        match queued.anomaly {
+            Anomaly::CostSpike { z_score } => {
+                warn!(
+                    template = %template.name,
+                    model = %routed_model,
+                    z_score,
+                    "cost spike detected; downgrading model"
+                );
+                if let Some(downgraded) = downgrade_model_slug(routed_model, config) {
+                    warn!(
+                        template = %template.name,
+                        from_model = %routed_model,
+                        to_model = %downgraded,
+                        "applying anomaly-driven model downgrade"
+                    );
+                    *routed_model = downgraded;
+                }
+            }
+            Anomaly::QualityDegradation { avg_drop } => {
+                warn!(
+                    template = %template.name,
+                    model = %queued.model_slug,
+                    avg_drop,
+                    "quality degradation detected; recording negative router observation"
+                );
+                let mut observation_template = template.clone();
+                observation_template.model = queued.model_slug;
+                record_cascade_router_outcome_with_layout(
+                    state,
+                    &observation_template,
+                    false,
+                    repo_layout,
+                )
+                .await?;
+            }
+            Anomaly::PromptLoop { repeated_count } => {
+                return Err(anyhow::anyhow!(
+                    "prompt loop detected after {} identical prompts",
+                    repeated_count
+                ));
+            }
+            Anomaly::BudgetExhausted { used, limit } => {
+                return Err(anyhow::anyhow!(
+                    "session budget exhausted: ${used:.2} >= ${limit:.2}"
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_anomaly_preflight(
+    state: &Arc<AppState>,
+    template: &AgentTemplate,
+    dispatch_signal: &Signal,
+    repo_ctx: Option<&RepoContext>,
+    routed_model: &mut String,
+) -> Result<()> {
+    let session_root = repo_ctx
+        .map(|ctx| ctx.repo_workdir.as_path())
+        .unwrap_or_else(|| state.workdir.as_path());
+    let repo_layout = repo_ctx.map(|ctx| &ctx.layout);
+    let base_config = state.roko_config.read().await.clone();
+    let effective_config = repo_ctx
+        .and_then(|ctx| ctx.repo_config.clone())
+        .unwrap_or(base_config);
+
+    apply_pending_anomalies(
+        state,
+        template,
+        session_root,
+        repo_layout,
+        routed_model,
+        &effective_config,
+    )
+    .await?;
+
+    let prompt_hash = prompt_hash_u64(dispatch_signal);
+    if let Some(Anomaly::PromptLoop { repeated_count }) = with_dispatch_anomaly_session(
+        session_root,
+        |session| session.detector.check_prompt(prompt_hash),
+    ) {
+        return Err(anyhow::anyhow!(
+            "prompt loop detected after {} identical prompts",
+            repeated_count
+        ));
+    }
+
+    let budget_limit = f64::from(effective_config.budget.max_plan_usd);
+    if let Some(Anomaly::BudgetExhausted { used, limit }) = with_dispatch_anomaly_session(
+        session_root,
+        |session| session.detector.check_budget(budget_limit),
+    ) {
+        let _ = (used, limit);
+        return Err(anyhow::anyhow!(
+            "session budget exhausted: ${used:.2} >= ${limit:.2}"
+        ));
+    }
+
+    Ok(())
+}
+
+fn record_post_turn_anomalies(
+    session_root: &Path,
+    model_slug: &str,
+    cost_usd: f64,
+    quality_score: f64,
+    budget_limit: f64,
+) {
+    let anomalies = with_dispatch_anomaly_session(session_root, |session| {
+        let mut observed = Vec::new();
+        if let Some(anomaly) = session.detector.check_cost(cost_usd) {
+            observed.push(anomaly);
+        }
+        if let Some(anomaly) = session.detector.check_quality(quality_score) {
+            observed.push(anomaly);
+        }
+        if let Some(anomaly) = session.detector.check_budget(budget_limit) {
+            observed.push(anomaly);
+        }
+        observed
+    });
+
+    for anomaly in anomalies {
+        queue_pending_anomaly(session_root, anomaly, model_slug.to_string());
     }
 }
 
@@ -1319,6 +1543,7 @@ async fn dispatch_agent(
                 result: AgentResult::fail(fallback_output),
                 gate_verdicts: Vec::new(),
                 success: false,
+                model_used: template.model.clone(),
             }
         }
     };
@@ -1346,6 +1571,15 @@ async fn dispatch_template(
 ) -> Result<DispatchOutcome> {
     let dispatch_started = Instant::now();
     let dispatch_signal = build_dispatch_signal(&template, &signal)?;
+    let mut routed_template = template.clone();
+    run_anomaly_preflight(
+        &state,
+        &template,
+        &dispatch_signal,
+        repo_ctx,
+        &mut routed_template.model,
+    )
+    .await?;
 
     // When a repo context is available, create a repo-aware dispatcher
     // so the agent runs in the repo's directory with cross-repo context.
@@ -1365,7 +1599,7 @@ async fn dispatch_template(
     };
 
     let dispatch_result = match effective_dispatcher
-        .dispatch(template.clone(), dispatch_signal.clone())
+        .dispatch(routed_template.clone(), dispatch_signal.clone())
         .await
     {
         Ok(result) => result,
@@ -1391,6 +1625,7 @@ async fn dispatch_template(
                 result,
                 gate_verdicts: Vec::new(),
                 success: false,
+                model_used: routed_template.model.clone(),
             });
         }
     };
@@ -1412,6 +1647,21 @@ async fn dispatch_template(
     }
 
     let success = dispatch_result.success && gate_verdicts.iter().all(|verdict| verdict.passed);
+    let model_used = output
+        .tag("model")
+        .map(str::to_string)
+        .unwrap_or_else(|| routed_template.model.clone());
+    let session_root = repo_ctx
+        .map(|ctx| ctx.repo_workdir.as_path())
+        .unwrap_or_else(|| state.workdir.as_path());
+    let budget_limit = f64::from(state.roko_config.read().await.budget.max_plan_usd);
+    record_post_turn_anomalies(
+        session_root,
+        &model_used,
+        f64::from(dispatch_result.usage.cost_usd),
+        if success { 1.0 } else { 0.0 },
+        budget_limit,
+    );
     record_template_run(&state, &template.name, success).await;
 
     let completion_kind = format!("template_dispatch:{}", template.name);
@@ -1432,6 +1682,7 @@ async fn dispatch_template(
         result: dispatch_result,
         gate_verdicts,
         success,
+        model_used,
     })
 }
 
@@ -1736,6 +1987,8 @@ async fn append_dispatch_episode(
         .output
         .tag("agent")
         .map_or_else(|| "claude".to_string(), ToString::to_string);
+    let mut recording_template = template.clone();
+    recording_template.model = outcome.model_used.clone();
     let episode_id = Uuid::new_v4().to_string();
     let turns = 1_u64;
     let tokens_used = u64::from(outcome.result.usage.total_tokens());
@@ -1745,7 +1998,7 @@ async fn append_dispatch_episode(
     episode.id = episode_id.clone();
     episode.episode_id = episode_id;
     episode.agent_template = template.name.clone();
-    episode.model = template.model.clone();
+    episode.model = recording_template.model.clone();
     episode.trigger_kind = signal.kind.as_str().to_string();
     episode.trigger_signal_hash = signal.id.to_hex();
     episode.started_at = started_at;
@@ -1833,7 +2086,7 @@ async fn append_dispatch_episode(
 
     if let Err(err) = record_cascade_router_outcome_with_layout(
         state,
-        template,
+        &recording_template,
         outcome.result.success,
         repo_layout,
     )
@@ -2383,5 +2636,40 @@ filter = { path = "src/*.rs" }
             .as_deref()
             .unwrap_or(global_dir.path());
         assert_eq!(effective, repo_dir.path());
+    }
+
+    #[test]
+    fn anomaly_dispatch_prompt_loop_halts_after_five_identical_prompts() {
+        let session_root = tempfile::tempdir().expect("session tempdir");
+        let signal = Signal::builder(Kind::Prompt)
+            .body(Body::text("looping prompt"))
+            .provenance(Provenance::trusted("test"))
+            .build();
+        let prompt_hash = prompt_hash_u64(&signal);
+
+        for _ in 0..4 {
+            let anomaly = with_dispatch_anomaly_session(session_root.path(), |session| {
+                session.detector.check_prompt(prompt_hash)
+            });
+            assert!(anomaly.is_none());
+        }
+
+        let anomaly = with_dispatch_anomaly_session(session_root.path(), |session| {
+            session.detector.check_prompt(prompt_hash)
+        });
+
+        assert!(matches!(
+            anomaly,
+            Some(Anomaly::PromptLoop { repeated_count: 5 })
+        ));
+    }
+
+    #[test]
+    fn anomaly_dispatch_model_downgrade_prefers_configured_fallback() {
+        let mut config = RokoConfig::default();
+        config.agent.fallback_model = Some("claude-haiku-3-5".to_string());
+
+        let downgraded = downgrade_model_slug("claude-opus-4", &config);
+        assert_eq!(downgraded.as_deref(), Some("claude-haiku-3-5"));
     }
 }
