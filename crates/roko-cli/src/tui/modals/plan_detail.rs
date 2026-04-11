@@ -40,7 +40,7 @@ pub fn render_plan_detail_modal(
         .split(inner);
 
     // Plan metadata header.
-    let ratio = if plan.tasks_total > 0 {
+    let _ratio = if plan.tasks_total > 0 {
         plan.tasks_done as f64 / plan.tasks_total as f64
     } else {
         0.0

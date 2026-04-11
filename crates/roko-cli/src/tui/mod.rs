@@ -12,10 +12,13 @@ pub mod dashboard;
 pub mod event;
 pub mod layout;
 pub mod modals;
+pub mod mori_atmosphere;
+pub mod mori_theme;
 pub mod pages;
 pub mod postfx;
 pub mod tabs;
 pub mod theme;
+pub mod tui_state;
 pub mod views;
 pub mod widgets;
 

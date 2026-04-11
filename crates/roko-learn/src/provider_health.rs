@@ -21,12 +21,15 @@
 //!
 //! Recovery timestamps use [`std::time::Instant`] so they are immune to
 //! wall-clock adjustments. Because `Instant` is not serializable, the
-//! tracker is an in-memory runtime component only.
+//! tracker is an in-memory runtime component only. Persisted provider
+//! snapshots use unix milliseconds and are handled by
+//! [`ProviderHealthRegistry`].
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::path::Path;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // ─── Serializable health snapshot types ────────────────────────────────────
 
@@ -154,6 +157,125 @@ impl ProviderHealth {
             _ => 5_000,
         }
     }
+}
+
+/// Persisted registry snapshot for loading and saving provider health.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct ProviderHealthRegistrySnapshot {
+    /// Per-provider health snapshots keyed by provider id.
+    providers: HashMap<String, ProviderHealth>,
+}
+
+/// Thread-safe registry of provider health snapshots.
+///
+/// The registry stores [`ProviderHealth`] values keyed by provider id and
+/// provides a disk-backed persistence layer for the runtime circuit breaker.
+pub struct ProviderHealthRegistry {
+    providers: Mutex<HashMap<String, ProviderHealth>>,
+}
+
+impl ProviderHealthRegistry {
+    /// Create an empty registry.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            providers: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Record a successful request for `provider_id`.
+    pub fn record_success(&self, provider_id: &str) {
+        let mut providers = self.providers.lock();
+        let health = providers
+            .entry(provider_id.to_owned())
+            .or_insert_with(|| new_provider_health(provider_id));
+        health.record_success();
+    }
+
+    /// Record a failed request for `provider_id`.
+    pub fn record_failure(&self, provider_id: &str, error: ErrorClass) {
+        let mut providers = self.providers.lock();
+        let health = providers
+            .entry(provider_id.to_owned())
+            .or_insert_with(|| new_provider_health(provider_id));
+        health.record_failure(error, unix_ms_now());
+    }
+
+    /// Return whether `provider_id` is currently available for routing.
+    ///
+    /// Unknown providers are treated as available.
+    pub fn is_available(&self, provider_id: &str) -> bool {
+        let mut providers = self.providers.lock();
+        match providers.get_mut(provider_id) {
+            Some(health) => health.is_available(unix_ms_now()),
+            None => true,
+        }
+    }
+
+    /// Filter `candidates` to only providers that are currently available.
+    pub fn available_providers(&self, candidates: &[String]) -> Vec<String> {
+        candidates
+            .iter()
+            .filter(|provider_id| self.is_available(provider_id))
+            .cloned()
+            .collect()
+    }
+
+    /// Persist the registry to `path` as JSON.
+    pub fn save(&self, path: &Path) -> Result<(), std::io::Error> {
+        let snapshot = ProviderHealthRegistrySnapshot {
+            providers: self.providers.lock().clone(),
+        };
+        let json = serde_json::to_string_pretty(&snapshot)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, json)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    /// Load the registry from `path`, or return a new empty registry.
+    pub fn load_or_new(path: &Path) -> Self {
+        let snapshot = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<ProviderHealthRegistrySnapshot>(&s).ok());
+
+        match snapshot {
+            Some(snapshot) => Self {
+                providers: Mutex::new(snapshot.providers),
+            },
+            None => Self::new(),
+        }
+    }
+}
+
+impl Default for ProviderHealthRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn new_provider_health(provider_id: &str) -> ProviderHealth {
+    ProviderHealth {
+        provider_id: provider_id.to_owned(),
+        state: CircuitState::Closed,
+        consecutive_failures: 0,
+        total_requests: 0,
+        total_failures: 0,
+        last_failure_at: None,
+        cooldown_until: None,
+        failure_window: Vec::new(),
+    }
+}
+
+fn unix_ms_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
 }
 
 // ─── HealthState ─────────────────────────────────────────────────────────────
@@ -365,6 +487,7 @@ impl Default for ProviderHealthTracker {
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use tempfile::TempDir;
 
     /// Unknown provider is implicitly healthy.
     #[test]
@@ -674,5 +797,48 @@ mod tests {
         health.record_failure(ErrorClass::AuthFailure, 200);
         health.record_failure(ErrorClass::AuthFailure, 300);
         assert_eq!(health.cooldown_until, Some(300_300));
+    }
+
+    /// Registry stores per-provider state and filters unavailable providers.
+    #[test]
+    fn provider_health_registry_filters_unavailable_providers() {
+        let registry = ProviderHealthRegistry::new();
+        registry.record_success("good");
+        registry.record_failure("bad", ErrorClass::Timeout);
+        registry.record_failure("bad", ErrorClass::Timeout);
+        registry.record_failure("bad", ErrorClass::Timeout);
+
+        let candidates = vec!["good".to_owned(), "bad".to_owned(), "unknown".to_owned()];
+        assert_eq!(
+            registry.available_providers(&candidates),
+            vec!["good".to_owned(), "unknown".to_owned()]
+        );
+    }
+
+    /// Registry snapshots persist to disk and load back intact.
+    #[test]
+    fn provider_health_registry_roundtrip() {
+        let tmp = TempDir::new().expect("create tempdir");
+        let path = tmp.path().join("provider-health.json");
+
+        let registry = ProviderHealthRegistry::new();
+        registry.record_success("alpha");
+        registry.record_failure("beta", ErrorClass::RateLimit);
+        registry.record_failure("beta", ErrorClass::RateLimit);
+        registry.record_failure("beta", ErrorClass::RateLimit);
+        registry.save(&path).expect("save registry");
+
+        let loaded = ProviderHealthRegistry::load_or_new(&path);
+        assert!(loaded.is_available("alpha"));
+        assert!(!loaded.is_available("beta"));
+
+        let mut providers = loaded
+            .providers
+            .lock()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        providers.sort();
+        assert_eq!(providers, vec!["alpha".to_owned(), "beta".to_owned()]);
     }
 }

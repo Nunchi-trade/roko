@@ -1,6 +1,7 @@
 //! Reusable widgets for the dashboard TUI.
 
 pub mod agent_grid;
+pub mod braille;
 pub mod error_digest;
 pub mod header_bar;
 pub mod phase_bar;
