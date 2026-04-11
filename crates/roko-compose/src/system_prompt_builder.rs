@@ -27,8 +27,9 @@
 //!
 //! Anti-pattern #8: **no `std::fs`**. All content arrives via builder methods.
 
-use crate::PadState;
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
+use crate::PadState;
+use roko_learn::section_effect::{PriorityChange, SectionEffectivenessRegistry};
 
 /// A composable system prompt built from 7 layers.
 ///
@@ -61,6 +62,14 @@ pub struct SystemPromptBuilder {
     affect_state: Option<PadState>,
     /// Whether to insert cache alignment markers between tiers.
     cache_markers: bool,
+    /// Learned section-effectiveness data scoped to one role.
+    section_effectiveness: Option<SectionEffectivenessConfig>,
+}
+
+#[derive(Clone)]
+struct SectionEffectivenessConfig {
+    role: String,
+    registry: SectionEffectivenessRegistry,
 }
 
 impl SystemPromptBuilder {
@@ -80,6 +89,7 @@ impl SystemPromptBuilder {
             anti_patterns: Vec::new(),
             affect_state: None,
             cache_markers: false,
+            section_effectiveness: None,
         }
     }
 
@@ -147,6 +157,20 @@ impl SystemPromptBuilder {
     #[must_use]
     pub const fn with_cache_markers(mut self) -> Self {
         self.cache_markers = true;
+        self
+    }
+
+    /// Apply learned section-effectiveness adjustments for `role`.
+    #[must_use]
+    pub fn with_section_effectiveness(
+        mut self,
+        role: impl Into<String>,
+        registry: &SectionEffectivenessRegistry,
+    ) -> Self {
+        self.section_effectiveness = Some(SectionEffectivenessConfig {
+            role: role.into(),
+            registry: registry.clone(),
+        });
         self
     }
 
@@ -240,7 +264,7 @@ impl SystemPromptBuilder {
         // Layer 1: Role Identity
         sections.push(
             PromptSection::new("role_identity", &self.role_identity)
-                .with_priority(SectionPriority::Critical)
+                .with_priority(self.effective_priority("role_identity", SectionPriority::Critical))
                 .with_cache_layer(CacheLayer::System)
                 .with_placement(Placement::Start),
         );
@@ -250,7 +274,9 @@ impl SystemPromptBuilder {
             if !conv.is_empty() {
                 sections.push(
                     PromptSection::new("conventions", conv)
-                        .with_priority(SectionPriority::High)
+                        .with_priority(
+                            self.effective_priority("conventions", SectionPriority::High),
+                        )
                         .with_cache_layer(CacheLayer::System)
                         .with_placement(Placement::Start),
                 );
@@ -262,7 +288,9 @@ impl SystemPromptBuilder {
             if !tools.is_empty() {
                 sections.push(
                     PromptSection::new("tool_instructions", tools)
-                        .with_priority(SectionPriority::Normal)
+                        .with_priority(
+                            self.effective_priority("tool_instructions", SectionPriority::Normal),
+                        )
                         .with_cache_layer(CacheLayer::System)
                         .with_placement(Placement::Middle),
                 );
@@ -274,7 +302,9 @@ impl SystemPromptBuilder {
             if !domain.is_empty() {
                 sections.push(
                     PromptSection::new("domain_context", domain)
-                        .with_priority(SectionPriority::High)
+                        .with_priority(
+                            self.effective_priority("domain_context", SectionPriority::High),
+                        )
                         .with_cache_layer(CacheLayer::Session)
                         .with_placement(Placement::Middle),
                 );
@@ -286,7 +316,9 @@ impl SystemPromptBuilder {
             if !context.is_empty() {
                 sections.push(
                     PromptSection::new("context_layer", format!("## Relevant Context\n{context}"))
-                        .with_priority(SectionPriority::High)
+                        .with_priority(
+                            self.effective_priority("context_layer", SectionPriority::High),
+                        )
                         .with_cache_layer(CacheLayer::Session)
                         .with_placement(Placement::Middle),
                 );
@@ -303,7 +335,7 @@ impl SystemPromptBuilder {
                 .join("\n");
             sections.push(
                 PromptSection::new("anti_patterns", format!("Do NOT:\n{anti_text}"))
-                    .with_priority(SectionPriority::High)
+                    .with_priority(self.effective_priority("anti_patterns", SectionPriority::High))
                     .with_cache_layer(CacheLayer::Session)
                     .with_placement(Placement::End),
             );
@@ -313,7 +345,9 @@ impl SystemPromptBuilder {
         if let Some(affect) = self.affect_guidance() {
             sections.push(
                 PromptSection::new("affect_guidance", affect)
-                    .with_priority(SectionPriority::Normal)
+                    .with_priority(
+                        self.effective_priority("affect_guidance", SectionPriority::Normal),
+                    )
                     .with_cache_layer(CacheLayer::Dynamic)
                     .with_placement(Placement::End),
             );
@@ -324,7 +358,9 @@ impl SystemPromptBuilder {
             if !task.is_empty() {
                 sections.push(
                     PromptSection::new("task_context", task)
-                        .with_priority(SectionPriority::Critical)
+                        .with_priority(
+                            self.effective_priority("task_context", SectionPriority::Critical),
+                        )
                         .with_cache_layer(CacheLayer::Task)
                         .with_placement(Placement::End),
                 );
@@ -372,11 +408,46 @@ impl SystemPromptBuilder {
             None
         }
     }
+
+    fn effective_priority(&self, section: &str, base_priority: SectionPriority) -> SectionPriority {
+        let Some(config) = &self.section_effectiveness else {
+            return base_priority;
+        };
+        section_priority_from_u8(adjusted_priority(
+            base_priority as u8,
+            section,
+            &config.role,
+            &config.registry,
+        ))
+    }
+}
+
+fn adjusted_priority(
+    base_priority: u8,
+    section: &str,
+    role: &str,
+    registry: &SectionEffectivenessRegistry,
+) -> u8 {
+    match registry.recommend_priority_change(section, role) {
+        PriorityChange::Increase => base_priority.saturating_add(1),
+        PriorityChange::Decrease => base_priority.saturating_sub(1),
+        PriorityChange::NoChange | PriorityChange::InsufficientData => base_priority,
+    }
+}
+
+const fn section_priority_from_u8(priority: u8) -> SectionPriority {
+    match priority {
+        0 => SectionPriority::Low,
+        1 => SectionPriority::Normal,
+        2 => SectionPriority::High,
+        _ => SectionPriority::Critical,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roko_learn::section_effect::SectionEffectivenessRegistry;
 
     #[test]
     fn build_with_all_layers() {
@@ -700,11 +771,9 @@ mod tests {
         assert!(start_sections.iter().any(|s| s.name == "role_identity"));
         assert!(start_sections.iter().any(|s| s.name == "conventions"));
         // Tools at Middle.
-        assert!(
-            middle_sections
-                .iter()
-                .any(|s| s.name == "tool_instructions")
-        );
+        assert!(middle_sections
+            .iter()
+            .any(|s| s.name == "tool_instructions"));
         // Task and anti-patterns at End.
         assert!(end_sections.iter().any(|s| s.name == "task_context"));
         assert!(end_sections.iter().any(|s| s.name == "anti_patterns"));
@@ -721,5 +790,87 @@ mod tests {
         assert!(prompt.contains("<!-- cache:system -->"));
         // No session marker because domain and anti_patterns are empty.
         assert!(!prompt.contains("<!-- cache:session -->"));
+    }
+
+    #[test]
+    fn section_priority_adjustment_increases_positive_lift_sections() {
+        let mut registry = SectionEffectivenessRegistry::new();
+        for _ in 0..24 {
+            registry.record_outcome("conventions", "Implementer", true, true);
+        }
+        for _ in 0..6 {
+            registry.record_outcome("conventions", "Implementer", true, false);
+        }
+        for _ in 0..2 {
+            registry.record_outcome("conventions", "Implementer", false, true);
+        }
+        for _ in 0..8 {
+            registry.record_outcome("conventions", "Implementer", false, false);
+        }
+
+        let sections = SystemPromptBuilder::new("Role")
+            .with_conventions("Use snake_case")
+            .with_section_effectiveness("Implementer", &registry)
+            .build_sections();
+
+        let conventions = sections
+            .iter()
+            .find(|section| section.name == "conventions");
+        assert_eq!(
+            conventions.map(|section| section.priority),
+            Some(SectionPriority::Critical)
+        );
+    }
+
+    #[test]
+    fn section_priority_adjustment_decreases_negative_lift_sections() {
+        let mut registry = SectionEffectivenessRegistry::new();
+        for _ in 0..5 {
+            registry.record_outcome("anti_patterns", "Implementer", true, true);
+        }
+        for _ in 0..20 {
+            registry.record_outcome("anti_patterns", "Implementer", true, false);
+        }
+        for _ in 0..8 {
+            registry.record_outcome("anti_patterns", "Implementer", false, true);
+        }
+        for _ in 0..2 {
+            registry.record_outcome("anti_patterns", "Implementer", false, false);
+        }
+
+        let sections = SystemPromptBuilder::new("Role")
+            .add_anti_pattern("No unwrap()")
+            .with_section_effectiveness("Implementer", &registry)
+            .build_sections();
+
+        let anti_patterns = sections
+            .iter()
+            .find(|section| section.name == "anti_patterns");
+        assert_eq!(
+            anti_patterns.map(|section| section.priority),
+            Some(SectionPriority::Normal)
+        );
+    }
+
+    #[test]
+    fn section_priority_adjustment_ignores_insufficient_data() {
+        let mut registry = SectionEffectivenessRegistry::new();
+        for _ in 0..5 {
+            registry.record_outcome("tool_instructions", "Implementer", true, true);
+            registry.record_outcome("tool_instructions", "Implementer", false, false);
+        }
+
+        let sections = SystemPromptBuilder::new("Role")
+            .with_tools("Read, Edit, Bash")
+            .with_section_effectiveness("Implementer", &registry)
+            .build_sections();
+
+        let tools = sections
+            .iter()
+            .find(|section| section.name == "tool_instructions");
+        assert_eq!(
+            tools.map(|section| section.priority),
+            Some(SectionPriority::Normal)
+        );
     }
 }
