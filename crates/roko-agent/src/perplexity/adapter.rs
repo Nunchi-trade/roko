@@ -7,6 +7,8 @@
 
 use crate::agent::{Agent, AgentResult};
 use crate::openai_agent::OpenAiAgent;
+use crate::perplexity::chat::PerplexityChatAgent;
+use crate::perplexity::types::SearchOptions;
 use crate::provider::{AgentCreationError, AgentOptions, ProviderAdapter, ProviderError};
 use async_trait::async_trait;
 use roko_core::agent::ProviderKind;
@@ -16,54 +18,6 @@ use serde_json::Value;
 
 /// Default Perplexity API base URL.
 const DEFAULT_BASE_URL: &str = "https://api.perplexity.ai";
-
-// ─── PerplexityChatAgent ─────────────────────────────────────────────────────
-
-/// Standard Perplexity Sonar chat agent with search-grounded completions.
-///
-/// Uses the OpenAI-compatible `/chat/completions` endpoint at the Perplexity
-/// base URL. Search-specific extensions (citations, annotations, search options)
-/// will be wired in a follow-on task.
-pub struct PerplexityChatAgent {
-    inner: OpenAiAgent,
-    name: String,
-}
-
-impl PerplexityChatAgent {
-    #[must_use]
-    pub fn new(
-        api_key: String,
-        base_url: String,
-        model: ModelProfile,
-        options: &AgentOptions,
-    ) -> Self {
-        let name = if options.name.is_empty() {
-            format!("perplexity:{}", model.slug)
-        } else {
-            options.name.clone()
-        };
-        let timeout = options.timeout_ms.unwrap_or(120_000);
-        let inner = OpenAiAgent::new(api_key, model.slug)
-            .with_base_url(base_url)
-            .with_timeout_ms(timeout);
-        Self { inner, name }
-    }
-}
-
-#[async_trait]
-impl Agent for PerplexityChatAgent {
-    async fn run(&self, input: &Signal, ctx: &Context) -> AgentResult {
-        self.inner.run(input, ctx).await
-    }
-
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn supports_streaming(&self) -> bool {
-        false
-    }
-}
 
 // ─── PerplexityEmbedAgent ────────────────────────────────────────────────────
 
@@ -196,12 +150,21 @@ impl ProviderAdapter for PerplexityAdapter {
             )));
         }
 
-        Ok(Box::new(PerplexityChatAgent::new(
-            api_key,
-            base_url,
-            model.clone(),
-            options,
-        )))
+        let name = if options.name.is_empty() {
+            format!("perplexity:{}", model.slug)
+        } else {
+            options.name.clone()
+        };
+        let timeout = options.timeout_ms.unwrap_or(120_000);
+        let search_options = SearchOptions {
+            search_context_size: model.search_context_size.clone(),
+            ..Default::default()
+        };
+
+        Ok(Box::new(
+            PerplexityChatAgent::new(api_key, base_url, model.slug.clone(), name, timeout)
+                .with_search_options(search_options),
+        ))
     }
 
     fn classify_error(&self, status: u16, body: &Value) -> ProviderError {
