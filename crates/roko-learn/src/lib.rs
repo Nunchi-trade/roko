@@ -42,6 +42,7 @@ pub mod pareto;
 pub mod pattern_discovery;
 pub mod playbook;
 pub mod playbook_rules;
+pub mod prediction;
 pub mod prompt_experiment;
 pub mod provider_health;
 pub mod quality_judge;
