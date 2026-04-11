@@ -186,6 +186,8 @@ fn gemini_provider(base_url: impl Into<String>) -> ProviderConfig {
         command: None,
         args: None,
         timeout_ms: Some(1_500),
+        ttft_timeout_ms: Some(15_000),
+        connect_timeout_ms: Some(5_000),
         extra_headers: None,
         max_concurrent: None,
     }

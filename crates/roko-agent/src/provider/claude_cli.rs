@@ -183,6 +183,8 @@ printf '%s\n' '{{"type":"content_block_delta","delta":{{"text":"adapter-ok"}}}}'
                 "provider-value".to_string(),
             ]),
             timeout_ms: Some(2_500),
+            ttft_timeout_ms: Some(15_000),
+            connect_timeout_ms: Some(5_000),
             extra_headers: None,
             max_concurrent: None,
         };
@@ -265,6 +267,8 @@ printf '%s\n' '{"type":"content_block_delta","delta":{"text":"late"}}'
             command: Some(script.display().to_string()),
             args: None,
             timeout_ms: Some(1_000),
+            ttft_timeout_ms: Some(15_000),
+            connect_timeout_ms: Some(5_000),
             extra_headers: None,
             max_concurrent: None,
         };

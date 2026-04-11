@@ -390,7 +390,9 @@ impl RokoConfig {
                 api_key_env: None,
                 command: Some(claude_command),
                 args: self.agent.args.clone(),
-                timeout_ms: self.agent.timeout_ms,
+                timeout_ms: self.agent.timeout_ms.or(default_provider_timeout_ms()),
+                ttft_timeout_ms: default_provider_ttft_timeout_ms(),
+                connect_timeout_ms: default_provider_connect_timeout_ms(),
                 extra_headers: None,
                 max_concurrent: None,
             },
@@ -407,7 +409,9 @@ impl RokoConfig {
                         .map(|_| "ANTHROPIC_API_KEY".to_string()),
                     command: None,
                     args: None,
-                    timeout_ms: self.agent.timeout_ms,
+                    timeout_ms: self.agent.timeout_ms.or(default_provider_timeout_ms()),
+                    ttft_timeout_ms: default_provider_ttft_timeout_ms(),
+                    connect_timeout_ms: default_provider_connect_timeout_ms(),
                     extra_headers: None,
                     max_concurrent: None,
                 },
@@ -702,7 +706,9 @@ where
 /// - `api_key_env`: optional environment variable name that holds the API key
 /// - `command`: optional CLI binary name for subprocess providers
 /// - `args`: optional CLI arguments for subprocess providers
-/// - `timeout_ms`: optional request or subprocess timeout
+/// - `timeout_ms`: optional hard request or subprocess timeout
+/// - `ttft_timeout_ms`: optional time-to-first-token timeout
+/// - `connect_timeout_ms`: optional TCP connection timeout
 /// - `extra_headers`: optional HTTP headers to inject on outbound requests
 /// - `max_concurrent`: optional concurrency limit for this provider
 ///
@@ -712,7 +718,9 @@ where
 /// - `api_key_env`: `None`
 /// - `command`: `None`
 /// - `args`: `None`
-/// - `timeout_ms`: `None`
+/// - `timeout_ms`: `120_000`
+/// - `ttft_timeout_ms`: `15_000`
+/// - `connect_timeout_ms`: `5_000`
 /// - `extra_headers`: `None`
 /// - `max_concurrent`: `None`
 ///
@@ -723,6 +731,8 @@ where
 /// base_url = "https://api.anthropic.com"
 /// api_key_env = "ANTHROPIC_API_KEY"
 /// timeout_ms = 120000
+/// ttft_timeout_ms = 15000
+/// connect_timeout_ms = 5000
 ///
 /// [providers.claude_cli]
 /// kind = "claude_cli"
@@ -746,15 +756,42 @@ pub struct ProviderConfig {
     /// Arguments passed to the CLI command.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<String>>,
-    /// Request timeout in milliseconds.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Hard request or subprocess timeout in milliseconds.
+    #[serde(
+        default = "default_provider_timeout_ms",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub timeout_ms: Option<u64>,
+    /// Time-to-first-token timeout in milliseconds.
+    #[serde(
+        default = "default_provider_ttft_timeout_ms",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub ttft_timeout_ms: Option<u64>,
+    /// TCP connection timeout in milliseconds.
+    #[serde(
+        default = "default_provider_connect_timeout_ms",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub connect_timeout_ms: Option<u64>,
     /// Extra headers to inject on outbound requests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_headers: Option<HashMap<String, String>>,
     /// Maximum concurrent requests allowed for this provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrent: Option<u32>,
+}
+
+const fn default_provider_timeout_ms() -> Option<u64> {
+    Some(120_000)
+}
+
+const fn default_provider_ttft_timeout_ms() -> Option<u64> {
+    Some(15_000)
+}
+
+const fn default_provider_connect_timeout_ms() -> Option<u64> {
+    Some(5_000)
 }
 
 impl ProviderConfig {
@@ -2082,6 +2119,8 @@ cost_cache_read_per_m = 0.10
         );
         assert_eq!(zai.api_key_env.as_deref(), Some("ZAI_API_KEY"));
         assert_eq!(zai.timeout_ms, Some(180_000));
+        assert_eq!(zai.ttft_timeout_ms, Some(15_000));
+        assert_eq!(zai.connect_timeout_ms, Some(5_000));
         assert_eq!(
             zai.extra_headers
                 .as_ref()
@@ -2098,6 +2137,9 @@ cost_cache_read_per_m = 0.10
             Some("https://api.moonshot.ai/v1")
         );
         assert_eq!(moonshot.api_key_env.as_deref(), Some("MOONSHOT_API_KEY"));
+        assert_eq!(moonshot.timeout_ms, Some(120_000));
+        assert_eq!(moonshot.ttft_timeout_ms, Some(15_000));
+        assert_eq!(moonshot.connect_timeout_ms, Some(5_000));
 
         let glm = cfg.models.get("glm-5-1").expect("glm model");
         assert_eq!(glm.provider, "zai");
@@ -2174,10 +2216,15 @@ base_url = "http://localhost:11434"
             ]
         );
         assert_eq!(claude.timeout_ms, Some(120_000));
+        assert_eq!(claude.ttft_timeout_ms, Some(15_000));
+        assert_eq!(claude.connect_timeout_ms, Some(5_000));
 
         let ollama = cfg.providers.get("ollama").expect("ollama provider");
         assert_eq!(ollama.kind, ProviderKind::OpenAiCompat);
         assert_eq!(ollama.base_url.as_deref(), Some("http://localhost:11434"));
+        assert_eq!(ollama.timeout_ms, Some(120_000));
+        assert_eq!(ollama.ttft_timeout_ms, Some(15_000));
+        assert_eq!(ollama.connect_timeout_ms, Some(5_000));
     }
 
     #[test]
@@ -2243,11 +2290,16 @@ api_key_env = "ZAI_API_KEY"
             ]
         );
         assert_eq!(claude.timeout_ms, Some(300_000));
+        assert_eq!(claude.ttft_timeout_ms, Some(15_000));
+        assert_eq!(claude.connect_timeout_ms, Some(5_000));
 
         let anthropic = providers.get("anthropic").expect("anthropic provider");
         assert_eq!(anthropic.kind, ProviderKind::AnthropicApi);
         assert_eq!(anthropic.base_url.as_deref(), Some("http://127.0.0.1:4000"));
         assert_eq!(anthropic.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY"));
+        assert_eq!(anthropic.timeout_ms, Some(300_000));
+        assert_eq!(anthropic.ttft_timeout_ms, Some(15_000));
+        assert_eq!(anthropic.connect_timeout_ms, Some(5_000));
     }
 
     #[test]
@@ -2308,6 +2360,8 @@ api_key_env = "EXAMPLE_API_KEY"
 command = "claude"
 args = ["--print", "--output-format", "stream-json"]
 timeout_ms = 120000
+ttft_timeout_ms = 15000
+connect_timeout_ms = 5000
 extra_headers = { "HTTP-Referer" = "roko-agent" }
 max_concurrent = 4
 "#;
@@ -2325,6 +2379,8 @@ max_concurrent = 4
             ]
         );
         assert_eq!(cfg.timeout_ms, Some(120000));
+        assert_eq!(cfg.ttft_timeout_ms, Some(15000));
+        assert_eq!(cfg.connect_timeout_ms, Some(5000));
         assert_eq!(
             cfg.extra_headers
                 .as_ref()
@@ -2369,6 +2425,8 @@ max_concurrent = 4
             command: None,
             args: None,
             timeout_ms: None,
+            ttft_timeout_ms: Some(15_000),
+            connect_timeout_ms: Some(5_000),
             extra_headers: None,
             max_concurrent: None,
         };
@@ -2390,11 +2448,40 @@ max_concurrent = 4
             command: None,
             args: None,
             timeout_ms: None,
+            ttft_timeout_ms: Some(15_000),
+            connect_timeout_ms: Some(5_000),
             extra_headers: None,
             max_concurrent: None,
         };
 
         assert_eq!(cfg.resolve_api_key(), None);
+    }
+
+    #[test]
+    fn provider_timeouts_default_when_omitted() {
+        let toml = r#"
+kind = "openai_compat"
+"#;
+        let cfg = toml::from_str::<ProviderConfig>(toml).expect("parse");
+
+        assert_eq!(cfg.timeout_ms, Some(120_000));
+        assert_eq!(cfg.ttft_timeout_ms, Some(15_000));
+        assert_eq!(cfg.connect_timeout_ms, Some(5_000));
+    }
+
+    #[test]
+    fn provider_timeouts_allow_per_provider_overrides() {
+        let toml = r#"
+kind = "openai_compat"
+timeout_ms = 240000
+ttft_timeout_ms = 25000
+connect_timeout_ms = 8000
+"#;
+        let cfg = toml::from_str::<ProviderConfig>(toml).expect("parse");
+
+        assert_eq!(cfg.timeout_ms, Some(240_000));
+        assert_eq!(cfg.ttft_timeout_ms, Some(25_000));
+        assert_eq!(cfg.connect_timeout_ms, Some(8_000));
     }
 
     #[test]
