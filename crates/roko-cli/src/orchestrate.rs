@@ -18,6 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context as _, Result, anyhow};
 use bardo_runtime::cancel::CancelToken;
 use bardo_runtime::process::ProcessSupervisor;
+use roko_agent::chat_types::FinishReason;
 use roko_agent::mcp::{McpConfig, McpServerConfig};
 use roko_agent::provider::{AgentOptions, create_agent_for_model};
 use roko_agent::translate::{ClaudeTranslator, RenderedTools, Translator};
@@ -54,6 +55,7 @@ use roko_learn::budget::{BudgetAction, BudgetGuardrail};
 use roko_learn::costs_db::CostRecord;
 use roko_learn::efficiency::{AgentEfficiencyEvent, FleetCFactor, compute_fleet_cfactor};
 use roko_learn::episode_logger::{Episode, GateVerdict, Usage};
+use roko_learn::events::{AgentEvent, EventBus as LearningEventBus};
 use roko_learn::latency::LatencyRegistry;
 use roko_learn::model_experiment::ModelExperimentStore;
 use roko_learn::playbook::{Playbook, PlaybookStore};
@@ -105,6 +107,116 @@ fn latency_registry_path(workdir: &Path) -> PathBuf {
         .join(".roko")
         .join("learn")
         .join("latency-stats.json")
+}
+
+#[derive(Debug, Clone)]
+struct TurnLearningFeedback {
+    task_id: String,
+    model: String,
+    provider: String,
+    timestamp_ms: i64,
+    prompt_hash: u64,
+    ttft_ms: u64,
+    total_ms: u64,
+    output_tokens: u64,
+    cost_usd: f64,
+    usage: roko_agent::Usage,
+    success: bool,
+}
+
+fn publish_turn_learning_feedback(
+    event_bus: &LearningEventBus,
+    latency_registry: &LatencyRegistry,
+    anomaly_detector: &mut AnomalyDetector,
+    feedback: TurnLearningFeedback,
+) {
+    let mut rx = event_bus.subscribe();
+    event_bus.publish(AgentEvent::TurnStarted {
+        task_id: feedback.task_id.clone(),
+        model: feedback.model.clone(),
+        provider: feedback.provider.clone(),
+        timestamp_ms: feedback.timestamp_ms,
+    });
+    event_bus.publish(AgentEvent::TurnCompleted {
+        turn: 1,
+        usage: feedback.usage,
+        tool_call_count: 0,
+        gate_passed: Some(feedback.success),
+        finish_reason: if feedback.success {
+            FinishReason::Stop
+        } else {
+            FinishReason::Error("agent failed".to_string())
+        },
+    });
+    event_bus.publish(AgentEvent::CostRecorded {
+        model: feedback.model.clone(),
+        provider: feedback.provider.clone(),
+        cost_usd: feedback.cost_usd,
+        tokens: u64::from(feedback.usage.total_tokens()),
+    });
+
+    drain_turn_learning_events(&mut rx, latency_registry, anomaly_detector, &feedback);
+}
+
+fn drain_turn_learning_events(
+    rx: &mut tokio::sync::broadcast::Receiver<AgentEvent>,
+    latency_registry: &LatencyRegistry,
+    anomaly_detector: &mut AnomalyDetector,
+    feedback: &TurnLearningFeedback,
+) {
+    loop {
+        match rx.try_recv() {
+            Ok(AgentEvent::TurnStarted { .. }) => {
+                if let Some(anomaly) = anomaly_detector.check_prompt(feedback.prompt_hash) {
+                    tracing::warn!(
+                        model = %feedback.model,
+                        provider = %feedback.provider,
+                        ?anomaly,
+                        "learning anomaly detected from prompt"
+                    );
+                }
+            }
+            Ok(AgentEvent::TurnCompleted { .. }) => {
+                latency_registry.record(
+                    &feedback.model,
+                    &feedback.provider,
+                    feedback.ttft_ms as f64,
+                    feedback.total_ms as f64,
+                    feedback.output_tokens,
+                );
+                tracing::info!(
+                    model = %feedback.model,
+                    provider = %feedback.provider,
+                    ttft_ms = feedback.ttft_ms,
+                    total_ms = feedback.total_ms,
+                    output_tokens = feedback.output_tokens,
+                    "learning latency recorded"
+                );
+            }
+            Ok(AgentEvent::CostRecorded { .. }) => {
+                if let Some(anomaly) = anomaly_detector.check_cost(feedback.cost_usd) {
+                    tracing::warn!(
+                        model = %feedback.model,
+                        provider = %feedback.provider,
+                        ?anomaly,
+                        "learning anomaly detected from cost"
+                    );
+                } else {
+                    tracing::info!(
+                        model = %feedback.model,
+                        provider = %feedback.provider,
+                        "learning anomaly scan complete"
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            | Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
+                tracing::warn!(skipped, "learning feedback lagged behind event stream");
+            }
+        }
+    }
 }
 
 fn install_episode_distillation_hook(learning: &mut LearningRuntime, workdir: &Path) {
@@ -1019,6 +1131,8 @@ pub struct PlanRunner {
     latency_registry: LatencyRegistry,
     /// Session-local anomaly detector for runaway loops and cost spikes.
     anomaly_detector: AnomalyDetector,
+    /// Event bus used to publish post-turn learning signals.
+    learning_event_bus: LearningEventBus,
     /// In-memory efficiency events collected during this run.
     efficiency_events: Vec<AgentEfficiencyEvent>,
     /// Optional event bus sender for HTTP API event streaming.
@@ -2005,6 +2119,7 @@ impl PlanRunner {
             ),
             latency_registry: LatencyRegistry::load_or_new(&latency_registry_path(workdir)),
             anomaly_detector: AnomalyDetector::new(chrono::Utc::now().timestamp_millis()),
+            learning_event_bus: LearningEventBus::new(256),
             efficiency_events: Vec::new(),
             server_event_bus: None,
             state_hub_sender: None,
@@ -2115,6 +2230,7 @@ impl PlanRunner {
             ),
             latency_registry: LatencyRegistry::load_or_new(&latency_registry_path(workdir)),
             anomaly_detector: AnomalyDetector::new(chrono::Utc::now().timestamp_millis()),
+            learning_event_bus: LearningEventBus::new(256),
             efficiency_events: Vec::new(),
             server_event_bus: None,
             state_hub_sender: None,
@@ -2229,6 +2345,7 @@ impl PlanRunner {
             ),
             latency_registry: LatencyRegistry::load_or_new(&latency_registry_path(workdir)),
             anomaly_detector: AnomalyDetector::new(chrono::Utc::now().timestamp_millis()),
+            learning_event_bus: LearningEventBus::new(256),
             efficiency_events: Vec::new(),
             server_event_bus: None,
             state_hub_sender: None,
@@ -4488,49 +4605,24 @@ impl PlanRunner {
         let ttft_ms = ttft_source_ms.saturating_sub(prompt.created_at_ms).max(0) as u64;
         let total_ms = result.usage.wall_ms;
         let output_tokens = u64::from(result.usage.output_tokens);
-
-        self.latency_registry.record(
-            model,
-            &provider_id,
-            ttft_ms as f64,
-            total_ms as f64,
-            output_tokens,
+        publish_turn_learning_feedback(
+            &self.learning_event_bus,
+            &self.latency_registry,
+            &mut self.anomaly_detector,
+            TurnLearningFeedback {
+                task_id: prompt.id.to_hex(),
+                model: model.to_string(),
+                provider: provider_id,
+                timestamp_ms: prompt.created_at_ms,
+                prompt_hash,
+                ttft_ms,
+                total_ms,
+                output_tokens,
+                cost_usd: f64::from(result.usage.cost_usd),
+                usage: result.usage,
+                success: result.success,
+            },
         );
-        tracing::info!(
-            model = %model,
-            provider = %provider_id,
-            ttft_ms,
-            total_ms,
-            output_tokens,
-            "learning latency recorded"
-        );
-
-        if let Some(anomaly) = self.anomaly_detector.check_prompt(prompt_hash) {
-            tracing::warn!(
-                model = %model,
-                provider = %provider_id,
-                ?anomaly,
-                "learning anomaly detected from prompt"
-            );
-        }
-
-        if let Some(anomaly) = self
-            .anomaly_detector
-            .check_cost(f64::from(result.usage.cost_usd))
-        {
-            tracing::warn!(
-                model = %model,
-                provider = %provider_id,
-                ?anomaly,
-                "learning anomaly detected from cost"
-            );
-        } else {
-            tracing::info!(
-                model = %model,
-                provider = %provider_id,
-                "learning anomaly scan complete"
-            );
-        }
     }
 
     /// Record a LinUCB observation for the implementer task route.
@@ -9767,6 +9859,54 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    #[test]
+    fn event_bus_wiring_records_turn_feedback() {
+        let tmp = TempDir::new().expect("tempdir");
+        let latency_path = tmp.path().join("latency-stats.json");
+        let latency_registry = LatencyRegistry::load_or_new(&latency_path);
+        let mut anomaly_detector = AnomalyDetector::new(1_700_000_000_000);
+        let event_bus = LearningEventBus::new(16);
+
+        for _ in 0..5 {
+            publish_turn_learning_feedback(
+                &event_bus,
+                &latency_registry,
+                &mut anomaly_detector,
+                TurnLearningFeedback {
+                    task_id: "task-2k23".to_string(),
+                    model: "glm-5.1".to_string(),
+                    provider: "zai".to_string(),
+                    timestamp_ms: 1_700_000_000_000,
+                    prompt_hash: 42,
+                    ttft_ms: 120,
+                    total_ms: 900,
+                    output_tokens: 64,
+                    cost_usd: 0.05,
+                    usage: roko_agent::Usage {
+                        input_tokens: 128,
+                        output_tokens: 64,
+                        cost_usd: 0.05,
+                        wall_ms: 900,
+                        ..Default::default()
+                    },
+                    success: true,
+                },
+            );
+        }
+
+        let stats = latency_registry
+            .get("glm-5.1", "zai")
+            .expect("latency stats should be recorded");
+        assert_eq!(stats.observations, 5);
+        assert_eq!(stats.recent_latencies, vec![900.0; 5]);
+
+        assert!(matches!(
+            anomaly_detector.check_prompt(42),
+            Some(roko_learn::anomaly::Anomaly::PromptLoop { repeated_count })
+                if repeated_count >= 5
+        ));
+    }
 
     #[test]
     fn budget_enforcement_routes_to_mechanical_model() {
