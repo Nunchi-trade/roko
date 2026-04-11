@@ -53,6 +53,14 @@ pub fn create_agent_for_model(
         .or_else(|| config.effective_providers().get(&profile.provider).cloned())
         .ok_or_else(|| AgentCreationError::MissingConfig("provider".into()))?;
 
+    tracing::info!(
+        model_key = model_key,
+        slug = %resolved.slug,
+        provider = %resolved.provider_kind,
+        base_url = ?provider_config.base_url,
+        "creating agent via provider adapter"
+    );
+
     let adapter = adapter_for_kind(resolved.provider_kind);
     adapter.create_agent(&provider_config, &profile, &options)
 }
