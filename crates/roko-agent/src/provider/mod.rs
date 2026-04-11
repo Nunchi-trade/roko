@@ -45,8 +45,11 @@ use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::config::schema::RokoConfig;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub mod anthropic_api;
 pub mod claude_cli;
@@ -68,6 +71,7 @@ static CURSOR_ACP_ADAPTER: CursorAcpAdapter = CursorAcpAdapter;
 static OPENAI_COMPAT_ADAPTER: OpenAiCompatAdapter = OpenAiCompatAdapter;
 static PERPLEXITY_ADAPTER: PerplexityAdapter = PerplexityAdapter;
 static GEMINI_ADAPTER: GeminiAdapter = GeminiAdapter;
+const DEFAULT_PROVIDER_MAX_CONCURRENT: usize = 10;
 
 /// Return the static adapter for a provider kind.
 #[must_use]
@@ -113,6 +117,42 @@ pub fn create_agent_for_model(
 
     let adapter = adapter_for_kind(resolved.provider_kind);
     adapter.create_agent(&provider_config, &profile, &options)
+}
+
+/// Shared semaphores that cap in-flight requests per provider.
+#[derive(Debug)]
+pub struct ProviderSemaphores {
+    semaphores: HashMap<String, Arc<Semaphore>>,
+    default_permits: usize,
+}
+
+impl ProviderSemaphores {
+    #[must_use]
+    pub fn new(configs: &HashMap<String, ProviderConfig>) -> Self {
+        let mut semaphores = HashMap::with_capacity(configs.len());
+        for (id, config) in configs {
+            let permits = config
+                .max_concurrent
+                .unwrap_or(DEFAULT_PROVIDER_MAX_CONCURRENT as u32)
+                .max(1) as usize;
+            semaphores.insert(id.clone(), Arc::new(Semaphore::new(permits)));
+        }
+
+        Self {
+            semaphores,
+            default_permits: DEFAULT_PROVIDER_MAX_CONCURRENT,
+        }
+    }
+
+    pub async fn acquire(&self, provider_id: &str) -> OwnedSemaphorePermit {
+        let semaphore = self
+            .semaphores
+            .get(provider_id)
+            .cloned()
+            .unwrap_or_else(|| Arc::new(Semaphore::new(self.default_permits)));
+
+        semaphore.acquire_owned().await.expect("semaphore closed")
+    }
 }
 
 /// Adapter for a protocol family. Creates Agent instances configured for a
@@ -212,6 +252,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
+    use tokio::time::timeout;
 
     fn prompt(text: &str) -> Signal {
         Signal::builder(Kind::Prompt).body(Body::text(text)).build()
@@ -413,5 +454,47 @@ mod tests {
         assert_eq!(parsed["messages"][0]["content"], "hello");
 
         handle.join().expect("server thread");
+    }
+
+    #[tokio::test]
+    async fn provider_semaphore_blocks_fourth_request_when_limit_is_three() {
+        let mut configs = HashMap::new();
+        configs.insert(
+            "zai".to_string(),
+            ProviderConfig {
+                kind: ProviderKind::OpenAiCompat,
+                base_url: Some("https://api.z.ai/api/paas/v4".to_string()),
+                api_key_env: Some("ZAI_API_KEY".to_string()),
+                command: None,
+                args: None,
+                timeout_ms: Some(1_500),
+                ttft_timeout_ms: Some(15_000),
+                connect_timeout_ms: Some(5_000),
+                extra_headers: None,
+                max_concurrent: Some(3),
+            },
+        );
+
+        let semaphores = ProviderSemaphores::new(&configs);
+        let permit_one = semaphores.acquire("zai").await;
+        let permit_two = semaphores.acquire("zai").await;
+        let permit_three = semaphores.acquire("zai").await;
+
+        assert!(
+            timeout(Duration::from_millis(50), semaphores.acquire("zai"))
+                .await
+                .is_err(),
+            "fourth request should block while all permits are held"
+        );
+
+        drop(permit_one);
+
+        let permit_four = timeout(Duration::from_millis(50), semaphores.acquire("zai"))
+            .await
+            .expect("fourth request should acquire after a permit is released");
+
+        drop(permit_two);
+        drop(permit_three);
+        drop(permit_four);
     }
 }
