@@ -12,6 +12,7 @@
 //! - [`result_msg`] — tool-result message construction (§36.56).
 //! - [`checkpoint`] — resumable state (§36.57).
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -131,12 +132,14 @@ pub struct ToolLoopOutput {
 /// Drives the `prompt -> LLM -> tool_calls -> dispatch -> results -> LLM`
 /// cycle until the LLM stops calling tools, the iteration cap is
 /// reached, the cancel token fires, or the backend errors.
+#[derive(Clone)]
 pub struct ToolLoop {
     translator: Arc<dyn Translator>,
     dispatcher: Arc<ToolDispatcher>,
     backend: Arc<dyn LlmBackend>,
     max_iterations: usize,
     context_token_limit: usize,
+    checkpoint_path: Option<PathBuf>,
 }
 
 impl ToolLoop {
@@ -153,6 +156,7 @@ impl ToolLoop {
             backend,
             max_iterations: DEFAULT_MAX_ITERATIONS,
             context_token_limit: DEFAULT_CONTEXT_TOKEN_LIMIT,
+            checkpoint_path: None,
         }
     }
 
@@ -170,6 +174,13 @@ impl ToolLoop {
         self
     }
 
+    /// Persist resumable checkpoints at the provided path.
+    #[must_use]
+    pub fn with_checkpoint_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.checkpoint_path = Some(path.into());
+        self
+    }
+
     /// Run a fresh tool loop from an initial system + user prompt.
     pub async fn run(
         &self,
@@ -178,6 +189,25 @@ impl ToolLoop {
         tools: &[ToolDef],
         ctx: &ToolContext,
     ) -> ToolLoopOutput {
+        if let Some(path) = self.checkpoint_path.as_deref().filter(|path| path.exists()) {
+            match Checkpoint::load(path) {
+                Ok(cp) => return self.resume(cp, tools, ctx).await,
+                Err(err) => {
+                    return ToolLoopOutput {
+                        final_text: String::new(),
+                        iterations: 0,
+                        tool_calls: Vec::new(),
+                        total_usage: Usage::default(),
+                        stop_reason: StopReason::BackendError(format!(
+                            "checkpoint load {}: {err}",
+                            path.display()
+                        )),
+                        checkpoint: None,
+                    };
+                }
+            }
+        }
+
         let messages = result_msg::initial_messages(system, user);
         self.run_inner(messages, 0, Vec::new(), Usage::default(), tools, ctx, None)
             .await
@@ -312,6 +342,7 @@ impl ToolLoop {
 
             // No tool calls -> final answer.
             if calls.is_empty() {
+                self.clear_checkpoint_file();
                 let final_text = response.extract_text();
                 return ToolLoopOutput {
                     final_text,
@@ -340,7 +371,44 @@ impl ToolLoop {
             prune::prune_if_needed(&mut messages, self.context_token_limit);
 
             iterations += 1;
+            self.save_checkpoint_snapshot(iterations, &all_calls, &messages);
         }
+    }
+}
+
+impl ToolLoop {
+    fn save_checkpoint_snapshot(
+        &self,
+        iterations: usize,
+        all_calls: &[ToolCall],
+        messages: &[serde_json::Value],
+    ) {
+        let Some(path) = self.checkpoint_path.as_deref() else {
+            return;
+        };
+
+        let cp = Checkpoint::new(iterations, all_calls.to_vec(), messages.to_vec());
+        if let Err(err) = cp.save(path) {
+            tracing::warn!(path = %path.display(), error = %err, "failed to persist tool loop checkpoint");
+        }
+    }
+
+    fn clear_checkpoint_file(&self) {
+        let Some(path) = self.checkpoint_path.as_deref() else {
+            return;
+        };
+
+        if let Err(err) = remove_checkpoint_file(path) {
+            tracing::warn!(path = %path.display(), error = %err, "failed to clear tool loop checkpoint");
+        }
+    }
+}
+
+fn remove_checkpoint_file(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
     }
 }
 
@@ -774,6 +842,36 @@ mod tests {
         }
     }
 
+    struct CheckpointPersistenceBackend;
+
+    #[async_trait]
+    impl LlmBackend for CheckpointPersistenceBackend {
+        async fn send_turn(
+            &self,
+            messages: &[serde_json::Value],
+            _tools: &RenderedTools,
+            _session: &SessionState,
+        ) -> Result<BackendResponse, LlmError> {
+            let resumed = messages
+                .iter()
+                .any(|message| message["role"] == "tool" && message.get("tool_call_id").is_some());
+
+            if resumed {
+                Ok(BackendResponse::Json(
+                    serde_json::json!({"message": {"content": "resumed final answer"}}),
+                ))
+            } else {
+                Ok(BackendResponse::Json(serde_json::json!({
+                    "tool_calls": [{
+                        "id": "persist-1",
+                        "name": "echo",
+                        "arguments": {"step": 1}
+                    }]
+                })))
+            }
+        }
+    }
+
     #[async_trait]
     impl LlmBackend for SessionContinuityBackend {
         async fn send_turn(
@@ -1069,6 +1167,42 @@ mod tests {
         assert_eq!(out2.iterations, 5);
         // 3 from the first run (in the checkpoint) + 2 new ones.
         assert_eq!(out2.tool_calls.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_persistence_survives_restart() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let checkpoint_path = dir
+            .path()
+            .join(".roko")
+            .join("state")
+            .join("tool-loop-task-1.json");
+        let ctx = ToolContext::testing(dir.path());
+
+        let first = make_tool_loop(Arc::new(CheckpointPersistenceBackend), 1)
+            .with_checkpoint_path(checkpoint_path.clone());
+        let out1 = first.run("system", "user", &test_tools(), &ctx).await;
+
+        assert_eq!(out1.stop_reason, StopReason::MaxIterations);
+        assert!(checkpoint_path.exists(), "checkpoint should be persisted");
+
+        let persisted = Checkpoint::load(&checkpoint_path).expect("load persisted checkpoint");
+        assert_eq!(persisted.iterations, 1);
+        assert_eq!(persisted.tool_calls.len(), 1);
+        assert_eq!(persisted.tool_calls[0].id, "persist-1");
+
+        let resumed = make_tool_loop(Arc::new(CheckpointPersistenceBackend), 5)
+            .with_checkpoint_path(checkpoint_path.clone());
+        let out2 = resumed.run("ignored", "ignored", &test_tools(), &ctx).await;
+
+        assert_eq!(out2.stop_reason, StopReason::Stop);
+        assert_eq!(out2.iterations, 1);
+        assert_eq!(out2.tool_calls.len(), 1);
+        assert_eq!(out2.final_text, "resumed final answer");
+        assert!(
+            !checkpoint_path.exists(),
+            "successful completion should clear the persisted checkpoint"
+        );
     }
 
     #[tokio::test]

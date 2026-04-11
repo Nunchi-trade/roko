@@ -563,7 +563,7 @@ fn prompt_hash_u64(signal: &Signal) -> u64 {
     u64::from_be_bytes(bytes)
 }
 
-fn task_id_from_context(ctx: &Context) -> String {
+pub(crate) fn task_id_from_context(ctx: &Context) -> String {
     ctx.attr("task_id")
         .or_else(|| ctx.attr("task"))
         .or(ctx.session.as_deref())

@@ -5,8 +5,10 @@
 //! loop can be serialized to disk and resumed later — e.g. after a
 //! crash, manual pause, or context-window rotation.
 
+use roko_core::Result;
 use roko_core::tool::ToolCall;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 /// Serializable snapshot of a [`ToolLoop`](super::ToolLoop) mid-execution.
 ///
@@ -56,6 +58,32 @@ impl Checkpoint {
     pub fn from_bytes(bytes: &[u8]) -> serde_json::Result<Self> {
         serde_json::from_slice(bytes)
     }
+
+    /// Persist the checkpoint to disk as formatted JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if serialization fails, the parent directory
+    /// cannot be created, or the file cannot be written.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_string_pretty(self)?;
+        std::fs::write(path, json)?;
+        Ok(())
+    }
+
+    /// Load a checkpoint from a JSON file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read or the JSON is invalid.
+    pub fn load(path: &Path) -> Result<Self> {
+        let json = std::fs::read_to_string(path)?;
+        let cp: Self = serde_json::from_str(&json)?;
+        Ok(cp)
+    }
 }
 
 #[cfg(test)]
@@ -89,5 +117,24 @@ mod tests {
         assert_eq!(recovered.iterations, 0);
         assert!(recovered.tool_calls.is_empty());
         assert!(recovered.messages.is_empty());
+    }
+
+    #[test]
+    fn save_and_load_round_trip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state").join("checkpoint.json");
+        let cp = Checkpoint::new(
+            2,
+            vec![ToolCall::new("c1", "echo", serde_json::json!({"value": 7}))],
+            vec![serde_json::json!({"role": "user", "content": "resume me"})],
+        );
+
+        cp.save(&path).expect("save checkpoint");
+        let loaded = Checkpoint::load(&path).expect("load checkpoint");
+
+        assert_eq!(loaded.iterations, cp.iterations);
+        assert_eq!(loaded.tool_calls.len(), 1);
+        assert_eq!(loaded.tool_calls[0].name, "echo");
+        assert_eq!(loaded.messages, cp.messages);
     }
 }

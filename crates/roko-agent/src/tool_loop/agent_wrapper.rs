@@ -6,8 +6,10 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use roko_core::tool::{ToolContext, ToolDef};
 use roko_core::{Body, Context, Kind, Signal};
+use roko_fs::RokoLayout;
 
 use crate::agent::{Agent, AgentResult};
+use crate::task_runner::task_id_from_context;
 
 use super::{StopReason, ToolLoop};
 
@@ -69,15 +71,32 @@ impl ToolLoopAgent {
             .tag("iterations", iterations.to_string())
             .build()
     }
+
+    fn checkpoint_path(&self, ctx: &Context) -> Option<PathBuf> {
+        let task_id = task_id_from_context(ctx);
+        if task_id.is_empty() {
+            return None;
+        }
+
+        let safe_task_id = task_id.replace(['/', '\\'], "_");
+        Some(
+            RokoLayout::for_project(&self.worktree_path)
+                .state_dir()
+                .join(format!("tool-loop-{safe_task_id}.json")),
+        )
+    }
 }
 
 #[async_trait]
 impl Agent for ToolLoopAgent {
-    async fn run(&self, input: &Signal, _ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Signal, ctx: &Context) -> AgentResult {
         let prompt = input.body.as_text().unwrap_or_default();
         let tool_ctx = ToolContext::testing(&self.worktree_path);
-        let output = self
-            .tool_loop
+        let tool_loop = match self.checkpoint_path(ctx) {
+            Some(path) => self.tool_loop.clone().with_checkpoint_path(path),
+            None => self.tool_loop.clone(),
+        };
+        let output = tool_loop
             .run(
                 self.system_prompt.as_deref().unwrap_or(""),
                 prompt,
