@@ -414,10 +414,6 @@ impl RokoConfig {
     /// minimum model registry needed for backwards compatibility.
     #[must_use]
     pub fn effective_models(&self) -> HashMap<String, ModelProfile> {
-        if !self.models.is_empty() {
-            return self.models.clone();
-        }
-
         let mut models = HashMap::new();
 
         for slug in self.agent.tier_models.values() {
@@ -436,6 +432,10 @@ impl RokoConfig {
             models
                 .entry(default_model.to_owned())
                 .or_insert_with(|| self.synthesized_model_profile(default_model));
+        }
+
+        for (model_key, profile) in &self.models {
+            models.insert(model_key.clone(), profile.clone());
         }
 
         models
@@ -492,6 +492,8 @@ impl RokoConfig {
     /// - `ROKO_MODEL` -- sets `agent.default_model`
     /// - `ROKO_BACKEND` -- sets `agent.default_backend`
     /// - `ROKO_EFFORT` -- sets `agent.default_effort`
+    /// - `ROKO_PROVIDER` -- overrides the provider for `agent.default_model`
+    /// - `ROKO_MODEL_SLUG` -- overrides the slug sent to the API
     /// - `ROKO_CONTEXT_LIMIT_K` -- sets `agent.context_limit_k`
     /// - `ROKO_MAX_AGENTS` -- sets `conductor.max_agents`
     /// - `ROKO_BUDGET_USD` -- sets `budget.max_plan_usd`
@@ -500,6 +502,9 @@ impl RokoConfig {
     /// - `ROKO_SKIP_TESTS` -- sets `gates.skip_tests`
     /// - `ROKO_CLIPPY` -- sets `gates.clippy_enabled`
     pub fn apply_env(&mut self, env_fn: &dyn Fn(&str) -> Option<String>) {
+        let provider_override = env_fn("ROKO_PROVIDER");
+        let model_slug_override = env_fn("ROKO_MODEL_SLUG");
+
         if let Some(v) = env_fn("ROKO_MODEL") {
             self.agent.default_model = v;
         }
@@ -535,6 +540,24 @@ impl RokoConfig {
         }
         if let Some(v) = env_fn("ROKO_CLIPPY") {
             self.gates.clippy_enabled = parse_bool_env(&v);
+        }
+
+        if provider_override.is_some() || model_slug_override.is_some() {
+            let default_model = self.agent.default_model.trim();
+            if !default_model.is_empty() {
+                let synthesized = self.synthesized_model_profile(default_model);
+                let entry = self
+                    .models
+                    .entry(default_model.to_owned())
+                    .or_insert(synthesized);
+
+                if let Some(v) = provider_override {
+                    entry.provider = v;
+                }
+                if let Some(v) = model_slug_override {
+                    entry.slug = v;
+                }
+            }
         }
     }
 
@@ -2162,6 +2185,24 @@ repo = "roko"
         assert!(cfg.conductor.express_mode);
         assert!(cfg.gates.skip_tests);
         assert!(!cfg.gates.clippy_enabled);
+    }
+
+    #[test]
+    fn env_override_provider() {
+        let mut cfg = RokoConfig::default();
+        let env = |key: &str| -> Option<String> {
+            match key {
+                "ROKO_PROVIDER" => Some("openrouter".into()),
+                "ROKO_MODEL_SLUG" => Some("z-ai/glm-5.1".into()),
+                _ => None,
+            }
+        };
+        cfg.apply_env(&env);
+
+        let models = cfg.effective_models();
+        let default_model = models.get(&cfg.agent.default_model).expect("default model");
+        assert_eq!(default_model.provider, "openrouter");
+        assert_eq!(default_model.slug, "z-ai/glm-5.1");
     }
 
     #[test]
