@@ -233,6 +233,9 @@ pub struct Episode {
     /// Optional short failure reason (hashed, never raw output).
     #[serde(default)]
     pub failure_reason: Option<String>,
+    /// Optional short reasoning summary for auditing and debugging.
+    #[serde(default)]
+    pub reasoning_summary: Option<String>,
     /// Mark this episode as a headline — headline episodes are never
     /// pruned by [`EpisodeLogger::compact`], regardless of age or count.
     #[serde(default)]
@@ -278,6 +281,7 @@ impl Episode {
             tokens_used: 0,
             external_actions: Vec::new(),
             failure_reason: None,
+            reasoning_summary: None,
             headline: false,
             extra: HashMap::new(),
         }
@@ -1049,6 +1053,30 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert!(!all[0].success);
         assert_eq!(all[0].failure_reason.as_deref(), Some("E0277:Send+Sync"));
+    }
+
+    #[tokio::test]
+    async fn episode_reasoning_round_trips() {
+        let (_dir, path) = tmp_log();
+        let logger = EpisodeLogger::new(&path);
+        let mut ep = sample("agent-a", "task-1", true);
+        let reasoning = "reason ".repeat(80);
+        ep.reasoning_summary = Some(reasoning.chars().take(500).collect());
+
+        logger.append(&ep).await.expect("append");
+
+        let all = EpisodeLogger::read_all(&path).await.expect("read");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].reasoning_summary, ep.reasoning_summary);
+        assert_eq!(
+            all[0]
+                .reasoning_summary
+                .as_ref()
+                .expect("reasoning summary")
+                .chars()
+                .count(),
+            500
+        );
     }
 
     #[test]
