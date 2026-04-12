@@ -240,20 +240,35 @@ impl App {
         // Responsive outer margin on large terminals
         let content_area = super::layout::responsive_outer_margin(full_area);
 
-        // Main layout: header (1 line) + content + footer (1 line)
+        // Main layout: header (1 line) + wave row (1 line) + content + footer (1 line)
+        let has_waves = !self.tui_state.execution_waves.is_empty();
+        let wave_row_height = if has_waves { 1 } else { 0 };
         let main_layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1), // Mori-style header bar
-                Constraint::Min(0),   // Content area
-                Constraint::Length(1), // Status footer
+                Constraint::Length(1),              // Mori-style header bar
+                Constraint::Length(wave_row_height), // Wave indicator row (hidden when idle)
+                Constraint::Min(0),                 // Content area
+                Constraint::Length(1),              // Status footer
             ])
             .split(content_area);
 
-        // Header: tab bar
+        // Header: Mori header bar
         self.render_tab_header(frame, main_layout[0], &theme);
 
+        // Wave indicator row (only when waves exist)
+        if has_waves {
+            super::widgets::wave_progress::render_wave_progress(
+                frame,
+                main_layout[1],
+                &self.tui_state,
+            );
+        }
+
         // Content: dispatch to active tab view
+        let content_idx = if has_waves { 2 } else { 1 };
+        let footer_idx = if has_waves { 3 } else { 2 };
+
         let view_state = ViewState {
             scroll: self.tui_state.plan_scroll_offset as u16,
             selected: self.tui_state.selected_plan_idx,
@@ -263,7 +278,7 @@ impl App {
         };
         views::render_tab_content(
             frame,
-            main_layout[1],
+            main_layout[content_idx],
             self.tui_state.active_tab,
             &self.data,
             &self.tui_state,
@@ -272,7 +287,7 @@ impl App {
         );
 
         // Footer: status line
-        self.render_status_footer(frame, main_layout[2], &theme);
+        self.render_status_footer(frame, main_layout[footer_idx], &theme);
 
         // Dim overlay before modals
         if self.active_modal.is_some() || self.tui_state.show_help {
