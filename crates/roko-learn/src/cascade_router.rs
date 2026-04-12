@@ -22,17 +22,17 @@
 
 use parking_lot::Mutex;
 use roko_agent::provider::ProviderError;
-use roko_core::OperatingFrequency;
 use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
 use roko_core::config::schema::RewardWeights;
+use roko_core::OperatingFrequency;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::cfactor::{AgentDispatchBias, CFactor};
 use crate::model_experiment::ModelExperimentStore;
-use crate::model_router::{COLD_START_THRESHOLD, CONTEXT_DIM, LinUCBRouter, RoutingContext};
-use crate::pareto::{ModelObservation, compute_pareto_frontier};
+use crate::model_router::{LinUCBRouter, RoutingContext, COLD_START_THRESHOLD, CONTEXT_DIM};
+use crate::pareto::{compute_pareto_frontier, ModelObservation};
 use crate::provider_health::ProviderHealthRegistry;
 
 // ─── CascadeStage ───────────────────────────────────────────────────────────
@@ -736,9 +736,10 @@ impl CascadeRouter {
     /// Load a cascade router from a persisted JSON file, or create a new one.
     ///
     /// If the file exists and parses correctly, the confidence stats are restored
-    /// and the model slugs from the file are merged with the provided `model_slugs`
-    /// (the union is used). If the file doesn't exist or fails to parse, a fresh
-    /// router is created with the given `model_slugs`.
+    /// for the current `model_slugs`. When a model slug changes version between
+    /// runs (for example `glm-5` -> `glm-5.1`), half of the old confidence stats
+    /// are seeded into the new slug. If the file doesn't exist or fails to parse,
+    /// a fresh router is created with the given `model_slugs`.
     ///
     /// # Panics
     ///
@@ -755,21 +756,20 @@ impl CascadeRouter {
                 total_observations,
                 role_table,
             }) => {
-                // Merge model sets: union of persisted + provided.
-                let mut slugs: Vec<String> = persisted_model_slugs;
-                for s in &model_slugs {
-                    if !slugs.contains(s) {
-                        slugs.push(s.clone());
-                    }
-                }
-                if slugs.is_empty() {
-                    slugs = model_slugs;
-                }
+                let slugs = if model_slugs.is_empty() {
+                    persisted_model_slugs.clone()
+                } else {
+                    model_slugs
+                };
                 assert!(!slugs.is_empty(), "CascadeRouter: need at least one model");
+                let version_changes = detect_version_changes(&persisted_model_slugs, &slugs);
+                let migrated_stats =
+                    migrated_confidence_stats(&confidence_stats, &version_changes, &slugs);
                 let mut router = Self::new(slugs);
+
                 // Restore confidence stats.
                 let mut stats = router.confidence_stats.lock();
-                for (model, persisted) in &confidence_stats {
+                for (model, persisted) in &migrated_stats {
                     stats.insert(
                         model.clone(),
                         ModelStats {
@@ -791,7 +791,9 @@ impl CascadeRouter {
                 router.linucb.set_total_observations(total);
                 if !role_table.is_empty() {
                     for (role, slug) in role_table {
-                        router.role_table.insert(role, slug);
+                        router
+                            .role_table
+                            .insert(role, remap_role_table_entry(slug, &version_changes));
                     }
                 }
 
@@ -1164,10 +1166,108 @@ struct CascadeSnapshot {
 }
 
 /// Serializable form of per-model confidence stats.
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 struct PersistedModelStats {
     trials: u64,
     successes: u64,
+}
+
+impl PersistedModelStats {
+    fn weighted_half(self) -> Self {
+        Self {
+            trials: self.trials / 2,
+            successes: self.successes / 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum VersionChange {
+    Added(String),
+    Removed(String),
+    Upgraded { old: String, new: String },
+}
+
+fn detect_version_changes(
+    persisted_slugs: &[String],
+    current_slugs: &[String],
+) -> Vec<VersionChange> {
+    let mut changes = Vec::new();
+    let persisted_set: HashSet<&str> = persisted_slugs.iter().map(String::as_str).collect();
+    let current_set: HashSet<&str> = current_slugs.iter().map(String::as_str).collect();
+
+    for slug in current_slugs {
+        if !persisted_set.contains(slug.as_str()) {
+            let prefix = slug
+                .rsplit_once('-')
+                .map_or(slug.as_str(), |(prefix, _)| prefix);
+            if let Some(old) = persisted_slugs
+                .iter()
+                .find(|candidate| candidate.starts_with(prefix))
+            {
+                changes.push(VersionChange::Upgraded {
+                    old: old.clone(),
+                    new: slug.clone(),
+                });
+            } else {
+                changes.push(VersionChange::Added(slug.clone()));
+            }
+        }
+    }
+
+    for slug in persisted_slugs {
+        if !current_set.contains(slug.as_str()) {
+            changes.push(VersionChange::Removed(slug.clone()));
+        }
+    }
+
+    changes
+}
+
+fn migrated_confidence_stats(
+    persisted_stats: &HashMap<String, PersistedModelStats>,
+    changes: &[VersionChange],
+    active_slugs: &[String],
+) -> HashMap<String, PersistedModelStats> {
+    let active_set: HashSet<&str> = active_slugs.iter().map(String::as_str).collect();
+    let mut migrated = persisted_stats
+        .iter()
+        .filter(|(slug, _)| active_set.contains(slug.as_str()))
+        .map(|(slug, stats)| (slug.clone(), *stats))
+        .collect::<HashMap<_, _>>();
+
+    for change in changes {
+        if let VersionChange::Upgraded { old, new } = change {
+            let Some(old_stats) = persisted_stats.get(old) else {
+                continue;
+            };
+            let transferred = old_stats.weighted_half();
+            if transferred.trials == 0 && transferred.successes == 0 {
+                continue;
+            }
+
+            let entry = migrated.entry(new.clone()).or_insert(PersistedModelStats {
+                trials: 0,
+                successes: 0,
+            });
+            entry.trials += transferred.trials;
+            entry.successes += transferred.successes;
+        }
+    }
+
+    migrated
+}
+
+fn remap_role_table_entry(slug: String, changes: &[VersionChange]) -> String {
+    for change in changes {
+        if let VersionChange::Upgraded { old, new } = change {
+            if slug == *old {
+                return new.clone();
+            }
+        }
+    }
+
+    slug
 }
 
 // ─── Tests ────────────────────────────────────────��─────────────────────────
@@ -1732,6 +1832,60 @@ mod tests {
         let result = cascade.route(&ctx);
 
         assert_eq!(result.primary.slug, "gpt-5");
+    }
+
+    #[test]
+    fn version_change_detection_detects_glm_upgrade() {
+        let changes = detect_version_changes(&["glm-5".to_string()], &["glm-5.1".to_string()]);
+
+        assert!(changes.contains(&VersionChange::Upgraded {
+            old: "glm-5".to_string(),
+            new: "glm-5.1".to_string(),
+        }));
+    }
+
+    #[test]
+    fn version_change_detection_transfers_weighted_stats_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cascade-router.json");
+        let snapshot = CascadeSnapshot {
+            model_slugs: vec!["glm-5".to_string()],
+            confidence_stats: HashMap::from([(
+                "glm-5".to_string(),
+                PersistedModelStats {
+                    trials: 10,
+                    successes: 6,
+                },
+            )]),
+            total_observations: 10,
+            role_table: HashMap::new(),
+        };
+        std::fs::write(&path, serde_json::to_string_pretty(&snapshot).unwrap()).unwrap();
+
+        let loaded = CascadeRouter::load_or_new(&path, vec!["glm-5.1".to_string()]);
+        let stats = loaded.confidence_snapshot();
+
+        assert_eq!(stats.get("glm-5.1"), Some(&(5, 3)));
+        assert!(!stats.contains_key("glm-5"));
+        assert_eq!(loaded.total_observations(), 10);
+    }
+
+    #[test]
+    fn version_change_detection_remaps_role_table_upgrade() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cascade-router.json");
+        let snapshot = CascadeSnapshot {
+            model_slugs: vec!["glm-5".to_string()],
+            confidence_stats: HashMap::new(),
+            total_observations: 0,
+            role_table: HashMap::from([(AgentRole::Implementer, "glm-5".to_string())]),
+        };
+        std::fs::write(&path, serde_json::to_string_pretty(&snapshot).unwrap()).unwrap();
+
+        let loaded = CascadeRouter::load_or_new(&path, vec!["glm-5.1".to_string()]);
+        let routed = loaded.route(&default_ctx());
+
+        assert_eq!(routed.primary.slug, "glm-5.1");
     }
 
     #[test]
