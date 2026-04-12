@@ -350,6 +350,19 @@ pub struct ArmState {
     pub reward_stats: MultiObjectiveStats,
 }
 
+/// Debug score for one candidate arm under a specific routing context.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CandidateArmScore {
+    /// Model slug this score belongs to.
+    pub slug: String,
+    /// Full LinUCB score (`exploitation + exploration`).
+    pub score: f64,
+    /// Learned mean-reward estimate (`theta^T * x`).
+    pub exploitation: f64,
+    /// Uncertainty bonus added for exploration.
+    pub exploration: f64,
+}
+
 impl ArmState {
     /// Create a fresh arm with identity A matrix and zero b vector.
     fn new(slug: impl Into<String>, dim: usize) -> Self {
@@ -922,6 +935,48 @@ impl LinUCBRouter {
         self.state.read().arms.clone()
     }
 
+    /// Score the supplied candidates for the given routing context.
+    ///
+    /// This mirrors the internal LinUCB selection math without selecting a
+    /// winner, so debugging surfaces can show how each arm compared.
+    pub fn score_candidates_with_alpha_adjuster<F>(
+        &self,
+        ctx: &RoutingContext,
+        candidate_slugs: &[String],
+        mut alpha_for_slug: F,
+    ) -> Vec<CandidateArmScore>
+    where
+        F: FnMut(&str) -> f64,
+    {
+        if candidate_slugs.is_empty() {
+            return Vec::new();
+        }
+
+        let state = self.state.read();
+        let mut scores = Vec::new();
+
+        for arm in &state.arms {
+            if !candidate_slugs
+                .iter()
+                .any(|candidate| slugs_match(&arm.slug, candidate))
+            {
+                continue;
+            }
+
+            let x = ctx.to_features_for_model(Some(&arm.slug));
+            let alpha = alpha_for_slug(&arm.slug);
+            let (exploitation, exploration) = linucb_score_components(arm, &x, alpha);
+            scores.push(CandidateArmScore {
+                slug: arm.slug.clone(),
+                score: exploitation + exploration,
+                exploitation,
+                exploration,
+            });
+        }
+
+        scores
+    }
+
     /// Persist router state to the configured path.
     ///
     /// # Errors
@@ -1009,10 +1064,16 @@ impl LinUCBRouter {
 /// If matrix inversion fails (should not happen for a well-formed A with
 /// identity initialization), returns the mean reward estimate only.
 fn linucb_score(arm: &ArmState, x: &[f64], alpha: f64) -> f64 {
+    let (exploitation, exploration) = linucb_score_components(arm, x, alpha);
+    exploitation + exploration
+}
+
+/// Compute the LinUCB exploitation and exploration components separately.
+fn linucb_score_components(arm: &ArmState, x: &[f64], alpha: f64) -> (f64, f64) {
     let Some(a_inv) = cholesky_inverse(&arm.a_matrix) else {
         // Fallback: use mean reward only (no exploration bonus).
         // theta ~ A_inv * b is undefined if A is singular.
-        return 0.0;
+        return (0.0, 0.0);
     };
 
     // theta = A_inv * b
@@ -1023,7 +1084,7 @@ fn linucb_score(arm: &ArmState, x: &[f64], alpha: f64) -> f64 {
     let a_inv_x = mat_vec_mul(&a_inv, x);
     let exploration = alpha * dot(x, &a_inv_x).max(0.0).sqrt();
 
-    exploitation + exploration
+    (exploitation, exploration)
 }
 
 /// Compute alpha (exploration parameter) from observation count.

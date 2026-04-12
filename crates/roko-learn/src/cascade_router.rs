@@ -31,7 +31,9 @@ use std::path::Path;
 
 use crate::cfactor::{AgentDispatchBias, CFactor};
 use crate::model_experiment::ModelExperimentStore;
-use crate::model_router::{COLD_START_THRESHOLD, CONTEXT_DIM, LinUCBRouter, RoutingContext};
+use crate::model_router::{
+    COLD_START_THRESHOLD, CONTEXT_DIM, CandidateArmScore, LinUCBRouter, RoutingContext,
+};
 use crate::pareto::{ModelObservation, compute_pareto_frontier};
 use crate::provider_health::ProviderHealthRegistry;
 
@@ -120,6 +122,40 @@ pub struct CascadeSelection {
     pub observations: u64,
     /// Which cascade stage produced the recommendation.
     pub stage: CascadeStage,
+}
+
+/// Debug score for one model candidate within the cascade.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CascadeCandidateScore {
+    /// Model slug this score belongs to.
+    pub slug: String,
+    /// Stage-specific score used for comparison.
+    pub score: f64,
+    /// Whether this candidate was selected.
+    pub selected: bool,
+    /// Whether this candidate is on the current Pareto frontier.
+    pub on_pareto_frontier: bool,
+    /// LinUCB mean-reward estimate, when UCB routing is active.
+    pub exploitation: Option<f64>,
+    /// LinUCB exploration bonus, when UCB routing is active.
+    pub exploration: Option<f64>,
+}
+
+/// Explainability snapshot for one routing decision.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CascadeRouteExplanation {
+    /// Which cascade stage handled this routing decision.
+    pub stage: CascadeStage,
+    /// Total observations recorded when the explanation was generated.
+    pub observations: u64,
+    /// Current LinUCB alpha, when the UCB stage is active.
+    pub alpha: Option<f64>,
+    /// Selected model slug.
+    pub selected_slug: String,
+    /// Candidate scores in descending order.
+    pub candidates: Vec<CascadeCandidateScore>,
+    /// Current Pareto frontier snapshot used by the cascade.
+    pub pareto_frontier: Vec<String>,
 }
 
 // ─── Confidence-stage stats ─────────────────────────────────────────────────
@@ -694,6 +730,128 @@ impl CascadeRouter {
             .iter()
             .map(|(k, v)| (k.clone(), (v.trials, v.successes)))
             .collect()
+    }
+
+    /// Explain the current routing decision for `ctx`.
+    ///
+    /// If `candidates` is provided, scoring is restricted to that subset,
+    /// matching the behavior of provider-health filtering.
+    pub fn explain_route(
+        &self,
+        ctx: &RoutingContext,
+        candidates: Option<&[String]>,
+    ) -> CascadeRouteExplanation {
+        let candidates = candidates
+            .filter(|candidates| !candidates.is_empty())
+            .unwrap_or(&self.model_slugs);
+        let stage = self.current_stage();
+        let observations = self.total_observations();
+        let pareto_frontier = self.recompute_pareto_frontier();
+
+        match stage {
+            CascadeStage::Static => {
+                let selected = if std::ptr::eq(candidates, self.model_slugs.as_slice()) {
+                    self.route_static(ctx, None, None).primary.slug
+                } else {
+                    self.route_static_filtered(ctx, candidates).primary.slug
+                };
+                let mut scored = candidates
+                    .iter()
+                    .map(|slug| CascadeCandidateScore {
+                        slug: slug.clone(),
+                        score: if slugs_match(slug, &selected) { 1.0 } else { 0.0 },
+                        selected: slugs_match(slug, &selected),
+                        on_pareto_frontier: pareto_frontier.iter().any(|entry| entry == slug),
+                        exploitation: None,
+                        exploration: None,
+                    })
+                    .collect::<Vec<_>>();
+                scored.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.slug.cmp(&b.slug)));
+
+                CascadeRouteExplanation {
+                    stage,
+                    observations,
+                    alpha: None,
+                    selected_slug: selected,
+                    candidates: scored,
+                    pareto_frontier,
+                }
+            }
+            CascadeStage::Confidence => {
+                let scores = self.confidence_scores(candidates, ctx);
+                let selected = choose_best_scored_slug(scores.clone());
+                let mut scored = scores
+                    .into_iter()
+                    .map(|(slug, score)| CascadeCandidateScore {
+                        selected: slugs_match(&slug, &selected),
+                        on_pareto_frontier: pareto_frontier.iter().any(|entry| entry == &slug),
+                        slug,
+                        score,
+                        exploitation: None,
+                        exploration: None,
+                    })
+                    .collect::<Vec<_>>();
+                scored.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.slug.cmp(&b.slug)));
+
+                CascadeRouteExplanation {
+                    stage,
+                    observations,
+                    alpha: None,
+                    selected_slug: selected,
+                    candidates: scored,
+                    pareto_frontier,
+                }
+            }
+            CascadeStage::Ucb => {
+                self.refresh_pareto_frontier_if_needed();
+                let frontier = {
+                    let state = self.pareto_frontier.lock();
+                    if state.bucket == 0 || state.frontier.is_empty() {
+                        pareto_frontier.clone()
+                    } else {
+                        state.frontier.clone()
+                    }
+                };
+                let base_alpha = self.linucb.current_alpha();
+                let arm_scores: Vec<CandidateArmScore> = self
+                    .linucb
+                    .score_candidates_with_alpha_adjuster(ctx, candidates, |slug| {
+                        pareto_adjusted_alpha(base_alpha, slug, &frontier)
+                    });
+
+                let selected = arm_scores
+                    .iter()
+                    .max_by(|left, right| {
+                        left.score
+                            .total_cmp(&right.score)
+                            .then_with(|| right.slug.cmp(&left.slug))
+                    })
+                    .map(|score| score.slug.clone())
+                    .unwrap_or_else(|| candidates[0].clone());
+
+                let mut scored = arm_scores
+                    .into_iter()
+                    .map(|candidate| CascadeCandidateScore {
+                        selected: slugs_match(&candidate.slug, &selected),
+                        on_pareto_frontier: frontier.iter().any(|entry| entry == &candidate.slug),
+                        slug: candidate.slug,
+                        score: candidate.score,
+                        exploitation: Some(candidate.exploitation),
+                        exploration: Some(candidate.exploration),
+                    })
+                    .collect::<Vec<_>>();
+                scored.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.slug.cmp(&b.slug)));
+
+                CascadeRouteExplanation {
+                    stage,
+                    observations,
+                    alpha: Some(base_alpha),
+                    selected_slug: selected,
+                    candidates: scored,
+                    pareto_frontier: frontier,
+                }
+            }
+        }
     }
 
     /// Save confidence stats, model slugs, and total observation count to a JSON file.

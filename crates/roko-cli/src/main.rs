@@ -26,17 +26,21 @@ use roko_cli::{
     PageId, PipeMode, Plan, PlanSummary, ReplMode, RepoRegistry, SessionStatus, Source,
     WizardInputs, config_cmd, load_layered, run_init_wizard, run_once,
 };
-use roko_core::agent::ProviderKind;
+use roko_core::agent::{AgentRole, ProviderKind};
 use roko_core::config::ServeDeployWebhookConfig;
 use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
+use roko_core::task::{TaskCategory, TaskComplexityBand};
 use roko_core::{ContentHash, Context, Kind, Query, Substrate};
 use roko_core::{Headlines, TaskMetric, compute_headlines};
+use roko_learn::cascade_router::{CascadeRouteExplanation, CascadeRouter};
 use roko_dreams::{DreamAgentConfig, DreamEngine, DreamLoopConfig, DreamRunner};
 use roko_fs::{FileSubstrate, FsObservabilitySinks, RokoLayout};
 use roko_learn::cfactor::{CFactor, trend_arrow as cfactor_trend_arrow};
+use roko_learn::cost_table::CostTable;
 use roko_learn::efficiency::compute_role_profiles;
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
-use roko_learn::latency::LatencyStats;
+use roko_learn::latency::{LatencyRegistry, LatencyStats};
+use roko_learn::model_router::{RoutingContext, normalized_cost};
 use roko_learn::prompt_experiment::ExperimentStore;
 use roko_learn::provider_health::{CircuitState, ProviderHealth};
 use roko_learn::runtime_feedback::{read_efficiency_events, refresh_cfactor_snapshot};
@@ -599,6 +603,20 @@ enum ProviderCmd {
 enum ModelCmd {
     /// List configured models and their capabilities.
     List {
+        /// Directory containing `roko.toml` (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Show the current routing decision and optionally explain why it won.
+    Route {
+        /// Model key or slug to explain.
+        model: String,
+        /// Show the full routing trace instead of only the final decision.
+        #[arg(long)]
+        explain: bool,
+        /// Complexity tier (`mechanical`, `focused`, `integrative`, `architectural`).
+        #[arg(long)]
+        complexity: Option<String>,
         /// Directory containing `roko.toml` (default: cwd / --repo).
         #[arg(long)]
         workdir: Option<PathBuf>,
@@ -1557,6 +1575,16 @@ async fn cmd_model(cli: &Cli, cmd: ModelCmd) -> Result<i32> {
             cmd_model_list(&wd)?;
             Ok(EXIT_SUCCESS)
         }
+        ModelCmd::Route {
+            model,
+            explain,
+            complexity,
+            workdir,
+        } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            cmd_model_route(&wd, cli.role.as_deref(), &model, explain, complexity.as_deref())?;
+            Ok(EXIT_SUCCESS)
+        }
     }
 }
 
@@ -1612,6 +1640,433 @@ fn cmd_model_list(workdir: &Path) -> Result<()> {
 
     print!("{}", format_model_rows(&rows));
     Ok(())
+}
+
+fn cmd_model_route(
+    workdir: &Path,
+    role_arg: Option<&str>,
+    requested_model: &str,
+    explain: bool,
+    complexity_arg: Option<&str>,
+) -> Result<()> {
+    let config = load_roko_config(workdir)?;
+    let models = configured_models(&config);
+    if models.is_empty() {
+        println!("no models configured");
+        return Ok(());
+    }
+
+    let mut model_slugs = models
+        .values()
+        .map(|profile| profile.slug.clone())
+        .collect::<Vec<_>>();
+    model_slugs.sort();
+    model_slugs.dedup();
+
+    let role = parse_agent_role(role_arg)?;
+    let complexity = parse_route_complexity(complexity_arg)?;
+    let aliases = model_aliases_by_slug(&models);
+    let requested_slug =
+        resolve_requested_model_slug(requested_model, &models).unwrap_or_else(|| requested_model.to_string());
+    let context = RoutingContext {
+        task_category: TaskCategory::Implementation,
+        complexity: complexity.band,
+        iteration: 1,
+        role,
+        crate_familiarity: 0.0,
+        has_prior_failure: false,
+        affect_confidence: 0.5,
+        previous_model: Some(requested_slug.clone()),
+        plan_context_tokens: None,
+    };
+
+    let router = CascadeRouter::load_or_new(&cascade_router_path(workdir), model_slugs.clone());
+    let provider_health = load_provider_health_snapshot(&provider_health_path(workdir))?;
+    let latency_registry = LatencyRegistry::load_or_new(&latency_stats_path(workdir));
+    let model_providers = model_provider_map(&models, &model_slugs);
+    let available_candidates =
+        available_model_candidates(&model_slugs, &model_providers, &provider_health, unix_ms_now());
+    let explanation = router.explain_route(
+        &context,
+        (!available_candidates.is_empty()).then_some(available_candidates.as_slice()),
+    );
+
+    if !explain {
+        let selected_name = display_model_name(&aliases, &explanation.selected_slug);
+        let provider = model_providers
+            .get(&explanation.selected_slug)
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
+        println!("{selected_name} via {provider}");
+        return Ok(());
+    }
+
+    let confidence = router.confidence_snapshot();
+    let cost_table = CostTable::from_config(&models).with_defaults();
+    print!(
+        "{}",
+        format_model_route_explanation(
+            requested_model,
+            &requested_slug,
+            &aliases,
+            &explanation,
+            &confidence,
+            &model_providers,
+            &provider_health,
+            &latency_registry,
+            &cost_table,
+        )
+    );
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RouteComplexity {
+    band: TaskComplexityBand,
+    tier_label: &'static str,
+}
+
+fn parse_agent_role(input: Option<&str>) -> Result<AgentRole> {
+    let Some(input) = input.map(str::trim).filter(|input| !input.is_empty()) else {
+        return Ok(AgentRole::Implementer);
+    };
+
+    let normalized = normalize_route_token(input);
+    std::iter::once(AgentRole::Conductor)
+        .chain(AgentRole::ALL_AGENTS)
+        .find(|role| {
+            normalize_route_token(role.label()) == normalized
+                || normalize_route_token(role.short()) == normalized
+        })
+        .ok_or_else(|| anyhow!("unknown role '{input}'"))
+}
+
+fn parse_route_complexity(input: Option<&str>) -> Result<RouteComplexity> {
+    let Some(input) = input.map(str::trim).filter(|input| !input.is_empty()) else {
+        return Ok(RouteComplexity {
+            band: TaskComplexityBand::Standard,
+            tier_label: "focused",
+        });
+    };
+
+    match normalize_route_token(input).as_str() {
+        "mechanical" | "fast" | "low" => Ok(RouteComplexity {
+            band: TaskComplexityBand::Fast,
+            tier_label: "mechanical",
+        }),
+        "focused" | "standard" | "medium" => Ok(RouteComplexity {
+            band: TaskComplexityBand::Standard,
+            tier_label: "focused",
+        }),
+        "integrative" => Ok(RouteComplexity {
+            band: TaskComplexityBand::Standard,
+            tier_label: "integrative",
+        }),
+        "architectural" | "complex" | "premium" | "high" => Ok(RouteComplexity {
+            band: TaskComplexityBand::Complex,
+            tier_label: "architectural",
+        }),
+        _ => bail!("unknown complexity '{input}'"),
+    }
+}
+
+fn normalize_route_token(input: &str) -> String {
+    input
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn resolve_requested_model_slug(
+    requested_model: &str,
+    models: &HashMap<String, ModelProfile>,
+) -> Option<String> {
+    if let Some(profile) = models.get(requested_model) {
+        return Some(profile.slug.clone());
+    }
+
+    let normalized = normalize_route_token(requested_model);
+    let mut entries = models.iter().collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.0.cmp(right.0));
+
+    for (model_key, profile) in entries {
+        if normalize_route_token(model_key) == normalized
+            || normalize_route_token(&profile.slug) == normalized
+        {
+            return Some(profile.slug.clone());
+        }
+    }
+
+    None
+}
+
+fn model_aliases_by_slug(models: &HashMap<String, ModelProfile>) -> HashMap<String, String> {
+    let mut grouped: HashMap<String, Vec<String>> = HashMap::new();
+    for (model_key, profile) in models {
+        grouped
+            .entry(profile.slug.clone())
+            .or_default()
+            .push(model_key.clone());
+    }
+
+    let mut aliases = HashMap::new();
+    for (slug, mut keys) in grouped {
+        keys.sort();
+        let alias = if keys.len() == 1 {
+            keys[0].clone()
+        } else {
+            slug.clone()
+        };
+        aliases.insert(slug, alias);
+    }
+    aliases
+}
+
+fn display_model_name(aliases: &HashMap<String, String>, slug: &str) -> String {
+    aliases
+        .get(slug)
+        .cloned()
+        .unwrap_or_else(|| slug.to_string())
+}
+
+fn model_provider_map(
+    models: &HashMap<String, ModelProfile>,
+    model_slugs: &[String],
+) -> HashMap<String, String> {
+    let mut entries = models.iter().collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.0.cmp(right.0));
+
+    let mut providers = HashMap::new();
+    for slug in model_slugs {
+        if let Some((_, profile)) = entries.iter().find(|(_, profile)| profile.slug == *slug) {
+            providers.insert(slug.clone(), profile.provider.clone());
+        }
+    }
+    providers
+}
+
+fn available_model_candidates(
+    model_slugs: &[String],
+    model_providers: &HashMap<String, String>,
+    provider_health: &HashMap<String, ProviderHealth>,
+    now_ms: i64,
+) -> Vec<String> {
+    model_slugs
+        .iter()
+        .filter(|slug| {
+            model_providers
+                .get(slug.as_str())
+                .map(|provider| provider_is_available(provider_health.get(provider), now_ms))
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect()
+}
+
+fn provider_is_available(health: Option<&ProviderHealth>, now_ms: i64) -> bool {
+    health
+        .map(|snapshot| effective_circuit_state(snapshot, now_ms) != CircuitState::Open)
+        .unwrap_or(true)
+}
+
+fn format_model_route_explanation(
+    requested_model: &str,
+    requested_slug: &str,
+    aliases: &HashMap<String, String>,
+    explanation: &CascadeRouteExplanation,
+    confidence: &HashMap<String, (u64, u64)>,
+    model_providers: &HashMap<String, String>,
+    provider_health: &HashMap<String, ProviderHealth>,
+    latency_registry: &LatencyRegistry,
+    cost_table: &CostTable,
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "Routing decision for '{requested_model}':");
+    let _ = writeln!(
+        out,
+        "  Stage: {} ({} observations)",
+        format_route_stage(explanation.stage),
+        explanation.observations
+    );
+    if let Some(alpha) = explanation.alpha {
+        let _ = writeln!(out, "  Alpha: {alpha:.3} ({})", describe_alpha(alpha));
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "  Candidate Scores:");
+
+    let candidate_names = explanation
+        .candidates
+        .iter()
+        .map(|candidate| display_model_name(aliases, &candidate.slug))
+        .collect::<Vec<_>>();
+    let name_width = candidate_names
+        .iter()
+        .map(String::len)
+        .max()
+        .unwrap_or("Model".len())
+        .max("Model".len());
+
+    for (candidate, name) in explanation.candidates.iter().zip(candidate_names.iter()) {
+        let (trials, successes) = confidence.get(&candidate.slug).copied().unwrap_or((0, 0));
+        let pass_rate = if trials > 0 {
+            successes as f64 / trials as f64
+        } else {
+            0.0
+        };
+        let provider = model_providers.get(&candidate.slug).map(String::as_str);
+        let cost = normalized_cost(&candidate.slug, cost_table);
+        let latency = provider
+            .and_then(|provider| normalized_latency_for_model(&candidate.slug, provider, latency_registry))
+            .unwrap_or(0.0);
+        let selected_marker = if candidate.selected { "  <- selected" } else { "" };
+
+        let _ = writeln!(
+            out,
+            "    {:<name_width$}  {:>5.3}  (pass: {:>3.0}%, cost: {:.2}, latency: {:.2}){}",
+            name,
+            candidate.score,
+            pass_rate * 100.0,
+            cost,
+            latency,
+            selected_marker,
+            name_width = name_width,
+        );
+    }
+
+    let _ = writeln!(out);
+    let _ = writeln!(out, "  Provider Health:");
+    let mut providers = explanation
+        .candidates
+        .iter()
+        .filter_map(|candidate| model_providers.get(&candidate.slug))
+        .cloned()
+        .collect::<Vec<_>>();
+    providers.sort();
+    providers.dedup();
+    if providers.is_empty() {
+        let _ = writeln!(out, "    none");
+    } else {
+        let now_ms = unix_ms_now();
+        for provider in providers {
+            let status = format_provider_health_note(provider_health.get(&provider), now_ms);
+            let _ = writeln!(out, "    {provider}: {status}");
+        }
+    }
+
+    let _ = writeln!(out);
+    let _ = writeln!(out, "  Cache Affinity:");
+    let previous_name = display_model_name(aliases, requested_slug);
+    let affinity_note = match explanation.stage {
+        roko_learn::cascade_router::CascadeStage::Confidence
+            if explanation
+                .candidates
+                .iter()
+                .any(|candidate| candidate.slug == requested_slug) =>
+        {
+            "(+0.15 bonus applied)"
+        }
+        roko_learn::cascade_router::CascadeStage::Ucb
+            if explanation
+                .candidates
+                .iter()
+                .any(|candidate| candidate.slug == requested_slug) =>
+        {
+            "(affinity feature active)"
+        }
+        _ => "(no matching candidate bonus)",
+    };
+    let _ = writeln!(out, "    Previous model: {previous_name} {affinity_note}");
+
+    let _ = writeln!(out);
+    let _ = writeln!(out, "  Pareto Status:");
+    let selected_name = display_model_name(aliases, &explanation.selected_slug);
+    let pareto_status = if explanation
+        .pareto_frontier
+        .iter()
+        .any(|slug| slug == &explanation.selected_slug)
+    {
+        "ON frontier (not dominated)"
+    } else {
+        "OFF frontier (dominated)"
+    };
+    let _ = writeln!(out, "    {selected_name}: {pareto_status}");
+
+    let selected_provider = model_providers
+        .get(&explanation.selected_slug)
+        .cloned()
+        .unwrap_or_else(|| "unknown".to_string());
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "  Final: {} via {}",
+        display_model_name(aliases, &explanation.selected_slug),
+        selected_provider
+    );
+    out
+}
+
+fn format_route_stage(stage: roko_learn::cascade_router::CascadeStage) -> &'static str {
+    match stage {
+        roko_learn::cascade_router::CascadeStage::Static => "Static",
+        roko_learn::cascade_router::CascadeStage::Confidence => "Confidence",
+        roko_learn::cascade_router::CascadeStage::Ucb => "UCB",
+    }
+}
+
+fn describe_alpha(alpha: f64) -> &'static str {
+    if alpha <= 0.10 {
+        "mostly exploitation"
+    } else if alpha <= 0.25 {
+        "balanced exploration"
+    } else {
+        "exploration-heavy"
+    }
+}
+
+fn normalized_latency_for_model(
+    model_slug: &str,
+    provider: &str,
+    latency_registry: &LatencyRegistry,
+) -> Option<f64> {
+    let stats = latency_registry.get(model_slug, provider)?;
+    let sla_ms = default_latency_sla_for_slug(model_slug) as f64;
+    (sla_ms > 0.0).then(|| (stats.total_latency_ema_ms / sla_ms).min(1.0))
+}
+
+fn default_latency_sla_for_slug(slug: &str) -> u64 {
+    if slug.contains("haiku") {
+        10_000
+    } else if slug.contains("opus") || slug.contains("premium") {
+        120_000
+    } else {
+        30_000
+    }
+}
+
+fn format_provider_health_note(health: Option<&ProviderHealth>, now_ms: i64) -> String {
+    let Some(health) = health else {
+        return "CLOSED (healthy)".to_string();
+    };
+
+    match effective_circuit_state(health, now_ms) {
+        CircuitState::Closed => "CLOSED (healthy)".to_string(),
+        CircuitState::HalfOpen => "HALF-OPEN (probe allowed)".to_string(),
+        CircuitState::Open => {
+            let cooldown = format_cooldown(Some(health), CircuitState::Open, now_ms);
+            if cooldown == "—" {
+                "OPEN (cooldown active)".to_string()
+            } else {
+                format!("OPEN ({cooldown})")
+            }
+        }
+    }
+}
+
+fn cascade_router_path(workdir: &Path) -> PathBuf {
+    RokoLayout::for_project(workdir)
+        .learn_dir()
+        .join("cascade-router.json")
 }
 
 fn cmd_provider_health(workdir: &Path) -> Result<()> {
@@ -5024,6 +5479,34 @@ mod tests {
             Some(Command::Model {
                 cmd: ModelCmd::List { .. }
             })
+        ));
+    }
+
+    #[test]
+    fn cli_parses_model_route_subcommand() {
+        let cli = Cli::try_parse_from([
+            "roko",
+            "model",
+            "route",
+            "glm-5-1",
+            "--explain",
+            "--role",
+            "implementer",
+            "--complexity",
+            "integrative",
+        ])
+        .unwrap();
+        assert_eq!(cli.role.as_deref(), Some("implementer"));
+        assert!(matches!(
+            cli.command,
+            Some(Command::Model {
+                cmd: ModelCmd::Route {
+                    model,
+                    explain: true,
+                    complexity: Some(complexity),
+                    ..
+                }
+            }) if model == "glm-5-1" && complexity == "integrative"
         ));
     }
 
