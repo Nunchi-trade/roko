@@ -120,6 +120,8 @@ pub fn run_init_wizard(target: Option<PathBuf>, inputs: &WizardInputs) -> Result
         repos: None,
         gates,
         executor: Some(default_executor_layer()),
+        providers: None,
+        models: None,
         serve: Some(ServeLayer {
             auth: Some(ServeAuthLayer {
                 enabled: Some(false),
@@ -520,6 +522,16 @@ fn print_resolved(r: &ResolvedConfig) {
         r.sources.prompt_role.tag()
     );
     println!(
+        "  providers         = {:?} {}",
+        r.config.providers,
+        r.sources.providers.tag()
+    );
+    println!(
+        "  models            = {:?} {}",
+        r.config.models,
+        r.sources.models.tag()
+    );
+    println!(
         "  dreams.auto_dream  = {} {}",
         r.config.dreams.auto_dream,
         r.sources.dreams_auto_dream.tag()
@@ -553,6 +565,8 @@ fn print_resolved(r: &ResolvedConfig) {
         && r.sources.auto_plan == Source::Default
         && r.sources.prompt_token_budget == Source::Default
         && r.sources.prompt_role == Source::Default
+        && r.sources.providers == Source::Default
+        && r.sources.models == Source::Default
         && r.sources.tools_prefer_mcp == Source::Default
         && r.sources.dreams_auto_dream == Source::Default
         && r.sources.dreams_idle_threshold_mins == Source::Default

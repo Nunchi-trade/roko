@@ -6,10 +6,13 @@
 
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use roko_core::config::schema::RokoConfig;
-use roko_core::config::schema::SubscriptionConfig;
+use roko_core::agent::ProviderKind;
+use roko_core::config::schema::{
+    ModelProfile, ProviderConfig, ProviderRouting, RokoConfig, SubscriptionConfig,
+};
 use roko_core::config::{ServeConfig, ServeDeployConfig, ServeDeployWebhookConfig};
 use roko_orchestrator::ExecutorConfig;
 
@@ -42,6 +45,12 @@ pub struct Config {
     /// Cost budget configuration.
     #[serde(default)]
     pub budget: BudgetConfig,
+    /// Provider registry keyed by provider name.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub providers: HashMap<String, ProviderConfig>,
+    /// Model registry keyed by model name.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub models: HashMap<String, ModelProfile>,
     /// API serving options.
     #[serde(default)]
     pub serve: ServeConfig,
@@ -68,6 +77,8 @@ impl Default for Config {
             gates: vec![GateConfig::default_shell_true()],
             executor: ExecutorConfig::default(),
             budget: BudgetConfig::default(),
+            providers: HashMap::new(),
+            models: HashMap::new(),
             serve: ServeConfig::default(),
             log_format: None,
             bind: None,
@@ -806,6 +817,12 @@ pub struct ConfigLayer {
     /// Executor settings overrides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executor: Option<ExecutorLayer>,
+    /// Provider registry overrides keyed by provider name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub providers: Option<HashMap<String, ProviderLayer>>,
+    /// Model registry overrides keyed by model name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<HashMap<String, ModelProfileLayer>>,
     /// API serving options overrides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serve: Option<ServeLayer>,
@@ -867,6 +884,26 @@ impl ConfigLayer {
                 None => e,
             });
         }
+        if let Some(overlay_providers) = overlay.providers {
+            let mut providers = self.providers.unwrap_or_default();
+            for (name, layer) in overlay_providers {
+                providers
+                    .entry(name)
+                    .and_modify(|base| *base = base.clone().merge(layer.clone()))
+                    .or_insert(layer);
+            }
+            self.providers = Some(providers);
+        }
+        if let Some(overlay_models) = overlay.models {
+            let mut models = self.models.unwrap_or_default();
+            for (name, layer) in overlay_models {
+                models
+                    .entry(name)
+                    .and_modify(|base| *base = base.clone().merge(layer.clone()))
+                    .or_insert(layer);
+            }
+            self.models = Some(models);
+        }
         if let Some(s) = overlay.serve {
             self.serve = Some(match self.serve {
                 Some(base) => base.merge(s),
@@ -889,13 +926,14 @@ impl ConfigLayer {
             && self.prompt.is_none()
             && self.gates.is_none()
             && self.executor.is_none()
+            && self.providers.is_none()
+            && self.models.is_none()
             && self.serve.is_none()
             && self.repos.is_none()
     }
 
     /// Resolve into a concrete [`Config`], filling missing fields with defaults.
-    #[must_use]
-    pub fn resolve(self) -> Config {
+    pub fn resolve(self) -> Result<Config> {
         let agent = match self.agent {
             Some(a) => {
                 let defaults = AgentConfig::default();
@@ -967,6 +1005,30 @@ impl ConfigLayer {
             }
             None => ExecutorConfig::default(),
         };
+        let providers = match self.providers {
+            Some(providers) => providers
+                .into_iter()
+                .map(|(name, layer)| {
+                    let provider = layer
+                        .resolve()
+                        .with_context(|| format!("resolve providers.{name}"))?;
+                    Ok((name, provider))
+                })
+                .collect::<Result<HashMap<_, _>>>()?,
+            None => HashMap::new(),
+        };
+        let models = match self.models {
+            Some(models) => models
+                .into_iter()
+                .map(|(name, layer)| {
+                    let profile = layer
+                        .resolve()
+                        .with_context(|| format!("resolve models.{name}"))?;
+                    Ok((name, profile))
+                })
+                .collect::<Result<HashMap<_, _>>>()?,
+            None => HashMap::new(),
+        };
         let serve = match self.serve {
             Some(s) => {
                 let defaults = ServeConfig::default();
@@ -983,7 +1045,7 @@ impl ConfigLayer {
             }
             None => ServeConfig::default(),
         };
-        Config {
+        Ok(Config {
             agent,
             auto_plan,
             dreams,
@@ -993,11 +1055,261 @@ impl ConfigLayer {
             gates,
             executor,
             budget: BudgetConfig::default(),
+            providers,
+            models,
             serve,
             log_format: None,
             bind: None,
             data_dir: None,
+        })
+    }
+}
+
+/// Partial provider config used for layered merges.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ProviderLayer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ProviderKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttft_timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect_timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_headers: Option<HashMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent: Option<u32>,
+}
+
+impl ProviderLayer {
+    #[must_use]
+    pub fn merge(self, overlay: Self) -> Self {
+        Self {
+            kind: overlay.kind.or(self.kind),
+            base_url: overlay.base_url.or(self.base_url),
+            api_key_env: overlay.api_key_env.or(self.api_key_env),
+            command: overlay.command.or(self.command),
+            args: overlay.args.or(self.args),
+            timeout_ms: overlay.timeout_ms.or(self.timeout_ms),
+            ttft_timeout_ms: overlay.ttft_timeout_ms.or(self.ttft_timeout_ms),
+            connect_timeout_ms: overlay.connect_timeout_ms.or(self.connect_timeout_ms),
+            extra_headers: overlay.extra_headers.or(self.extra_headers),
+            max_concurrent: overlay.max_concurrent.or(self.max_concurrent),
         }
+    }
+
+    pub fn resolve(self) -> Result<ProviderConfig> {
+        Ok(ProviderConfig {
+            kind: self.kind.context("missing required field `kind`")?,
+            base_url: self.base_url,
+            api_key_env: self.api_key_env,
+            command: self.command,
+            args: self.args,
+            timeout_ms: self.timeout_ms.or(Some(120_000)),
+            ttft_timeout_ms: self.ttft_timeout_ms.or(Some(15_000)),
+            connect_timeout_ms: self.connect_timeout_ms.or(Some(5_000)),
+            extra_headers: self.extra_headers,
+            max_concurrent: self.max_concurrent,
+        })
+    }
+}
+
+/// Partial OpenRouter routing overrides used for layered merges.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ProviderRoutingLayer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_fallbacks: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_price: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_parameters: Option<Vec<String>>,
+}
+
+impl ProviderRoutingLayer {
+    #[must_use]
+    pub fn merge(self, overlay: Self) -> Self {
+        Self {
+            sort: overlay.sort.or(self.sort),
+            order: overlay.order.or(self.order),
+            allow_fallbacks: overlay.allow_fallbacks.or(self.allow_fallbacks),
+            max_price: overlay.max_price.or(self.max_price),
+            require_parameters: overlay.require_parameters.or(self.require_parameters),
+        }
+    }
+
+    #[must_use]
+    pub fn resolve(self) -> ProviderRouting {
+        ProviderRouting {
+            sort: self.sort,
+            order: self.order,
+            allow_fallbacks: self.allow_fallbacks,
+            max_price: self.max_price,
+            require_parameters: self.require_parameters,
+        }
+    }
+}
+
+/// Partial model profile used for layered merges.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ModelProfileLayer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_tools: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_thinking: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_vision: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_web_search: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_mcp_tools: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_partial: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_grounding: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_code_execution: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_caching: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_routing: Option<ProviderRoutingLayer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_input_per_m: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_output_per_m: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_input_per_m_high: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_output_per_m_high: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_read_per_m: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_write_per_m: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tools: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokenizer_ratio: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_search: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_citations: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_async: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_embedding_model: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_context_size: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_per_request: Option<f64>,
+}
+
+impl ModelProfileLayer {
+    #[must_use]
+    pub fn merge(self, overlay: Self) -> Self {
+        Self {
+            provider: overlay.provider.or(self.provider),
+            slug: overlay.slug.or(self.slug),
+            context_window: overlay.context_window.or(self.context_window),
+            max_output: overlay.max_output.or(self.max_output),
+            supports_tools: overlay.supports_tools.or(self.supports_tools),
+            supports_thinking: overlay.supports_thinking.or(self.supports_thinking),
+            supports_vision: overlay.supports_vision.or(self.supports_vision),
+            supports_web_search: overlay.supports_web_search.or(self.supports_web_search),
+            supports_mcp_tools: overlay.supports_mcp_tools.or(self.supports_mcp_tools),
+            supports_partial: overlay.supports_partial.or(self.supports_partial),
+            supports_grounding: overlay.supports_grounding.or(self.supports_grounding),
+            supports_code_execution: overlay
+                .supports_code_execution
+                .or(self.supports_code_execution),
+            supports_caching: overlay.supports_caching.or(self.supports_caching),
+            provider_routing: match (self.provider_routing, overlay.provider_routing) {
+                (Some(base), Some(overlay)) => Some(base.merge(overlay)),
+                (None, Some(overlay)) => Some(overlay),
+                (Some(base), None) => Some(base),
+                (None, None) => None,
+            },
+            tool_format: overlay.tool_format.or(self.tool_format),
+            cost_input_per_m: overlay.cost_input_per_m.or(self.cost_input_per_m),
+            cost_output_per_m: overlay.cost_output_per_m.or(self.cost_output_per_m),
+            cost_input_per_m_high: overlay.cost_input_per_m_high.or(self.cost_input_per_m_high),
+            cost_output_per_m_high: overlay
+                .cost_output_per_m_high
+                .or(self.cost_output_per_m_high),
+            cost_cache_read_per_m: overlay.cost_cache_read_per_m.or(self.cost_cache_read_per_m),
+            cost_cache_write_per_m: overlay
+                .cost_cache_write_per_m
+                .or(self.cost_cache_write_per_m),
+            thinking_level: overlay.thinking_level.or(self.thinking_level),
+            max_tools: overlay.max_tools.or(self.max_tools),
+            tokenizer_ratio: overlay.tokenizer_ratio.or(self.tokenizer_ratio),
+            supports_search: overlay.supports_search.or(self.supports_search),
+            supports_citations: overlay.supports_citations.or(self.supports_citations),
+            supports_async: overlay.supports_async.or(self.supports_async),
+            is_embedding_model: overlay.is_embedding_model.or(self.is_embedding_model),
+            search_context_size: overlay.search_context_size.or(self.search_context_size),
+            cost_per_request: overlay.cost_per_request.or(self.cost_per_request),
+        }
+    }
+
+    pub fn resolve(self) -> Result<ModelProfile> {
+        Ok(ModelProfile {
+            provider: self.provider.context("missing required field `provider`")?,
+            slug: self.slug.context("missing required field `slug`")?,
+            context_window: self.context_window.unwrap_or(128_000),
+            max_output: self.max_output,
+            supports_tools: self.supports_tools.unwrap_or(true),
+            supports_thinking: self.supports_thinking.unwrap_or(false),
+            supports_vision: self.supports_vision.unwrap_or(false),
+            supports_web_search: self.supports_web_search.unwrap_or(false),
+            supports_mcp_tools: self.supports_mcp_tools.unwrap_or(false),
+            supports_partial: self.supports_partial.unwrap_or(false),
+            supports_grounding: self.supports_grounding.unwrap_or(false),
+            supports_code_execution: self.supports_code_execution.unwrap_or(false),
+            supports_caching: self.supports_caching.unwrap_or(false),
+            provider_routing: self.provider_routing.map(ProviderRoutingLayer::resolve),
+            tool_format: self
+                .tool_format
+                .unwrap_or_else(|| "openai_json".to_string()),
+            cost_input_per_m: self.cost_input_per_m,
+            cost_output_per_m: self.cost_output_per_m,
+            cost_input_per_m_high: self.cost_input_per_m_high,
+            cost_output_per_m_high: self.cost_output_per_m_high,
+            cost_cache_read_per_m: self.cost_cache_read_per_m,
+            cost_cache_write_per_m: self.cost_cache_write_per_m,
+            thinking_level: self.thinking_level,
+            max_tools: self.max_tools,
+            tokenizer_ratio: self.tokenizer_ratio,
+            supports_search: self.supports_search.unwrap_or(false),
+            supports_citations: self.supports_citations.unwrap_or(false),
+            supports_async: self.supports_async.unwrap_or(false),
+            is_embedding_model: self.is_embedding_model.unwrap_or(false),
+            search_context_size: self.search_context_size,
+            cost_per_request: self.cost_per_request,
+        })
     }
 }
 
@@ -1449,6 +1761,10 @@ pub struct ConfigSources {
     pub prompt_token_budget: Source,
     /// Where `prompt.role` came from.
     pub prompt_role: Source,
+    /// Where `providers` came from.
+    pub providers: Source,
+    /// Where `models` came from.
+    pub models: Source,
     /// Where `dreams.auto_dream` came from.
     pub dreams_auto_dream: Source,
     /// Where `dreams.idle_threshold_mins` came from.
@@ -1469,7 +1785,7 @@ pub fn load_layered(workdir: &Path) -> Result<ResolvedConfig> {
     if let Some(env_path) = &paths.env_override {
         let layer = ConfigLayer::from_file(env_path)?;
         let sources = sources_from_layer(&layer, Source::Env, Source::Default);
-        let config = layer.resolve();
+        let config = layer.resolve()?;
         let repo_registry = RepoRegistry::load(&config, workdir)?;
         return Ok(ResolvedConfig {
             config,
@@ -1491,7 +1807,7 @@ pub fn load_layered(workdir: &Path) -> Result<ResolvedConfig> {
 
     let sources = compute_sources(&global_layer, &project_layer);
     let merged = global_layer.merge(project_layer);
-    let config = merged.resolve();
+    let config = merged.resolve()?;
     let repo_registry = RepoRegistry::load(&config, workdir)?;
 
     Ok(ResolvedConfig {
@@ -1575,6 +1891,8 @@ fn compute_sources(global: &ConfigLayer, project: &ConfigLayer) -> ConfigSources
             p_prompt.and_then(|p| p.role.as_ref()).is_some(),
             g_prompt.and_then(|p| p.role.as_ref()).is_some(),
         ),
+        providers: pick(project.providers.is_some(), global.providers.is_some()),
+        models: pick(project.models.is_some(), global.models.is_some()),
         dreams_auto_dream: pick(
             p_dreams.and_then(|d| d.auto_dream).is_some(),
             g_dreams.and_then(|d| d.auto_dream).is_some(),
@@ -1612,6 +1930,8 @@ fn sources_from_layer(layer: &ConfigLayer, present: Source, fallback: Source) ->
         tools_mcp_timeout_secs: pick(tools.and_then(|t| t.mcp_timeout_secs).is_some()),
         prompt_token_budget: pick(prompt.and_then(|p| p.token_budget).is_some()),
         prompt_role: pick(prompt.and_then(|p| p.role.as_ref()).is_some()),
+        providers: pick(layer.providers.is_some()),
+        models: pick(layer.models.is_some()),
         dreams_auto_dream: pick(dreams.and_then(|d| d.auto_dream).is_some()),
         dreams_idle_threshold_mins: pick(dreams.and_then(|d| d.idle_threshold_mins).is_some()),
         dreams_min_episodes_for_dream: pick(
@@ -1935,7 +2255,7 @@ auto_replan = false
         )
         .unwrap();
 
-        let cfg = layer.resolve();
+        let cfg = layer.resolve().unwrap();
         assert_eq!(cfg.executor.max_concurrent_plans, 6);
         assert_eq!(
             cfg.executor.max_concurrent_tasks,
@@ -1967,7 +2287,7 @@ auto_plan = true
         )
         .unwrap();
 
-        let cfg = layer.resolve();
+        let cfg = layer.resolve().unwrap();
         assert!(cfg.auto_plan);
     }
 
@@ -1990,6 +2310,8 @@ auto_plan = true
         assert_eq!(parsed.tools.prefer_mcp, cfg.tools.prefer_mcp);
         assert_eq!(parsed.tools.global_denied, cfg.tools.global_denied);
         assert_eq!(parsed.tools.mcp_timeout_secs, cfg.tools.mcp_timeout_secs);
+        assert_eq!(parsed.providers, cfg.providers);
+        assert_eq!(parsed.models, cfg.models);
         assert_eq!(parsed.repos.len(), cfg.repos.len());
         assert_eq!(parsed.gates.len(), cfg.gates.len());
         assert_eq!(parsed.serve.auth.enabled, cfg.serve.auth.enabled);
@@ -2085,7 +2407,7 @@ token_budget = 8000
         )
         .unwrap();
 
-        let merged = global.merge(project).resolve();
+        let merged = global.merge(project).resolve().unwrap();
         assert_eq!(merged.agent.command, "mods");
         assert_eq!(
             merged.agent.args,
@@ -2100,14 +2422,78 @@ token_budget = 8000
     }
 
     #[test]
+    fn layer_merge_merges_provider_and_model_entries() {
+        let global = ConfigLayer::parse_toml(
+            r#"
+[providers.zai]
+kind = "openai_compat"
+base_url = "https://global.example"
+api_key_env = "GLOBAL_KEY"
+
+[models.glm-5-1]
+provider = "zai"
+slug = "glm-5.1"
+supports_tools = true
+"#,
+        )
+        .unwrap();
+        let project = ConfigLayer::parse_toml(
+            r#"
+[providers.zai]
+base_url = "https://project.example"
+timeout_ms = 42000
+
+[models.glm-5-1]
+supports_thinking = true
+max_output = 131072
+"#,
+        )
+        .unwrap();
+
+        let merged = global.merge(project).resolve().unwrap();
+        let provider = merged.providers.get("zai").unwrap();
+        assert_eq!(provider.kind, ProviderKind::OpenAiCompat);
+        assert_eq!(
+            provider.base_url.as_deref(),
+            Some("https://project.example")
+        );
+        assert_eq!(provider.api_key_env.as_deref(), Some("GLOBAL_KEY"));
+        assert_eq!(provider.timeout_ms, Some(42_000));
+
+        let model = merged.models.get("glm-5-1").unwrap();
+        assert_eq!(model.provider, "zai");
+        assert_eq!(model.slug, "glm-5.1");
+        assert!(model.supports_tools);
+        assert!(model.supports_thinking);
+        assert_eq!(model.max_output, Some(131_072));
+    }
+
+    #[test]
+    fn layer_resolve_errors_when_provider_kind_missing() {
+        let layer = ConfigLayer::parse_toml(
+            r#"
+[providers.zai]
+base_url = "https://api.z.ai/api/paas/v4"
+"#,
+        )
+        .unwrap();
+
+        let err = layer.resolve().unwrap_err();
+        assert!(err.to_string().contains("resolve providers.zai"));
+        assert!(err.to_string().contains("missing required field `kind`"));
+    }
+
+    #[test]
     fn layer_resolve_empty_uses_defaults() {
         let layer = ConfigLayer::default();
-        let cfg = layer.resolve();
+        let cfg = layer.resolve().unwrap();
         assert_eq!(cfg.agent.command, "cat");
         assert!(!cfg.tools.prefer_mcp);
         assert!(cfg.tools.global_denied.is_empty());
         assert_eq!(cfg.tools.mcp_timeout_secs, 30);
         assert_eq!(cfg.prompt.token_budget, 10_000);
+        assert!(cfg.providers.is_empty());
+        assert!(cfg.models.is_empty());
         assert!(cfg.dreams.auto_dream);
         assert_eq!(cfg.dreams.idle_threshold_mins, 15);
         assert_eq!(cfg.dreams.min_episodes_for_dream, 5);
@@ -2128,7 +2514,7 @@ min_episodes_for_dream = 9
         )
         .unwrap();
 
-        let cfg = layer.resolve();
+        let cfg = layer.resolve().unwrap();
         assert!(!cfg.dreams.auto_dream);
         assert_eq!(cfg.dreams.idle_threshold_mins, 22);
         assert_eq!(cfg.dreams.min_episodes_for_dream, 9);
@@ -2163,6 +2549,8 @@ token_budget = 8000
         assert_eq!(sources.tools_mcp_timeout_secs, Source::Default);
         assert_eq!(sources.prompt_token_budget, Source::Project);
         assert_eq!(sources.prompt_role, Source::Default);
+        assert_eq!(sources.providers, Source::Default);
+        assert_eq!(sources.models, Source::Default);
         assert_eq!(sources.agent_args, Source::Default);
         assert_eq!(sources.dreams_auto_dream, Source::Default);
         assert_eq!(sources.dreams_idle_threshold_mins, Source::Default);
@@ -2187,7 +2575,7 @@ program = "echo"
 "#,
         )
         .unwrap();
-        let merged = global.merge(project).resolve();
+        let merged = global.merge(project).resolve().unwrap();
         assert_eq!(merged.gates.len(), 1);
         assert!(matches!(&merged.gates[0], GateConfig::Shell { program, .. } if program == "echo"));
     }
