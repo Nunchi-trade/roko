@@ -298,8 +298,8 @@ impl LearningRuntime {
         let cascade_router = CascadeRouter::load_or_new(
             &paths.cascade_router_json,
             vec![
-                "claude-sonnet-4-20250514".into(),
-                "claude-haiku-4-5-20251001".into(),
+                "claude-sonnet-4-5".into(),
+                "claude-haiku-4-5".into(),
             ],
         );
         let context_pack_cache = ContextPackCache::new(256, paths.root.join("context-cache.json"));
@@ -1555,7 +1555,7 @@ mod tests {
         let mut ep = sample_episode(true);
         ep.extra.insert(
             "model".to_string(),
-            serde_json::json!("claude-sonnet-4-20250514"),
+            serde_json::json!("claude-sonnet-4-5"),
         );
 
         let update = runtime
@@ -1579,7 +1579,7 @@ mod tests {
             .and_then(serde_json::Value::as_object)
             .expect("confidence stats should be persisted");
         let sonnet = stats
-            .get("claude-sonnet-4-20250514")
+            .get("claude-sonnet-4-5")
             .and_then(serde_json::Value::as_object)
             .expect("sonnet observation should be persisted");
         assert_eq!(

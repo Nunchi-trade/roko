@@ -47,6 +47,9 @@ impl ProviderAdapter for CursorAcpAdapter {
             .with_base_url(Self::base_url(provider))
             .with_timeout_ms(timeout_ms);
 
+        if let Some(headers) = &provider.extra_headers {
+            agent = agent.with_extra_headers(headers.clone());
+        }
         if !options.name.is_empty() {
             agent = agent.with_name(options.name.clone());
         }
@@ -169,6 +172,7 @@ mod tests {
             cost_cache_write_per_m: None,
             max_tools: None,
             tokenizer_ratio: None,
+            ..Default::default()
         }
     }
 

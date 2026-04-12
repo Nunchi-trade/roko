@@ -19,6 +19,7 @@ use crate::usage::Usage;
 use async_trait::async_trait;
 use roko_core::{Body, Context, Kind, Provenance, Signal};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -166,6 +167,7 @@ pub struct ClaudeAgent {
     system_prompt: Option<String>,
     tools: Option<Vec<AnthropicTool>>,
     tool_choice: Option<ToolChoice>,
+    extra_headers: Vec<(String, String)>,
     poster: Arc<dyn HttpPoster>,
 }
 
@@ -199,6 +201,7 @@ impl ClaudeAgent {
             system_prompt: None,
             tools: None,
             tool_choice: None,
+            extra_headers: Vec::new(),
             poster: Arc::new(ReqwestPoster::new()),
         }
     }
@@ -272,6 +275,15 @@ impl ClaudeAgent {
         self
     }
 
+    /// Inject additional HTTP headers on every request.
+    #[must_use]
+    pub fn with_extra_headers(mut self, extra_headers: HashMap<String, String>) -> Self {
+        let mut extra_headers: Vec<(String, String)> = extra_headers.into_iter().collect();
+        extra_headers.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        self.extra_headers = extra_headers;
+        self
+    }
+
     /// Configured model slug.
     #[must_use]
     pub fn model(&self) -> &str {
@@ -289,13 +301,15 @@ impl ClaudeAgent {
     }
 
     fn headers(&self) -> Vec<(String, String)> {
-        vec![
+        let mut headers = vec![
             ("x-api-key".to_owned(), self.api_key.clone()),
             (
                 "anthropic-version".to_owned(),
                 self.anthropic_version.clone(),
             ),
-        ]
+        ];
+        headers.extend(self.extra_headers.iter().cloned());
+        headers
     }
 
     fn fail(&self, input: &Signal, reason: &str, started: Instant) -> AgentResult {

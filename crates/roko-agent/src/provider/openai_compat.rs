@@ -176,15 +176,12 @@ impl ProviderAdapter for OpenAiCompatAdapter {
         model: &ModelProfile,
         options: &AgentOptions,
     ) -> Result<Box<dyn Agent>, AgentCreationError> {
+        let is_local = provider.base_url.as_deref().is_some_and(|url| {
+            url.starts_with("http://localhost:") || url.starts_with("http://127.0.0.1:")
+        });
         let api_key = provider
             .resolve_api_key()
-            .or_else(|| {
-                if provider.base_url.as_deref() == Some("http://localhost:11434") {
-                    Some(String::new())
-                } else {
-                    None
-                }
-            })
+            .or_else(|| if is_local { Some(String::new()) } else { None })
             .ok_or_else(|| {
                 AgentCreationError::MissingApiKey(provider.api_key_env.clone().unwrap_or_default())
             })?;
@@ -211,12 +208,16 @@ impl ProviderAdapter for OpenAiCompatAdapter {
         inject_kimi_params(&mut extra_body_params, model);
         inject_provider_routing(&mut extra_body_params, provider, model);
 
-        let agent = CodexAgent::new(api_key, model.slug.clone())
+        let mut agent = CodexAgent::new(api_key, model.slug.clone())
             .with_base_url(base_url)
             .with_timeout_ms(timeout)
             .with_max_tokens(max_tokens)
             .with_extra_body_params(extra_body_params)
             .with_name(options.name.clone());
+
+        if let Some(headers) = &provider.extra_headers {
+            agent = agent.with_extra_headers(headers.clone());
+        }
 
         Ok(Box::new(agent))
     }
@@ -425,6 +426,7 @@ mod tests {
             cost_cache_write_per_m: None,
             max_tools: None,
             tokenizer_ratio: None,
+            ..Default::default()
         };
         let options = AgentOptions {
             timeout_ms: Some(2_500),
@@ -517,6 +519,7 @@ mod tests {
             cost_cache_write_per_m: None,
             max_tools: Some(128),
             tokenizer_ratio: None,
+            ..Default::default()
         };
         let options = AgentOptions {
             timeout_ms: Some(2_500),
@@ -611,6 +614,7 @@ mod tests {
             cost_cache_write_per_m: None,
             max_tools: None,
             tokenizer_ratio: None,
+            ..Default::default()
         };
         let options = AgentOptions {
             timeout_ms: Some(2_500),
@@ -686,6 +690,7 @@ mod tests {
             cost_cache_write_per_m: None,
             max_tools: Some(128),
             tokenizer_ratio: None,
+            ..Default::default()
         };
 
         let base64_message = ChatMessage {

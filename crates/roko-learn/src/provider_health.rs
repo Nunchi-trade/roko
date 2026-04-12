@@ -27,7 +27,7 @@
 
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -90,18 +90,22 @@ pub struct ProviderHealth {
     /// Timestamp when the provider may be retried, in unix milliseconds.
     pub cooldown_until: Option<i64>,
     /// Rolling window of recent failures.
-    pub failure_window: Vec<FailureRecord>,
+    pub failure_window: VecDeque<FailureRecord>,
 }
 
 impl ProviderHealth {
     /// Record a successful request.
     ///
-    /// A successful probe from `HalfOpen` closes the circuit again.
+    /// A success from `HalfOpen` or `Open` closes the circuit. The `Open`
+    /// case handles providers whose state was persisted as Open and whose
+    /// cooldown expired before the process reloaded — without this, a
+    /// success would clear `consecutive_failures` but leave the circuit
+    /// permanently locked out.
     pub fn record_success(&mut self) {
         self.total_requests = self.total_requests.saturating_add(1);
         self.consecutive_failures = 0;
         self.cooldown_until = None;
-        if self.state == CircuitState::HalfOpen {
+        if self.state == CircuitState::HalfOpen || self.state == CircuitState::Open {
             self.state = CircuitState::Closed;
         }
     }
@@ -112,12 +116,12 @@ impl ProviderHealth {
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
         self.total_failures = self.total_failures.saturating_add(1);
         self.last_failure_at = Some(now_ms);
-        self.failure_window.push(FailureRecord {
+        self.failure_window.push_back(FailureRecord {
             timestamp_ms: now_ms,
             error_class: error,
         });
         if self.failure_window.len() > 20 {
-            self.failure_window.remove(0);
+            self.failure_window.pop_front();
         }
 
         // Trip to Open after 3 consecutive failures.
@@ -267,7 +271,7 @@ fn new_provider_health(provider_id: &str) -> ProviderHealth {
         total_failures: 0,
         last_failure_at: None,
         cooldown_until: None,
-        failure_window: Vec::new(),
+        failure_window: VecDeque::new(),
     }
 }
 
@@ -715,7 +719,7 @@ mod tests {
             total_failures: 7,
             last_failure_at: Some(1_725_000_000_000),
             cooldown_until: Some(1_725_000_030_000),
-            failure_window: vec![
+            failure_window: VecDeque::from(vec![
                 FailureRecord {
                     timestamp_ms: 1_725_000_000_000,
                     error_class: ErrorClass::RateLimit,
@@ -724,7 +728,7 @@ mod tests {
                     timestamp_ms: 1_725_000_010_000,
                     error_class: ErrorClass::Timeout,
                 },
-            ],
+            ]),
         };
 
         let json = serde_json::to_string(&health).expect("serialize provider health");
@@ -750,7 +754,7 @@ mod tests {
             total_failures: 0,
             last_failure_at: None,
             cooldown_until: None,
-            failure_window: Vec::new(),
+            failure_window: VecDeque::new(),
         };
 
         health.record_failure(ErrorClass::Timeout, 1_000);
@@ -781,7 +785,7 @@ mod tests {
             total_failures: 0,
             last_failure_at: None,
             cooldown_until: None,
-            failure_window: Vec::new(),
+            failure_window: VecDeque::new(),
         };
 
         health.record_failure(ErrorClass::RateLimit, 10);

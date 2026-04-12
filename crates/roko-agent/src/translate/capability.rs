@@ -167,7 +167,7 @@ pub fn translator_for(slug: &str) -> Arc<dyn Translator> {
 
 /// Short, stable name of the translator Roko picks for a model slug.
 ///
-/// Returns one of `"claude"`, `"ollama"`, or `"react"`. Useful for logs,
+/// Returns one of `"claude"`, `"openai"`, or `"react"`. Useful for logs,
 /// TUI telemetry, and tests where the concrete type is hidden behind a
 /// `dyn Translator` object.
 ///
@@ -180,7 +180,7 @@ pub fn translator_name_for(slug: &str) -> &'static str {
     }
     match caps.tool_format {
         ToolFormat::AnthropicBlocks => "claude",
-        ToolFormat::OpenAiJson => "ollama",
+        ToolFormat::OpenAiJson => "openai",
         // ReActText + every format without a dedicated translator
         // (HermesJson, Gemma4Tokens, MistralTokens, Pythonic, QwenXml,
         // JsonMode, Custom) falls through to the ReAct fallback.
@@ -304,6 +304,7 @@ mod tests {
             cost_cache_write_per_m: None,
             max_tools: Some(32),
             tokenizer_ratio: Some(1.0),
+            ..Default::default()
         };
 
         let caps = capabilities_from_profile(&profile);
@@ -392,8 +393,8 @@ mod tests {
     fn translator_name_for_known_slugs() {
         assert_eq!(translator_name_for("claude-opus-4-6"), "claude");
         assert_eq!(translator_name_for("claude-sonnet-4-5"), "claude");
-        assert_eq!(translator_name_for("gpt-5"), "ollama");
-        assert_eq!(translator_name_for("gpt-4.1"), "ollama");
+        assert_eq!(translator_name_for("gpt-5"), "openai");
+        assert_eq!(translator_name_for("gpt-4.1"), "openai");
         assert_eq!(translator_name_for("random-model-123"), "react");
         assert_eq!(translator_name_for("llama3.2-3b"), "react");
         // HermesJson has no dedicated translator → react

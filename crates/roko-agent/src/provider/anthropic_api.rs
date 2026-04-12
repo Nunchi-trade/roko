@@ -52,6 +52,9 @@ impl ProviderAdapter for AnthropicApiAdapter {
             .with_timeout_ms(timeout_ms)
             .with_max_tokens(max_tokens);
 
+        if let Some(headers) = &provider.extra_headers {
+            agent = agent.with_extra_headers(headers.clone());
+        }
         if let Some(prompt) = &options.system_prompt {
             agent = agent.with_system_prompt(prompt.clone());
         }
@@ -177,6 +180,7 @@ mod tests {
             cost_cache_write_per_m: None,
             max_tools: None,
             tokenizer_ratio: None,
+            ..Default::default()
         }
     }
 

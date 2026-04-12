@@ -476,6 +476,7 @@ impl RokoConfig {
             cost_cache_write_per_m: None,
             max_tools: Some(u32::from(tool_profile.max_tools_before_degrade)),
             tokenizer_ratio: None,
+            ..Default::default()
         }
     }
 
@@ -809,7 +810,7 @@ pub struct ProviderRouting {
 }
 
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModelProfile {
     /// Key into the `[providers.*]` table.
     pub provider: String,
@@ -863,6 +864,24 @@ pub struct ModelProfile {
     /// Tokenizer ratio vs OpenAI `o200k_base`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokenizer_ratio: Option<f64>,
+    /// Whether the model supports web-grounded search (Perplexity Sonar).
+    #[serde(default)]
+    pub supports_search: bool,
+    /// Whether the model returns citations in responses (Perplexity Sonar).
+    #[serde(default)]
+    pub supports_citations: bool,
+    /// Whether the model supports the async job API (Perplexity deep research).
+    #[serde(default)]
+    pub supports_async: bool,
+    /// Whether this is an embedding model rather than a chat model.
+    #[serde(default)]
+    pub is_embedding_model: bool,
+    /// Search context size hint: "low", "medium", or "high" (Perplexity).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_context_size: Option<String>,
+    /// Per-request fee in USD on top of token costs (Perplexity pricing model).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_per_request: Option<f64>,
 }
 
 /// PRD lifecycle settings.
@@ -2061,9 +2080,33 @@ api_key_env = "ZAI_API_KEY"
 
     #[test]
     fn effective_providers_backwards_compat() {
+        // When roko.toml has explicit [providers.*] entries, effective_providers
+        // returns them directly rather than synthesizing from [agent].
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../roko.toml");
         let text = std::fs::read_to_string(path).expect("read roko.toml");
         let cfg = RokoConfig::from_toml(&text).expect("parse roko.toml");
+        let providers = cfg.effective_providers();
+
+        let claude = providers.get("claude_cli").expect("claude_cli provider");
+        assert_eq!(claude.kind, ProviderKind::ClaudeCli);
+        assert_eq!(claude.command.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn effective_providers_synthesized_from_agent_section() {
+        // When no explicit [providers] exist, effective_providers synthesizes
+        // from the legacy [agent] section.
+        let toml = r#"
+[agent]
+command = "claude"
+args = ["--print", "--output-format", "stream-json", "--dangerously-skip-permissions"]
+timeout_ms = 300000
+env = [
+  ["ANTHROPIC_BASE_URL", "http://127.0.0.1:4000"],
+  ["ANTHROPIC_API_KEY", "mori-local-gateway"],
+]
+"#;
+        let cfg = RokoConfig::from_toml(toml).expect("parse");
         let providers = cfg.effective_providers();
 
         let claude = providers.get("claude_cli").expect("claude_cli provider");

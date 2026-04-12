@@ -72,18 +72,50 @@ impl ProviderAdapter for ClaudeCliAdapter {
     }
 
     fn classify_error(&self, status: u16, body: &Value) -> ProviderError {
+        // For a CLI subprocess, the body typically carries stderr text.
+        // Inspect it first; fall back to the HTTP status code for callers
+        // that pass one through.
+        let stderr = body
+            .as_str()
+            .or_else(|| body.pointer("/error").and_then(Value::as_str))
+            .or_else(|| body.pointer("/message").and_then(Value::as_str))
+            .unwrap_or("");
+        let lower = stderr.to_ascii_lowercase();
+
+        if lower.contains("rate limit") {
+            return ProviderError::RateLimit {
+                retry_after_ms: None,
+            };
+        }
+        if lower.contains("unauthorized") || lower.contains("permission denied") {
+            return ProviderError::AuthFailure;
+        }
+        if lower.contains("timed out") || lower.contains("timeout") {
+            return ProviderError::Timeout;
+        }
+        if lower.contains("context window") || lower.contains("context length") {
+            return ProviderError::ContextOverflow;
+        }
+        if lower.contains("model not found") || lower.contains("unknown model") {
+            return ProviderError::ModelNotFound;
+        }
+
+        // Fallback: honour the status code when stderr had nothing useful.
         match status {
             429 => ProviderError::RateLimit {
-                retry_after_ms: body
-                    .pointer("/retry_after")
-                    .and_then(|value| value.as_u64())
-                    .map(|seconds| seconds * 1000),
+                retry_after_ms: None,
             },
             401 | 403 => ProviderError::AuthFailure,
             404 => ProviderError::ModelNotFound,
             408 => ProviderError::Timeout,
             500..=599 => ProviderError::ServerError(status),
-            _ => ProviderError::Other(format!("HTTP {}", status)),
+            _ => {
+                if stderr.is_empty() {
+                    ProviderError::Other(format!("CLI exit status {status}"))
+                } else {
+                    ProviderError::Other(stderr.to_string())
+                }
+            }
         }
     }
 }
@@ -130,6 +162,7 @@ mod tests {
             cost_cache_write_per_m: None,
             max_tools: None,
             tokenizer_ratio: None,
+            ..Default::default()
         }
     }
 

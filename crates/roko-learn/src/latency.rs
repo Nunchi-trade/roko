@@ -7,7 +7,7 @@
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 
 /// Rolling latency statistics for one model routed through one provider.
@@ -26,7 +26,7 @@ pub struct LatencyStats {
     /// Number of observations recorded for this model/provider pair.
     pub observations: u64,
     /// Last 100 total latencies, used for percentile calculations.
-    pub recent_latencies: Vec<f64>,
+    pub recent_latencies: VecDeque<f64>,
 }
 
 impl LatencyStats {
@@ -40,9 +40,9 @@ impl LatencyStats {
             self.tokens_per_second_ema = alpha * tps + (1.0 - alpha) * self.tokens_per_second_ema;
         }
         self.observations += 1;
-        self.recent_latencies.push(total_ms);
+        self.recent_latencies.push_back(total_ms);
         if self.recent_latencies.len() > 100 {
-            self.recent_latencies.remove(0);
+            self.recent_latencies.pop_front();
         }
     }
 
@@ -66,7 +66,7 @@ impl LatencyStats {
             return 0.0;
         }
 
-        let mut latencies = self.recent_latencies.clone();
+        let mut latencies: Vec<f64> = self.recent_latencies.iter().copied().collect();
         latencies.sort_by(|a, b| a.total_cmp(b));
 
         let clamped = quantile.clamp(0.0, 1.0);
@@ -188,6 +188,7 @@ impl Default for LatencyRegistry {
 #[cfg(test)]
 mod tests {
     use super::{LatencyRegistry, LatencyStats};
+    use std::collections::VecDeque;
     use tempfile::tempdir;
 
     fn assert_close(actual: f64, expected: f64) {
@@ -212,7 +213,7 @@ mod tests {
         assert_close(stats.total_latency_ema_ms, 28.0);
         assert_close(stats.tokens_per_second_ema, 122.5);
         assert_eq!(stats.observations, 2);
-        assert_eq!(stats.recent_latencies, vec![200.0, 100.0]);
+        assert_eq!(stats.recent_latencies, VecDeque::from(vec![200.0, 100.0]));
         assert_close(stats.p50_ms(), 200.0);
         assert_close(stats.p95_ms(), 200.0);
         assert_close(stats.p99_ms(), 200.0);
@@ -248,11 +249,11 @@ mod tests {
         assert_eq!(zai.model_slug, "glm-5.1");
         assert_eq!(zai.provider_id, "zai");
         assert_eq!(zai.observations, 2);
-        assert_eq!(zai.recent_latencies, vec![200.0, 300.0]);
+        assert_eq!(zai.recent_latencies, VecDeque::from(vec![200.0, 300.0]));
         assert_eq!(openrouter.model_slug, "glm-5.1");
         assert_eq!(openrouter.provider_id, "openrouter");
         assert_eq!(openrouter.observations, 1);
-        assert_eq!(openrouter.recent_latencies, vec![400.0]);
+        assert_eq!(openrouter.recent_latencies, VecDeque::from(vec![400.0]));
     }
 
     #[test]
@@ -274,10 +275,10 @@ mod tests {
         assert_eq!(zai.model_slug, "glm-5.1");
         assert_eq!(zai.provider_id, "zai");
         assert_eq!(zai.observations, 1);
-        assert_eq!(zai.recent_latencies, vec![240.0]);
+        assert_eq!(zai.recent_latencies, VecDeque::from(vec![240.0]));
         assert_eq!(anthropic.model_slug, "claude-sonnet-4-6");
         assert_eq!(anthropic.provider_id, "anthropic");
         assert_eq!(anthropic.observations, 1);
-        assert_eq!(anthropic.recent_latencies, vec![160.0]);
+        assert_eq!(anthropic.recent_latencies, VecDeque::from(vec![160.0]));
     }
 }

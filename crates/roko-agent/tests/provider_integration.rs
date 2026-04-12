@@ -51,6 +51,7 @@ fn glm_5_1_model() -> ModelProfile {
         cost_cache_write_per_m: None,
         max_tools: None,
         tokenizer_ratio: None,
+        ..Default::default()
     }
 }
 
@@ -96,6 +97,7 @@ fn ollama_local_model() -> ModelProfile {
         cost_cache_write_per_m: None,
         max_tools: None,
         tokenizer_ratio: None,
+        ..Default::default()
     }
 }
 

@@ -168,6 +168,7 @@ impl OpenRouterModel {
                 .and_then(|value| value.per_million()),
             max_tools: None,
             tokenizer_ratio: None,
+            ..Default::default()
         }
     }
 }

@@ -832,19 +832,8 @@ fn slugs_match(lhs: &str, rhs: &str) -> bool {
     lhs == rhs || slug_family(lhs).is_some_and(|family| slug_family(rhs) == Some(family))
 }
 
-fn slug_family(slug: &str) -> Option<&'static str> {
-    if slug.contains("haiku") {
-        Some("haiku")
-    } else if slug.contains("sonnet") {
-        Some("sonnet")
-    } else if slug.contains("opus") {
-        Some("opus")
-    } else if slug.contains("glm") {
-        Some("glm")
-    } else {
-        None
-    }
-}
+// Use the canonical slug_family from cascade_router.
+use crate::cascade_router::slug_family;
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
 

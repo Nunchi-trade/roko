@@ -209,6 +209,47 @@ impl CostTable {
                 cache_read_per_m: None,
             },
         );
+        // Bare Anthropic direct API slugs (used by cascade router).
+        models.insert(
+            "claude-opus-4-6".to_string(),
+            ModelPricing {
+                input_per_m: 15.00,
+                output_per_m: 75.00,
+                cache_read_per_m: None,
+            },
+        );
+        models.insert(
+            "claude-sonnet-4-5".to_string(),
+            ModelPricing {
+                input_per_m: 3.00,
+                output_per_m: 15.00,
+                cache_read_per_m: None,
+            },
+        );
+        models.insert(
+            "claude-sonnet-4-6".to_string(),
+            ModelPricing {
+                input_per_m: 3.00,
+                output_per_m: 15.00,
+                cache_read_per_m: None,
+            },
+        );
+        models.insert(
+            "claude-haiku-4-5".to_string(),
+            ModelPricing {
+                input_per_m: 0.80,
+                output_per_m: 4.00,
+                cache_read_per_m: None,
+            },
+        );
+        models.insert(
+            "claude-haiku-3-5".to_string(),
+            ModelPricing {
+                input_per_m: 0.25,
+                output_per_m: 1.25,
+                cache_read_per_m: None,
+            },
+        );
 
         Self { models }
     }

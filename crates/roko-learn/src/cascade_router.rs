@@ -27,7 +27,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::cfactor::{AgentDispatchBias, CFactor};
-use crate::model_router::{COLD_START_THRESHOLD, CONTEXT_DIM, LinUCBRouter, RoutingContext};
+use crate::model_router::{COLD_START_THRESHOLD, LinUCBRouter, RoutingContext};
 use crate::pareto::{ModelObservation, compute_pareto_frontier};
 use crate::provider_health::ProviderHealthRegistry;
 
@@ -267,7 +267,11 @@ fn slugs_match(lhs: &str, rhs: &str) -> bool {
     lhs == rhs || slug_family(lhs).is_some_and(|family| slug_family(rhs) == Some(family))
 }
 
-fn slug_family(slug: &str) -> Option<&'static str> {
+/// Classify a model slug into a known model family.
+///
+/// This is the canonical family classifier used by both `cascade_router` and
+/// `model_router` for slug matching, Pareto cost proxies, and static routing.
+pub fn slug_family(slug: &str) -> Option<&'static str> {
     if slug.starts_with("kimi-k2") {
         Some("kimi-k2")
     } else if slug.contains("haiku") {
@@ -276,6 +280,18 @@ fn slug_family(slug: &str) -> Option<&'static str> {
         Some("sonnet")
     } else if slug.contains("opus") {
         Some("opus")
+    } else if slug.contains("glm") {
+        Some("glm")
+    } else if slug.starts_with("gpt-") {
+        Some("gpt")
+    } else if slug.starts_with("o1") {
+        Some("o1")
+    } else if slug.starts_with("o3") {
+        Some("o3")
+    } else if slug.starts_with("deepseek") {
+        Some("deepseek")
+    } else if slug.starts_with("gemini") {
+        Some("gemini")
     } else {
         None
     }
@@ -515,14 +531,27 @@ impl CascadeRouter {
     ///
     /// This is used by event-driven feedback paths that only know which model
     /// produced the episode, not the original routing features.
+    ///
+    /// Only updates confidence-stage statistics (trials/successes), NOT the
+    /// `LinUCB` bandit. A zero-vector context would produce a rank-0 outer
+    /// product (`0 * 0^T = 0`), teaching `LinUCB` nothing while still
+    /// incrementing the observation counter and causing premature stage
+    /// transitions.
     pub fn record_outcome(&self, model_slug: &str, success: bool) -> bool {
         let Some(model_idx) = self.model_index_for_slug(model_slug) else {
             return false;
         };
 
-        let reward = if success { 1.0 } else { 0.0 };
-        let context = [0.0; CONTEXT_DIM];
-        self.observe_internal(&context, model_idx, reward, success);
+        let Some(slug) = self.model_slugs.get(model_idx) else {
+            return false;
+        };
+
+        let mut stats = self.confidence_stats.lock();
+        let entry = stats.entry(slug.clone()).or_default();
+        entry.trials += 1;
+        if success {
+            entry.successes += 1;
+        }
         true
     }
 
@@ -550,6 +579,9 @@ impl CascadeRouter {
 
         // Update LinUCB (always, so it's ready when stage transitions).
         self.linucb.update_features(context_vec, model_idx, reward);
+
+        // Refresh Pareto frontier if the observation count crossed a bucket boundary.
+        self.refresh_pareto_frontier_if_needed();
     }
 
     /// Access the underlying `LinUCB` router (for introspection / persistence).
@@ -1509,7 +1541,9 @@ mod tests {
         let cascade = CascadeRouter::new(test_slugs());
 
         assert!(cascade.record_outcome("claude-sonnet-4-5", true));
-        assert_eq!(cascade.total_observations(), 1);
+        // record_outcome only updates confidence stats, NOT the LinUCB
+        // bandit, so the LinUCB observation counter stays at 0.
+        assert_eq!(cascade.total_observations(), 0);
 
         let stats = cascade.confidence_snapshot();
         assert_eq!(stats.get("claude-sonnet-4-5"), Some(&(1, 1)));

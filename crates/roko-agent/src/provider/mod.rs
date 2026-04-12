@@ -328,6 +328,7 @@ mod tests {
                 cost_cache_write_per_m: None,
                 max_tools: None,
                 tokenizer_ratio: None,
+                ..Default::default()
             },
         );
         config
