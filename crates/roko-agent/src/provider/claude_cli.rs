@@ -189,6 +189,7 @@ printf '%s\n' '{{"type":"content_block_delta","delta":{{"text":"adapter-ok"}}}}'
             max_concurrent: None,
         };
         let options = AgentOptions {
+            command: None,
             timeout_ms: Some(1_500),
             system_prompt: Some("system guidance".to_string()),
             cached_content: None,

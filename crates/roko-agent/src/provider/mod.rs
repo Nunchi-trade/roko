@@ -39,7 +39,7 @@
 //! In both cases, the goal is the same: keep provider-specific wiring out of
 //! the call sites and centralize it in this module.
 
-use crate::Agent;
+use crate::{Agent, ExecAgent};
 use crate::gemini::GeminiAdapter;
 use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::config::schema::RokoConfig;
@@ -47,7 +47,7 @@ use roko_core::config::schema::{ModelProfile, ProviderConfig};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -97,16 +97,46 @@ pub fn create_agent_for_model(
 ) -> Result<Box<dyn Agent>, AgentCreationError> {
     let mut options = options;
     let resolved = resolve_model(config, model_key);
-
     let profile = resolved
         .profile
-        .or_else(|| config.effective_models().get(model_key).cloned())
-        .ok_or_else(|| AgentCreationError::MissingConfig("model".into()))?;
+        .or_else(|| config.effective_models().get(model_key).cloned());
+    let provider_config = profile
+        .as_ref()
+        .and_then(|profile| {
+            resolved.provider_config.clone().or_else(|| {
+                config
+                    .effective_providers()
+                    .get(&profile.provider)
+                    .cloned()
+            })
+        });
+    let legacy_command = options.command.as_deref().or(config.agent.command.as_deref());
 
-    let provider_config = resolved
-        .provider_config
-        .or_else(|| config.effective_providers().get(&profile.provider).cloned())
-        .ok_or_else(|| AgentCreationError::MissingConfig("provider".into()))?;
+    let Some(provider_config) = provider_config else {
+        if is_known_protocol_command(legacy_command) {
+            return Err(AgentCreationError::MissingConfig("provider".into()));
+        }
+
+        tracing::warn!(
+            model_key = model_key,
+            command = %legacy_command.unwrap_or("unknown"),
+            "no provider found — falling back to ExecAgent (no tool support)"
+        );
+
+        let mut agent = ExecAgent::new(
+            legacy_command.unwrap_or("cat"),
+            options.extra_args.clone(),
+        )
+        .with_timeout_ms(options.timeout_ms.unwrap_or(120_000));
+        if !options.name.is_empty() {
+            agent = agent.with_name(options.name.clone());
+        }
+        if !options.env.is_empty() {
+            agent = agent.with_env(options.env.clone());
+        }
+        return Ok(Box::new(agent));
+    };
+    let profile = profile.ok_or_else(|| AgentCreationError::MissingConfig("model".into()))?;
 
     tracing::info!(
         model_key = model_key,
@@ -123,6 +153,19 @@ pub fn create_agent_for_model(
 
     let adapter = adapter_for_kind(resolved.provider_kind);
     adapter.create_agent(&provider_config, &profile, &options)
+}
+
+fn is_known_protocol_command(command: Option<&str>) -> bool {
+    let Some(command) = command else {
+        return false;
+    };
+
+    let executable = Path::new(command)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(command);
+
+    matches!(executable, "claude" | "codex" | "cursor-agent" | "cursor_agent")
 }
 
 /// Shared semaphores that cap in-flight requests per provider.
@@ -183,6 +226,7 @@ pub trait ProviderAdapter: Send + Sync {
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default)]
 pub struct AgentOptions {
+    pub command: Option<String>,
     pub timeout_ms: Option<u64>,
     pub system_prompt: Option<String>,
     pub cached_content: Option<String>,
@@ -461,6 +505,29 @@ mod tests {
         assert_eq!(parsed["messages"][0]["content"], "hello");
 
         handle.join().expect("server thread");
+    }
+
+    #[tokio::test]
+    async fn exec_agent_fallback_for_unknown_model_key() {
+        let mut config = RokoConfig::default();
+        config.agent.command = Some("cat".to_string());
+
+        let agent = create_agent_for_model(
+            &config,
+            "unknown-model",
+            AgentOptions {
+                timeout_ms: Some(250),
+                name: "fallback-agent".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("fallback exec agent");
+
+        assert_eq!(agent.name(), "fallback-agent");
+
+        let result = agent.run(&prompt("fallback-ok"), &Context::now()).await;
+        assert!(result.success);
+        assert_eq!(result.output.body.as_text().unwrap_or(""), "fallback-ok");
     }
 
     #[tokio::test]

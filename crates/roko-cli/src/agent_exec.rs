@@ -64,6 +64,7 @@ pub async fn run_agent(opts: AgentExecOpts<'_>) -> Result<i32> {
         &routing_config,
         &model,
         AgentOptions {
+            command: routing_config.agent.command.clone(),
             timeout_ms: Some(600_000), // 10 min for plan generation / research tasks
             system_prompt: opts.system_prompt.map(str::to_string),
             cached_content: None,

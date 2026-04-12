@@ -1701,6 +1701,7 @@ fn build_agent(
         roko_config,
         &template.model,
         AgentOptions {
+            command: roko_config.agent.command.clone(),
             timeout_ms: None,
             system_prompt: Some(system_prompt.to_string()),
             cached_content: None,

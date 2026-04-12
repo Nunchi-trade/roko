@@ -316,6 +316,7 @@ async fn dispatch_agent(
             &routing_config,
             &model,
             AgentOptions {
+                command: Some(config.agent.command.clone()),
                 timeout_ms: Some(config.agent.timeout_ms),
                 system_prompt: Some(system_prompt),
                 cached_content: None,
@@ -378,6 +379,7 @@ async fn dispatch_agent(
             &routing_config,
             &model,
             AgentOptions {
+                command: Some(config.agent.command.clone()),
                 timeout_ms: Some(config.agent.timeout_ms),
                 system_prompt: None,
                 cached_content: None,

@@ -8115,6 +8115,7 @@ impl PlanRunner {
                 &roko_config,
                 &selected_model,
                 AgentOptions {
+                    command: Some(self.config.agent.command.clone()),
                     timeout_ms: Some(self.effective_task_timeout_ms(task_def.as_ref())),
                     system_prompt: Some(role_instruction.clone()),
                     cached_content,
