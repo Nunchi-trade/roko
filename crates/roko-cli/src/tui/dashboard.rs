@@ -92,21 +92,21 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// Build the default dark palette that matches a typical terminal theme.
+    /// ROSEDUST palette — warm rose/indigo aesthetic from Mori's design system.
     #[must_use]
     pub const fn dark() -> Self {
         Self {
-            foreground: Color::White,
-            muted: Color::DarkGray,
-            background: Color::Black,
-            accent: Color::Cyan,
-            accent_foreground: Color::Black,
-            success: Color::Green,
-            warning: Color::Yellow,
-            danger: Color::Red,
-            info: Color::Blue,
-            selection_background: Color::Cyan,
-            selection_foreground: Color::Black,
+            foreground: Color::Rgb(165, 142, 158),       // #A58E9E — rose-tinted text
+            muted: Color::Rgb(110, 85, 105),             // #6E5569 — ghost text
+            background: Color::Rgb(0, 0, 0),             // #000000 — void
+            accent: Color::Rgb(185, 120, 148),           // #B97894 — primary rose
+            accent_foreground: Color::Rgb(0, 0, 0),      // #000000 — contrast on rose
+            success: Color::Rgb(125, 158, 140),          // #7D9E8C — sage green
+            warning: Color::Rgb(195, 155, 95),           // #C39B5F — amber caution
+            danger: Color::Rgb(195, 110, 85),            // #C36E55 — ember red
+            info: Color::Rgb(120, 115, 165),             // #7873A5 — dream indigo
+            selection_background: Color::Rgb(34, 28, 36), // #221C24 — highlight
+            selection_foreground: Color::Rgb(215, 198, 158), // #D7C69E — bone bright
         }
     }
 

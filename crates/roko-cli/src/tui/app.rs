@@ -874,6 +874,9 @@ impl App {
                 }
                 true
             }
+            // F-keys and tab switching should work even with overlay open
+            KeyCode::F(n) if (1..=7).contains(&n) => false,
+            KeyCode::Char('1'..='7') => false,
             _ => true,
         }
     }
