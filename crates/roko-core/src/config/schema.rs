@@ -4,7 +4,8 @@
 //! slice they need. All fields carry serde defaults so a bare `schema_version = 2`
 //! produces a fully-populated config.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
@@ -652,11 +653,172 @@ impl RokoConfig {
     }
 }
 
+/// Non-fatal config warnings emitted by semantic reference validation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ValidationWarning {
+    /// A model points at a provider key that does not exist.
+    UnknownProvider {
+        /// Model registry key that contains the bad reference.
+        model: String,
+        /// Unknown provider reference from the model profile.
+        provider: String,
+        /// Closest matching provider key, if one is close enough to suggest.
+        similar: Option<String>,
+    },
+    /// A field points at a model key that does not exist.
+    UnknownModel {
+        /// Fully-qualified config field name.
+        field: String,
+        /// Unknown model key referenced by that field.
+        model: String,
+    },
+}
+
+impl fmt::Display for ValidationWarning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownProvider {
+                model,
+                provider,
+                similar,
+            } => {
+                write!(
+                    f,
+                    "Model '{model}' references missing provider '{provider}'"
+                )?;
+                if let Some(similar) = similar {
+                    write!(f, " (did you mean '{similar}'?)")?;
+                }
+                Ok(())
+            }
+            Self::UnknownModel { field, model } => {
+                write!(f, "{field} references missing model '{model}'")
+            }
+        }
+    }
+}
+
+/// Validate cross-reference integrity for provider and model keys.
+#[must_use]
+pub fn validate_references(config: &RokoConfig) -> Vec<ValidationWarning> {
+    let providers = config.effective_providers();
+    let provider_keys = providers.keys().map(String::as_str).collect::<HashSet<_>>();
+
+    let mut warnings = Vec::new();
+
+    let mut model_entries = config.models.iter().collect::<Vec<_>>();
+    model_entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+    for (model_key, profile) in model_entries {
+        let provider = profile.provider.trim();
+        if !provider_keys.contains(provider) {
+            warnings.push(ValidationWarning::UnknownProvider {
+                model: model_key.clone(),
+                provider: profile.provider.clone(),
+                similar: find_similar(provider, provider_keys.iter().copied()),
+            });
+        }
+    }
+
+    let explicit_model_keys = config
+        .models
+        .keys()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let effective_models = config.effective_models();
+
+    if let Some(fallback_model) = config
+        .agent
+        .fallback_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|fallback_model| !fallback_model.is_empty())
+    {
+        let model_exists = if explicit_model_keys.is_empty() {
+            effective_models.contains_key(fallback_model)
+        } else {
+            explicit_model_keys.contains(fallback_model)
+        };
+        if !model_exists {
+            warnings.push(ValidationWarning::UnknownModel {
+                field: "agent.fallback_model".to_string(),
+                model: fallback_model.to_string(),
+            });
+        }
+    }
+
+    if !explicit_model_keys.is_empty() {
+        let mut tier_entries = config.agent.tier_models.iter().collect::<Vec<_>>();
+        tier_entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+        for (tier, model_key) in tier_entries {
+            let model_key = model_key.trim();
+            if model_key.is_empty() || explicit_model_keys.contains(model_key) {
+                continue;
+            }
+            warnings.push(ValidationWarning::UnknownModel {
+                field: format!("agent.tier_models.{tier}"),
+                model: model_key.to_string(),
+            });
+        }
+    }
+
+    warnings
+}
+
 fn parse_bool_env(s: &str) -> bool {
     matches!(
         s.trim().to_ascii_lowercase().as_str(),
         "1" | "true" | "yes" | "on"
     )
+}
+
+fn find_similar<'a>(needle: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    let needle = needle.trim();
+    if needle.is_empty() {
+        return None;
+    }
+
+    let mut best_match = None;
+    let mut best_distance = usize::MAX;
+
+    for candidate in candidates {
+        let distance = edit_distance(needle, candidate);
+        if distance < best_distance {
+            best_distance = distance;
+            best_match = Some(candidate);
+        }
+    }
+
+    (best_distance <= 3).then(|| best_match.expect("distance implies candidate").to_string())
+}
+
+fn edit_distance(left: &str, right: &str) -> usize {
+    if left == right {
+        return 0;
+    }
+    if left.is_empty() {
+        return right.chars().count();
+    }
+    if right.is_empty() {
+        return left.chars().count();
+    }
+
+    let right_chars = right.chars().collect::<Vec<_>>();
+    let mut costs = (0..=right_chars.len()).collect::<Vec<_>>();
+
+    for (left_idx, left_ch) in left.chars().enumerate() {
+        let mut previous_diagonal = costs[0];
+        costs[0] = left_idx + 1;
+
+        for (right_idx, right_ch) in right_chars.iter().copied().enumerate() {
+            let insertion = costs[right_idx + 1] + 1;
+            let deletion = costs[right_idx] + 1;
+            let substitution = previous_diagonal + usize::from(left_ch != right_ch);
+            previous_diagonal = costs[right_idx + 1];
+            costs[right_idx + 1] = insertion.min(deletion).min(substitution);
+        }
+    }
+
+    *costs.last().unwrap_or(&0)
 }
 
 #[cfg(test)]
@@ -3265,6 +3427,115 @@ port = 3000
             let model = cfg.models.get(model_key).expect("openrouter model");
             assert_eq!(model.provider, "openrouter");
         }
+    }
+
+    #[test]
+    fn validate_references_warns_on_unknown_provider_with_suggestion() {
+        let mut cfg = RokoConfig::default();
+        cfg.providers.insert(
+            "openrouter".to_string(),
+            ProviderConfig {
+                kind: ProviderKind::OpenAiCompat,
+                base_url: Some("https://openrouter.ai/api/v1".to_string()),
+                api_key_env: Some("OPENROUTER_API_KEY".to_string()),
+                command: None,
+                args: None,
+                timeout_ms: None,
+                extra_headers: None,
+                max_concurrent: None,
+            },
+        );
+        cfg.models.insert(
+            "glm-5-1".to_string(),
+            ModelProfile {
+                provider: "openruoter".to_string(),
+                slug: "z-ai/glm-5.1".to_string(),
+                context_window: 200_000,
+                max_output: None,
+                supports_tools: true,
+                supports_thinking: true,
+                supports_vision: false,
+                supports_web_search: false,
+                supports_mcp_tools: false,
+                supports_partial: false,
+                provider_routing: None,
+                tool_format: "openai_json".to_string(),
+                cost_input_per_m: None,
+                cost_output_per_m: None,
+                cost_cache_read_per_m: None,
+                cost_cache_write_per_m: None,
+                max_tools: None,
+                tokenizer_ratio: None,
+            },
+        );
+
+        let warnings = validate_references(&cfg);
+
+        assert_eq!(
+            warnings,
+            vec![ValidationWarning::UnknownProvider {
+                model: "glm-5-1".to_string(),
+                provider: "openruoter".to_string(),
+                similar: Some("openrouter".to_string()),
+            }]
+        );
+        assert_eq!(
+            warnings[0].to_string(),
+            "Model 'glm-5-1' references missing provider 'openruoter' (did you mean 'openrouter'?)"
+        );
+    }
+
+    #[test]
+    fn validate_references_warns_on_unknown_fallback_model() {
+        let mut cfg = RokoConfig::default();
+        cfg.models.insert(
+            "glm-5-1".to_string(),
+            ModelProfile {
+                provider: "claude_cli".to_string(),
+                slug: "glm-5.1".to_string(),
+                context_window: 200_000,
+                max_output: None,
+                supports_tools: true,
+                supports_thinking: false,
+                supports_vision: false,
+                supports_web_search: false,
+                supports_mcp_tools: false,
+                supports_partial: false,
+                provider_routing: None,
+                tool_format: "openai_json".to_string(),
+                cost_input_per_m: None,
+                cost_output_per_m: None,
+                cost_cache_read_per_m: None,
+                cost_cache_write_per_m: None,
+                max_tools: None,
+                tokenizer_ratio: None,
+            },
+        );
+        cfg.agent.fallback_model = Some("missing-model".to_string());
+
+        let warnings = validate_references(&cfg);
+
+        assert!(warnings.contains(&ValidationWarning::UnknownModel {
+            field: "agent.fallback_model".to_string(),
+            model: "missing-model".to_string(),
+        }));
+    }
+
+    #[test]
+    fn validate_references_allows_legacy_fallback_model() {
+        let mut cfg = RokoConfig::default();
+        cfg.agent.default_model = "claude-sonnet-4-6".to_string();
+        cfg.agent
+            .tier_models
+            .insert("mechanical".to_string(), "claude-haiku-4-5".to_string());
+        cfg.agent.fallback_model = Some("claude-haiku-4-5".to_string());
+
+        let warnings = validate_references(&cfg);
+
+        assert!(
+            warnings.is_empty(),
+            "expected no warnings, got {warnings:?}"
+        );
     }
 
     #[test]
