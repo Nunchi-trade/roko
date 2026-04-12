@@ -68,7 +68,9 @@ use roko_learn::events::{AgentEvent, EventBus as LearningEventBus};
 use roko_learn::latency::LatencyRegistry;
 use roko_learn::model_experiment::ModelExperimentStore;
 use roko_learn::playbook::{Playbook, PlaybookStore};
-use roko_learn::routing_log::{CandidateEntry, RoutingDecisionLog, RoutingDecisionLogStore};
+use roko_learn::routing_log::{
+    RoutingDecisionLog, RoutingDecisionLogStore, RoutingDecisionMeta, RoutingLogger,
+};
 use roko_learn::runtime_feedback::{
     CompletedRunInput, LearningRuntime, LearningUpdate, read_efficiency_events,
     refresh_cfactor_snapshot,
@@ -7778,51 +7780,31 @@ impl PlanRunner {
             selected_model_experiment = None;
         }
 
-        let mut routing_candidates = routing_explanation
+        let candidate_models = routing_explanation
             .as_ref()
             .map(|explanation| {
                 explanation
                     .candidates
                     .iter()
-                    .map(|candidate| {
-                        let provider = self.provider_id_for_model(&candidate.slug);
-                        let disqualified = (!self.learning.provider_health().is_healthy(&provider))
-                            .then_some("provider_unhealthy".to_string());
-                        CandidateEntry {
-                            model: candidate.slug.clone(),
-                            provider,
-                            score: candidate.score,
-                            disqualified,
-                        }
-                    })
+                    .map(|candidate| candidate.slug.clone())
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        if !routing_candidates
+        let mut model_providers = candidate_models
             .iter()
-            .any(|candidate| candidate.model == selected_model)
-        {
-            routing_candidates.insert(
-                0,
-                CandidateEntry {
-                    model: selected_model.clone(),
-                    provider: self.provider_id_for_model(&selected_model),
-                    score: 1.0,
-                    disqualified: None,
-                },
-            );
-        }
-        if routing_candidates.is_empty() {
-            routing_candidates.push(CandidateEntry {
-                model: selected_model.clone(),
-                provider: self.provider_id_for_model(&selected_model),
-                score: 1.0,
-                disqualified: None,
-            });
-        }
-
-        let routing_log = RoutingDecisionLog {
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            .map(|model| (model.clone(), self.provider_id_for_model(model)))
+            .collect::<HashMap<_, _>>();
+        model_providers
+            .entry(selected_model.clone())
+            .or_insert_with(|| self.provider_id_for_model(&selected_model));
+        let disqualifications = model_providers
+            .iter()
+            .filter_map(|(model, provider)| {
+                (!self.learning.provider_health().is_healthy(provider))
+                    .then_some((model.clone(), "provider_unhealthy".to_string()))
+            })
+            .collect::<HashMap<_, _>>();
+        let routing_meta = RoutingDecisionMeta {
             trace_id: Self::trace_id_for(plan_id, task).to_hex(),
             task_id: task.to_string(),
             requested_model: requested_model.clone(),
@@ -7831,22 +7813,27 @@ impl PlanRunner {
                 .as_ref()
                 .map(|td| td.tier.clone())
                 .unwrap_or_else(|| "unknown".to_string()),
-            selected_provider: self.provider_id_for_model(&selected_model),
-            selected_model: selected_model.clone(),
             routing_stage: routing_stage.clone(),
             routing_reason: routing_reason.clone(),
-            candidates: routing_candidates,
-            outcome_success: None,
-            outcome_cost_usd: None,
-            outcome_latency_ms: None,
         };
-        match RoutingDecisionLogStore::open_creating(routing_log_path(&self.workdir)).await {
-            Ok(store) => {
-                if let Err(err) = store.append(&routing_log).await {
-                    tracing::warn!(error = %err, "failed to append routing decision log");
-                } else {
-                    routing_log_record = Some(routing_log);
-                    routing_log_store = Some(store);
+        match RoutingLogger::open_creating(routing_log_path(&self.workdir)) {
+            Ok(logger) => {
+                let logger = logger
+                    .with_model_providers(model_providers)
+                    .with_disqualifications(disqualifications);
+                match self.learning.cascade_router().append_routing_log(
+                    &logger,
+                    &routing_meta,
+                    &selected_model,
+                    routing_explanation.as_ref(),
+                ) {
+                    Ok(routing_log) => {
+                        routing_log_record = Some(routing_log);
+                        routing_log_store = Some(logger.store());
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "failed to append routing decision log");
+                    }
                 }
             }
             Err(err) => {

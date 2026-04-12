@@ -36,6 +36,7 @@ use crate::model_router::{
 };
 use crate::pareto::{ModelObservation, compute_pareto_frontier};
 use crate::provider_health::ProviderHealthRegistry;
+use crate::routing_log::{CandidateEntry, RoutingDecisionLog, RoutingDecisionMeta, RoutingLogger};
 
 // ─── CascadeStage ───────────────────────────────────────────────────────────
 
@@ -564,6 +565,24 @@ impl CascadeRouter {
         self.route_with_cfactor(ctx, None, None)
     }
 
+    /// Route a context through the cascade and append a routing decision log.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the routing decision cannot be persisted.
+    pub fn route_logged(
+        &self,
+        ctx: &RoutingContext,
+        log: &RoutingLogger,
+        meta: &RoutingDecisionMeta,
+    ) -> std::io::Result<(CascadeModel, RoutingDecisionLog)> {
+        let selected = self.route(ctx);
+        let explanation = self.explain_route(ctx, None);
+        let record =
+            self.append_routing_log(log, meta, &selected.primary.slug, Some(&explanation))?;
+        Ok((selected, record))
+    }
+
     /// Route a context through the cascade, overriding selection when a model
     /// experiment is active for the current role and task category.
     pub fn route_with_experiments(
@@ -868,6 +887,79 @@ impl CascadeRouter {
                 }
             }
         }
+    }
+
+    /// Append a routing decision log entry for a selected model.
+    ///
+    /// When `explanation` is absent, the selected model is recorded as the sole
+    /// candidate so callers can still emit a complete decision log.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the routing decision cannot be persisted.
+    pub fn append_routing_log(
+        &self,
+        log: &RoutingLogger,
+        meta: &RoutingDecisionMeta,
+        selected_model: &str,
+        explanation: Option<&CascadeRouteExplanation>,
+    ) -> std::io::Result<RoutingDecisionLog> {
+        let mut candidates = explanation
+            .map(|explanation| {
+                explanation
+                    .candidates
+                    .iter()
+                    .map(|candidate| CandidateEntry {
+                        model: candidate.slug.clone(),
+                        provider: log.provider_for_model(&candidate.slug),
+                        score: candidate.score,
+                        disqualified: log.disqualified_reason(&candidate.slug),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        if !candidates
+            .iter()
+            .any(|candidate| candidate.model == selected_model)
+        {
+            candidates.insert(
+                0,
+                CandidateEntry {
+                    model: selected_model.to_string(),
+                    provider: log.provider_for_model(selected_model),
+                    score: 1.0,
+                    disqualified: log.disqualified_reason(selected_model),
+                },
+            );
+        }
+        if candidates.is_empty() {
+            candidates.push(CandidateEntry {
+                model: selected_model.to_string(),
+                provider: log.provider_for_model(selected_model),
+                score: 1.0,
+                disqualified: log.disqualified_reason(selected_model),
+            });
+        }
+
+        let record = RoutingDecisionLog {
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            trace_id: meta.trace_id.clone(),
+            task_id: meta.task_id.clone(),
+            requested_model: meta.requested_model.clone(),
+            role: meta.role.clone(),
+            task_complexity: meta.task_complexity.clone(),
+            selected_provider: log.provider_for_model(selected_model),
+            selected_model: selected_model.to_string(),
+            routing_stage: meta.routing_stage.clone(),
+            routing_reason: meta.routing_reason.clone(),
+            candidates,
+            outcome_success: None,
+            outcome_cost_usd: None,
+            outcome_latency_ms: None,
+        };
+        log.append(&record)?;
+        Ok(record)
     }
 
     /// Save confidence stats, model slugs, and total observation count to a JSON file.
@@ -1452,8 +1544,10 @@ mod tests {
     use crate::model_experiment::{ModelExperiment, ModelExperimentStore, ModelVariant};
     use crate::prompt_experiment::ExperimentStatus;
     use crate::provider_health::{ErrorClass, ProviderHealthRegistry};
+    use crate::routing_log::{RoutingDecisionMeta, RoutingLogger};
     use roko_core::task::{TaskCategory, TaskComplexityBand};
     use std::collections::HashMap;
+    use tempfile::TempDir;
 
     fn test_slugs() -> Vec<String> {
         vec![
@@ -1513,6 +1607,41 @@ mod tests {
             result.context_overflow_fallback.as_ref().unwrap().slug,
             "claude-opus-4"
         );
+    }
+
+    #[test]
+    fn append_routing_log_records_candidates() {
+        let cascade = CascadeRouter::new(test_slugs());
+        let ctx = default_ctx();
+        let explanation = cascade.explain_route(&ctx, None);
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join("routing.jsonl");
+        let logger = RoutingLogger::open_creating(&path)
+            .expect("logger")
+            .with_model_providers(HashMap::from([
+                ("claude-haiku-3-5".to_string(), "anthropic".to_string()),
+                ("claude-sonnet-4-5".to_string(), "anthropic".to_string()),
+                ("claude-opus-4".to_string(), "anthropic".to_string()),
+            ]));
+        let meta = RoutingDecisionMeta {
+            trace_id: "trace-123".to_string(),
+            task_id: "task-2m14".to_string(),
+            requested_model: "claude-sonnet-4-5".to_string(),
+            role: "implementer".to_string(),
+            task_complexity: "standard".to_string(),
+            routing_stage: explanation.stage.label().to_string(),
+            routing_reason: "role_default".to_string(),
+        };
+
+        let record = cascade
+            .append_routing_log(&logger, &meta, "claude-sonnet-4-5", Some(&explanation))
+            .expect("append routing log");
+
+        assert_eq!(record.selected_model, "claude-sonnet-4-5");
+        assert!(!record.candidates.is_empty());
+        let stored = std::fs::read_to_string(&path).expect("read log");
+        let entry: serde_json::Value = serde_json::from_str(stored.trim()).expect("parse json");
+        assert_eq!(entry["task_id"], "task-2m14");
     }
 
     #[test]

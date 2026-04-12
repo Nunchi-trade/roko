@@ -4,6 +4,7 @@
 //! written again with outcome fields populated after the task completes. The
 //! latest record for a given `trace_id` is therefore the canonical view.
 
+use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -68,6 +69,25 @@ pub struct CandidateEntry {
     pub disqualified: Option<String>,
 }
 
+/// Per-decision metadata attached to a routing log entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutingDecisionMeta {
+    /// Deterministic trace identifier for the task dispatch.
+    pub trace_id: String,
+    /// Stable task identifier within the plan.
+    pub task_id: String,
+    /// Originally requested model before routing/override logic.
+    pub requested_model: String,
+    /// Agent role requesting the model.
+    pub role: String,
+    /// Task complexity label used for routing.
+    pub task_complexity: String,
+    /// Routing stage responsible for the base decision.
+    pub routing_stage: String,
+    /// Human-readable machine-parsable reason for the final decision.
+    pub routing_reason: String,
+}
+
 /// Append-only JSONL log for [`RoutingDecisionLog`] values.
 #[derive(Debug, Clone)]
 pub struct RoutingDecisionLogStore {
@@ -94,6 +114,19 @@ impl RoutingDecisionLogStore {
         let path = path.into();
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
+        }
+        Ok(Self { path, fsync: true })
+    }
+
+    /// Create parent directories and return a log at `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when parent directories cannot be created.
+    pub fn open_creating_blocking(path: impl Into<PathBuf>) -> io::Result<Self> {
+        let path = path.into();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
         }
         Ok(Self { path, fsync: true })
     }
@@ -132,6 +165,27 @@ impl RoutingDecisionLogStore {
         Ok(())
     }
 
+    /// Append one [`RoutingDecisionLog`] as one JSON line using blocking I/O.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for serialization or file I/O failures.
+    pub fn append_blocking(&self, record: &RoutingDecisionLog) -> io::Result<()> {
+        let mut line = serde_json::to_string(record)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        line.push('\n');
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        use std::io::Write as _;
+        file.write_all(line.as_bytes())?;
+        if self.fsync {
+            file.sync_data()?;
+        }
+        Ok(())
+    }
+
     /// Read all valid records; malformed lines are skipped.
     ///
     /// # Errors
@@ -156,6 +210,81 @@ impl RoutingDecisionLogStore {
             }
         }
         Ok(out)
+    }
+}
+
+/// Synchronous helper for recording routing decisions during model selection.
+#[derive(Debug, Clone)]
+pub struct RoutingLogger {
+    store: RoutingDecisionLogStore,
+    model_providers: HashMap<String, String>,
+    disqualifications: HashMap<String, String>,
+}
+
+impl RoutingLogger {
+    /// Create a new logger backed by `store`.
+    #[must_use]
+    pub fn new(store: RoutingDecisionLogStore) -> Self {
+        Self {
+            store,
+            model_providers: HashMap::new(),
+            disqualifications: HashMap::new(),
+        }
+    }
+
+    /// Create parent directories and return a logger at `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when parent directories cannot be created.
+    pub fn open_creating(path: impl Into<PathBuf>) -> io::Result<Self> {
+        Ok(Self::new(RoutingDecisionLogStore::open_creating_blocking(
+            path,
+        )?))
+    }
+
+    /// Seed the logger with a model -> provider mapping.
+    #[must_use]
+    pub fn with_model_providers(mut self, model_providers: HashMap<String, String>) -> Self {
+        self.model_providers = model_providers;
+        self
+    }
+
+    /// Seed the logger with explicit candidate disqualification reasons.
+    #[must_use]
+    pub fn with_disqualifications(mut self, disqualifications: HashMap<String, String>) -> Self {
+        self.disqualifications = disqualifications;
+        self
+    }
+
+    /// Return the backing store so callers can append completion records later.
+    #[must_use]
+    pub fn store(&self) -> RoutingDecisionLogStore {
+        self.store.clone()
+    }
+
+    /// Resolve the provider for `model`, falling back to the model slug.
+    #[must_use]
+    pub fn provider_for_model(&self, model: &str) -> String {
+        self.model_providers
+            .get(model)
+            .cloned()
+            .unwrap_or_else(|| model.to_string())
+    }
+
+    /// Return the disqualification reason for `model`, if any.
+    #[must_use]
+    pub fn disqualified_reason(&self, model: &str) -> Option<String> {
+        self.disqualifications.get(model).cloned()
+    }
+
+    /// Append a routing decision immediately.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for serialization or file I/O failures.
+    pub fn append(&self, record: &RoutingDecisionLog) -> io::Result<()> {
+        self.store.append_blocking(record)
     }
 }
 
