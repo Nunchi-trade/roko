@@ -23,6 +23,7 @@ thiserror = { workspace = true }
 parking_lot = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util", "sync", "rt", "macros"] }
 chrono = { workspace = true }
+tracing = { workspace = true }
 globset = { workspace = true }
 rand = { workspace = true }
 rand_chacha = { workspace = true }

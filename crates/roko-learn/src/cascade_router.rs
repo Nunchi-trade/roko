@@ -20,6 +20,7 @@
 //! [`parking_lot::Mutex`] for confidence-stage statistics.
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use roko_agent::{AgentResult, gemini::GeminiMetadata};
 use roko_core::OperatingFrequency;
@@ -74,6 +75,19 @@ impl std::fmt::Display for CascadeStage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.label())
     }
+}
+
+/// Recorded transition between cascade maturity stages.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StageTransition {
+    /// Previous active stage.
+    pub from: CascadeStage,
+    /// Newly activated stage.
+    pub to: CascadeStage,
+    /// Observation count when the transition occurred.
+    pub observations: u64,
+    /// Timestamp when the transition was recorded.
+    pub timestamp: DateTime<Utc>,
 }
 
 // ─── CascadeModel ───────────────────────────────────────────────────────────
@@ -758,6 +772,8 @@ pub struct CascadeRouter {
     role_table: Mutex<HashMap<AgentRole, String>>,
     /// Ordered list of model slugs (arms available to the router).
     model_slugs: Vec<String>,
+    /// Active stage and recorded stage-transition history.
+    stage_tracking: Mutex<StageTracking>,
     /// Optional free-tier Gemini runner used for shadow evaluation.
     free_tier_shadow_runner: Option<Arc<dyn ShadowModelRunner>>,
 }
@@ -767,6 +783,12 @@ pub struct CascadeRouter {
 struct ParetoFrontierState {
     frontier: Vec<String>,
     bucket: u64,
+}
+
+#[derive(Debug, Clone)]
+struct StageTracking {
+    current: CascadeStage,
+    transitions: Vec<StageTransition>,
 }
 
 impl CascadeRouter {
@@ -786,6 +808,10 @@ impl CascadeRouter {
             pareto_frontier: Mutex::new(ParetoFrontierState::default()),
             role_table: Mutex::new(default_role_model_table(&model_slugs)),
             model_slugs,
+            stage_tracking: Mutex::new(StageTracking {
+                current: CascadeStage::Static,
+                transitions: Vec::new(),
+            }),
             free_tier_shadow_runner: None,
         }
     }
@@ -828,13 +854,52 @@ impl CascadeRouter {
     /// Determine the current cascade stage based on total observations.
     #[must_use]
     pub fn current_stage(&self) -> CascadeStage {
-        stage_for_observations(self.linucb.total_observations())
+        self.stage_tracking.lock().current
     }
 
     /// Total observations recorded across all stages.
     #[must_use]
     pub fn total_observations(&self) -> u64 {
         self.linucb.total_observations()
+    }
+
+    /// Record a stage transition when the observation count crosses a stage boundary.
+    pub fn check_stage_transition(&self) -> Option<StageTransition> {
+        let obs = self.total_observations();
+        let next = stage_for_observations(obs);
+
+        let transition = {
+            let mut tracking = self.stage_tracking.lock();
+            if next == tracking.current {
+                return None;
+            }
+
+            let transition = StageTransition {
+                from: tracking.current,
+                to: next,
+                observations: obs,
+                timestamp: Utc::now(),
+            };
+            tracking.current = next;
+            tracking.transitions.push(transition.clone());
+            transition
+        };
+
+        tracing::info!(
+            from = %transition.from,
+            to = %transition.to,
+            observations = transition.observations,
+            timestamp = %transition.timestamp.to_rfc3339(),
+            "cascade router stage transition"
+        );
+
+        Some(transition)
+    }
+
+    /// Return the recorded stage-transition history.
+    #[must_use]
+    pub fn stage_transitions(&self) -> Vec<StageTransition> {
+        self.stage_tracking.lock().transitions.clone()
     }
 
     /// Select a model from a raw context vector.
@@ -1303,6 +1368,8 @@ impl CascadeRouter {
             return;
         };
 
+        let mut stage_tracking = self.stage_tracking.lock();
+
         // Update confidence stats.
         let mut stats = self.confidence_stats.lock();
         let entry = stats.entry(slug.clone()).or_default();
@@ -1332,6 +1399,28 @@ impl CascadeRouter {
 
         // Update LinUCB (always, so it's ready when stage transitions).
         self.linucb.update_features(context_vec, model_idx, reward);
+
+        let obs = self.linucb.total_observations();
+        let next = stage_for_observations(obs);
+        if next != stage_tracking.current {
+            let transition = StageTransition {
+                from: stage_tracking.current,
+                to: next,
+                observations: obs,
+                timestamp: Utc::now(),
+            };
+            stage_tracking.current = next;
+            stage_tracking.transitions.push(transition.clone());
+            drop(stage_tracking);
+
+            tracing::info!(
+                from = %transition.from,
+                to = %transition.to,
+                observations = transition.observations,
+                timestamp = %transition.timestamp.to_rfc3339(),
+                "cascade router stage transition"
+            );
+        }
     }
 
     /// Access the underlying `LinUCB` router (for introspection / persistence).
@@ -1396,6 +1485,7 @@ impl CascadeRouter {
     /// stage-2 routing, and the total observation count determines which cascade
     /// stage is active after reload.
     pub fn save(&self, path: &Path) -> Result<(), std::io::Error> {
+        let stage_transitions = self.stage_tracking.lock().transitions.clone();
         let snapshot = CascadeSnapshot {
             model_slugs: self.model_slugs.clone(),
             role_table: self.role_table.lock().clone(),
@@ -1428,6 +1518,7 @@ impl CascadeRouter {
                 })
                 .collect(),
             total_observations: self.linucb.total_observations(),
+            stage_transitions,
         };
         let json = serde_json::to_string_pretty(&snapshot)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -1514,6 +1605,11 @@ impl CascadeRouter {
                     snap.confidence_stats.values().map(|s| s.trials).sum()
                 };
                 router.linucb.set_total_observations(total);
+                {
+                    let mut stage_tracking = router.stage_tracking.lock();
+                    stage_tracking.current = stage_for_observations(total);
+                    stage_tracking.transitions = snap.stage_transitions;
+                }
 
                 router
             }
@@ -2247,6 +2343,8 @@ struct CascadeSnapshot {
     /// from the sum of per-model trials.
     #[serde(default)]
     total_observations: u64,
+    #[serde(default)]
+    stage_transitions: Vec<StageTransition>,
 }
 
 /// Serializable form of per-model confidence stats.
@@ -2423,6 +2521,55 @@ mod tests {
         assert_eq!(cascade.current_stage(), CascadeStage::Ucb);
         let result = cascade.route(&ctx);
         assert_eq!(result.stage, CascadeStage::Ucb);
+    }
+
+    #[test]
+    fn stage_transition_logging() {
+        let cascade = CascadeRouter::new(test_slugs());
+        let ctx = default_ctx();
+        let before = Utc::now();
+
+        for _ in 0..50 {
+            cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.8, true);
+        }
+
+        let transitions = cascade.stage_transitions();
+        assert_eq!(transitions.len(), 1);
+        assert_eq!(
+            transitions[0],
+            StageTransition {
+                from: CascadeStage::Static,
+                to: CascadeStage::Confidence,
+                observations: 50,
+                timestamp: transitions[0].timestamp,
+            }
+        );
+        assert!(transitions[0].timestamp >= before);
+
+        for _ in 0..150 {
+            cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.8, true);
+        }
+
+        let transitions = cascade.stage_transitions();
+        assert_eq!(transitions.len(), 2);
+        assert_eq!(
+            transitions[1],
+            StageTransition {
+                from: CascadeStage::Confidence,
+                to: CascadeStage::Ucb,
+                observations: 200,
+                timestamp: transitions[1].timestamp,
+            }
+        );
+        assert!(transitions[1].timestamp >= transitions[0].timestamp);
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("cascade-router.json");
+        cascade.save(&path).unwrap();
+
+        let reloaded = CascadeRouter::load_or_new(&path, test_slugs());
+        assert_eq!(reloaded.current_stage(), CascadeStage::Ucb);
+        assert_eq!(reloaded.stage_transitions(), transitions);
     }
 
     // ── Test 7: confidence stage prefers high-success model ─────────────
