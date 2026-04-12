@@ -16,17 +16,18 @@ roko-agent = { path = "../roko-agent" }
 roko-golem = { path = "../roko-golem" }
 roko-daimon = { path = "../roko-daimon" }
 bardo-primitives = { path = "../bardo-primitives" }
+async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 parking_lot = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util", "sync", "rt", "macros"] }
 chrono = { workspace = true }
+tracing = { workspace = true }
 globset = { workspace = true }
 rand = { workspace = true }
 rand_chacha = { workspace = true }
 toml = { workspace = true }
-tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

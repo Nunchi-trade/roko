@@ -13,8 +13,11 @@ use crate::provider::openai_compat::{
 };
 use crate::tool_loop::LlmBackend;
 
+/// Tail-latency hedging for latency-sensitive requests.
+pub mod hedged;
 pub mod openai_compat;
 
+pub use hedged::HedgedBackend;
 pub use openai_compat::OpenAiCompatBackend;
 
 struct SharedHttpPoster {
@@ -59,6 +62,12 @@ pub fn create_backend(
                 "CLI/ACP backends don't use LlmBackend — they own the tool loop".into(),
             ))
         }
+        ProviderKind::PerplexityApi => Err(AgentCreationError::MissingConfig(
+            "Perplexity tool-loop backend is not implemented yet".into(),
+        )),
+        ProviderKind::GeminiApi => Err(AgentCreationError::MissingConfig(
+            "Gemini tool-loop backend is not implemented yet".into(),
+        )),
     }
 }
 
@@ -124,6 +133,8 @@ mod tests {
             command: None,
             args: None,
             timeout_ms: Some(90_000),
+            ttft_timeout_ms: Some(15_000),
+            connect_timeout_ms: Some(5_000),
             extra_headers: Some(HashMap::from([(
                 "X-Test-Header".to_string(),
                 "present".to_string(),
@@ -140,18 +151,10 @@ mod tests {
             max_output: Some(131_072),
             supports_tools: true,
             supports_thinking: true,
-            supports_vision: false,
-            supports_web_search: false,
-            supports_mcp_tools: false,
-            supports_partial: false,
-            provider_routing: None,
             tool_format: "openai_json".to_string(),
             cost_input_per_m: Some(1.40),
             cost_output_per_m: Some(4.40),
-            cost_cache_read_per_m: None,
-            cost_cache_write_per_m: None,
-            max_tools: None,
-            tokenizer_ratio: None,
+            ..Default::default()
         }
     }
 

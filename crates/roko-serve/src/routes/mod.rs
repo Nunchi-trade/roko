@@ -11,6 +11,7 @@ mod learning;
 mod middleware;
 mod plans;
 mod prds;
+mod providers;
 mod research;
 mod run;
 mod sse;
@@ -26,6 +27,8 @@ use super::state::AppState;
 use axum::Router;
 use roko_core::config::ServeAuthConfig;
 use tower_http::trace::TraceLayer;
+
+pub use self::config::reload_config_from_disk;
 
 /// Build the complete API router with all route groups and middleware.
 pub fn build_router(
@@ -47,6 +50,9 @@ pub fn build_router(
         .merge(learning::routes())
         .merge(config::routes())
         .merge(deployments::routes())
+        .nest("/providers", providers::router())
+        .nest("/models", providers::models_router())
+        .nest("/routing", providers::routing_router())
         .merge(sse::routes());
 
     let api = if api_auth.enabled {

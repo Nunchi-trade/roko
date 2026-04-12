@@ -19,6 +19,8 @@ pub mod scheduler;
 pub mod state;
 pub mod templates;
 
+pub use crate::routes::reload_config_from_disk;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -130,7 +132,7 @@ impl ServerBuilder {
             self.state
                 .get_or_insert_with(|| Arc::new(build_app_state(workdir, runtime, roko_config))),
         );
-        let dispatcher_roko_config = state.roko_config.read().await.clone();
+        let dispatcher_roko_config = state.load_roko_config().as_ref().clone();
         let dispatcher = Arc::new(dispatch::TemplateAgentDispatcher::new(
             state.workdir.clone(),
             None,
@@ -189,7 +191,7 @@ pub async fn run_server(
 
 /// Run the HTTP server against an already constructed [`AppState`].
 pub async fn run_server_with_state(state: Arc<AppState>, bind: &str, port: u16) -> Result<()> {
-    let roko_config = state.roko_config.read().await.clone();
+    let roko_config = state.load_roko_config().as_ref().clone();
     let router = routes::build_router(
         Arc::clone(&state),
         &roko_config.server.cors_origins,

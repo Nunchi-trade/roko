@@ -60,6 +60,8 @@ fn zai_provider_config(base_url: impl Into<String>) -> ProviderConfig {
         command: None,
         args: None,
         timeout_ms: Some(1_500),
+        ttft_timeout_ms: Some(15_000),
+        connect_timeout_ms: Some(5_000),
         extra_headers: None,
         max_concurrent: None,
     }
@@ -77,12 +79,18 @@ fn glm_5_1_model() -> ModelProfile {
         supports_web_search: false,
         supports_mcp_tools: false,
         supports_partial: false,
+        supports_grounding: false,
+        supports_code_execution: false,
+        supports_caching: false,
         provider_routing: None,
         tool_format: "openai_json".to_string(),
         cost_input_per_m: None,
         cost_output_per_m: None,
+        cost_input_per_m_high: None,
+        cost_output_per_m_high: None,
         cost_cache_read_per_m: None,
         cost_cache_write_per_m: None,
+        thinking_level: None,
         max_tools: None,
         tokenizer_ratio: None,
         ..Default::default()
@@ -106,6 +114,8 @@ fn ollama_provider_config(base_url: impl Into<String>) -> ProviderConfig {
         command: None,
         args: None,
         timeout_ms: Some(1_500),
+        ttft_timeout_ms: Some(15_000),
+        connect_timeout_ms: Some(5_000),
         extra_headers: None,
         max_concurrent: None,
     }
@@ -123,12 +133,18 @@ fn ollama_local_model() -> ModelProfile {
         supports_web_search: false,
         supports_mcp_tools: false,
         supports_partial: false,
+        supports_grounding: false,
+        supports_code_execution: false,
+        supports_caching: false,
         provider_routing: None,
         tool_format: "openai_json".to_string(),
         cost_input_per_m: None,
         cost_output_per_m: None,
+        cost_input_per_m_high: None,
+        cost_output_per_m_high: None,
         cost_cache_read_per_m: None,
         cost_cache_write_per_m: None,
+        thinking_level: None,
         max_tools: None,
         tokenizer_ratio: None,
         ..Default::default()
@@ -498,12 +514,16 @@ async fn ollama_local_via_factory_uses_mock_server() {
         .expect("capture lock")
         .take()
         .expect("captured request");
-    assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1"));
+    assert!(
+        request.starts_with("POST /chat/completions HTTP/1.1"),
+        "unexpected request line: {}",
+        request.lines().next().unwrap_or("")
+    );
 
     let body = request.split("\r\n\r\n").nth(1).expect("request body");
     let parsed: serde_json::Value = serde_json::from_str(body).expect("json request body");
     assert_eq!(parsed["model"], "llama3.1:8b");
-    assert_eq!(parsed["messages"][0]["content"], "hello from ollama");
+    assert_eq!(parsed["messages"][1]["content"], "hello from ollama");
 
     handle.join().expect("server thread");
 }

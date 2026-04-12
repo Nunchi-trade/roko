@@ -6,10 +6,13 @@
 
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use roko_core::config::schema::RokoConfig;
-use roko_core::config::schema::SubscriptionConfig;
+use roko_core::agent::ProviderKind;
+use roko_core::config::schema::{
+    ModelProfile, ProviderConfig, ProviderRouting, RokoConfig, SubscriptionConfig,
+};
 use roko_core::config::{ServeConfig, ServeDeployConfig, ServeDeployWebhookConfig};
 use roko_orchestrator::ExecutorConfig;
 
@@ -42,6 +45,12 @@ pub struct Config {
     /// Cost budget configuration.
     #[serde(default)]
     pub budget: BudgetConfig,
+    /// Provider registry keyed by provider name.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub providers: HashMap<String, ProviderConfig>,
+    /// Model registry keyed by model name.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub models: HashMap<String, ModelProfile>,
     /// API serving options.
     #[serde(default)]
     pub serve: ServeConfig,
@@ -68,6 +77,8 @@ impl Default for Config {
             gates: vec![GateConfig::default_shell_true()],
             executor: ExecutorConfig::default(),
             budget: BudgetConfig::default(),
+            providers: HashMap::new(),
+            models: HashMap::new(),
             serve: ServeConfig::default(),
             log_format: None,
             bind: None,
@@ -764,7 +775,7 @@ pub enum Source {
     Project,
     /// Value is the built-in default.
     Default,
-    /// Value came from the file pointed at by `ROKO_CONFIG`.
+    /// Value came from `ROKO_CONFIG` or a `ROKO__*` override.
     Env,
 }
 
@@ -806,6 +817,12 @@ pub struct ConfigLayer {
     /// Executor settings overrides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executor: Option<ExecutorLayer>,
+    /// Provider registry overrides keyed by provider name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub providers: Option<HashMap<String, ProviderLayer>>,
+    /// Model registry overrides keyed by model name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<HashMap<String, ModelProfileLayer>>,
     /// API serving options overrides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serve: Option<ServeLayer>,
@@ -867,6 +884,26 @@ impl ConfigLayer {
                 None => e,
             });
         }
+        if let Some(overlay_providers) = overlay.providers {
+            let mut providers = self.providers.unwrap_or_default();
+            for (name, layer) in overlay_providers {
+                providers
+                    .entry(name)
+                    .and_modify(|base| *base = base.clone().merge(layer.clone()))
+                    .or_insert(layer);
+            }
+            self.providers = Some(providers);
+        }
+        if let Some(overlay_models) = overlay.models {
+            let mut models = self.models.unwrap_or_default();
+            for (name, layer) in overlay_models {
+                models
+                    .entry(name)
+                    .and_modify(|base| *base = base.clone().merge(layer.clone()))
+                    .or_insert(layer);
+            }
+            self.models = Some(models);
+        }
         if let Some(s) = overlay.serve {
             self.serve = Some(match self.serve {
                 Some(base) => base.merge(s),
@@ -889,13 +926,14 @@ impl ConfigLayer {
             && self.prompt.is_none()
             && self.gates.is_none()
             && self.executor.is_none()
+            && self.providers.is_none()
+            && self.models.is_none()
             && self.serve.is_none()
             && self.repos.is_none()
     }
 
     /// Resolve into a concrete [`Config`], filling missing fields with defaults.
-    #[must_use]
-    pub fn resolve(self) -> Config {
+    pub fn resolve(self) -> Result<Config> {
         let agent = match self.agent {
             Some(a) => {
                 let defaults = AgentConfig::default();
@@ -967,6 +1005,30 @@ impl ConfigLayer {
             }
             None => ExecutorConfig::default(),
         };
+        let providers = match self.providers {
+            Some(providers) => providers
+                .into_iter()
+                .map(|(name, layer)| {
+                    let provider = layer
+                        .resolve()
+                        .with_context(|| format!("resolve providers.{name}"))?;
+                    Ok((name, provider))
+                })
+                .collect::<Result<HashMap<_, _>>>()?,
+            None => HashMap::new(),
+        };
+        let models = match self.models {
+            Some(models) => models
+                .into_iter()
+                .map(|(name, layer)| {
+                    let profile = layer
+                        .resolve()
+                        .with_context(|| format!("resolve models.{name}"))?;
+                    Ok((name, profile))
+                })
+                .collect::<Result<HashMap<_, _>>>()?,
+            None => HashMap::new(),
+        };
         let serve = match self.serve {
             Some(s) => {
                 let defaults = ServeConfig::default();
@@ -983,7 +1045,7 @@ impl ConfigLayer {
             }
             None => ServeConfig::default(),
         };
-        Config {
+        Ok(Config {
             agent,
             auto_plan,
             dreams,
@@ -993,11 +1055,261 @@ impl ConfigLayer {
             gates,
             executor,
             budget: BudgetConfig::default(),
+            providers,
+            models,
             serve,
             log_format: None,
             bind: None,
             data_dir: None,
+        })
+    }
+}
+
+/// Partial provider config used for layered merges.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ProviderLayer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ProviderKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttft_timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect_timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_headers: Option<HashMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent: Option<u32>,
+}
+
+impl ProviderLayer {
+    #[must_use]
+    pub fn merge(self, overlay: Self) -> Self {
+        Self {
+            kind: overlay.kind.or(self.kind),
+            base_url: overlay.base_url.or(self.base_url),
+            api_key_env: overlay.api_key_env.or(self.api_key_env),
+            command: overlay.command.or(self.command),
+            args: overlay.args.or(self.args),
+            timeout_ms: overlay.timeout_ms.or(self.timeout_ms),
+            ttft_timeout_ms: overlay.ttft_timeout_ms.or(self.ttft_timeout_ms),
+            connect_timeout_ms: overlay.connect_timeout_ms.or(self.connect_timeout_ms),
+            extra_headers: overlay.extra_headers.or(self.extra_headers),
+            max_concurrent: overlay.max_concurrent.or(self.max_concurrent),
         }
+    }
+
+    pub fn resolve(self) -> Result<ProviderConfig> {
+        Ok(ProviderConfig {
+            kind: self.kind.context("missing required field `kind`")?,
+            base_url: self.base_url,
+            api_key_env: self.api_key_env,
+            command: self.command,
+            args: self.args,
+            timeout_ms: self.timeout_ms.or(Some(120_000)),
+            ttft_timeout_ms: self.ttft_timeout_ms.or(Some(15_000)),
+            connect_timeout_ms: self.connect_timeout_ms.or(Some(5_000)),
+            extra_headers: self.extra_headers,
+            max_concurrent: self.max_concurrent,
+        })
+    }
+}
+
+/// Partial OpenRouter routing overrides used for layered merges.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ProviderRoutingLayer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_fallbacks: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_price: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_parameters: Option<Vec<String>>,
+}
+
+impl ProviderRoutingLayer {
+    #[must_use]
+    pub fn merge(self, overlay: Self) -> Self {
+        Self {
+            sort: overlay.sort.or(self.sort),
+            order: overlay.order.or(self.order),
+            allow_fallbacks: overlay.allow_fallbacks.or(self.allow_fallbacks),
+            max_price: overlay.max_price.or(self.max_price),
+            require_parameters: overlay.require_parameters.or(self.require_parameters),
+        }
+    }
+
+    #[must_use]
+    pub fn resolve(self) -> ProviderRouting {
+        ProviderRouting {
+            sort: self.sort,
+            order: self.order,
+            allow_fallbacks: self.allow_fallbacks,
+            max_price: self.max_price,
+            require_parameters: self.require_parameters,
+        }
+    }
+}
+
+/// Partial model profile used for layered merges.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ModelProfileLayer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_tools: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_thinking: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_vision: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_web_search: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_mcp_tools: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_partial: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_grounding: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_code_execution: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_caching: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_routing: Option<ProviderRoutingLayer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_input_per_m: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_output_per_m: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_input_per_m_high: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_output_per_m_high: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_read_per_m: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_write_per_m: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tools: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokenizer_ratio: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_search: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_citations: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_async: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_embedding_model: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_context_size: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_per_request: Option<f64>,
+}
+
+impl ModelProfileLayer {
+    #[must_use]
+    pub fn merge(self, overlay: Self) -> Self {
+        Self {
+            provider: overlay.provider.or(self.provider),
+            slug: overlay.slug.or(self.slug),
+            context_window: overlay.context_window.or(self.context_window),
+            max_output: overlay.max_output.or(self.max_output),
+            supports_tools: overlay.supports_tools.or(self.supports_tools),
+            supports_thinking: overlay.supports_thinking.or(self.supports_thinking),
+            supports_vision: overlay.supports_vision.or(self.supports_vision),
+            supports_web_search: overlay.supports_web_search.or(self.supports_web_search),
+            supports_mcp_tools: overlay.supports_mcp_tools.or(self.supports_mcp_tools),
+            supports_partial: overlay.supports_partial.or(self.supports_partial),
+            supports_grounding: overlay.supports_grounding.or(self.supports_grounding),
+            supports_code_execution: overlay
+                .supports_code_execution
+                .or(self.supports_code_execution),
+            supports_caching: overlay.supports_caching.or(self.supports_caching),
+            provider_routing: match (self.provider_routing, overlay.provider_routing) {
+                (Some(base), Some(overlay)) => Some(base.merge(overlay)),
+                (None, Some(overlay)) => Some(overlay),
+                (Some(base), None) => Some(base),
+                (None, None) => None,
+            },
+            tool_format: overlay.tool_format.or(self.tool_format),
+            cost_input_per_m: overlay.cost_input_per_m.or(self.cost_input_per_m),
+            cost_output_per_m: overlay.cost_output_per_m.or(self.cost_output_per_m),
+            cost_input_per_m_high: overlay.cost_input_per_m_high.or(self.cost_input_per_m_high),
+            cost_output_per_m_high: overlay
+                .cost_output_per_m_high
+                .or(self.cost_output_per_m_high),
+            cost_cache_read_per_m: overlay.cost_cache_read_per_m.or(self.cost_cache_read_per_m),
+            cost_cache_write_per_m: overlay
+                .cost_cache_write_per_m
+                .or(self.cost_cache_write_per_m),
+            thinking_level: overlay.thinking_level.or(self.thinking_level),
+            max_tools: overlay.max_tools.or(self.max_tools),
+            tokenizer_ratio: overlay.tokenizer_ratio.or(self.tokenizer_ratio),
+            supports_search: overlay.supports_search.or(self.supports_search),
+            supports_citations: overlay.supports_citations.or(self.supports_citations),
+            supports_async: overlay.supports_async.or(self.supports_async),
+            is_embedding_model: overlay.is_embedding_model.or(self.is_embedding_model),
+            search_context_size: overlay.search_context_size.or(self.search_context_size),
+            cost_per_request: overlay.cost_per_request.or(self.cost_per_request),
+        }
+    }
+
+    pub fn resolve(self) -> Result<ModelProfile> {
+        Ok(ModelProfile {
+            provider: self.provider.context("missing required field `provider`")?,
+            slug: self.slug.context("missing required field `slug`")?,
+            context_window: self.context_window.unwrap_or(128_000),
+            max_output: self.max_output,
+            supports_tools: self.supports_tools.unwrap_or(true),
+            supports_thinking: self.supports_thinking.unwrap_or(false),
+            supports_vision: self.supports_vision.unwrap_or(false),
+            supports_web_search: self.supports_web_search.unwrap_or(false),
+            supports_mcp_tools: self.supports_mcp_tools.unwrap_or(false),
+            supports_partial: self.supports_partial.unwrap_or(false),
+            supports_grounding: self.supports_grounding.unwrap_or(false),
+            supports_code_execution: self.supports_code_execution.unwrap_or(false),
+            supports_caching: self.supports_caching.unwrap_or(false),
+            provider_routing: self.provider_routing.map(ProviderRoutingLayer::resolve),
+            tool_format: self
+                .tool_format
+                .unwrap_or_else(|| "openai_json".to_string()),
+            cost_input_per_m: self.cost_input_per_m,
+            cost_output_per_m: self.cost_output_per_m,
+            cost_input_per_m_high: self.cost_input_per_m_high,
+            cost_output_per_m_high: self.cost_output_per_m_high,
+            cost_cache_read_per_m: self.cost_cache_read_per_m,
+            cost_cache_write_per_m: self.cost_cache_write_per_m,
+            thinking_level: self.thinking_level,
+            max_tools: self.max_tools,
+            tokenizer_ratio: self.tokenizer_ratio,
+            supports_search: self.supports_search.unwrap_or(false),
+            supports_citations: self.supports_citations.unwrap_or(false),
+            supports_async: self.supports_async.unwrap_or(false),
+            is_embedding_model: self.is_embedding_model.unwrap_or(false),
+            search_context_size: self.search_context_size,
+            cost_per_request: self.cost_per_request,
+        })
     }
 }
 
@@ -1011,6 +1323,596 @@ where
         .try_into()
         .map_err(|err| anyhow!(err))
         .context(context)
+}
+
+pub(crate) fn apply_layer_value(layer: &mut ConfigLayer, key: &str, value: &str) -> Result<()> {
+    match key.split('.').collect::<Vec<_>>().as_slice() {
+        ["auto_plan"] => {
+            layer.auto_plan = Some(value.parse::<bool>().context("parse auto_plan as bool")?);
+        }
+        ["agent", "command"] => {
+            let agent = layer.agent.get_or_insert_with(AgentLayer::default);
+            agent.command = Some(value.into());
+        }
+        ["agent", "args"] => {
+            let agent = layer.agent.get_or_insert_with(AgentLayer::default);
+            agent.args = Some(parse_string_list(value, "parse JSON array for agent.args")?);
+        }
+        ["agent", "model"] => {
+            let agent = layer.agent.get_or_insert_with(AgentLayer::default);
+            agent.model = Some(value.into());
+        }
+        ["agent", "effort"] => {
+            let agent = layer.agent.get_or_insert_with(AgentLayer::default);
+            agent.effort = Some(value.into());
+        }
+        ["agent", "bare_mode"] => {
+            let agent = layer.agent.get_or_insert_with(AgentLayer::default);
+            agent.bare_mode = Some(value.parse::<bool>().context("parse bare_mode as bool")?);
+        }
+        ["agent", "fallback_model"] => {
+            let agent = layer.agent.get_or_insert_with(AgentLayer::default);
+            agent.fallback_model = Some(value.into());
+        }
+        ["agent", "timeout_ms"] => {
+            let agent = layer.agent.get_or_insert_with(AgentLayer::default);
+            agent.timeout_ms = Some(value.parse().context("parse timeout_ms as u64")?);
+        }
+        ["agent", "env"] => {
+            let agent = layer.agent.get_or_insert_with(AgentLayer::default);
+            agent.env =
+                Some(serde_json::from_str(value).context("parse JSON array for agent.env")?);
+        }
+        ["agent", "clean_output"] => {
+            let agent = layer.agent.get_or_insert_with(AgentLayer::default);
+            agent.clean_output = Some(
+                value
+                    .parse::<bool>()
+                    .context("parse clean_output as bool")?,
+            );
+        }
+        ["agent", "mcp_config"] => {
+            let agent = layer.agent.get_or_insert_with(AgentLayer::default);
+            agent.mcp_config = Some(PathBuf::from(value));
+        }
+        ["dreams", "auto_dream"] => {
+            let dreams = layer.dreams.get_or_insert_with(DreamsLayer::default);
+            dreams.auto_dream = Some(value.parse::<bool>().context("parse auto_dream as bool")?);
+        }
+        ["dreams", "idle_threshold_mins"] => {
+            let dreams = layer.dreams.get_or_insert_with(DreamsLayer::default);
+            dreams.idle_threshold_mins = Some(
+                value
+                    .parse::<u64>()
+                    .context("parse idle_threshold_mins as u64")?,
+            );
+        }
+        ["dreams", "min_episodes_for_dream"] => {
+            let dreams = layer.dreams.get_or_insert_with(DreamsLayer::default);
+            dreams.min_episodes_for_dream = Some(
+                value
+                    .parse::<usize>()
+                    .context("parse min_episodes_for_dream as usize")?,
+            );
+        }
+        ["tools", "prefer_mcp"] => {
+            let tools = layer.tools.get_or_insert_with(ToolsLayer::default);
+            tools.prefer_mcp = Some(value.parse::<bool>().context("parse prefer_mcp as bool")?);
+        }
+        ["tools", "global_denied"] => {
+            let tools = layer.tools.get_or_insert_with(ToolsLayer::default);
+            tools.global_denied = Some(parse_string_list(
+                value,
+                "parse JSON array for tools.global_denied",
+            )?);
+        }
+        ["tools", "mcp_timeout_secs"] => {
+            let tools = layer.tools.get_or_insert_with(ToolsLayer::default);
+            tools.mcp_timeout_secs = Some(
+                value
+                    .parse::<u64>()
+                    .context("parse mcp_timeout_secs as u64")?,
+            );
+        }
+        ["prompt", "token_budget"] => {
+            let prompt = layer.prompt.get_or_insert_with(PromptLayer::default);
+            prompt.token_budget = Some(
+                value
+                    .parse::<usize>()
+                    .context("parse token_budget as usize")?,
+            );
+        }
+        ["prompt", "role"] => {
+            let prompt = layer.prompt.get_or_insert_with(PromptLayer::default);
+            prompt.role = Some(value.into());
+        }
+        ["prompt", "files"] => {
+            let prompt = layer.prompt.get_or_insert_with(PromptLayer::default);
+            prompt.files =
+                Some(serde_json::from_str(value).context("parse JSON array for prompt.files")?);
+        }
+        ["executor", "max_concurrent_plans"] => {
+            let executor = layer.executor.get_or_insert_with(ExecutorLayer::default);
+            executor.max_concurrent_plans = Some(
+                value
+                    .parse::<usize>()
+                    .context("parse max_concurrent_plans as usize")?,
+            );
+        }
+        ["executor", "max_concurrent_tasks"] => {
+            let executor = layer.executor.get_or_insert_with(ExecutorLayer::default);
+            executor.max_concurrent_tasks = Some(
+                value
+                    .parse::<usize>()
+                    .context("parse max_concurrent_tasks as usize")?,
+            );
+        }
+        ["executor", "max_auto_fix_iterations"] => {
+            let executor = layer.executor.get_or_insert_with(ExecutorLayer::default);
+            executor.max_auto_fix_iterations = Some(
+                value
+                    .parse::<u32>()
+                    .context("parse max_auto_fix_iterations as u32")?,
+            );
+        }
+        ["executor", "max_merge_attempts"] => {
+            let executor = layer.executor.get_or_insert_with(ExecutorLayer::default);
+            executor.max_merge_attempts = Some(
+                value
+                    .parse::<u32>()
+                    .context("parse max_merge_attempts as u32")?,
+            );
+        }
+        ["executor", "task_timeout_secs"] => {
+            let executor = layer.executor.get_or_insert_with(ExecutorLayer::default);
+            executor.task_timeout_secs = Some(
+                value
+                    .parse::<u64>()
+                    .context("parse task_timeout_secs as u64")?,
+            );
+        }
+        ["executor", "budget_usd"] => {
+            let executor = layer.executor.get_or_insert_with(ExecutorLayer::default);
+            executor.budget_usd = Some(value.parse::<f64>().context("parse budget_usd as f64")?);
+        }
+        ["executor", "auto_replan"] => {
+            let executor = layer.executor.get_or_insert_with(ExecutorLayer::default);
+            executor.auto_replan =
+                Some(value.parse::<bool>().context("parse auto_replan as bool")?);
+        }
+        ["providers", name, "kind"] => {
+            let provider = provider_layer_mut(layer, name);
+            provider.kind = Some(parse_string_enum(value, "parse provider kind")?);
+        }
+        ["providers", name, "base_url"] => {
+            let provider = provider_layer_mut(layer, name);
+            provider.base_url = Some(value.into());
+        }
+        ["providers", name, "api_key_env"] => {
+            let provider = provider_layer_mut(layer, name);
+            provider.api_key_env = Some(value.into());
+        }
+        ["providers", name, "command"] => {
+            let provider = provider_layer_mut(layer, name);
+            provider.command = Some(value.into());
+        }
+        ["providers", name, "args"] => {
+            let provider = provider_layer_mut(layer, name);
+            provider.args = Some(parse_string_list(
+                value,
+                "parse JSON array for provider args",
+            )?);
+        }
+        ["providers", name, "timeout_ms"] => {
+            let provider = provider_layer_mut(layer, name);
+            provider.timeout_ms = Some(value.parse::<u64>().context("parse timeout_ms as u64")?);
+        }
+        ["providers", name, "ttft_timeout_ms"] => {
+            let provider = provider_layer_mut(layer, name);
+            provider.ttft_timeout_ms = Some(
+                value
+                    .parse::<u64>()
+                    .context("parse ttft_timeout_ms as u64")?,
+            );
+        }
+        ["providers", name, "connect_timeout_ms"] => {
+            let provider = provider_layer_mut(layer, name);
+            provider.connect_timeout_ms = Some(
+                value
+                    .parse::<u64>()
+                    .context("parse connect_timeout_ms as u64")?,
+            );
+        }
+        ["providers", name, "extra_headers"] => {
+            let provider = provider_layer_mut(layer, name);
+            provider.extra_headers =
+                Some(serde_json::from_str(value).context("parse JSON object for extra_headers")?);
+        }
+        ["providers", name, "max_concurrent"] => {
+            let provider = provider_layer_mut(layer, name);
+            provider.max_concurrent = Some(
+                value
+                    .parse::<u32>()
+                    .context("parse max_concurrent as u32")?,
+            );
+        }
+        ["models", name, "provider"] => {
+            let model = model_layer_mut(layer, name);
+            model.provider = Some(value.into());
+        }
+        ["models", name, "slug"] => {
+            let model = model_layer_mut(layer, name);
+            model.slug = Some(value.into());
+        }
+        ["models", name, "context_window"] => {
+            let model = model_layer_mut(layer, name);
+            model.context_window = Some(
+                value
+                    .parse::<u64>()
+                    .context("parse context_window as u64")?,
+            );
+        }
+        ["models", name, "max_output"] => {
+            let model = model_layer_mut(layer, name);
+            model.max_output = Some(value.parse::<u64>().context("parse max_output as u64")?);
+        }
+        ["models", name, "supports_tools"] => {
+            let model = model_layer_mut(layer, name);
+            model.supports_tools = Some(
+                value
+                    .parse::<bool>()
+                    .context("parse supports_tools as bool")?,
+            );
+        }
+        ["models", name, "supports_thinking"] => {
+            let model = model_layer_mut(layer, name);
+            model.supports_thinking = Some(
+                value
+                    .parse::<bool>()
+                    .context("parse supports_thinking as bool")?,
+            );
+        }
+        ["models", name, "supports_vision"] => {
+            let model = model_layer_mut(layer, name);
+            model.supports_vision = Some(
+                value
+                    .parse::<bool>()
+                    .context("parse supports_vision as bool")?,
+            );
+        }
+        ["models", name, "supports_web_search"] => {
+            let model = model_layer_mut(layer, name);
+            model.supports_web_search = Some(
+                value
+                    .parse::<bool>()
+                    .context("parse supports_web_search as bool")?,
+            );
+        }
+        ["models", name, "supports_mcp_tools"] => {
+            let model = model_layer_mut(layer, name);
+            model.supports_mcp_tools = Some(
+                value
+                    .parse::<bool>()
+                    .context("parse supports_mcp_tools as bool")?,
+            );
+        }
+        ["models", name, "supports_partial"] => {
+            let model = model_layer_mut(layer, name);
+            model.supports_partial = Some(
+                value
+                    .parse::<bool>()
+                    .context("parse supports_partial as bool")?,
+            );
+        }
+        ["models", name, "supports_grounding"] => {
+            let model = model_layer_mut(layer, name);
+            model.supports_grounding = Some(
+                value
+                    .parse::<bool>()
+                    .context("parse supports_grounding as bool")?,
+            );
+        }
+        ["models", name, "supports_code_execution"] => {
+            let model = model_layer_mut(layer, name);
+            model.supports_code_execution = Some(
+                value
+                    .parse::<bool>()
+                    .context("parse supports_code_execution as bool")?,
+            );
+        }
+        ["models", name, "supports_caching"] => {
+            let model = model_layer_mut(layer, name);
+            model.supports_caching = Some(
+                value
+                    .parse::<bool>()
+                    .context("parse supports_caching as bool")?,
+            );
+        }
+        ["models", name, "provider_routing", "sort"] => {
+            let routing = model_routing_layer_mut(layer, name);
+            routing.sort = Some(value.into());
+        }
+        ["models", name, "provider_routing", "order"] => {
+            let routing = model_routing_layer_mut(layer, name);
+            routing.order = Some(parse_string_list(
+                value,
+                "parse JSON array for provider_routing.order",
+            )?);
+        }
+        ["models", name, "provider_routing", "allow_fallbacks"] => {
+            let routing = model_routing_layer_mut(layer, name);
+            routing.allow_fallbacks = Some(
+                value
+                    .parse::<bool>()
+                    .context("parse allow_fallbacks as bool")?,
+            );
+        }
+        ["models", name, "provider_routing", "max_price"] => {
+            let routing = model_routing_layer_mut(layer, name);
+            routing.max_price = Some(value.parse::<f64>().context("parse max_price as f64")?);
+        }
+        ["models", name, "provider_routing", "require_parameters"] => {
+            let routing = model_routing_layer_mut(layer, name);
+            routing.require_parameters = Some(parse_string_list(
+                value,
+                "parse JSON array for provider_routing.require_parameters",
+            )?);
+        }
+        ["models", name, "tool_format"] => {
+            let model = model_layer_mut(layer, name);
+            model.tool_format = Some(value.into());
+        }
+        ["models", name, "cost_input_per_m"] => {
+            let model = model_layer_mut(layer, name);
+            model.cost_input_per_m = Some(
+                value
+                    .parse::<f64>()
+                    .context("parse cost_input_per_m as f64")?,
+            );
+        }
+        ["models", name, "cost_output_per_m"] => {
+            let model = model_layer_mut(layer, name);
+            model.cost_output_per_m = Some(
+                value
+                    .parse::<f64>()
+                    .context("parse cost_output_per_m as f64")?,
+            );
+        }
+        ["models", name, "cost_input_per_m_high"] => {
+            let model = model_layer_mut(layer, name);
+            model.cost_input_per_m_high = Some(
+                value
+                    .parse::<f64>()
+                    .context("parse cost_input_per_m_high as f64")?,
+            );
+        }
+        ["models", name, "cost_output_per_m_high"] => {
+            let model = model_layer_mut(layer, name);
+            model.cost_output_per_m_high = Some(
+                value
+                    .parse::<f64>()
+                    .context("parse cost_output_per_m_high as f64")?,
+            );
+        }
+        ["models", name, "cost_cache_read_per_m"] => {
+            let model = model_layer_mut(layer, name);
+            model.cost_cache_read_per_m = Some(
+                value
+                    .parse::<f64>()
+                    .context("parse cost_cache_read_per_m as f64")?,
+            );
+        }
+        ["models", name, "cost_cache_write_per_m"] => {
+            let model = model_layer_mut(layer, name);
+            model.cost_cache_write_per_m = Some(
+                value
+                    .parse::<f64>()
+                    .context("parse cost_cache_write_per_m as f64")?,
+            );
+        }
+        ["models", name, "thinking_level"] => {
+            let model = model_layer_mut(layer, name);
+            model.thinking_level = Some(value.into());
+        }
+        ["models", name, "max_tools"] => {
+            let model = model_layer_mut(layer, name);
+            model.max_tools = Some(value.parse::<u32>().context("parse max_tools as u32")?);
+        }
+        ["models", name, "tokenizer_ratio"] => {
+            let model = model_layer_mut(layer, name);
+            model.tokenizer_ratio = Some(
+                value
+                    .parse::<f64>()
+                    .context("parse tokenizer_ratio as f64")?,
+            );
+        }
+        ["models", name, "supports_search"] => {
+            let model = model_layer_mut(layer, name);
+            model.supports_search = Some(
+                value
+                    .parse::<bool>()
+                    .context("parse supports_search as bool")?,
+            );
+        }
+        ["models", name, "supports_citations"] => {
+            let model = model_layer_mut(layer, name);
+            model.supports_citations = Some(
+                value
+                    .parse::<bool>()
+                    .context("parse supports_citations as bool")?,
+            );
+        }
+        ["models", name, "supports_async"] => {
+            let model = model_layer_mut(layer, name);
+            model.supports_async = Some(
+                value
+                    .parse::<bool>()
+                    .context("parse supports_async as bool")?,
+            );
+        }
+        ["models", name, "is_embedding_model"] => {
+            let model = model_layer_mut(layer, name);
+            model.is_embedding_model = Some(
+                value
+                    .parse::<bool>()
+                    .context("parse is_embedding_model as bool")?,
+            );
+        }
+        ["models", name, "search_context_size"] => {
+            let model = model_layer_mut(layer, name);
+            model.search_context_size = Some(value.into());
+        }
+        ["models", name, "cost_per_request"] => {
+            let model = model_layer_mut(layer, name);
+            model.cost_per_request = Some(
+                value
+                    .parse::<f64>()
+                    .context("parse cost_per_request as f64")?,
+            );
+        }
+        ["serve", "auth", "enabled"] => {
+            let auth = serve_auth_layer_mut(layer);
+            auth.enabled = Some(value.parse::<bool>().context("parse enabled as bool")?);
+        }
+        ["serve", "auth", "api_key"] => {
+            let auth = serve_auth_layer_mut(layer);
+            auth.api_key = Some(value.into());
+        }
+        ["serve", "deploy", "provider"] => {
+            let deploy = serve_deploy_layer_mut(layer);
+            deploy.provider = Some(value.into());
+        }
+        ["serve", "deploy", "environment"] => {
+            let deploy = serve_deploy_layer_mut(layer);
+            deploy.environment = Some(parse_string_list(
+                value,
+                "parse JSON array for serve.deploy.environment",
+            )?);
+        }
+        ["serve", "deploy", "webhooks"] => {
+            let deploy = serve_deploy_layer_mut(layer);
+            deploy.webhooks = Some(
+                serde_json::from_str(value)
+                    .context("parse JSON array for serve.deploy.webhooks")?,
+            );
+        }
+        _ => return Err(anyhow!("unknown key: {key}")),
+    }
+
+    Ok(())
+}
+
+fn parse_string_list(value: &str, json_context: &'static str) -> Result<Vec<String>> {
+    if value.trim_start().starts_with('[') {
+        serde_json::from_str(value).context(json_context)
+    } else {
+        Ok(value.split_whitespace().map(String::from).collect())
+    }
+}
+
+fn parse_string_enum<T>(value: &str, context: &'static str) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_value(serde_json::Value::String(value.to_string())).context(context)
+}
+
+fn provider_layer_mut<'a>(layer: &'a mut ConfigLayer, name: &str) -> &'a mut ProviderLayer {
+    layer
+        .providers
+        .get_or_insert_with(HashMap::new)
+        .entry(name.to_string())
+        .or_default()
+}
+
+fn model_layer_mut<'a>(layer: &'a mut ConfigLayer, name: &str) -> &'a mut ModelProfileLayer {
+    layer
+        .models
+        .get_or_insert_with(HashMap::new)
+        .entry(name.to_string())
+        .or_default()
+}
+
+fn model_routing_layer_mut<'a>(
+    layer: &'a mut ConfigLayer,
+    name: &str,
+) -> &'a mut ProviderRoutingLayer {
+    model_layer_mut(layer, name)
+        .provider_routing
+        .get_or_insert_with(ProviderRoutingLayer::default)
+}
+
+fn serve_auth_layer_mut(layer: &mut ConfigLayer) -> &mut ServeAuthLayer {
+    layer
+        .serve
+        .get_or_insert_with(ServeLayer::default)
+        .auth
+        .get_or_insert_with(ServeAuthLayer::default)
+}
+
+fn serve_deploy_layer_mut(layer: &mut ConfigLayer) -> &mut ServeDeployLayer {
+    layer
+        .serve
+        .get_or_insert_with(ServeLayer::default)
+        .deploy
+        .get_or_insert_with(ServeDeployLayer::default)
+}
+
+fn collect_env_override_layer() -> Result<(ConfigLayer, Vec<String>)> {
+    collect_env_override_layer_from(std::env::vars())
+}
+
+fn collect_env_override_layer_from<I>(vars: I) -> Result<(ConfigLayer, Vec<String>)>
+where
+    I: IntoIterator<Item = (String, String)>,
+{
+    let mut layer = ConfigLayer::default();
+    let mut paths = Vec::new();
+
+    for (key, value) in vars {
+        let Some(path) = env_override_path(&key) else {
+            continue;
+        };
+        apply_layer_value(&mut layer, &path, &value)
+            .with_context(|| format!("set {path} from {key}"))?;
+        paths.push(path);
+    }
+
+    Ok((layer, paths))
+}
+
+fn env_override_path(key: &str) -> Option<String> {
+    let suffix = key.strip_prefix("ROKO__")?;
+    if suffix.is_empty() {
+        return None;
+    }
+    Some(suffix.to_ascii_lowercase().replace("__", "."))
+}
+
+fn apply_env_source_overrides(sources: &mut ConfigSources, paths: &[String]) {
+    for path in paths {
+        match path.as_str() {
+            "auto_plan" => sources.auto_plan = Source::Env,
+            "agent.command" => sources.agent_command = Source::Env,
+            "agent.args" => sources.agent_args = Source::Env,
+            "agent.model" => sources.agent_model = Source::Env,
+            "agent.effort" => sources.agent_effort = Source::Env,
+            "agent.bare_mode" => sources.agent_bare_mode = Source::Env,
+            "agent.fallback_model" => sources.agent_fallback_model = Source::Env,
+            "agent.timeout_ms" => sources.agent_timeout_ms = Source::Env,
+            "tools.prefer_mcp" => sources.tools_prefer_mcp = Source::Env,
+            "tools.global_denied" => sources.tools_global_denied = Source::Env,
+            "tools.mcp_timeout_secs" => sources.tools_mcp_timeout_secs = Source::Env,
+            "prompt.token_budget" => sources.prompt_token_budget = Source::Env,
+            "prompt.role" => sources.prompt_role = Source::Env,
+            "dreams.auto_dream" => sources.dreams_auto_dream = Source::Env,
+            "dreams.idle_threshold_mins" => sources.dreams_idle_threshold_mins = Source::Env,
+            "dreams.min_episodes_for_dream" => sources.dreams_min_episodes_for_dream = Source::Env,
+            path if path.starts_with("providers.") => sources.providers = Source::Env,
+            path if path.starts_with("models.") => sources.models = Source::Env,
+            _ => {}
+        }
+    }
 }
 
 fn interpolate_env_values(value: &mut toml::Value) -> Result<()> {
@@ -1449,6 +2351,10 @@ pub struct ConfigSources {
     pub prompt_token_budget: Source,
     /// Where `prompt.role` came from.
     pub prompt_role: Source,
+    /// Where `providers` came from.
+    pub providers: Source,
+    /// Where `models` came from.
+    pub models: Source,
     /// Where `dreams.auto_dream` came from.
     pub dreams_auto_dream: Source,
     /// Where `dreams.idle_threshold_mins` came from.
@@ -1461,15 +2367,18 @@ pub struct ConfigSources {
 
 /// Load global + project configs, merge them, and return a `ResolvedConfig`.
 ///
-/// Precedence (highest first): `ROKO_CONFIG` env var → project → global → defaults.
+/// Precedence (highest first): `ROKO__*` env vars → `ROKO_CONFIG` env var →
+/// project → global → defaults.
 pub fn load_layered(workdir: &Path) -> Result<ResolvedConfig> {
     let paths = resolve_paths(workdir);
+    let (env_layer, env_paths) = collect_env_override_layer()?;
 
-    // If ROKO_CONFIG is set, it alone resolves the config.
+    // If ROKO_CONFIG is set, it alone resolves the file config; field-level
+    // ROKO__* env vars still apply on top.
     if let Some(env_path) = &paths.env_override {
-        let layer = ConfigLayer::from_file(env_path)?;
+        let layer = ConfigLayer::from_file(env_path)?.merge(env_layer);
         let sources = sources_from_layer(&layer, Source::Env, Source::Default);
-        let config = layer.resolve();
+        let config = layer.resolve()?;
         let repo_registry = RepoRegistry::load(&config, workdir)?;
         return Ok(ResolvedConfig {
             config,
@@ -1489,9 +2398,10 @@ pub fn load_layered(workdir: &Path) -> Result<ResolvedConfig> {
         None => ConfigLayer::default(),
     };
 
-    let sources = compute_sources(&global_layer, &project_layer);
-    let merged = global_layer.merge(project_layer);
-    let config = merged.resolve();
+    let mut sources = compute_sources(&global_layer, &project_layer);
+    apply_env_source_overrides(&mut sources, &env_paths);
+    let merged = global_layer.merge(project_layer).merge(env_layer);
+    let config = merged.resolve()?;
     let repo_registry = RepoRegistry::load(&config, workdir)?;
 
     Ok(ResolvedConfig {
@@ -1575,6 +2485,8 @@ fn compute_sources(global: &ConfigLayer, project: &ConfigLayer) -> ConfigSources
             p_prompt.and_then(|p| p.role.as_ref()).is_some(),
             g_prompt.and_then(|p| p.role.as_ref()).is_some(),
         ),
+        providers: pick(project.providers.is_some(), global.providers.is_some()),
+        models: pick(project.models.is_some(), global.models.is_some()),
         dreams_auto_dream: pick(
             p_dreams.and_then(|d| d.auto_dream).is_some(),
             g_dreams.and_then(|d| d.auto_dream).is_some(),
@@ -1612,6 +2524,8 @@ fn sources_from_layer(layer: &ConfigLayer, present: Source, fallback: Source) ->
         tools_mcp_timeout_secs: pick(tools.and_then(|t| t.mcp_timeout_secs).is_some()),
         prompt_token_budget: pick(prompt.and_then(|p| p.token_budget).is_some()),
         prompt_role: pick(prompt.and_then(|p| p.role.as_ref()).is_some()),
+        providers: pick(layer.providers.is_some()),
+        models: pick(layer.models.is_some()),
         dreams_auto_dream: pick(dreams.and_then(|d| d.auto_dream).is_some()),
         dreams_idle_threshold_mins: pick(dreams.and_then(|d| d.idle_threshold_mins).is_some()),
         dreams_min_episodes_for_dream: pick(
@@ -1935,7 +2849,7 @@ auto_replan = false
         )
         .unwrap();
 
-        let cfg = layer.resolve();
+        let cfg = layer.resolve().unwrap();
         assert_eq!(cfg.executor.max_concurrent_plans, 6);
         assert_eq!(
             cfg.executor.max_concurrent_tasks,
@@ -1967,7 +2881,7 @@ auto_plan = true
         )
         .unwrap();
 
-        let cfg = layer.resolve();
+        let cfg = layer.resolve().unwrap();
         assert!(cfg.auto_plan);
     }
 
@@ -1990,6 +2904,8 @@ auto_plan = true
         assert_eq!(parsed.tools.prefer_mcp, cfg.tools.prefer_mcp);
         assert_eq!(parsed.tools.global_denied, cfg.tools.global_denied);
         assert_eq!(parsed.tools.mcp_timeout_secs, cfg.tools.mcp_timeout_secs);
+        assert_eq!(parsed.providers, cfg.providers);
+        assert_eq!(parsed.models, cfg.models);
         assert_eq!(parsed.repos.len(), cfg.repos.len());
         assert_eq!(parsed.gates.len(), cfg.gates.len());
         assert_eq!(parsed.serve.auth.enabled, cfg.serve.auth.enabled);
@@ -2085,7 +3001,7 @@ token_budget = 8000
         )
         .unwrap();
 
-        let merged = global.merge(project).resolve();
+        let merged = global.merge(project).resolve().unwrap();
         assert_eq!(merged.agent.command, "mods");
         assert_eq!(
             merged.agent.args,
@@ -2100,14 +3016,107 @@ token_budget = 8000
     }
 
     #[test]
+    fn layer_merge_merges_provider_and_model_entries() {
+        let global = ConfigLayer::parse_toml(
+            r#"
+[providers.zai]
+kind = "openai_compat"
+base_url = "https://global.example"
+api_key_env = "GLOBAL_KEY"
+
+[models.glm-5-1]
+provider = "zai"
+slug = "glm-5.1"
+supports_tools = true
+"#,
+        )
+        .unwrap();
+        let project = ConfigLayer::parse_toml(
+            r#"
+[providers.zai]
+base_url = "https://project.example"
+timeout_ms = 42000
+
+[models.glm-5-1]
+supports_thinking = true
+max_output = 131072
+"#,
+        )
+        .unwrap();
+
+        let merged = global.merge(project).resolve().unwrap();
+        let provider = merged.providers.get("zai").unwrap();
+        assert_eq!(provider.kind, ProviderKind::OpenAiCompat);
+        assert_eq!(
+            provider.base_url.as_deref(),
+            Some("https://project.example")
+        );
+        assert_eq!(provider.api_key_env.as_deref(), Some("GLOBAL_KEY"));
+        assert_eq!(provider.timeout_ms, Some(42_000));
+
+        let model = merged.models.get("glm-5-1").unwrap();
+        assert_eq!(model.provider, "zai");
+        assert_eq!(model.slug, "glm-5.1");
+        assert!(model.supports_tools);
+        assert!(model.supports_thinking);
+        assert_eq!(model.max_output, Some(131_072));
+    }
+
+    #[test]
+    fn apply_layer_value_sets_provider_and_model_entries() {
+        let mut layer = ConfigLayer::default();
+        apply_layer_value(&mut layer, "providers.zai.kind", "openai_compat").unwrap();
+        apply_layer_value(
+            &mut layer,
+            "providers.zai.base_url",
+            "https://api.z.ai/api/paas/v4",
+        )
+        .unwrap();
+        apply_layer_value(&mut layer, "models.glm51.provider", "zai").unwrap();
+        apply_layer_value(&mut layer, "models.glm51.slug", "glm-5.1").unwrap();
+        apply_layer_value(&mut layer, "models.glm51.supports_thinking", "true").unwrap();
+
+        let cfg = layer.resolve().unwrap();
+        let provider = cfg.providers.get("zai").unwrap();
+        assert_eq!(provider.kind, ProviderKind::OpenAiCompat);
+        assert_eq!(
+            provider.base_url.as_deref(),
+            Some("https://api.z.ai/api/paas/v4")
+        );
+
+        let model = cfg.models.get("glm51").unwrap();
+        assert_eq!(model.provider, "zai");
+        assert_eq!(model.slug, "glm-5.1");
+        assert!(model.supports_thinking);
+    }
+
+    #[test]
+    fn layer_resolve_errors_when_provider_kind_missing() {
+        let layer = ConfigLayer::parse_toml(
+            r#"
+[providers.zai]
+base_url = "https://api.z.ai/api/paas/v4"
+"#,
+        )
+        .unwrap();
+
+        let err = layer.resolve().unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("resolve providers.zai"));
+        assert!(msg.contains("missing required field `kind`"));
+    }
+
+    #[test]
     fn layer_resolve_empty_uses_defaults() {
         let layer = ConfigLayer::default();
-        let cfg = layer.resolve();
+        let cfg = layer.resolve().unwrap();
         assert_eq!(cfg.agent.command, "cat");
         assert!(!cfg.tools.prefer_mcp);
         assert!(cfg.tools.global_denied.is_empty());
         assert_eq!(cfg.tools.mcp_timeout_secs, 30);
         assert_eq!(cfg.prompt.token_budget, 10_000);
+        assert!(cfg.providers.is_empty());
+        assert!(cfg.models.is_empty());
         assert!(cfg.dreams.auto_dream);
         assert_eq!(cfg.dreams.idle_threshold_mins, 15);
         assert_eq!(cfg.dreams.min_episodes_for_dream, 5);
@@ -2128,7 +3137,7 @@ min_episodes_for_dream = 9
         )
         .unwrap();
 
-        let cfg = layer.resolve();
+        let cfg = layer.resolve().unwrap();
         assert!(!cfg.dreams.auto_dream);
         assert_eq!(cfg.dreams.idle_threshold_mins, 22);
         assert_eq!(cfg.dreams.min_episodes_for_dream, 9);
@@ -2163,10 +3172,49 @@ token_budget = 8000
         assert_eq!(sources.tools_mcp_timeout_secs, Source::Default);
         assert_eq!(sources.prompt_token_budget, Source::Project);
         assert_eq!(sources.prompt_role, Source::Default);
+        assert_eq!(sources.providers, Source::Default);
+        assert_eq!(sources.models, Source::Default);
         assert_eq!(sources.agent_args, Source::Default);
         assert_eq!(sources.dreams_auto_dream, Source::Default);
         assert_eq!(sources.dreams_idle_threshold_mins, Source::Default);
         assert_eq!(sources.dreams_min_episodes_for_dream, Source::Default);
+    }
+
+    #[test]
+    fn env_override_layer_applies_last_and_marks_sources() {
+        let global = ConfigLayer::parse_toml(
+            r#"
+[agent]
+command = "cat"
+model = "from-file"
+
+[providers.zai]
+kind = "openai_compat"
+base_url = "https://file.example"
+"#,
+        )
+        .unwrap();
+        let project = ConfigLayer::default();
+        let (env_layer, env_paths) = collect_env_override_layer_from(vec![
+            ("ROKO__AGENT__MODEL".to_string(), "test".to_string()),
+            (
+                "ROKO__PROVIDERS__ZAI__BASE_URL".to_string(),
+                "https://env.example".to_string(),
+            ),
+        ])
+        .unwrap();
+
+        let mut sources = compute_sources(&global, &project);
+        apply_env_source_overrides(&mut sources, &env_paths);
+        let resolved = global.merge(project).merge(env_layer).resolve().unwrap();
+
+        assert_eq!(resolved.agent.model.as_deref(), Some("test"));
+        assert_eq!(sources.agent_model, Source::Env);
+        assert_eq!(
+            resolved.providers.get("zai").unwrap().base_url.as_deref(),
+            Some("https://env.example")
+        );
+        assert_eq!(sources.providers, Source::Env);
     }
 
     #[test]
@@ -2187,7 +3235,7 @@ program = "echo"
 "#,
         )
         .unwrap();
-        let merged = global.merge(project).resolve();
+        let merged = global.merge(project).resolve().unwrap();
         assert_eq!(merged.gates.len(), 1);
         assert!(matches!(&merged.gates[0], GateConfig::Shell { program, .. } if program == "echo"));
     }

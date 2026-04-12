@@ -39,13 +39,17 @@
 //! In both cases, the goal is the same: keep provider-specific wiring out of
 //! the call sites and centralize it in this module.
 
-use crate::Agent;
+use crate::{Agent, ExecAgent};
+use crate::gemini::GeminiAdapter;
 use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::config::schema::RokoConfig;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub mod anthropic_api;
 pub mod claude_cli;
@@ -59,10 +63,15 @@ pub use cursor_acp::CursorAcpAdapter;
 pub use openai_compat::OpenAiCompatAdapter;
 pub use openrouter_meta::fetch_model_metadata;
 
+use crate::perplexity::PerplexityAdapter;
+
 static ANTHROPIC_API_ADAPTER: AnthropicApiAdapter = AnthropicApiAdapter;
 static CLAUDE_CLI_ADAPTER: ClaudeCliAdapter = ClaudeCliAdapter;
 static CURSOR_ACP_ADAPTER: CursorAcpAdapter = CursorAcpAdapter;
 static OPENAI_COMPAT_ADAPTER: OpenAiCompatAdapter = OpenAiCompatAdapter;
+static PERPLEXITY_ADAPTER: PerplexityAdapter = PerplexityAdapter;
+static GEMINI_ADAPTER: GeminiAdapter = GeminiAdapter;
+const DEFAULT_PROVIDER_MAX_CONCURRENT: usize = 10;
 
 /// Return the static adapter for a provider kind.
 #[must_use]
@@ -72,6 +81,8 @@ pub fn adapter_for_kind(kind: ProviderKind) -> &'static dyn ProviderAdapter {
         ProviderKind::ClaudeCli => &CLAUDE_CLI_ADAPTER,
         ProviderKind::AnthropicApi => &ANTHROPIC_API_ADAPTER,
         ProviderKind::CursorAcp => &CURSOR_ACP_ADAPTER,
+        ProviderKind::PerplexityApi => &PERPLEXITY_ADAPTER,
+        ProviderKind::GeminiApi => &GEMINI_ADAPTER,
     }
 }
 
@@ -84,17 +95,48 @@ pub fn create_agent_for_model(
     model_key: &str,
     options: AgentOptions,
 ) -> Result<Box<dyn Agent>, AgentCreationError> {
+    let mut options = options;
     let resolved = resolve_model(config, model_key);
-
     let profile = resolved
         .profile
-        .or_else(|| config.effective_models().get(model_key).cloned())
-        .ok_or_else(|| AgentCreationError::MissingConfig("model".into()))?;
+        .or_else(|| config.effective_models().get(model_key).cloned());
+    let provider_config = profile
+        .as_ref()
+        .and_then(|profile| {
+            resolved.provider_config.clone().or_else(|| {
+                config
+                    .effective_providers()
+                    .get(&profile.provider)
+                    .cloned()
+            })
+        });
+    let legacy_command = options.command.as_deref().or(config.agent.command.as_deref());
 
-    let provider_config = resolved
-        .provider_config
-        .or_else(|| config.effective_providers().get(&profile.provider).cloned())
-        .ok_or_else(|| AgentCreationError::MissingConfig("provider".into()))?;
+    let Some(provider_config) = provider_config else {
+        if is_known_protocol_command(legacy_command) {
+            return Err(AgentCreationError::MissingConfig("provider".into()));
+        }
+
+        tracing::warn!(
+            model_key = model_key,
+            command = %legacy_command.unwrap_or("unknown"),
+            "no provider found — falling back to ExecAgent (no tool support)"
+        );
+
+        let mut agent = ExecAgent::new(
+            legacy_command.unwrap_or("cat"),
+            options.extra_args.clone(),
+        )
+        .with_timeout_ms(options.timeout_ms.unwrap_or(120_000));
+        if !options.name.is_empty() {
+            agent = agent.with_name(options.name.clone());
+        }
+        if !options.env.is_empty() {
+            agent = agent.with_env(options.env.clone());
+        }
+        return Ok(Box::new(agent));
+    };
+    let profile = profile.ok_or_else(|| AgentCreationError::MissingConfig("model".into()))?;
 
     tracing::info!(
         model_key = model_key,
@@ -104,8 +146,62 @@ pub fn create_agent_for_model(
         "creating agent via provider adapter"
     );
 
+    if options.provider_semaphores.is_none() {
+        let providers = config.effective_providers();
+        options.provider_semaphores = Some(Arc::new(ProviderSemaphores::new(&providers)));
+    }
+
     let adapter = adapter_for_kind(resolved.provider_kind);
     adapter.create_agent(&provider_config, &profile, &options)
+}
+
+fn is_known_protocol_command(command: Option<&str>) -> bool {
+    let Some(command) = command else {
+        return false;
+    };
+
+    let executable = Path::new(command)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(command);
+
+    matches!(executable, "claude" | "codex" | "cursor-agent" | "cursor_agent")
+}
+
+/// Shared semaphores that cap in-flight requests per provider.
+#[derive(Debug)]
+pub struct ProviderSemaphores {
+    semaphores: HashMap<String, Arc<Semaphore>>,
+    default_permits: usize,
+}
+
+impl ProviderSemaphores {
+    #[must_use]
+    pub fn new(configs: &HashMap<String, ProviderConfig>) -> Self {
+        let mut semaphores = HashMap::with_capacity(configs.len());
+        for (id, config) in configs {
+            let permits = config
+                .max_concurrent
+                .unwrap_or(DEFAULT_PROVIDER_MAX_CONCURRENT as u32)
+                .max(1) as usize;
+            semaphores.insert(id.clone(), Arc::new(Semaphore::new(permits)));
+        }
+
+        Self {
+            semaphores,
+            default_permits: DEFAULT_PROVIDER_MAX_CONCURRENT,
+        }
+    }
+
+    pub async fn acquire(&self, provider_id: &str) -> OwnedSemaphorePermit {
+        let semaphore = self
+            .semaphores
+            .get(provider_id)
+            .cloned()
+            .unwrap_or_else(|| Arc::new(Semaphore::new(self.default_permits)));
+
+        semaphore.acquire_owned().await.expect("semaphore closed")
+    }
 }
 
 /// Adapter for a protocol family. Creates Agent instances configured for a
@@ -130,10 +226,13 @@ pub trait ProviderAdapter: Send + Sync {
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default)]
 pub struct AgentOptions {
+    pub command: Option<String>,
     pub timeout_ms: Option<u64>,
     pub system_prompt: Option<String>,
+    pub cached_content: Option<String>,
     pub tools: Option<String>,
     pub mcp_config: Option<PathBuf>,
+    pub provider_semaphores: Option<Arc<ProviderSemaphores>>,
     pub env: Vec<(String, String)>,
     pub extra_args: Vec<String>,
     pub effort: Option<String>,
@@ -203,6 +302,16 @@ pub fn should_retry(error: &ProviderError) -> RetryAction {
     }
 }
 
+impl ProviderError {
+    #[must_use]
+    pub const fn retry_after_ms(&self) -> Option<u64> {
+        match self {
+            Self::RateLimit { retry_after_ms } => *retry_after_ms,
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum AgentCreationError {
     #[error("Missing API key: env var {0} not set")]
@@ -223,6 +332,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
+    use tokio::time::timeout;
 
     fn prompt(text: &str) -> Signal {
         Signal::builder(Kind::Prompt).body(Body::text(text)).build()
@@ -303,6 +413,8 @@ mod tests {
                 command: None,
                 args: None,
                 timeout_ms: Some(1_500),
+                ttft_timeout_ms: Some(15_000),
+                connect_timeout_ms: Some(5_000),
                 extra_headers: None,
                 max_concurrent: None,
             },
@@ -320,12 +432,18 @@ mod tests {
                 supports_web_search: false,
                 supports_mcp_tools: false,
                 supports_partial: false,
+                supports_grounding: false,
+                supports_code_execution: false,
+                supports_caching: false,
                 provider_routing: None,
                 tool_format: "openai_json".to_string(),
                 cost_input_per_m: None,
                 cost_output_per_m: None,
+                cost_input_per_m_high: None,
+                cost_output_per_m_high: None,
                 cost_cache_read_per_m: None,
                 cost_cache_write_per_m: None,
+                thinking_level: None,
                 max_tools: None,
                 tokenizer_ratio: None,
                 ..Default::default()
@@ -351,6 +469,14 @@ mod tests {
         assert_eq!(
             adapter_for_kind(ProviderKind::CursorAcp).kind(),
             ProviderKind::CursorAcp
+        );
+        assert_eq!(
+            adapter_for_kind(ProviderKind::PerplexityApi).kind(),
+            ProviderKind::PerplexityApi
+        );
+        assert_eq!(
+            adapter_for_kind(ProviderKind::GeminiApi).kind(),
+            ProviderKind::GeminiApi
         );
     }
 
@@ -395,12 +521,16 @@ mod tests {
             .expect("capture lock")
             .take()
             .expect("captured request");
-        assert!(request.starts_with("POST /v4/v1/chat/completions HTTP/1.1"));
+        assert!(
+            request.starts_with("POST /v4/chat/completions HTTP/1.1"),
+            "unexpected request line: {}",
+            request.lines().next().unwrap_or("")
+        );
         let body = request.split("\r\n\r\n").nth(1).expect("request body");
         let parsed: serde_json::Value = serde_json::from_str(body).expect("json request body");
         assert_eq!(parsed["model"], "glm-5.1");
         assert_eq!(parsed["max_tokens"], 1024);
-        assert_eq!(parsed["messages"][0]["content"], "hello");
+        assert_eq!(parsed["messages"][1]["content"], "hello");
 
         handle.join().expect("server thread");
     }
@@ -440,5 +570,70 @@ mod tests {
             should_retry(&ProviderError::Other("x".to_string())),
             RetryAction::TryFallback
         );
+    }
+
+    #[tokio::test]
+    async fn exec_agent_fallback_for_unknown_model_key() {
+        let mut config = RokoConfig::default();
+        config.agent.command = Some("cat".to_string());
+
+        let agent = create_agent_for_model(
+            &config,
+            "unknown-model",
+            AgentOptions {
+                timeout_ms: Some(250),
+                name: "fallback-agent".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("fallback exec agent");
+
+        assert_eq!(agent.name(), "fallback-agent");
+
+        let result = agent.run(&prompt("fallback-ok"), &Context::now()).await;
+        assert!(result.success);
+        assert_eq!(result.output.body.as_text().unwrap_or(""), "fallback-ok");
+    }
+
+    #[tokio::test]
+    async fn provider_semaphore_blocks_fourth_request_when_limit_is_three() {
+        let mut configs = HashMap::new();
+        configs.insert(
+            "zai".to_string(),
+            ProviderConfig {
+                kind: ProviderKind::OpenAiCompat,
+                base_url: Some("https://api.z.ai/api/paas/v4".to_string()),
+                api_key_env: Some("ZAI_API_KEY".to_string()),
+                command: None,
+                args: None,
+                timeout_ms: Some(1_500),
+                ttft_timeout_ms: Some(15_000),
+                connect_timeout_ms: Some(5_000),
+                extra_headers: None,
+                max_concurrent: Some(3),
+            },
+        );
+
+        let semaphores = ProviderSemaphores::new(&configs);
+        let permit_one = semaphores.acquire("zai").await;
+        let permit_two = semaphores.acquire("zai").await;
+        let permit_three = semaphores.acquire("zai").await;
+
+        assert!(
+            timeout(Duration::from_millis(50), semaphores.acquire("zai"))
+                .await
+                .is_err(),
+            "fourth request should block while all permits are held"
+        );
+
+        drop(permit_one);
+
+        let permit_four = timeout(Duration::from_millis(50), semaphores.acquire("zai"))
+            .await
+            .expect("fourth request should acquire after a permit is released");
+
+        drop(permit_two);
+        drop(permit_three);
+        drop(permit_four);
     }
 }

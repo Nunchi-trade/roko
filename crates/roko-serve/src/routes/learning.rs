@@ -817,6 +817,7 @@ mod tests {
                 name: "Baseline".into(),
                 section_name: "system_prompt".into(),
                 content: "v1".into(),
+                slug: None,
                 active: true,
             },
             roko_learn::prompt_experiment::PromptVariant {
@@ -824,6 +825,7 @@ mod tests {
                 name: "Verbose".into(),
                 section_name: "system_prompt".into(),
                 content: "v2".into(),
+                slug: None,
                 active: true,
             },
         ];

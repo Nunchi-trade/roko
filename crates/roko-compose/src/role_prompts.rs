@@ -127,6 +127,8 @@ pub struct RoleSystemPromptSpec {
     pub task_context: TaskContext,
     /// Comma-separated hosted-backend tool allowlist.
     pub tool_allowlist_csv: String,
+    /// Optional model slug hint for future model-specific prompt formatting.
+    pub model_hint: Option<String>,
     /// Optional extra conventions appended after defaults.
     pub extra_conventions: Option<String>,
     /// Optional extra anti-patterns appended after defaults.
@@ -145,6 +147,7 @@ impl RoleSystemPromptSpec {
             role,
             task_context,
             tool_allowlist_csv: tool_csv.into(),
+            model_hint: None,
             extra_conventions: None,
             extra_anti_patterns: Vec::new(),
             affect_state: None,
@@ -156,6 +159,13 @@ impl RoleSystemPromptSpec {
     #[must_use]
     pub fn with_extra_conventions(mut self, text: impl Into<String>) -> Self {
         self.extra_conventions = Some(text.into());
+        self
+    }
+
+    /// Attach an optional model slug hint for future prompt adaptation.
+    #[must_use]
+    pub fn with_model_hint(mut self, model_hint: impl Into<String>) -> Self {
+        self.model_hint = Some(model_hint.into());
         self
     }
 
@@ -428,6 +438,18 @@ mod tests {
 
         let prompt = spec.build();
         assert!(prompt.contains("You are under time pressure, focus on the most critical path."));
+    }
+
+    #[test]
+    fn model_hint_passthrough() {
+        let ctx = TaskContext::new("Implement model hint passthrough");
+        let baseline = RoleSystemPromptSpec::new(AgentRole::Implementer, ctx.clone(), "Read,Edit");
+        let hinted = RoleSystemPromptSpec::new(AgentRole::Implementer, ctx, "Read,Edit")
+            .with_model_hint("glm-5.1");
+
+        assert_eq!(hinted.model_hint.as_deref(), Some("glm-5.1"));
+        assert_eq!(baseline.build(), hinted.build());
+        assert_eq!(baseline.build_sections(), hinted.build_sections());
     }
 
     #[test]

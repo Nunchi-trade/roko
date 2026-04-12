@@ -25,6 +25,7 @@
 //! snapshots use unix milliseconds and are handled by
 //! [`ProviderHealthRegistry`].
 
+use chrono::{DateTime, Utc};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -437,9 +438,9 @@ pub struct ProviderStatus {
     /// Number of failures since the last success.
     pub consecutive_failures: u32,
     /// When the most recent failure was recorded.
-    pub last_failure_at: Option<Instant>,
+    pub last_failure_at: Option<DateTime<Utc>>,
     /// When the most recent success was recorded.
-    pub last_success_at: Option<Instant>,
+    pub last_success_at: Option<DateTime<Utc>>,
     /// Lifetime attempts routed through this provider.
     pub total_attempts: u64,
     /// Lifetime successful attempts.
@@ -458,6 +459,17 @@ impl ProviderStatus {
             total_attempts: 0,
             total_successes: 0,
         }
+    }
+
+    /// Return the observed failure rate across all lifetime attempts.
+    #[must_use]
+    pub fn error_rate(&self) -> f64 {
+        if self.total_attempts == 0 {
+            return 0.0;
+        }
+
+        (self.total_attempts.saturating_sub(self.total_successes)) as f64
+            / self.total_attempts as f64
     }
 }
 
@@ -499,7 +511,7 @@ impl ProviderHealthTracker {
     /// [`HealthState::Healthy`] regardless of current state.
     #[allow(clippy::significant_drop_tightening)]
     pub fn record_success(&self, provider: &str) {
-        let now = Instant::now();
+        let now = Utc::now();
         let mut map = self.providers.write();
         let status = map
             .entry(provider.to_owned())
@@ -519,7 +531,8 @@ impl ProviderHealthTracker {
     /// [`HealthState::Unhealthy`].
     #[allow(clippy::significant_drop_tightening)]
     pub fn record_failure(&self, provider: &str) {
-        let now = Instant::now();
+        let now = Utc::now();
+        let recovery_at = Instant::now() + self.recovery_window;
         let mut map = self.providers.write();
         let status = map
             .entry(provider.to_owned())
@@ -533,9 +546,7 @@ impl ProviderHealthTracker {
         if status.consecutive_failures >= self.failure_threshold
             || status.state == HealthState::Probing
         {
-            status.state = HealthState::Unhealthy {
-                recovery_at: now + self.recovery_window,
-            };
+            status.state = HealthState::Unhealthy { recovery_at };
         }
     }
 
@@ -602,6 +613,16 @@ impl ProviderHealthTracker {
     /// Return a snapshot of every tracked provider's status.
     pub fn snapshot(&self) -> Vec<ProviderStatus> {
         self.providers.read().values().cloned().collect()
+    }
+
+    /// Return the current status for `provider`, defaulting to a healthy entry.
+    #[must_use]
+    pub fn get(&self, provider: &str) -> ProviderStatus {
+        self.providers
+            .read()
+            .get(provider)
+            .cloned()
+            .unwrap_or_else(|| ProviderStatus::new(provider.to_owned()))
     }
 }
 

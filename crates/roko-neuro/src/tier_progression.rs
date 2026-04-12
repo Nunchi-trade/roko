@@ -88,6 +88,12 @@ pub struct HeuristicRule {
     pub last_seen_ms: i64,
     /// Distinct episode ids that support this heuristic.
     pub source_episodes: Vec<String>,
+    /// Which model this heuristic is specific to, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_model: Option<String>,
+    /// How broadly the heuristic applies across models.
+    #[serde(default = "default_model_generality")]
+    pub model_generality: f64,
 }
 
 impl HeuristicRule {
@@ -95,6 +101,13 @@ impl HeuristicRule {
     #[must_use]
     pub fn summary(&self) -> String {
         format!("If {}, then {}.", self.when_clause, self.then_clause)
+    }
+
+    /// Return whether the heuristic should be injected for
+    /// `current_model`.
+    #[must_use]
+    pub fn applies_to_model(&self, current_model: &str) -> bool {
+        self.model_generality > 0.7 || self.source_model.as_deref() == Some(current_model)
     }
 }
 
@@ -320,6 +333,8 @@ impl TierProgression {
                 first_seen_ms: insight.first_seen_ms,
                 last_seen_ms: insight.last_seen_ms,
                 source_episodes: insight.source_episodes.clone(),
+                source_model: None,
+                model_generality: default_model_generality(),
             })
             .collect();
 
@@ -382,6 +397,8 @@ impl From<&InsightRecord> for KnowledgeEntry {
                 "raw-episodes".to_string(),
                 "validated".to_string(),
             ],
+            source_model: None,
+            model_generality: default_model_generality(),
             created_at: Utc::now(),
             half_life_days: KnowledgeKind::Insight.default_half_life_days(),
             hdc_vector: None,
@@ -406,6 +423,8 @@ impl From<&HeuristicRule> for KnowledgeEntry {
                 "actionable".to_string(),
                 "validated".to_string(),
             ],
+            source_model: value.source_model.clone(),
+            model_generality: value.model_generality,
             created_at: Utc::now(),
             half_life_days: KnowledgeKind::Heuristic.default_half_life_days(),
             hdc_vector: None,
@@ -432,6 +451,8 @@ impl From<&PlaybookCompilation> for KnowledgeEntry {
                 .into_iter()
                 .collect(),
             tags: vec!["tier:playbook".to_string(), "machine-parseable".to_string()],
+            source_model: playbook_source_model(&value.rules),
+            model_generality: playbook_model_generality(&value.rules),
             created_at: Utc::now(),
             half_life_days: DEFAULT_HALF_LIFE_DAYS,
             hdc_vector: None,
@@ -659,6 +680,28 @@ fn render_playbook_markdown(
     }
 
     out
+}
+
+fn playbook_source_model(rules: &[HeuristicRule]) -> Option<String> {
+    let mut models = rules.iter().filter_map(|rule| rule.source_model.as_deref());
+    let first = models.next()?;
+    if models.all(|model| model == first) {
+        Some(first.to_string())
+    } else {
+        None
+    }
+}
+
+fn playbook_model_generality(rules: &[HeuristicRule]) -> f64 {
+    rules
+        .iter()
+        .map(|rule| rule.model_generality)
+        .reduce(f64::min)
+        .unwrap_or_else(default_model_generality)
+}
+
+const fn default_model_generality() -> f64 {
+    1.0
 }
 
 #[derive(Debug, Serialize)]
@@ -1015,6 +1058,8 @@ mod tests {
                     first_seen_ms: 1,
                     last_seen_ms: 2,
                     source_episodes: vec!["ep-1".to_string(), "ep-2".to_string()],
+                    source_model: None,
+                    model_generality: default_model_generality(),
                 },
                 HeuristicRule {
                     id: "heuristic-failure".to_string(),
@@ -1027,6 +1072,8 @@ mod tests {
                     first_seen_ms: 3,
                     last_seen_ms: 4,
                     source_episodes: vec!["ep-3".to_string(), "ep-4".to_string()],
+                    source_model: None,
+                    model_generality: default_model_generality(),
                 },
             ],
             playbook: PlaybookCompilation {

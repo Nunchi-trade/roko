@@ -338,6 +338,16 @@ fn infer_operating_frequency(description: Option<&str>) -> OperatingFrequency {
 }
 
 impl TaskDef {
+    /// Whether this task may benefit from pre-dispatch search context enrichment.
+    ///
+    /// Returns `true` for complex tiers (`architectural`, `integrative`) that
+    /// typically benefit from real-world examples and best-practice documentation
+    /// found via the Perplexity Sonar search API.
+    #[must_use]
+    pub fn needs_external_context(&self) -> bool {
+        matches!(self.tier.as_str(), "architectural" | "integrative")
+    }
+
     /// Map the task to an operating frequency.
     ///
     /// If the task declares a frequency, use it. Otherwise infer it from the

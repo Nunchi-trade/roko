@@ -18,9 +18,11 @@ pub mod adaptive_threshold;
 
 pub mod artifact_store;
 pub mod clippy_gate;
+pub mod code_exec;
 pub mod compile;
 pub mod diff_gate;
 pub mod env_builder;
+pub mod fact_check;
 pub mod feedback;
 pub mod gate_pipeline;
 pub mod generated;
@@ -38,9 +40,13 @@ pub mod verify_chain_gate;
 
 pub use artifact_store::ArtifactStore;
 pub use clippy_gate::ClippyGate;
+pub use code_exec::{
+    CodeExecutionBackend, CodeExecutionGate, CodeExecutionOutcome, CodeExecutionPayload,
+};
 pub use compile::CompileGate;
 pub use diff_gate::{DiffAnalysis, DiffGate, DiffPayload, analyze_diff};
 pub use env_builder::{GateEnv, GateEnvBuilder, build_for_rung};
+pub use fact_check::{FactCheckGate, SearchHit, SearchOracle};
 pub use feedback::{GateFeedback, Severity, feedback_for_agent};
 pub use generated::{GateError, GateGenerator, GeneratedCheck};
 pub use payload::{BuildSystem, GatePayload, TestSelector};

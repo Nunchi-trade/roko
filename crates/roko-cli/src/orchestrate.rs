@@ -19,7 +19,9 @@ use anyhow::{Context as _, Result, anyhow};
 use bardo_runtime::cancel::CancelToken;
 use bardo_runtime::process::ProcessSupervisor;
 use roko_agent::chat_types::FinishReason;
+use roko_agent::gemini::{Content, GeminiCacheClient, Part};
 use roko_agent::mcp::{McpConfig, McpServerConfig};
+use roko_agent::perplexity::PerplexitySearchClient;
 use roko_agent::provider::{AgentOptions, create_agent_for_model};
 use roko_agent::task_runner::{
     AnomalyDetector as RunnerAnomalyDetector, BudgetGuardrail as RunnerBudgetGuardrail,
@@ -30,11 +32,11 @@ use roko_agent::translate::{ClaudeTranslator, RenderedTools, Translator};
 use roko_agent::{Agent, AgentResult, ClaudeCliAgent, ExecAgent};
 use roko_compose::{
     ContextProvider, Placement, PlanArtifacts, PromptComposer, PromptSection, RoleSystemPromptSpec,
-    SectionPriority, TaskContext,
+    SectionPriority, TaskContext, budget_for,
 };
 use roko_conductor::diagnosis::{DiagnosisEngine, ErrorCategory};
 use roko_conductor::{Conductor, ConductorDecision};
-use roko_core::agent::resolve_model;
+use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::config::schema::RokoConfig;
 use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::obs::health::{AlwaysUpProbe, ProbeRegistry};
@@ -44,7 +46,7 @@ use roko_core::tool::trace::{FailureKind, FailureTrace, TraceStep};
 use roko_core::tool::{FormatBandit, ProfileBandit, ToolTraceEvent, TraceSink};
 use roko_core::{
     AgentRole, Body, Budget, Composer, Context, Gate, Kind, OperatingFrequency, PhaseKind,
-    Provenance, Signal, Substrate, Verdict,
+    Provenance, Signal, Substrate, TaskCategory, Verdict,
 };
 use roko_daimon::{AffectEngine as _, AffectEvent, DaimonState, DispatchParams};
 use roko_dreams::{DreamAgentConfig, DreamLoopConfig, DreamRunner};
@@ -55,7 +57,7 @@ use roko_gate::{
     adaptive_threshold::AdaptiveThresholds, clippy_gate::ClippyGate, compile::CompileGate,
     payload::GatePayload, test_gate::TestGate,
 };
-use roko_learn::anomaly::AnomalyDetector;
+use roko_learn::anomaly::{Anomaly, AnomalyDetector};
 use roko_learn::budget::{BudgetAction, BudgetGuardrail};
 use roko_learn::conductor::{
     ConductorAction as RetryConductorAction, ConductorBandit,
@@ -76,7 +78,9 @@ use roko_learn::runtime_feedback::{
     refresh_cfactor_snapshot,
 };
 use roko_learn::skill_library::Skill;
-use roko_learn::skill_library::{SkillExtractionRequest, SkillGateResult, SkillLibrary};
+use roko_learn::skill_library::{
+    SkillExtractionRequest, SkillGateResult, SkillLibrary, SkillQuery,
+};
 use roko_neuro::{KnowledgeEntry, KnowledgeKind, KnowledgeStore, NeuroStore};
 use roko_orchestrator::worktree::{WorktreeConfig, WorktreeManager};
 use roko_orchestrator::{
@@ -87,6 +91,7 @@ use roko_std::NoOpScorer;
 use roko_std::StaticToolRegistry;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
+use tokio::signal;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken as TokioCancellationToken;
 use tracing::{Instrument, info_span, instrument};
@@ -102,6 +107,7 @@ const WATCHER_INTERVAL_SECS: u64 = 30;
 const WATCHER_SIGNAL_TAIL: usize = 200;
 const EFFICIENCY_SIGNAL_TAIL: usize = 256;
 const GHOST_TURN_SIGNAL_KIND: &str = "conductor.ghost_turn";
+const SHUTDOWN_DRAIN_GRACE_SECS: u64 = 30;
 
 fn model_experiments_path(workdir: &Path) -> PathBuf {
     workdir
@@ -241,6 +247,61 @@ fn drain_turn_learning_events(
     }
 }
 
+fn state_dir(workdir: &Path) -> PathBuf {
+    workdir.join(".roko").join("state")
+}
+
+fn executor_snapshot_path(workdir: &Path) -> PathBuf {
+    state_dir(workdir).join("executor.json")
+}
+
+fn save_snapshot_atomic(snapshot: &ExecutorSnapshot, path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create snapshot dir {}", parent.display()))?;
+    }
+    let tmp_path = path.with_extension("json.tmp");
+    let json = snapshot.to_json().map_err(|e| anyhow!("snapshot: {e}"))?;
+    std::fs::write(&tmp_path, &json)
+        .with_context(|| format!("write snapshot tmp {}", tmp_path.display()))?;
+    std::fs::rename(&tmp_path, path)
+        .with_context(|| format!("rename snapshot {}", path.display()))?;
+    Ok(())
+}
+
+async fn wait_for_shutdown_signal() -> Result<&'static str> {
+    #[cfg(unix)]
+    {
+        let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
+            .map_err(|e| anyhow!("install SIGTERM handler: {e}"))?;
+        tokio::select! {
+            result = signal::ctrl_c() => {
+                result.map_err(|e| anyhow!("wait for SIGINT: {e}"))?;
+                Ok("SIGINT")
+            }
+            _ = sigterm.recv() => Ok("SIGTERM"),
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        signal::ctrl_c()
+            .await
+            .map_err(|e| anyhow!("wait for Ctrl+C: {e}"))?;
+        Ok("SIGINT")
+    }
+}
+
+fn sync_file_if_present(path: &Path) -> Result<()> {
+    match std::fs::File::open(path) {
+        Ok(file) => file
+            .sync_all()
+            .with_context(|| format!("sync {}", path.display())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("open {}", path.display())),
+    }
+}
+
 fn install_episode_distillation_hook(learning: &mut LearningRuntime, workdir: &Path) {
     let distillation_workdir = workdir.to_path_buf();
     learning.set_episode_completion_hook(move |episode| {
@@ -267,13 +328,6 @@ fn frequency_label(frequency: OperatingFrequency) -> &'static str {
     }
 }
 
-fn mechanical_tier_model(tier_models: &HashMap<String, String>) -> String {
-    tier_models
-        .get("mechanical")
-        .cloned()
-        .unwrap_or_else(|| "claude-haiku-4-5".into())
-}
-
 fn task_runner_cost_table(resolved: &roko_core::agent::ResolvedModel) -> RunnerCostTable {
     let mut cost_table = RunnerCostTable::default();
 
@@ -290,6 +344,29 @@ fn task_runner_cost_table(resolved: &roko_core::agent::ResolvedModel) -> RunnerC
     }
 
     cost_table
+}
+
+fn routing_model_provider_map(config: &RokoConfig) -> HashMap<String, String> {
+    let mut providers = HashMap::new();
+    for (model_key, profile) in config.effective_models() {
+        providers.insert(model_key, profile.provider.clone());
+        providers.entry(profile.slug).or_insert(profile.provider);
+    }
+    providers
+}
+
+fn provider_id_for_routing_model(
+    config: &RokoConfig,
+    model_providers: &HashMap<String, String>,
+    model: &str,
+) -> String {
+    model_providers.get(model).cloned().unwrap_or_else(|| {
+        let resolved = resolve_model(config, model);
+        resolved
+            .profile
+            .map(|profile| profile.provider)
+            .unwrap_or_else(|| resolved.provider_kind.label().to_owned())
+    })
 }
 
 // ─── ContextAttributionTracker ────────────────────────────────────────────
@@ -522,6 +599,72 @@ fn crate_name_for_path(path: &str) -> Option<String> {
         [first, ..] if *first == "Cargo.toml" => Some("workspace".to_string()),
         _ => None,
     }
+}
+
+fn crate_root_for_path(path: &str) -> Option<PathBuf> {
+    let normalized = path.replace('\\', "/");
+    let parts: Vec<&str> = normalized
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    match parts.as_slice() {
+        [first, second, ..] if *first == "crates" || *first == "apps" => {
+            Some(PathBuf::from(first).join(second))
+        }
+        [first, ..] if matches!(*first, "src" | "tests" | "benches" | "examples") => {
+            Some(PathBuf::new())
+        }
+        [first] if matches!(*first, "Cargo.toml" | "build.rs") => Some(PathBuf::new()),
+        _ => None,
+    }
+}
+
+fn collect_crate_source_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+
+    for entry in std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+        let entry = entry.with_context(|| format!("read entry in {}", dir.display()))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_crate_source_files(&path, files)?;
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+            files.push(path);
+        }
+    }
+
+    Ok(())
+}
+
+fn read_full_crate_source(crate_root: &Path) -> Result<String> {
+    let mut files = Vec::new();
+
+    for path in [crate_root.join("Cargo.toml"), crate_root.join("build.rs")] {
+        if path.is_file() {
+            files.push(path);
+        }
+    }
+    for dir in ["src", "tests", "benches", "examples"] {
+        collect_crate_source_files(&crate_root.join(dir), &mut files)?;
+    }
+
+    files.sort();
+    files.dedup();
+
+    let mut combined = String::new();
+    for path in files {
+        let contents =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let relative = path.strip_prefix(crate_root).unwrap_or(path.as_path());
+        combined.push_str(&format!(
+            "// FILE: {}\n{}\n\n",
+            relative.display(),
+            contents
+        ));
+    }
+
+    Ok(combined)
 }
 
 fn log_tasks_validation_issue(
@@ -1018,17 +1161,28 @@ fn render_prior_experience(skills: &[Skill]) -> String {
     use std::fmt::Write as _;
 
     let mut content = String::from(
-        "## Prior Experience\n\nThe following skills were successful in similar prior tasks:\n",
+        "## Relevant Skills\n\nThe following skills were high-confidence matches for this task:\n",
     );
     for (idx, skill) in skills.iter().enumerate() {
         let _ = write!(
             content,
-            "\n### {}. {} (success rate: {:.0}%)\n",
+            "\n### {}. {} (confidence: {:.0}%)\n",
             idx + 1,
             skill.name,
-            (skill.success_rate.clamp(0.0, 1.0) * 100.0).round(),
+            (skill.score.clamp(0.0, 1.0) * 100.0).round(),
         );
         let _ = writeln!(content, "Summary: {}", skill.summary);
+        if skill.usage_count > 0 {
+            let _ = writeln!(
+                content,
+                "Telemetry: {:.0}% success over {} uses",
+                (skill.success_rate.clamp(0.0, 1.0) * 100.0).round(),
+                skill.usage_count
+            );
+        }
+        if skill.validated_count > 0 {
+            let _ = writeln!(content, "Validated matches: {}", skill.validated_count);
+        }
         if !skill.description.is_empty() {
             let _ = writeln!(content, "Description: {}", skill.description);
         }
@@ -1043,6 +1197,132 @@ fn render_prior_experience(skills: &[Skill]) -> String {
         }
     }
     content
+}
+
+fn select_prompt_skills(
+    skill_library: &SkillLibrary,
+    task_def: Option<&crate::task_parser::TaskDef>,
+    task_text: &str,
+    limit: usize,
+) -> Vec<Skill> {
+    let task_files = task_def.map(|task| task.files.clone()).unwrap_or_default();
+    let mut tags = extract_task_symbols(task_text);
+    if let Some(crate_name) = task_crate_name(task_def) {
+        tags.push(crate_name);
+    }
+
+    let query = SkillQuery {
+        tags,
+        category: Some(TaskCategory::Implementation.label().to_string()),
+        files_hint: task_files,
+    };
+
+    skill_library
+        .select(&query, limit)
+        .into_iter()
+        .filter(|skill| skill.score >= 0.5)
+        .filter(|skill| !skill.tags.iter().any(|tag| tag == "outcome:failure"))
+        .collect()
+}
+
+fn neuro_prompt_task_category(role: AgentRole) -> TaskCategory {
+    match role {
+        AgentRole::Researcher | AgentRole::PrePlanner | AgentRole::Strategist => {
+            TaskCategory::Research
+        }
+        AgentRole::Refactorer => TaskCategory::Refactor,
+        AgentRole::Scribe => TaskCategory::Docs,
+        AgentRole::DocVerifier
+        | AgentRole::IntegrationTester
+        | AgentRole::TerminalValidator
+        | AgentRole::GolemLifecycleTester
+        | AgentRole::RegressionDetector
+        | AgentRole::CoverageTracker
+        | AgentRole::CrossSystemTester
+        | AgentRole::DependencyValidator
+        | AgentRole::FullLoopValidator => TaskCategory::Verification,
+        _ => TaskCategory::Implementation,
+    }
+}
+
+fn playbook_heuristic_query(
+    role: AgentRole,
+    task_def: Option<&crate::task_parser::TaskDef>,
+    task_text: &str,
+) -> String {
+    let mut query_parts = vec![
+        neuro_prompt_task_category(role).label().to_string(),
+        task_text.trim().to_string(),
+    ];
+    if let Some(crate_name) = task_crate_name(task_def) {
+        query_parts.push(crate_name);
+    }
+    query_parts.retain(|part| !part.trim().is_empty());
+    query_parts.join(" ")
+}
+
+fn select_playbook_heuristics(
+    knowledge_store: &KnowledgeStore,
+    role: AgentRole,
+    task_def: Option<&crate::task_parser::TaskDef>,
+    task_text: &str,
+    current_model: &str,
+    limit: usize,
+) -> Vec<KnowledgeEntry> {
+    let query = playbook_heuristic_query(role, task_def, task_text);
+    knowledge_store
+        .query_kind(
+            &query,
+            KnowledgeKind::Playbook,
+            limit.saturating_mul(3).max(limit),
+        )
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|entry| entry.confidence > 0.0)
+        .filter(|entry| entry.applies_to_model(current_model))
+        .take(limit)
+        .collect()
+}
+
+fn render_playbook_heuristics(entries: &[KnowledgeEntry]) -> String {
+    use std::fmt::Write as _;
+
+    let mut content = String::from(
+        "## Playbook Heuristics\n\nThe following promoted heuristics were distilled from repeated successful runs:\n",
+    );
+    for (idx, entry) in entries.iter().enumerate() {
+        let confidence = entry.confidence.clamp(0.0, 1.0);
+        let tags = if entry.tags.is_empty() {
+            String::from("-")
+        } else {
+            entry.tags.join(", ")
+        };
+        let _ = write!(
+            content,
+            "\n### {}. Playbook match ({:.0}%)\nTags: {}\n\n{}\n",
+            idx + 1,
+            confidence * 100.0,
+            tags,
+            entry.content.trim()
+        );
+    }
+    content
+}
+
+fn build_playbook_heuristics_context(
+    knowledge_store: &KnowledgeStore,
+    role: AgentRole,
+    task_def: Option<&crate::task_parser::TaskDef>,
+    task_text: &str,
+    current_model: &str,
+) -> Option<String> {
+    let heuristics =
+        select_playbook_heuristics(knowledge_store, role, task_def, task_text, current_model, 3);
+    if heuristics.is_empty() {
+        None
+    } else {
+        Some(render_playbook_heuristics(&heuristics))
+    }
 }
 
 fn render_playbook_context(playbook: &Playbook) -> String {
@@ -1087,6 +1367,42 @@ fn latest_efficiency_event(text: &str) -> Option<AgentEfficiencyEvent> {
     }
 
     None
+}
+
+/// Enrich a task with search context from Perplexity Sonar before dispatch.
+///
+/// Runs a single `sonar` search query for tasks whose tier indicates they
+/// benefit from external best-practice documentation (`architectural` or
+/// `integrative`). Returns `None` for simple tasks or when the search fails.
+///
+/// The returned string is a markdown-formatted context block with the top 3
+/// search results, suitable for injection as a `PromptSection`.
+async fn enrich_task_context_with_search(
+    task: &crate::task_parser::TaskDef,
+    pplx_client: &PerplexitySearchClient,
+) -> Option<String> {
+    if !task.needs_external_context() {
+        return None;
+    }
+
+    let description = task.description.as_deref().unwrap_or(&task.title);
+    let query = format!("Rust {} {} best practices patterns", task.tier, description);
+
+    let results = pplx_client.search(&query).await.ok()?;
+
+    if results.results.is_empty() {
+        return None;
+    }
+
+    let context = results
+        .results
+        .iter()
+        .take(3)
+        .map(|r| format!("### {}\n{}\nSource: {}", r.title, r.content, r.url))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    Some(context)
 }
 
 // ─── PlanRunner ───────────────────────────────────────────────────────────
@@ -1137,6 +1453,8 @@ pub struct PlanRunner {
     cancel: CancelToken,
     /// Per-plan task tracking for granular Implementing → Gating progression.
     task_trackers: HashMap<String, TaskTracker>,
+    /// Explicit Gemini context caches keyed by plan id.
+    gemini_plan_caches: HashMap<String, GeminiPlanCache>,
     /// Conductor for anomaly detection between phases.
     conductor: Arc<Conductor>,
     /// Signals accumulated during the current plan run for conductor evaluation.
@@ -1153,6 +1471,10 @@ pub struct PlanRunner {
     plan_costs: HashMap<String, f64>,
     /// Cumulative USD cost per plan/task dispatch key.
     task_costs: HashMap<String, f64>,
+    /// Session-local detector for prompt loops, cost spikes, and quality drift.
+    anomaly_detector: AnomalyDetector,
+    /// Pending one-shot model override applied to the next routed task dispatch.
+    force_model_override: Option<String>,
     /// Metric registry for counters/histograms/gauges (prometheus-style).
     metrics: Arc<MetricRegistry>,
     /// Format-selection bandit for adaptive tool-call format per model/role.
@@ -1171,8 +1493,6 @@ pub struct PlanRunner {
     adaptive_thresholds: AdaptiveThresholds,
     /// Rolling latency registry for routed model/provider pairs.
     latency_registry: LatencyRegistry,
-    /// Session-local anomaly detector for runaway loops and cost spikes.
-    anomaly_detector: AnomalyDetector,
     /// Event bus used to publish post-turn learning signals.
     learning_event_bus: LearningEventBus,
     /// In-memory efficiency events collected during this run.
@@ -1184,6 +1504,12 @@ pub struct PlanRunner {
     state_hub_sender: Option<roko_core::StateHubSender>,
     /// Optional cloud execution state for code-implementer runs.
     cloud_execution: Option<CloudExecution>,
+    /// Optional Perplexity search client for pre-dispatch context enrichment.
+    ///
+    /// Present when `PERPLEXITY_API_KEY` is set at startup. Used to run a
+    /// single `sonar` search before dispatching complex tasks so the agent
+    /// receives grounded best-practice context.
+    search_client: Option<PerplexitySearchClient>,
 }
 
 /// Tracks per-task completion within a plan. Lives in PlanRunner (CLI crate),
@@ -1202,6 +1528,8 @@ struct TaskTracker {
     last_gate_failure_phase: Option<String>,
     /// The task id that was most recently dispatched for implementation.
     last_impl_task_id: Option<String>,
+    /// Model slug used by the most recently dispatched implementation task.
+    last_impl_model_slug: Option<String>,
     review_feedback: Option<String>,
     impl_round: u32,
     /// Skill matched during the last dispatch (for confidence updates).
@@ -1214,6 +1542,12 @@ struct TaskTracker {
     last_skill_request: Option<SkillExtractionRequest>,
     /// Number of consecutive gate failures for this plan (for re-planning, §9).
     gate_failure_count: u32,
+}
+
+#[derive(Debug, Clone)]
+struct GeminiPlanCache {
+    model_slug: String,
+    cache_id: String,
 }
 
 /// Shared MCP server runtime state for a plan run.
@@ -1278,6 +1612,7 @@ fn cascade_routing_context(
         crate_familiarity,
         has_prior_failure,
         affect_confidence,
+        thinking_level: Some(runner.config.agent.effort.clone()),
         previous_model: None,
         plan_context_tokens: None,
     }
@@ -1312,6 +1647,7 @@ impl TaskTracker {
             last_gate_failure: None,
             last_gate_failure_phase: None,
             last_impl_task_id: None,
+            last_impl_model_slug: None,
             review_feedback: None,
             impl_round: 0,
             last_matched_skill_id: None,
@@ -2123,6 +2459,7 @@ impl PlanRunner {
             supervisor: ProcessSupervisor::new(cancel.clone()),
             cancel,
             task_trackers,
+            gemini_plan_caches: HashMap::new(),
             conductor: Arc::new(Conductor::new()),
             conductor_signals: Vec::new(),
             retry_conductor: ConductorBandit::load_or_new(&conductor_policy_path(workdir)),
@@ -2143,6 +2480,8 @@ impl PlanRunner {
             ),
             plan_costs: HashMap::new(),
             task_costs: HashMap::new(),
+            anomaly_detector: AnomalyDetector::new(now_unix_ms_i64()),
+            force_model_override: None,
             metrics,
             format_bandit: ProfileBandit::with_static_profiles(),
             mcp_server_names,
@@ -2161,7 +2500,6 @@ impl PlanRunner {
                     .join("gate-thresholds.json"),
             ),
             latency_registry: LatencyRegistry::load_or_new(&latency_registry_path(workdir)),
-            anomaly_detector: AnomalyDetector::new(chrono::Utc::now().timestamp_millis()),
             learning_event_bus: LearningEventBus::new(256),
             efficiency_events: Vec::new(),
             server_event_bus: None,
@@ -2169,6 +2507,9 @@ impl PlanRunner {
             cloud_execution: None,
             playbook,
             knowledge_store,
+            search_client: std::env::var("PERPLEXITY_API_KEY")
+                .ok()
+                .map(PerplexitySearchClient::new),
         })
     }
 
@@ -2235,6 +2576,7 @@ impl PlanRunner {
             supervisor: ProcessSupervisor::new(cancel.clone()),
             cancel,
             task_trackers,
+            gemini_plan_caches: HashMap::new(),
             conductor: Arc::new(Conductor::new()),
             conductor_signals: Vec::new(),
             retry_conductor: ConductorBandit::load_or_new(&conductor_policy_path(workdir)),
@@ -2255,6 +2597,8 @@ impl PlanRunner {
             ),
             plan_costs: HashMap::new(),
             task_costs: HashMap::new(),
+            anomaly_detector: AnomalyDetector::new(now_unix_ms_i64()),
+            force_model_override: None,
             metrics,
             format_bandit: ProfileBandit::with_static_profiles(),
             mcp_server_names,
@@ -2273,7 +2617,6 @@ impl PlanRunner {
                     .join("gate-thresholds.json"),
             ),
             latency_registry: LatencyRegistry::load_or_new(&latency_registry_path(workdir)),
-            anomaly_detector: AnomalyDetector::new(chrono::Utc::now().timestamp_millis()),
             learning_event_bus: LearningEventBus::new(256),
             efficiency_events: Vec::new(),
             server_event_bus: None,
@@ -2281,6 +2624,9 @@ impl PlanRunner {
             cloud_execution: None,
             playbook,
             knowledge_store,
+            search_client: std::env::var("PERPLEXITY_API_KEY")
+                .ok()
+                .map(PerplexitySearchClient::new),
         })
     }
 
@@ -2351,6 +2697,7 @@ impl PlanRunner {
             supervisor: ProcessSupervisor::new(cancel.clone()),
             cancel,
             task_trackers,
+            gemini_plan_caches: HashMap::new(),
             conductor: Arc::new(Conductor::new()),
             conductor_signals: Vec::new(),
             retry_conductor: ConductorBandit::load_or_new(&conductor_policy_path(workdir)),
@@ -2371,6 +2718,8 @@ impl PlanRunner {
             ),
             plan_costs: HashMap::new(),
             task_costs: HashMap::new(),
+            anomaly_detector: AnomalyDetector::new(now_unix_ms_i64()),
+            force_model_override: None,
             metrics,
             format_bandit: ProfileBandit::with_static_profiles(),
             mcp_server_names,
@@ -2389,7 +2738,6 @@ impl PlanRunner {
                     .join("gate-thresholds.json"),
             ),
             latency_registry: LatencyRegistry::load_or_new(&latency_registry_path(workdir)),
-            anomaly_detector: AnomalyDetector::new(chrono::Utc::now().timestamp_millis()),
             learning_event_bus: LearningEventBus::new(256),
             efficiency_events: Vec::new(),
             server_event_bus: None,
@@ -2397,6 +2745,9 @@ impl PlanRunner {
             cloud_execution: None,
             playbook,
             knowledge_store,
+            search_client: std::env::var("PERPLEXITY_API_KEY")
+                .ok()
+                .map(PerplexitySearchClient::new),
         })
     }
 
@@ -2534,6 +2885,29 @@ impl PlanRunner {
         mcp_state.ref_counts.clear();
     }
 
+    /// Force-kill all managed agent processes, then persist runtime artifacts.
+    async fn force_shutdown(&self) {
+        let killed = self.supervisor.kill_all().await;
+        if !killed.is_empty() {
+            tracing::warn!(
+                "[orchestrate] killed {} agent processes after shutdown timeout",
+                killed.len()
+            );
+        }
+        self.shutdown().await;
+    }
+
+    /// Flush log-like runtime artifacts so resume sees the latest state.
+    async fn flush_logs(&self) -> Result<()> {
+        sync_file_if_present(&self.workdir.join(".roko").join("signals.jsonl"))?;
+        sync_file_if_present(&self.workdir.join(".roko").join("episodes.jsonl"))?;
+        sync_file_if_present(&self.workdir.join(".roko").join("logs").join("daemon.log"))?;
+        sync_file_if_present(&self.workdir.join(".roko").join("logs").join("daemon.err"))?;
+        std::io::stdout().flush().context("flush stdout")?;
+        std::io::stderr().flush().context("flush stderr")?;
+        Ok(())
+    }
+
     /// The root cancellation token — callers can cancel to trigger shutdown.
     #[must_use]
     pub const fn cancel_token(&self) -> &CancelToken {
@@ -2650,6 +3024,7 @@ impl PlanRunner {
             ConductorDecision::Continue => {}
             ConductorDecision::Restart { watcher, reason } => {
                 tracing::info!("[conductor] {plan_id}: RESTART ({watcher}) — {reason}");
+                self.record_conductor_negative_feedback(plan_id, &decision);
                 self.emit_execution_event(
                     plan_id,
                     crate::serve::events::ExecutionEvent::WatcherAlert {
@@ -2660,6 +3035,7 @@ impl PlanRunner {
             }
             ConductorDecision::Fail { watcher, reason } => {
                 tracing::error!("[conductor] {plan_id}: FAIL ({watcher}) — {reason}");
+                self.record_conductor_negative_feedback(plan_id, &decision);
                 self.emit_execution_event(
                     plan_id,
                     crate::serve::events::ExecutionEvent::WatcherAlert {
@@ -2671,6 +3047,40 @@ impl PlanRunner {
             _ => {}
         }
         decision
+    }
+
+    fn record_conductor_negative_feedback(&self, plan_id: &str, intervention: &ConductorDecision) {
+        let Some((task_id, model_slug, task_def)) =
+            self.task_trackers.get(plan_id).and_then(|tracker| {
+                Some((
+                    tracker.last_impl_task_id.clone()?,
+                    tracker.last_impl_model_slug.clone()?,
+                    tracker.last_impl_task().cloned(),
+                ))
+            })
+        else {
+            return;
+        };
+
+        let routing_context = cascade_routing_context(
+            self,
+            plan_id,
+            &task_id,
+            AgentRole::Implementer,
+            task_def.as_ref(),
+        );
+        if self
+            .learning
+            .record_conductor_intervention(&routing_context, &model_slug, intervention)
+        {
+            tracing::info!(
+                plan_id = %plan_id,
+                task_id = %task_id,
+                model = %model_slug,
+                decision = intervention.label(),
+                "recorded conductor intervention as negative routing feedback"
+            );
+        }
     }
 
     /// Push a conductor signal so watchers can detect anomalies (§7).
@@ -2712,16 +3122,17 @@ impl PlanRunner {
     /// Returns an error if the state directory cannot be created or the
     /// files cannot be written.
     pub fn save_state(&self) -> Result<()> {
-        let state_dir = self.workdir.join(".roko").join("state");
+        let state_dir = state_dir(&self.workdir);
         std::fs::create_dir_all(&state_dir).map_err(|e| anyhow!("create state dir: {e}"))?;
 
         // Executor snapshot — atomic write.
-        let exec_json = self.snapshot()?;
         let exec_path = state_dir.join("executor.json");
-        let exec_tmp = state_dir.join("executor.json.tmp");
-        std::fs::write(&exec_tmp, &exec_json).map_err(|e| anyhow!("write executor tmp: {e}"))?;
-        std::fs::rename(&exec_tmp, &exec_path)
-            .map_err(|e| anyhow!("rename executor snapshot: {e}"))?;
+        #[allow(clippy::cast_possible_truncation)]
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        let exec_snapshot = self.executor.snapshot(ts);
+        save_snapshot_atomic(&exec_snapshot, &exec_path)?;
 
         // Event log snapshot — atomic write.
         let log_json = self.event_log_snapshot()?;
@@ -2748,6 +3159,68 @@ impl PlanRunner {
         }
 
         Ok(())
+    }
+
+    /// Persist the current state and ensure the executor snapshot is present at
+    /// `snapshot_path`, even when the caller wants a non-default location.
+    fn save_state_to(&self, snapshot_path: &Path) -> Result<()> {
+        self.save_state()?;
+
+        let default_snapshot = executor_snapshot_path(&self.workdir);
+        if snapshot_path == default_snapshot {
+            return Ok(());
+        }
+
+        #[allow(clippy::cast_possible_truncation)]
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        let snapshot = self.executor.snapshot(ts);
+        save_snapshot_atomic(&snapshot, snapshot_path)?;
+        Ok(())
+    }
+
+    fn current_report(&self) -> OrchestrationReport {
+        let snapshot = self.executor.snapshot(0);
+        let mut plan_ids = snapshot.queue_order;
+        for plan_id in snapshot.plan_states.keys() {
+            if !plan_ids.iter().any(|queued| queued == plan_id) {
+                plan_ids.push(plan_id.clone());
+            }
+        }
+
+        let plans = plan_ids
+            .iter()
+            .map(|id| {
+                let state = self.executor.plan_state(id);
+                let succeeded = state.is_some_and(|s| {
+                    matches!(
+                        s.current_phase.kind(),
+                        PhaseKind::Complete | PhaseKind::Done
+                    )
+                });
+                PlanRunReport {
+                    plan_id: id.clone(),
+                    succeeded,
+                    agent_calls: self.per_plan_agents.get(id).copied().unwrap_or(0),
+                    gate_results: self.per_plan_gates.get(id).cloned().unwrap_or_default(),
+                }
+            })
+            .collect();
+
+        let fleet_cfactor = compute_fleet_cfactor(&self.efficiency_events);
+        let fleet_cfactor = if fleet_cfactor.plan_count > 0 {
+            Some(fleet_cfactor)
+        } else {
+            None
+        };
+
+        OrchestrationReport {
+            total_agent_calls: self.agent_calls,
+            total_gate_runs: self.gate_runs,
+            plans,
+            fleet_cfactor,
+        }
     }
 
     /// Returns a reference to the inner executor (for status queries).
@@ -2870,6 +3343,124 @@ impl PlanRunner {
         trackers
     }
 
+    fn plan_crate_root(&self, plan_id: &str) -> Option<PathBuf> {
+        let tracker = self.task_trackers.get(plan_id)?;
+        let mut roots = tracker
+            .tasks_file
+            .tasks
+            .iter()
+            .flat_map(|task| task.files.iter())
+            .filter_map(|path| crate_root_for_path(path))
+            .collect::<Vec<_>>();
+        roots.sort();
+        roots.dedup();
+        (roots.len() == 1).then(|| self.workdir.join(&roots[0]))
+    }
+
+    async fn ensure_plan_gemini_cache(
+        &mut self,
+        plan_id: &str,
+        roko_config: &RokoConfig,
+        model_key: &str,
+    ) -> Result<Option<String>> {
+        if !roko_config.gemini.enable_context_caching {
+            return Ok(None);
+        }
+
+        let resolved = resolve_model(roko_config, model_key);
+        if resolved.provider_kind != ProviderKind::GeminiApi {
+            return Ok(None);
+        }
+
+        let Some(model) = resolved
+            .profile
+            .or_else(|| roko_config.effective_models().get(model_key).cloned())
+        else {
+            return Ok(None);
+        };
+
+        if !model.supports_caching {
+            return Ok(None);
+        }
+
+        if let Some(cache) = self.gemini_plan_caches.get(plan_id) {
+            if cache.model_slug == model.slug {
+                return Ok(Some(cache.cache_id.clone()));
+            }
+            return Ok(None);
+        }
+
+        let Some(provider) = resolved.provider_config.or_else(|| {
+            roko_config
+                .effective_providers()
+                .get(&model.provider)
+                .cloned()
+        }) else {
+            return Ok(None);
+        };
+
+        let Some(crate_root) = self.plan_crate_root(plan_id) else {
+            tracing::debug!(
+                "[orchestrate] skipped Gemini context caching for {plan_id}: no single crate root"
+            );
+            return Ok(None);
+        };
+
+        let crate_source = match read_full_crate_source(&crate_root) {
+            Ok(source) if !source.trim().is_empty() => source,
+            Ok(_) => return Ok(None),
+            Err(error) => {
+                tracing::warn!(
+                    "[orchestrate] failed to read crate source for Gemini cache {}: {error}",
+                    crate_root.display()
+                );
+                return Ok(None);
+            }
+        };
+
+        let Some(api_key) = provider.resolve_api_key() else {
+            return Ok(None);
+        };
+        let base_url = provider
+            .base_url
+            .unwrap_or_else(|| "https://generativelanguage.googleapis.com".to_string());
+        let timeout_ms = provider.timeout_ms.unwrap_or(120_000);
+        let cache_client = GeminiCacheClient::new(api_key, base_url).with_timeout_ms(timeout_ms);
+
+        match cache_client
+            .create_cache(
+                &model.slug,
+                &[Content {
+                    role: "user".to_string(),
+                    parts: vec![Part::Text { text: crate_source }],
+                }],
+                3_600,
+            )
+            .await
+        {
+            Ok(cache_id) => {
+                tracing::info!(
+                    "[orchestrate] created Gemini context cache for {plan_id} using {}",
+                    model.slug
+                );
+                self.gemini_plan_caches.insert(
+                    plan_id.to_string(),
+                    GeminiPlanCache {
+                        model_slug: model.slug,
+                        cache_id: cache_id.clone(),
+                    },
+                );
+                Ok(Some(cache_id))
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "[orchestrate] failed to create Gemini context cache for {plan_id}: {error}"
+                );
+                Ok(None)
+            }
+        }
+    }
+
     /// Extract completed task ids from legacy resume snapshots.
     ///
     /// Older `executor.json` files stored per-task records under `tasks`
@@ -2980,6 +3571,11 @@ impl PlanRunner {
                 break;
             }
 
+            if self.cancel.is_cancelled() {
+                tracing::warn!("[orchestrate] shutdown requested; stopping new dispatches");
+                break;
+            }
+
             let completed_plans = self.executor.completed_plans();
             for plan_id in &plan_ids {
                 let Some(state) = self.executor.plan_state(plan_id) else {
@@ -3005,12 +3601,19 @@ impl PlanRunner {
                 // No actions but not all terminal — wait and retry.
                 tokio::select! {
                     _ = watcher_cancel.cancelled() => break,
+                    _ = self.cancel.cancelled() => break,
                     _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {}
                 }
                 continue;
             }
 
             for action in actions {
+                if self.cancel.is_cancelled() {
+                    tracing::warn!(
+                        "[orchestrate] shutdown requested; leaving remaining actions queued"
+                    );
+                    break;
+                }
                 self.dispatch_action(action).await;
             }
 
@@ -3048,51 +3651,57 @@ impl PlanRunner {
             })
             .collect();
 
-        // Emit plan-completed server events.
-        for p in &plans {
-            self.emit_server_event(crate::serve::events::ServerEvent::PlanCompleted {
-                plan_id: p.plan_id.clone(),
-                success: p.succeeded,
-            });
-            self.emit_execution_event(
-                &p.plan_id,
-                crate::serve::events::ExecutionEvent::PlanCompleted {
-                    outcome: if p.succeeded {
-                        "succeeded".to_string()
-                    } else {
-                        "failed".to_string()
-                    },
-                    stats: serde_json::json!({
-                        "plan_id": &p.plan_id,
-                        "succeeded": p.succeeded,
-                        "agent_calls": p.agent_calls,
-                        "gate_results": &p.gate_results,
-                    }),
-                },
+        if self.cancel.is_cancelled() {
+            tracing::warn!(
+                "[orchestrate] run interrupted by shutdown signal; preserving partial state"
             );
-        }
-
-        // Increment plan completion metrics and log cost summaries.
-        for p in &plans {
-            let status = if p.succeeded { "succeeded" } else { "failed" };
-            self.metrics
-                .register_counter(
-                    "roko_plans_total",
-                    "",
-                    LabelSet::from_pairs(&[("status", status)]),
-                )
-                .inc();
-
-            // Log cost summary from plan_costs HashMap.
-            let plan_cost = self.plan_costs.get(&p.plan_id).copied().unwrap_or(0.0);
-            if plan_cost > 0.0 {
-                tracing::info!(
-                    plan_id = %p.plan_id,
-                    cost_usd = plan_cost,
-                    agent_calls = p.agent_calls,
-                    succeeded = p.succeeded,
-                    "plan completed"
+        } else {
+            // Emit plan-completed server events.
+            for p in &plans {
+                self.emit_server_event(crate::serve::events::ServerEvent::PlanCompleted {
+                    plan_id: p.plan_id.clone(),
+                    success: p.succeeded,
+                });
+                self.emit_execution_event(
+                    &p.plan_id,
+                    crate::serve::events::ExecutionEvent::PlanCompleted {
+                        outcome: if p.succeeded {
+                            "succeeded".to_string()
+                        } else {
+                            "failed".to_string()
+                        },
+                        stats: serde_json::json!({
+                            "plan_id": &p.plan_id,
+                            "succeeded": p.succeeded,
+                            "agent_calls": p.agent_calls,
+                            "gate_results": &p.gate_results,
+                        }),
+                    },
                 );
+            }
+
+            // Increment plan completion metrics and log cost summaries.
+            for p in &plans {
+                let status = if p.succeeded { "succeeded" } else { "failed" };
+                self.metrics
+                    .register_counter(
+                        "roko_plans_total",
+                        "",
+                        LabelSet::from_pairs(&[("status", status)]),
+                    )
+                    .inc();
+
+                // Log cost summary from plan_costs HashMap.
+                let plan_cost = self.plan_costs.get(&p.plan_id).copied().unwrap_or(0.0);
+                if plan_cost > 0.0 {
+                    tracing::info!(
+                        plan_id = %p.plan_id,
+                        cost_usd = plan_cost,
+                        agent_calls = p.agent_calls,
+                        succeeded = p.succeeded,
+                        "plan completed"
+                    );
+                }
             }
         }
 
@@ -3164,8 +3773,10 @@ impl PlanRunner {
             "plan run complete"
         );
 
-        // Auto-dream consolidation at plan completion (§5D.05).
-        self.maybe_auto_dream().await;
+        if !self.cancel.is_cancelled() {
+            // Auto-dream consolidation at plan completion (§5D.05).
+            self.maybe_auto_dream().await;
+        }
 
         // Final save before returning.
         if let Err(e) = self.save_state() {
@@ -3279,6 +3890,79 @@ impl PlanRunner {
     /// trackers for task-level granularity.
     #[instrument(skip_all, fields(plan_dir = %path.display()))]
     pub async fn run_task_plans(&mut self, path: &Path) -> Result<OrchestrationReport> {
+        enum RunExit {
+            Completed(Result<OrchestrationReport>),
+            Signaled(Result<OrchestrationReport>),
+            SignalTimedOut,
+        }
+
+        let snapshot_path = executor_snapshot_path(&self.workdir);
+        let cancel = self.cancel.clone();
+        let outcome = {
+            let run = self.run_task_plans_inner(path);
+            tokio::pin!(run);
+
+            tokio::select! {
+                result = &mut run => RunExit::Completed(result),
+                signal = wait_for_shutdown_signal() => {
+                    let signal = match signal {
+                        Ok(signal) => signal,
+                        Err(err) => return Err(err),
+                    };
+                    tracing::warn!(
+                        signal,
+                        "[orchestrate] shutdown signal received, draining in-flight tasks"
+                    );
+
+                    // Stop accepting new work. The run loop observes this and exits
+                    // after the current in-flight task finishes or gets aborted.
+                    cancel.cancel();
+
+                    match tokio::time::timeout(
+                        Duration::from_secs(SHUTDOWN_DRAIN_GRACE_SECS),
+                        &mut run,
+                    )
+                    .await
+                    {
+                        Ok(result) => RunExit::Signaled(result),
+                        Err(_) => {
+                            tracing::warn!(
+                                "[orchestrate] shutdown drain timed out after {}s, killing remaining agents",
+                                SHUTDOWN_DRAIN_GRACE_SECS
+                            );
+                            RunExit::SignalTimedOut
+                        }
+                    }
+                }
+            }
+        };
+
+        match outcome {
+            RunExit::Completed(result) => result,
+            RunExit::Signaled(result) => {
+                self.save_state_to(&snapshot_path)?;
+                tracing::info!(
+                    "[orchestrate] checkpoint saved to {}",
+                    snapshot_path.display()
+                );
+                self.flush_logs().await?;
+                result
+            }
+            RunExit::SignalTimedOut => {
+                self.force_shutdown().await;
+                self.save_state_to(&snapshot_path)?;
+                tracing::info!(
+                    "[orchestrate] checkpoint saved to {}",
+                    snapshot_path.display()
+                );
+                self.flush_logs().await?;
+                Ok(self.current_report())
+            }
+        }
+    }
+
+    #[instrument(skip_all, fields(plan_dir = %path.display()))]
+    async fn run_task_plans_inner(&mut self, path: &Path) -> Result<OrchestrationReport> {
         let watcher_cancel = TokioCancellationToken::new();
         let watcher_task = WatcherRunner {
             conductor: Arc::clone(&self.conductor),
@@ -3555,6 +4239,8 @@ impl PlanRunner {
                                     "gate-failure".to_string(),
                                     phase.to_string(),
                                 ],
+                                source_model: None,
+                                model_generality: 1.0,
                                 created_at: chrono::Utc::now(),
                                 half_life_days: KnowledgeKind::AntiKnowledge
                                     .default_half_life_days(),
@@ -4116,6 +4802,7 @@ impl PlanRunner {
         // Track which task is being worked on (used by autofix if gates fail).
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
             tracker.last_impl_task_id = Some(task_id.to_string());
+            tracker.last_impl_model_slug = None;
         }
 
         let wt_id = format!("{plan_id}-{task_id}");
@@ -4421,6 +5108,7 @@ impl PlanRunner {
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
             if let Some(first) = task_ids.first() {
                 tracker.last_impl_task_id = Some(first.clone());
+                tracker.last_impl_model_slug = None;
             }
         }
 
@@ -5034,8 +5722,10 @@ impl PlanRunner {
     fn build_learned_context(
         &self,
         role: AgentRole,
+        task_def: Option<&crate::task_parser::TaskDef>,
         task_text: &str,
         task_tier: Option<&str>,
+        current_model: &str,
     ) -> LearnedContext {
         use roko_learn::playbook_rules::MatchContext;
 
@@ -5094,12 +5784,23 @@ impl PlanRunner {
             parts.push(pat_section);
         }
 
-        // 4. Durable knowledge queried from NeuroStore for this task.
+        // 4. Playbook-tier heuristics distilled by roko-neuro.
+        if let Some(playbook_heuristics) = build_playbook_heuristics_context(
+            &self.knowledge_store,
+            role,
+            task_def,
+            task_text,
+            current_model,
+        ) {
+            parts.push(playbook_heuristics);
+        }
+
+        // 5. Durable knowledge queried from NeuroStore for this task.
         if let Some(knowledge_context) = self.build_knowledge_context(task_text, task_tier) {
             parts.push(knowledge_context);
         }
 
-        // 5. Prompt experiment variants — check if any active experiment applies.
+        // 6. Prompt experiment variants — check if any active experiment applies.
         let mut experiment_variant_id = None;
         // Check standard prompt section names for active experiments.
         {
@@ -5113,7 +5814,7 @@ impl PlanRunner {
             }
         }
 
-        // 6. Crate familiarity score from cascade router observations (§9).
+        // 7. Crate familiarity score from cascade router observations (§9).
         let obs_count = self.learning.cascade_router().total_observations();
         if obs_count > 0 {
             let familiarity = (obs_count as f64 / 100.0).min(1.0);
@@ -5144,6 +5845,10 @@ impl PlanRunner {
             tracing::debug!("[orchestrate] knowledge query failed for task context");
             return None;
         };
+        let entries: Vec<_> = entries
+            .into_iter()
+            .filter(|entry| entry.kind != KnowledgeKind::Playbook)
+            .collect();
         if entries.is_empty() {
             return None;
         }
@@ -6116,6 +6821,7 @@ impl PlanRunner {
                             tracker.last_gate_failure = None;
                             tracker.last_gate_failure_phase = None;
                             tracker.last_impl_task_id = None;
+                            tracker.last_impl_model_slug = None;
                         }
                         self.record_replan_episode(
                             plan_id,
@@ -6456,6 +7162,7 @@ impl PlanRunner {
                     tracker.last_gate_failure = None;
                     tracker.last_gate_failure_phase = None;
                     tracker.last_impl_task_id = None;
+                    tracker.last_impl_model_slug = None;
                 }
             }
             Err(e) => {
@@ -7532,6 +8239,7 @@ impl PlanRunner {
         let frequency = task_def
             .as_ref()
             .map_or(OperatingFrequency::Theta, |td| td.operating_frequency());
+        let explicit_model_override = model_override;
 
         let mcp_lease = self.acquire_task_mcp_servers(task_def.as_ref()).await;
 
@@ -7539,7 +8247,7 @@ impl PlanRunner {
         // Also collect attribution keys for context feedback after the agent runs.
         let mut attribution_keys: Vec<(String, String)> = Vec::new();
         let (task_text, mut selected_model) = if let Some(override_prompt) = prompt_override {
-            let model = model_override.unwrap_or_else(|| {
+            let model = explicit_model_override.clone().unwrap_or_else(|| {
                 self.config
                     .agent
                     .model
@@ -7549,14 +8257,16 @@ impl PlanRunner {
             (override_prompt, model)
         } else if let Some(ref td) = task_def {
             let prompt = td.build_prompt(plan_id, &self.workdir);
-            let model = td.effective_model(
-                self.config
-                    .agent
-                    .model
-                    .as_deref()
-                    .unwrap_or("claude-sonnet-4-6"),
-                Some(&self.config.agent.tier_models),
-            );
+            let model = explicit_model_override.clone().unwrap_or_else(|| {
+                td.effective_model(
+                    self.config
+                        .agent
+                        .model
+                        .as_deref()
+                        .unwrap_or("claude-sonnet-4-6"),
+                    Some(&self.config.agent.tier_models),
+                )
+            });
             tracing::info!(
                 "[orchestrate] Task {} tier={} model={} max_loc={:?} context={} verify={}",
                 td.id,
@@ -7578,6 +8288,22 @@ impl PlanRunner {
                 .unwrap_or_else(|| "claude-opus-4-6".into());
             (text, model)
         };
+        let roko_config = match load_roko_config(&self.workdir) {
+            Ok(config) => config,
+            Err(err) => {
+                tracing::warn!(
+                    "[orchestrate] failed to load roko.toml for provider routing metadata: {err}"
+                );
+                RokoConfig::default()
+            }
+        };
+        let model_providers = routing_model_provider_map(&roko_config);
+        let pending_force_model_override =
+            if task_def.is_some() && explicit_model_override.is_none() {
+                self.force_model_override.take()
+            } else {
+                None
+            };
 
         let requested_model = selected_model.clone();
         let mut routing_stage = "static".to_string();
@@ -7674,7 +8400,8 @@ impl PlanRunner {
                 ));
             }
             BudgetAction::RouteToCheaper => {
-                selected_model = mechanical_tier_model(&self.config.agent.tier_models);
+                selected_model = mechanical_tier_model(&self.config)
+                    .unwrap_or_else(|| "claude-haiku-4-5".into());
                 routing_reason = "budget_guardrail".to_string();
             }
             BudgetAction::Warn { percent_used, .. } => {
@@ -7684,24 +8411,10 @@ impl PlanRunner {
         }
 
         // ── Dispatch-time skill hint from successful prior tasks ──────
-        let task_files_for_skill_query = task_def
-            .as_ref()
-            .map(|td| td.files.clone())
-            .unwrap_or_default();
-        let task_tier_for_skill_query = task_def.as_ref().map(|td| td.tier.as_str()).unwrap_or("");
-        let symbols_for_skill_query = extract_task_symbols(&task_text);
-        let prior_skills: Vec<_> = self
-            .skill_library
-            .query(
-                &task_files_for_skill_query,
-                task_tier_for_skill_query,
-                &symbols_for_skill_query,
-            )
-            .into_iter()
-            .filter(|skill| skill.success_rate > 0.5)
-            .take(3)
-            .collect();
-        let skill_context_section = if prior_skills.is_empty() {
+        let prior_skills =
+            select_prompt_skills(&self.skill_library, task_def.as_ref(), &task_text, 5);
+        let skill_budget = budget_for(role).skills;
+        let skill_context_section = if prior_skills.is_empty() || skill_budget == 0 {
             None
         } else {
             let skill_text = render_prior_experience(&prior_skills);
@@ -7710,7 +8423,7 @@ impl PlanRunner {
                 PromptSection::new("skill-library", skill_text)
                     .with_priority(SectionPriority::Low)
                     .with_placement(Placement::Middle)
-                    .with_hard_cap(2048),
+                    .with_hard_cap(skill_budget),
                 skill_text_len,
             ))
         };
@@ -7748,6 +8461,7 @@ impl PlanRunner {
                 .clone()
                 .unwrap_or_else(|| "claude-sonnet-4-6".into());
             tracing::warn!(
+                unhealthy_model = %selected_model,
                 unhealthy_provider = %selected_provider,
                 fallback_model = %fallback,
                 "model marked unhealthy by ProviderHealthTracker, falling back"
@@ -7839,6 +8553,10 @@ impl PlanRunner {
             Err(err) => {
                 tracing::warn!(error = %err, "failed to open routing decision log");
             }
+        }
+        if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+            tracker.last_impl_task_id = Some(task.to_string());
+            tracker.last_impl_model_slug = Some(selected_model.clone());
         }
 
         // ── Build context via tiered ContextProvider ───────────────
@@ -8008,8 +8726,10 @@ impl PlanRunner {
         // ── Inject learned knowledge (skills, playbook rules, patterns) ──
         let learned = self.build_learned_context(
             role,
+            task_def.as_ref(),
             &task_text,
             task_def.as_ref().map(|td| td.tier.as_str()),
+            &selected_model,
         );
         if !learned.text.is_empty() {
             let learned_section = PromptSection::new("learned-context", &learned.text)
@@ -8099,6 +8819,9 @@ impl PlanRunner {
             )
             .entered();
             let roko_config = load_roko_config(&self.workdir)?;
+            let cached_content = self
+                .ensure_plan_gemini_cache(plan_id, &roko_config, &selected_model)
+                .await?;
             let task_read_args = task_def
                 .as_ref()
                 .map(task_read_cli_args)
@@ -8120,10 +8843,13 @@ impl PlanRunner {
                 &roko_config,
                 &selected_model,
                 AgentOptions {
+                    command: Some(self.config.agent.command.clone()),
                     timeout_ms: Some(self.effective_task_timeout_ms(task_def.as_ref())),
                     system_prompt: Some(role_instruction.clone()),
+                    cached_content,
                     tools: Some(task_allowed_tools_csv.clone()),
                     mcp_config: self.resolve_mcp_config_path().await,
+                    provider_semaphores: None,
                     env: self.config.agent.env.clone(),
                     extra_args,
                     effort: Some(dispatch_effort.clone()),
@@ -8407,6 +9133,12 @@ impl PlanRunner {
                         .display()
                 );
             }
+        }
+
+        if let Some(forced_model) =
+            detect_cost_anomaly_override(&mut self.anomaly_detector, task_cost, &self.config)
+        {
+            self.force_model_override = Some(forced_model);
         }
 
         if !result.success {
@@ -9769,6 +10501,39 @@ fn now_unix_ms_i64() -> i64 {
     }
 }
 
+fn mechanical_tier_model(config: &Config) -> Option<String> {
+    config.agent.tier_models.get("mechanical").cloned()
+}
+
+fn detect_cost_anomaly_override(
+    detector: &mut AnomalyDetector,
+    turn_cost: f64,
+    config: &Config,
+) -> Option<String> {
+    match detector.check_cost(turn_cost) {
+        Some(Anomaly::CostSpike { z_score }) => {
+            let mechanical_model = mechanical_tier_model(config);
+            match mechanical_model.as_deref() {
+                Some(model) => {
+                    tracing::warn!(
+                        z_score,
+                        forced_model = %model,
+                        "cost anomaly detected; forcing cheaper model on next routed turn"
+                    );
+                }
+                None => {
+                    tracing::warn!(
+                        z_score,
+                        "cost anomaly detected but no mechanical tier model is configured"
+                    );
+                }
+            }
+            mechanical_model
+        }
+        _ => None,
+    }
+}
+
 fn build_system_prompt(role: AgentRole, plan_id: &str, task: &str, tools_csv: &str) -> String {
     build_system_prompt_with_context(role, plan_id, task, tools_csv, None)
 }
@@ -10524,9 +11289,15 @@ mod tests {
             BudgetAction::RouteToCheaper
         );
 
-        let mut tier_models = HashMap::new();
-        tier_models.insert("mechanical".to_string(), "claude-haiku-4-5".to_string());
-        assert_eq!(mechanical_tier_model(&tier_models), "claude-haiku-4-5");
+        let mut config = Config::default();
+        config
+            .agent
+            .tier_models
+            .insert("mechanical".to_string(), "claude-haiku-4-5".to_string());
+        assert_eq!(
+            mechanical_tier_model(&config),
+            Some("claude-haiku-4-5".to_string())
+        );
     }
 
     #[test]
@@ -10990,6 +11761,240 @@ files = ["crates/roko-cli/src/orchestrate.rs"]
 
         let reloaded = CrateFamiliarityTracker::load(&path);
         assert!((reloaded.score_for_task(Some(&task)) - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn skill_injection_selects_high_confidence_matching_skills() {
+        let tmp = TempDir::new().unwrap();
+        let library = SkillLibrary::new(tmp.path().join("skills.json"))
+            .await
+            .unwrap();
+
+        let mut matching = Skill::new(
+            "matching_skill",
+            "Wire prompt assembly through the skill library",
+            "Inject the skill section before the task body.",
+        );
+        matching.task_category = "implementation".to_string();
+        matching.files = vec!["crates/roko-cli/src/orchestrate.rs".to_string()];
+        matching.tags = vec!["PromptComposer".to_string(), "roko-cli".to_string()];
+        matching.score = 0.91;
+        matching.success_rate = 0.75;
+        matching.usage_count = 4;
+        matching.validated_count = 2;
+        library.register(&matching).await.unwrap();
+
+        let mut low_confidence = Skill::new(
+            "low_confidence_skill",
+            "Weakly related prompt tweak",
+            "This should not be injected.",
+        );
+        low_confidence.task_category = "implementation".to_string();
+        low_confidence.files = vec!["crates/roko-cli/src/orchestrate.rs".to_string()];
+        low_confidence.score = 0.2;
+        library.register(&low_confidence).await.unwrap();
+
+        let mut failed = Skill::new(
+            "failed_skill",
+            "Failure pattern that should stay out of the prompt",
+            "This should not be injected.",
+        );
+        failed.task_category = "implementation".to_string();
+        failed.files = vec!["crates/roko-cli/src/orchestrate.rs".to_string()];
+        failed.tags = vec!["outcome:failure".to_string()];
+        failed.score = 0.95;
+        library.register(&failed).await.unwrap();
+
+        let task: crate::task_parser::TaskDef = toml::from_str(
+            r#"
+id = "T1"
+title = "Wire Skill Library into PromptComposer"
+files = ["crates/roko-cli/src/orchestrate.rs"]
+"#,
+        )
+        .unwrap();
+
+        let selected = select_prompt_skills(
+            &library,
+            Some(&task),
+            "Wire Skill Library into PromptComposer and inject relevant skills",
+            5,
+        );
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].name, "matching_skill");
+
+        let rendered = render_prior_experience(&selected);
+        assert!(rendered.contains("matching_skill"));
+        assert!(rendered.contains("confidence: 91%"));
+        assert!(rendered.contains("Telemetry: 75% success over 4 uses"));
+    }
+
+    #[test]
+    fn neuro_heuristic_injection_uses_playbook_tier_matches() {
+        let tmp = TempDir::new().unwrap();
+        let store = KnowledgeStore::new(tmp.path().join("knowledge.jsonl"));
+
+        store
+            .add(KnowledgeEntry {
+                id: "playbook-match".to_string(),
+                kind: KnowledgeKind::Playbook,
+                source: Some("roko-neuro".to_string()),
+                content: "# PLAYBOOK\n\n## Action Rules\n\nPrefer injecting playbook heuristics before the task body when wiring prompt assembly in crates/roko-cli/src/orchestrate.rs.\n".to_string(),
+                confidence: 0.94,
+                confidence_weight: 0.94,
+                refuted_insight_id: None,
+                refutation_evidence: None,
+                source_episodes: vec!["ep-1".to_string(), "ep-2".to_string()],
+                tags: vec![
+                    "tier:playbook".to_string(),
+                    "implementation".to_string(),
+                    "roko-cli".to_string(),
+                ],
+                source_model: None,
+                model_generality: 1.0,
+                created_at: chrono::Utc::now(),
+                half_life_days: 30.0,
+                hdc_vector: None,
+            })
+            .unwrap();
+
+        store
+            .add(KnowledgeEntry {
+                id: "heuristic-match".to_string(),
+                kind: KnowledgeKind::Heuristic,
+                source: Some("roko-neuro".to_string()),
+                content: "This lower-tier heuristic should not be injected when requesting Playbook-tier guidance.".to_string(),
+                confidence: 0.99,
+                confidence_weight: 0.99,
+                refuted_insight_id: None,
+                refutation_evidence: None,
+                source_episodes: vec!["ep-3".to_string()],
+                tags: vec![
+                    "tier:heuristic".to_string(),
+                    "implementation".to_string(),
+                    "roko-cli".to_string(),
+                ],
+                source_model: None,
+                model_generality: 1.0,
+                created_at: chrono::Utc::now(),
+                half_life_days: 90.0,
+                hdc_vector: None,
+            })
+            .unwrap();
+
+        let task: crate::task_parser::TaskDef = toml::from_str(
+            r#"
+id = "T1"
+title = "Wire prompt assembly to inject neuro playbook heuristics"
+files = ["crates/roko-cli/src/orchestrate.rs"]
+"#,
+        )
+        .unwrap();
+
+        let context = build_playbook_heuristics_context(
+            &store,
+            AgentRole::Implementer,
+            Some(&task),
+            "Wire prompt assembly to inject neuro playbook heuristics in roko-cli orchestrate",
+            "claude-sonnet-4-5",
+        )
+        .expect("playbook context");
+
+        assert!(context.contains("## Playbook Heuristics"));
+        assert!(context.contains("Prefer injecting playbook heuristics before the task body"));
+        assert!(!context.contains("lower-tier heuristic"));
+    }
+
+    #[test]
+    fn model_specific_playbook_heuristics_require_matching_model() {
+        let tmp = TempDir::new().unwrap();
+        let store = KnowledgeStore::new(tmp.path().join("knowledge.jsonl"));
+
+        store
+            .add(KnowledgeEntry {
+                id: "playbook-model-specific".to_string(),
+                kind: KnowledgeKind::Playbook,
+                source: Some("roko-neuro".to_string()),
+                content: "# PLAYBOOK\n\nUse XML tool-call tags for this model.\n".to_string(),
+                confidence: 0.92,
+                confidence_weight: 0.92,
+                refuted_insight_id: None,
+                refutation_evidence: None,
+                source_episodes: vec!["ep-1".to_string()],
+                tags: vec!["tier:playbook".to_string(), "implementation".to_string()],
+                source_model: Some("claude-sonnet-4-5".to_string()),
+                model_generality: 0.1,
+                created_at: chrono::Utc::now(),
+                half_life_days: 30.0,
+                hdc_vector: None,
+            })
+            .unwrap();
+
+        let task: crate::task_parser::TaskDef = toml::from_str(
+            r#"
+id = "T1"
+title = "Inject only matching model-specific playbook heuristics"
+files = ["crates/roko-cli/src/orchestrate.rs"]
+"#,
+        )
+        .unwrap();
+
+        let mismatch = build_playbook_heuristics_context(
+            &store,
+            AgentRole::Implementer,
+            Some(&task),
+            "Inject only matching model-specific playbook heuristics",
+            "gpt-5.4",
+        );
+        assert!(mismatch.is_none());
+
+        let matched = build_playbook_heuristics_context(
+            &store,
+            AgentRole::Implementer,
+            Some(&task),
+            "Inject only matching model-specific playbook heuristics",
+            "claude-sonnet-4-5",
+        )
+        .expect("matched playbook context");
+        assert!(matched.contains("XML tool-call tags"));
+    }
+
+    #[test]
+    fn cost_anomaly_downgrade() {
+        let mut config = Config::default();
+        config
+            .agent
+            .tier_models
+            .insert("mechanical".to_string(), "claude-haiku-4-5".to_string());
+
+        let mut detector = AnomalyDetector::new(1_700_000_000_000);
+        for cost in [1.0, 1.2, 0.9, 1.1, 1.05, 0.95, 1.15, 1.0] {
+            assert!(detect_cost_anomaly_override(&mut detector, cost, &config).is_none());
+        }
+
+        assert_eq!(
+            detect_cost_anomaly_override(&mut detector, 10.0, &config),
+            Some("claude-haiku-4-5".to_string())
+        );
+    }
+
+    #[test]
+    fn atomic_checkpoint_preserves_existing_snapshot_on_tmp_write_failure() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("executor.json");
+
+        let original = ExecutorSnapshot::new(1);
+        save_snapshot_atomic(&original, &path).unwrap();
+        let original_json = std::fs::read_to_string(&path).unwrap();
+
+        let tmp_path = path.with_extension("json.tmp");
+        std::fs::create_dir(&tmp_path).unwrap();
+
+        let replacement = ExecutorSnapshot::new(2);
+        let err = save_snapshot_atomic(&replacement, &path).unwrap_err();
+        assert!(err.to_string().contains("write snapshot tmp"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original_json);
     }
 
     #[test]

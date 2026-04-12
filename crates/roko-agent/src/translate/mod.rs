@@ -18,6 +18,7 @@
 //! # Submodules
 //!
 //! - [`claude`] — Claude CLI (`--tools=...` flag + stream-json `tool_use` blocks)
+//! - [`gemini`] — Gemini native `functionDeclarations` / `functionCall` / `functionResponse`
 //! - [`ollama`] — OpenAI-compatible JSON over `/api/chat`
 //! - [`openai`] — `/v1/chat/completions` (mostly same wire as Ollama)
 //! - [`react`] — prompt-level `ReAct` fallback for models without native tools
@@ -33,12 +34,13 @@
 
 #![allow(clippy::module_name_repetitions)]
 
-pub use crate::chat_types::{ChatResponse, FinishReason, ResponseMetadata, SessionState};
+pub use crate::chat_types::{FinishReason, SessionState};
 use crate::usage::Usage;
 use roko_core::tool::{ToolCall, ToolDef, ToolFormat, ToolResult};
 
 pub mod capability;
 pub mod claude;
+pub mod gemini;
 pub mod ollama;
 pub mod openai;
 pub mod react;
@@ -47,9 +49,33 @@ pub use capability::{
     ModelCapabilities, capabilities_for, capabilities_from_profile, translator_for,
 };
 pub use claude::ClaudeTranslator;
+pub use gemini::GeminiTranslator;
 pub use ollama::OllamaTranslator;
 pub use openai::OpenAiTranslator;
 pub use react::ReActTranslator;
+
+/// Canonical response from any provider, after adapter parsing.
+#[derive(Debug, Clone, Default)]
+pub struct ChatResponse {
+    pub content: String,
+    pub reasoning: Option<String>,
+    pub tool_calls: Vec<ToolCall>,
+    pub usage: Usage,
+    pub finish_reason: crate::chat_types::FinishReason,
+    pub metadata: ResponseMetadata,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ResponseMetadata {
+    pub response_id: Option<String>,
+    pub model_used: Option<String>,
+    pub cached_tokens: Option<u64>,
+    pub content_filter: Option<serde_json::Value>,
+    pub web_search: Option<serde_json::Value>,
+    pub extra: Option<serde_json::Value>,
+    pub provider_latency_ms: Option<u64>,
+    pub raw_finish_reason: Option<String>,
+}
 
 /// Normalize provider-specific finish reasons into canonical [`FinishReason`] values.
 #[must_use]
@@ -158,6 +184,7 @@ impl BackendResponse {
                     v.pointer("/choices/0/message/content")
                         .and_then(|x| x.as_str())
                 })
+                .or_else(|| extract_gemini_text(v))
                 .unwrap_or("")
                 .to_string(),
             Self::StreamJson(events) => {
@@ -220,6 +247,19 @@ fn extract_reasoning_from_value(value: &serde_json::Value) -> Option<String> {
         .get("content")
         .and_then(serde_json::Value::as_array)
         .and_then(|blocks| extract_reasoning_from_blocks(blocks.as_slice()))
+}
+
+fn extract_gemini_text(value: &serde_json::Value) -> Option<&str> {
+    value
+        .pointer("/candidates/0/content/parts")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|parts| {
+            parts.iter().find_map(|part| {
+                part.get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|text| !text.is_empty())
+            })
+        })
 }
 
 fn extract_reasoning_from_blocks(blocks: &[serde_json::Value]) -> Option<String> {
@@ -325,6 +365,21 @@ mod tests {
     }
 
     #[test]
+    fn backend_response_extract_text_from_gemini_json() {
+        let r = BackendResponse::Json(serde_json::json!({
+            "candidates": [{
+                "content": {
+                    "parts": [
+                        { "functionCall": { "name": "read_file", "args": { "path": "x" } } },
+                        { "text": "done" }
+                    ]
+                }
+            }]
+        }));
+        assert_eq!(r.extract_text(), "done");
+    }
+
+    #[test]
     fn backend_response_extract_text_from_stream_json() {
         let r = BackendResponse::StreamJson(vec![
             serde_json::json!({"delta": {"text": "one "}}),
@@ -412,6 +467,7 @@ mod tests {
         assert_eq!(response.metadata.model_used, None);
         assert_eq!(response.metadata.cached_tokens, None);
         assert_eq!(response.metadata.content_filter, None);
+        assert_eq!(response.metadata.extra, None);
         assert_eq!(response.metadata.provider_latency_ms, None);
         assert_eq!(response.metadata.raw_finish_reason, None);
 

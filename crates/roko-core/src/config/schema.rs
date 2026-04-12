@@ -121,6 +121,14 @@ pub struct RokoConfig {
     /// Cloud deployment settings (Railway, etc.).
     #[serde(default)]
     pub deploy: DeployConfig,
+
+    /// Perplexity-specific settings (search recency, domain filters, etc.).
+    #[serde(default)]
+    pub perplexity: PerplexityConfig,
+
+    /// Gemini-specific settings (model defaults, thinking, safety, caching).
+    #[serde(default)]
+    pub gemini: GeminiConfig,
 }
 
 const fn default_schema_version() -> u32 {
@@ -155,6 +163,8 @@ impl Default for RokoConfig {
             subscriptions: Vec::new(),
             server: ServerConfig::default(),
             deploy: DeployConfig::default(),
+            perplexity: PerplexityConfig::default(),
+            gemini: GeminiConfig::default(),
         }
     }
 }
@@ -460,7 +470,9 @@ impl RokoConfig {
                 api_key_env: None,
                 command: Some(claude_command),
                 args: self.agent.args.clone(),
-                timeout_ms: self.agent.timeout_ms,
+                timeout_ms: self.agent.timeout_ms.or(default_provider_timeout_ms()),
+                ttft_timeout_ms: default_provider_ttft_timeout_ms(),
+                connect_timeout_ms: default_provider_connect_timeout_ms(),
                 extra_headers: None,
                 max_concurrent: None,
             },
@@ -477,7 +489,9 @@ impl RokoConfig {
                         .map(|_| "ANTHROPIC_API_KEY".to_string()),
                     command: None,
                     args: None,
-                    timeout_ms: self.agent.timeout_ms,
+                    timeout_ms: self.agent.timeout_ms.or(default_provider_timeout_ms()),
+                    ttft_timeout_ms: default_provider_ttft_timeout_ms(),
+                    connect_timeout_ms: default_provider_connect_timeout_ms(),
                     extra_headers: None,
                     max_concurrent: None,
                 },
@@ -530,6 +544,7 @@ impl RokoConfig {
             AgentBackend::Codex | AgentBackend::OpenAi | AgentBackend::Ollama => {
                 ProviderKind::OpenAiCompat.label()
             }
+            AgentBackend::Perplexity => ProviderKind::PerplexityApi.label(),
         };
 
         let context_window = match tool_profile.preferred {
@@ -548,12 +563,18 @@ impl RokoConfig {
             supports_web_search: false,
             supports_mcp_tools: false,
             supports_partial: false,
+            supports_grounding: false,
+            supports_code_execution: false,
+            supports_caching: false,
             provider_routing: None,
             tool_format: tool_profile.preferred.as_str().to_owned(),
             cost_input_per_m: None,
             cost_output_per_m: None,
+            cost_input_per_m_high: None,
+            cost_output_per_m_high: None,
             cost_cache_read_per_m: None,
             cost_cache_write_per_m: None,
+            thinking_level: None,
             max_tools: Some(u32::from(tool_profile.max_tools_before_degrade)),
             tokenizer_ratio: None,
             ..Default::default()
@@ -922,7 +943,9 @@ where
 /// - `api_key_env`: optional environment variable name that holds the API key
 /// - `command`: optional CLI binary name for subprocess providers
 /// - `args`: optional CLI arguments for subprocess providers
-/// - `timeout_ms`: optional request or subprocess timeout
+/// - `timeout_ms`: optional hard request or subprocess timeout
+/// - `ttft_timeout_ms`: optional time-to-first-token timeout
+/// - `connect_timeout_ms`: optional TCP connection timeout
 /// - `extra_headers`: optional HTTP headers to inject on outbound requests
 /// - `max_concurrent`: optional concurrency limit for this provider
 ///
@@ -932,7 +955,9 @@ where
 /// - `api_key_env`: `None`
 /// - `command`: `None`
 /// - `args`: `None`
-/// - `timeout_ms`: `None`
+/// - `timeout_ms`: `120_000`
+/// - `ttft_timeout_ms`: `15_000`
+/// - `connect_timeout_ms`: `5_000`
 /// - `extra_headers`: `None`
 /// - `max_concurrent`: `None`
 ///
@@ -943,6 +968,8 @@ where
 /// base_url = "https://api.anthropic.com"
 /// api_key_env = "ANTHROPIC_API_KEY"
 /// timeout_ms = 120000
+/// ttft_timeout_ms = 15000
+/// connect_timeout_ms = 5000
 ///
 /// [providers.claude_cli]
 /// kind = "claude_cli"
@@ -966,15 +993,42 @@ pub struct ProviderConfig {
     /// Arguments passed to the CLI command.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<String>>,
-    /// Request timeout in milliseconds.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Hard request or subprocess timeout in milliseconds.
+    #[serde(
+        default = "default_provider_timeout_ms",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub timeout_ms: Option<u64>,
+    /// Time-to-first-token timeout in milliseconds.
+    #[serde(
+        default = "default_provider_ttft_timeout_ms",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub ttft_timeout_ms: Option<u64>,
+    /// TCP connection timeout in milliseconds.
+    #[serde(
+        default = "default_provider_connect_timeout_ms",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub connect_timeout_ms: Option<u64>,
     /// Extra headers to inject on outbound requests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_headers: Option<HashMap<String, String>>,
     /// Maximum concurrent requests allowed for this provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrent: Option<u32>,
+}
+
+const fn default_provider_timeout_ms() -> Option<u64> {
+    Some(120_000)
+}
+
+const fn default_provider_ttft_timeout_ms() -> Option<u64> {
+    Some(15_000)
+}
+
+const fn default_provider_connect_timeout_ms() -> Option<u64> {
+    Some(5_000)
 }
 
 impl ProviderConfig {
@@ -1082,6 +1136,15 @@ pub struct ModelProfile {
     /// Whether the model supports partial continuation.
     #[serde(default)]
     pub supports_partial: bool,
+    /// Whether the model supports Google Search grounding.
+    #[serde(default)]
+    pub supports_grounding: bool,
+    /// Whether the model supports built-in code execution.
+    #[serde(default)]
+    pub supports_code_execution: bool,
+    /// Whether the model supports provider-side context caching.
+    #[serde(default)]
+    pub supports_caching: bool,
     /// OpenRouter-specific routing overrides for this model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_routing: Option<ProviderRouting>,
@@ -1094,12 +1157,21 @@ pub struct ModelProfile {
     /// Output token cost per million tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_output_per_m: Option<f64>,
+    /// Input token cost per million tokens for the high-context pricing tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_input_per_m_high: Option<f64>,
+    /// Output token cost per million tokens for the high-context pricing tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_output_per_m_high: Option<f64>,
     /// Cache read cost per million tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_cache_read_per_m: Option<f64>,
     /// Cache write cost per million tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_cache_write_per_m: Option<f64>,
+    /// Provider-specific reasoning depth label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<String>,
     /// Maximum number of tools before behavior degrades.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tools: Option<u32>,
@@ -2401,6 +2473,111 @@ impl Default for DeployConfig {
     }
 }
 
+// ---- Gemini config -------------------------------------------------------
+
+fn default_thinking_medium() -> String {
+    "medium".to_string()
+}
+
+/// Gemini-specific model and request settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GeminiConfig {
+    /// Default model for standard Gemini chat requests.
+    pub default_model: Option<String>,
+    /// Default model for Gemini grounding requests.
+    pub grounding_model: Option<String>,
+    /// Default model for Gemini code execution requests.
+    pub code_exec_model: Option<String>,
+    /// Default Gemini embedding model.
+    pub embed_model: Option<String>,
+    /// Prefer the standard-tier free models when available.
+    #[serde(default)]
+    pub use_free_tier: bool,
+    /// Gemini native thinking depth: "minimal", "low", "medium", or "high".
+    #[serde(default = "default_thinking_medium")]
+    pub thinking_level: String,
+    /// Enable provider-side context caching when supported.
+    #[serde(default)]
+    pub enable_context_caching: bool,
+    /// Per-category Gemini safety thresholds.
+    #[serde(default)]
+    pub safety_settings: Vec<SafetySetting>,
+}
+
+impl Default for GeminiConfig {
+    fn default() -> Self {
+        Self {
+            default_model: None,
+            grounding_model: None,
+            code_exec_model: None,
+            embed_model: None,
+            use_free_tier: false,
+            thinking_level: default_thinking_medium(),
+            enable_context_caching: false,
+            safety_settings: Vec::new(),
+        }
+    }
+}
+
+/// Gemini native safety configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SafetySetting {
+    /// Gemini harm category, e.g. `HARM_CATEGORY_HATE_SPEECH`.
+    pub category: String,
+    /// Gemini blocking threshold, e.g. `BLOCK_NONE`.
+    pub threshold: String,
+}
+
+// ---- Perplexity config ---------------------------------------------------
+
+fn default_recency() -> String {
+    "year".to_string()
+}
+
+/// Perplexity-specific search and model settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PerplexityConfig {
+    /// Default model for search-grounded queries.
+    pub default_search_model: Option<String>,
+    /// Default model for deep research tasks.
+    pub default_research_model: Option<String>,
+    /// Default model for reasoning tasks.
+    pub default_reasoning_model: Option<String>,
+    /// Default model for embeddings.
+    pub default_embed_model: Option<String>,
+    /// Recency filter applied to web search: "hour"/"day"/"week"/"month"/"year".
+    #[serde(default = "default_recency")]
+    pub search_recency_filter: String,
+    /// Restrict results to academic sources.
+    #[serde(default)]
+    pub academic_mode: bool,
+    /// Global domain allowlist for web search.
+    #[serde(default)]
+    pub search_domain_filter: Vec<String>,
+    /// Include images in search results.
+    #[serde(default)]
+    pub return_images: bool,
+    /// Include related questions in search results.
+    #[serde(default = "default_true")]
+    pub return_related_questions: bool,
+}
+
+impl Default for PerplexityConfig {
+    fn default() -> Self {
+        Self {
+            default_search_model: None,
+            default_research_model: None,
+            default_reasoning_model: None,
+            default_embed_model: None,
+            search_recency_filter: default_recency(),
+            academic_mode: false,
+            search_domain_filter: Vec::new(),
+            return_images: false,
+            return_related_questions: true,
+        }
+    }
+}
+
 // ---- tests ---------------------------------------------------------------
 
 #[cfg(test)]
@@ -2659,6 +2836,8 @@ cost_cache_read_per_m = 0.10
         );
         assert_eq!(zai.api_key_env.as_deref(), Some("ZAI_API_KEY"));
         assert_eq!(zai.timeout_ms, Some(180_000));
+        assert_eq!(zai.ttft_timeout_ms, Some(15_000));
+        assert_eq!(zai.connect_timeout_ms, Some(5_000));
         assert_eq!(
             zai.extra_headers
                 .as_ref()
@@ -2675,6 +2854,9 @@ cost_cache_read_per_m = 0.10
             Some("https://api.moonshot.ai/v1")
         );
         assert_eq!(moonshot.api_key_env.as_deref(), Some("MOONSHOT_API_KEY"));
+        assert_eq!(moonshot.timeout_ms, Some(120_000));
+        assert_eq!(moonshot.ttft_timeout_ms, Some(15_000));
+        assert_eq!(moonshot.connect_timeout_ms, Some(5_000));
 
         let glm = cfg.models.get("glm-5-1").expect("glm model");
         assert_eq!(glm.provider, "zai");
@@ -2751,10 +2933,15 @@ base_url = "http://localhost:11434"
             ]
         );
         assert_eq!(claude.timeout_ms, Some(120_000));
+        assert_eq!(claude.ttft_timeout_ms, Some(15_000));
+        assert_eq!(claude.connect_timeout_ms, Some(5_000));
 
         let ollama = cfg.providers.get("ollama").expect("ollama provider");
         assert_eq!(ollama.kind, ProviderKind::OpenAiCompat);
         assert_eq!(ollama.base_url.as_deref(), Some("http://localhost:11434"));
+        assert_eq!(ollama.timeout_ms, Some(120_000));
+        assert_eq!(ollama.ttft_timeout_ms, Some(15_000));
+        assert_eq!(ollama.connect_timeout_ms, Some(5_000));
     }
 
     #[test]
@@ -2844,11 +3031,16 @@ env = [
             ]
         );
         assert_eq!(claude.timeout_ms, Some(300_000));
+        assert_eq!(claude.ttft_timeout_ms, Some(15_000));
+        assert_eq!(claude.connect_timeout_ms, Some(5_000));
 
         let anthropic = providers.get("anthropic").expect("anthropic provider");
         assert_eq!(anthropic.kind, ProviderKind::AnthropicApi);
         assert_eq!(anthropic.base_url.as_deref(), Some("http://127.0.0.1:4000"));
         assert_eq!(anthropic.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY"));
+        assert_eq!(anthropic.timeout_ms, Some(300_000));
+        assert_eq!(anthropic.ttft_timeout_ms, Some(15_000));
+        assert_eq!(anthropic.connect_timeout_ms, Some(5_000));
     }
 
     #[test]
@@ -2909,6 +3101,8 @@ api_key_env = "EXAMPLE_API_KEY"
 command = "claude"
 args = ["--print", "--output-format", "stream-json"]
 timeout_ms = 120000
+ttft_timeout_ms = 15000
+connect_timeout_ms = 5000
 extra_headers = { "HTTP-Referer" = "roko-agent" }
 max_concurrent = 4
 "#;
@@ -2926,6 +3120,8 @@ max_concurrent = 4
             ]
         );
         assert_eq!(cfg.timeout_ms, Some(120000));
+        assert_eq!(cfg.ttft_timeout_ms, Some(15000));
+        assert_eq!(cfg.connect_timeout_ms, Some(5000));
         assert_eq!(
             cfg.extra_headers
                 .as_ref()
@@ -2970,6 +3166,8 @@ max_concurrent = 4
             command: None,
             args: None,
             timeout_ms: None,
+            ttft_timeout_ms: Some(15_000),
+            connect_timeout_ms: Some(5_000),
             extra_headers: None,
             max_concurrent: None,
         };
@@ -2991,11 +3189,40 @@ max_concurrent = 4
             command: None,
             args: None,
             timeout_ms: None,
+            ttft_timeout_ms: Some(15_000),
+            connect_timeout_ms: Some(5_000),
             extra_headers: None,
             max_concurrent: None,
         };
 
         assert_eq!(cfg.resolve_api_key(), None);
+    }
+
+    #[test]
+    fn provider_timeouts_default_when_omitted() {
+        let toml = r#"
+kind = "openai_compat"
+"#;
+        let cfg = toml::from_str::<ProviderConfig>(toml).expect("parse");
+
+        assert_eq!(cfg.timeout_ms, Some(120_000));
+        assert_eq!(cfg.ttft_timeout_ms, Some(15_000));
+        assert_eq!(cfg.connect_timeout_ms, Some(5_000));
+    }
+
+    #[test]
+    fn provider_timeouts_allow_per_provider_overrides() {
+        let toml = r#"
+kind = "openai_compat"
+timeout_ms = 240000
+ttft_timeout_ms = 25000
+connect_timeout_ms = 8000
+"#;
+        let cfg = toml::from_str::<ProviderConfig>(toml).expect("parse");
+
+        assert_eq!(cfg.timeout_ms, Some(240_000));
+        assert_eq!(cfg.ttft_timeout_ms, Some(25_000));
+        assert_eq!(cfg.connect_timeout_ms, Some(8_000));
     }
 
     #[test]
@@ -3015,11 +3242,17 @@ slug = "claude-opus-4-6"
         assert!(!cfg.supports_web_search);
         assert!(!cfg.supports_mcp_tools);
         assert!(!cfg.supports_partial);
+        assert!(!cfg.supports_grounding);
+        assert!(!cfg.supports_code_execution);
+        assert!(!cfg.supports_caching);
         assert_eq!(cfg.tool_format, "openai_json");
         assert_eq!(cfg.cost_input_per_m, None);
         assert_eq!(cfg.cost_output_per_m, None);
+        assert_eq!(cfg.cost_input_per_m_high, None);
+        assert_eq!(cfg.cost_output_per_m_high, None);
         assert_eq!(cfg.cost_cache_read_per_m, None);
         assert_eq!(cfg.cost_cache_write_per_m, None);
+        assert_eq!(cfg.thinking_level, None);
         assert_eq!(cfg.max_tools, None);
         assert_eq!(cfg.tokenizer_ratio, None);
         assert_eq!(cfg.provider_routing, None);
@@ -3622,6 +3855,8 @@ port = 3000
                 command: None,
                 args: None,
                 timeout_ms: None,
+                ttft_timeout_ms: None,
+                connect_timeout_ms: None,
                 extra_headers: None,
                 max_concurrent: None,
             },
@@ -3647,6 +3882,7 @@ port = 3000
                 cost_cache_write_per_m: None,
                 max_tools: None,
                 tokenizer_ratio: None,
+                ..Default::default()
             },
         );
 
@@ -3690,6 +3926,7 @@ port = 3000
                 cost_cache_write_per_m: None,
                 max_tools: None,
                 tokenizer_ratio: None,
+                ..Default::default()
             },
         );
         cfg.agent.fallback_model = Some("missing-model".to_string());
@@ -3732,6 +3969,400 @@ model = "opus"
         assert!(imp.backend.is_none());
         assert!(imp.context_limit_k.is_none());
         assert!(imp.turn_budget_usd.is_none());
+    }
+
+    #[test]
+    fn perplexity_config_defaults() {
+        let cfg = RokoConfig::from_toml("").expect("parse empty");
+        assert_eq!(cfg.perplexity.search_recency_filter, "year");
+        assert!(!cfg.perplexity.academic_mode);
+        assert!(cfg.perplexity.search_domain_filter.is_empty());
+        assert!(!cfg.perplexity.return_images);
+        assert!(cfg.perplexity.return_related_questions);
+        assert!(cfg.perplexity.default_search_model.is_none());
+    }
+
+    #[test]
+    fn perplexity_config_section_parses() {
+        let toml = r#"
+[perplexity]
+default_search_model = "sonar"
+default_research_model = "sonar-deep-research"
+search_recency_filter = "week"
+academic_mode = true
+search_domain_filter = ["arxiv.org", "nature.com"]
+return_images = true
+return_related_questions = false
+"#;
+        let cfg = RokoConfig::from_toml(toml).expect("parse");
+        assert_eq!(
+            cfg.perplexity.default_search_model.as_deref(),
+            Some("sonar")
+        );
+        assert_eq!(
+            cfg.perplexity.default_research_model.as_deref(),
+            Some("sonar-deep-research")
+        );
+        assert_eq!(cfg.perplexity.search_recency_filter, "week");
+        assert!(cfg.perplexity.academic_mode);
+        assert_eq!(
+            cfg.perplexity.search_domain_filter,
+            vec!["arxiv.org", "nature.com"]
+        );
+        assert!(cfg.perplexity.return_images);
+        assert!(!cfg.perplexity.return_related_questions);
+    }
+
+    #[test]
+    fn perplexity_example_config() {
+        let example = include_str!("../../../../examples/roko-perplexity.toml");
+        let cfg = RokoConfig::from_toml(example).expect("roko-perplexity example should parse");
+        assert_eq!(cfg.schema_version, CURRENT_SCHEMA_VERSION);
+
+        // Perplexity provider
+        let pplx = cfg
+            .providers
+            .get("perplexity")
+            .expect("perplexity provider");
+        assert_eq!(pplx.kind, ProviderKind::PerplexityApi);
+        assert_eq!(pplx.base_url.as_deref(), Some("https://api.perplexity.ai"));
+        assert_eq!(pplx.api_key_env.as_deref(), Some("PERPLEXITY_API_KEY"));
+
+        // Claude CLI provider
+        let claude = cfg
+            .providers
+            .get("claude_cli")
+            .expect("claude_cli provider");
+        assert_eq!(claude.kind, ProviderKind::ClaudeCli);
+
+        // Sonar models resolve to the perplexity provider
+        for model_key in ["sonar", "sonar-pro", "sonar-deep-research"] {
+            let model = cfg.models.get(model_key).expect(model_key);
+            assert_eq!(
+                model.provider, "perplexity",
+                "{model_key} should use perplexity provider"
+            );
+            assert!(model.supports_search, "{model_key} should support search");
+            assert!(
+                model.supports_citations,
+                "{model_key} should support citations"
+            );
+        }
+
+        // Claude Opus resolves to claude_cli provider
+        let claude_opus = cfg.models.get("claude-opus").expect("claude-opus model");
+        assert_eq!(claude_opus.provider, "claude_cli");
+        assert_eq!(claude_opus.slug, "claude-opus-4-6");
+        assert!(claude_opus.supports_tools);
+
+        // sonar-deep-research has async support
+        let deep = cfg
+            .models
+            .get("sonar-deep-research")
+            .expect("sonar-deep-research");
+        assert!(deep.supports_async);
+
+        // Perplexity search config
+        assert_eq!(
+            cfg.perplexity.default_search_model.as_deref(),
+            Some("sonar")
+        );
+        assert_eq!(
+            cfg.perplexity.default_research_model.as_deref(),
+            Some("sonar-pro")
+        );
+        assert!(cfg.perplexity.academic_mode);
+        assert_eq!(cfg.perplexity.search_recency_filter, "year");
+        assert!(cfg.perplexity.return_related_questions);
+
+        // Role overrides
+        let researcher = cfg.agent.roles.get("researcher").expect("researcher role");
+        assert_eq!(researcher.model.as_deref(), Some("sonar-pro"));
+        let fact_checker = cfg
+            .agent
+            .roles
+            .get("fact_checker")
+            .expect("fact_checker role");
+        assert_eq!(fact_checker.model.as_deref(), Some("sonar"));
+    }
+
+    #[test]
+    fn gemini_config_defaults() {
+        let cfg = RokoConfig::from_toml("").expect("parse empty");
+        assert!(cfg.gemini.default_model.is_none());
+        assert!(cfg.gemini.grounding_model.is_none());
+        assert!(cfg.gemini.code_exec_model.is_none());
+        assert!(cfg.gemini.embed_model.is_none());
+        assert!(!cfg.gemini.use_free_tier);
+        assert_eq!(cfg.gemini.thinking_level, "medium");
+        assert!(!cfg.gemini.enable_context_caching);
+        assert!(cfg.gemini.safety_settings.is_empty());
+    }
+
+    #[test]
+    fn gemini_config_section_parses() {
+        let toml = r#"
+[gemini]
+default_model = "gemini-2.5-flash"
+grounding_model = "gemini-3-flash-preview"
+code_exec_model = "gemini-2.5-pro"
+embed_model = "gemini-embedding-2-preview"
+use_free_tier = true
+thinking_level = "high"
+enable_context_caching = true
+
+[[gemini.safety_settings]]
+category = "HARM_CATEGORY_HATE_SPEECH"
+threshold = "BLOCK_NONE"
+
+[[gemini.safety_settings]]
+category = "HARM_CATEGORY_HARASSMENT"
+threshold = "BLOCK_LOW_AND_ABOVE"
+"#;
+        let cfg = RokoConfig::from_toml(toml).expect("parse");
+        assert_eq!(
+            cfg.gemini.default_model.as_deref(),
+            Some("gemini-2.5-flash")
+        );
+        assert_eq!(
+            cfg.gemini.grounding_model.as_deref(),
+            Some("gemini-3-flash-preview")
+        );
+        assert_eq!(
+            cfg.gemini.code_exec_model.as_deref(),
+            Some("gemini-2.5-pro")
+        );
+        assert_eq!(
+            cfg.gemini.embed_model.as_deref(),
+            Some("gemini-embedding-2-preview")
+        );
+        assert!(cfg.gemini.use_free_tier);
+        assert_eq!(cfg.gemini.thinking_level, "high");
+        assert!(cfg.gemini.enable_context_caching);
+        assert_eq!(cfg.gemini.safety_settings.len(), 2);
+        assert_eq!(
+            cfg.gemini.safety_settings[0],
+            SafetySetting {
+                category: "HARM_CATEGORY_HATE_SPEECH".to_string(),
+                threshold: "BLOCK_NONE".to_string(),
+            }
+        );
+        assert_eq!(
+            cfg.gemini.safety_settings[1],
+            SafetySetting {
+                category: "HARM_CATEGORY_HARASSMENT".to_string(),
+                threshold: "BLOCK_LOW_AND_ABOVE".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn gemini_example_config() {
+        let example = include_str!("../../../../examples/roko-gemini.toml");
+        let cfg = RokoConfig::from_toml(example).expect("roko-gemini example should parse");
+        assert_eq!(cfg.schema_version, CURRENT_SCHEMA_VERSION);
+
+        let provider = cfg.providers.get("gemini").expect("gemini provider");
+        assert_eq!(provider.kind, ProviderKind::GeminiApi);
+        assert_eq!(
+            provider.base_url.as_deref(),
+            Some("https://generativelanguage.googleapis.com")
+        );
+        assert_eq!(provider.api_key_env.as_deref(), Some("GEMINI_API_KEY"));
+
+        assert_eq!(cfg.agent.default_model, "gemini-2-5-flash");
+        assert_eq!(
+            cfg.agent.tier_models.get("mechanical").map(String::as_str),
+            Some("gemini-2-5-flash-lite")
+        );
+        assert_eq!(
+            cfg.agent
+                .tier_models
+                .get("architectural")
+                .map(String::as_str),
+            Some("gemini-3-1-pro")
+        );
+
+        assert_eq!(
+            cfg.gemini.default_model.as_deref(),
+            Some("gemini-2-5-flash")
+        );
+        assert_eq!(
+            cfg.gemini.grounding_model.as_deref(),
+            Some("gemini-3-flash")
+        );
+        assert_eq!(
+            cfg.gemini.code_exec_model.as_deref(),
+            Some("gemini-2-5-pro")
+        );
+        assert_eq!(
+            cfg.gemini.embed_model.as_deref(),
+            Some("gemini-embedding-2")
+        );
+        assert!(cfg.gemini.use_free_tier);
+        assert_eq!(cfg.gemini.thinking_level, "medium");
+        assert!(cfg.gemini.enable_context_caching);
+        assert_eq!(cfg.gemini.safety_settings.len(), 2);
+
+        let expected = [
+            ("gemini-2-5-flash-lite", "gemini-2.5-flash-lite"),
+            ("gemini-2-5-flash", "gemini-2.5-flash"),
+            ("gemini-2-5-pro", "gemini-2.5-pro"),
+            ("gemini-3-1-pro", "gemini-3.1-pro-preview"),
+            ("gemini-3-flash", "gemini-3-flash-preview"),
+            ("gemini-3-1-flash-lite", "gemini-3.1-flash-lite-preview"),
+            ("gemini-embedding-2", "gemini-embedding-2-preview"),
+        ];
+
+        for (model_key, slug) in expected {
+            let model = cfg.models.get(model_key).expect(model_key);
+            assert_eq!(model.provider, "gemini");
+            assert_eq!(model.slug, slug);
+
+            let resolved = crate::agent::resolve_model(&cfg, model_key);
+            assert_eq!(resolved.model_key, model_key);
+            assert_eq!(resolved.slug, slug);
+            assert_eq!(resolved.provider_kind, ProviderKind::GeminiApi);
+            assert!(resolved.provider_config.is_some());
+            assert!(resolved.profile.is_some());
+        }
+
+        let flash_lite = cfg
+            .models
+            .get("gemini-2-5-flash-lite")
+            .expect("flash-lite model");
+        assert_eq!(flash_lite.tool_format, "openai_json");
+        assert!(flash_lite.supports_caching);
+        assert!(!flash_lite.supports_grounding);
+        assert!(!flash_lite.supports_code_execution);
+
+        let pro = cfg.models.get("gemini-2-5-pro").expect("pro model");
+        assert_eq!(pro.tool_format, "gemini_native");
+        assert!(pro.supports_grounding);
+        assert!(pro.supports_code_execution);
+        assert_eq!(pro.cost_input_per_m_high, Some(2.50));
+        assert_eq!(pro.cost_output_per_m_high, Some(15.00));
+
+        let pro_31 = cfg.models.get("gemini-3-1-pro").expect("3.1 pro model");
+        assert_eq!(pro_31.thinking_level.as_deref(), Some("dynamic"));
+
+        let embed = cfg
+            .models
+            .get("gemini-embedding-2")
+            .expect("embedding model");
+        assert!(embed.is_embedding_model);
+        assert!(!embed.supports_tools);
+    }
+
+    #[test]
+    fn multi_provider_config() {
+        let example = include_str!("../../../../examples/roko-multi-provider.toml");
+        let cfg = RokoConfig::from_toml(example).expect("roko-multi-provider example should parse");
+        assert_eq!(cfg.schema_version, CURRENT_SCHEMA_VERSION);
+
+        let claude = cfg
+            .providers
+            .get("claude_cli")
+            .expect("claude_cli provider");
+        assert_eq!(claude.kind, ProviderKind::ClaudeCli);
+        assert_eq!(claude.command.as_deref(), Some("claude"));
+
+        let gemini = cfg.providers.get("gemini").expect("gemini provider");
+        assert_eq!(gemini.kind, ProviderKind::GeminiApi);
+        assert_eq!(
+            gemini.base_url.as_deref(),
+            Some("https://generativelanguage.googleapis.com")
+        );
+        assert_eq!(gemini.api_key_env.as_deref(), Some("GEMINI_API_KEY"));
+
+        let perplexity = cfg
+            .providers
+            .get("perplexity")
+            .expect("perplexity provider");
+        assert_eq!(perplexity.kind, ProviderKind::PerplexityApi);
+        assert_eq!(
+            perplexity.base_url.as_deref(),
+            Some("https://api.perplexity.ai")
+        );
+        assert_eq!(
+            perplexity.api_key_env.as_deref(),
+            Some("PERPLEXITY_API_KEY")
+        );
+
+        assert_eq!(cfg.agent.default_model, "claude-opus");
+        assert_eq!(
+            cfg.agent.tier_models.get("mechanical").map(String::as_str),
+            Some("gemini-2-5-flash-lite")
+        );
+        assert_eq!(
+            cfg.agent.tier_models.get("focused").map(String::as_str),
+            Some("gemini-2-5-flash")
+        );
+        assert_eq!(
+            cfg.agent.tier_models.get("integrative").map(String::as_str),
+            Some("claude-opus")
+        );
+        assert_eq!(
+            cfg.agent
+                .tier_models
+                .get("architectural")
+                .map(String::as_str),
+            Some("claude-opus")
+        );
+
+        let researcher = cfg.agent.roles.get("researcher").expect("researcher role");
+        assert_eq!(researcher.model.as_deref(), Some("sonar-pro"));
+        let fact_checker = cfg
+            .agent
+            .roles
+            .get("fact_checker")
+            .expect("fact_checker role");
+        assert_eq!(fact_checker.model.as_deref(), Some("sonar"));
+
+        let expected = [
+            ("claude-opus", ProviderKind::ClaudeCli, "claude-opus-4-6"),
+            (
+                "gemini-2-5-flash-lite",
+                ProviderKind::GeminiApi,
+                "gemini-2.5-flash-lite",
+            ),
+            (
+                "gemini-2-5-flash",
+                ProviderKind::GeminiApi,
+                "gemini-2.5-flash",
+            ),
+            ("sonar-pro", ProviderKind::PerplexityApi, "sonar-pro"),
+            ("sonar", ProviderKind::PerplexityApi, "sonar"),
+        ];
+
+        for (model_key, provider_kind, slug) in expected {
+            let resolved = crate::agent::resolve_model(&cfg, model_key);
+            assert_eq!(resolved.model_key, model_key);
+            assert_eq!(resolved.slug, slug);
+            assert_eq!(resolved.provider_kind, provider_kind);
+            assert!(resolved.provider_config.is_some());
+            assert!(resolved.profile.is_some());
+        }
+
+        assert_eq!(
+            cfg.gemini.default_model.as_deref(),
+            Some("gemini-2-5-flash")
+        );
+        assert_eq!(
+            cfg.gemini.grounding_model.as_deref(),
+            Some("gemini-2-5-flash")
+        );
+        assert_eq!(cfg.gemini.thinking_level, "medium");
+        assert!(cfg.gemini.use_free_tier);
+
+        assert_eq!(
+            cfg.perplexity.default_search_model.as_deref(),
+            Some("sonar")
+        );
+        assert_eq!(
+            cfg.perplexity.default_research_model.as_deref(),
+            Some("sonar-pro")
+        );
     }
 
     #[test]

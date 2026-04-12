@@ -4,6 +4,7 @@
 //! reusable facts, procedures, heuristics, and constraints, then
 //! normalizes the structured response into [`KnowledgeEntry`] values.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -149,10 +150,13 @@ struct DistillationEnvelope {
 impl DistillationEnvelope {
     fn into_entries(self, episodes: &[Episode]) -> Vec<KnowledgeEntry> {
         let fallback_source = batch_source_episodes(episodes);
+        let episode_models = episode_models_by_source(episodes);
 
         self.entries
             .into_iter()
-            .filter_map(|candidate| candidate.into_entry(fallback_source.as_deref()))
+            .filter_map(|candidate| {
+                candidate.into_entry(fallback_source.as_deref(), &episode_models)
+            })
             .collect()
     }
 }
@@ -170,11 +174,19 @@ struct DistillationCandidate {
     #[serde(default)]
     tags: Vec<String>,
     #[serde(default)]
+    source_model: Option<String>,
+    #[serde(default = "default_candidate_model_generality")]
+    model_generality: f64,
+    #[serde(default)]
     half_life_days: Option<f64>,
 }
 
 impl DistillationCandidate {
-    fn into_entry(mut self, fallback_source: Option<&[String]>) -> Option<KnowledgeEntry> {
+    fn into_entry(
+        mut self,
+        fallback_source: Option<&[String]>,
+        episode_models: &BTreeMap<String, String>,
+    ) -> Option<KnowledgeEntry> {
         let content = self.content.trim();
         if content.is_empty() {
             return None;
@@ -197,6 +209,14 @@ impl DistillationCandidate {
         self.tags.dedup();
 
         let confidence = self.confidence.clamp(0.0, 1.0);
+        let (source_model, model_generality) = inferred_model_scope(
+            self.kind,
+            self.source_model.take(),
+            self.model_generality,
+            &self.source_episodes,
+            &self.tags,
+            episode_models,
+        );
         let half_life_days = self
             .half_life_days
             .filter(|value| value.is_finite() && *value > 0.0)
@@ -213,6 +233,8 @@ impl DistillationCandidate {
             refutation_evidence: None,
             source_episodes: self.source_episodes,
             tags: self.tags,
+            source_model,
+            model_generality,
             created_at: Utc::now(),
             half_life_days,
             hdc_vector: None,
@@ -308,6 +330,8 @@ fn distillation_system_prompt() -> String {
          Facts should be direct observations.\n\
          Procedures should describe a fix or recipe.\n\
          Heuristics should only appear when the episodes show a recurring pattern.\n\
+         For heuristics, set source_model plus a low model_generality only when the guidance depends on one model's behavior, formatting, or tool syntax.\n\
+         Use model_generality near 1.0 for heuristics that work across models and omit source_model for those general rules.\n\
          Constraints should only appear when the episodes show repeated failures or guardrails.\n\n\
          {}\n",
         extractor.extraction_prompt(&schema)
@@ -335,6 +359,8 @@ fn distillation_schema() -> Value {
                             "type": "array",
                             "items": { "type": "string" }
                         },
+                        "source_model": { "type": ["string", "null"] },
+                        "model_generality": { "type": "number" },
                         "half_life_days": { "type": "number" }
                     }
                 }
@@ -406,8 +432,80 @@ fn batch_source_episodes(episodes: &[Episode]) -> Option<Vec<String>> {
     }
 }
 
+fn episode_models_by_source(episodes: &[Episode]) -> BTreeMap<String, String> {
+    let mut models = BTreeMap::new();
+    for episode in episodes {
+        let model = episode.model.trim();
+        if model.is_empty() {
+            continue;
+        }
+        models.insert(episode_source_id(episode).to_string(), model.to_string());
+    }
+    models
+}
+
+fn inferred_model_scope(
+    kind: KnowledgeKind,
+    source_model: Option<String>,
+    model_generality: f64,
+    source_episodes: &[String],
+    tags: &[String],
+    episode_models: &BTreeMap<String, String>,
+) -> (Option<String>, f64) {
+    if kind != KnowledgeKind::Heuristic && kind != KnowledgeKind::Playbook {
+        return (None, 1.0);
+    }
+
+    let explicit_model = source_model
+        .and_then(normalize_model_slug)
+        .or_else(|| tagged_model(tags, "target-model:"))
+        .or_else(|| tagged_model(tags, "source-model:"));
+    let explicit_generality = sanitize_model_generality(model_generality);
+
+    if explicit_model.is_some() || explicit_generality <= 0.7 {
+        return (explicit_model, explicit_generality);
+    }
+
+    let models: BTreeSet<String> = source_episodes
+        .iter()
+        .filter_map(|episode_id| episode_models.get(episode_id))
+        .filter_map(|model| normalize_model_slug(model.to_string()))
+        .collect();
+
+    if models.len() == 1 && explicit_generality < 1.0 {
+        return (models.into_iter().next(), explicit_generality);
+    }
+
+    (None, explicit_generality)
+}
+
+fn tagged_model(tags: &[String], prefix: &str) -> Option<String> {
+    tags.iter()
+        .find_map(|tag| tag.strip_prefix(prefix))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn normalize_model_slug(model: String) -> Option<String> {
+    let model = model.trim();
+    (!model.is_empty()).then(|| model.to_string())
+}
+
+fn sanitize_model_generality(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        default_candidate_model_generality()
+    }
+}
+
 fn default_candidate_confidence() -> f64 {
     DEFAULT_CONFIDENCE
+}
+
+fn default_candidate_model_generality() -> f64 {
+    1.0
 }
 
 #[cfg(test)]
@@ -501,6 +599,26 @@ mod tests {
         let entries = distiller.distill(&episodes).await.expect("distill");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].source_episodes, vec!["ep-a", "ep-b"]);
+    }
+
+    #[tokio::test]
+    async fn model_specific_heuristics_preserve_model_metadata() {
+        let backend = MockBackend::new(
+            r#"<|json|>{"entries":[{"kind":"heuristic","content":"Use XML tool tags for tool calls.","confidence":0.82,"source_episodes":["ep-a"],"source_model":"claude-sonnet-4-5","model_generality":0.2}]}<|/json|>"#,
+        );
+        let distiller = Distiller::with_backend(backend);
+        let episodes = vec![episode("signal-a", "ep-a", true)];
+
+        let entries = distiller.distill(&episodes).await.expect("distill");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].kind, KnowledgeKind::Heuristic);
+        assert_eq!(
+            entries[0].source_model.as_deref(),
+            Some("claude-sonnet-4-5")
+        );
+        assert!((entries[0].model_generality - 0.2).abs() < f64::EPSILON);
+        assert!(entries[0].applies_to_model("claude-sonnet-4-5"));
+        assert!(!entries[0].applies_to_model("gpt-5.4"));
     }
 
     #[test]

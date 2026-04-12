@@ -66,6 +66,16 @@ impl LatencyStats {
         self.percentile(0.99)
     }
 
+    /// Recommended timeout = 2x the observed p95 latency, clamped to [5s, 300s].
+    pub fn adaptive_timeout_ms(&self) -> u64 {
+        if self.observations < 10 {
+            return 120_000;
+        }
+
+        let timeout = (self.p95_ms() * 2.0) as u64;
+        timeout.clamp(5_000, 300_000)
+    }
+
     fn percentile(&self, quantile: f64) -> f64 {
         if self.recent_latencies.is_empty() {
             return 0.0;
@@ -146,6 +156,47 @@ impl LatencyRegistry {
             .lock()
             .get(&(model.to_owned(), provider.to_owned()))
             .cloned()
+    }
+
+    /// Return aggregate latency stats pooled across all models for `provider`.
+    #[must_use]
+    pub fn get_all_for_provider(&self, provider: &str) -> LatencyStats {
+        let stats = self.stats.lock();
+        let mut aggregate = LatencyStats {
+            provider_id: provider.to_owned(),
+            ..Default::default()
+        };
+        let mut weighted_ttft = 0.0;
+        let mut weighted_total = 0.0;
+        let mut weighted_tps = 0.0;
+
+        for entry in stats
+            .values()
+            .filter(|entry| entry.provider_id.as_str() == provider)
+        {
+            let weight = entry.observations as f64;
+            aggregate.observations = aggregate.observations.saturating_add(entry.observations);
+            aggregate
+                .recent_latencies
+                .extend(entry.recent_latencies.iter().copied());
+            weighted_ttft += entry.ttft_ema_ms * weight;
+            weighted_total += entry.total_latency_ema_ms * weight;
+            weighted_tps += entry.tokens_per_second_ema * weight;
+        }
+
+        if aggregate.observations > 0 {
+            let total_weight = aggregate.observations as f64;
+            aggregate.ttft_ema_ms = weighted_ttft / total_weight;
+            aggregate.total_latency_ema_ms = weighted_total / total_weight;
+            aggregate.tokens_per_second_ema = weighted_tps / total_weight;
+        }
+
+        if aggregate.recent_latencies.len() > 100 {
+            let excess = aggregate.recent_latencies.len() - 100;
+            aggregate.recent_latencies.drain(0..excess);
+        }
+
+        aggregate
     }
 
     /// Persist the registry to `path` as JSON.
@@ -354,6 +405,44 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_timeout_uses_p95_with_bounds_and_fallback() {
+        let mut stats = LatencyStats::default();
+        for latency_ms in [
+            500.0, 750.0, 900.0, 1_100.0, 1_250.0, 1_500.0, 2_000.0, 2_500.0, 2_750.0,
+        ] {
+            stats.record(latency_ms, latency_ms, 1);
+        }
+        assert_eq!(stats.observations, 9);
+        assert_eq!(stats.adaptive_timeout_ms(), 120_000);
+
+        stats.record(3_000.0, 3_000.0, 1);
+        assert_close(stats.p95_ms(), 3_000.0);
+        assert_eq!(stats.adaptive_timeout_ms(), 6_000);
+
+        let mut slower_stats = LatencyStats::default();
+        for latency_ms in [
+            8_000.0, 10_000.0, 12_000.0, 15_000.0, 18_000.0, 20_000.0, 22_000.0, 25_000.0,
+            28_000.0, 30_000.0,
+        ] {
+            slower_stats.record(latency_ms, latency_ms, 1);
+        }
+        assert_close(slower_stats.p95_ms(), 30_000.0);
+        assert_eq!(slower_stats.adaptive_timeout_ms(), 60_000);
+
+        let mut fast_stats = LatencyStats::default();
+        for _ in 0..10 {
+            fast_stats.record(1_000.0, 1_000.0, 1);
+        }
+        assert_eq!(fast_stats.adaptive_timeout_ms(), 5_000);
+
+        let mut very_slow_stats = LatencyStats::default();
+        for _ in 0..10 {
+            very_slow_stats.record(200_000.0, 200_000.0, 1);
+        }
+        assert_eq!(very_slow_stats.adaptive_timeout_ms(), 300_000);
+    }
+
+    #[test]
     fn latency_registry_tracks_pairs_independently() {
         let registry = LatencyRegistry::new();
 
@@ -431,5 +520,22 @@ mod tests {
             assert_eq!(anthropic.observations, 1);
             assert_eq!(anthropic.recent_latencies, vec![160.0]);
         }
+    }
+
+    #[test]
+    fn latency_registry_aggregates_provider_percentiles() {
+        let registry = LatencyRegistry::new();
+
+        registry.record("glm-5.1", "zai", 10.0, 100.0, 1);
+        registry.record("glm-5.1", "zai", 20.0, 200.0, 1);
+        registry.record("glm-4.6", "zai", 30.0, 300.0, 1);
+        registry.record("gpt-4o", "openai", 40.0, 400.0, 1);
+
+        let stats = registry.get_all_for_provider("zai");
+        assert_eq!(stats.provider_id, "zai");
+        assert_eq!(stats.observations, 3);
+        assert_close(stats.p50_ms(), 200.0);
+        assert_close(stats.p95_ms(), 300.0);
+        assert_close(stats.p99_ms(), 300.0);
     }
 }

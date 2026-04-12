@@ -146,6 +146,7 @@ mod tests {
             cost_cache_write_per_m: Some(1.75),
             max_tools: None,
             tokenizer_ratio: Some(1.05),
+            ..Default::default()
         }
     }
 

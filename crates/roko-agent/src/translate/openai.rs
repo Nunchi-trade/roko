@@ -22,7 +22,7 @@
 //! and the arguments decoding differ.
 
 use crate::usage::Usage;
-use roko_core::tool::{ToolCall, ToolDef, ToolFormat, ToolResult};
+use roko_core::tool::{ToolCall, ToolDef, ToolFormat, ToolResult, ToolSource};
 
 use super::{BackendResponse, RenderedResults, RenderedTools, Translator, TranslatorError};
 
@@ -119,43 +119,27 @@ impl Translator for OpenAiTranslator {
 }
 
 fn render_tool(t: &ToolDef) -> serde_json::Value {
-    match tool_kind(t) {
-        ToolKind::Function => serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": t.name,
-                "description": t.description,
-                "parameters": t.parameters.as_value(),
-            }
-        }),
-        ToolKind::WebSearch => serde_json::json!({
+    match &t.source {
+        ToolSource::Builtin | ToolSource::Mcp { .. } | ToolSource::Plugin { .. } => {
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters.as_value(),
+                }
+            })
+        }
+        ToolSource::WebSearch { config, .. } => serde_json::json!({
             "type": "web_search",
-            "web_search": {
-                "enable": true,
-                "search_engine": "search_std",
-                "count": 10,
-                "content_size": "high",
+            "web_search": config,
+        }),
+        ToolSource::Retrieval { knowledge_id } => serde_json::json!({
+            "type": "retrieval",
+            "retrieval": {
+                "knowledge_id": knowledge_id,
             },
         }),
-        ToolKind::Retrieval => serde_json::json!({
-            "type": "retrieval",
-            "retrieval": t.parameters.as_value(),
-        }),
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ToolKind {
-    Function,
-    WebSearch,
-    Retrieval,
-}
-
-fn tool_kind(tool: &ToolDef) -> ToolKind {
-    match tool.name.as_str() {
-        "web_search" => ToolKind::WebSearch,
-        "retrieval" => ToolKind::Retrieval,
-        _ => ToolKind::Function,
     }
 }
 
@@ -221,7 +205,7 @@ pub fn parse_glm_metadata(json: &serde_json::Value) -> crate::translate::Respons
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roko_core::tool::{ToolCategory, ToolError, ToolPermission, ToolSchema};
+    use roko_core::tool::{ToolCategory, ToolError, ToolPermission, ToolSchema, ToolSource};
 
     fn tool(name: &str, desc: &str) -> ToolDef {
         ToolDef::new(name, desc, ToolCategory::Read, ToolPermission::read_only()).with_parameters(
@@ -271,23 +255,41 @@ mod tests {
     }
 
     #[test]
-    fn glm_web_search_render() {
-        let tools = [
-            tool("read_file", "Read a file"),
-            ToolDef::new(
-                "web_search",
-                "Search the web",
-                ToolCategory::Network,
-                ToolPermission::networked(),
-            ),
-        ];
+    fn render_tools_with_source() {
+        let mut web_search = ToolDef::new(
+            "web_search",
+            "Search the web",
+            ToolCategory::Network,
+            ToolPermission::networked(),
+        );
+        web_search.source = ToolSource::WebSearch {
+            provider: "glm".to_string(),
+            config: serde_json::json!({
+                "enable": true,
+                "search_engine": "search_std",
+                "count": 10,
+                "content_size": "high",
+            }),
+        };
+
+        let mut retrieval = ToolDef::new(
+            "retrieval",
+            "Retrieve from knowledge base",
+            ToolCategory::Read,
+            ToolPermission::read_only(),
+        );
+        retrieval.source = ToolSource::Retrieval {
+            knowledge_id: "kb_123".to_string(),
+        };
+
+        let tools = [tool("read_file", "Read a file"), web_search, retrieval];
 
         let rendered = OpenAiTranslator.render_tools(&tools);
         let RenderedTools::JsonArray(v) = rendered else {
             panic!("expected JsonArray");
         };
         let arr = v.as_array().expect("array");
-        assert_eq!(arr.len(), 2);
+        assert_eq!(arr.len(), 3);
         assert_eq!(arr[0]["type"], "function");
         assert_eq!(arr[0]["function"]["name"], "read_file");
         assert_eq!(arr[1]["type"], "web_search");
@@ -295,11 +297,13 @@ mod tests {
         assert_eq!(arr[1]["web_search"]["search_engine"], "search_std");
         assert_eq!(arr[1]["web_search"]["count"], 10);
         assert_eq!(arr[1]["web_search"]["content_size"], "high");
+        assert_eq!(arr[2]["type"], "retrieval");
+        assert_eq!(arr[2]["retrieval"]["knowledge_id"], "kb_123");
     }
 
     #[test]
-    fn glm_mcp_tool_render() {
-        let tools = [ToolDef::new(
+    fn mcp_source_renders_as_standard_function() {
+        let mut mcp_tool = ToolDef::new(
             "zread",
             "Search docs",
             ToolCategory::Mcp,
@@ -313,7 +317,12 @@ mod tests {
             "headers": {
                 "Authorization": "Bearer KEY"
             }
-        })))];
+        })));
+        mcp_tool.source = ToolSource::Mcp {
+            server: "zread".to_string(),
+        };
+
+        let tools = [mcp_tool];
 
         let rendered = OpenAiTranslator.render_tools(&tools);
         let RenderedTools::JsonArray(v) = rendered else {
@@ -321,16 +330,26 @@ mod tests {
         };
         let arr = v.as_array().expect("array");
         assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0]["type"], "mcp");
-        assert_eq!(arr[0]["mcp"]["server_label"], "zread");
+        assert_eq!(arr[0]["type"], "function");
+        assert_eq!(arr[0]["function"]["name"], "zread");
+        assert_eq!(arr[0]["function"]["description"], "Search docs");
         assert_eq!(
-            arr[0]["mcp"]["server_url"],
+            arr[0]["function"]["parameters"]["server_url"],
             "https://api.z.ai/api/mcp/zread/mcp"
         );
-        assert_eq!(arr[0]["mcp"]["transport_type"], "http");
-        assert_eq!(arr[0]["mcp"]["allowed_tools"][0], "search_doc");
-        assert_eq!(arr[0]["mcp"]["allowed_tools"][1], "read_file");
-        assert_eq!(arr[0]["mcp"]["headers"]["Authorization"], "Bearer KEY");
+        assert_eq!(arr[0]["function"]["parameters"]["transport_type"], "http");
+        assert_eq!(
+            arr[0]["function"]["parameters"]["allowed_tools"][0],
+            "search_doc"
+        );
+        assert_eq!(
+            arr[0]["function"]["parameters"]["allowed_tools"][1],
+            "read_file"
+        );
+        assert_eq!(
+            arr[0]["function"]["parameters"]["headers"]["Authorization"],
+            "Bearer KEY"
+        );
     }
 
     #[test]

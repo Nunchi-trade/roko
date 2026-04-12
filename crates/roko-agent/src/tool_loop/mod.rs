@@ -8,18 +8,26 @@
 //! # Submodules
 //!
 //! - [`max_iter`] — iteration-cap configuration (§36.54).
+//! - [`compaction`] — gentle tool-result truncation (§36.58).
 //! - [`prune`] — context-growth guard (§36.55).
 //! - [`result_msg`] — tool-result message construction (§36.56).
 //! - [`checkpoint`] — resumable state (§36.57).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
-use roko_core::tool::{ToolCall, ToolContext, ToolDef};
+use roko_core::{
+    config::schema::ModelProfile,
+    tool::{ToolCall, ToolContext, ToolDef},
+};
+use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::dispatcher::ToolDispatcher;
+use crate::provider::ProviderError;
+use crate::retry::RetryPolicy;
 use crate::streaming::StreamChunk;
 use crate::translate::{BackendResponse, RenderedTools, SessionState, Translator};
 use crate::usage::Usage;
@@ -27,6 +35,7 @@ use crate::usage::Usage;
 pub mod agent_wrapper;
 pub mod backends;
 pub mod checkpoint;
+pub mod compaction;
 pub mod max_iter;
 pub mod prune;
 pub mod result_msg;
@@ -91,6 +100,12 @@ pub enum LlmError {
     /// A network-level failure (DNS, timeout, connection reset).
     #[error("network error: {0}")]
     Network(String),
+    /// The backend returned a provider-classified error suitable for retry logic.
+    #[error("provider error: {0}")]
+    Provider(ProviderError),
+    /// Retry budget was exhausted before a successful backend response arrived.
+    #[error("retries exhausted")]
+    RetriesExhausted,
 }
 
 // ─── StopReason + Output ─────────────────────────────────────────────
@@ -125,6 +140,13 @@ pub struct ToolLoopOutput {
     pub checkpoint: Option<Checkpoint>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OverflowAction {
+    Ok,
+    CompactRecommended,
+    CompactRequired,
+}
+
 // ─── ToolLoop ────────────────────────────────────────────────────────
 
 /// Multi-turn tool-calling loop (§36.f).
@@ -140,6 +162,8 @@ pub struct ToolLoop {
     max_iterations: usize,
     context_token_limit: usize,
     checkpoint_path: Option<PathBuf>,
+    model_profile: Option<ModelProfile>,
+    retry_policy: RetryPolicy,
 }
 
 impl ToolLoop {
@@ -157,6 +181,8 @@ impl ToolLoop {
             max_iterations: DEFAULT_MAX_ITERATIONS,
             context_token_limit: DEFAULT_CONTEXT_TOKEN_LIMIT,
             checkpoint_path: None,
+            model_profile: None,
+            retry_policy: RetryPolicy::default(),
         }
     }
 
@@ -178,6 +204,20 @@ impl ToolLoop {
     #[must_use]
     pub fn with_checkpoint_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.checkpoint_path = Some(path.into());
+        self
+    }
+
+    /// Configure the model profile used for context-overflow detection.
+    #[must_use]
+    pub fn with_model_profile(mut self, model_profile: ModelProfile) -> Self {
+        self.model_profile = Some(model_profile);
+        self
+    }
+
+    /// Override the default retry policy used for provider-backed backend calls.
+    #[must_use]
+    pub fn with_retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
+        self.retry_policy = retry_policy;
         self
     }
 
@@ -269,6 +309,8 @@ impl ToolLoop {
         let mut session = SessionState::default();
 
         loop {
+            self.prune_context_if_needed(&mut messages);
+
             // §36.54 — iteration cap.
             if max_iter::is_exhausted(iterations, self.max_iterations) {
                 let cp = Checkpoint::new(iterations, all_calls.clone(), messages);
@@ -303,8 +345,7 @@ impl ToolLoop {
                         .await
                 }
                 None => {
-                    self.backend
-                        .send_turn(&messages, &rendered_tools, &session)
+                    self.send_turn_with_retry(&messages, &rendered_tools, &session)
                         .await
                 }
             } {
@@ -368,11 +409,80 @@ impl ToolLoop {
             result_msg::append_results(&mut messages, rendered_results);
 
             // §36.55 — context-growth guard.
-            prune::prune_if_needed(&mut messages, self.context_token_limit);
+            self.prune_context_if_needed(&mut messages);
 
             iterations += 1;
             self.save_checkpoint_snapshot(iterations, &all_calls, &messages);
         }
+    }
+
+    fn check_context_overflow(&self, messages: &[Value], model: &ModelProfile) -> OverflowAction {
+        let estimated_tokens = prune::estimate_message_tokens(messages);
+        let limit = Self::model_context_limit(model);
+
+        if estimated_tokens > limit {
+            return OverflowAction::CompactRequired;
+        }
+        if estimated_tokens > Self::compaction_target(limit) {
+            return OverflowAction::CompactRecommended;
+        }
+        OverflowAction::Ok
+    }
+
+    fn prune_context_if_needed(&self, messages: &mut Vec<Value>) {
+        match self.model_profile.as_ref() {
+            Some(model) => match self.check_context_overflow(messages, model) {
+                OverflowAction::Ok => {}
+                OverflowAction::CompactRecommended | OverflowAction::CompactRequired => {
+                    compaction::compact_tool_results(messages);
+                    prune::prune_if_needed(
+                        messages,
+                        Self::compaction_target(Self::model_context_limit(model)),
+                    );
+                }
+            },
+            None => {
+                if prune::estimate_message_tokens(messages) > self.context_token_limit {
+                    compaction::compact_tool_results(messages);
+                }
+                prune::prune_if_needed(messages, self.context_token_limit);
+            }
+        }
+    }
+
+    fn model_context_limit(model: &ModelProfile) -> usize {
+        usize::try_from(model.context_window)
+            .ok()
+            .filter(|limit| *limit > 0)
+            .unwrap_or(128_000)
+    }
+
+    const fn compaction_target(limit: usize) -> usize {
+        limit.saturating_mul(80) / 100
+    }
+
+    async fn send_turn_with_retry(
+        &self,
+        messages: &[serde_json::Value],
+        tools: &RenderedTools,
+        session: &SessionState,
+    ) -> Result<BackendResponse, LlmError> {
+        for attempt in 0..self.retry_policy.max_attempts {
+            match self.backend.send_turn(messages, tools, session).await {
+                Ok(response) => return Ok(response),
+                Err(LlmError::Provider(ref error))
+                    if self.retry_policy.should_retry(error, attempt) =>
+                {
+                    let delay = self
+                        .retry_policy
+                        .delay_with_retry_after(attempt, error.retry_after_ms());
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        Err(LlmError::RetriesExhausted)
     }
 }
 
@@ -432,6 +542,14 @@ impl std::fmt::Debug for ToolLoop {
             .field("backend", &"Arc<dyn LlmBackend>")
             .field("max_iterations", &self.max_iterations)
             .field("context_token_limit", &self.context_token_limit)
+            .field(
+                "model_profile",
+                &self
+                    .model_profile
+                    .as_ref()
+                    .map(|model| (&model.provider, &model.slug, model.context_window)),
+            )
+            .field("retry_policy", &self.retry_policy)
             .finish()
     }
 }
@@ -677,6 +795,45 @@ mod tests {
         }
     }
 
+    struct RetryingBackend {
+        attempts: AtomicUsize,
+        failures_before_success: usize,
+        error: ProviderError,
+    }
+
+    impl RetryingBackend {
+        fn new(failures_before_success: usize, error: ProviderError) -> Self {
+            Self {
+                attempts: AtomicUsize::new(0),
+                failures_before_success,
+                error,
+            }
+        }
+
+        fn attempts(&self) -> usize {
+            self.attempts.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl LlmBackend for RetryingBackend {
+        async fn send_turn(
+            &self,
+            _messages: &[serde_json::Value],
+            _tools: &RenderedTools,
+            _session: &SessionState,
+        ) -> Result<BackendResponse, LlmError> {
+            let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
+            if attempt < self.failures_before_success {
+                Err(LlmError::Provider(self.error.clone()))
+            } else {
+                Ok(BackendResponse::Json(
+                    serde_json::json!({"message": {"content": "final after retry"}}),
+                ))
+            }
+        }
+    }
+
     #[async_trait]
     impl LlmBackend for CapturingBackend {
         async fn send_turn(
@@ -694,6 +851,62 @@ mod tests {
             } else {
                 Ok(BackendResponse::Json(
                     serde_json::json!({"message": {"content": "final"}}),
+                ))
+            }
+        }
+    }
+
+    /// Captures messages on each call.  First call: three tool calls with large
+    /// arguments (enough to overflow a 1 000-token context).  Second call: final
+    /// answer.  Used by [`context_overflow_detection_prunes_before_next_request`].
+    struct OverflowCapturingBackend {
+        call_count: AtomicUsize,
+        captured: parking_lot::Mutex<Vec<Vec<serde_json::Value>>>,
+    }
+
+    impl OverflowCapturingBackend {
+        fn new() -> Self {
+            Self {
+                call_count: AtomicUsize::new(0),
+                captured: parking_lot::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmBackend for OverflowCapturingBackend {
+        async fn send_turn(
+            &self,
+            messages: &[serde_json::Value],
+            _tools: &RenderedTools,
+            _session: &SessionState,
+        ) -> Result<BackendResponse, LlmError> {
+            self.captured.lock().push(messages.to_vec());
+            let n = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                // Return 3 tool calls with large arguments so that the
+                // accumulated messages exceed a 1 000-token context window.
+                // Each tool result will echo back ~700 chars of padding,
+                // producing ~700 * 3 / 4 ≈ 525 tokens of tool output alone.
+                let pad = "x".repeat(700);
+                Ok(BackendResponse::Json(serde_json::json!({
+                    "assistant_message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {"id": "ov-1", "name": "echo"},
+                            {"id": "ov-2", "name": "echo"},
+                            {"id": "ov-3", "name": "echo"},
+                        ]
+                    },
+                    "tool_calls": [
+                        {"id": "ov-1", "name": "echo", "arguments": {"pad": pad}},
+                        {"id": "ov-2", "name": "echo", "arguments": {"pad": pad}},
+                        {"id": "ov-3", "name": "echo", "arguments": {"pad": pad}},
+                    ]
+                })))
+            } else {
+                Ok(BackendResponse::Json(
+                    serde_json::json!({"message": {"content": "final after pruning"}}),
                 ))
             }
         }
@@ -906,6 +1119,60 @@ mod tests {
         }
     }
 
+    fn test_retry_policy() -> RetryPolicy {
+        RetryPolicy {
+            max_attempts: 3,
+            base_delay_ms: 0,
+            max_delay_ms: 0,
+            ..RetryPolicy::default()
+        }
+    }
+
+    fn test_model_profile(context_window: u64) -> ModelProfile {
+        ModelProfile {
+            provider: "test-provider".to_string(),
+            slug: "test-model".to_string(),
+            context_window,
+            max_output: None,
+            supports_tools: true,
+            supports_thinking: false,
+            supports_vision: false,
+            supports_web_search: false,
+            supports_mcp_tools: false,
+            supports_partial: false,
+            supports_grounding: false,
+            supports_code_execution: false,
+            supports_caching: false,
+            provider_routing: None,
+            tool_format: "openai_json".to_string(),
+            cost_input_per_m: None,
+            cost_output_per_m: None,
+            cost_input_per_m_high: None,
+            cost_output_per_m_high: None,
+            cost_cache_read_per_m: None,
+            cost_cache_write_per_m: None,
+            thinking_level: None,
+            max_tools: None,
+            tokenizer_ratio: None,
+            ..Default::default()
+        }
+    }
+
+    fn messages_for_estimated_tokens(target_tokens: usize) -> Vec<Value> {
+        let mut messages = vec![
+            serde_json::json!({"role": "system", "content": "sys"}),
+            serde_json::json!({"role": "user", "content": "usr"}),
+        ];
+        while prune::estimate_message_tokens(&messages) < target_tokens {
+            messages.push(serde_json::json!({
+                "role": "tool",
+                "tool_call_id": format!("c{}", messages.len()),
+                "content": "x".repeat(512),
+            }));
+        }
+        messages
+    }
+
     // ─── Tests ───────────────────────────────────────────────────────
 
     #[tokio::test]
@@ -1026,6 +1293,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retry_with_jitter_retries_rate_limits_until_success() {
+        let backend = Arc::new(RetryingBackend::new(
+            2,
+            ProviderError::RateLimit {
+                retry_after_ms: None,
+            },
+        ));
+        let tl = make_tool_loop(backend.clone(), 25).with_retry_policy(test_retry_policy());
+        let ctx = ToolContext::testing("/tmp");
+
+        let out = tl.run("system", "user", &test_tools(), &ctx).await;
+
+        assert_eq!(out.stop_reason, StopReason::Stop);
+        assert_eq!(out.final_text, "final after retry");
+        assert_eq!(backend.attempts(), 3);
+    }
+
+    #[tokio::test]
+    async fn retry_with_jitter_does_not_retry_auth_failures() {
+        let backend = Arc::new(RetryingBackend::new(usize::MAX, ProviderError::AuthFailure));
+        let tl = make_tool_loop(backend.clone(), 25).with_retry_policy(test_retry_policy());
+        let ctx = ToolContext::testing("/tmp");
+
+        let out = tl.run("system", "user", &test_tools(), &ctx).await;
+
+        match &out.stop_reason {
+            StopReason::BackendError(msg) => {
+                assert!(msg.contains("authentication failed"), "msg={msg}");
+            }
+            other => panic!("expected BackendError, got {other:?}"),
+        }
+        assert_eq!(backend.attempts(), 1);
+    }
+
+    #[tokio::test]
     async fn parallel_tool_calls_dispatched_in_one_batch() {
         let backend = Arc::new(ParallelCallsBackend::new());
         let tl = make_tool_loop(backend, 25);
@@ -1062,6 +1364,129 @@ mod tests {
         assert!(msgs.len() >= 5, "should keep at least head + tail");
         assert_eq!(msgs[0]["role"], "system");
         assert_eq!(msgs[1]["role"], "user");
+    }
+
+    #[test]
+    fn context_overflow_detection_classifies_utilization_thresholds() {
+        let backend = Arc::new(FinalAnswerBackend {
+            text: "unused".into(),
+        });
+        let tl = make_tool_loop(backend, 25).with_model_profile(test_model_profile(2_000));
+
+        let ok_messages = messages_for_estimated_tokens(1_400);
+        assert_eq!(
+            tl.check_context_overflow(&ok_messages, tl.model_profile.as_ref().expect("model")),
+            OverflowAction::Ok
+        );
+
+        let recommended_messages = messages_for_estimated_tokens(1_700);
+        assert_eq!(
+            tl.check_context_overflow(
+                &recommended_messages,
+                tl.model_profile.as_ref().expect("model"),
+            ),
+            OverflowAction::CompactRecommended
+        );
+
+        let required_messages = messages_for_estimated_tokens(2_100);
+        assert_eq!(
+            tl.check_context_overflow(
+                &required_messages,
+                tl.model_profile.as_ref().expect("model"),
+            ),
+            OverflowAction::CompactRequired
+        );
+    }
+
+    #[tokio::test]
+    async fn context_overflow_detection_prunes_before_next_request() {
+        let backend = Arc::new(OverflowCapturingBackend::new());
+        // Use a context window small enough that the 3 x 700-char tool
+        // results (~619 estimated tokens) exceed the 80% compaction
+        // target (770 * 0.8 = 616), triggering a prune pass that removes
+        // exactly one droppable message before the second backend call.
+        let tl = make_tool_loop(backend.clone(), 25).with_model_profile(test_model_profile(770));
+        let ctx = ToolContext::testing("/tmp");
+
+        let out = tl.run("system", "user", &test_tools(), &ctx).await;
+
+        assert_eq!(out.stop_reason, StopReason::Stop);
+        assert_eq!(out.final_text, "final after pruning");
+
+        let captured = backend.captured.lock();
+        assert_eq!(captured.len(), 2, "backend should be called twice");
+        let second_call_messages = &captured[1];
+        assert_eq!(
+            second_call_messages.len(),
+            5,
+            "one message should be pruned from the 6-message history"
+        );
+        assert_eq!(second_call_messages[0]["role"], "system");
+        assert_eq!(second_call_messages[1]["role"], "user");
+        assert!(
+            prune::estimate_message_tokens(second_call_messages)
+                <= ToolLoop::compaction_target(770),
+            "expected second request to be compacted below the 80% target",
+        );
+    }
+
+    #[test]
+    fn tool_result_compaction_runs_before_pruning() {
+        let backend = Arc::new(FinalAnswerBackend {
+            text: "unused".into(),
+        });
+        let mut messages = vec![
+            serde_json::json!({"role": "system", "content": "sys"}),
+            serde_json::json!({"role": "user", "content": "usr"}),
+            serde_json::json!({"role": "assistant", "tool_calls": [{"id": "old"}]}),
+            serde_json::json!({
+                "role": "tool",
+                "tool_call_id": "old",
+                "content": "a".repeat(900),
+            }),
+            serde_json::json!({"role": "assistant", "tool_calls": [{"id": "recent-1"}]}),
+            serde_json::json!({
+                "role": "tool",
+                "tool_call_id": "recent-1",
+                "content": "b".repeat(900),
+            }),
+            serde_json::json!({"role": "assistant", "tool_calls": [{"id": "recent-2"}]}),
+            serde_json::json!({
+                "role": "tool",
+                "tool_call_id": "recent-2",
+                "content": "c".repeat(900),
+            }),
+        ];
+        let mut compacted = messages.clone();
+        compaction::compact_tool_results(&mut compacted);
+
+        let before_tokens = prune::estimate_message_tokens(&messages);
+        let compacted_tokens = prune::estimate_message_tokens(&compacted);
+        assert!(
+            compacted_tokens < before_tokens,
+            "compaction should shrink old results"
+        );
+
+        let target = compacted_tokens + ((before_tokens - compacted_tokens) / 2).max(1);
+        let limit = (target * 100).div_ceil(80);
+        let tl = make_tool_loop(backend, 25).with_model_profile(test_model_profile(limit as u64));
+
+        tl.prune_context_if_needed(&mut messages);
+
+        assert_eq!(
+            messages.len(),
+            8,
+            "compaction should avoid dropping messages"
+        );
+        assert_eq!(messages[3]["tool_call_id"], "old");
+        assert!(
+            messages[3]["content"]
+                .as_str()
+                .expect("compacted old content")
+                .contains("[truncated, 900 chars total]"),
+        );
+        assert_eq!(messages[5]["content"], "b".repeat(900));
+        assert_eq!(messages[7]["content"], "c".repeat(900));
     }
 
     #[tokio::test]

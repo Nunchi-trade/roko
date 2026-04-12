@@ -377,13 +377,17 @@ impl ProviderAdapter for OpenAiCompatAdapter {
             return Ok(Box::new(agent));
         }
 
-        let agent = CodexAgent::new(api_key, model.slug.clone())
+        let mut agent = CodexAgent::new(api_key, model.slug.clone())
             .with_base_url(base_url_for_codex(provider))
             .with_timeout_ms(timeout)
             .with_max_tokens(max_tokens)
             .with_extra_headers(extra_headers)
             .with_extra_body_params(extra_body_params)
             .with_name(agent_name);
+
+        if let Some(provider_semaphores) = options.provider_semaphores.clone() {
+            agent = agent.with_provider_semaphores(model.provider.clone(), provider_semaphores);
+        }
 
         Ok(Box::new(agent))
     }
@@ -652,6 +656,8 @@ mod tests {
             command: None,
             args: None,
             timeout_ms: Some(1_500),
+            ttft_timeout_ms: Some(15_000),
+            connect_timeout_ms: Some(5_000),
             extra_headers: None,
             max_concurrent: None,
         };
@@ -666,12 +672,18 @@ mod tests {
             supports_web_search: false,
             supports_mcp_tools: false,
             supports_partial: false,
+            supports_grounding: false,
+            supports_code_execution: false,
+            supports_caching: false,
             provider_routing: None,
             tool_format: "openai_json".to_string(),
             cost_input_per_m: None,
             cost_output_per_m: None,
+            cost_input_per_m_high: None,
+            cost_output_per_m_high: None,
             cost_cache_read_per_m: None,
             cost_cache_write_per_m: None,
+            thinking_level: None,
             max_tools: None,
             tokenizer_ratio: None,
             ..Default::default()
@@ -699,7 +711,11 @@ mod tests {
             .expect("capture lock")
             .take()
             .expect("captured request");
-        assert!(request.starts_with("POST /v4/v1/chat/completions HTTP/1.1"));
+        assert!(
+            request.starts_with("POST /v4/chat/completions HTTP/1.1"),
+            "unexpected request line: {}",
+            request.lines().next().unwrap_or("")
+        );
 
         let body = request.split("\r\n\r\n").nth(1).expect("request body");
         let parsed: Value = serde_json::from_str(body).expect("json request body");
@@ -744,6 +760,8 @@ mod tests {
             command: None,
             args: None,
             timeout_ms: Some(1_500),
+            ttft_timeout_ms: Some(15_000),
+            connect_timeout_ms: Some(5_000),
             extra_headers: None,
             max_concurrent: None,
         };
@@ -758,12 +776,18 @@ mod tests {
             supports_web_search: false,
             supports_mcp_tools: false,
             supports_partial: true,
+            supports_grounding: false,
+            supports_code_execution: false,
+            supports_caching: false,
             provider_routing: None,
             tool_format: "openai_json".to_string(),
             cost_input_per_m: None,
             cost_output_per_m: None,
+            cost_input_per_m_high: None,
+            cost_output_per_m_high: None,
             cost_cache_read_per_m: None,
             cost_cache_write_per_m: None,
+            thinking_level: None,
             max_tools: Some(128),
             tokenizer_ratio: None,
             ..Default::default()
@@ -863,6 +887,8 @@ mod tests {
             command: None,
             args: None,
             timeout_ms: Some(1_500),
+            ttft_timeout_ms: None,
+            connect_timeout_ms: None,
             extra_headers: None,
             max_concurrent: None,
         };
@@ -885,6 +911,7 @@ mod tests {
             cost_cache_write_per_m: None,
             max_tools: None,
             tokenizer_ratio: None,
+            ..Default::default()
         };
 
         let agent = OpenAiCompatAdapter
@@ -987,6 +1014,8 @@ done
             command: None,
             args: None,
             timeout_ms: Some(1_500),
+            ttft_timeout_ms: None,
+            connect_timeout_ms: None,
             extra_headers: None,
             max_concurrent: None,
         };
@@ -1009,6 +1038,7 @@ done
             cost_cache_write_per_m: None,
             max_tools: None,
             tokenizer_ratio: None,
+            ..Default::default()
         };
         let options = AgentOptions {
             mcp_config: Some(mcp_config),
@@ -1070,6 +1100,8 @@ done
             command: None,
             args: None,
             timeout_ms: Some(1_500),
+            ttft_timeout_ms: Some(15_000),
+            connect_timeout_ms: Some(5_000),
             extra_headers: None,
             max_concurrent: None,
         };
@@ -1084,6 +1116,9 @@ done
             supports_web_search: false,
             supports_mcp_tools: false,
             supports_partial: false,
+            supports_grounding: false,
+            supports_code_execution: false,
+            supports_caching: false,
             provider_routing: Some(roko_core::config::schema::ProviderRouting {
                 sort: Some("price".to_string()),
                 order: Some(vec!["z-ai".to_string(), "moonshotai".to_string()]),
@@ -1094,8 +1129,11 @@ done
             tool_format: "openai_json".to_string(),
             cost_input_per_m: None,
             cost_output_per_m: None,
+            cost_input_per_m_high: None,
+            cost_output_per_m_high: None,
             cost_cache_read_per_m: None,
             cost_cache_write_per_m: None,
+            thinking_level: None,
             max_tools: None,
             tokenizer_ratio: None,
             ..Default::default()
@@ -1166,12 +1204,18 @@ done
             supports_web_search: false,
             supports_mcp_tools: false,
             supports_partial: true,
+            supports_grounding: false,
+            supports_code_execution: false,
+            supports_caching: false,
             provider_routing: None,
             tool_format: "openai_json".to_string(),
             cost_input_per_m: None,
             cost_output_per_m: None,
+            cost_input_per_m_high: None,
+            cost_output_per_m_high: None,
             cost_cache_read_per_m: None,
             cost_cache_write_per_m: None,
+            thinking_level: None,
             max_tools: Some(128),
             tokenizer_ratio: None,
             ..Default::default()

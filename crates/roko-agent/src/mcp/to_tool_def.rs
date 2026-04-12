@@ -4,7 +4,9 @@
 //! [`roko_core::tool::ToolDef`] that plugs directly into any
 //! [`ToolRegistry`].
 
-use roko_core::tool::{ToolCategory, ToolConcurrency, ToolDef, ToolPermission, ToolSchema};
+use roko_core::tool::{
+    ToolCategory, ToolConcurrency, ToolDef, ToolPermission, ToolSchema, ToolSource,
+};
 
 use super::client::McpToolDef;
 
@@ -41,6 +43,10 @@ pub fn mcp_to_tool_def(mcp_tool: &McpToolDef, server_prefix: &str) -> ToolDef {
         timeout_ms: 60_000,
         concurrency: ToolConcurrency::Parallel,
         idempotent: false,
+        source: ToolSource::Mcp {
+            server: server_prefix.to_string(),
+        },
+        metadata: None,
     }
 }
 
@@ -125,5 +131,12 @@ mod tests {
         assert!(!def.idempotent);
         assert!(def.permission.read);
         assert!(!def.permission.write);
+        assert_eq!(
+            def.source,
+            ToolSource::Mcp {
+                server: "fs".to_string()
+            }
+        );
+        assert_eq!(def.metadata, None);
     }
 }

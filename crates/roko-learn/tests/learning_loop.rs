@@ -9,7 +9,7 @@ use tempfile::TempDir;
 use roko_core::agent::AgentRole;
 use roko_core::task::{TaskCategory, TaskComplexityBand};
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
-use roko_learn::model_router::{COLD_START_THRESHOLD, LinUCBRouter, RoutingContext};
+use roko_learn::model_router::{LinUCBRouter, RoutingContext};
 // ProviderHealthTracker removed — health tracking not yet integrated into LinUCBRouter
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -23,6 +23,7 @@ fn default_ctx() -> RoutingContext {
         crate_familiarity: 0.5,
         has_prior_failure: false,
         affect_confidence: 0.5,
+        thinking_level: None,
         previous_model: None,
         plan_context_tokens: None,
     }

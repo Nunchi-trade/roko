@@ -6,9 +6,9 @@
 //! working global config with one interactive pass.
 
 use crate::config::{
-    AgentLayer, ConfigLayer, ConfigPaths, DetectedCli, DreamsLayer, ExecutorLayer, GateConfig,
-    PromptLayer, ResolvedConfig, ServeAuthLayer, ServeDeployLayer, ServeDeployWebhookLayer,
-    ServeLayer, Source, ToolsLayer, detect_clis, global_config_path, load_layered, resolve_paths,
+    AgentLayer, ConfigLayer, ConfigPaths, DetectedCli, ExecutorLayer, GateConfig, PromptLayer,
+    ResolvedConfig, ServeAuthLayer, ServeLayer, Source, ToolsLayer, apply_layer_value, detect_clis,
+    global_config_path, load_layered, resolve_paths,
 };
 use anyhow::{Context as _, Result, anyhow};
 use roko_core::agent::ProviderKind;
@@ -125,6 +125,8 @@ pub fn run_init_wizard(target: Option<PathBuf>, inputs: &WizardInputs) -> Result
         repos: None,
         gates,
         executor: Some(default_executor_layer()),
+        providers: None,
+        models: None,
         serve: Some(ServeLayer {
             auth: Some(ServeAuthLayer {
                 enabled: Some(false),
@@ -629,6 +631,16 @@ fn print_resolved(r: &ResolvedConfig) {
         r.sources.prompt_role.tag()
     );
     println!(
+        "  providers         = {:?} {}",
+        r.config.providers,
+        r.sources.providers.tag()
+    );
+    println!(
+        "  models            = {:?} {}",
+        r.config.models,
+        r.sources.models.tag()
+    );
+    println!(
         "  dreams.auto_dream  = {} {}",
         r.config.dreams.auto_dream,
         r.sources.dreams_auto_dream.tag()
@@ -662,6 +674,8 @@ fn print_resolved(r: &ResolvedConfig) {
         && r.sources.auto_plan == Source::Default
         && r.sources.prompt_token_budget == Source::Default
         && r.sources.prompt_role == Source::Default
+        && r.sources.providers == Source::Default
+        && r.sources.models == Source::Default
         && r.sources.tools_prefer_mcp == Source::Default
         && r.sources.dreams_auto_dream == Source::Default
         && r.sources.dreams_idle_threshold_mins == Source::Default
@@ -672,129 +686,7 @@ fn print_resolved(r: &ResolvedConfig) {
 }
 
 fn apply_key_value(layer: &mut ConfigLayer, key: &str, value: &str) -> Result<()> {
-    match key {
-        "agent.command" => {
-            let agent = layer.agent.get_or_insert_with(AgentLayer::default);
-            agent.command = Some(value.into());
-        }
-        "agent.args" => {
-            // Split on whitespace for simple cases; JSON array for anything richer.
-            let args: Vec<String> = if value.trim_start().starts_with('[') {
-                serde_json::from_str(value).context("parse JSON array for agent.args")?
-            } else {
-                value.split_whitespace().map(String::from).collect()
-            };
-            let agent = layer.agent.get_or_insert_with(AgentLayer::default);
-            agent.args = Some(args);
-        }
-        "agent.model" => {
-            let agent = layer.agent.get_or_insert_with(AgentLayer::default);
-            agent.model = Some(value.into());
-        }
-        "agent.effort" => {
-            let agent = layer.agent.get_or_insert_with(AgentLayer::default);
-            agent.effort = Some(value.into());
-        }
-        "agent.bare_mode" => {
-            let bare_mode = value.parse::<bool>().context("parse bare_mode as bool")?;
-            let agent = layer.agent.get_or_insert_with(AgentLayer::default);
-            agent.bare_mode = Some(bare_mode);
-        }
-        "agent.fallback_model" => {
-            let agent = layer.agent.get_or_insert_with(AgentLayer::default);
-            agent.fallback_model = Some(value.into());
-        }
-        "agent.timeout_ms" => {
-            let ms: u64 = value.parse().context("parse timeout_ms as u64")?;
-            let agent = layer.agent.get_or_insert_with(AgentLayer::default);
-            agent.timeout_ms = Some(ms);
-        }
-        "prompt.token_budget" => {
-            let n: usize = value.parse().context("parse token_budget as usize")?;
-            let prompt = layer.prompt.get_or_insert_with(PromptLayer::default);
-            prompt.token_budget = Some(n);
-        }
-        "prompt.role" => {
-            let prompt = layer.prompt.get_or_insert_with(PromptLayer::default);
-            prompt.role = Some(value.into());
-        }
-        "dreams.auto_dream" => {
-            let auto_dream = value.parse::<bool>().context("parse auto_dream as bool")?;
-            let dreams = layer.dreams.get_or_insert_with(DreamsLayer::default);
-            dreams.auto_dream = Some(auto_dream);
-        }
-        "dreams.idle_threshold_mins" => {
-            let mins = value
-                .parse::<u64>()
-                .context("parse idle_threshold_mins as u64")?;
-            let dreams = layer.dreams.get_or_insert_with(DreamsLayer::default);
-            dreams.idle_threshold_mins = Some(mins);
-        }
-        "dreams.min_episodes_for_dream" => {
-            let min_episodes = value
-                .parse::<usize>()
-                .context("parse min_episodes_for_dream as usize")?;
-            let dreams = layer.dreams.get_or_insert_with(DreamsLayer::default);
-            dreams.min_episodes_for_dream = Some(min_episodes);
-        }
-        "tools.prefer_mcp" => {
-            let prefer_mcp = value.parse::<bool>().context("parse prefer_mcp as bool")?;
-            let tools = layer.tools.get_or_insert_with(ToolsLayer::default);
-            tools.prefer_mcp = Some(prefer_mcp);
-        }
-        "tools.global_denied" => {
-            let denied: Vec<String> = if value.trim_start().starts_with('[') {
-                serde_json::from_str(value).context("parse JSON array for tools.global_denied")?
-            } else {
-                value.split_whitespace().map(String::from).collect()
-            };
-            let tools = layer.tools.get_or_insert_with(ToolsLayer::default);
-            tools.global_denied = Some(denied);
-        }
-        "tools.mcp_timeout_secs" => {
-            let secs = value
-                .parse::<u64>()
-                .context("parse mcp_timeout_secs as u64")?;
-            let tools = layer.tools.get_or_insert_with(ToolsLayer::default);
-            tools.mcp_timeout_secs = Some(secs);
-        }
-        "serve.auth.enabled" => {
-            let enabled = value.parse::<bool>().context("parse enabled as bool")?;
-            let serve = layer.serve.get_or_insert_with(ServeLayer::default);
-            let auth = serve.auth.get_or_insert_with(ServeAuthLayer::default);
-            auth.enabled = Some(enabled);
-        }
-        "serve.auth.api_key" => {
-            let serve = layer.serve.get_or_insert_with(ServeLayer::default);
-            let auth = serve.auth.get_or_insert_with(ServeAuthLayer::default);
-            auth.api_key = Some(value.into());
-        }
-        "serve.deploy.provider" => {
-            let serve = layer.serve.get_or_insert_with(ServeLayer::default);
-            let deploy = serve.deploy.get_or_insert_with(ServeDeployLayer::default);
-            deploy.provider = Some(value.into());
-        }
-        "serve.deploy.environment" => {
-            let environment: Vec<String> = if value.trim_start().starts_with('[') {
-                serde_json::from_str(value)
-                    .context("parse JSON array for serve.deploy.environment")?
-            } else {
-                value.split_whitespace().map(String::from).collect()
-            };
-            let serve = layer.serve.get_or_insert_with(ServeLayer::default);
-            let deploy = serve.deploy.get_or_insert_with(ServeDeployLayer::default);
-            deploy.environment = Some(environment);
-        }
-        "serve.deploy.webhooks" => {
-            let webhooks: Vec<ServeDeployWebhookLayer> = serde_json::from_str(value)
-                .context("parse JSON array for serve.deploy.webhooks")?;
-            let serve = layer.serve.get_or_insert_with(ServeLayer::default);
-            let deploy = serve.deploy.get_or_insert_with(ServeDeployLayer::default);
-            deploy.webhooks = Some(webhooks);
-        }
-        other => return Err(anyhow!("unknown key: {other}")),
-    }
-    Ok(())
+    apply_layer_value(layer, key, value)
 }
 
 #[derive(Debug)]
@@ -875,6 +767,8 @@ fn legacy_provider_config(config: &RokoConfig) -> Result<(String, ProviderConfig
                 command: Some(command.to_string()),
                 args: config.agent.args.clone(),
                 timeout_ms: config.agent.timeout_ms,
+                ttft_timeout_ms: None,
+                connect_timeout_ms: None,
                 extra_headers: None,
                 max_concurrent: None,
             },
@@ -892,6 +786,8 @@ fn legacy_provider_config(config: &RokoConfig) -> Result<(String, ProviderConfig
                 command: None,
                 args: None,
                 timeout_ms: config.agent.timeout_ms,
+                ttft_timeout_ms: None,
+                connect_timeout_ms: None,
                 extra_headers: None,
                 max_concurrent: None,
             },
@@ -1758,6 +1654,7 @@ command = "claude"
                 cost_cache_write_per_m: None,
                 max_tools: None,
                 tokenizer_ratio: None,
+                ..Default::default()
             },
         );
 
@@ -1785,6 +1682,8 @@ command = "claude"
                 command: None,
                 args: None,
                 timeout_ms: None,
+                ttft_timeout_ms: None,
+                connect_timeout_ms: None,
                 extra_headers: None,
                 max_concurrent: None,
             },
@@ -1850,6 +1749,8 @@ command = "claude"
                 command: None,
                 args: None,
                 timeout_ms: None,
+                ttft_timeout_ms: None,
+                connect_timeout_ms: None,
                 extra_headers: None,
                 max_concurrent: None,
             },
@@ -1875,6 +1776,7 @@ command = "claude"
                 cost_cache_write_per_m: None,
                 max_tools: None,
                 tokenizer_ratio: None,
+                ..Default::default()
             },
         );
 

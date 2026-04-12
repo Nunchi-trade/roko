@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -26,16 +27,18 @@ use crate::costs_db::{CostRecord, CostsDb};
 use crate::costs_log::CostsLog;
 use crate::efficiency::AgentEfficiencyEvent;
 use crate::episode_logger::{Episode, EpisodeLogger, LoggerError};
-use crate::model_router::RoutingContext;
+use crate::latency::LatencyRegistry;
+use crate::model_router::{RoutingContext, compute_routing_reward_v2};
 use crate::pattern_discovery::{
     CrossEpisodeConsolidationReport, CrossEpisodeConsolidator, EpisodeView, PatternMiner,
 };
 use crate::playbook::PlaybookStore;
 use crate::playbook_rules::PlaybookRules;
-use crate::prompt_experiment::ExperimentStore;
+use crate::prompt_experiment::{ExperimentStatus, ExperimentStore, PromptExperiment};
 use crate::provider_health::ProviderHealthTracker;
 use crate::regression::{RegressionReport, RegressionThresholds, detect_regressions};
 use crate::skill_library::{SkillLibrary, SkillLibraryError, TemplatePatternGenerator};
+use roko_core::ConductorDecision;
 use roko_core::agent::AgentRole;
 use roko_core::task::{TaskCategory, TaskComplexityBand};
 use roko_daimon::{AffectEngine as _, AffectEvent, DaimonState, queue_wait_arousal};
@@ -92,6 +95,8 @@ pub struct LearningPaths {
     pub task_metrics_jsonl: PathBuf,
     /// Append-only efficiency events JSONL file.
     pub efficiency_jsonl: PathBuf,
+    /// Persisted latency registry snapshot.
+    pub latency_stats_json: PathBuf,
     /// Append-only C-Factor history JSONL file.
     pub cfactor_jsonl: PathBuf,
     /// Cascade router persisted observations JSON.
@@ -115,6 +120,7 @@ impl LearningPaths {
             playbook_rules_toml: root.join("playbook-rules.toml"),
             task_metrics_jsonl: root.join("task-metrics.jsonl"),
             efficiency_jsonl: root.join("efficiency.jsonl"),
+            latency_stats_json: root.join("latency-stats.json"),
             cfactor_jsonl: root.join("c-factor.jsonl"),
             cascade_router_json: root.join("cascade-router.json"),
             experiments_json: root.join("experiments.json"),
@@ -138,6 +144,64 @@ impl Default for RegressionConfig {
         Self {
             thresholds: RegressionThresholds::default(),
             current_window: 20,
+        }
+    }
+}
+
+/// Cadence controls for learning subsystems that should not all react on the
+/// same episode boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpdateFrequency {
+    /// Cascade router observation cadence.
+    pub router_every_n_episodes: u32,
+    /// Reserved for orchestrator-managed adaptive gate threshold batching.
+    pub gate_thresholds_every_n: u32,
+    /// Prompt experiment outcome cadence.
+    pub experiments_every_n: u32,
+    /// Skill extraction cadence.
+    pub skill_mining_every_n: u32,
+    /// Pattern miner ingestion cadence.
+    pub pattern_discovery_every_n: u32,
+    /// Cross-episode consolidation cadence.
+    pub distiller_every_n: u32,
+}
+
+impl UpdateFrequency {
+    fn due(episode_count: u64, every_n: u32) -> bool {
+        let cadence = u64::from(every_n.max(1));
+        episode_count % cadence == 0
+    }
+
+    fn router_due(self, episode_count: u64) -> bool {
+        Self::due(episode_count, self.router_every_n_episodes)
+    }
+
+    fn experiments_due(self, episode_count: u64) -> bool {
+        Self::due(episode_count, self.experiments_every_n)
+    }
+
+    fn skill_mining_due(self, episode_count: u64) -> bool {
+        Self::due(episode_count, self.skill_mining_every_n)
+    }
+
+    fn pattern_discovery_due(self, episode_count: u64) -> bool {
+        Self::due(episode_count, self.pattern_discovery_every_n)
+    }
+
+    fn distiller_due(self, episode_count: u64) -> bool {
+        Self::due(episode_count, self.distiller_every_n)
+    }
+}
+
+impl Default for UpdateFrequency {
+    fn default() -> Self {
+        Self {
+            router_every_n_episodes: 1,
+            gate_thresholds_every_n: 5,
+            experiments_every_n: 1,
+            skill_mining_every_n: 10,
+            pattern_discovery_every_n: 20,
+            distiller_every_n: 50,
         }
     }
 }
@@ -250,6 +314,8 @@ pub enum LearningRuntimeError {
 pub struct LearningRuntime {
     paths: LearningPaths,
     episode_logger: EpisodeLogger,
+    update_frequency: UpdateFrequency,
+    episode_count: AtomicU64,
     affect_engine: parking_lot::Mutex<DaimonState>,
     costs_log: CostsLog,
     costs_db: CostsDb,
@@ -260,6 +326,7 @@ pub struct LearningRuntime {
     regression: RegressionConfig,
     task_metrics: AsyncMutex<Vec<TaskMetric>>,
     pattern_miner: parking_lot::Mutex<PatternMiner>,
+    latency_registry: LatencyRegistry,
     cascade_router: CascadeRouter,
     context_pack_cache: ContextPackCache,
     experiment_store: parking_lot::Mutex<ExperimentStore>,
@@ -288,6 +355,7 @@ impl LearningRuntime {
         let costs_db = CostsDb::new();
         let existing_costs = costs_log.read_all().await?;
         costs_db.insert_batch(existing_costs);
+        let episode_count = count_episode_records(&paths.episodes_jsonl).await?;
 
         let skill_library = SkillLibrary::new(&paths.skills_json).await?;
         let playbook_store = PlaybookStore::new(&paths.playbooks_dir);
@@ -295,6 +363,7 @@ impl LearningRuntime {
         let task_metrics = load_task_metrics(&paths.task_metrics_jsonl).await?;
 
         let pattern_miner = parking_lot::Mutex::new(PatternMiner::new(3, 0.5));
+        let latency_registry = LatencyRegistry::load_or_new(&paths.latency_stats_json);
         let cascade_router = CascadeRouter::load_or_new(
             &paths.cascade_router_json,
             vec![
@@ -308,6 +377,8 @@ impl LearningRuntime {
         Ok(Self {
             paths,
             episode_logger,
+            update_frequency: UpdateFrequency::default(),
+            episode_count: AtomicU64::new(episode_count),
             affect_engine: parking_lot::Mutex::new(DaimonState::load_or_new(&affect_path)),
             costs_log,
             costs_db,
@@ -318,6 +389,7 @@ impl LearningRuntime {
             regression,
             task_metrics: AsyncMutex::new(task_metrics),
             pattern_miner,
+            latency_registry,
             cascade_router,
             context_pack_cache,
             experiment_store: parking_lot::Mutex::new(experiment_store),
@@ -347,6 +419,7 @@ impl LearningRuntime {
         let costs_db = CostsDb::new();
         let existing_costs = costs_log.read_all().await?;
         costs_db.insert_batch(existing_costs);
+        let episode_count = count_episode_records(&paths.episodes_jsonl).await?;
 
         let skill_library = SkillLibrary::new(&paths.skills_json).await?;
         let playbook_store = PlaybookStore::new(&paths.playbooks_dir);
@@ -354,6 +427,7 @@ impl LearningRuntime {
         let task_metrics = load_task_metrics(&paths.task_metrics_jsonl).await?;
 
         let pattern_miner = parking_lot::Mutex::new(PatternMiner::new(3, 0.5));
+        let latency_registry = LatencyRegistry::load_or_new(&paths.latency_stats_json);
         let cascade_router = CascadeRouter::load_or_new(&paths.cascade_router_json, models);
         let context_pack_cache = ContextPackCache::new(256, paths.root.join("context-cache.json"));
         let experiment_store = ExperimentStore::load_or_new(&paths.experiments_json);
@@ -361,6 +435,8 @@ impl LearningRuntime {
         Ok(Self {
             paths,
             episode_logger,
+            update_frequency: UpdateFrequency::default(),
+            episode_count: AtomicU64::new(episode_count),
             affect_engine: parking_lot::Mutex::new(DaimonState::load_or_new(&affect_path)),
             costs_log,
             costs_db,
@@ -371,6 +447,7 @@ impl LearningRuntime {
             regression,
             task_metrics: AsyncMutex::new(task_metrics),
             pattern_miner,
+            latency_registry,
             cascade_router,
             context_pack_cache,
             experiment_store: parking_lot::Mutex::new(experiment_store),
@@ -393,6 +470,17 @@ impl LearningRuntime {
         &self.paths
     }
 
+    /// Borrow the configured subsystem update cadences.
+    #[must_use]
+    pub const fn update_frequency(&self) -> &UpdateFrequency {
+        &self.update_frequency
+    }
+
+    /// Override the subsystem update cadences for this runtime.
+    pub fn set_update_frequency(&mut self, update_frequency: UpdateFrequency) {
+        self.update_frequency = update_frequency;
+    }
+
     /// Borrow in-memory costs DB.
     #[must_use]
     pub const fn costs_db(&self) -> &CostsDb {
@@ -403,6 +491,24 @@ impl LearningRuntime {
     #[must_use]
     pub const fn provider_health(&self) -> &ProviderHealthTracker {
         &self.provider_health
+    }
+
+    /// Filter model slugs down to those whose providers are currently healthy.
+    ///
+    /// When every candidate resolves to an unhealthy provider, the original
+    /// `all_model_slugs` set is returned so routing can still make progress.
+    pub fn healthy_model_slugs<F>(&self, all_model_slugs: &[String], provider_of: F) -> Vec<String>
+    where
+        F: Fn(&str) -> String,
+    {
+        let healthy_models = self
+            .provider_health
+            .filter_arms(all_model_slugs, provider_of);
+        if healthy_models.is_empty() {
+            all_model_slugs.to_vec()
+        } else {
+            healthy_models
+        }
     }
 
     /// Borrow skill library.
@@ -420,6 +526,12 @@ impl LearningRuntime {
     #[must_use]
     pub const fn playbook_rules(&self) -> &PlaybookRules {
         &self.playbook_rules
+    }
+
+    /// Borrow the latency registry used for routing feedback.
+    #[must_use]
+    pub const fn latency_registry(&self) -> &LatencyRegistry {
+        &self.latency_registry
     }
 
     /// Borrow pattern miner (behind `parking_lot::Mutex` for `&mut` access).
@@ -491,7 +603,32 @@ impl LearningRuntime {
             .open(&self.paths.efficiency_jsonl)
             .await?;
         f.write_all(line.as_bytes()).await?;
+        self.record_latency_from_efficiency_event(event)?;
         Ok(())
+    }
+
+    /// Compute a latency-aware routing reward for a model/provider observation.
+    ///
+    /// The current wall-clock latency comes from the efficiency event emitted
+    /// for this turn. When that timing is unavailable, the historical p50 for
+    /// the same `(model, provider)` pair is used as a fallback.
+    #[must_use]
+    pub fn compute_routing_reward_with_latency(
+        &self,
+        gate_passed: bool,
+        cost_usd: f64,
+        wall_time_ms: u64,
+        model: &str,
+        provider: &str,
+    ) -> f64 {
+        compute_reward_with_latency(
+            gate_passed,
+            cost_usd,
+            wall_time_ms,
+            &self.latency_registry,
+            model,
+            provider,
+        )
     }
 
     /// Read all persisted efficiency events from the JSONL log.
@@ -527,6 +664,32 @@ impl LearningRuntime {
         Ok(())
     }
 
+    /// Record conductor-driven negative feedback for the routed model.
+    ///
+    /// Restart/fail interventions indicate the selected model failed to make
+    /// acceptable progress for the current routing context, so they are fed
+    /// back into the cascade router as a zero-reward failure.
+    pub fn record_conductor_intervention(
+        &self,
+        routing_context: &RoutingContext,
+        model_slug: &str,
+        intervention: &ConductorDecision,
+    ) -> bool {
+        if !matches!(
+            intervention,
+            ConductorDecision::Restart { .. } | ConductorDecision::Fail { .. }
+        ) {
+            return false;
+        }
+
+        self.cascade_router
+            .record_observation(routing_context, model_slug, 0.0, false);
+        if let Err(err) = self.save_cascade_router() {
+            eprintln!("[learn] cascade router save failed after conductor intervention: {err}");
+        }
+        true
+    }
+
     /// Append one raw episode record without triggering any learning updates.
     pub async fn append_episode(&self, episode: &Episode) -> Result<(), LearningRuntimeError> {
         let mut episode = episode.clone();
@@ -556,6 +719,7 @@ impl LearningRuntime {
         if let Some(hook) = &self.episode_completion_hook {
             hook(input.episode.clone());
         }
+        let episode_count = self.episode_count.fetch_add(1, Ordering::Relaxed) + 1;
 
         if input.playbook_id.is_none() {
             input.playbook_id = extra_string(&input.episode, "playbook_id");
@@ -619,7 +783,9 @@ impl LearningRuntime {
         }
 
         let generator = TemplatePatternGenerator;
-        if let Some(skill) = self.skill_library.extract(&input.episode, &generator).await {
+        if self.update_frequency.skill_mining_due(episode_count)
+            && let Some(skill) = self.skill_library.extract(&input.episode, &generator).await
+        {
             update.extracted_skill_id = Some(skill.name);
         }
 
@@ -634,17 +800,22 @@ impl LearningRuntime {
                 compute_regression_report(&metrics_snapshot, &self.regression);
         }
 
-        self.append_cfactor_snapshot().await?;
+        if self.update_frequency.distiller_due(episode_count) {
+            self.append_cfactor_snapshot().await?;
+        }
 
         // ── Pattern mining ──────────────────────────────────────────────
         let actions = EpisodeActions::from_episode(&input.episode);
-        if !actions.actions.is_empty() {
+        if self.update_frequency.pattern_discovery_due(episode_count) && !actions.actions.is_empty()
+        {
             self.pattern_miner.lock().ingest_episode(&actions);
             update.patterns_ingested = true;
         }
 
         // ── Cascade router observation ─────────────────────────────────
-        update.router_updated = self.update_cascade_router(&input.episode);
+        if self.update_frequency.router_due(episode_count) {
+            update.router_updated = self.update_cascade_router(&input.episode);
+        }
 
         // Persist immediately so the router state file always reflects the
         // latest observation count and confidence stats.
@@ -655,11 +826,26 @@ impl LearningRuntime {
         }
 
         // ── Prompt experiment outcome ────────────────────────────────────
-        if let Some(ref variant_id) = input.experiment_variant_id {
+        if self.update_frequency.experiments_due(episode_count)
+            && let Some(ref variant_id) = input.experiment_variant_id
+        {
             let mut store = self.experiment_store.lock();
+            let was_running = store
+                .iter()
+                .find(|experiment| experiment.stats.contains_key(variant_id))
+                .is_some_and(|experiment| experiment.status == ExperimentStatus::Running);
             store.record_outcome(variant_id, input.episode.success);
+            let static_table_updated = was_running
+                && store
+                    .iter()
+                    .find(|experiment| experiment.stats.contains_key(variant_id))
+                    .is_some_and(|experiment| self.on_experiment_concluded(experiment));
             if let Err(e) = store.save(&self.paths.experiments_json) {
                 eprintln!("[learn] experiment store save failed: {e}");
+            }
+            drop(store);
+            if static_table_updated && let Err(e) = self.save_cascade_router() {
+                eprintln!("[learn] cascade router save failed after experiment conclusion: {e}");
             }
         }
 
@@ -740,6 +926,7 @@ impl LearningRuntime {
             crate_familiarity,
             has_prior_failure: !episode.success,
             affect_confidence: extra_f64(episode, "affect_confidence").unwrap_or(0.5),
+            thinking_level: None,
             previous_model: None,
             plan_context_tokens: None,
         };
@@ -751,9 +938,46 @@ impl LearningRuntime {
         {
             return false;
         }
-        let reward = if episode.success { 1.0 } else { 0.0 };
+        let provider = extra_string(episode, "provider")
+            .or_else(|| extra_string(episode, "backend"))
+            .unwrap_or_else(|| "unknown-provider".to_string());
+        let reward = self.compute_routing_reward_with_latency(
+            episode.success,
+            episode.usage.cost_usd,
+            episode.usage.wall_ms,
+            &slug,
+            &provider,
+        );
         self.cascade_router
             .record_observation(&ctx, &slug, reward, episode.success);
+        true
+    }
+
+    /// Promote a concluded model experiment winner into the router's static table.
+    fn on_experiment_concluded(&self, experiment: &PromptExperiment) -> bool {
+        let (Some(winner_id), Some(role_raw)) =
+            (experiment.winner_id.as_deref(), experiment.role.as_deref())
+        else {
+            return false;
+        };
+        let Some(role) = parse_agent_role(role_raw) else {
+            return false;
+        };
+        let Some(winner_slug) = experiment
+            .variants
+            .iter()
+            .find(|variant| variant.id == winner_id)
+            .and_then(|variant| variant.slug.as_deref())
+        else {
+            return false;
+        };
+        if !self.cascade_router.update_static_table(role, winner_slug) {
+            return false;
+        }
+        eprintln!(
+            "[learn] experiment concluded — updated static routing table: experiment={} winner={} role={}",
+            experiment.experiment_id, winner_slug, role_raw
+        );
         true
     }
 
@@ -780,6 +1004,74 @@ impl LearningRuntime {
     async fn append_cfactor_snapshot(&self) -> Result<(), LearningRuntimeError> {
         let snapshot = compute_cfactor_snapshot(&self.paths.root).await?;
         append_cfactor_snapshot(&self.paths.cfactor_jsonl, &snapshot).await?;
+        Ok(())
+    }
+}
+
+fn compute_reward_with_latency(
+    gate_passed: bool,
+    cost_usd: f64,
+    wall_time_ms: u64,
+    latency_stats: &LatencyRegistry,
+    model: &str,
+    provider: &str,
+) -> f64 {
+    let pass_rate = if gate_passed { 1.0 } else { 0.0 };
+    let max_cost = 5.0;
+    let normalized_cost = (cost_usd / max_cost).min(1.0);
+    let historical_p50_ms = latency_stats
+        .get(model, provider)
+        .map(|stats| stats.p50_ms());
+    let observed_latency_ms = if wall_time_ms > 0 {
+        wall_time_ms as f64
+    } else {
+        historical_p50_ms.unwrap_or(30_000.0)
+    };
+    let sla_ms = 120_000.0;
+    compute_routing_reward_v2(pass_rate, normalized_cost, observed_latency_ms, sla_ms)
+}
+
+fn latency_model_slug(event: &AgentEfficiencyEvent) -> &str {
+    let model = event.model_used.trim();
+    if model.is_empty() {
+        event.model.trim()
+    } else {
+        model
+    }
+}
+
+fn latency_provider_id(event: &AgentEfficiencyEvent) -> &str {
+    event.backend.trim()
+}
+
+fn latency_total_ms(event: &AgentEfficiencyEvent) -> f64 {
+    if event.wall_time_ms > 0 {
+        event.wall_time_ms as f64
+    } else {
+        event.duration_ms as f64
+    }
+}
+
+impl LearningRuntime {
+    fn record_latency_from_efficiency_event(
+        &self,
+        event: &AgentEfficiencyEvent,
+    ) -> Result<(), LearningRuntimeError> {
+        let model = latency_model_slug(event);
+        let provider = latency_provider_id(event);
+        if model.is_empty() || provider.is_empty() {
+            return Ok(());
+        }
+
+        let total_ms = latency_total_ms(event);
+        self.latency_registry.record(
+            model,
+            provider,
+            event.time_to_first_token_ms as f64,
+            total_ms,
+            event.output_tokens,
+        );
+        self.latency_registry.save(&self.paths.latency_stats_json)?;
         Ok(())
     }
 }
@@ -887,6 +1179,22 @@ async fn load_task_metrics(path: &Path) -> io::Result<Vec<TaskMetric>> {
         }
     }
     Ok(out)
+}
+
+async fn count_episode_records(path: &Path) -> io::Result<u64> {
+    let file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(err) => return Err(err),
+    };
+    let mut lines = BufReader::new(file).lines();
+    let mut count = 0_u64;
+    while let Some(line) = lines.next_line().await? {
+        if !line.trim().is_empty() {
+            count = count.saturating_add(1);
+        }
+    }
+    Ok(count)
 }
 
 /// Append one `TaskMetric` line to `path`.
@@ -1285,6 +1593,7 @@ fn convergence_velocity_from_agreement(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prompt_experiment::{PromptExperiment, PromptVariant};
     use chrono::Utc;
     use roko_core::metric::{ConfigHash, TaskMetric};
     use tempfile::TempDir;
@@ -1364,10 +1673,34 @@ mod tests {
         m
     }
 
+    fn sample_pattern_episode(success: bool, suffix: &str) -> Episode {
+        let mut ep = sample_episode(success);
+        ep.id = format!("episode-{suffix}");
+        ep.episode_id = format!("episode-{suffix}");
+        ep.task_id = format!("task-{suffix}");
+        ep.gate_verdicts = vec![
+            crate::episode_logger::GateVerdict::new("read", true),
+            crate::episode_logger::GateVerdict::new("edit", true),
+            crate::episode_logger::GateVerdict::new("test", true),
+        ];
+        ep.extra.insert(
+            "task_tags".to_string(),
+            serde_json::json!(["rust", format!("tag-{suffix}")]),
+        );
+        ep.extra.insert(
+            "files".to_string(),
+            serde_json::json!([format!("crates/roko-cli/src/{suffix}.rs")]),
+        );
+        ep
+    }
+
     #[tokio::test]
     async fn completed_run_updates_episode_cost_provider_and_skill() {
         let tmp = TempDir::new().unwrap();
-        let runtime = LearningRuntime::open_under(tmp.path()).await.unwrap();
+        let mut runtime = LearningRuntime::open_under(tmp.path()).await.unwrap();
+        let mut freq = *runtime.update_frequency();
+        freq.skill_mining_every_n = 1;
+        runtime.set_update_frequency(freq);
 
         let input = CompletedRunInput::from_episode(sample_episode(true));
         let update = runtime.record_completed_run(input).await.unwrap();
@@ -1394,7 +1727,10 @@ mod tests {
     #[tokio::test]
     async fn completed_runs_append_cfactor_history() {
         let tmp = TempDir::new().unwrap();
-        let runtime = LearningRuntime::open_under(tmp.path()).await.unwrap();
+        let mut runtime = LearningRuntime::open_under(tmp.path()).await.unwrap();
+        let mut freq = *runtime.update_frequency();
+        freq.distiller_every_n = 1;
+        runtime.set_update_frequency(freq);
 
         runtime
             .record_completed_run(CompletedRunInput::from_episode(sample_episode(true)))
@@ -1414,6 +1750,143 @@ mod tests {
         assert_eq!(snapshots.len(), 2);
         assert_eq!(snapshots[0].episode_count, 1);
         assert_eq!(snapshots[1].episode_count, 2);
+    }
+
+    #[tokio::test]
+    async fn update_frequency_separation() {
+        let tmp = TempDir::new().unwrap();
+        let mut runtime = LearningRuntime::open_with_models(
+            LearningPaths::under(tmp.path()),
+            RegressionConfig::default(),
+            vec!["claude-opus-4-6".to_string()],
+        )
+        .await
+        .unwrap();
+        runtime.set_update_frequency(UpdateFrequency {
+            router_every_n_episodes: 2,
+            gate_thresholds_every_n: 5,
+            experiments_every_n: 3,
+            skill_mining_every_n: 2,
+            pattern_discovery_every_n: 3,
+            distiller_every_n: 4,
+        });
+
+        let mut experiment = PromptExperiment::new(
+            "cadence-exp",
+            "model-routing",
+            vec![PromptVariant {
+                id: "cadence".to_string(),
+                name: "Cadence".to_string(),
+                section_name: "model-routing".to_string(),
+                content: String::new(),
+                slug: Some("claude-opus-4-6".to_string()),
+                active: true,
+            }],
+        );
+        experiment.min_trials_per_variant = 100;
+        runtime.experiment_store().lock().register(experiment);
+
+        let update = runtime
+            .record_completed_run(CompletedRunInput {
+                experiment_variant_id: Some("cadence".to_string()),
+                ..CompletedRunInput::from_episode(sample_pattern_episode(true, "one"))
+            })
+            .await
+            .unwrap();
+        assert!(!update.router_updated);
+        assert!(update.extracted_skill_id.is_none());
+        assert!(!update.patterns_ingested);
+        assert_eq!(runtime.cascade_router().total_observations(), 0);
+        assert_eq!(runtime.skill_library().len(), 0);
+        assert_eq!(runtime.pattern_miner().lock().total_episodes(), 0);
+        assert!(!runtime.paths().cfactor_jsonl.exists());
+        assert_eq!(
+            runtime
+                .experiment_store()
+                .lock()
+                .get("cadence-exp")
+                .and_then(|exp| exp.stats.get("cadence"))
+                .map(|stats| stats.trials),
+            Some(0)
+        );
+
+        let update = runtime
+            .record_completed_run(CompletedRunInput {
+                experiment_variant_id: Some("cadence".to_string()),
+                ..CompletedRunInput::from_episode(sample_pattern_episode(true, "two"))
+            })
+            .await
+            .unwrap();
+        assert!(update.router_updated);
+        assert!(update.extracted_skill_id.is_some());
+        assert!(!update.patterns_ingested);
+        assert_eq!(runtime.cascade_router().total_observations(), 1);
+        assert_eq!(runtime.skill_library().len(), 1);
+        assert_eq!(runtime.pattern_miner().lock().total_episodes(), 0);
+        assert!(!runtime.paths().cfactor_jsonl.exists());
+        assert_eq!(
+            runtime
+                .experiment_store()
+                .lock()
+                .get("cadence-exp")
+                .and_then(|exp| exp.stats.get("cadence"))
+                .map(|stats| stats.trials),
+            Some(0)
+        );
+
+        let update = runtime
+            .record_completed_run(CompletedRunInput {
+                experiment_variant_id: Some("cadence".to_string()),
+                ..CompletedRunInput::from_episode(sample_pattern_episode(true, "three"))
+            })
+            .await
+            .unwrap();
+        assert!(!update.router_updated);
+        assert!(update.extracted_skill_id.is_none());
+        assert!(update.patterns_ingested);
+        assert_eq!(runtime.cascade_router().total_observations(), 1);
+        assert_eq!(runtime.skill_library().len(), 1);
+        assert_eq!(runtime.pattern_miner().lock().total_episodes(), 1);
+        assert!(!runtime.paths().cfactor_jsonl.exists());
+        assert_eq!(
+            runtime
+                .experiment_store()
+                .lock()
+                .get("cadence-exp")
+                .and_then(|exp| exp.stats.get("cadence"))
+                .map(|stats| stats.trials),
+            Some(1)
+        );
+
+        let update = runtime
+            .record_completed_run(CompletedRunInput {
+                experiment_variant_id: Some("cadence".to_string()),
+                ..CompletedRunInput::from_episode(sample_pattern_episode(true, "four"))
+            })
+            .await
+            .unwrap();
+        assert!(update.router_updated);
+        assert!(update.extracted_skill_id.is_some());
+        assert!(!update.patterns_ingested);
+        assert_eq!(runtime.cascade_router().total_observations(), 2);
+        assert_eq!(runtime.skill_library().len(), 2);
+        assert_eq!(runtime.pattern_miner().lock().total_episodes(), 1);
+        let cfactor_jsonl = std::fs::read_to_string(&runtime.paths().cfactor_jsonl).unwrap();
+        let snapshots: Vec<crate::cfactor::CFactor> = cfactor_jsonl
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("valid c-factor snapshot"))
+            .collect();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].episode_count, 4);
+        assert_eq!(
+            runtime
+                .experiment_store()
+                .lock()
+                .get("cadence-exp")
+                .and_then(|exp| exp.stats.get("cadence"))
+                .map(|stats| stats.trials),
+            Some(1)
+        );
     }
 
     #[test]
@@ -1518,6 +1991,7 @@ mod tests {
             crate_familiarity: 0.5,
             has_prior_failure: false,
             affect_confidence: 0.5,
+            thinking_level: None,
             previous_model: None,
             plan_context_tokens: None,
         };
@@ -1591,6 +2065,114 @@ mod tests {
             sonnet.get("successes").and_then(serde_json::Value::as_u64),
             Some(1),
             "persisted router should reflect the successful observation"
+        );
+    }
+
+    #[tokio::test]
+    async fn experiment_updates_static_table() {
+        let tmp = TempDir::new().unwrap();
+        let learn_root = tmp.path().join(".roko").join("learn");
+        let paths = LearningPaths::under(&learn_root);
+        let runtime = LearningRuntime::open_with_models(
+            paths.clone(),
+            RegressionConfig::default(),
+            vec![
+                "claude-sonnet-4-20250514".to_string(),
+                "claude-haiku-4-5-20251001".to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let mut experiment = PromptExperiment::new(
+            "model-routing-exp",
+            "model-routing",
+            vec![
+                PromptVariant {
+                    id: "sonnet".to_string(),
+                    name: "Sonnet".to_string(),
+                    section_name: "model-routing".to_string(),
+                    content: String::new(),
+                    slug: Some("claude-sonnet-4-20250514".to_string()),
+                    active: true,
+                },
+                PromptVariant {
+                    id: "haiku".to_string(),
+                    name: "Haiku".to_string(),
+                    section_name: "model-routing".to_string(),
+                    content: String::new(),
+                    slug: Some("claude-haiku-4-5-20251001".to_string()),
+                    active: true,
+                },
+            ],
+        );
+        experiment.role = Some("implementer".to_string());
+        experiment.min_trials_per_variant = 1;
+        experiment.min_effect_size = 0.5;
+        runtime.experiment_store().lock().register(experiment);
+
+        let mut before_ctx = RoutingContext {
+            task_category: TaskCategory::Implementation,
+            complexity: TaskComplexityBand::Standard,
+            iteration: 0,
+            role: AgentRole::Implementer,
+            crate_familiarity: 0.5,
+            has_prior_failure: false,
+            affect_confidence: 0.5,
+            thinking_level: None,
+            previous_model: None,
+            plan_context_tokens: None,
+        };
+        assert_eq!(
+            runtime.cascade_router().route(&before_ctx).primary.slug,
+            "claude-sonnet-4-20250514"
+        );
+
+        let mut losing_episode = sample_episode(false);
+        losing_episode.extra.insert(
+            "model".to_string(),
+            serde_json::json!("claude-sonnet-4-20250514"),
+        );
+        runtime
+            .record_completed_run(CompletedRunInput {
+                experiment_variant_id: Some("sonnet".to_string()),
+                ..CompletedRunInput::from_episode(losing_episode)
+            })
+            .await
+            .unwrap();
+
+        let mut winning_episode = sample_episode(true);
+        winning_episode.extra.insert(
+            "model".to_string(),
+            serde_json::json!("claude-haiku-4-5-20251001"),
+        );
+        runtime
+            .record_completed_run(CompletedRunInput {
+                experiment_variant_id: Some("haiku".to_string()),
+                ..CompletedRunInput::from_episode(winning_episode)
+            })
+            .await
+            .unwrap();
+
+        before_ctx.iteration = 1;
+        assert_eq!(
+            runtime.cascade_router().route(&before_ctx).primary.slug,
+            "claude-haiku-4-5-20251001"
+        );
+
+        let reloaded = LearningRuntime::open_with_models(
+            paths,
+            RegressionConfig::default(),
+            vec![
+                "claude-sonnet-4-20250514".to_string(),
+                "claude-haiku-4-5-20251001".to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reloaded.cascade_router().route(&before_ctx).primary.slug,
+            "claude-haiku-4-5-20251001"
         );
     }
 
@@ -1695,5 +2277,188 @@ mod tests {
         let report = update.regression_report.expect("regression report");
         assert!(report.sufficient_data);
         assert!(!report.alerts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn health_filters_routing() {
+        let tmp = TempDir::new().unwrap();
+        let runtime = LearningRuntime::open_with_models(
+            LearningPaths::under(tmp.path()),
+            RegressionConfig::default(),
+            vec![
+                "moonshot-fast".to_string(),
+                "moonshot-premium".to_string(),
+                "anthropic-safe".to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+
+        for _ in 0..3 {
+            runtime.provider_health().record_failure("moonshot");
+        }
+
+        let all_model_slugs = runtime
+            .cascade_router()
+            .linucb()
+            .arm_stats()
+            .into_iter()
+            .map(|arm| arm.slug)
+            .collect::<Vec<_>>();
+        let healthy_models = runtime.healthy_model_slugs(&all_model_slugs, |model_slug| {
+            if model_slug.starts_with("moonshot") {
+                "moonshot".to_string()
+            } else {
+                "anthropic".to_string()
+            }
+        });
+
+        assert_eq!(healthy_models, vec!["anthropic-safe".to_string()]);
+
+        let ctx = RoutingContext {
+            task_category: TaskCategory::Implementation,
+            complexity: TaskComplexityBand::Standard,
+            iteration: 0,
+            role: AgentRole::Implementer,
+            crate_familiarity: 0.5,
+            has_prior_failure: false,
+            affect_confidence: 0.5,
+            thinking_level: None,
+            previous_model: None,
+            plan_context_tokens: None,
+        };
+        let selected = runtime
+            .cascade_router()
+            .select_for_frequency_among(
+                roko_core::OperatingFrequency::Theta,
+                Some(&ctx),
+                None,
+                Some("Implementer"),
+                &healthy_models,
+            )
+            .expect("theta should route to a healthy model");
+
+        assert_eq!(selected.slug, "anthropic-safe");
+    }
+
+    #[tokio::test]
+    async fn conductor_negative_feedback_records_failed_router_observation() {
+        let tmp = TempDir::new().unwrap();
+        let runtime = LearningRuntime::open_with_models(
+            LearningPaths::under(tmp.path()),
+            RegressionConfig::default(),
+            vec!["claude-opus-4-6".to_string()],
+        )
+        .await
+        .unwrap();
+
+        let routing_context = RoutingContext {
+            task_category: TaskCategory::Implementation,
+            complexity: TaskComplexityBand::Standard,
+            iteration: 1,
+            role: AgentRole::Implementer,
+            crate_familiarity: 0.5,
+            has_prior_failure: false,
+            affect_confidence: 0.5,
+            thinking_level: None,
+            previous_model: None,
+            plan_context_tokens: None,
+        };
+
+        let recorded = runtime.record_conductor_intervention(
+            &routing_context,
+            "claude-opus-4-6",
+            &ConductorDecision::restart("stuck-pattern", "repeated output"),
+        );
+        assert!(recorded);
+
+        let stats = runtime.cascade_router().observation_snapshot();
+        let opus = stats.get("claude-opus-4-6").expect("router stats");
+        assert_eq!(opus.trials, 1);
+        assert_eq!(opus.successes, 0);
+
+        let reloaded = LearningRuntime::open_with_models(
+            LearningPaths::under(tmp.path()),
+            RegressionConfig::default(),
+            vec!["claude-opus-4-6".to_string()],
+        )
+        .await
+        .unwrap();
+        let persisted = reloaded.cascade_router().observation_snapshot();
+        let opus = persisted
+            .get("claude-opus-4-6")
+            .expect("persisted router stats");
+        assert_eq!(opus.trials, 1);
+        assert_eq!(opus.successes, 0);
+    }
+
+    #[tokio::test]
+    async fn latency_aware_reward_prefers_faster_models() {
+        let tmp = TempDir::new().unwrap();
+        let runtime = LearningRuntime::open_under(tmp.path()).await.unwrap();
+
+        let event = AgentEfficiencyEvent {
+            backend: "anthropic".to_string(),
+            model: "claude-opus-4-6".to_string(),
+            model_used: "claude-opus-4-6".to_string(),
+            wall_time_ms: 1_000,
+            duration_ms: 1_000,
+            output_tokens: 128,
+            ..AgentEfficiencyEvent::default()
+        };
+        runtime.append_efficiency_event(&event).await.unwrap();
+
+        let faster = runtime.compute_routing_reward_with_latency(
+            true,
+            0.25,
+            1_000,
+            "claude-opus-4-6",
+            "anthropic",
+        );
+        let slower = runtime.compute_routing_reward_with_latency(
+            true,
+            0.25,
+            60_000,
+            "claude-opus-4-6",
+            "anthropic",
+        );
+
+        assert!(faster > slower, "faster={faster}, slower={slower}");
+    }
+
+    #[tokio::test]
+    async fn latency_aware_reward_uses_latency_registry_fallback() {
+        let tmp = TempDir::new().unwrap();
+        let runtime = LearningRuntime::open_under(tmp.path()).await.unwrap();
+
+        for wall_time_ms in [10_000_u64, 20_000, 30_000] {
+            let event = AgentEfficiencyEvent {
+                backend: "anthropic".to_string(),
+                model: "claude-opus-4-6".to_string(),
+                model_used: "claude-opus-4-6".to_string(),
+                wall_time_ms,
+                duration_ms: wall_time_ms,
+                output_tokens: 64,
+                ..AgentEfficiencyEvent::default()
+            };
+            runtime.append_efficiency_event(&event).await.unwrap();
+        }
+
+        let reloaded = LearningRuntime::open_under(tmp.path()).await.unwrap();
+        let stats = reloaded
+            .latency_registry()
+            .get("claude-opus-4-6", "anthropic")
+            .expect("latency stats");
+        assert_eq!(stats.p50_ms(), 20_000.0);
+
+        let reward = reloaded.compute_routing_reward_with_latency(
+            true,
+            0.25,
+            0,
+            "claude-opus-4-6",
+            "anthropic",
+        );
+        let expected = compute_routing_reward_v2(1.0, 0.25_f64 / 5.0, 20_000.0, 120_000.0);
+        assert!((reward - expected).abs() < 1e-9);
     }
 }
