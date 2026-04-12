@@ -2,6 +2,11 @@
 //!
 //! Two-panel layout: left 35% (branch tree + worktree list),
 //! right 65% (commit graph + branch info).
+//!
+//! Populates data by running git commands when the TuiState fields are
+//! empty, so the view always shows real repository state.
+
+use std::process::Command;
 
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Modifier;
@@ -47,8 +52,7 @@ pub struct CommitEntry {
     pub graph_prefix: String,
 }
 
-/// Git view data container. Populated externally and passed in.
-/// When the full TuiState is wired, this will be sourced from there.
+/// Git view data container.
 #[derive(Debug, Clone, Default)]
 pub struct GitViewData {
     pub branches: Vec<GitBranchNode>,
@@ -56,6 +60,7 @@ pub struct GitViewData {
     pub commits: Vec<CommitEntry>,
     pub current_branch: String,
     pub remote_url: String,
+    pub status_lines: Vec<String>,
 }
 
 /// Render the full git view.
@@ -67,10 +72,7 @@ pub fn render(
     view_state: &ViewState,
     theme: &Theme,
 ) {
-    // Git data is not yet available from DashboardData; render with
-    // placeholder data. The integration layer will supply GitViewData
-    // via an extended render function once TuiState is wired.
-    let git_data = GitViewData::default();
+    let git_data = collect_git_data();
     render_with_git_data(frame, area, &git_data, view_state, theme);
 }
 
@@ -89,7 +91,7 @@ pub fn render_with_git_data(
     render_right_panel(frame, panels[1], git_data, view_state, theme);
 }
 
-/// Left panel: branch tree (top 60%) + worktree list (bottom 40%).
+/// Left panel: branch tree (top 50%) + worktree list (mid 25%) + status (bottom 25%).
 fn render_left_panel(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -97,11 +99,16 @@ fn render_left_panel(
     view_state: &ViewState,
     theme: &Theme,
 ) {
-    let sections =
-        Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).split(area);
+    let sections = Layout::vertical([
+        Constraint::Percentage(50),
+        Constraint::Percentage(25),
+        Constraint::Percentage(25),
+    ])
+    .split(area);
 
     render_branch_tree(frame, sections[0], git_data, view_state, theme);
     render_worktree_list(frame, sections[1], git_data, theme);
+    render_status(frame, sections[2], git_data, theme);
 }
 
 /// Branch tree: hierarchical branch listing.
@@ -114,14 +121,13 @@ fn render_branch_tree(
 ) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Branches ")
+        .title(format!(" Branches ({}) ", git_data.branches.len()))
         .border_style(theme.accent());
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // TODO: use branch_tree widget here when available
     if git_data.branches.is_empty() {
-        let empty = Paragraph::new("no branch data (run git fetch)")
+        let empty = Paragraph::new("no branch data")
             .style(theme.muted())
             .wrap(Wrap { trim: false });
         frame.render_widget(empty, inner);
@@ -170,7 +176,7 @@ fn render_worktree_list(
 ) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Worktrees ")
+        .title(format!(" Worktrees ({}) ", git_data.worktrees.len()))
         .border_style(theme.muted());
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -205,7 +211,60 @@ fn render_worktree_list(
     frame.render_widget(table, inner);
 }
 
-/// Right panel: commit graph (top 50%) + branch info (bottom 50%).
+/// Status panel: git status summary.
+fn render_status(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    git_data: &GitViewData,
+    theme: &Theme,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Status ")
+        .border_style(theme.muted());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if git_data.status_lines.is_empty() {
+        let empty = Paragraph::new("clean working tree")
+            .style(theme.success())
+            .wrap(Wrap { trim: false });
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    let lines: Vec<Line<'_>> = git_data
+        .status_lines
+        .iter()
+        .take(inner.height as usize)
+        .map(|line| {
+            let style = if line.starts_with('M') || line.starts_with(" M") {
+                theme.warning()
+            } else if line.starts_with('A') || line.starts_with("??") {
+                theme.success()
+            } else if line.starts_with('D') {
+                theme.danger()
+            } else {
+                theme.text()
+            };
+            Line::from(Span::styled(truncate(line, 40), style))
+        })
+        .collect();
+
+    let remaining = git_data.status_lines.len().saturating_sub(inner.height as usize);
+    let mut all_lines = lines;
+    if remaining > 0 {
+        all_lines.push(Line::from(Span::styled(
+            format!("  ... +{remaining} more"),
+            theme.muted(),
+        )));
+    }
+
+    let paragraph = Paragraph::new(all_lines).wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, inner);
+}
+
+/// Right panel: commit graph (top 60%) + branch info (bottom 40%).
 fn render_right_panel(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -214,7 +273,7 @@ fn render_right_panel(
     theme: &Theme,
 ) {
     let sections =
-        Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).split(area);
+        Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).split(area);
 
     render_commit_graph(frame, sections[0], git_data, view_state, theme);
     render_branch_info(frame, sections[1], git_data, theme);
@@ -230,13 +289,13 @@ fn render_commit_graph(
 ) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Commit Graph ")
+        .title(format!(" Commit Graph ({}) ", git_data.commits.len()))
         .border_style(theme.accent());
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     if git_data.commits.is_empty() {
-        let empty = Paragraph::new("no commit history loaded")
+        let empty = Paragraph::new("no commit history")
             .style(theme.muted())
             .wrap(Wrap { trim: false });
         frame.render_widget(empty, inner);
@@ -288,18 +347,19 @@ fn render_branch_info(
         git_data.current_branch.as_str()
     };
 
-    let current_node = git_data
-        .branches
-        .iter()
-        .find(|b| b.is_current);
+    let current_node = git_data.branches.iter().find(|b| b.is_current);
+
+    let tracking_display = current_node
+        .and_then(|n| n.tracking.as_deref())
+        .unwrap_or("(none)");
 
     let lines = vec![
         Line::from(vec![
-            Span::styled("branch:  ", theme.muted()),
+            Span::styled("branch:   ", theme.muted()),
             Span::styled(current, theme.accent_bold()),
         ]),
         Line::from(vec![
-            Span::styled("remote:  ", theme.muted()),
+            Span::styled("remote:   ", theme.muted()),
             Span::raw(if git_data.remote_url.is_empty() {
                 "(none)"
             } else {
@@ -307,15 +367,11 @@ fn render_branch_info(
             }),
         ]),
         Line::from(vec![
-            Span::styled("tracking:", theme.muted()),
-            Span::raw(
-                current_node
-                    .and_then(|n| n.tracking.as_deref())
-                    .unwrap_or("(none)"),
-            ),
+            Span::styled("tracking: ", theme.muted()),
+            Span::raw(tracking_display),
         ]),
         Line::from(vec![
-            Span::styled("ahead:   ", theme.muted()),
+            Span::styled("ahead:    ", theme.muted()),
             Span::styled(
                 current_node.map_or("0".to_string(), |n| n.ahead.to_string()),
                 theme.success(),
@@ -327,10 +383,253 @@ fn render_branch_info(
                 theme.warning(),
             ),
         ]),
+        Line::from(vec![
+            Span::styled("branches: ", theme.muted()),
+            Span::raw(git_data.branches.len().to_string()),
+            Span::raw("  "),
+            Span::styled("worktrees: ", theme.muted()),
+            Span::raw(git_data.worktrees.len().to_string()),
+        ]),
+        Line::from(vec![
+            Span::styled("modified: ", theme.muted()),
+            Span::raw(git_data.status_lines.len().to_string()),
+            Span::styled(" files", theme.muted()),
+        ]),
     ];
 
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
     frame.render_widget(paragraph, inner);
+}
+
+// ---------------------------------------------------------------------------
+// Git data collection
+// ---------------------------------------------------------------------------
+
+/// Collect live git data by running git commands.
+fn collect_git_data() -> GitViewData {
+    let current_branch = run_git(&["rev-parse", "--abbrev-ref", "HEAD"])
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
+    let remote_url = run_git(&["remote", "get-url", "origin"])
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
+    let branches = collect_branches(&current_branch);
+    let worktrees = collect_worktrees();
+    let commits = collect_commits();
+    let status_lines = collect_status();
+
+    GitViewData {
+        branches,
+        worktrees,
+        commits,
+        current_branch,
+        remote_url,
+        status_lines,
+    }
+}
+
+/// Run a git command and return stdout as a string.
+fn run_git(args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .args(args)
+        .output()
+        .ok()?;
+    if output.status.success() {
+        Some(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        None
+    }
+}
+
+/// Collect branch list with ahead/behind info.
+fn collect_branches(current_branch: &str) -> Vec<GitBranchNode> {
+    // git branch --format with ahead/behind
+    let output = run_git(&[
+        "for-each-ref",
+        "--sort=-committerdate",
+        "--format=%(refname:short)\t%(upstream:short)\t%(upstream:track)",
+        "refs/heads/",
+    ]);
+
+    let Some(output) = output else {
+        return Vec::new();
+    };
+
+    let mut branches = Vec::new();
+    for line in output.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.split('\t').collect();
+        let name = parts.first().map_or("", |s| s.trim()).to_string();
+        let tracking = parts.get(1).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+
+        let track_info = parts.get(2).map_or("", |s| s.trim());
+        let (ahead, behind) = parse_ahead_behind(track_info);
+
+        let is_current = name == current_branch;
+        // Compute depth from path segments (e.g. feature/foo -> depth 1)
+        let depth = name.matches('/').count().min(3) as u16;
+
+        branches.push(GitBranchNode {
+            name,
+            is_current,
+            tracking,
+            ahead,
+            behind,
+            depth,
+        });
+    }
+
+    // Ensure current branch is first
+    branches.sort_by(|a, b| b.is_current.cmp(&a.is_current).then(a.name.cmp(&b.name)));
+    branches
+}
+
+/// Parse "[ahead N, behind M]" from git tracking info.
+fn parse_ahead_behind(s: &str) -> (u32, u32) {
+    let mut ahead = 0u32;
+    let mut behind = 0u32;
+    if s.contains("ahead") {
+        if let Some(n) = s
+            .split("ahead ")
+            .nth(1)
+            .and_then(|s| s.split([',', ']']).next())
+            .and_then(|n| n.trim().parse().ok())
+        {
+            ahead = n;
+        }
+    }
+    if s.contains("behind") {
+        if let Some(n) = s
+            .split("behind ")
+            .nth(1)
+            .and_then(|s| s.split(']').next())
+            .and_then(|n| n.trim().parse().ok())
+        {
+            behind = n;
+        }
+    }
+    (ahead, behind)
+}
+
+/// Collect worktree list.
+fn collect_worktrees() -> Vec<WorktreeEntry> {
+    let output = run_git(&["worktree", "list", "--porcelain"]);
+    let Some(output) = output else {
+        return Vec::new();
+    };
+
+    let mut worktrees = Vec::new();
+    let mut current_path = String::new();
+    let mut current_branch = String::new();
+
+    for line in output.lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            if !current_path.is_empty() {
+                worktrees.push(WorktreeEntry {
+                    path: current_path.clone(),
+                    branch: current_branch.clone(),
+                    status: String::from("active"),
+                });
+            }
+            current_path = path.trim().to_string();
+            current_branch = String::new();
+        } else if let Some(branch) = line.strip_prefix("branch ") {
+            current_branch = branch
+                .trim()
+                .strip_prefix("refs/heads/")
+                .unwrap_or(branch.trim())
+                .to_string();
+        } else if line.trim() == "bare" {
+            current_branch = String::from("(bare)");
+        } else if line.trim() == "detached" {
+            current_branch = String::from("(detached)");
+        }
+    }
+
+    // Push last entry
+    if !current_path.is_empty() {
+        worktrees.push(WorktreeEntry {
+            path: current_path,
+            branch: current_branch,
+            status: String::from("active"),
+        });
+    }
+
+    worktrees
+}
+
+/// Collect recent commits with graph.
+fn collect_commits() -> Vec<CommitEntry> {
+    let output = run_git(&[
+        "log",
+        "--oneline",
+        "--graph",
+        "--decorate=short",
+        "-30",
+        "--format=%h\t%s\t%an",
+    ]);
+    let Some(output) = output else {
+        return Vec::new();
+    };
+
+    let mut commits = Vec::new();
+    for line in output.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        // The graph characters come before the hash. Split on the first
+        // non-graph character sequence that looks like a short hash.
+        let (graph_prefix, rest) = split_graph_line(line);
+        let parts: Vec<&str> = rest.splitn(3, '\t').collect();
+
+        let hash_short = parts.first().map_or("", |s| s.trim()).to_string();
+        let subject = parts.get(1).map_or("", |s| s.trim()).to_string();
+        let author = parts.get(2).map_or("", |s| s.trim()).to_string();
+
+        if !hash_short.is_empty() {
+            commits.push(CommitEntry {
+                hash_short,
+                subject,
+                author,
+                graph_prefix,
+            });
+        }
+    }
+
+    commits
+}
+
+/// Split a git log --graph line into graph prefix and rest.
+fn split_graph_line(line: &str) -> (String, &str) {
+    // Graph chars: *, |, /, \, space
+    let graph_end = line
+        .char_indices()
+        .find(|(_, ch)| !matches!(ch, '*' | '|' | '/' | '\\' | ' ' | '_'))
+        .map_or(line.len(), |(idx, _)| idx);
+    let prefix = &line[..graph_end];
+    let rest = &line[graph_end..];
+    (prefix.to_string(), rest)
+}
+
+/// Collect git status --short.
+fn collect_status() -> Vec<String> {
+    let output = run_git(&["status", "--short"]);
+    let Some(output) = output else {
+        return Vec::new();
+    };
+    output
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .take(50)
+        .map(|l| l.to_string())
+        .collect()
 }
 
 fn truncate(s: &str, max: usize) -> String {

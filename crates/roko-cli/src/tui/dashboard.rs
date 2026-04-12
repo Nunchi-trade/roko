@@ -734,6 +734,12 @@ impl DashboardData {
     pub(crate) fn root(&self) -> &Path {
         &self.root
     }
+
+    /// Cached episodes for log display.
+    #[must_use]
+    pub(crate) fn episodes(&self) -> &[Episode] {
+        &self.episodes
+    }
 }
 
 /// Summary of a task that is currently active.
