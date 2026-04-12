@@ -132,16 +132,17 @@ pub fn render_status_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
     let keys: &str = match state.active_tab {
         Tab::Dashboard => {
             if has_failures {
-                "\u{2191}\u{2193}:nav  r:retry  Tab:panel  ?:help"
+                "\u{2191}\u{2193}:nav  a/o/d/e/g:sub-tab  Tab:panel  ?:help"
             } else {
-                "\u{2191}\u{2193}:nav  Enter:detail  Tab:panel  ?:help"
+                "\u{2191}\u{2193}:nav  a/o/d/e/g:sub-tab  Tab:panel  ?:help"
             }
         }
-        Tab::Plans => "\u{2191}\u{2193}:nav  Enter:detail  /:filter  ?:help",
-        Tab::Agents => "\u{2191}\u{2193}:nav  Tab:panel  ?:help",
-        Tab::Logs => "\u{2191}\u{2193}/PgUp/PgDn:scroll  ?:help",
-        Tab::Signals => "\u{2191}\u{2193}:nav  Enter:detail  ?:help",
+        Tab::Plans => "\u{2191}\u{2193}:nav  Enter:detail  h/l:drill  /:filter  ?:help",
+        Tab::Agents => "\u{2191}\u{2193}:nav  `:cycle  i:inject  y:approve  ?:help",
+        Tab::Git => "\u{2191}\u{2193}:nav  h/l:drill  Enter:expand  ?:help",
+        Tab::Logs => "\u{2191}\u{2193}/PgUp/PgDn:scroll  /:filter  ?:help",
         Tab::Config => "j/k:nav  Enter:toggle  ?:help",
+        Tab::Inspect => "\u{2191}\u{2193}:nav  ?:help",
     };
 
     spans.push(Span::styled(

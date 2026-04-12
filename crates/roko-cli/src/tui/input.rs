@@ -422,6 +422,24 @@ fn handle_global_key(key: KeyEvent) -> Option<TuiAction> {
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Some(TuiAction::Refresh)
         }
+        // Ctrl-a: approve all pending
+        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(TuiAction::ApproveAll)
+        }
+        // Ctrl-t: open task picker
+        KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(TuiAction::OpenTaskPicker)
+        }
+        // Ctrl-x: force advance (confirm)
+        KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(TuiAction::ForceAdvance)
+        }
+        // Ctrl-d: reset selected plan (confirm)
+        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(TuiAction::ResetPlanState)
+        }
+        // F8 / u: queue overview
+        KeyCode::F(8) | KeyCode::Char('u') => Some(TuiAction::ShowQueueOverview),
         KeyCode::Tab => Some(TuiAction::FocusNext),
         KeyCode::BackTab => Some(TuiAction::FocusPrev),
         _ => Option::None,
@@ -432,14 +450,49 @@ fn handle_global_key(key: KeyEvent) -> Option<TuiAction> {
 // Per-tab key handlers
 // ---------------------------------------------------------------------------
 
-fn handle_dashboard_key(key: KeyEvent, _focus: FocusZone) -> TuiAction {
+fn handle_dashboard_key(key: KeyEvent, focus: FocusZone) -> TuiAction {
     match key.code {
-        KeyCode::Up | KeyCode::Char('k') => TuiAction::ScrollFocusedUp,
-        KeyCode::Down | KeyCode::Char('j') => TuiAction::ScrollFocusedDown,
+        // Navigation — focus-aware
+        KeyCode::Up | KeyCode::Char('k') => match focus {
+            FocusZone::PlanTree => TuiAction::SelectPlanUp,
+            FocusZone::AgentOutput => TuiAction::ScrollAgentUp,
+            _ => TuiAction::ScrollFocusedUp,
+        },
+        KeyCode::Down | KeyCode::Char('j') => match focus {
+            FocusZone::PlanTree => TuiAction::SelectPlanDown,
+            FocusZone::AgentOutput => TuiAction::ScrollAgentDown,
+            _ => TuiAction::ScrollFocusedDown,
+        },
+        KeyCode::PageUp => TuiAction::ScrollFocusedUp,
+        KeyCode::PageDown => TuiAction::ScrollFocusedDown,
+        KeyCode::End => TuiAction::ScrollAgentEnd,
+
+        // Plan tree operations
         KeyCode::Enter => TuiAction::ShowPlanDetail,
+        KeyCode::Esc => TuiAction::ClosePlanDetail,
+        KeyCode::Left | KeyCode::Char('h') => TuiAction::DrillOut,
+        KeyCode::Right | KeyCode::Char('l') => TuiAction::DrillIn,
+
+        // Sub-tab switching (a/o/d/e/g/m/P)
+        KeyCode::Char('a') => TuiAction::SwitchDetailTab(0), // Agents
+        KeyCode::Char('o') => TuiAction::SwitchDetailTab(1), // Output
+        KeyCode::Char('d') => TuiAction::SwitchDetailTab(2), // Diff
+        KeyCode::Char('e') => TuiAction::SwitchDetailTab(3), // Errors
+        KeyCode::Char('g') => TuiAction::SwitchDetailTab(4), // Git
+        KeyCode::Char('m') => TuiAction::SwitchDetailTab(5), // MCP
+        KeyCode::Char('P') => TuiAction::SwitchDetailTab(6), // Processes
+
+        // Modal triggers
         KeyCode::Char('w') => TuiAction::ShowWaveOverview,
         KeyCode::Char('p') => TuiAction::TogglePause,
         KeyCode::Char('n') => TuiAction::DismissNotification,
+        KeyCode::Char('i') => TuiAction::StartInject,
+        KeyCode::Char('y') => TuiAction::ApproveCommand,
+        KeyCode::Char('v') => TuiAction::ReverifyPlan,
+
+        // Agent role tabs (backtick cycles, Alt+N selects)
+        KeyCode::Char('`') => TuiAction::SwitchAgentTab(usize::MAX), // cycle
+
         _ => TuiAction::None,
     }
 }
@@ -464,7 +517,18 @@ fn handle_plans_key(key: KeyEvent, focus: FocusZone) -> TuiAction {
         KeyCode::Char(']') => TuiAction::WaveNext,
         KeyCode::Left | KeyCode::Char('h') => TuiAction::DrillOut,
         KeyCode::Right | KeyCode::Char('l') => TuiAction::DrillIn,
-        KeyCode::Char('R') => TuiAction::RestartPlan,
+        KeyCode::PageUp => TuiAction::ScrollFocusedUp,
+        KeyCode::PageDown => TuiAction::ScrollFocusedDown,
+
+        // Filter mode
+        KeyCode::Char('/') => TuiAction::StartFilter,
+
+        // Plan operations (Mori parity)
+        KeyCode::Char('s') => TuiAction::RestartPlan,     // soft retry
+        KeyCode::Char('z') => TuiAction::ReverifyPlan,    // diagnose
+        KeyCode::Char('S') => TuiAction::ResetPlanState,  // repair preserve
+        KeyCode::Char('R') => TuiAction::RestartPhase,    // repair clean
+        KeyCode::Char('c') => TuiAction::ReverifyPlan,    // reverify
         KeyCode::Char('F') => TuiAction::ForceAdvance,
         KeyCode::Char('V') => TuiAction::ReverifyPlan,
         _ => TuiAction::None,
@@ -473,6 +537,7 @@ fn handle_plans_key(key: KeyEvent, focus: FocusZone) -> TuiAction {
 
 fn handle_agents_key(key: KeyEvent, focus: FocusZone) -> TuiAction {
     match key.code {
+        // Focus-aware navigation
         KeyCode::Up | KeyCode::Char('k') => match focus {
             FocusZone::AgentOutput => TuiAction::ScrollAgentUp,
             FocusZone::RightPanel => TuiAction::ScrollDiffUp,
@@ -483,11 +548,22 @@ fn handle_agents_key(key: KeyEvent, focus: FocusZone) -> TuiAction {
             FocusZone::RightPanel => TuiAction::ScrollDiffDown,
             _ => TuiAction::ScrollFocusedDown,
         },
+        KeyCode::PageUp => TuiAction::ScrollAgentUp,
+        KeyCode::PageDown => TuiAction::ScrollAgentDown,
         KeyCode::End | KeyCode::Char('G') => TuiAction::ScrollAgentEnd,
+        KeyCode::Home => TuiAction::ScrollAgentUp, // scroll to top
+
+        // Agent role tab switching (1-4 direct, backtick cycles)
+        KeyCode::Char('`') => TuiAction::SwitchAgentTab(usize::MAX), // cycle
         KeyCode::Char('1') => TuiAction::SwitchAgentTab(0),
         KeyCode::Char('2') => TuiAction::SwitchAgentTab(1),
         KeyCode::Char('3') => TuiAction::SwitchAgentTab(2),
         KeyCode::Char('4') => TuiAction::SwitchAgentTab(3),
+        KeyCode::Char('5') => TuiAction::SwitchAgentTab(4),
+        KeyCode::Char('6') => TuiAction::SwitchAgentTab(5),
+        KeyCode::Char('7') => TuiAction::SwitchAgentTab(6),
+
+        // Agent approval and interaction
         KeyCode::Char('a') => TuiAction::ApproveCommand,
         KeyCode::Char('A') => TuiAction::ApproveAll,
         KeyCode::Char('x') => TuiAction::RejectCommand,
@@ -512,8 +588,11 @@ fn handle_logs_key(key: KeyEvent, _focus: FocusZone) -> TuiAction {
     match key.code {
         KeyCode::Up | KeyCode::Char('k') => TuiAction::ScrollLogUp,
         KeyCode::Down | KeyCode::Char('j') => TuiAction::ScrollLogDown,
-        KeyCode::Char('/') => TuiAction::StartFilter,
+        KeyCode::PageUp => TuiAction::ScrollLogUp,
+        KeyCode::PageDown => TuiAction::ScrollLogDown,
+        KeyCode::Home => TuiAction::ScrollLogUp,
         KeyCode::End | KeyCode::Char('G') => TuiAction::ScrollAgentEnd,
+        KeyCode::Char('/') => TuiAction::StartFilter,
         _ => TuiAction::None,
     }
 }

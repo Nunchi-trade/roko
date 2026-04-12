@@ -4486,13 +4486,13 @@ mod tests {
     }
 
     #[test]
-    fn theme_defaults_to_a_dark_terminal_palette() {
+    fn theme_defaults_to_rosedust_palette() {
         let theme = Theme::from_no_color(false);
-        assert_eq!(theme.foreground, Color::White);
-        assert_eq!(theme.background, Color::Black);
-        assert_eq!(theme.accent, Color::Cyan);
-        assert_eq!(theme.selection_background, Color::Cyan);
-        assert_eq!(theme.selection_foreground, Color::Black);
+        assert_eq!(theme.foreground, Color::Rgb(165, 142, 158)); // rose-tinted text
+        assert_eq!(theme.background, Color::Rgb(0, 0, 0)); // void
+        assert_eq!(theme.accent, Color::Rgb(185, 120, 148)); // primary rose
+        assert_eq!(theme.selection_background, Color::Rgb(34, 28, 36)); // highlight
+        assert_eq!(theme.selection_foreground, Color::Rgb(215, 198, 158)); // bone
     }
 
     #[test]

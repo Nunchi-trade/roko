@@ -476,7 +476,14 @@ impl App {
                     };
             }
             TuiAction::SwitchAgentTab(idx) => {
-                self.tui_state.selected_agent_tab = idx;
+                if idx == usize::MAX {
+                    // Cycle: backtick
+                    let agent_count = self.tui_state.agents.len().max(1);
+                    self.tui_state.selected_agent_tab =
+                        (self.tui_state.selected_agent_tab + 1) % agent_count;
+                } else {
+                    self.tui_state.selected_agent_tab = idx;
+                }
             }
             TuiAction::SwitchDetailTab(idx) => {
                 self.tui_state.plan_detail_tab = idx;
@@ -1111,43 +1118,68 @@ impl DetailState {
 fn help_lines() -> Vec<Line<'static>> {
     let theme = Theme::from_env();
     vec![
-        Line::from(Span::styled("roko dashboard keybindings", theme.accent_bold())),
+        Line::from(Span::styled(
+            "roko dashboard keybindings",
+            theme.accent_bold(),
+        )),
         Line::from(""),
         Line::from(Span::styled("Navigation", theme.accent_bold())),
-        Line::from("F1-F7    switch tabs (Dashboard/Plans/Agents/Git/Logs/Config/Inspect)"),
-        Line::from("Tab      cycle focus between panels"),
-        Line::from("Shift+Tab cycle focus backward"),
-        Line::from("j/k      scroll focused panel"),
-        Line::from("Enter    expand/drill into selection"),
-        Line::from("Esc      close overlay / drill out"),
-        Line::from("q        close overlay or quit"),
+        Line::from("F1-F7      switch tabs (Dashboard/Plans/Agents/Git/Logs/Config/Inspect)"),
+        Line::from("F8 / u     queue overview modal"),
+        Line::from("Tab        cycle focus between panels"),
+        Line::from("Shift+Tab  cycle focus backward"),
+        Line::from("j/k ↑/↓    scroll focused panel"),
+        Line::from("PgUp/PgDn  page scroll"),
+        Line::from("Enter      expand/drill into selection"),
+        Line::from("Esc        close overlay / drill out"),
+        Line::from("q          close overlay or quit"),
         Line::from(""),
-        Line::from(Span::styled("Modals", theme.accent_bold())),
-        Line::from("?        toggle this help"),
-        Line::from("w        wave overview"),
-        Line::from("p        pause/resume pipeline"),
-        Line::from("i        inject message to agent (Agents tab)"),
-        Line::from("/        filter mode (Logs tab)"),
-        Line::from("Ctrl-t   task picker"),
+        Line::from(Span::styled(
+            "Dashboard Sub-Tabs (F1)",
+            theme.accent_bold(),
+        )),
+        Line::from("a          Agents panel"),
+        Line::from("o          Output panel"),
+        Line::from("d          Diff panel"),
+        Line::from("e          Errors panel"),
+        Line::from("g          Git panel"),
+        Line::from("m          MCP / Context panel"),
+        Line::from("P          Processes panel"),
         Line::from(""),
-        Line::from(Span::styled("Agent Controls", theme.accent_bold())),
-        Line::from("a        approve pending command"),
-        Line::from("A        approve all pending"),
-        Line::from("x        reject pending command"),
-        Line::from("1-4      switch agent tab"),
-        Line::from("G/End    resume auto-scroll"),
+        Line::from(Span::styled("Modals & Modes", theme.accent_bold())),
+        Line::from("?          toggle this help"),
+        Line::from("w          wave overview"),
+        Line::from("p          pause/resume pipeline"),
+        Line::from("i          inject message to agent"),
+        Line::from("/          filter mode (Plans/Logs)"),
+        Line::from("Ctrl-t     task picker"),
+        Line::from("Ctrl-a     approve all pending"),
+        Line::from("Ctrl-x     force advance (confirm)"),
+        Line::from("Ctrl-d     reset selected plan (confirm)"),
         Line::from(""),
-        Line::from(Span::styled("Plans", theme.accent_bold())),
-        Line::from("e        expand/collapse plan"),
-        Line::from("[/]      wave prev/next"),
-        Line::from("h/l      drill out/in"),
-        Line::from("R        restart plan"),
-        Line::from("F        force advance"),
-        Line::from("V        re-verify plan"),
+        Line::from(Span::styled("Agent Controls (F3)", theme.accent_bold())),
+        Line::from("y          approve pending command"),
+        Line::from("A          approve all pending"),
+        Line::from("x          reject pending command"),
+        Line::from("`          cycle agent tabs"),
+        Line::from("1-7        switch agent tab directly"),
+        Line::from("G/End      resume auto-scroll"),
+        Line::from(""),
+        Line::from(Span::styled("Plans (F2)", theme.accent_bold())),
+        Line::from("e          expand/collapse plan"),
+        Line::from("[/]        wave prev/next"),
+        Line::from("h/l ←/→    drill out/in"),
+        Line::from("s          soft retry plan"),
+        Line::from("R          restart phase"),
+        Line::from("F          force advance"),
+        Line::from("V / c      re-verify plan"),
+        Line::from("S          repair (preserve completed)"),
+        Line::from("t          task picker"),
+        Line::from("o          queue overview"),
         Line::from(""),
         Line::from(Span::styled("General", theme.accent_bold())),
-        Line::from("r        refresh data"),
-        Line::from("Ctrl-C   quit immediately"),
+        Line::from("Ctrl-r     refresh data"),
+        Line::from("Ctrl-C     quit immediately"),
     ]
 }
 
