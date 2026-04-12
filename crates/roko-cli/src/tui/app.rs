@@ -240,11 +240,11 @@ impl App {
         // Responsive outer margin on large terminals
         let content_area = super::layout::responsive_outer_margin(full_area);
 
-        // Main layout: header + alert_banner + content + footer
+        // Main layout: header (1 line) + content + footer (1 line)
         let main_layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3), // Tab bar header
+                Constraint::Length(1), // Mori-style header bar
                 Constraint::Min(0),   // Content area
                 Constraint::Length(1), // Status footer
             ])
