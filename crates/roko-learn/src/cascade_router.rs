@@ -22,17 +22,17 @@
 
 use parking_lot::Mutex;
 use roko_agent::provider::ProviderError;
+use roko_core::OperatingFrequency;
 use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
 use roko_core::config::schema::RewardWeights;
-use roko_core::OperatingFrequency;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::cfactor::{AgentDispatchBias, CFactor};
 use crate::model_experiment::ModelExperimentStore;
-use crate::model_router::{LinUCBRouter, RoutingContext, COLD_START_THRESHOLD, CONTEXT_DIM};
-use crate::pareto::{compute_pareto_frontier, ModelObservation};
+use crate::model_router::{COLD_START_THRESHOLD, CONTEXT_DIM, LinUCBRouter, RoutingContext};
+use crate::pareto::{ModelObservation, compute_pareto_frontier};
 use crate::provider_health::ProviderHealthRegistry;
 
 // ─── CascadeStage ───────────────────────────────────────────────────────────

@@ -38,11 +38,12 @@
 //!
 //! # Thread safety
 //!
-//! All mutable state is behind a [`parking_lot::Mutex`] so the router can
-//! be shared across async tasks via `Arc<LinUCBRouter>`.
+//! All mutable state is behind a [`parking_lot::RwLock`] so the router can
+//! be shared across async tasks via `Arc<LinUCBRouter>` while allowing
+//! concurrent read-side routing.
 
 use crate::cost_table::CostTable;
-use parking_lot::Mutex;
+use parking_lot::RwLock;
 use rand::Rng;
 use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
 pub use roko_core::config::schema::RewardWeights;
@@ -575,14 +576,14 @@ struct RouterSnapshot {
 ///
 /// Thread-safe: wrap in `Arc` for shared access.
 pub struct LinUCBRouter {
-    state: Mutex<RouterState>,
+    state: RwLock<RouterState>,
     /// Filesystem path for persistence (optional).
     persist_path: Option<PathBuf>,
     /// Static fallback table: tier -> model slug.
     static_table: HashMap<ModelTier, String>,
 }
 
-/// Interior mutable state protected by the mutex.
+/// Interior mutable state protected by the read-write lock.
 #[derive(Debug, Clone)]
 struct RouterState {
     arms: Vec<ArmState>,
@@ -606,7 +607,7 @@ impl LinUCBRouter {
             .map(|slug| ArmState::new(slug, CONTEXT_DIM))
             .collect();
         Self {
-            state: Mutex::new(RouterState {
+            state: RwLock::new(RouterState {
                 arms,
                 total_observations: 0,
             }),
@@ -634,19 +635,19 @@ impl LinUCBRouter {
     /// `alpha = ALPHA_MIN + (ALPHA_MAX - ALPHA_MIN) * exp(-observations / ALPHA_TAU)`
     #[must_use]
     pub fn current_alpha(&self) -> f64 {
-        let obs = self.state.lock().total_observations;
+        let obs = self.state.read().total_observations;
         alpha_for_observations(obs)
     }
 
     /// Total observations recorded.
     #[must_use]
     pub fn total_observations(&self) -> u64 {
-        self.state.lock().total_observations
+        self.state.read().total_observations
     }
 
     /// Override the total observation count (used when restoring from persisted state).
     pub fn set_total_observations(&self, count: u64) {
-        self.state.lock().total_observations = count;
+        self.state.write().total_observations = count;
     }
 
     /// Select the best model for the given context.
@@ -654,7 +655,7 @@ impl LinUCBRouter {
     /// If `total_observations < COLD_START_THRESHOLD`, returns the static
     /// fallback model for the context's complexity band tier.
     pub fn select_model(&self, ctx: &RoutingContext) -> ModelSpec {
-        let state = self.state.lock();
+        let state = self.state.read();
 
         // Cold start: use static routing.
         if state.total_observations < COLD_START_THRESHOLD {
@@ -691,7 +692,7 @@ impl LinUCBRouter {
     /// This is the lower-level entry point used by the cascade router when it
     /// already has the encoded feature vector.
     pub fn select_features(&self, x: &[f64]) -> ModelSpec {
-        let state = self.state.lock();
+        let state = self.state.read();
 
         // Cold start: use static routing.
         if state.total_observations < COLD_START_THRESHOLD {
@@ -732,7 +733,7 @@ impl LinUCBRouter {
         candidate_slugs: &[String],
     ) -> ModelSpec {
         let alpha = {
-            let state = self.state.lock();
+            let state = self.state.read();
             alpha_for_observations(state.total_observations)
         };
         self.select_features_from_candidates_with_alpha_adjuster(ctx, candidate_slugs, |_| alpha)
@@ -756,7 +757,7 @@ impl LinUCBRouter {
             return self.select_model(ctx);
         }
 
-        let state = self.state.lock();
+        let state = self.state.read();
 
         // Cold start: use the filtered static table.
         if state.total_observations < COLD_START_THRESHOLD {
@@ -878,7 +879,7 @@ impl LinUCBRouter {
         }
 
         {
-            let mut state = self.state.lock();
+            let mut state = self.state.write();
             let Some(arm) = state.arms.get_mut(model_idx) else {
                 return;
             };
@@ -910,7 +911,7 @@ impl LinUCBRouter {
     #[must_use]
     pub fn model_index(&self, model_slug: &str) -> Option<usize> {
         self.state
-            .lock()
+            .read()
             .arms
             .iter()
             .position(|arm| slugs_match(&arm.slug, model_slug))
@@ -918,7 +919,7 @@ impl LinUCBRouter {
 
     /// Snapshot of all arm statistics (clone under lock).
     pub fn arm_stats(&self) -> Vec<ArmState> {
-        self.state.lock().arms.clone()
+        self.state.read().arms.clone()
     }
 
     /// Persist router state to the configured path.
@@ -934,7 +935,7 @@ impl LinUCBRouter {
             .ok_or_else(|| std::io::Error::other("LinUCBRouter: no persist_path set"))?;
 
         let snapshot = {
-            let state = self.state.lock();
+            let state = self.state.read();
             RouterSnapshot {
                 arms: state.arms.clone(),
                 total_observations: state.total_observations,
@@ -991,7 +992,7 @@ impl LinUCBRouter {
         let total_observations = arms.iter().map(|a| a.observations).sum();
 
         Ok(Self {
-            state: Mutex::new(RouterState {
+            state: RwLock::new(RouterState {
                 arms,
                 total_observations,
             }),
@@ -1135,6 +1136,8 @@ mod tests {
     use super::*;
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
+    use std::sync::{Arc, Barrier, mpsc};
+    use std::time::Duration;
 
     fn test_slugs() -> Vec<String> {
         vec![
@@ -1713,6 +1716,42 @@ mod tests {
 
         let model = router.select_model(&ctx);
         assert_eq!(model.slug, "gpt-5-mini");
+    }
+
+    #[test]
+    fn concurrent_routing_allows_parallel_readers() {
+        let router = Arc::new(LinUCBRouter::new(test_slugs()));
+        router.set_total_observations(COLD_START_THRESHOLD);
+
+        let barrier = Arc::new(Barrier::new(11));
+        let (tx, rx) = mpsc::channel();
+        let held_read_guard = router.state.read();
+
+        for _ in 0..10 {
+            let router = Arc::clone(&router);
+            let barrier = Arc::clone(&barrier);
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                let model = router.select_features(&default_ctx().to_features());
+                tx.send(model.slug).expect("send selected model");
+            });
+        }
+        drop(tx);
+
+        barrier.wait();
+
+        for _ in 0..10 {
+            let selected = rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("concurrent select_features should complete while a reader holds the lock");
+            assert!(
+                !selected.is_empty(),
+                "selected model slug should not be empty"
+            );
+        }
+
+        drop(held_read_guard);
     }
 
     #[test]
