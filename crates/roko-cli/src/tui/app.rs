@@ -908,9 +908,75 @@ impl App {
         }
     }
 
+    /// Update system metrics (CPU, memory) on each refresh.
+    fn update_sys_metrics(&mut self) {
+        // CPU: parse from `ps` (macOS/Linux compatible)
+        if let Ok(out) = std::process::Command::new("ps")
+            .args(["-A", "-o", "%cpu"])
+            .output()
+        {
+            if out.status.success() {
+                let text = String::from_utf8_lossy(&out.stdout);
+                let total: f64 = text
+                    .lines()
+                    .skip(1) // header
+                    .filter_map(|l| l.trim().parse::<f64>().ok())
+                    .sum();
+                self.tui_state.sys.cpu_pct = total.min(100.0) as f32;
+                self.tui_state.sys.cpu_history.push(self.tui_state.sys.cpu_pct);
+                if self.tui_state.sys.cpu_history.len() > 60 {
+                    self.tui_state.sys.cpu_history.remove(0);
+                }
+            }
+        }
+        // Memory: parse from `vm_stat` on macOS
+        #[cfg(target_os = "macos")]
+        {
+            if let Ok(out) = std::process::Command::new("vm_stat").output() {
+                if out.status.success() {
+                    let text = String::from_utf8_lossy(&out.stdout);
+                    let page_size = 16384u64; // Apple Silicon default
+                    let mut active = 0u64;
+                    let mut wired = 0u64;
+                    let mut compressed = 0u64;
+                    for line in text.lines() {
+                        if let Some(val) = extract_vm_stat_value(line, "Pages active") {
+                            active = val * page_size;
+                        }
+                        if let Some(val) = extract_vm_stat_value(line, "Pages wired") {
+                            wired = val * page_size;
+                        }
+                        if let Some(val) =
+                            extract_vm_stat_value(line, "Pages occupied by compressor")
+                        {
+                            compressed = val * page_size;
+                        }
+                    }
+                    self.tui_state.sys.mem_used_bytes = active + wired + compressed;
+                    // Total physical memory from sysctl
+                    if self.tui_state.sys.mem_total_bytes == 0 {
+                        if let Ok(out) = std::process::Command::new("sysctl")
+                            .args(["-n", "hw.memsize"])
+                            .output()
+                        {
+                            if out.status.success() {
+                                if let Ok(v) =
+                                    String::from_utf8_lossy(&out.stdout).trim().parse::<u64>()
+                                {
+                                    self.tui_state.sys.mem_total_bytes = v;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn refresh_snapshot_if_needed(&mut self) {
         if self.last_refresh.elapsed() >= Duration::from_millis(250) {
             self.refresh_snapshot();
+            self.update_sys_metrics();
         }
     }
 
@@ -1180,6 +1246,20 @@ fn help_lines() -> Vec<Line<'static>> {
         Line::from("Ctrl-r     refresh data"),
         Line::from("Ctrl-C     quit immediately"),
     ]
+}
+
+/// Extract a numeric value from a vm_stat line like "Pages active:    123456."
+#[cfg(target_os = "macos")]
+fn extract_vm_stat_value(line: &str, key: &str) -> Option<u64> {
+    if !line.contains(key) {
+        return None;
+    }
+    line.split(':')
+        .nth(1)?
+        .trim()
+        .trim_end_matches('.')
+        .parse::<u64>()
+        .ok()
 }
 
 fn pretty_json(value: &Value) -> String {
