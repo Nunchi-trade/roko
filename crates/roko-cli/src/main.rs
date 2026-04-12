@@ -35,15 +35,18 @@ use roko_fs::{FileSubstrate, FsObservabilitySinks, RokoLayout};
 use roko_learn::cfactor::{CFactor, trend_arrow as cfactor_trend_arrow};
 use roko_learn::efficiency::compute_role_profiles;
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
+use roko_learn::latency::LatencyStats;
 use roko_learn::prompt_experiment::ExperimentStore;
+use roko_learn::provider_health::{CircuitState, ProviderHealth};
 use roko_learn::runtime_feedback::{read_efficiency_events, refresh_cfactor_snapshot};
 use roko_neuro::{DEFAULT_GC_MIN_CONFIDENCE, KnowledgeStore};
-use std::collections::BTreeMap;
+use serde::Deserialize;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::fmt::Write as _;
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
 use tracing_subscriber::registry::LookupSpan;
@@ -566,6 +569,12 @@ enum ProviderCmd {
     /// List configured providers and their current connection status.
     List {
         /// Directory containing `roko.toml` (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Show persisted provider circuit-breaker health and latency.
+    Health {
+        /// Directory containing `.roko/` (default: cwd / --repo).
         #[arg(long)]
         workdir: Option<PathBuf>,
     },
@@ -1420,11 +1429,79 @@ struct ProviderListRow {
     status: String,
 }
 
+const PROVIDER_FAILURE_THRESHOLD: u32 = 3;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProviderHealthRow {
+    provider: String,
+    state: String,
+    fails: String,
+    cooldown: String,
+    latency_p50: String,
+    error_rate: String,
+    last_check: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ProviderHealthSnapshot {
+    #[serde(default)]
+    providers: HashMap<String, ProviderHealth>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct LatencyStatsSnapshot {
+    #[serde(default)]
+    entries: Vec<LatencyStatsEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LatencyStatsEntry {
+    provider: String,
+    stats: LatencyStats,
+}
+
+#[derive(Debug, Default)]
+struct ProviderLatencySummary {
+    recent_latencies: Vec<f64>,
+    weighted_latency_ms: f64,
+    observations: u64,
+}
+
+impl ProviderLatencySummary {
+    fn record(&mut self, stats: &LatencyStats) {
+        self.recent_latencies
+            .extend(stats.recent_latencies.iter().copied());
+        self.weighted_latency_ms += stats.total_latency_ema_ms * stats.observations as f64;
+        self.observations = self.observations.saturating_add(stats.observations);
+    }
+
+    fn p50_ms(&self) -> Option<f64> {
+        if !self.recent_latencies.is_empty() {
+            let mut latencies = self.recent_latencies.clone();
+            latencies.sort_by(|a, b| a.total_cmp(b));
+            let idx = ((latencies.len() as f64) * 0.50).floor() as usize;
+            let idx = idx.min(latencies.len().saturating_sub(1));
+            return latencies.get(idx).copied();
+        }
+
+        if self.observations > 0 {
+            return Some(self.weighted_latency_ms / self.observations as f64);
+        }
+
+        None
+    }
+}
+
 async fn cmd_provider(cli: &Cli, cmd: ProviderCmd) -> Result<i32> {
     match cmd {
         ProviderCmd::List { workdir } => {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             cmd_provider_list(&wd).await?;
+            Ok(EXIT_SUCCESS)
+        }
+        ProviderCmd::Health { workdir } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            cmd_provider_health(&wd)?;
             Ok(EXIT_SUCCESS)
         }
     }
@@ -1456,6 +1533,45 @@ async fn cmd_provider_list(workdir: &Path) -> Result<()> {
     }
 
     print!("{}", format_provider_rows(&rows));
+    Ok(())
+}
+
+fn cmd_provider_health(workdir: &Path) -> Result<()> {
+    let config = load_roko_config(workdir)?;
+    let configured = configured_providers(&config);
+    let health_path = provider_health_path(workdir);
+    let latency_path = latency_stats_path(workdir);
+    let provider_health = load_provider_health_snapshot(&health_path)?;
+    let latency_stats = load_latency_stats_by_provider(&latency_path)?;
+
+    let mut provider_names = BTreeSet::new();
+    provider_names.extend(configured.keys().cloned());
+    provider_names.extend(provider_health.keys().cloned());
+    provider_names.extend(latency_stats.keys().cloned());
+
+    if provider_names.is_empty() {
+        println!("no provider health recorded");
+        return Ok(());
+    }
+
+    let now_ms = unix_ms_now();
+    let health_file_ms = file_modified_ms(&health_path);
+    let latency_file_ms = file_modified_ms(&latency_path);
+    let rows = provider_names
+        .into_iter()
+        .map(|provider| {
+            build_provider_health_row(
+                &provider,
+                provider_health.get(&provider),
+                latency_stats.get(&provider),
+                now_ms,
+                health_file_ms,
+                latency_file_ms,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    print!("{}", format_provider_health_rows(&rows));
     Ok(())
 }
 
@@ -1654,6 +1770,255 @@ fn format_provider_rows(rows: &[ProviderListRow]) -> String {
     }
 
     out
+}
+
+fn provider_health_path(workdir: &Path) -> PathBuf {
+    RokoLayout::for_project(workdir)
+        .learn_dir()
+        .join("provider-health.json")
+}
+
+fn latency_stats_path(workdir: &Path) -> PathBuf {
+    RokoLayout::for_project(workdir)
+        .learn_dir()
+        .join("latency-stats.json")
+}
+
+fn load_provider_health_snapshot(path: &Path) -> Result<HashMap<String, ProviderHealth>> {
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+
+    let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let snapshot: ProviderHealthSnapshot =
+        serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
+    Ok(snapshot.providers)
+}
+
+fn load_latency_stats_by_provider(path: &Path) -> Result<HashMap<String, ProviderLatencySummary>> {
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+
+    let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let snapshot: LatencyStatsSnapshot =
+        serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
+
+    let mut providers = HashMap::new();
+    for entry in snapshot.entries {
+        providers
+            .entry(entry.provider)
+            .or_insert_with(ProviderLatencySummary::default)
+            .record(&entry.stats);
+    }
+
+    Ok(providers)
+}
+
+fn build_provider_health_row(
+    provider: &str,
+    health: Option<&ProviderHealth>,
+    latency: Option<&ProviderLatencySummary>,
+    now_ms: i64,
+    health_file_ms: Option<i64>,
+    latency_file_ms: Option<i64>,
+) -> ProviderHealthRow {
+    let state = health
+        .map(|snapshot| effective_circuit_state(snapshot, now_ms))
+        .unwrap_or(CircuitState::Closed);
+    let fails = health
+        .map(|snapshot| {
+            format!(
+                "{}/{}",
+                snapshot.consecutive_failures, PROVIDER_FAILURE_THRESHOLD
+            )
+        })
+        .unwrap_or_else(|| format!("0/{PROVIDER_FAILURE_THRESHOLD}"));
+    let cooldown = format_cooldown(health, state, now_ms);
+    let latency_p50 = latency
+        .and_then(ProviderLatencySummary::p50_ms)
+        .map(format_latency_p50)
+        .unwrap_or_else(|| "—".to_string());
+    let error_rate = health
+        .filter(|snapshot| snapshot.total_requests > 0)
+        .map(|snapshot| {
+            format!(
+                "{:.1}%",
+                (snapshot.total_failures as f64 * 100.0) / snapshot.total_requests as f64
+            )
+        })
+        .unwrap_or_else(|| "—".to_string());
+
+    let mut last_check_ms = health.and_then(|snapshot| snapshot.last_failure_at);
+    if health.is_some() {
+        last_check_ms = max_timestamp(last_check_ms, health_file_ms);
+    }
+    if latency.is_some() {
+        last_check_ms = max_timestamp(last_check_ms, latency_file_ms);
+    }
+
+    ProviderHealthRow {
+        provider: provider.to_string(),
+        state: format_circuit_state(state).to_string(),
+        fails,
+        cooldown,
+        latency_p50,
+        error_rate,
+        last_check: last_check_ms
+            .map(|timestamp_ms| format_timestamp_age(timestamp_ms, now_ms))
+            .unwrap_or_else(|| "—".to_string()),
+    }
+}
+
+fn effective_circuit_state(health: &ProviderHealth, now_ms: i64) -> CircuitState {
+    match health.state {
+        CircuitState::Open if health.cooldown_until.is_some_and(|until| now_ms >= until) => {
+            CircuitState::HalfOpen
+        }
+        state => state,
+    }
+}
+
+fn format_circuit_state(state: CircuitState) -> &'static str {
+    match state {
+        CircuitState::Closed => "CLOSED",
+        CircuitState::Open => "OPEN",
+        CircuitState::HalfOpen => "HALF-OPEN",
+    }
+}
+
+fn format_cooldown(health: Option<&ProviderHealth>, state: CircuitState, now_ms: i64) -> String {
+    let Some(health) = health else {
+        return "—".to_string();
+    };
+
+    if state != CircuitState::Open {
+        return "—".to_string();
+    }
+
+    health
+        .cooldown_until
+        .map(|until| until.saturating_sub(now_ms))
+        .filter(|remaining_ms| *remaining_ms > 0)
+        .map(format_remaining_ms)
+        .unwrap_or_else(|| "—".to_string())
+}
+
+fn format_provider_health_rows(rows: &[ProviderHealthRow]) -> String {
+    let mut widths = [
+        "Provider".len(),
+        "State".len(),
+        "Fails".len(),
+        "Cooldown".len(),
+        "Latency p50".len(),
+        "Error Rate".len(),
+        "Last Check".len(),
+    ];
+
+    for row in rows {
+        widths[0] = widths[0].max(row.provider.len());
+        widths[1] = widths[1].max(row.state.len());
+        widths[2] = widths[2].max(row.fails.len());
+        widths[3] = widths[3].max(row.cooldown.len());
+        widths[4] = widths[4].max(row.latency_p50.len());
+        widths[5] = widths[5].max(row.error_rate.len());
+        widths[6] = widths[6].max(row.last_check.len());
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "{:<provider_w$}  {:<state_w$}  {:<fails_w$}  {:<cooldown_w$}  {:<latency_w$}  {:<error_w$}  {:<last_w$}",
+        "Provider",
+        "State",
+        "Fails",
+        "Cooldown",
+        "Latency p50",
+        "Error Rate",
+        "Last Check",
+        provider_w = widths[0],
+        state_w = widths[1],
+        fails_w = widths[2],
+        cooldown_w = widths[3],
+        latency_w = widths[4],
+        error_w = widths[5],
+        last_w = widths[6],
+    );
+
+    for row in rows {
+        let _ = writeln!(
+            out,
+            "{:<provider_w$}  {:<state_w$}  {:<fails_w$}  {:<cooldown_w$}  {:<latency_w$}  {:<error_w$}  {:<last_w$}",
+            row.provider,
+            row.state,
+            row.fails,
+            row.cooldown,
+            row.latency_p50,
+            row.error_rate,
+            row.last_check,
+            provider_w = widths[0],
+            state_w = widths[1],
+            fails_w = widths[2],
+            cooldown_w = widths[3],
+            latency_w = widths[4],
+            error_w = widths[5],
+            last_w = widths[6],
+        );
+    }
+
+    out
+}
+
+fn format_latency_p50(ms: f64) -> String {
+    if ms >= 500.0 {
+        format!("{:.1}s", ms / 1000.0)
+    } else {
+        format!("{ms:.0}ms")
+    }
+}
+
+fn format_remaining_ms(ms: i64) -> String {
+    let secs = (ms.max(0) + 999) / 1000;
+    format!("{} left", format_compact_duration(secs))
+}
+
+fn format_timestamp_age(timestamp_ms: i64, now_ms: i64) -> String {
+    let secs = now_ms.saturating_sub(timestamp_ms).max(0) / 1000;
+    format!("{} ago", format_compact_duration(secs))
+}
+
+fn format_compact_duration(secs: i64) -> String {
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m", secs / 60),
+        3600..=86_399 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86_400),
+    }
+}
+
+fn file_modified_ms(path: &Path) -> Option<i64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    system_time_to_ms(modified)
+}
+
+fn system_time_to_ms(timestamp: SystemTime) -> Option<i64> {
+    timestamp
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+}
+
+fn unix_ms_now() -> i64 {
+    system_time_to_ms(SystemTime::now()).unwrap_or(0)
+}
+
+fn max_timestamp(left: Option<i64>, right: Option<i64>) -> Option<i64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    }
 }
 
 fn dispatch_config(cmd: ConfigCmd) -> Result<()> {
@@ -4242,6 +4607,17 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_provider_health_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "provider", "health"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Provider {
+                cmd: ProviderCmd::Health { .. }
+            })
+        ));
+    }
+
+    #[test]
     fn format_provider_rows_renders_headers_and_rows() {
         let output = format_provider_rows(&[ProviderListRow {
             provider: "anthropic".to_string(),
@@ -4254,6 +4630,61 @@ mod tests {
         assert!(output.contains("Base URL"));
         assert!(output.contains("anthropic"));
         assert!(output.contains("ok (cli found)"));
+    }
+
+    #[test]
+    fn build_provider_health_row_formats_state_latency_and_error_rate() {
+        let health = ProviderHealth {
+            provider_id: "zai".to_string(),
+            state: CircuitState::Open,
+            consecutive_failures: 3,
+            total_requests: 20,
+            total_failures: 3,
+            last_failure_at: Some(90_000),
+            cooldown_until: Some(108_000),
+            failure_window: Vec::new(),
+        };
+        let latency = ProviderLatencySummary {
+            recent_latencies: vec![800.0, 1_200.0, 600.0],
+            weighted_latency_ms: 0.0,
+            observations: 0,
+        };
+
+        let row = build_provider_health_row(
+            "zai",
+            Some(&health),
+            Some(&latency),
+            100_000,
+            Some(95_000),
+            Some(99_000),
+        );
+
+        assert_eq!(row.provider, "zai");
+        assert_eq!(row.state, "OPEN");
+        assert_eq!(row.fails, "3/3");
+        assert_eq!(row.cooldown, "8s left");
+        assert_eq!(row.latency_p50, "0.8s");
+        assert_eq!(row.error_rate, "15.0%");
+        assert_eq!(row.last_check, "1s ago");
+    }
+
+    #[test]
+    fn format_provider_health_rows_renders_headers_and_rows() {
+        let output = format_provider_health_rows(&[ProviderHealthRow {
+            provider: "openrouter".to_string(),
+            state: "CLOSED".to_string(),
+            fails: "0/3".to_string(),
+            cooldown: "—".to_string(),
+            latency_p50: "0.8s".to_string(),
+            error_rate: "0.0%".to_string(),
+            last_check: "5m ago".to_string(),
+        }]);
+
+        assert!(output.contains("Provider"));
+        assert!(output.contains("Latency p50"));
+        assert!(output.contains("Error Rate"));
+        assert!(output.contains("openrouter"));
+        assert!(output.contains("0.8s"));
     }
 
     #[test]
