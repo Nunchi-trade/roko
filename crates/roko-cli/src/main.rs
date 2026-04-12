@@ -32,9 +32,9 @@ use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
 use roko_core::task::{TaskCategory, TaskComplexityBand};
 use roko_core::{ContentHash, Context, Kind, Query, Substrate};
 use roko_core::{Headlines, TaskMetric, compute_headlines};
-use roko_learn::cascade_router::{CascadeRouteExplanation, CascadeRouter};
 use roko_dreams::{DreamAgentConfig, DreamEngine, DreamLoopConfig, DreamRunner};
 use roko_fs::{FileSubstrate, FsObservabilitySinks, RokoLayout};
+use roko_learn::cascade_router::{CascadeRouteExplanation, CascadeRouter};
 use roko_learn::cfactor::{CFactor, trend_arrow as cfactor_trend_arrow};
 use roko_learn::cost_table::CostTable;
 use roko_learn::efficiency::compute_role_profiles;
@@ -730,6 +730,12 @@ enum ConfigCmd {
         #[arg(long)]
         workdir: Option<PathBuf>,
     },
+    /// Validate `roko.toml` syntax, schema, and semantic references.
+    Validate {
+        /// Directory to resolve project config from (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
 }
 
 fn main() {
@@ -882,7 +888,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
         Command::Replay { hash, workdir } => cmd_replay(workdir, hash).await,
         Command::Dream { cmd } => cmd_dream(cli, cmd).await,
         Command::Config { cmd } => {
-            dispatch_config(cmd)?;
+            dispatch_config(cmd).await?;
             Ok(EXIT_SUCCESS)
         }
         Command::Inject {
@@ -1582,7 +1588,13 @@ async fn cmd_model(cli: &Cli, cmd: ModelCmd) -> Result<i32> {
             workdir,
         } => {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
-            cmd_model_route(&wd, cli.role.as_deref(), &model, explain, complexity.as_deref())?;
+            cmd_model_route(
+                &wd,
+                cli.role.as_deref(),
+                &model,
+                explain,
+                complexity.as_deref(),
+            )?;
             Ok(EXIT_SUCCESS)
         }
     }
@@ -1666,8 +1678,8 @@ fn cmd_model_route(
     let role = parse_agent_role(role_arg)?;
     let complexity = parse_route_complexity(complexity_arg)?;
     let aliases = model_aliases_by_slug(&models);
-    let requested_slug =
-        resolve_requested_model_slug(requested_model, &models).unwrap_or_else(|| requested_model.to_string());
+    let requested_slug = resolve_requested_model_slug(requested_model, &models)
+        .unwrap_or_else(|| requested_model.to_string());
     let context = RoutingContext {
         task_category: TaskCategory::Implementation,
         complexity: complexity.band,
@@ -1684,8 +1696,12 @@ fn cmd_model_route(
     let provider_health = load_provider_health_snapshot(&provider_health_path(workdir))?;
     let latency_registry = LatencyRegistry::load_or_new(&latency_stats_path(workdir));
     let model_providers = model_provider_map(&models, &model_slugs);
-    let available_candidates =
-        available_model_candidates(&model_slugs, &model_providers, &provider_health, unix_ms_now());
+    let available_candidates = available_model_candidates(
+        &model_slugs,
+        &model_providers,
+        &provider_health,
+        unix_ms_now(),
+    );
     let explanation = router.explain_route(
         &context,
         (!available_candidates.is_empty()).then_some(available_candidates.as_slice()),
@@ -1917,9 +1933,15 @@ fn format_model_route_explanation(
         let provider = model_providers.get(&candidate.slug).map(String::as_str);
         let cost = normalized_cost(&candidate.slug, cost_table);
         let latency = provider
-            .and_then(|provider| normalized_latency_for_model(&candidate.slug, provider, latency_registry))
+            .and_then(|provider| {
+                normalized_latency_for_model(&candidate.slug, provider, latency_registry)
+            })
             .unwrap_or(0.0);
-        let selected_marker = if candidate.selected { "  <- selected" } else { "" };
+        let selected_marker = if candidate.selected {
+            "  <- selected"
+        } else {
+            ""
+        };
 
         let _ = writeln!(
             out,
@@ -2864,7 +2886,7 @@ fn max_timestamp(left: Option<i64>, right: Option<i64>) -> Option<i64> {
     }
 }
 
-fn dispatch_config(cmd: ConfigCmd) -> Result<()> {
+async fn dispatch_config(cmd: ConfigCmd) -> Result<()> {
     match cmd {
         ConfigCmd::Init {
             yes,
@@ -2941,6 +2963,10 @@ fn dispatch_config(cmd: ConfigCmd) -> Result<()> {
         ConfigCmd::CheckSecrets { workdir } => {
             let wd = workdir.unwrap_or_else(|| PathBuf::from("."));
             config_cmd::cmd_check_secrets(&wd)
+        }
+        ConfigCmd::Validate { workdir } => {
+            let wd = workdir.unwrap_or_else(|| PathBuf::from("."));
+            config_cmd::cmd_validate(&wd).await
         }
     }
 }

@@ -759,14 +759,22 @@ impl CascadeRouter {
                     .iter()
                     .map(|slug| CascadeCandidateScore {
                         slug: slug.clone(),
-                        score: if slugs_match(slug, &selected) { 1.0 } else { 0.0 },
+                        score: if slugs_match(slug, &selected) {
+                            1.0
+                        } else {
+                            0.0
+                        },
                         selected: slugs_match(slug, &selected),
                         on_pareto_frontier: pareto_frontier.iter().any(|entry| entry == slug),
                         exploitation: None,
                         exploration: None,
                     })
                     .collect::<Vec<_>>();
-                scored.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.slug.cmp(&b.slug)));
+                scored.sort_by(|a, b| {
+                    b.score
+                        .total_cmp(&a.score)
+                        .then_with(|| a.slug.cmp(&b.slug))
+                });
 
                 CascadeRouteExplanation {
                     stage,
@@ -791,7 +799,11 @@ impl CascadeRouter {
                         exploration: None,
                     })
                     .collect::<Vec<_>>();
-                scored.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.slug.cmp(&b.slug)));
+                scored.sort_by(|a, b| {
+                    b.score
+                        .total_cmp(&a.score)
+                        .then_with(|| a.slug.cmp(&b.slug))
+                });
 
                 CascadeRouteExplanation {
                     stage,
@@ -840,7 +852,11 @@ impl CascadeRouter {
                         exploration: Some(candidate.exploration),
                     })
                     .collect::<Vec<_>>();
-                scored.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.slug.cmp(&b.slug)));
+                scored.sort_by(|a, b| {
+                    b.score
+                        .total_cmp(&a.score)
+                        .then_with(|| a.slug.cmp(&b.slug))
+                });
 
                 CascadeRouteExplanation {
                     stage,
