@@ -11,7 +11,9 @@ use crate::config::{
     ServeLayer, Source, ToolsLayer, detect_clis, global_config_path, load_layered, resolve_paths,
 };
 use anyhow::{Context as _, Result, anyhow};
-use roko_core::config::schema::RokoConfig;
+use roko_core::agent::ProviderKind;
+use roko_core::config::schema::{CURRENT_SCHEMA_VERSION, ModelProfile, ProviderConfig, RokoConfig};
+use roko_core::tool::{ToolFormat, profile_for_model};
 use roko_orchestrator::ExecutorConfig;
 use std::collections::BTreeSet;
 use std::fs;
@@ -335,6 +337,46 @@ pub async fn cmd_validate(workdir: &Path) -> Result<()> {
         Ok(())
     } else {
         Err(anyhow!("config validation failed"))
+    }
+}
+
+/// Migrate a legacy project-local `roko.toml` into explicit provider/model tables.
+pub fn cmd_migrate(workdir: &Path, dry_run: bool) -> Result<()> {
+    let paths = resolve_paths(workdir);
+    let config_path = validate_config_path(&paths, workdir)?;
+    let text =
+        fs::read_to_string(&config_path).with_context(|| format!("read {}", config_path.display()))?;
+    let plan = build_config_migration_plan(&text)?;
+
+    match plan {
+        ConfigMigrationPlan::AlreadyCurrent => {
+            println!("roko.toml already uses [providers.*]; nothing to migrate");
+            Ok(())
+        }
+        ConfigMigrationPlan::Legacy(plan) => {
+            println!("Detected roko.toml version 1 (no [providers] section)");
+            println!();
+            println!("Proposed changes:");
+            for line in render_migration_preview(&plan)? {
+                println!("{line}");
+            }
+
+            if dry_run {
+                println!();
+                println!("[dry-run] no changes written");
+                return Ok(());
+            }
+
+            println!();
+            if !prompt_bool("Apply changes?", false)? {
+                return Err(anyhow!("cancelled"));
+            }
+
+            fs::write(&config_path, &plan.rendered)
+                .with_context(|| format!("write {}", config_path.display()))?;
+            println!("updated {}", config_path.display());
+            Ok(())
+        }
     }
 }
 
@@ -755,6 +797,234 @@ fn apply_key_value(layer: &mut ConfigLayer, key: &str, value: &str) -> Result<()
     Ok(())
 }
 
+#[derive(Debug)]
+enum ConfigMigrationPlan {
+    AlreadyCurrent,
+    Legacy(LegacyConfigMigration),
+}
+
+#[derive(Debug)]
+struct LegacyConfigMigration {
+    provider_name: String,
+    provider: ProviderConfig,
+    models: Vec<(String, ModelProfile)>,
+    rendered: String,
+}
+
+fn build_config_migration_plan(text: &str) -> Result<ConfigMigrationPlan> {
+    let raw_value: toml::Value = toml::from_str(text).context("parse config toml")?;
+    let mut raw = raw_value
+        .as_table()
+        .cloned()
+        .ok_or_else(|| anyhow!("config root must be a TOML table"))?;
+
+    if raw
+        .get("providers")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|providers| !providers.is_empty())
+    {
+        return Ok(ConfigMigrationPlan::AlreadyCurrent);
+    }
+
+    let config = RokoConfig::from_toml(text).context("parse roko config")?;
+    let provider = legacy_provider_config(&config)?;
+    let models = legacy_model_profiles(&config, &provider.0)?;
+
+    let provider_value = toml::Value::try_from(provider.1.clone()).context("serialize provider")?;
+    let mut providers_table = toml::map::Map::new();
+    providers_table.insert(provider.0.clone(), provider_value);
+    raw.insert("providers".to_string(), toml::Value::Table(providers_table));
+
+    let mut models_table = toml::map::Map::new();
+    for (model_key, profile) in &models {
+        let value = toml::Value::try_from(profile.clone())
+            .with_context(|| format!("serialize model '{model_key}'"))?;
+        models_table.insert(model_key.clone(), value);
+    }
+    raw.insert("models".to_string(), toml::Value::Table(models_table));
+    raw.insert(
+        "schema_version".to_string(),
+        toml::Value::Integer(i64::from(CURRENT_SCHEMA_VERSION)),
+    );
+
+    let rendered = toml::to_string_pretty(&toml::Value::Table(raw)).context("serialize config")?;
+    Ok(ConfigMigrationPlan::Legacy(LegacyConfigMigration {
+        provider_name: provider.0,
+        provider: provider.1,
+        models,
+        rendered,
+    }))
+}
+
+fn legacy_provider_config(config: &RokoConfig) -> Result<(String, ProviderConfig)> {
+    let command = config
+        .agent
+        .command
+        .as_deref()
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+        .ok_or_else(|| anyhow!("legacy config is missing agent.command"))?;
+
+    match command {
+        "claude" => Ok((
+            "claude_cli".to_string(),
+            ProviderConfig {
+                kind: ProviderKind::ClaudeCli,
+                base_url: None,
+                api_key_env: None,
+                command: Some(command.to_string()),
+                args: config.agent.args.clone(),
+                timeout_ms: config.agent.timeout_ms,
+                extra_headers: None,
+                max_concurrent: None,
+            },
+        )),
+        "ollama" => Ok((
+            "ollama".to_string(),
+            ProviderConfig {
+                kind: ProviderKind::OpenAiCompat,
+                base_url: Some(
+                    legacy_agent_env(config.agent.env.as_ref(), "OLLAMA_HOST")
+                        .unwrap_or("http://localhost:11434")
+                        .to_string(),
+                ),
+                api_key_env: None,
+                command: None,
+                args: None,
+                timeout_ms: config.agent.timeout_ms,
+                extra_headers: None,
+                max_concurrent: None,
+            },
+        )),
+        other => Err(anyhow!(
+            "legacy agent.command '{other}' cannot be migrated safely; only 'claude' and 'ollama' are supported"
+        )),
+    }
+}
+
+fn legacy_model_profiles(
+    config: &RokoConfig,
+    provider_name: &str,
+) -> Result<Vec<(String, ModelProfile)>> {
+    let mut model_keys = BTreeSet::new();
+
+    let default_model = config.agent.default_model.trim();
+    if !default_model.is_empty() {
+        model_keys.insert(default_model.to_string());
+    }
+
+    for model in config.agent.tier_models.values() {
+        let model = model.trim();
+        if !model.is_empty() {
+            model_keys.insert(model.to_string());
+        }
+    }
+
+    if model_keys.is_empty() {
+        return Err(anyhow!("legacy config has no agent.model or agent.tier_models to migrate"));
+    }
+
+    Ok(model_keys
+        .into_iter()
+        .map(|model_key| {
+            (
+                model_key.clone(),
+                synthesized_legacy_model_profile(provider_name, &model_key),
+            )
+        })
+        .collect())
+}
+
+fn synthesized_legacy_model_profile(provider_name: &str, slug: &str) -> ModelProfile {
+    let tool_profile = profile_for_model(slug);
+    let tool_format = match provider_name {
+        "claude_cli" => ToolFormat::AnthropicBlocks,
+        _ => ToolFormat::OpenAiJson,
+    };
+    let context_window = if matches!(tool_format, ToolFormat::AnthropicBlocks) {
+        200_000
+    } else {
+        128_000
+    };
+
+    ModelProfile {
+        provider: provider_name.to_string(),
+        slug: slug.to_string(),
+        context_window,
+        max_output: None,
+        supports_tools: tool_profile.supports_tools,
+        supports_thinking: false,
+        supports_vision: false,
+        supports_web_search: false,
+        supports_mcp_tools: false,
+        supports_partial: false,
+        provider_routing: None,
+        tool_format: tool_format.as_str().to_string(),
+        cost_input_per_m: None,
+        cost_output_per_m: None,
+        cost_cache_read_per_m: None,
+        cost_cache_write_per_m: None,
+        max_tools: Some(u32::from(tool_profile.max_tools_before_degrade)),
+        tokenizer_ratio: None,
+    }
+}
+
+fn legacy_agent_env<'a>(env: Option<&'a Vec<(String, String)>>, key: &str) -> Option<&'a str> {
+    env.and_then(|entries| {
+        entries.iter().find_map(|(name, value)| {
+            (name.trim().eq_ignore_ascii_case(key) && !value.trim().is_empty())
+                .then_some(value.as_str())
+        })
+    })
+}
+
+fn render_migration_preview(plan: &LegacyConfigMigration) -> Result<Vec<String>> {
+    let mut lines = Vec::new();
+    lines.extend(render_prefixed_toml_block(single_provider_preview(
+        &plan.provider_name,
+        &plan.provider,
+    )?));
+    for (model_key, profile) in &plan.models {
+        lines.push("  +".to_string());
+        lines.extend(render_prefixed_toml_block(single_model_preview(
+            model_key, profile,
+        )?));
+    }
+    lines.push("  +".to_string());
+    lines.push(format!("  + schema_version = {CURRENT_SCHEMA_VERSION}"));
+    Ok(lines)
+}
+
+fn single_provider_preview(name: &str, provider: &ProviderConfig) -> Result<String> {
+    let mut outer = toml::map::Map::new();
+    let mut providers = toml::map::Map::new();
+    providers.insert(
+        name.to_string(),
+        toml::Value::try_from(provider.clone()).context("serialize provider preview")?,
+    );
+    outer.insert("providers".to_string(), toml::Value::Table(providers));
+    toml::to_string_pretty(&toml::Value::Table(outer)).context("serialize provider preview")
+}
+
+fn single_model_preview(model_key: &str, profile: &ModelProfile) -> Result<String> {
+    let mut outer = toml::map::Map::new();
+    let mut models = toml::map::Map::new();
+    models.insert(
+        model_key.to_string(),
+        toml::Value::try_from(profile.clone()).context("serialize model preview")?,
+    );
+    outer.insert("models".to_string(), toml::Value::Table(models));
+    toml::to_string_pretty(&toml::Value::Table(outer)).context("serialize model preview")
+}
+
+fn render_prefixed_toml_block(block: String) -> Vec<String> {
+    block
+        .trim()
+        .lines()
+        .map(|line| format!("  + {line}"))
+        .collect()
+}
+
 #[derive(Debug, Default)]
 struct SemanticValidationReport {
     provider_reference_errors: Vec<String>,
@@ -1163,6 +1433,7 @@ fn prompt_bool(label: &str, default: bool) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
     use roko_core::agent::ProviderKind;
     use roko_core::config::schema::{ModelProfile, ProviderConfig};
     use std::collections::HashMap;
@@ -1367,6 +1638,93 @@ mod tests {
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
         assert_eq!(fs::read_to_string(&path).unwrap(), "TOKEN=abc123");
+    }
+
+    #[test]
+    fn build_config_migration_plan_synthesizes_supported_legacy_claude_config() {
+        let text = r#"
+[agent]
+command = "claude"
+args = ["--print", "--output-format", "stream-json"]
+model = "claude-sonnet-4-6"
+timeout_ms = 300000
+
+[agent.tier_models]
+mechanical = "claude-haiku-4-5"
+"#;
+
+        let plan = build_config_migration_plan(text).unwrap();
+        let ConfigMigrationPlan::Legacy(plan) = plan else {
+            panic!("expected legacy migration plan");
+        };
+
+        assert_eq!(plan.provider_name, "claude_cli");
+        assert_eq!(plan.provider.kind, ProviderKind::ClaudeCli);
+        assert_eq!(plan.provider.command.as_deref(), Some("claude"));
+        assert_eq!(
+            plan.provider.args.as_deref(),
+            Some(&[
+                "--print".to_string(),
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+            ][..])
+        );
+        assert_eq!(plan.provider.timeout_ms, Some(300_000));
+        assert_eq!(plan.models.len(), 2);
+        assert_eq!(plan.models[0].0, "claude-haiku-4-5");
+        assert_eq!(plan.models[0].1.provider, "claude_cli");
+        assert_eq!(plan.models[0].1.tool_format, "anthropic_blocks");
+        assert_eq!(plan.models[1].0, "claude-sonnet-4-6");
+        assert_eq!(plan.models[1].1.provider, "claude_cli");
+
+        let migrated = RokoConfig::from_toml(&plan.rendered).unwrap();
+        assert_eq!(migrated.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(migrated.providers.len(), 1);
+        assert_eq!(migrated.models.len(), 2);
+
+        let legacy = Config::parse_toml(&plan.rendered).unwrap();
+        assert_eq!(legacy.agent.command, "claude");
+        assert_eq!(
+            legacy.agent.args,
+            vec![
+                "--print".to_string(),
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+            ]
+        );
+        assert_eq!(legacy.agent.model.as_deref(), Some("claude-sonnet-4-6"));
+    }
+
+    #[test]
+    fn build_config_migration_plan_rejects_unsupported_legacy_backend() {
+        let text = r#"
+[agent]
+command = "mods"
+model = "gpt-5"
+"#;
+
+        let err = build_config_migration_plan(text).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("legacy agent.command 'mods' cannot be migrated safely"));
+    }
+
+    #[test]
+    fn build_config_migration_plan_noops_for_current_provider_registry() {
+        let text = r#"
+schema_version = 2
+
+[agent]
+command = "claude"
+model = "claude-sonnet-4-6"
+
+[providers.claude_cli]
+kind = "claude_cli"
+command = "claude"
+"#;
+
+        let plan = build_config_migration_plan(text).unwrap();
+        assert!(matches!(plan, ConfigMigrationPlan::AlreadyCurrent));
     }
 
     #[tokio::test]

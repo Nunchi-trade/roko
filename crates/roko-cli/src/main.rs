@@ -736,6 +736,15 @@ enum ConfigCmd {
         #[arg(long)]
         workdir: Option<PathBuf>,
     },
+    /// Migrate a legacy project `roko.toml` into explicit provider/model tables.
+    Migrate {
+        /// Directory to resolve project config from (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+        /// Print the proposed migration without writing changes.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 fn main() {
@@ -2967,6 +2976,10 @@ async fn dispatch_config(cmd: ConfigCmd) -> Result<()> {
         ConfigCmd::Validate { workdir } => {
             let wd = workdir.unwrap_or_else(|| PathBuf::from("."));
             config_cmd::cmd_validate(&wd).await
+        }
+        ConfigCmd::Migrate { workdir, dry_run } => {
+            let wd = workdir.unwrap_or_else(|| PathBuf::from("."));
+            config_cmd::cmd_migrate(&wd, dry_run)
         }
     }
 }
