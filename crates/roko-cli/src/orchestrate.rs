@@ -1048,6 +1048,97 @@ fn select_prompt_skills(
         .collect()
 }
 
+fn neuro_prompt_task_category(role: AgentRole) -> TaskCategory {
+    match role {
+        AgentRole::Researcher | AgentRole::PrePlanner | AgentRole::Strategist => {
+            TaskCategory::Research
+        }
+        AgentRole::Refactorer => TaskCategory::Refactor,
+        AgentRole::Scribe => TaskCategory::Docs,
+        AgentRole::DocVerifier
+        | AgentRole::IntegrationTester
+        | AgentRole::TerminalValidator
+        | AgentRole::GolemLifecycleTester
+        | AgentRole::RegressionDetector
+        | AgentRole::CoverageTracker
+        | AgentRole::CrossSystemTester
+        | AgentRole::DependencyValidator
+        | AgentRole::FullLoopValidator => TaskCategory::Verification,
+        _ => TaskCategory::Implementation,
+    }
+}
+
+fn playbook_heuristic_query(
+    role: AgentRole,
+    task_def: Option<&crate::task_parser::TaskDef>,
+    task_text: &str,
+) -> String {
+    let mut query_parts = vec![
+        neuro_prompt_task_category(role).label().to_string(),
+        task_text.trim().to_string(),
+    ];
+    if let Some(crate_name) = task_crate_name(task_def) {
+        query_parts.push(crate_name);
+    }
+    query_parts.retain(|part| !part.trim().is_empty());
+    query_parts.join(" ")
+}
+
+fn select_playbook_heuristics(
+    knowledge_store: &KnowledgeStore,
+    role: AgentRole,
+    task_def: Option<&crate::task_parser::TaskDef>,
+    task_text: &str,
+    limit: usize,
+) -> Vec<KnowledgeEntry> {
+    let query = playbook_heuristic_query(role, task_def, task_text);
+    knowledge_store
+        .query_kind(&query, KnowledgeKind::Playbook, limit)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|entry| entry.confidence > 0.0)
+        .collect()
+}
+
+fn render_playbook_heuristics(entries: &[KnowledgeEntry]) -> String {
+    use std::fmt::Write as _;
+
+    let mut content = String::from(
+        "## Playbook Heuristics\n\nThe following promoted heuristics were distilled from repeated successful runs:\n",
+    );
+    for (idx, entry) in entries.iter().enumerate() {
+        let confidence = entry.confidence.clamp(0.0, 1.0);
+        let tags = if entry.tags.is_empty() {
+            String::from("-")
+        } else {
+            entry.tags.join(", ")
+        };
+        let _ = write!(
+            content,
+            "\n### {}. Playbook match ({:.0}%)\nTags: {}\n\n{}\n",
+            idx + 1,
+            confidence * 100.0,
+            tags,
+            entry.content.trim()
+        );
+    }
+    content
+}
+
+fn build_playbook_heuristics_context(
+    knowledge_store: &KnowledgeStore,
+    role: AgentRole,
+    task_def: Option<&crate::task_parser::TaskDef>,
+    task_text: &str,
+) -> Option<String> {
+    let heuristics = select_playbook_heuristics(knowledge_store, role, task_def, task_text, 3);
+    if heuristics.is_empty() {
+        None
+    } else {
+        Some(render_playbook_heuristics(&heuristics))
+    }
+}
+
 fn render_playbook_context(playbook: &Playbook) -> String {
     let mut parts = vec![
         format!("Name: {}", playbook.name),
@@ -5031,6 +5122,7 @@ impl PlanRunner {
     fn build_learned_context(
         &self,
         role: AgentRole,
+        task_def: Option<&crate::task_parser::TaskDef>,
         task_text: &str,
         task_tier: Option<&str>,
     ) -> LearnedContext {
@@ -5091,12 +5183,19 @@ impl PlanRunner {
             parts.push(pat_section);
         }
 
-        // 4. Durable knowledge queried from NeuroStore for this task.
+        // 4. Playbook-tier heuristics distilled by roko-neuro.
+        if let Some(playbook_heuristics) =
+            build_playbook_heuristics_context(&self.knowledge_store, role, task_def, task_text)
+        {
+            parts.push(playbook_heuristics);
+        }
+
+        // 5. Durable knowledge queried from NeuroStore for this task.
         if let Some(knowledge_context) = self.build_knowledge_context(task_text, task_tier) {
             parts.push(knowledge_context);
         }
 
-        // 5. Prompt experiment variants — check if any active experiment applies.
+        // 6. Prompt experiment variants — check if any active experiment applies.
         let mut experiment_variant_id = None;
         // Check standard prompt section names for active experiments.
         {
@@ -5110,7 +5209,7 @@ impl PlanRunner {
             }
         }
 
-        // 6. Crate familiarity score from cascade router observations (§9).
+        // 7. Crate familiarity score from cascade router observations (§9).
         let obs_count = self.learning.cascade_router().total_observations();
         if obs_count > 0 {
             let familiarity = (obs_count as f64 / 100.0).min(1.0);
@@ -5141,6 +5240,10 @@ impl PlanRunner {
             tracing::debug!("[orchestrate] knowledge query failed for task context");
             return None;
         };
+        let entries: Vec<_> = entries
+            .into_iter()
+            .filter(|entry| entry.kind != KnowledgeKind::Playbook)
+            .collect();
         if entries.is_empty() {
             return None;
         }
@@ -7889,6 +7992,7 @@ impl PlanRunner {
         // ── Inject learned knowledge (skills, playbook rules, patterns) ──
         let learned = self.build_learned_context(
             role,
+            task_def.as_ref(),
             &task_text,
             task_def.as_ref().map(|td| td.tier.as_str()),
         );
@@ -10732,6 +10836,77 @@ files = ["crates/roko-cli/src/orchestrate.rs"]
         assert!(rendered.contains("matching_skill"));
         assert!(rendered.contains("confidence: 91%"));
         assert!(rendered.contains("Telemetry: 75% success over 4 uses"));
+    }
+
+    #[test]
+    fn neuro_heuristic_injection_uses_playbook_tier_matches() {
+        let tmp = TempDir::new().unwrap();
+        let store = KnowledgeStore::new(tmp.path().join("knowledge.jsonl"));
+
+        store
+            .add(KnowledgeEntry {
+                id: "playbook-match".to_string(),
+                kind: KnowledgeKind::Playbook,
+                source: Some("roko-neuro".to_string()),
+                content: "# PLAYBOOK\n\n## Action Rules\n\nPrefer injecting playbook heuristics before the task body when wiring prompt assembly in crates/roko-cli/src/orchestrate.rs.\n".to_string(),
+                confidence: 0.94,
+                confidence_weight: 0.94,
+                refuted_insight_id: None,
+                refutation_evidence: None,
+                source_episodes: vec!["ep-1".to_string(), "ep-2".to_string()],
+                tags: vec![
+                    "tier:playbook".to_string(),
+                    "implementation".to_string(),
+                    "roko-cli".to_string(),
+                ],
+                created_at: chrono::Utc::now(),
+                half_life_days: 30.0,
+                hdc_vector: None,
+            })
+            .unwrap();
+
+        store
+            .add(KnowledgeEntry {
+                id: "heuristic-match".to_string(),
+                kind: KnowledgeKind::Heuristic,
+                source: Some("roko-neuro".to_string()),
+                content: "This lower-tier heuristic should not be injected when requesting Playbook-tier guidance.".to_string(),
+                confidence: 0.99,
+                confidence_weight: 0.99,
+                refuted_insight_id: None,
+                refutation_evidence: None,
+                source_episodes: vec!["ep-3".to_string()],
+                tags: vec![
+                    "tier:heuristic".to_string(),
+                    "implementation".to_string(),
+                    "roko-cli".to_string(),
+                ],
+                created_at: chrono::Utc::now(),
+                half_life_days: 90.0,
+                hdc_vector: None,
+            })
+            .unwrap();
+
+        let task: crate::task_parser::TaskDef = toml::from_str(
+            r#"
+id = "T1"
+title = "Wire prompt assembly to inject neuro playbook heuristics"
+files = ["crates/roko-cli/src/orchestrate.rs"]
+"#,
+        )
+        .unwrap();
+
+        let context = build_playbook_heuristics_context(
+            &store,
+            AgentRole::Implementer,
+            Some(&task),
+            "Wire prompt assembly to inject neuro playbook heuristics in roko-cli orchestrate",
+        )
+        .expect("playbook context");
+
+        assert!(context.contains("## Playbook Heuristics"));
+        assert!(context.contains("Prefer injecting playbook heuristics before the task body"));
+        assert!(!context.contains("lower-tier heuristic"));
     }
 
     #[test]

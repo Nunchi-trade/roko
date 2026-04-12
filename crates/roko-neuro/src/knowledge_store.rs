@@ -247,6 +247,38 @@ impl KnowledgeStore {
     ///
     /// Returns an error if the backing file cannot be read.
     pub fn query(&self, topic: &str, limit: usize) -> Result<Vec<KnowledgeEntry>> {
+        self.query_filtered(topic, limit, |_| true)
+    }
+
+    /// Query the store for entries of a specific knowledge kind relevant to
+    /// `topic`.
+    ///
+    /// This is a thin extension over [`KnowledgeStore::query`] used by prompt
+    /// assembly to recall only the highest-tier distilled guidance (for
+    /// example, Playbook entries) without pulling lower-tier noise into the
+    /// prompt.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing file cannot be read.
+    pub fn query_kind(
+        &self,
+        topic: &str,
+        kind: KnowledgeKind,
+        limit: usize,
+    ) -> Result<Vec<KnowledgeEntry>> {
+        self.query_filtered(topic, limit, |entry| entry.kind == kind)
+    }
+
+    fn query_filtered<F>(
+        &self,
+        topic: &str,
+        limit: usize,
+        mut include: F,
+    ) -> Result<Vec<KnowledgeEntry>>
+    where
+        F: FnMut(&KnowledgeEntry) -> bool,
+    {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -259,6 +291,9 @@ impl KnowledgeStore {
         let mut scored: Vec<(f64, KnowledgeEntry)> = entries
             .into_iter()
             .filter_map(|entry| {
+                if !include(&entry) {
+                    return None;
+                }
                 let keyword_score = keyword_score(&entry, &topic_terms, &topic_norm);
                 let recency = recency_factor(&entry, now);
                 let confidence = effective_confidence(&entry);
