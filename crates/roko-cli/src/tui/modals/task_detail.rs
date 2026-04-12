@@ -1,7 +1,7 @@
 //! Task breakdown modal.
 //!
-//! Displays task details, phase, outcome, and related gate verdicts in a
-//! bordered scrollable overlay.
+//! Displays task details, phase, outcome, related gate verdicts, and agent
+//! output in a bordered scrollable overlay.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -16,11 +16,15 @@ use crate::tui::dashboard::Theme;
 /// Render the task detail modal overlay.
 ///
 /// Caller should pass an area produced by `centered_rect(86, 84, frame.area())`.
+///
+/// `task_output` is an optional slice of output lines from `data.task_outputs`
+/// for this task. When present, they are rendered below the gate verdicts.
 pub fn render_task_detail_modal(
     frame: &mut Frame<'_>,
     area: Rect,
     task: &TaskState,
     gates: &[GateVerdict],
+    task_output: Option<&[String]>,
     scroll: u16,
     theme: &Theme,
 ) {
@@ -132,6 +136,28 @@ pub fn render_task_detail_modal(
                 ),
                 Span::styled(ts, theme.muted()),
             ]));
+        }
+    }
+
+    // Task output section (from data.task_outputs).
+    if let Some(output) = task_output {
+        if !output.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Agent Output",
+                theme.accent().add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(Span::styled(
+                "\u{2500}".repeat(40),
+                theme.muted(),
+            )));
+
+            for line in output {
+                lines.push(Line::from(Span::styled(
+                    format!("  {line}"),
+                    theme.text(),
+                )));
+            }
         }
     }
 

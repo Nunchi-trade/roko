@@ -106,8 +106,8 @@ fn render_right_panel(
     let focused = matches!(tui_state.focus, FocusZone::RightPanel);
 
     match sub {
-        0 => render_sub_agents(frame, sections[1], data, view_state, focused, theme),
-        1 => render_output_panel(frame, sections[1], data, view_state, focused, theme),
+        0 => render_sub_agents(frame, sections[1], data, tui_state, view_state, focused, theme),
+        1 => render_output_panel(frame, sections[1], data, tui_state, view_state, focused, theme),
         2 => render_sub_diff(frame, sections[1], data, tui_state, theme),
         3 => render_sub_errors(frame, sections[1], data, theme),
         4 => render_sub_git(frame, sections[1], theme),
@@ -145,6 +145,7 @@ fn render_sub_agents(
     frame: &mut Frame<'_>,
     area: Rect,
     data: &DashboardData,
+    tui_state: &TuiState,
     view_state: &ViewState,
     focused: bool,
     theme: &Theme,
@@ -184,7 +185,7 @@ fn render_sub_agents(
         .collect();
 
     widgets::parallel_pool::render_parallel_pool(frame, sections[0], &pool, view_state.selected, theme);
-    render_output_panel(frame, sections[1], data, view_state, focused, theme);
+    render_output_panel(frame, sections[1], data, tui_state, view_state, focused, theme);
 }
 
 // ---------------------------------------------------------------------------
@@ -195,6 +196,7 @@ fn render_output_panel(
     frame: &mut Frame<'_>,
     area: Rect,
     data: &DashboardData,
+    tui_state: &TuiState,
     view_state: &ViewState,
     focused: bool,
     theme: &Theme,
@@ -207,11 +209,48 @@ fn render_output_panel(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let lines: Vec<&str> = data
-        .current_plan_execution
-        .as_ref()
-        .map(|exec| exec.agent_output_tail.iter().map(String::as_str).collect())
-        .unwrap_or_default();
+    // Collect output lines from the best available source.
+    //
+    // Priority:
+    //   1. current_plan_execution.agent_output_tail
+    //   2. selected agent's output from tui_state.agents_by_id
+    //   3. most recent task output from data.task_outputs
+    let collected: Vec<String> = {
+        // 1. Plan execution output tail.
+        let exec_lines: Vec<String> = data
+            .current_plan_execution
+            .as_ref()
+            .map(|exec| exec.agent_output_tail.clone())
+            .unwrap_or_default();
+        if !exec_lines.is_empty() {
+            exec_lines
+        } else if let Some(agent) = tui_state
+            .agents_by_id
+            .values()
+            .nth(tui_state.selected_agent_tab)
+        {
+            // 2. Selected agent output.
+            if !agent.output_lines.is_empty() {
+                agent.output_lines.clone()
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        }
+    };
+
+    // 3. Fallback: most recent task output from data.task_outputs.
+    let collected = if collected.is_empty() {
+        data.task_outputs
+            .values()
+            .max_by_key(|v| v.len())
+            .cloned()
+            .unwrap_or_default()
+    } else {
+        collected
+    };
+    let lines: Vec<&str> = collected.iter().map(String::as_str).collect();
 
     if lines.is_empty() {
         frame.render_widget(

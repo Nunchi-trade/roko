@@ -90,6 +90,7 @@ pub fn render_with_entries(
     let episode_count = data.episodes().len();
     let eff_count = data.efficiency_events.len();
     let gate_count = data.gate_results.len();
+    let event_count = data.event_log.len();
 
     let tail_label = if view_state.auto_tail {
         "TAIL"
@@ -110,6 +111,8 @@ pub fn render_with_entries(
         Span::styled(format!("efficiency:{eff_count}"), theme.muted()),
         Span::styled("  ", theme.muted()),
         Span::styled(format!("gates:{gate_count}"), theme.warning()),
+        Span::styled("  ", theme.muted()),
+        Span::styled(format!("events:{event_count}"), theme.text()),
     ]);
     let status = Paragraph::new(vec![status_line1]).alignment(Alignment::Right);
     frame.render_widget(status, sections[0]);
@@ -324,6 +327,34 @@ fn build_unified_log(data: &DashboardData) -> Vec<LogEntry> {
         seq += 1;
     }
 
+    // 5. Orchestrator event log
+    for event in &data.event_log {
+        let ts_ms = event.timestamp_ms as i64;
+        let ts = format_timestamp_ms(ts_ms);
+        let level = match event.event_type.as_str() {
+            "error" | "task_failed" | "gate_failed" => LogLevel::Error,
+            "warning" | "retry" => LogLevel::Warn,
+            "debug" => LogLevel::Debug,
+            _ => LogLevel::Info,
+        };
+        let detail = if event.task_id.is_empty() {
+            event.message.clone()
+        } else {
+            format!("[{}] {}", event.task_id, event.message)
+        };
+        entries.insert(
+            (ts_ms, seq),
+            LogEntry {
+                timestamp: ts,
+                timestamp_ms: ts_ms,
+                level,
+                source: format!("event:{}", truncate(&event.event_type, 16)),
+                message: detail,
+            },
+        );
+        seq += 1;
+    }
+
     // Collect and return sorted by time
     entries.into_values().collect()
 }
@@ -348,6 +379,8 @@ fn source_style(source: &str, theme: &Theme) -> ratatui::style::Style {
         theme.warning()
     } else if source.starts_with("efficiency:") {
         theme.muted()
+    } else if source.starts_with("event:") {
+        theme.info()
     } else {
         theme.text()
     }

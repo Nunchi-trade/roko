@@ -628,6 +628,25 @@ fn render_plan_line(
         }
 
         lines.push(Line::from(detail_spans));
+
+        // Show last error as an additional detail line.
+        if let Some(err) = &plan.last_error {
+            let err_budget = content_width.saturating_sub(indent.len() + 6);
+            lines.push(Line::from(vec![
+                Span::styled(format!("{indent}  "), Style::default().bg(bg)),
+                Span::styled(
+                    "\u{26a0} ",
+                    Style::default()
+                        .fg(theme.danger)
+                        .bg(bg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    truncate(err, err_budget),
+                    Style::default().fg(theme.danger).bg(bg),
+                ),
+            ]));
+        }
     }
 }
 
@@ -661,16 +680,42 @@ fn render_right_panel(
 
     // Show execution detail if available
     if let Some(exec) = &data.current_plan_execution {
+        // Check for last_error on the matching plan summary.
+        let plan_error: Option<&str> = data
+            .plans
+            .iter()
+            .find(|p| p.id == exec.plan_id)
+            .and_then(|p| p.last_error.as_deref());
+        let error_height = if plan_error.is_some() { 2u16 } else { 0u16 };
+
         let sections = Layout::vertical([
-            Constraint::Length(5),  // Plan header + progress
-            Constraint::Min(0),    // Task table
-            Constraint::Length(6),  // Gate results
+            Constraint::Length(error_height), // Error banner (if any)
+            Constraint::Length(5),            // Plan header + progress
+            Constraint::Min(0),              // Task table
+            Constraint::Length(6),           // Gate results
         ])
         .split(inner);
 
-        render_execution_header(frame, sections[0], exec, theme);
-        render_execution_tasks(frame, sections[1], exec, view_state, theme);
-        render_gate_summary(frame, sections[2], data, theme);
+        // Render error banner at the top of the detail panel.
+        if let Some(err) = plan_error {
+            let err_line = Line::from(vec![
+                Span::styled(
+                    " \u{26a0} ERROR: ",
+                    Style::default()
+                        .fg(theme.danger)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    truncate(err, 70),
+                    Style::default().fg(theme.danger),
+                ),
+            ]);
+            frame.render_widget(Paragraph::new(vec![err_line, Line::from("")]), sections[0]);
+        }
+
+        render_execution_header(frame, sections[1], exec, theme);
+        render_execution_tasks(frame, sections[2], exec, view_state, theme);
+        render_gate_summary(frame, sections[3], data, theme);
         return;
     }
 
@@ -1017,9 +1062,10 @@ fn render_plan_summary(
     view_state: &ViewState,
     theme: &Theme,
 ) {
+    let header_height = if plan.last_error.is_some() { 8u16 } else { 7u16 };
     let sections = Layout::vertical([
-        Constraint::Length(7),  // Header
-        Constraint::Min(0),    // Tasks
+        Constraint::Length(header_height),  // Header (extra line for error)
+        Constraint::Min(0),                // Tasks
     ])
     .split(area);
 
@@ -1069,6 +1115,19 @@ fn render_plan_summary(
             },
         ]),
     ];
+
+    // Show last error prominently if present.
+    if let Some(err) = &plan.last_error {
+        header_lines.push(Line::from(vec![
+            Span::styled(" error:  ", Style::default().fg(theme.danger)),
+            Span::styled(
+                truncate(err, 80),
+                Style::default()
+                    .fg(theme.danger)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
 
     if gate_total > 0 {
         let gate_color = if gate_passed == gate_total {

@@ -560,7 +560,7 @@ fn render_right_panel(
     frame: &mut Frame<'_>,
     area: Rect,
     data: &DashboardData,
-    _tui_state: &TuiState,
+    tui_state: &TuiState,
     view_state: &ViewState,
     theme: &Theme,
 ) {
@@ -570,7 +570,7 @@ fn render_right_panel(
     render_role_tabs(frame, layout[0], data, view_state, theme);
 
     // -- Output body --
-    render_output_body(frame, layout[1], data, view_state, theme);
+    render_output_body(frame, layout[1], data, tui_state, view_state, theme);
 }
 
 // ---------------------------------------------------------------------------
@@ -628,6 +628,7 @@ fn render_output_body(
     frame: &mut Frame<'_>,
     area: Rect,
     data: &DashboardData,
+    tui_state: &TuiState,
     view_state: &ViewState,
     theme: &Theme,
 ) {
@@ -678,12 +679,82 @@ fn render_output_body(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Gather output lines
-    let output_lines: Vec<&str> = data
-        .current_plan_execution
-        .as_ref()
-        .map(|exec| exec.agent_output_tail.iter().map(String::as_str).collect())
-        .unwrap_or_default();
+    // Gather output lines from the best available source.
+    //
+    // Priority:
+    //   1. current_plan_execution.agent_output_tail
+    //   2. selected agent's output from tui_state.agents_by_id
+    //   3. task_outputs for the agent's current task
+    //   4. episode output text
+    let collected: Vec<String> = {
+        // 1. Plan execution output tail.
+        let exec_lines: Vec<String> = data
+            .current_plan_execution
+            .as_ref()
+            .map(|exec| exec.agent_output_tail.clone())
+            .unwrap_or_default();
+
+        if !exec_lines.is_empty() {
+            exec_lines
+        } else if let Some(agent_summary) = selected_agent {
+            // 2. Selected agent output from tui_state.agents_by_id.
+            if let Some(agent_state) = tui_state.agents_by_id.get(&agent_summary.id) {
+                if !agent_state.output_lines.is_empty() {
+                    agent_state.output_lines.clone()
+                } else if let Some(task_id) = &agent_state.task_id {
+                    // 3. Task outputs for agent's current task.
+                    data.task_outputs
+                        .get(task_id)
+                        .cloned()
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        }
+    };
+
+    // 4. Fallback: episode output text for the selected agent.
+    let collected = if collected.is_empty() {
+        if let Some(agent_summary) = selected_agent {
+            let mut episode_output = Vec::new();
+            for episode in data.episodes() {
+                if episode.agent_id == agent_summary.id {
+                    // Extract output text from episode extra fields.
+                    for key in [
+                        "stderr",
+                        "agent_stderr",
+                        "output",
+                        "stdout",
+                        "agent_output",
+                        "output_tail",
+                    ] {
+                        if let Some(text) = episode.extra.get(key).and_then(|v| v.as_str()) {
+                            if !text.trim().is_empty() {
+                                episode_output =
+                                    text.lines().map(String::from).collect();
+                                break;
+                            }
+                        }
+                    }
+                    if !episode_output.is_empty() {
+                        break;
+                    }
+                }
+            }
+            episode_output
+        } else {
+            Vec::new()
+        }
+    } else {
+        collected
+    };
+
+    let output_lines: Vec<&str> = collected.iter().map(String::as_str).collect();
 
     if output_lines.is_empty() {
         // Centered empty state
