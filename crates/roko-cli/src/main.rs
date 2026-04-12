@@ -18,6 +18,7 @@ use octocrab::Octocrab;
 use octocrab::models::hooks::{Config as HookConfig, ContentType, Hook};
 use octocrab::models::webhook_events::WebhookEventType;
 use roko_agent::process::{cleanup_orphaned_agents, reap_orphaned_children};
+use roko_agent::translate::BackendResponse;
 use roko_cli::serve_runtime::RokoCliRuntime;
 use roko_cli::tui::App;
 use roko_cli::{
@@ -27,7 +28,7 @@ use roko_cli::{
 };
 use roko_core::agent::ProviderKind;
 use roko_core::config::ServeDeployWebhookConfig;
-use roko_core::config::schema::{ProviderConfig, RokoConfig};
+use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
 use roko_core::{ContentHash, Context, Kind, Query, Substrate};
 use roko_core::{Headlines, TaskMetric, compute_headlines};
 use roko_dreams::{DreamAgentConfig, DreamEngine, DreamLoopConfig, DreamRunner};
@@ -41,12 +42,13 @@ use roko_learn::provider_health::{CircuitState, ProviderHealth};
 use roko_learn::runtime_feedback::{read_efficiency_events, refresh_cfactor_snapshot};
 use roko_neuro::{DEFAULT_GC_MIN_CONFIDENCE, KnowledgeStore};
 use serde::Deserialize;
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::fmt::Write as _;
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
 use tracing_subscriber::registry::LookupSpan;
@@ -575,6 +577,14 @@ enum ProviderCmd {
     /// Show persisted provider circuit-breaker health and latency.
     Health {
         /// Directory containing `.roko/` (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Send a minimal request to verify provider connectivity.
+    Test {
+        /// Provider name from `[providers.*]`.
+        provider: String,
+        /// Directory containing `roko.toml` (default: cwd / --repo).
         #[arg(long)]
         workdir: Option<PathBuf>,
     },
@@ -1504,6 +1514,11 @@ async fn cmd_provider(cli: &Cli, cmd: ProviderCmd) -> Result<i32> {
             cmd_provider_health(&wd)?;
             Ok(EXIT_SUCCESS)
         }
+        ProviderCmd::Test { provider, workdir } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            cmd_provider_test(&wd, &provider).await?;
+            Ok(EXIT_SUCCESS)
+        }
     }
 }
 
@@ -1575,6 +1590,23 @@ fn cmd_provider_health(workdir: &Path) -> Result<()> {
     Ok(())
 }
 
+async fn cmd_provider_test(workdir: &Path, provider_name: &str) -> Result<()> {
+    let config = load_roko_config(workdir)?;
+    let providers = configured_providers(&config);
+    let provider = providers
+        .get(provider_name)
+        .ok_or_else(|| anyhow!("provider '{provider_name}' is not configured"))?;
+    let model = select_provider_test_model(&config, provider_name)
+        .ok_or_else(|| anyhow!("provider '{provider_name}' has no configured models"))?;
+
+    match provider.kind {
+        ProviderKind::OpenAiCompat => {
+            run_openai_compat_provider_test(provider_name, provider, &model.1).await
+        }
+        other => bail!("provider '{provider_name}' uses unsupported kind '{other}'"),
+    }
+}
+
 fn configured_providers(config: &RokoConfig) -> std::collections::HashMap<String, ProviderConfig> {
     if !config.providers.is_empty() {
         return config.providers.clone();
@@ -1593,6 +1625,184 @@ fn configured_providers(config: &RokoConfig) -> std::collections::HashMap<String
     }
 
     std::collections::HashMap::new()
+}
+
+fn configured_models(config: &RokoConfig) -> std::collections::HashMap<String, ModelProfile> {
+    config.effective_models()
+}
+
+fn select_provider_test_model(
+    config: &RokoConfig,
+    provider_name: &str,
+) -> Option<(String, ModelProfile)> {
+    let models = configured_models(config);
+    let default_model = config.agent.default_model.trim();
+    if let Some(profile) = models.get(default_model)
+        && profile.provider == provider_name
+    {
+        return Some((default_model.to_string(), profile.clone()));
+    }
+
+    let mut candidates = models
+        .into_iter()
+        .filter(|(_, profile)| profile.provider == provider_name)
+        .collect::<Vec<_>>();
+    candidates.sort_by(|a, b| a.0.cmp(&b.0));
+    candidates.into_iter().next()
+}
+
+async fn run_openai_compat_provider_test(
+    provider_name: &str,
+    provider: &ProviderConfig,
+    model: &ModelProfile,
+) -> Result<()> {
+    let endpoint = openai_compat_test_endpoint(provider);
+    let api_key_env = provider
+        .api_key_env
+        .as_deref()
+        .map(str::trim)
+        .filter(|env_name| !env_name.is_empty());
+    let api_key = provider
+        .resolve_api_key()
+        .filter(|value| !value.trim().is_empty());
+    let body = json!({
+        "model": model.slug,
+        "messages": [{
+            "role": "user",
+            "content": "Say hello"
+        }],
+        "max_tokens": 10
+    });
+    let body_text = serde_json::to_string(&body).context("serialize provider test body")?;
+
+    println!("Testing provider '{provider_name}' ({})...", provider.kind);
+    println!("  Endpoint: {endpoint}");
+    match (api_key_env, api_key.as_ref()) {
+        (Some(env_name), Some(_)) => println!("  API Key:  set ({env_name})"),
+        (Some(env_name), None) => {
+            println!("  API Key:  missing ({env_name})");
+            bail!("missing API key: env var {env_name} not set");
+        }
+        (None, _) => println!("  API Key:  not required"),
+    }
+    println!("  Model:    {}", model.slug);
+    println!();
+    println!("  Sending: {body_text}");
+
+    let client = reqwest::Client::builder()
+        .user_agent("roko-cli/0.1")
+        .timeout(Duration::from_millis(provider.timeout_ms.unwrap_or(120_000)))
+        .build()
+        .context("build provider test client")?;
+
+    let mut request = client
+        .post(&endpoint)
+        .header("content-type", "application/json");
+    if let Some(api_key) = api_key {
+        request = request.bearer_auth(api_key);
+    }
+    if let Some(extra_headers) = provider.extra_headers.as_ref() {
+        let mut entries = extra_headers.iter().collect::<Vec<_>>();
+        entries.sort_by(|a, b| a.0.cmp(b.0).then_with(|| a.1.cmp(b.1)));
+        for (name, value) in entries {
+            request = request.header(name.as_str(), value.as_str());
+        }
+    }
+
+    let started = Instant::now();
+    let response = request
+        .json(&body)
+        .send()
+        .await
+        .with_context(|| format!("send provider test request to {endpoint}"))?;
+    let elapsed = started.elapsed();
+    let status = response.status();
+    let status_line = status.to_string();
+    let response_text = response
+        .text()
+        .await
+        .context("read provider test response body")?;
+
+    if !status.is_success() {
+        println!(
+            "  Response: {} ({})",
+            status_line,
+            format_provider_test_duration(elapsed)
+        );
+        println!("  Error:    {response_text}");
+        bail!("provider '{provider_name}' test failed");
+    }
+
+    let response_json: Value = serde_json::from_str(&response_text)
+        .with_context(|| format!("parse provider test response from {endpoint}"))?;
+    let backend_response = BackendResponse::Json(response_json);
+    let content = backend_response.extract_text();
+    let usage = backend_response.extract_usage();
+    let cost = estimate_provider_test_cost(model, &usage);
+
+    println!(
+        "  Response: {} ({})",
+        status_line,
+        format_provider_test_duration(elapsed)
+    );
+    println!(
+        "  Content:  {}",
+        serde_json::to_string(&content).context("format provider test content")?
+    );
+    println!(
+        "  Tokens:   input={}, output={}",
+        usage.input_tokens, usage.output_tokens
+    );
+    match cost {
+        Some(cost) => println!("  Cost:     ${cost:.6}"),
+        None => println!("  Cost:     n/a"),
+    }
+    println!();
+    println!("  ✓ Provider '{provider_name}' is working");
+    Ok(())
+}
+
+fn openai_compat_test_endpoint(provider: &ProviderConfig) -> String {
+    format!(
+        "{}/chat/completions",
+        provider
+            .base_url
+            .as_deref()
+            .unwrap_or("https://api.openai.com/v1")
+            .trim_end_matches('/')
+    )
+}
+
+fn estimate_provider_test_cost(model: &ModelProfile, usage: &roko_agent::Usage) -> Option<f64> {
+    let mut cost = 0.0;
+    let mut priced = false;
+
+    if let Some(rate) = model.cost_input_per_m {
+        cost += f64::from(usage.input_tokens) * rate / 1_000_000.0;
+        priced = true;
+    }
+    if let Some(rate) = model.cost_output_per_m {
+        cost += f64::from(usage.output_tokens) * rate / 1_000_000.0;
+        priced = true;
+    }
+    if let Some(rate) = model.cost_cache_read_per_m {
+        cost += f64::from(usage.cache_read_tokens) * rate / 1_000_000.0;
+        priced = true;
+    }
+    if let Some(rate) = model.cost_cache_write_per_m {
+        cost += f64::from(usage.cache_create_tokens) * rate / 1_000_000.0;
+        priced = true;
+    }
+
+    priced.then_some(cost)
+}
+
+fn format_provider_test_duration(duration: Duration) -> String {
+    if duration.as_secs_f64() >= 1.0 {
+        format!("{:.1}s", duration.as_secs_f64())
+    } else {
+        format!("{}ms", duration.as_millis())
+    }
 }
 
 async fn inspect_provider(
@@ -4615,6 +4825,73 @@ mod tests {
                 cmd: ProviderCmd::Health { .. }
             })
         ));
+    }
+
+    #[test]
+    fn cli_parses_provider_test_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "provider", "test", "zai"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Provider {
+                cmd: ProviderCmd::Test { provider, .. }
+            }) if provider == "zai"
+        ));
+    }
+
+    #[test]
+    fn select_provider_test_model_prefers_default_model() {
+        let mut config = RokoConfig::default();
+        config.agent.default_model = "glm-5-1".to_string();
+        config.models.insert(
+            "glm-5-1".to_string(),
+            ModelProfile {
+                provider: "zai".to_string(),
+                slug: "glm-5.1".to_string(),
+                context_window: 200_000,
+                max_output: Some(131_072),
+                supports_tools: true,
+                supports_thinking: true,
+                supports_vision: false,
+                supports_web_search: false,
+                supports_mcp_tools: false,
+                supports_partial: false,
+                provider_routing: None,
+                tool_format: "openai_json".to_string(),
+                cost_input_per_m: Some(1.40),
+                cost_output_per_m: Some(4.40),
+                cost_cache_read_per_m: None,
+                cost_cache_write_per_m: None,
+                max_tools: None,
+                tokenizer_ratio: None,
+            },
+        );
+        config.models.insert(
+            "glm-5-1-alt".to_string(),
+            ModelProfile {
+                provider: "zai".to_string(),
+                slug: "glm-5.1-air".to_string(),
+                context_window: 128_000,
+                max_output: Some(8_192),
+                supports_tools: true,
+                supports_thinking: false,
+                supports_vision: false,
+                supports_web_search: false,
+                supports_mcp_tools: false,
+                supports_partial: false,
+                provider_routing: None,
+                tool_format: "openai_json".to_string(),
+                cost_input_per_m: Some(1.0),
+                cost_output_per_m: Some(2.0),
+                cost_cache_read_per_m: None,
+                cost_cache_write_per_m: None,
+                max_tools: None,
+                tokenizer_ratio: None,
+            },
+        );
+
+        let selected = select_provider_test_model(&config, "zai").expect("selected model");
+        assert_eq!(selected.0, "glm-5-1");
+        assert_eq!(selected.1.slug, "glm-5.1");
     }
 
     #[test]
