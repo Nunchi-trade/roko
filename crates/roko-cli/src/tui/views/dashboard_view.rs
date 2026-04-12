@@ -56,7 +56,7 @@ pub fn render(
 
     render_left_panel(frame, main[0], data, tui_state, view_state, theme);
     render_right_panel(frame, main[1], data, tui_state, view_state, theme);
-    render_bottom_ribbon(frame, outer[1], data, theme);
+    render_bottom_ribbon(frame, outer[1], data, tui_state, theme);
 }
 
 // ===========================================================================
@@ -81,9 +81,12 @@ fn render_left_panel(
     let plan_focused = matches!(tui_state.focus, FocusZone::PlanTree);
     let task_focused = matches!(tui_state.focus, FocusZone::TaskProgress);
 
-    render_plan_tree(frame, sections[0], data, view_state, plan_focused, theme);
-    render_phase_compact(frame, sections[1], data, theme);
-    render_task_progress(frame, sections[2], data, view_state, task_focused, theme);
+    // Use the full Mori plan_tree widget (wave groups, sparklines, data-rain)
+    widgets::plan_tree::render_plan_tree(frame, sections[0], tui_state, plan_focused);
+    // Use the Mori phase_compact widget (segmented bar with spinner)
+    widgets::phase_compact::render_phase_compact(frame, sections[1], tui_state, false);
+    // Use the Mori task_progress widget (semantic checklist)
+    widgets::task_progress::render_task_progress(frame, sections[2], tui_state, task_focused);
 }
 
 // ---------------------------------------------------------------------------
@@ -673,6 +676,31 @@ fn render_sub_processes(
 // ===========================================================================
 
 fn render_bottom_ribbon(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    data: &DashboardData,
+    tui_state: &TuiState,
+    theme: &Theme,
+) {
+    // Use the Mori wave_progress + token_sparkline + sys_metrics widgets
+    let sections = Layout::horizontal([
+        Constraint::Percentage(40),
+        Constraint::Percentage(40),
+        Constraint::Percentage(20),
+    ])
+    .split(area);
+
+    // Wave progress: use the real widget
+    widgets::wave_progress::render_wave_progress(frame, sections[0], tui_state);
+    // Token sparkline: use the real widget
+    widgets::token_sparkline::render_token_sparkline(frame, sections[1], tui_state);
+    // Sys metrics: use the real widget
+    widgets::sys_metrics::render_sys_metrics(frame, sections[2], tui_state);
+}
+
+// Keep the old implementation as dead code for reference
+#[allow(dead_code)]
+fn render_bottom_ribbon_inline(
     frame: &mut Frame<'_>,
     area: Rect,
     data: &DashboardData,

@@ -141,8 +141,9 @@ impl App {
         let data = DashboardData::load_best_effort(&workdir);
         let mut tui_state = TuiState::new();
         tui_state.update_from_snapshot(&data);
+        tui_state.run_started = Some(Instant::now());
 
-        Self {
+        let mut app = Self {
             workdir,
             tui_state,
             atmosphere: Atmosphere::default(),
@@ -158,7 +159,9 @@ impl App {
             signal_selection: 0,
             gate_failure_selection: 0,
             overlay: None,
-        }
+        };
+        app.populate_git_info();
+        app
     }
 
     /// Return the active page (legacy).
@@ -216,6 +219,7 @@ impl App {
                 Event::Resize(_, _) => {}
                 Event::Tick => {
                     self.atmosphere.tick();
+                    self.tui_state.atmosphere.tick();
                     self.refresh_snapshot_if_needed();
                     self.expire_notifications();
                 }
@@ -852,11 +856,55 @@ impl App {
         self.data = DashboardData::load_best_effort(&self.workdir);
         self.scaffold = DashboardScaffold::new_in(&self.workdir);
         self.tui_state.update_from_snapshot(&self.data);
+        self.populate_git_info();
         self.last_refresh = Instant::now();
         self.clamp_signal_selection();
         self.clamp_gate_failure_selection();
         if self.pages().scaffold(self.current_page).is_none() {
             self.current_page = self.scaffold.active_page();
+        }
+    }
+
+    /// Populate TuiState git fields from actual git commands.
+    fn populate_git_info(&mut self) {
+        // Branch
+        if self.tui_state.git_branch.is_empty() {
+            if let Ok(out) = std::process::Command::new("git")
+                .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                .current_dir(&self.workdir)
+                .output()
+            {
+                if out.status.success() {
+                    self.tui_state.git_branch =
+                        String::from_utf8_lossy(&out.stdout).trim().to_string();
+                }
+            }
+        }
+        // Short commit hash
+        if self.tui_state.git_commit_short.is_empty() {
+            if let Ok(out) = std::process::Command::new("git")
+                .args(["rev-parse", "--short", "HEAD"])
+                .current_dir(&self.workdir)
+                .output()
+            {
+                if out.status.success() {
+                    self.tui_state.git_commit_short =
+                        String::from_utf8_lossy(&out.stdout).trim().to_string();
+                }
+            }
+        }
+        // Commit age
+        if self.tui_state.git_age.is_empty() {
+            if let Ok(out) = std::process::Command::new("git")
+                .args(["log", "-1", "--format=%cr"])
+                .current_dir(&self.workdir)
+                .output()
+            {
+                if out.status.success() {
+                    self.tui_state.git_age =
+                        String::from_utf8_lossy(&out.stdout).trim().to_string();
+                }
+            }
         }
     }
 
