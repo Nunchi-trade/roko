@@ -6,9 +6,9 @@
 //! working global config with one interactive pass.
 
 use crate::config::{
-    AgentLayer, ConfigLayer, ConfigPaths, DetectedCli, DreamsLayer, ExecutorLayer, GateConfig,
-    PromptLayer, ResolvedConfig, ServeAuthLayer, ServeDeployLayer, ServeDeployWebhookLayer,
-    ServeLayer, Source, ToolsLayer, detect_clis, global_config_path, load_layered, resolve_paths,
+    AgentLayer, ConfigLayer, ConfigPaths, DetectedCli, ExecutorLayer, GateConfig, PromptLayer,
+    ResolvedConfig, ServeAuthLayer, ServeLayer, Source, ToolsLayer, apply_layer_value, detect_clis,
+    global_config_path, load_layered, resolve_paths,
 };
 use anyhow::{Context as _, Result, anyhow};
 use roko_orchestrator::ExecutorConfig;
@@ -577,129 +577,7 @@ fn print_resolved(r: &ResolvedConfig) {
 }
 
 fn apply_key_value(layer: &mut ConfigLayer, key: &str, value: &str) -> Result<()> {
-    match key {
-        "agent.command" => {
-            let agent = layer.agent.get_or_insert_with(AgentLayer::default);
-            agent.command = Some(value.into());
-        }
-        "agent.args" => {
-            // Split on whitespace for simple cases; JSON array for anything richer.
-            let args: Vec<String> = if value.trim_start().starts_with('[') {
-                serde_json::from_str(value).context("parse JSON array for agent.args")?
-            } else {
-                value.split_whitespace().map(String::from).collect()
-            };
-            let agent = layer.agent.get_or_insert_with(AgentLayer::default);
-            agent.args = Some(args);
-        }
-        "agent.model" => {
-            let agent = layer.agent.get_or_insert_with(AgentLayer::default);
-            agent.model = Some(value.into());
-        }
-        "agent.effort" => {
-            let agent = layer.agent.get_or_insert_with(AgentLayer::default);
-            agent.effort = Some(value.into());
-        }
-        "agent.bare_mode" => {
-            let bare_mode = value.parse::<bool>().context("parse bare_mode as bool")?;
-            let agent = layer.agent.get_or_insert_with(AgentLayer::default);
-            agent.bare_mode = Some(bare_mode);
-        }
-        "agent.fallback_model" => {
-            let agent = layer.agent.get_or_insert_with(AgentLayer::default);
-            agent.fallback_model = Some(value.into());
-        }
-        "agent.timeout_ms" => {
-            let ms: u64 = value.parse().context("parse timeout_ms as u64")?;
-            let agent = layer.agent.get_or_insert_with(AgentLayer::default);
-            agent.timeout_ms = Some(ms);
-        }
-        "prompt.token_budget" => {
-            let n: usize = value.parse().context("parse token_budget as usize")?;
-            let prompt = layer.prompt.get_or_insert_with(PromptLayer::default);
-            prompt.token_budget = Some(n);
-        }
-        "prompt.role" => {
-            let prompt = layer.prompt.get_or_insert_with(PromptLayer::default);
-            prompt.role = Some(value.into());
-        }
-        "dreams.auto_dream" => {
-            let auto_dream = value.parse::<bool>().context("parse auto_dream as bool")?;
-            let dreams = layer.dreams.get_or_insert_with(DreamsLayer::default);
-            dreams.auto_dream = Some(auto_dream);
-        }
-        "dreams.idle_threshold_mins" => {
-            let mins = value
-                .parse::<u64>()
-                .context("parse idle_threshold_mins as u64")?;
-            let dreams = layer.dreams.get_or_insert_with(DreamsLayer::default);
-            dreams.idle_threshold_mins = Some(mins);
-        }
-        "dreams.min_episodes_for_dream" => {
-            let min_episodes = value
-                .parse::<usize>()
-                .context("parse min_episodes_for_dream as usize")?;
-            let dreams = layer.dreams.get_or_insert_with(DreamsLayer::default);
-            dreams.min_episodes_for_dream = Some(min_episodes);
-        }
-        "tools.prefer_mcp" => {
-            let prefer_mcp = value.parse::<bool>().context("parse prefer_mcp as bool")?;
-            let tools = layer.tools.get_or_insert_with(ToolsLayer::default);
-            tools.prefer_mcp = Some(prefer_mcp);
-        }
-        "tools.global_denied" => {
-            let denied: Vec<String> = if value.trim_start().starts_with('[') {
-                serde_json::from_str(value).context("parse JSON array for tools.global_denied")?
-            } else {
-                value.split_whitespace().map(String::from).collect()
-            };
-            let tools = layer.tools.get_or_insert_with(ToolsLayer::default);
-            tools.global_denied = Some(denied);
-        }
-        "tools.mcp_timeout_secs" => {
-            let secs = value
-                .parse::<u64>()
-                .context("parse mcp_timeout_secs as u64")?;
-            let tools = layer.tools.get_or_insert_with(ToolsLayer::default);
-            tools.mcp_timeout_secs = Some(secs);
-        }
-        "serve.auth.enabled" => {
-            let enabled = value.parse::<bool>().context("parse enabled as bool")?;
-            let serve = layer.serve.get_or_insert_with(ServeLayer::default);
-            let auth = serve.auth.get_or_insert_with(ServeAuthLayer::default);
-            auth.enabled = Some(enabled);
-        }
-        "serve.auth.api_key" => {
-            let serve = layer.serve.get_or_insert_with(ServeLayer::default);
-            let auth = serve.auth.get_or_insert_with(ServeAuthLayer::default);
-            auth.api_key = Some(value.into());
-        }
-        "serve.deploy.provider" => {
-            let serve = layer.serve.get_or_insert_with(ServeLayer::default);
-            let deploy = serve.deploy.get_or_insert_with(ServeDeployLayer::default);
-            deploy.provider = Some(value.into());
-        }
-        "serve.deploy.environment" => {
-            let environment: Vec<String> = if value.trim_start().starts_with('[') {
-                serde_json::from_str(value)
-                    .context("parse JSON array for serve.deploy.environment")?
-            } else {
-                value.split_whitespace().map(String::from).collect()
-            };
-            let serve = layer.serve.get_or_insert_with(ServeLayer::default);
-            let deploy = serve.deploy.get_or_insert_with(ServeDeployLayer::default);
-            deploy.environment = Some(environment);
-        }
-        "serve.deploy.webhooks" => {
-            let webhooks: Vec<ServeDeployWebhookLayer> = serde_json::from_str(value)
-                .context("parse JSON array for serve.deploy.webhooks")?;
-            let serve = layer.serve.get_or_insert_with(ServeLayer::default);
-            let deploy = serve.deploy.get_or_insert_with(ServeDeployLayer::default);
-            deploy.webhooks = Some(webhooks);
-        }
-        other => return Err(anyhow!("unknown key: {other}")),
-    }
-    Ok(())
+    apply_layer_value(layer, key, value)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

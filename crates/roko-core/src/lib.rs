@@ -112,8 +112,8 @@ pub use tool::{
     FailureTrace, FormatBandit, KeywordOverlapScorer, MemoryPointer, MetricsKey, MetricsSink,
     ProfileBandit, RewardConfig, ToolCall, ToolCategory, ToolConcurrency, ToolContext, ToolDef,
     ToolError, ToolFormat, ToolFormatProfile, ToolHandler, ToolMetrics, ToolOutcome,
-    ToolPermission, ToolRegistry, ToolRelevanceScorer, ToolResult, ToolSchema, ToolTrace,
-    ToolTraceEvent, TraceBuilder, TraceId, TraceSink, TraceStep, ToolSource, VecToolRegistry,
+    ToolPermission, ToolRegistry, ToolRelevanceScorer, ToolResult, ToolSchema, ToolSource,
+    ToolTrace, ToolTraceEvent, TraceBuilder, TraceId, TraceSink, TraceStep, VecToolRegistry,
     compute_reward, galileo_tsq, profile_for_model,
 };
 pub use traits::{Composer, Gate, Policy, Router, Scorer, Substrate};
