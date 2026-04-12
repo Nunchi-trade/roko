@@ -17,20 +17,22 @@
 //! - `reasoning_content` must be carried forward in conversation history when
 //!   building the next turn.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::sync::Arc;
 
 use crate::Agent;
 use crate::codex_agent::{CodexAgent, DEFAULT_MAX_TOKENS};
 use crate::dispatcher::{HandlerResolver, ToolDispatcher};
 use crate::http::ReqwestPoster;
+use crate::mcp::{DynamicToolRegistry, McpConfig, discover_mcp_tools};
 use crate::provider::{AgentCreationError, AgentOptions, ProviderAdapter, ProviderError};
 use crate::tool_loop::backends::create_backend;
 use crate::tool_loop::{ToolLoop, ToolLoopAgent};
 use crate::translate::{OpenAiTranslator, Translator};
 use roko_core::agent::ProviderKind;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
-use roko_core::tool::{ToolDef, ToolRegistry};
+use roko_core::tool::{ToolDef, ToolRegistry, VecToolRegistry};
 use roko_std::StaticToolRegistry;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -236,11 +238,73 @@ fn parse_allowed_tools_csv(csv: Option<&str>) -> Option<HashSet<&str>> {
     (!allowed.is_empty()).then_some(allowed)
 }
 
-fn tool_defs_for_options(options: &AgentOptions) -> Vec<ToolDef> {
-    let registry = StaticToolRegistry::new();
-    let allowed = parse_allowed_tools_csv(options.tools.as_deref());
+fn block_on<F>(future: F) -> F::Output
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    if tokio::runtime::Handle::try_current().is_ok() {
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("create MCP discovery runtime")
+                .block_on(future)
+        })
+        .join()
+        .expect("join MCP discovery thread")
+    } else {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("create MCP discovery runtime")
+            .block_on(future)
+    }
+}
 
-    registry
+fn add_mcp_tools_to_registry(registry: &mut DynamicToolRegistry, mcp_tools: Vec<ToolDef>) {
+    let mut by_server: HashMap<String, Vec<ToolDef>> = HashMap::new();
+
+    for tool in mcp_tools {
+        let server = tool
+            .name
+            .split("__")
+            .next()
+            .unwrap_or("unknown")
+            .to_string();
+        by_server.entry(server).or_default().push(tool);
+    }
+
+    for (server, tools) in by_server {
+        registry.add_mcp_tools(&server, tools);
+    }
+}
+
+fn tool_registry_for_options(
+    options: &AgentOptions,
+) -> Result<(Arc<dyn ToolRegistry>, Vec<ToolDef>), AgentCreationError> {
+    let base = StaticToolRegistry::new();
+    let mut registry = DynamicToolRegistry::new(&base);
+
+    if let Some(mcp_config_path) = &options.mcp_config {
+        let mcp_config = McpConfig::load(mcp_config_path).map_err(|err| {
+            AgentCreationError::MissingConfig(format!(
+                "mcp config {}: {err}",
+                mcp_config_path.display()
+            ))
+        })?;
+        let mcp_tools =
+            block_on(async move { discover_mcp_tools(&mcp_config).await }).map_err(|err| {
+                AgentCreationError::MissingConfig(format!(
+                    "mcp tool discovery from {} failed: {err}",
+                    mcp_config_path.display()
+                ))
+            })?;
+        add_mcp_tools_to_registry(&mut registry, mcp_tools);
+    }
+
+    let allowed = parse_allowed_tools_csv(options.tools.as_deref());
+    let tools: Vec<ToolDef> = registry
         .all()
         .iter()
         .filter(|tool| {
@@ -249,7 +313,9 @@ fn tool_defs_for_options(options: &AgentOptions) -> Vec<ToolDef> {
                 .is_none_or(|allowed| allowed.contains(tool.name.as_str()))
         })
         .cloned()
-        .collect()
+        .collect();
+
+    Ok((Arc::new(VecToolRegistry::from_tools(tools.clone())), tools))
 }
 
 fn default_agent_name(model: &ModelProfile, options: &AgentOptions) -> String {
@@ -283,8 +349,7 @@ impl ProviderAdapter for OpenAiCompatAdapter {
         let agent_name = default_agent_name(model, options);
 
         if model.supports_tools {
-            let tools = tool_defs_for_options(options);
-            let registry: Arc<dyn ToolRegistry> = Arc::new(StaticToolRegistry::new());
+            let (registry, tools) = tool_registry_for_options(options)?;
             let resolver: Arc<dyn HandlerResolver> =
                 Arc::new(|name: &str| roko_std::tool::handlers::handler_for(name));
             let dispatcher = Arc::new(ToolDispatcher::new(registry, resolver));
@@ -359,6 +424,7 @@ mod tests {
     use super::*;
     use crate::http::{HttpPostError, HttpPoster};
     use roko_core::{Body, Context, Kind, Signal};
+    use std::fs;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
@@ -431,6 +497,17 @@ mod tests {
         });
 
         (format!("http://{}", addr), captured, handle)
+    }
+
+    fn write_script(path: &std::path::Path, body: &str) {
+        fs::write(path, body).expect("write script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(path).expect("script metadata").permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(path, perms).expect("chmod script");
+        }
     }
 
     fn spawn_chat_server_sequence(
@@ -841,6 +918,125 @@ mod tests {
             message.get("role").and_then(Value::as_str) == Some("tool")
                 && message.get("tool_call_id").and_then(Value::as_str) == Some("call-ls-1")
         }));
+
+        handle.join().expect("server thread");
+    }
+
+    #[tokio::test]
+    async fn mcp_bridge_http() {
+        let response = serde_json::json!({
+            "id": "chatcmpl-test",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "mcp-ok"},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 12,
+                "completion_tokens": 6,
+                "total_tokens": 18
+            }
+        })
+        .to_string();
+        let (base_url, captured, handle) = spawn_chat_server(response);
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let server_script = tmp.path().join("mcp-server.sh");
+        write_script(
+            &server_script,
+            r#"#!/bin/sh
+set -eu
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'
+      ;;
+    *'"method":"tools/list"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"Echo from MCP","inputSchema":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}]}}'
+      ;;
+    *)
+      printf '%s\n' '{"jsonrpc":"2.0","id":999,"result":{}}'
+      ;;
+  esac
+done
+"#,
+        );
+        let mcp_config = tmp.path().join("mcp.json");
+        fs::write(
+            &mcp_config,
+            serde_json::json!({
+                "servers": [{
+                    "name": "local",
+                    "command": server_script,
+                    "args": [],
+                    "env": {}
+                }]
+            })
+            .to_string(),
+        )
+        .expect("write mcp config");
+
+        let provider = ProviderConfig {
+            kind: ProviderKind::OpenAiCompat,
+            base_url: Some(format!("{base_url}/v1")),
+            api_key_env: Some("PATH".to_string()),
+            command: None,
+            args: None,
+            timeout_ms: Some(1_500),
+            extra_headers: None,
+            max_concurrent: None,
+        };
+        let model = ModelProfile {
+            provider: "zai".to_string(),
+            slug: "glm-5.1".to_string(),
+            context_window: 200_000,
+            max_output: Some(1_024),
+            supports_tools: true,
+            supports_thinking: true,
+            supports_vision: false,
+            supports_web_search: false,
+            supports_mcp_tools: false,
+            supports_partial: false,
+            provider_routing: None,
+            tool_format: "openai_json".to_string(),
+            cost_input_per_m: None,
+            cost_output_per_m: None,
+            cost_cache_read_per_m: None,
+            cost_cache_write_per_m: None,
+            max_tools: None,
+            tokenizer_ratio: None,
+        };
+        let options = AgentOptions {
+            mcp_config: Some(mcp_config),
+            ..Default::default()
+        };
+
+        let agent = OpenAiCompatAdapter
+            .create_agent(&provider, &model, &options)
+            .expect("create agent");
+
+        let result = agent.run(&prompt("hello"), &Context::now()).await;
+        assert!(result.success);
+        assert_eq!(result.output.body.as_text().unwrap_or(""), "mcp-ok");
+
+        let request = captured
+            .lock()
+            .expect("capture lock")
+            .take()
+            .expect("captured request");
+        let body = request.split("\r\n\r\n").nth(1).expect("request body");
+        let parsed: Value = serde_json::from_str(body).expect("json request body");
+        let tools = parsed["tools"].as_array().expect("tools array");
+
+        assert!(tools.iter().any(|tool| {
+            tool["function"]["name"].as_str() == Some("local__echo")
+                && tool["function"]["description"].as_str() == Some("Echo from MCP")
+        }));
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["function"]["name"].as_str() == Some("ls"))
+        );
 
         handle.join().expect("server thread");
     }

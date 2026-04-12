@@ -5,12 +5,14 @@
 //! `.mcp.json` config discovery, and a dynamic registry that composes
 //! static built-in tools with MCP-discovered tools.
 
+pub mod bridge;
 pub mod client;
 pub mod config;
 pub mod dedup;
 pub mod dynamic_registry;
 pub mod to_tool_def;
 
+pub use bridge::{McpBridgeError, discover_mcp_tools};
 pub use client::{
     McpClient, McpRequest, McpResponse, McpToolDef, McpToolResult, StdioTransport, Transport,
 };
