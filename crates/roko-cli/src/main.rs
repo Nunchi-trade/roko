@@ -25,8 +25,9 @@ use roko_cli::{
     PageId, PipeMode, Plan, PlanSummary, ReplMode, RepoRegistry, SessionStatus, Source,
     WizardInputs, config_cmd, load_layered, run_init_wizard, run_once,
 };
+use roko_core::agent::ProviderKind;
 use roko_core::config::ServeDeployWebhookConfig;
-use roko_core::config::schema::RokoConfig;
+use roko_core::config::schema::{ProviderConfig, RokoConfig};
 use roko_core::{ContentHash, Context, Kind, Query, Substrate};
 use roko_core::{Headlines, TaskMetric, compute_headlines};
 use roko_dreams::{DreamAgentConfig, DreamEngine, DreamLoopConfig, DreamRunner};
@@ -247,6 +248,11 @@ enum Command {
     EventSources {
         #[command(subcommand)]
         cmd: EventSourcesCmd,
+    },
+    /// Inspect configured LLM providers.
+    Provider {
+        #[command(subcommand)]
+        cmd: ProviderCmd,
     },
     /// Manage model experiments.
     Experiment {
@@ -556,6 +562,16 @@ enum EventSourcesCmd {
 }
 
 #[derive(Debug, Subcommand)]
+enum ProviderCmd {
+    /// List configured providers and their current connection status.
+    List {
+        /// Directory containing `roko.toml` (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum DeployCmd {
     /// Deploy the current workspace to Railway via the public GraphQL API.
     Railway {
@@ -849,6 +865,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             let _ = roko_cli::index::rebuild_all(&std::env::current_dir().unwrap_or_default());
             result
         }
+        Command::Provider { cmd } => cmd_provider(cli, cmd).await,
         Command::Experiment { cmd } => dispatch_experiment(cli, cmd),
         Command::Deploy { cmd } => cmd_deploy(cli, cmd).await,
         Command::Daemon { cmd } => cmd_daemon(cli, cmd).await,
@@ -1394,6 +1411,250 @@ async fn load_cfactor_history(path: PathBuf) -> Vec<CFactor> {
 // -----------------------------------------------------------------------
 // Subcommand handlers
 // -----------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProviderListRow {
+    provider: String,
+    kind: String,
+    base_url: String,
+    status: String,
+}
+
+async fn cmd_provider(cli: &Cli, cmd: ProviderCmd) -> Result<i32> {
+    match cmd {
+        ProviderCmd::List { workdir } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            cmd_provider_list(&wd).await?;
+            Ok(EXIT_SUCCESS)
+        }
+    }
+}
+
+async fn cmd_provider_list(workdir: &Path) -> Result<()> {
+    let config = load_roko_config(workdir)?;
+    let providers = configured_providers(&config);
+    if providers.is_empty() {
+        println!("no providers configured");
+        return Ok(());
+    }
+
+    let client = reqwest::Client::builder()
+        .user_agent("roko-cli/0.1")
+        .timeout(Duration::from_secs(2))
+        .build()
+        .context("build provider probe client")?;
+
+    let mut provider_names = providers.keys().cloned().collect::<Vec<_>>();
+    provider_names.sort_unstable();
+
+    let mut rows = Vec::with_capacity(provider_names.len());
+    for provider_name in provider_names {
+        let provider = providers
+            .get(&provider_name)
+            .expect("provider name collected from provider registry");
+        rows.push(inspect_provider(&client, &provider_name, provider).await);
+    }
+
+    print!("{}", format_provider_rows(&rows));
+    Ok(())
+}
+
+fn configured_providers(config: &RokoConfig) -> std::collections::HashMap<String, ProviderConfig> {
+    if !config.providers.is_empty() {
+        return config.providers.clone();
+    }
+
+    if config.agent.command.is_some()
+        || config.agent.args.is_some()
+        || config.agent.timeout_ms.is_some()
+        || config
+            .agent
+            .env
+            .as_ref()
+            .is_some_and(|entries| !entries.is_empty())
+    {
+        return config.effective_providers();
+    }
+
+    std::collections::HashMap::new()
+}
+
+async fn inspect_provider(
+    client: &reqwest::Client,
+    provider_name: &str,
+    provider: &ProviderConfig,
+) -> ProviderListRow {
+    match provider.kind {
+        ProviderKind::ClaudeCli => inspect_cli_provider(provider_name, provider),
+        _ => inspect_http_provider(client, provider_name, provider).await,
+    }
+}
+
+fn inspect_cli_provider(provider_name: &str, provider: &ProviderConfig) -> ProviderListRow {
+    let command = provider
+        .command
+        .as_deref()
+        .map(str::trim)
+        .filter(|command| !command.is_empty());
+    let status = match command {
+        Some(command) if command_available(command) => "ok (cli found)".to_string(),
+        Some(_) => "warn (cli missing)".to_string(),
+        None => "warn (command missing)".to_string(),
+    };
+
+    ProviderListRow {
+        provider: provider_name.to_string(),
+        kind: provider.kind.to_string(),
+        base_url: format!("(cli: {})", command.unwrap_or("<missing>")),
+        status,
+    }
+}
+
+async fn inspect_http_provider(
+    client: &reqwest::Client,
+    provider_name: &str,
+    provider: &ProviderConfig,
+) -> ProviderListRow {
+    let base_url = provider
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|base_url| !base_url.is_empty());
+    let mut issues = Vec::new();
+
+    if let Some(env_name) = provider
+        .api_key_env
+        .as_deref()
+        .map(str::trim)
+        .filter(|env_name| !env_name.is_empty())
+    {
+        let has_key = std::env::var(env_name)
+            .ok()
+            .is_some_and(|value| !value.trim().is_empty());
+        if !has_key {
+            issues.push("key missing".to_string());
+        }
+    }
+
+    match base_url {
+        Some(base_url) => {
+            if let Some(issue) = probe_base_url(client, base_url).await {
+                issues.push(issue);
+            }
+        }
+        None => issues.push("base URL missing".to_string()),
+    }
+
+    let status = if issues.is_empty() {
+        if provider
+            .api_key_env
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|env_name| !env_name.is_empty())
+        {
+            "ok (key set)".to_string()
+        } else {
+            "ok (reachable)".to_string()
+        }
+    } else {
+        format!("warn ({})", issues.join(", "))
+    };
+
+    ProviderListRow {
+        provider: provider_name.to_string(),
+        kind: provider.kind.to_string(),
+        base_url: base_url.unwrap_or("(missing)").to_string(),
+        status,
+    }
+}
+
+async fn probe_base_url(client: &reqwest::Client, base_url: &str) -> Option<String> {
+    match client.head(base_url).send().await {
+        Ok(_) => None,
+        Err(err) if err.is_builder() => Some("invalid base URL".to_string()),
+        Err(_) => Some("unreachable".to_string()),
+    }
+}
+
+fn command_available(command: &str) -> bool {
+    let command = command.trim();
+    if command.is_empty() {
+        return false;
+    }
+
+    let command_path = Path::new(command);
+    if command_path.is_absolute() || command.contains(std::path::MAIN_SEPARATOR) {
+        return executable_file(command_path);
+    }
+
+    roko_cli::config::command_on_path(command)
+}
+
+fn executable_file(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn format_provider_rows(rows: &[ProviderListRow]) -> String {
+    let mut widths = [
+        "Provider".len(),
+        "Kind".len(),
+        "Base URL".len(),
+        "Status".len(),
+    ];
+
+    for row in rows {
+        widths[0] = widths[0].max(row.provider.len());
+        widths[1] = widths[1].max(row.kind.len());
+        widths[2] = widths[2].max(row.base_url.len());
+        widths[3] = widths[3].max(row.status.len());
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "{:<provider_w$}  {:<kind_w$}  {:<base_w$}  {:<status_w$}",
+        "Provider",
+        "Kind",
+        "Base URL",
+        "Status",
+        provider_w = widths[0],
+        kind_w = widths[1],
+        base_w = widths[2],
+        status_w = widths[3],
+    );
+
+    for row in rows {
+        let _ = writeln!(
+            out,
+            "{:<provider_w$}  {:<kind_w$}  {:<base_w$}  {:<status_w$}",
+            row.provider,
+            row.kind,
+            row.base_url,
+            row.status,
+            provider_w = widths[0],
+            kind_w = widths[1],
+            base_w = widths[2],
+            status_w = widths[3],
+        );
+    }
+
+    out
+}
 
 fn dispatch_config(cmd: ConfigCmd) -> Result<()> {
     match cmd {
@@ -3967,6 +4228,32 @@ mod tests {
                 cmd: ExperimentCmd::Model { .. }
             })
         ));
+    }
+
+    #[test]
+    fn cli_parses_provider_list_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "provider", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Provider {
+                cmd: ProviderCmd::List { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn format_provider_rows_renders_headers_and_rows() {
+        let output = format_provider_rows(&[ProviderListRow {
+            provider: "anthropic".to_string(),
+            kind: "claude_cli".to_string(),
+            base_url: "(cli: claude)".to_string(),
+            status: "ok (cli found)".to_string(),
+        }]);
+
+        assert!(output.contains("Provider"));
+        assert!(output.contains("Base URL"));
+        assert!(output.contains("anthropic"));
+        assert!(output.contains("ok (cli found)"));
     }
 
     #[test]
