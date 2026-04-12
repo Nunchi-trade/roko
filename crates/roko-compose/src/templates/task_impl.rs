@@ -105,14 +105,14 @@ fn push_base_sections(sections: &mut Vec<PromptSection>, input: &TaskImplInput) 
     sections.push(
         PromptSection::new("agents_instructions", &input.agents_md)
             .with_priority(SectionPriority::Critical)
-            .with_cache_layer(CacheLayer::System)
+            .with_cache_layer(CacheLayer::Role)
             .with_placement(Placement::Start),
     );
     // 2. plan_spec — Session / Critical / Start / hard_cap 50k
     sections.push(
         PromptSection::new("plan_spec", truncate(&input.plan.content, 50_000))
             .with_priority(SectionPriority::Critical)
-            .with_cache_layer(CacheLayer::Session)
+            .with_cache_layer(CacheLayer::Workspace)
             .with_placement(Placement::Start)
             .with_hard_cap(50_000),
     );
@@ -120,7 +120,7 @@ fn push_base_sections(sections: &mut Vec<PromptSection>, input: &TaskImplInput) 
     sections.push(
         PromptSection::new("workspace_map", truncate(&input.workspace_map, 1_500))
             .with_priority(SectionPriority::High)
-            .with_cache_layer(CacheLayer::Session)
+            .with_cache_layer(CacheLayer::Workspace)
             .with_placement(Placement::Middle)
             .with_hard_cap(1_500),
     );
@@ -128,7 +128,7 @@ fn push_base_sections(sections: &mut Vec<PromptSection>, input: &TaskImplInput) 
     sections.push(
         PromptSection::new("brief", truncate(&input.brief, 2_000))
             .with_priority(SectionPriority::High)
-            .with_cache_layer(CacheLayer::Session)
+            .with_cache_layer(CacheLayer::Workspace)
             .with_placement(Placement::Middle)
             .with_hard_cap(2_000),
     );
@@ -136,7 +136,7 @@ fn push_base_sections(sections: &mut Vec<PromptSection>, input: &TaskImplInput) 
     sections.push(
         PromptSection::new("prd2_extract", truncate(&input.prd2_extract, 3_000))
             .with_priority(SectionPriority::High)
-            .with_cache_layer(CacheLayer::Session)
+            .with_cache_layer(CacheLayer::Workspace)
             .with_placement(Placement::Middle)
             .with_hard_cap(3_000),
     );
@@ -147,7 +147,7 @@ fn push_base_sections(sections: &mut Vec<PromptSection>, input: &TaskImplInput) 
             truncate(&input.cross_plan_context, 1_000),
         )
         .with_priority(SectionPriority::Normal)
-        .with_cache_layer(CacheLayer::Session)
+        .with_cache_layer(CacheLayer::Workspace)
         .with_placement(Placement::Middle)
         .with_hard_cap(1_000),
     );
@@ -156,7 +156,7 @@ fn push_base_sections(sections: &mut Vec<PromptSection>, input: &TaskImplInput) 
         sections.push(
             PromptSection::new("ignored_tests", truncate(&input.ignored_tests, 500))
                 .with_priority(SectionPriority::Low)
-                .with_cache_layer(CacheLayer::Session)
+                .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Middle)
                 .with_hard_cap(500),
         );
@@ -165,7 +165,7 @@ fn push_base_sections(sections: &mut Vec<PromptSection>, input: &TaskImplInput) 
     sections.push(
         PromptSection::new("assignment", format_assignment(input))
             .with_priority(SectionPriority::Critical)
-            .with_cache_layer(CacheLayer::Task)
+            .with_cache_layer(CacheLayer::Plan)
             .with_placement(Placement::End),
     );
 }
@@ -176,7 +176,7 @@ fn push_optional_sections(sections: &mut Vec<PromptSection>, input: &TaskImplInp
         sections.push(
             PromptSection::new("prior_task_outputs", truncate(prior, 2_000))
                 .with_priority(SectionPriority::Normal)
-                .with_cache_layer(CacheLayer::Dynamic)
+                .with_cache_layer(CacheLayer::Volatile)
                 .with_placement(Placement::Middle)
                 .with_hard_cap(2_000),
         );
@@ -185,7 +185,7 @@ fn push_optional_sections(sections: &mut Vec<PromptSection>, input: &TaskImplInp
         sections.push(
             PromptSection::new("verify_chain", truncate(chain, 2_000))
                 .with_priority(SectionPriority::High)
-                .with_cache_layer(CacheLayer::Session)
+                .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::End)
                 .with_hard_cap(2_000),
         );
@@ -196,7 +196,7 @@ fn push_optional_sections(sections: &mut Vec<PromptSection>, input: &TaskImplInp
             sections.push(
                 PromptSection::new("enhanced_sections", text)
                     .with_priority(SectionPriority::High)
-                    .with_cache_layer(CacheLayer::Task)
+                    .with_cache_layer(CacheLayer::Plan)
                     .with_placement(Placement::End),
             );
         }
@@ -205,7 +205,7 @@ fn push_optional_sections(sections: &mut Vec<PromptSection>, input: &TaskImplInp
         sections.push(
             PromptSection::new("sibling_tasks", format_siblings(&input.sibling_tasks))
                 .with_priority(SectionPriority::Normal)
-                .with_cache_layer(CacheLayer::Task)
+                .with_cache_layer(CacheLayer::Plan)
                 .with_placement(Placement::End),
         );
     }
@@ -213,7 +213,7 @@ fn push_optional_sections(sections: &mut Vec<PromptSection>, input: &TaskImplInp
         sections.push(
             PromptSection::new("file_context", ctx.as_str())
                 .with_priority(SectionPriority::High)
-                .with_cache_layer(CacheLayer::Task)
+                .with_cache_layer(CacheLayer::Plan)
                 .with_placement(Placement::End),
         );
     }
@@ -221,7 +221,7 @@ fn push_optional_sections(sections: &mut Vec<PromptSection>, input: &TaskImplInp
         sections.push(
             PromptSection::new("learning_pack", truncate(pack, 3_000))
                 .with_priority(SectionPriority::Normal)
-                .with_cache_layer(CacheLayer::Dynamic)
+                .with_cache_layer(CacheLayer::Volatile)
                 .with_placement(Placement::Middle)
                 .with_hard_cap(3_000),
         );
@@ -353,10 +353,10 @@ mod tests {
         assert_eq!(sections[7].priority, SectionPriority::Critical); // assignment
 
         // Cache layers
-        assert_eq!(sections[0].cache_layer, CacheLayer::System);
-        assert_eq!(sections[1].cache_layer, CacheLayer::Session);
-        assert_eq!(sections[7].cache_layer, CacheLayer::Task);
-        assert_eq!(sections[8].cache_layer, CacheLayer::Dynamic);
+        assert_eq!(sections[0].cache_layer, CacheLayer::Role);
+        assert_eq!(sections[1].cache_layer, CacheLayer::Workspace);
+        assert_eq!(sections[7].cache_layer, CacheLayer::Plan);
+        assert_eq!(sections[8].cache_layer, CacheLayer::Volatile);
 
         // Hard caps — task impl uses tighter budgets
         assert_eq!(sections[1].hard_cap, Some(50_000)); // plan_spec

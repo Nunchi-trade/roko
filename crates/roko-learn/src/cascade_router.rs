@@ -12,7 +12,8 @@
 //! # [`CascadeModel`]
 //!
 //! The router returns a [`CascadeModel`] containing a primary model,
-//! an optional fallback model, and a latency SLA in milliseconds.
+//! an ordered fallback chain, an optional context-overflow fallback,
+//! and a latency SLA in milliseconds.
 //!
 //! # Thread safety
 //!
@@ -20,16 +21,23 @@
 //! [`parking_lot::Mutex`] for confidence-stage statistics.
 
 use parking_lot::Mutex;
+use roko_agent::provider::ProviderError;
 use roko_core::OperatingFrequency;
 use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
+use roko_core::config::schema::RewardWeights;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::cfactor::{AgentDispatchBias, CFactor};
-use crate::model_router::{COLD_START_THRESHOLD, LinUCBRouter, RoutingContext};
+use crate::model_experiment::ModelExperimentStore;
+use crate::model_router::{
+    COLD_START_THRESHOLD, CandidateArmScore, LinUCBRouter, RoutingContext,
+};
+
 use crate::pareto::{ModelObservation, compute_pareto_frontier};
 use crate::provider_health::ProviderHealthRegistry;
+use crate::routing_log::{CandidateEntry, RoutingDecisionLog, RoutingDecisionMeta, RoutingLogger};
 
 // ─── CascadeStage ───────────────────────────────────────────────────────────
 
@@ -69,12 +77,42 @@ impl std::fmt::Display for CascadeStage {
 pub struct CascadeModel {
     /// Primary model to use.
     pub primary: ModelSpec,
-    /// Fallback model if the primary fails or times out.
-    pub fallback: Option<ModelSpec>,
+    /// Ordered fallback models to try after general failures.
+    pub fallback_chain: Vec<ModelSpec>,
+    /// Larger-context model to try when the primary overflows context.
+    pub context_overflow_fallback: Option<ModelSpec>,
     /// Latency SLA in milliseconds.
     pub latency_sla_ms: u64,
     /// Which cascade stage produced this recommendation.
     pub stage: CascadeStage,
+}
+
+impl CascadeModel {
+    /// Return the model to use for the given attempt number.
+    ///
+    /// Attempt 0 is the primary model. Subsequent attempts walk the fallback
+    /// chain in order until it is exhausted.
+    #[must_use]
+    pub fn model_for_attempt(&self, attempt: usize) -> Option<&ModelSpec> {
+        match attempt {
+            0 => Some(&self.primary),
+            _ => self.fallback_chain.get(attempt - 1),
+        }
+    }
+
+    /// Return the best fallback to use for a provider-specific failure.
+    #[must_use]
+    pub fn fallback_for_error(&self, error: &ProviderError) -> Option<&ModelSpec> {
+        match error {
+            ProviderError::ContextOverflow => self.context_overflow_fallback.as_ref(),
+            ProviderError::RateLimit { .. } => self
+                .fallback_chain
+                .iter()
+                .find(|model| model.backend != self.primary.backend)
+                .or_else(|| self.fallback_chain.first()),
+            _ => self.fallback_chain.first(),
+        }
+    }
 }
 
 /// Selection result for raw-context routing.
@@ -86,6 +124,40 @@ pub struct CascadeSelection {
     pub observations: u64,
     /// Which cascade stage produced the recommendation.
     pub stage: CascadeStage,
+}
+
+/// Debug score for one model candidate within the cascade.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CascadeCandidateScore {
+    /// Model slug this score belongs to.
+    pub slug: String,
+    /// Stage-specific score used for comparison.
+    pub score: f64,
+    /// Whether this candidate was selected.
+    pub selected: bool,
+    /// Whether this candidate is on the current Pareto frontier.
+    pub on_pareto_frontier: bool,
+    /// LinUCB mean-reward estimate, when UCB routing is active.
+    pub exploitation: Option<f64>,
+    /// LinUCB exploration bonus, when UCB routing is active.
+    pub exploration: Option<f64>,
+}
+
+/// Explainability snapshot for one routing decision.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CascadeRouteExplanation {
+    /// Which cascade stage handled this routing decision.
+    pub stage: CascadeStage,
+    /// Total observations recorded when the explanation was generated.
+    pub observations: u64,
+    /// Current LinUCB alpha, when the UCB stage is active.
+    pub alpha: Option<f64>,
+    /// Selected model slug.
+    pub selected_slug: String,
+    /// Candidate scores in descending order.
+    pub candidates: Vec<CascadeCandidateScore>,
+    /// Current Pareto frontier snapshot used by the cascade.
+    pub pareto_frontier: Vec<String>,
 }
 
 // ─── Confidence-stage stats ─────────────────────────────────────────────────
@@ -225,14 +297,54 @@ fn slug_to_tier(slug: &str) -> ModelTier {
     }
 }
 
-/// Determine the fallback model slug for a given primary tier.
-fn fallback_for_tier(tier: ModelTier) -> Option<String> {
-    match tier {
-        ModelTier::Fast => None, // no fallback below fast
-        ModelTier::Standard => Some("claude-haiku-3-5".to_string()),
-        // Premium and forward-compat: fall back to sonnet
-        _ => Some("claude-sonnet-4-5".to_string()),
+/// Build the ordered fallback chain for a routed primary model.
+fn fallback_chain_for_model(model_slugs: &[String], primary_slug: &str) -> Vec<ModelSpec> {
+    let primary_tier = slug_to_tier(primary_slug);
+
+    if matches!(primary_tier, ModelTier::Fast) {
+        return Vec::new();
     }
+
+    let mut grouped = [Vec::new(), Vec::new(), Vec::new()];
+
+    for slug in model_slugs {
+        if slugs_match(slug, primary_slug) {
+            continue;
+        }
+
+        let bucket = match primary_tier {
+            ModelTier::Standard => match slug_to_tier(slug) {
+                ModelTier::Fast => 0,
+                ModelTier::Standard => 1,
+                ModelTier::Premium => 2,
+                _ => 1,
+            },
+            ModelTier::Premium => match slug_to_tier(slug) {
+                ModelTier::Standard => 0,
+                ModelTier::Fast => 1,
+                ModelTier::Premium => 2,
+                _ => 0,
+            },
+            _ => 0,
+        };
+
+        grouped[bucket].push(ModelSpec::from_slug(slug));
+    }
+
+    grouped.into_iter().flatten().collect()
+}
+
+/// Find a stronger model to use when the selected model overflows context.
+fn context_overflow_fallback_for_model(
+    model_slugs: &[String],
+    primary_slug: &str,
+) -> Option<ModelSpec> {
+    let primary_rank = model_tier_rank(slug_to_tier(primary_slug));
+
+    model_slugs
+        .iter()
+        .find(|slug| model_tier_rank(slug_to_tier(slug)) > primary_rank)
+        .map(ModelSpec::from_slug)
 }
 
 fn low_confidence_tier_bonus(tier: ModelTier) -> f64 {
@@ -347,6 +459,11 @@ impl CascadeRouter {
     pub fn with_role_table(mut self, table: HashMap<AgentRole, String>) -> Self {
         self.role_table = table;
         self
+    }
+
+    /// Update the Stage 1 static role-to-model mapping for one role.
+    pub fn set_static_role_model(&mut self, role: AgentRole, model_slug: impl Into<String>) {
+        self.role_table.insert(role, model_slug.into());
     }
 
     /// Override the `LinUCB` router (builder pattern, for injecting pre-trained state).
@@ -465,6 +582,45 @@ impl CascadeRouter {
         self.route_with_cfactor(ctx, None, None)
     }
 
+    /// Route a context through the cascade and append a routing decision log.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the routing decision cannot be persisted.
+    pub fn route_logged(
+        &self,
+        ctx: &RoutingContext,
+        log: &RoutingLogger,
+        meta: &RoutingDecisionMeta,
+    ) -> std::io::Result<(CascadeModel, RoutingDecisionLog)> {
+        let selected = self.route(ctx);
+        let explanation = self.explain_route(ctx, None);
+        let record =
+            self.append_routing_log(log, meta, &selected.primary.slug, Some(&explanation))?;
+        Ok((selected, record))
+    }
+
+    /// Route a context through the cascade, overriding selection when a model
+    /// experiment is active for the current role and task category.
+    pub fn route_with_experiments(
+        &self,
+        ctx: &RoutingContext,
+        experiments: &ModelExperimentStore,
+    ) -> CascadeModel {
+        if let Some(variant) = experiments.assign_model(ctx.role.label(), ctx.task_category.label())
+        {
+            return CascadeModel {
+                primary: ModelSpec::from_slug(&variant.slug),
+                fallback_chain: Vec::new(),
+                context_overflow_fallback: None,
+                latency_sla_ms: 30_000,
+                stage: CascadeStage::Static,
+            };
+        }
+
+        self.route(ctx)
+    }
+
     /// Route a context through the cascade, excluding models whose provider
     /// is currently unavailable.
     ///
@@ -563,6 +719,36 @@ impl CascadeRouter {
         self.observe_internal(&context_vec, model_idx, reward, true);
     }
 
+    /// Record a successful multi-objective observation from a raw context vector.
+    pub fn observe_multi_objective(
+        &self,
+        context_vec: Vec<f64>,
+        model_idx: usize,
+        quality: f64,
+        normalized_cost: f64,
+        normalized_latency: f64,
+        weights: &RewardWeights,
+    ) {
+        let Some(slug) = self.model_slugs.get(model_idx) else {
+            return;
+        };
+
+        let mut stats = self.confidence_stats.lock();
+        let entry = stats.entry(slug.clone()).or_default();
+        entry.trials += 1;
+        entry.successes += 1;
+        drop(stats);
+
+        self.linucb.update_features_multi_objective(
+            &context_vec,
+            model_idx,
+            quality,
+            normalized_cost,
+            normalized_latency,
+            weights,
+        );
+    }
+
     fn observe_internal(&self, context_vec: &[f64], model_idx: usize, reward: f64, success: bool) {
         let Some(slug) = self.model_slugs.get(model_idx) else {
             return;
@@ -598,6 +784,217 @@ impl CascadeRouter {
             .collect()
     }
 
+    /// Explain the current routing decision for `ctx`.
+    ///
+    /// If `candidates` is provided, scoring is restricted to that subset,
+    /// matching the behavior of provider-health filtering.
+    pub fn explain_route(
+        &self,
+        ctx: &RoutingContext,
+        candidates: Option<&[String]>,
+    ) -> CascadeRouteExplanation {
+        let candidates = candidates
+            .filter(|candidates| !candidates.is_empty())
+            .unwrap_or(&self.model_slugs);
+        let stage = self.current_stage();
+        let observations = self.total_observations();
+        let pareto_frontier = self.recompute_pareto_frontier();
+
+        match stage {
+            CascadeStage::Static => {
+                let selected = if std::ptr::eq(candidates, self.model_slugs.as_slice()) {
+                    self.route_static(ctx, None, None).primary.slug
+                } else {
+                    self.route_static_filtered(ctx, candidates).primary.slug
+                };
+                let mut scored = candidates
+                    .iter()
+                    .map(|slug| CascadeCandidateScore {
+                        slug: slug.clone(),
+                        score: if slugs_match(slug, &selected) {
+                            1.0
+                        } else {
+                            0.0
+                        },
+                        selected: slugs_match(slug, &selected),
+                        on_pareto_frontier: pareto_frontier.iter().any(|entry| entry == slug),
+                        exploitation: None,
+                        exploration: None,
+                    })
+                    .collect::<Vec<_>>();
+                scored.sort_by(|a, b| {
+                    b.score
+                        .total_cmp(&a.score)
+                        .then_with(|| a.slug.cmp(&b.slug))
+                });
+
+                CascadeRouteExplanation {
+                    stage,
+                    observations,
+                    alpha: None,
+                    selected_slug: selected,
+                    candidates: scored,
+                    pareto_frontier,
+                }
+            }
+            CascadeStage::Confidence => {
+                let scores = self.confidence_scores(candidates, ctx);
+                let selected = choose_best_scored_slug(scores.clone());
+                let mut scored = scores
+                    .into_iter()
+                    .map(|(slug, score)| CascadeCandidateScore {
+                        selected: slugs_match(&slug, &selected),
+                        on_pareto_frontier: pareto_frontier.iter().any(|entry| entry == &slug),
+                        slug,
+                        score,
+                        exploitation: None,
+                        exploration: None,
+                    })
+                    .collect::<Vec<_>>();
+                scored.sort_by(|a, b| {
+                    b.score
+                        .total_cmp(&a.score)
+                        .then_with(|| a.slug.cmp(&b.slug))
+                });
+
+                CascadeRouteExplanation {
+                    stage,
+                    observations,
+                    alpha: None,
+                    selected_slug: selected,
+                    candidates: scored,
+                    pareto_frontier,
+                }
+            }
+            CascadeStage::Ucb => {
+                self.refresh_pareto_frontier_if_needed();
+                let frontier = {
+                    let state = self.pareto_frontier.lock();
+                    if state.bucket == 0 || state.frontier.is_empty() {
+                        pareto_frontier.clone()
+                    } else {
+                        state.frontier.clone()
+                    }
+                };
+                let base_alpha = self.linucb.current_alpha();
+                let arm_scores: Vec<CandidateArmScore> = self
+                    .linucb
+                    .score_candidates_with_alpha_adjuster(ctx, candidates, |slug| {
+                        pareto_adjusted_alpha(base_alpha, slug, &frontier)
+                    });
+
+                let selected = arm_scores
+                    .iter()
+                    .max_by(|left, right| {
+                        left.score
+                            .total_cmp(&right.score)
+                            .then_with(|| right.slug.cmp(&left.slug))
+                    })
+                    .map(|score| score.slug.clone())
+                    .unwrap_or_else(|| candidates[0].clone());
+
+                let mut scored = arm_scores
+                    .into_iter()
+                    .map(|candidate| CascadeCandidateScore {
+                        selected: slugs_match(&candidate.slug, &selected),
+                        on_pareto_frontier: frontier.iter().any(|entry| entry == &candidate.slug),
+                        slug: candidate.slug,
+                        score: candidate.score,
+                        exploitation: Some(candidate.exploitation),
+                        exploration: Some(candidate.exploration),
+                    })
+                    .collect::<Vec<_>>();
+                scored.sort_by(|a, b| {
+                    b.score
+                        .total_cmp(&a.score)
+                        .then_with(|| a.slug.cmp(&b.slug))
+                });
+
+                CascadeRouteExplanation {
+                    stage,
+                    observations,
+                    alpha: Some(base_alpha),
+                    selected_slug: selected,
+                    candidates: scored,
+                    pareto_frontier: frontier,
+                }
+            }
+        }
+    }
+
+    /// Append a routing decision log entry for a selected model.
+    ///
+    /// When `explanation` is absent, the selected model is recorded as the sole
+    /// candidate so callers can still emit a complete decision log.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the routing decision cannot be persisted.
+    pub fn append_routing_log(
+        &self,
+        log: &RoutingLogger,
+        meta: &RoutingDecisionMeta,
+        selected_model: &str,
+        explanation: Option<&CascadeRouteExplanation>,
+    ) -> std::io::Result<RoutingDecisionLog> {
+        let mut candidates = explanation
+            .map(|explanation| {
+                explanation
+                    .candidates
+                    .iter()
+                    .map(|candidate| CandidateEntry {
+                        model: candidate.slug.clone(),
+                        provider: log.provider_for_model(&candidate.slug),
+                        score: candidate.score,
+                        disqualified: log.disqualified_reason(&candidate.slug),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        if !candidates
+            .iter()
+            .any(|candidate| candidate.model == selected_model)
+        {
+            candidates.insert(
+                0,
+                CandidateEntry {
+                    model: selected_model.to_string(),
+                    provider: log.provider_for_model(selected_model),
+                    score: 1.0,
+                    disqualified: log.disqualified_reason(selected_model),
+                },
+            );
+        }
+        if candidates.is_empty() {
+            candidates.push(CandidateEntry {
+                model: selected_model.to_string(),
+                provider: log.provider_for_model(selected_model),
+                score: 1.0,
+                disqualified: log.disqualified_reason(selected_model),
+            });
+        }
+
+        let record = RoutingDecisionLog {
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            trace_id: meta.trace_id.clone(),
+            task_id: meta.task_id.clone(),
+            requested_model: meta.requested_model.clone(),
+            role: meta.role.clone(),
+            task_complexity: meta.task_complexity.clone(),
+            selected_provider: log.provider_for_model(selected_model),
+            selected_model: selected_model.to_string(),
+            routing_stage: meta.routing_stage.clone(),
+            routing_reason: meta.routing_reason.clone(),
+            candidates,
+            outcome_success: None,
+            outcome_cost_usd: None,
+            outcome_latency_ms: None,
+        };
+        log.append(&record)?;
+        Ok(record)
+    }
+
     /// Save confidence stats, model slugs, and total observation count to a JSON file.
     ///
     /// `LinUCB` arm weights are not persisted (they re-learn from new observations).
@@ -622,6 +1019,7 @@ impl CascadeRouter {
                 })
                 .collect(),
             total_observations: self.linucb.total_observations(),
+            role_table: self.role_table.clone(),
         };
         let json = serde_json::to_string_pretty(&snapshot)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -637,9 +1035,10 @@ impl CascadeRouter {
     /// Load a cascade router from a persisted JSON file, or create a new one.
     ///
     /// If the file exists and parses correctly, the confidence stats are restored
-    /// and the model slugs from the file are merged with the provided `model_slugs`
-    /// (the union is used). If the file doesn't exist or fails to parse, a fresh
-    /// router is created with the given `model_slugs`.
+    /// for the current `model_slugs`. When a model slug changes version between
+    /// runs (for example `glm-5` -> `glm-5.1`), half of the old confidence stats
+    /// are seeded into the new slug. If the file doesn't exist or fails to parse,
+    /// a fresh router is created with the given `model_slugs`.
     ///
     /// # Panics
     ///
@@ -650,22 +1049,26 @@ impl CascadeRouter {
             .and_then(|s| serde_json::from_str::<CascadeSnapshot>(&s).ok());
 
         match snapshot {
-            Some(snap) => {
-                // Merge model sets: union of persisted + provided.
-                let mut slugs: Vec<String> = snap.model_slugs;
-                for s in &model_slugs {
-                    if !slugs.contains(s) {
-                        slugs.push(s.clone());
-                    }
-                }
-                if slugs.is_empty() {
-                    slugs = model_slugs;
-                }
+            Some(CascadeSnapshot {
+                model_slugs: persisted_model_slugs,
+                confidence_stats,
+                total_observations,
+                role_table,
+            }) => {
+                let slugs = if model_slugs.is_empty() {
+                    persisted_model_slugs.clone()
+                } else {
+                    model_slugs
+                };
                 assert!(!slugs.is_empty(), "CascadeRouter: need at least one model");
-                let router = Self::new(slugs);
+                let version_changes = detect_version_changes(&persisted_model_slugs, &slugs);
+                let migrated_stats =
+                    migrated_confidence_stats(&confidence_stats, &version_changes, &slugs);
+                let mut router = Self::new(slugs);
+
                 // Restore confidence stats.
                 let mut stats = router.confidence_stats.lock();
-                for (model, persisted) in &snap.confidence_stats {
+                for (model, persisted) in &migrated_stats {
                     stats.insert(
                         model.clone(),
                         ModelStats {
@@ -679,12 +1082,19 @@ impl CascadeRouter {
                 // Restore total observation count so the cascade stage is correct.
                 // If the snapshot predates the `total_observations` field (default 0),
                 // recompute from the sum of per-model trials.
-                let total = if snap.total_observations > 0 {
-                    snap.total_observations
+                let total = if total_observations > 0 {
+                    total_observations
                 } else {
-                    snap.confidence_stats.values().map(|s| s.trials).sum()
+                    confidence_stats.values().map(|s| s.trials).sum()
                 };
                 router.linucb.set_total_observations(total);
+                if !role_table.is_empty() {
+                    for (role, slug) in role_table {
+                        router
+                            .role_table
+                            .insert(role, remap_role_table_entry(slug, &version_changes));
+                    }
+                }
 
                 router
             }
@@ -708,11 +1118,14 @@ impl CascadeRouter {
 
         let selected = self.bias_model_for_cfactor(ModelSpec::from_slug(&slug), cfactor, agent_id);
         let tier = slug_to_tier(&selected.slug);
-        let fallback = fallback_for_tier(tier).map(ModelSpec::from_slug);
+        let fallback_chain = fallback_chain_for_model(&self.model_slugs, &selected.slug);
+        let context_overflow_fallback =
+            context_overflow_fallback_for_model(&self.model_slugs, &selected.slug);
 
         CascadeModel {
             primary: selected,
-            fallback,
+            fallback_chain,
+            context_overflow_fallback,
             latency_sla_ms: default_latency_sla(tier),
             stage: CascadeStage::Static,
         }
@@ -745,11 +1158,14 @@ impl CascadeRouter {
         };
         let selected = ModelSpec::from_slug(selected_slug);
         let tier = slug_to_tier(&selected.slug);
-        let fallback = fallback_for_tier(tier).map(ModelSpec::from_slug);
+        let fallback_chain = fallback_chain_for_model(candidates, &selected.slug);
+        let context_overflow_fallback =
+            context_overflow_fallback_for_model(candidates, &selected.slug);
 
         CascadeModel {
             primary: selected,
-            fallback,
+            fallback_chain,
+            context_overflow_fallback,
             latency_sla_ms: default_latency_sla(tier),
             stage: CascadeStage::Static,
         }
@@ -767,11 +1183,14 @@ impl CascadeRouter {
         let selected =
             self.bias_model_for_cfactor(ModelSpec::from_slug(&best_slug), cfactor, agent_id);
         let tier = slug_to_tier(&selected.slug);
-        let fallback = fallback_for_tier(tier).map(ModelSpec::from_slug);
+        let fallback_chain = fallback_chain_for_model(&self.model_slugs, &selected.slug);
+        let context_overflow_fallback =
+            context_overflow_fallback_for_model(&self.model_slugs, &selected.slug);
 
         CascadeModel {
             primary: selected,
-            fallback,
+            fallback_chain,
+            context_overflow_fallback,
             latency_sla_ms: default_latency_sla(tier),
             stage: CascadeStage::Confidence,
         }
@@ -787,11 +1206,14 @@ impl CascadeRouter {
 
         let selected = ModelSpec::from_slug(best_slug);
         let tier = slug_to_tier(&selected.slug);
-        let fallback = fallback_for_tier(tier).map(ModelSpec::from_slug);
+        let fallback_chain = fallback_chain_for_model(candidates, &selected.slug);
+        let context_overflow_fallback =
+            context_overflow_fallback_for_model(candidates, &selected.slug);
 
         CascadeModel {
             primary: selected,
-            fallback,
+            fallback_chain,
+            context_overflow_fallback,
             latency_sla_ms: default_latency_sla(tier),
             stage: CascadeStage::Confidence,
         }
@@ -806,11 +1228,14 @@ impl CascadeRouter {
         let model = self.select_ucb_model(ctx, &self.model_slugs);
         let selected = self.bias_model_for_cfactor(model, cfactor, agent_id);
         let tier = slug_to_tier(&selected.slug);
-        let fallback = fallback_for_tier(tier).map(ModelSpec::from_slug);
+        let fallback_chain = fallback_chain_for_model(&self.model_slugs, &selected.slug);
+        let context_overflow_fallback =
+            context_overflow_fallback_for_model(&self.model_slugs, &selected.slug);
 
         CascadeModel {
             primary: selected,
-            fallback,
+            fallback_chain,
+            context_overflow_fallback,
             latency_sla_ms: default_latency_sla(tier),
             stage: CascadeStage::Ucb,
         }
@@ -820,11 +1245,14 @@ impl CascadeRouter {
         let model = self.select_ucb_model(ctx, candidates);
         let selected = model;
         let tier = slug_to_tier(&selected.slug);
-        let fallback = fallback_for_tier(tier).map(ModelSpec::from_slug);
+        let fallback_chain = fallback_chain_for_model(candidates, &selected.slug);
+        let context_overflow_fallback =
+            context_overflow_fallback_for_model(candidates, &selected.slug);
 
         CascadeModel {
             primary: selected,
-            fallback,
+            fallback_chain,
+            context_overflow_fallback,
             latency_sla_ms: default_latency_sla(tier),
             stage: CascadeStage::Ucb,
         }
@@ -1032,13 +1460,113 @@ struct CascadeSnapshot {
     /// from the sum of per-model trials.
     #[serde(default)]
     total_observations: u64,
+    #[serde(default)]
+    role_table: HashMap<AgentRole, String>,
 }
 
 /// Serializable form of per-model confidence stats.
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 struct PersistedModelStats {
     trials: u64,
     successes: u64,
+}
+
+impl PersistedModelStats {
+    fn weighted_half(self) -> Self {
+        Self {
+            trials: self.trials / 2,
+            successes: self.successes / 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum VersionChange {
+    Added(String),
+    Removed(String),
+    Upgraded { old: String, new: String },
+}
+
+fn detect_version_changes(
+    persisted_slugs: &[String],
+    current_slugs: &[String],
+) -> Vec<VersionChange> {
+    let mut changes = Vec::new();
+    let persisted_set: HashSet<&str> = persisted_slugs.iter().map(String::as_str).collect();
+    let current_set: HashSet<&str> = current_slugs.iter().map(String::as_str).collect();
+
+    for slug in current_slugs {
+        if !persisted_set.contains(slug.as_str()) {
+            let prefix = slug
+                .rsplit_once('-')
+                .map_or(slug.as_str(), |(prefix, _)| prefix);
+            if let Some(old) = persisted_slugs
+                .iter()
+                .find(|candidate| candidate.starts_with(prefix))
+            {
+                changes.push(VersionChange::Upgraded {
+                    old: old.clone(),
+                    new: slug.clone(),
+                });
+            } else {
+                changes.push(VersionChange::Added(slug.clone()));
+            }
+        }
+    }
+
+    for slug in persisted_slugs {
+        if !current_set.contains(slug.as_str()) {
+            changes.push(VersionChange::Removed(slug.clone()));
+        }
+    }
+
+    changes
+}
+
+fn migrated_confidence_stats(
+    persisted_stats: &HashMap<String, PersistedModelStats>,
+    changes: &[VersionChange],
+    active_slugs: &[String],
+) -> HashMap<String, PersistedModelStats> {
+    let active_set: HashSet<&str> = active_slugs.iter().map(String::as_str).collect();
+    let mut migrated = persisted_stats
+        .iter()
+        .filter(|(slug, _)| active_set.contains(slug.as_str()))
+        .map(|(slug, stats)| (slug.clone(), *stats))
+        .collect::<HashMap<_, _>>();
+
+    for change in changes {
+        if let VersionChange::Upgraded { old, new } = change {
+            let Some(old_stats) = persisted_stats.get(old) else {
+                continue;
+            };
+            let transferred = old_stats.weighted_half();
+            if transferred.trials == 0 && transferred.successes == 0 {
+                continue;
+            }
+
+            let entry = migrated.entry(new.clone()).or_insert(PersistedModelStats {
+                trials: 0,
+                successes: 0,
+            });
+            entry.trials += transferred.trials;
+            entry.successes += transferred.successes;
+        }
+    }
+
+    migrated
+}
+
+fn remap_role_table_entry(slug: String, changes: &[VersionChange]) -> String {
+    for change in changes {
+        if let VersionChange::Upgraded { old, new } = change {
+            if slug == *old {
+                return new.clone();
+            }
+        }
+    }
+
+    slug
 }
 
 // ─── Tests ────────────────────────────────────────��─────────────────────────
@@ -1046,9 +1574,13 @@ struct PersistedModelStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model_experiment::{ModelExperiment, ModelExperimentStore, ModelVariant};
+    use crate::prompt_experiment::ExperimentStatus;
     use crate::provider_health::{ErrorClass, ProviderHealthRegistry};
+    use crate::routing_log::{RoutingDecisionMeta, RoutingLogger};
     use roko_core::task::{TaskCategory, TaskComplexityBand};
     use std::collections::HashMap;
+    use tempfile::TempDir;
 
     fn test_slugs() -> Vec<String> {
         vec![
@@ -1096,13 +1628,87 @@ mod tests {
     // ── Test 3: static stage gives correct fallback ─────────────────────
 
     #[test]
-    fn static_stage_fallback_for_standard() {
+    fn static_stage_fallback_chain_for_standard() {
         let cascade = CascadeRouter::new(test_slugs());
         let ctx = default_ctx();
         let result = cascade.route(&ctx);
 
-        assert!(result.fallback.is_some());
-        assert_eq!(result.fallback.as_ref().unwrap().slug, "claude-haiku-3-5");
+        assert_eq!(result.fallback_chain.len(), 2);
+        assert_eq!(result.fallback_chain[0].slug, "claude-haiku-3-5");
+        assert_eq!(result.fallback_chain[1].slug, "claude-opus-4");
+        assert_eq!(
+            result.context_overflow_fallback.as_ref().unwrap().slug,
+            "claude-opus-4"
+        );
+    }
+
+    #[test]
+    fn append_routing_log_records_candidates() {
+        let cascade = CascadeRouter::new(test_slugs());
+        let ctx = default_ctx();
+        let explanation = cascade.explain_route(&ctx, None);
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join("routing.jsonl");
+        let logger = RoutingLogger::open_creating(&path)
+            .expect("logger")
+            .with_model_providers(HashMap::from([
+                ("claude-haiku-3-5".to_string(), "anthropic".to_string()),
+                ("claude-sonnet-4-5".to_string(), "anthropic".to_string()),
+                ("claude-opus-4".to_string(), "anthropic".to_string()),
+            ]));
+        let meta = RoutingDecisionMeta {
+            trace_id: "trace-123".to_string(),
+            task_id: "task-2m14".to_string(),
+            requested_model: "claude-sonnet-4-5".to_string(),
+            role: "implementer".to_string(),
+            task_complexity: "standard".to_string(),
+            routing_stage: explanation.stage.label().to_string(),
+            routing_reason: "role_default".to_string(),
+        };
+
+        let record = cascade
+            .append_routing_log(&logger, &meta, "claude-sonnet-4-5", Some(&explanation))
+            .expect("append routing log");
+
+        assert_eq!(record.selected_model, "claude-sonnet-4-5");
+        assert!(!record.candidates.is_empty());
+        let stored = std::fs::read_to_string(&path).expect("read log");
+        let entry: serde_json::Value = serde_json::from_str(stored.trim()).expect("parse json");
+        assert_eq!(entry["task_id"], "task-2m14");
+    }
+
+    #[test]
+    fn experiment_override_for_active_model_experiment() {
+        let cascade = CascadeRouter::new(test_slugs());
+        let ctx = default_ctx();
+
+        let mut store = ModelExperimentStore::default();
+        store.register(ModelExperiment {
+            experiment_id: "impl-model-ab".into(),
+            description: "Override implementer implementation routing".into(),
+            role: Some("implementer".into()),
+            task_category: Some("implementation".into()),
+            variants: vec![ModelVariant {
+                id: "override".into(),
+                model_key: "override-model".into(),
+                slug: "override-model-slug".into(),
+                provider: "test-provider".into(),
+            }],
+            stats: HashMap::new(),
+            status: ExperimentStatus::Running,
+            winner_id: None,
+            min_trials_per_variant: 1,
+            min_effect_size: 0.05,
+            created_at: "2026-04-11T00:00:00Z".into(),
+        });
+
+        let routed = cascade.route_with_experiments(&ctx, &store);
+
+        assert_eq!(routed.primary.slug, "override-model-slug");
+        assert!(routed.fallback_chain.is_empty());
+        assert_eq!(routed.context_overflow_fallback, None);
+        assert_eq!(routed.latency_sla_ms, 30_000);
+        assert_eq!(routed.stage, CascadeStage::Static);
     }
 
     // ── Test 4: fast tier has no fallback ────────────────────────────────
@@ -1114,7 +1720,7 @@ mod tests {
         ctx.role = AgentRole::Conductor; // Fast tier
 
         let result = cascade.route(&ctx);
-        assert!(result.fallback.is_none());
+        assert!(result.fallback_chain.is_empty());
     }
 
     // ── Test 5: transitions to Confidence at 50 observations ────────────
@@ -1477,8 +2083,69 @@ mod tests {
 
         let result = cascade.route(&ctx);
         assert_eq!(result.primary.slug, "claude-opus-4");
-        // Premium fallback is sonnet
-        assert_eq!(result.fallback.as_ref().unwrap().slug, "claude-sonnet-4-5");
+        assert_eq!(result.fallback_chain[0].slug, "claude-sonnet-4-5");
+        assert_eq!(result.fallback_chain[1].slug, "claude-haiku-3-5");
+        assert_eq!(result.context_overflow_fallback, None);
+    }
+
+    #[test]
+    fn fallback_chain_tries_each_model_in_order() {
+        let cascade = CascadeModel {
+            primary: ModelSpec::from_slug("primary-model"),
+            fallback_chain: vec![
+                ModelSpec::from_slug("fallback-1"),
+                ModelSpec::from_slug("fallback-2"),
+                ModelSpec::from_slug("fallback-3"),
+            ],
+            context_overflow_fallback: Some(ModelSpec::from_slug("larger-context")),
+            latency_sla_ms: 30_000,
+            stage: CascadeStage::Static,
+        };
+
+        assert_eq!(cascade.model_for_attempt(0).unwrap().slug, "primary-model");
+        assert_eq!(cascade.model_for_attempt(1).unwrap().slug, "fallback-1");
+        assert_eq!(cascade.model_for_attempt(2).unwrap().slug, "fallback-2");
+        assert_eq!(cascade.model_for_attempt(3).unwrap().slug, "fallback-3");
+        assert!(cascade.model_for_attempt(4).is_none());
+    }
+
+    #[test]
+    fn error_specific_fallback_routes_by_error_type() {
+        let cascade = CascadeModel {
+            primary: ModelSpec::from_slug("gpt-5"),
+            fallback_chain: vec![
+                ModelSpec::from_slug("glm-5.1"),
+                ModelSpec::from_slug("claude-sonnet-4-5"),
+                ModelSpec::from_slug("ollama/llama3"),
+            ],
+            context_overflow_fallback: Some(ModelSpec::from_slug("claude-opus-4")),
+            latency_sla_ms: 30_000,
+            stage: CascadeStage::Static,
+        };
+
+        assert_eq!(
+            cascade
+                .fallback_for_error(&ProviderError::ContextOverflow)
+                .unwrap()
+                .slug,
+            "claude-opus-4"
+        );
+        assert_eq!(
+            cascade
+                .fallback_for_error(&ProviderError::RateLimit {
+                    retry_after_ms: Some(1_000),
+                })
+                .unwrap()
+                .slug,
+            "claude-sonnet-4-5"
+        );
+        assert_eq!(
+            cascade
+                .fallback_for_error(&ProviderError::ServerError(503))
+                .unwrap()
+                .slug,
+            "glm-5.1"
+        );
     }
 
     // ── Test 16: display impl for CascadeStage ──────────────────────────
@@ -1501,6 +2168,60 @@ mod tests {
         let result = cascade.route(&ctx);
 
         assert_eq!(result.primary.slug, "gpt-5");
+    }
+
+    #[test]
+    fn version_change_detection_detects_glm_upgrade() {
+        let changes = detect_version_changes(&["glm-5".to_string()], &["glm-5.1".to_string()]);
+
+        assert!(changes.contains(&VersionChange::Upgraded {
+            old: "glm-5".to_string(),
+            new: "glm-5.1".to_string(),
+        }));
+    }
+
+    #[test]
+    fn version_change_detection_transfers_weighted_stats_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cascade-router.json");
+        let snapshot = CascadeSnapshot {
+            model_slugs: vec!["glm-5".to_string()],
+            confidence_stats: HashMap::from([(
+                "glm-5".to_string(),
+                PersistedModelStats {
+                    trials: 10,
+                    successes: 6,
+                },
+            )]),
+            total_observations: 10,
+            role_table: HashMap::new(),
+        };
+        std::fs::write(&path, serde_json::to_string_pretty(&snapshot).unwrap()).unwrap();
+
+        let loaded = CascadeRouter::load_or_new(&path, vec!["glm-5.1".to_string()]);
+        let stats = loaded.confidence_snapshot();
+
+        assert_eq!(stats.get("glm-5.1"), Some(&(5, 3)));
+        assert!(!stats.contains_key("glm-5"));
+        assert_eq!(loaded.total_observations(), 10);
+    }
+
+    #[test]
+    fn version_change_detection_remaps_role_table_upgrade() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cascade-router.json");
+        let snapshot = CascadeSnapshot {
+            model_slugs: vec!["glm-5".to_string()],
+            confidence_stats: HashMap::new(),
+            total_observations: 0,
+            role_table: HashMap::from([(AgentRole::Implementer, "glm-5".to_string())]),
+        };
+        std::fs::write(&path, serde_json::to_string_pretty(&snapshot).unwrap()).unwrap();
+
+        let loaded = CascadeRouter::load_or_new(&path, vec!["glm-5.1".to_string()]);
+        let routed = loaded.route(&default_ctx());
+
+        assert_eq!(routed.primary.slug, "glm-5.1");
     }
 
     #[test]

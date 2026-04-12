@@ -93,7 +93,7 @@ mod tests {
     fn make_signal(priority: SectionPriority, content: &str, created_at_ms: i64) -> Signal {
         PromptSection::new("x", content)
             .with_priority(priority)
-            .with_cache_layer(CacheLayer::Task)
+            .with_cache_layer(CacheLayer::Plan)
             .with_placement(Placement::Middle)
             .into_signal()
             .map(|mut s| {

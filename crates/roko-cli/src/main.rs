@@ -2,19 +2,23 @@
 //!
 //! See [`roko_cli`] for the lib-side description. The binary exposes
 //! subcommands (`init`, `run`, `status`, `replay`, `dream`, `config`, `inject`,
-//! `plan`, `research`, `neuro`, `subscription`, `event-sources`) plus top-level flags for mode selection (`--headless`,
+//! `plan`, `research`, `neuro`, `subscription`, `event-sources`, `experiment`) plus top-level flags for mode selection (`--headless`,
 //! `--role`, `--model`, `--effort`, `--json`, `--log-format`, `--quiet`,
 //! `--resume`, `--repo`, `--no-replan`, and a positional `[prompt]` for
 //! one-shot mode).
 
 #![allow(clippy::too_many_lines)]
 
+mod commands;
+
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::{Parser, Subcommand, ValueEnum};
+use commands::experiment::{ExperimentCmd, dispatch_experiment};
 use octocrab::Octocrab;
 use octocrab::models::hooks::{Config as HookConfig, ContentType, Hook};
 use octocrab::models::webhook_events::WebhookEventType;
 use roko_agent::process::{cleanup_orphaned_agents, reap_orphaned_children};
+use roko_agent::translate::BackendResponse;
 use roko_cli::serve_runtime::RokoCliRuntime;
 use roko_cli::tui::App;
 use roko_cli::{
@@ -22,24 +26,33 @@ use roko_cli::{
     PageId, PipeMode, Plan, PlanSummary, ReplMode, RepoRegistry, SessionStatus, Source,
     WizardInputs, config_cmd, load_layered, run_init_wizard, run_once,
 };
+use roko_core::agent::{AgentRole, ProviderKind};
 use roko_core::config::ServeDeployWebhookConfig;
-use roko_core::config::schema::RokoConfig;
+use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
+use roko_core::task::{TaskCategory, TaskComplexityBand};
 use roko_core::{ContentHash, Context, Kind, Query, Substrate};
 use roko_core::{Headlines, TaskMetric, compute_headlines};
 use roko_dreams::{DreamAgentConfig, DreamEngine, DreamLoopConfig, DreamRunner};
 use roko_fs::{FileSubstrate, FsObservabilitySinks, RokoLayout};
+use roko_learn::cascade_router::{CascadeRouteExplanation, CascadeRouter};
 use roko_learn::cfactor::{CFactor, trend_arrow as cfactor_trend_arrow};
+use roko_learn::cost_table::CostTable;
 use roko_learn::efficiency::compute_role_profiles;
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
+use roko_learn::latency::{LatencyRegistry, LatencyStats};
+use roko_learn::model_router::{RoutingContext, normalized_cost};
 use roko_learn::prompt_experiment::ExperimentStore;
+use roko_learn::provider_health::{CircuitState, ProviderHealth};
 use roko_learn::runtime_feedback::{read_efficiency_events, refresh_cfactor_snapshot};
 use roko_neuro::{DEFAULT_GC_MIN_CONFIDENCE, KnowledgeStore};
-use std::collections::BTreeMap;
+use serde::Deserialize;
+use serde_json::{Value, json};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::fmt::Write as _;
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
 use tracing_subscriber::registry::LookupSpan;
@@ -244,6 +257,21 @@ enum Command {
     EventSources {
         #[command(subcommand)]
         cmd: EventSourcesCmd,
+    },
+    /// Inspect configured LLM providers.
+    Provider {
+        #[command(subcommand)]
+        cmd: ProviderCmd,
+    },
+    /// Inspect configured models and their capabilities.
+    Model {
+        #[command(subcommand)]
+        cmd: ModelCmd,
+    },
+    /// Manage model experiments.
+    Experiment {
+        #[command(subcommand)]
+        cmd: ExperimentCmd,
     },
     /// Manage cloud deployment targets.
     Deploy {
@@ -548,6 +576,54 @@ enum EventSourcesCmd {
 }
 
 #[derive(Debug, Subcommand)]
+enum ProviderCmd {
+    /// List configured providers and their current connection status.
+    List {
+        /// Directory containing `roko.toml` (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Show persisted provider circuit-breaker health and latency.
+    Health {
+        /// Directory containing `.roko/` (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Send a minimal request to verify provider connectivity.
+    Test {
+        /// Provider name from `[providers.*]`.
+        provider: String,
+        /// Directory containing `roko.toml` (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ModelCmd {
+    /// List configured models and their capabilities.
+    List {
+        /// Directory containing `roko.toml` (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Show the current routing decision and optionally explain why it won.
+    Route {
+        /// Model key or slug to explain.
+        model: String,
+        /// Show the full routing trace instead of only the final decision.
+        #[arg(long)]
+        explain: bool,
+        /// Complexity tier (`mechanical`, `focused`, `integrative`, `architectural`).
+        #[arg(long)]
+        complexity: Option<String>,
+        /// Directory containing `roko.toml` (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum DeployCmd {
     /// Deploy the current workspace to Railway via the public GraphQL API.
     Railway {
@@ -653,6 +729,21 @@ enum ConfigCmd {
         /// Directory to resolve project config from (default: cwd).
         #[arg(long)]
         workdir: Option<PathBuf>,
+    },
+    /// Validate `roko.toml` syntax, schema, and semantic references.
+    Validate {
+        /// Directory to resolve project config from (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Migrate a legacy project `roko.toml` into explicit provider/model tables.
+    Migrate {
+        /// Directory to resolve project config from (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+        /// Print the proposed migration without writing changes.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -806,7 +897,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
         Command::Replay { hash, workdir } => cmd_replay(workdir, hash).await,
         Command::Dream { cmd } => cmd_dream(cli, cmd).await,
         Command::Config { cmd } => {
-            dispatch_config(cmd)?;
+            dispatch_config(cmd).await?;
             Ok(EXIT_SUCCESS)
         }
         Command::Inject {
@@ -841,6 +932,9 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             let _ = roko_cli::index::rebuild_all(&std::env::current_dir().unwrap_or_default());
             result
         }
+        Command::Provider { cmd } => cmd_provider(cli, cmd).await,
+        Command::Model { cmd } => cmd_model(cli, cmd).await,
+        Command::Experiment { cmd } => dispatch_experiment(cli, cmd),
         Command::Deploy { cmd } => cmd_deploy(cli, cmd).await,
         Command::Daemon { cmd } => cmd_daemon(cli, cmd).await,
         Command::Dashboard {
@@ -1386,7 +1480,1422 @@ async fn load_cfactor_history(path: PathBuf) -> Vec<CFactor> {
 // Subcommand handlers
 // -----------------------------------------------------------------------
 
-fn dispatch_config(cmd: ConfigCmd) -> Result<()> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProviderListRow {
+    provider: String,
+    kind: String,
+    base_url: String,
+    status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelListRow {
+    model: String,
+    provider: String,
+    slug: String,
+    context: String,
+    tools: String,
+    thinking: String,
+    vision: String,
+    cost: String,
+}
+
+const PROVIDER_FAILURE_THRESHOLD: u32 = 3;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProviderHealthRow {
+    provider: String,
+    state: String,
+    fails: String,
+    cooldown: String,
+    latency_p50: String,
+    error_rate: String,
+    last_check: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ProviderHealthSnapshot {
+    #[serde(default)]
+    providers: HashMap<String, ProviderHealth>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct LatencyStatsSnapshot {
+    #[serde(default)]
+    entries: Vec<LatencyStatsEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LatencyStatsEntry {
+    provider: String,
+    stats: LatencyStats,
+}
+
+#[derive(Debug, Default)]
+struct ProviderLatencySummary {
+    recent_latencies: Vec<f64>,
+    weighted_latency_ms: f64,
+    observations: u64,
+}
+
+impl ProviderLatencySummary {
+    fn record(&mut self, stats: &LatencyStats) {
+        self.recent_latencies
+            .extend(stats.recent_latencies.iter().copied());
+        self.weighted_latency_ms += stats.total_latency_ema_ms * stats.observations as f64;
+        self.observations = self.observations.saturating_add(stats.observations);
+    }
+
+    fn p50_ms(&self) -> Option<f64> {
+        if !self.recent_latencies.is_empty() {
+            let mut latencies = self.recent_latencies.clone();
+            latencies.sort_by(|a, b| a.total_cmp(b));
+            let idx = ((latencies.len() as f64) * 0.50).floor() as usize;
+            let idx = idx.min(latencies.len().saturating_sub(1));
+            return latencies.get(idx).copied();
+        }
+
+        if self.observations > 0 {
+            return Some(self.weighted_latency_ms / self.observations as f64);
+        }
+
+        None
+    }
+}
+
+async fn cmd_provider(cli: &Cli, cmd: ProviderCmd) -> Result<i32> {
+    match cmd {
+        ProviderCmd::List { workdir } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            cmd_provider_list(&wd).await?;
+            Ok(EXIT_SUCCESS)
+        }
+        ProviderCmd::Health { workdir } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            cmd_provider_health(&wd)?;
+            Ok(EXIT_SUCCESS)
+        }
+        ProviderCmd::Test { provider, workdir } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            cmd_provider_test(&wd, &provider).await?;
+            Ok(EXIT_SUCCESS)
+        }
+    }
+}
+
+async fn cmd_model(cli: &Cli, cmd: ModelCmd) -> Result<i32> {
+    match cmd {
+        ModelCmd::List { workdir } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            cmd_model_list(&wd)?;
+            Ok(EXIT_SUCCESS)
+        }
+        ModelCmd::Route {
+            model,
+            explain,
+            complexity,
+            workdir,
+        } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            cmd_model_route(
+                &wd,
+                cli.role.as_deref(),
+                &model,
+                explain,
+                complexity.as_deref(),
+            )?;
+            Ok(EXIT_SUCCESS)
+        }
+    }
+}
+
+async fn cmd_provider_list(workdir: &Path) -> Result<()> {
+    let config = load_roko_config(workdir)?;
+    let providers = configured_providers(&config);
+    if providers.is_empty() {
+        println!("no providers configured");
+        return Ok(());
+    }
+
+    let client = reqwest::Client::builder()
+        .user_agent("roko-cli/0.1")
+        .timeout(Duration::from_secs(2))
+        .build()
+        .context("build provider probe client")?;
+
+    let mut provider_names = providers.keys().cloned().collect::<Vec<_>>();
+    provider_names.sort_unstable();
+
+    let mut rows = Vec::with_capacity(provider_names.len());
+    for provider_name in provider_names {
+        let provider = providers
+            .get(&provider_name)
+            .expect("provider name collected from provider registry");
+        rows.push(inspect_provider(&client, &provider_name, provider).await);
+    }
+
+    print!("{}", format_provider_rows(&rows));
+    Ok(())
+}
+
+fn cmd_model_list(workdir: &Path) -> Result<()> {
+    let config = load_roko_config(workdir)?;
+    let models = configured_models(&config);
+    if models.is_empty() {
+        println!("no models configured");
+        return Ok(());
+    }
+
+    let mut model_names = models.keys().cloned().collect::<Vec<_>>();
+    model_names.sort_unstable();
+
+    let rows = model_names
+        .into_iter()
+        .map(|model_name| {
+            let profile = models
+                .get(&model_name)
+                .expect("model name collected from model registry");
+            build_model_list_row(&model_name, profile)
+        })
+        .collect::<Vec<_>>();
+
+    print!("{}", format_model_rows(&rows));
+    Ok(())
+}
+
+fn cmd_model_route(
+    workdir: &Path,
+    role_arg: Option<&str>,
+    requested_model: &str,
+    explain: bool,
+    complexity_arg: Option<&str>,
+) -> Result<()> {
+    let config = load_roko_config(workdir)?;
+    let models = configured_models(&config);
+    if models.is_empty() {
+        println!("no models configured");
+        return Ok(());
+    }
+
+    let mut model_slugs = models
+        .values()
+        .map(|profile| profile.slug.clone())
+        .collect::<Vec<_>>();
+    model_slugs.sort();
+    model_slugs.dedup();
+
+    let role = parse_agent_role(role_arg)?;
+    let complexity = parse_route_complexity(complexity_arg)?;
+    let aliases = model_aliases_by_slug(&models);
+    let requested_slug = resolve_requested_model_slug(requested_model, &models)
+        .unwrap_or_else(|| requested_model.to_string());
+    let context = RoutingContext {
+        task_category: TaskCategory::Implementation,
+        complexity: complexity.band,
+        iteration: 1,
+        role,
+        crate_familiarity: 0.0,
+        has_prior_failure: false,
+        affect_confidence: 0.5,
+        previous_model: Some(requested_slug.clone()),
+        plan_context_tokens: None,
+    };
+
+    let router = CascadeRouter::load_or_new(&cascade_router_path(workdir), model_slugs.clone());
+    let provider_health = load_provider_health_snapshot(&provider_health_path(workdir))?;
+    let latency_registry = LatencyRegistry::load_or_new(&latency_stats_path(workdir));
+    let model_providers = model_provider_map(&models, &model_slugs);
+    let available_candidates = available_model_candidates(
+        &model_slugs,
+        &model_providers,
+        &provider_health,
+        unix_ms_now(),
+    );
+    let explanation = router.explain_route(
+        &context,
+        (!available_candidates.is_empty()).then_some(available_candidates.as_slice()),
+    );
+
+    if !explain {
+        let selected_name = display_model_name(&aliases, &explanation.selected_slug);
+        let provider = model_providers
+            .get(&explanation.selected_slug)
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
+        println!("{selected_name} via {provider}");
+        return Ok(());
+    }
+
+    let confidence = router.confidence_snapshot();
+    let cost_table = CostTable::from_config(&models).with_defaults();
+    print!(
+        "{}",
+        format_model_route_explanation(
+            requested_model,
+            &requested_slug,
+            &aliases,
+            &explanation,
+            &confidence,
+            &model_providers,
+            &provider_health,
+            &latency_registry,
+            &cost_table,
+        )
+    );
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RouteComplexity {
+    band: TaskComplexityBand,
+    tier_label: &'static str,
+}
+
+fn parse_agent_role(input: Option<&str>) -> Result<AgentRole> {
+    let Some(input) = input.map(str::trim).filter(|input| !input.is_empty()) else {
+        return Ok(AgentRole::Implementer);
+    };
+
+    let normalized = normalize_route_token(input);
+    std::iter::once(AgentRole::Conductor)
+        .chain(AgentRole::ALL_AGENTS)
+        .find(|role| {
+            normalize_route_token(role.label()) == normalized
+                || normalize_route_token(role.short()) == normalized
+        })
+        .ok_or_else(|| anyhow!("unknown role '{input}'"))
+}
+
+fn parse_route_complexity(input: Option<&str>) -> Result<RouteComplexity> {
+    let Some(input) = input.map(str::trim).filter(|input| !input.is_empty()) else {
+        return Ok(RouteComplexity {
+            band: TaskComplexityBand::Standard,
+            tier_label: "focused",
+        });
+    };
+
+    match normalize_route_token(input).as_str() {
+        "mechanical" | "fast" | "low" => Ok(RouteComplexity {
+            band: TaskComplexityBand::Fast,
+            tier_label: "mechanical",
+        }),
+        "focused" | "standard" | "medium" => Ok(RouteComplexity {
+            band: TaskComplexityBand::Standard,
+            tier_label: "focused",
+        }),
+        "integrative" => Ok(RouteComplexity {
+            band: TaskComplexityBand::Standard,
+            tier_label: "integrative",
+        }),
+        "architectural" | "complex" | "premium" | "high" => Ok(RouteComplexity {
+            band: TaskComplexityBand::Complex,
+            tier_label: "architectural",
+        }),
+        _ => bail!("unknown complexity '{input}'"),
+    }
+}
+
+fn normalize_route_token(input: &str) -> String {
+    input
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn resolve_requested_model_slug(
+    requested_model: &str,
+    models: &HashMap<String, ModelProfile>,
+) -> Option<String> {
+    if let Some(profile) = models.get(requested_model) {
+        return Some(profile.slug.clone());
+    }
+
+    let normalized = normalize_route_token(requested_model);
+    let mut entries = models.iter().collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.0.cmp(right.0));
+
+    for (model_key, profile) in entries {
+        if normalize_route_token(model_key) == normalized
+            || normalize_route_token(&profile.slug) == normalized
+        {
+            return Some(profile.slug.clone());
+        }
+    }
+
+    None
+}
+
+fn model_aliases_by_slug(models: &HashMap<String, ModelProfile>) -> HashMap<String, String> {
+    let mut grouped: HashMap<String, Vec<String>> = HashMap::new();
+    for (model_key, profile) in models {
+        grouped
+            .entry(profile.slug.clone())
+            .or_default()
+            .push(model_key.clone());
+    }
+
+    let mut aliases = HashMap::new();
+    for (slug, mut keys) in grouped {
+        keys.sort();
+        let alias = if keys.len() == 1 {
+            keys[0].clone()
+        } else {
+            slug.clone()
+        };
+        aliases.insert(slug, alias);
+    }
+    aliases
+}
+
+fn display_model_name(aliases: &HashMap<String, String>, slug: &str) -> String {
+    aliases
+        .get(slug)
+        .cloned()
+        .unwrap_or_else(|| slug.to_string())
+}
+
+fn model_provider_map(
+    models: &HashMap<String, ModelProfile>,
+    model_slugs: &[String],
+) -> HashMap<String, String> {
+    let mut entries = models.iter().collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.0.cmp(right.0));
+
+    let mut providers = HashMap::new();
+    for slug in model_slugs {
+        if let Some((_, profile)) = entries.iter().find(|(_, profile)| profile.slug == *slug) {
+            providers.insert(slug.clone(), profile.provider.clone());
+        }
+    }
+    providers
+}
+
+fn available_model_candidates(
+    model_slugs: &[String],
+    model_providers: &HashMap<String, String>,
+    provider_health: &HashMap<String, ProviderHealth>,
+    now_ms: i64,
+) -> Vec<String> {
+    model_slugs
+        .iter()
+        .filter(|slug| {
+            model_providers
+                .get(slug.as_str())
+                .map(|provider| provider_is_available(provider_health.get(provider), now_ms))
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect()
+}
+
+fn provider_is_available(health: Option<&ProviderHealth>, now_ms: i64) -> bool {
+    health
+        .map(|snapshot| effective_circuit_state(snapshot, now_ms) != CircuitState::Open)
+        .unwrap_or(true)
+}
+
+fn format_model_route_explanation(
+    requested_model: &str,
+    requested_slug: &str,
+    aliases: &HashMap<String, String>,
+    explanation: &CascadeRouteExplanation,
+    confidence: &HashMap<String, (u64, u64)>,
+    model_providers: &HashMap<String, String>,
+    provider_health: &HashMap<String, ProviderHealth>,
+    latency_registry: &LatencyRegistry,
+    cost_table: &CostTable,
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "Routing decision for '{requested_model}':");
+    let _ = writeln!(
+        out,
+        "  Stage: {} ({} observations)",
+        format_route_stage(explanation.stage),
+        explanation.observations
+    );
+    if let Some(alpha) = explanation.alpha {
+        let _ = writeln!(out, "  Alpha: {alpha:.3} ({})", describe_alpha(alpha));
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "  Candidate Scores:");
+
+    let candidate_names = explanation
+        .candidates
+        .iter()
+        .map(|candidate| display_model_name(aliases, &candidate.slug))
+        .collect::<Vec<_>>();
+    let name_width = candidate_names
+        .iter()
+        .map(String::len)
+        .max()
+        .unwrap_or("Model".len())
+        .max("Model".len());
+
+    for (candidate, name) in explanation.candidates.iter().zip(candidate_names.iter()) {
+        let (trials, successes) = confidence.get(&candidate.slug).copied().unwrap_or((0, 0));
+        let pass_rate = if trials > 0 {
+            successes as f64 / trials as f64
+        } else {
+            0.0
+        };
+        let provider = model_providers.get(&candidate.slug).map(String::as_str);
+        let cost = normalized_cost(&candidate.slug, cost_table);
+        let latency = provider
+            .and_then(|provider| {
+                normalized_latency_for_model(&candidate.slug, provider, latency_registry)
+            })
+            .unwrap_or(0.0);
+        let selected_marker = if candidate.selected {
+            "  <- selected"
+        } else {
+            ""
+        };
+
+        let _ = writeln!(
+            out,
+            "    {:<name_width$}  {:>5.3}  (pass: {:>3.0}%, cost: {:.2}, latency: {:.2}){}",
+            name,
+            candidate.score,
+            pass_rate * 100.0,
+            cost,
+            latency,
+            selected_marker,
+            name_width = name_width,
+        );
+    }
+
+    let _ = writeln!(out);
+    let _ = writeln!(out, "  Provider Health:");
+    let mut providers = explanation
+        .candidates
+        .iter()
+        .filter_map(|candidate| model_providers.get(&candidate.slug))
+        .cloned()
+        .collect::<Vec<_>>();
+    providers.sort();
+    providers.dedup();
+    if providers.is_empty() {
+        let _ = writeln!(out, "    none");
+    } else {
+        let now_ms = unix_ms_now();
+        for provider in providers {
+            let status = format_provider_health_note(provider_health.get(&provider), now_ms);
+            let _ = writeln!(out, "    {provider}: {status}");
+        }
+    }
+
+    let _ = writeln!(out);
+    let _ = writeln!(out, "  Cache Affinity:");
+    let previous_name = display_model_name(aliases, requested_slug);
+    let affinity_note = match explanation.stage {
+        roko_learn::cascade_router::CascadeStage::Confidence
+            if explanation
+                .candidates
+                .iter()
+                .any(|candidate| candidate.slug == requested_slug) =>
+        {
+            "(+0.15 bonus applied)"
+        }
+        roko_learn::cascade_router::CascadeStage::Ucb
+            if explanation
+                .candidates
+                .iter()
+                .any(|candidate| candidate.slug == requested_slug) =>
+        {
+            "(affinity feature active)"
+        }
+        _ => "(no matching candidate bonus)",
+    };
+    let _ = writeln!(out, "    Previous model: {previous_name} {affinity_note}");
+
+    let _ = writeln!(out);
+    let _ = writeln!(out, "  Pareto Status:");
+    let selected_name = display_model_name(aliases, &explanation.selected_slug);
+    let pareto_status = if explanation
+        .pareto_frontier
+        .iter()
+        .any(|slug| slug == &explanation.selected_slug)
+    {
+        "ON frontier (not dominated)"
+    } else {
+        "OFF frontier (dominated)"
+    };
+    let _ = writeln!(out, "    {selected_name}: {pareto_status}");
+
+    let selected_provider = model_providers
+        .get(&explanation.selected_slug)
+        .cloned()
+        .unwrap_or_else(|| "unknown".to_string());
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "  Final: {} via {}",
+        display_model_name(aliases, &explanation.selected_slug),
+        selected_provider
+    );
+    out
+}
+
+fn format_route_stage(stage: roko_learn::cascade_router::CascadeStage) -> &'static str {
+    match stage {
+        roko_learn::cascade_router::CascadeStage::Static => "Static",
+        roko_learn::cascade_router::CascadeStage::Confidence => "Confidence",
+        roko_learn::cascade_router::CascadeStage::Ucb => "UCB",
+    }
+}
+
+fn describe_alpha(alpha: f64) -> &'static str {
+    if alpha <= 0.10 {
+        "mostly exploitation"
+    } else if alpha <= 0.25 {
+        "balanced exploration"
+    } else {
+        "exploration-heavy"
+    }
+}
+
+fn normalized_latency_for_model(
+    model_slug: &str,
+    provider: &str,
+    latency_registry: &LatencyRegistry,
+) -> Option<f64> {
+    let stats = latency_registry.get(model_slug, provider)?;
+    let sla_ms = default_latency_sla_for_slug(model_slug) as f64;
+    (sla_ms > 0.0).then(|| (stats.total_latency_ema_ms / sla_ms).min(1.0))
+}
+
+fn default_latency_sla_for_slug(slug: &str) -> u64 {
+    if slug.contains("haiku") {
+        10_000
+    } else if slug.contains("opus") || slug.contains("premium") {
+        120_000
+    } else {
+        30_000
+    }
+}
+
+fn format_provider_health_note(health: Option<&ProviderHealth>, now_ms: i64) -> String {
+    let Some(health) = health else {
+        return "CLOSED (healthy)".to_string();
+    };
+
+    match effective_circuit_state(health, now_ms) {
+        CircuitState::Closed => "CLOSED (healthy)".to_string(),
+        CircuitState::HalfOpen => "HALF-OPEN (probe allowed)".to_string(),
+        CircuitState::Open => {
+            let cooldown = format_cooldown(Some(health), CircuitState::Open, now_ms);
+            if cooldown == "—" {
+                "OPEN (cooldown active)".to_string()
+            } else {
+                format!("OPEN ({cooldown})")
+            }
+        }
+    }
+}
+
+fn cascade_router_path(workdir: &Path) -> PathBuf {
+    RokoLayout::for_project(workdir)
+        .learn_dir()
+        .join("cascade-router.json")
+}
+
+fn cmd_provider_health(workdir: &Path) -> Result<()> {
+    let config = load_roko_config(workdir)?;
+    let configured = configured_providers(&config);
+    let health_path = provider_health_path(workdir);
+    let latency_path = latency_stats_path(workdir);
+    let provider_health = load_provider_health_snapshot(&health_path)?;
+    let latency_stats = load_latency_stats_by_provider(&latency_path)?;
+
+    let mut provider_names = BTreeSet::new();
+    provider_names.extend(configured.keys().cloned());
+    provider_names.extend(provider_health.keys().cloned());
+    provider_names.extend(latency_stats.keys().cloned());
+
+    if provider_names.is_empty() {
+        println!("no provider health recorded");
+        return Ok(());
+    }
+
+    let now_ms = unix_ms_now();
+    let health_file_ms = file_modified_ms(&health_path);
+    let latency_file_ms = file_modified_ms(&latency_path);
+    let rows = provider_names
+        .into_iter()
+        .map(|provider| {
+            build_provider_health_row(
+                &provider,
+                provider_health.get(&provider),
+                latency_stats.get(&provider),
+                now_ms,
+                health_file_ms,
+                latency_file_ms,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    print!("{}", format_provider_health_rows(&rows));
+    Ok(())
+}
+
+async fn cmd_provider_test(workdir: &Path, provider_name: &str) -> Result<()> {
+    let config = load_roko_config(workdir)?;
+    let providers = configured_providers(&config);
+    let provider = providers
+        .get(provider_name)
+        .ok_or_else(|| anyhow!("provider '{provider_name}' is not configured"))?;
+    let model = select_provider_test_model(&config, provider_name)
+        .ok_or_else(|| anyhow!("provider '{provider_name}' has no configured models"))?;
+
+    match provider.kind {
+        ProviderKind::OpenAiCompat => {
+            run_openai_compat_provider_test(provider_name, provider, &model.1).await
+        }
+        other => bail!("provider '{provider_name}' uses unsupported kind '{other}'"),
+    }
+}
+
+fn configured_providers(config: &RokoConfig) -> std::collections::HashMap<String, ProviderConfig> {
+    if !config.providers.is_empty() {
+        return config.providers.clone();
+    }
+
+    if config.agent.command.is_some()
+        || config.agent.args.is_some()
+        || config.agent.timeout_ms.is_some()
+        || config
+            .agent
+            .env
+            .as_ref()
+            .is_some_and(|entries| !entries.is_empty())
+    {
+        return config.effective_providers();
+    }
+
+    std::collections::HashMap::new()
+}
+
+fn configured_models(config: &RokoConfig) -> std::collections::HashMap<String, ModelProfile> {
+    config.effective_models()
+}
+
+fn select_provider_test_model(
+    config: &RokoConfig,
+    provider_name: &str,
+) -> Option<(String, ModelProfile)> {
+    let models = configured_models(config);
+    let default_model = config.agent.default_model.trim();
+    if let Some(profile) = models.get(default_model)
+        && profile.provider == provider_name
+    {
+        return Some((default_model.to_string(), profile.clone()));
+    }
+
+    let mut candidates = models
+        .into_iter()
+        .filter(|(_, profile)| profile.provider == provider_name)
+        .collect::<Vec<_>>();
+    candidates.sort_by(|a, b| a.0.cmp(&b.0));
+    candidates.into_iter().next()
+}
+
+async fn run_openai_compat_provider_test(
+    provider_name: &str,
+    provider: &ProviderConfig,
+    model: &ModelProfile,
+) -> Result<()> {
+    let endpoint = openai_compat_test_endpoint(provider);
+    let api_key_env = provider
+        .api_key_env
+        .as_deref()
+        .map(str::trim)
+        .filter(|env_name| !env_name.is_empty());
+    let api_key = provider
+        .resolve_api_key()
+        .filter(|value| !value.trim().is_empty());
+    let body = json!({
+        "model": model.slug,
+        "messages": [{
+            "role": "user",
+            "content": "Say hello"
+        }],
+        "max_tokens": 10
+    });
+    let body_text = serde_json::to_string(&body).context("serialize provider test body")?;
+
+    println!("Testing provider '{provider_name}' ({})...", provider.kind);
+    println!("  Endpoint: {endpoint}");
+    match (api_key_env, api_key.as_ref()) {
+        (Some(env_name), Some(_)) => println!("  API Key:  set ({env_name})"),
+        (Some(env_name), None) => {
+            println!("  API Key:  missing ({env_name})");
+            bail!("missing API key: env var {env_name} not set");
+        }
+        (None, _) => println!("  API Key:  not required"),
+    }
+    println!("  Model:    {}", model.slug);
+    println!();
+    println!("  Sending: {body_text}");
+
+    let client = reqwest::Client::builder()
+        .user_agent("roko-cli/0.1")
+        .timeout(Duration::from_millis(
+            provider.timeout_ms.unwrap_or(120_000),
+        ))
+        .build()
+        .context("build provider test client")?;
+
+    let mut request = client
+        .post(&endpoint)
+        .header("content-type", "application/json");
+    if let Some(api_key) = api_key {
+        request = request.bearer_auth(api_key);
+    }
+    if let Some(extra_headers) = provider.extra_headers.as_ref() {
+        let mut entries = extra_headers.iter().collect::<Vec<_>>();
+        entries.sort_by(|a, b| a.0.cmp(b.0).then_with(|| a.1.cmp(b.1)));
+        for (name, value) in entries {
+            request = request.header(name.as_str(), value.as_str());
+        }
+    }
+
+    let started = Instant::now();
+    let response = request
+        .json(&body)
+        .send()
+        .await
+        .with_context(|| format!("send provider test request to {endpoint}"))?;
+    let elapsed = started.elapsed();
+    let status = response.status();
+    let status_line = status.to_string();
+    let response_text = response
+        .text()
+        .await
+        .context("read provider test response body")?;
+
+    if !status.is_success() {
+        println!(
+            "  Response: {} ({})",
+            status_line,
+            format_provider_test_duration(elapsed)
+        );
+        println!("  Error:    {response_text}");
+        bail!("provider '{provider_name}' test failed");
+    }
+
+    let response_json: Value = serde_json::from_str(&response_text)
+        .with_context(|| format!("parse provider test response from {endpoint}"))?;
+    let backend_response = BackendResponse::Json(response_json);
+    let content = backend_response.extract_text();
+    let usage = backend_response.extract_usage();
+    let cost = estimate_provider_test_cost(model, &usage);
+
+    println!(
+        "  Response: {} ({})",
+        status_line,
+        format_provider_test_duration(elapsed)
+    );
+    println!(
+        "  Content:  {}",
+        serde_json::to_string(&content).context("format provider test content")?
+    );
+    println!(
+        "  Tokens:   input={}, output={}",
+        usage.input_tokens, usage.output_tokens
+    );
+    match cost {
+        Some(cost) => println!("  Cost:     ${cost:.6}"),
+        None => println!("  Cost:     n/a"),
+    }
+    println!();
+    println!("  ✓ Provider '{provider_name}' is working");
+    Ok(())
+}
+
+fn openai_compat_test_endpoint(provider: &ProviderConfig) -> String {
+    format!(
+        "{}/chat/completions",
+        provider
+            .base_url
+            .as_deref()
+            .unwrap_or("https://api.openai.com/v1")
+            .trim_end_matches('/')
+    )
+}
+
+fn estimate_provider_test_cost(model: &ModelProfile, usage: &roko_agent::Usage) -> Option<f64> {
+    let mut cost = 0.0;
+    let mut priced = false;
+
+    if let Some(rate) = model.cost_input_per_m {
+        cost += f64::from(usage.input_tokens) * rate / 1_000_000.0;
+        priced = true;
+    }
+    if let Some(rate) = model.cost_output_per_m {
+        cost += f64::from(usage.output_tokens) * rate / 1_000_000.0;
+        priced = true;
+    }
+    if let Some(rate) = model.cost_cache_read_per_m {
+        cost += f64::from(usage.cache_read_tokens) * rate / 1_000_000.0;
+        priced = true;
+    }
+    if let Some(rate) = model.cost_cache_write_per_m {
+        cost += f64::from(usage.cache_create_tokens) * rate / 1_000_000.0;
+        priced = true;
+    }
+
+    priced.then_some(cost)
+}
+
+fn format_provider_test_duration(duration: Duration) -> String {
+    if duration.as_secs_f64() >= 1.0 {
+        format!("{:.1}s", duration.as_secs_f64())
+    } else {
+        format!("{}ms", duration.as_millis())
+    }
+}
+
+async fn inspect_provider(
+    client: &reqwest::Client,
+    provider_name: &str,
+    provider: &ProviderConfig,
+) -> ProviderListRow {
+    match provider.kind {
+        ProviderKind::ClaudeCli => inspect_cli_provider(provider_name, provider),
+        _ => inspect_http_provider(client, provider_name, provider).await,
+    }
+}
+
+fn inspect_cli_provider(provider_name: &str, provider: &ProviderConfig) -> ProviderListRow {
+    let command = provider
+        .command
+        .as_deref()
+        .map(str::trim)
+        .filter(|command| !command.is_empty());
+    let status = match command {
+        Some(command) if command_available(command) => "ok (cli found)".to_string(),
+        Some(_) => "warn (cli missing)".to_string(),
+        None => "warn (command missing)".to_string(),
+    };
+
+    ProviderListRow {
+        provider: provider_name.to_string(),
+        kind: provider.kind.to_string(),
+        base_url: format!("(cli: {})", command.unwrap_or("<missing>")),
+        status,
+    }
+}
+
+async fn inspect_http_provider(
+    client: &reqwest::Client,
+    provider_name: &str,
+    provider: &ProviderConfig,
+) -> ProviderListRow {
+    let base_url = provider
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|base_url| !base_url.is_empty());
+    let mut issues = Vec::new();
+
+    if let Some(env_name) = provider
+        .api_key_env
+        .as_deref()
+        .map(str::trim)
+        .filter(|env_name| !env_name.is_empty())
+    {
+        let has_key = std::env::var(env_name)
+            .ok()
+            .is_some_and(|value| !value.trim().is_empty());
+        if !has_key {
+            issues.push("key missing".to_string());
+        }
+    }
+
+    match base_url {
+        Some(base_url) => {
+            if let Some(issue) = probe_base_url(client, base_url).await {
+                issues.push(issue);
+            }
+        }
+        None => issues.push("base URL missing".to_string()),
+    }
+
+    let status = if issues.is_empty() {
+        if provider
+            .api_key_env
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|env_name| !env_name.is_empty())
+        {
+            "ok (key set)".to_string()
+        } else {
+            "ok (reachable)".to_string()
+        }
+    } else {
+        format!("warn ({})", issues.join(", "))
+    };
+
+    ProviderListRow {
+        provider: provider_name.to_string(),
+        kind: provider.kind.to_string(),
+        base_url: base_url.unwrap_or("(missing)").to_string(),
+        status,
+    }
+}
+
+async fn probe_base_url(client: &reqwest::Client, base_url: &str) -> Option<String> {
+    match client.head(base_url).send().await {
+        Ok(_) => None,
+        Err(err) if err.is_builder() => Some("invalid base URL".to_string()),
+        Err(_) => Some("unreachable".to_string()),
+    }
+}
+
+fn command_available(command: &str) -> bool {
+    let command = command.trim();
+    if command.is_empty() {
+        return false;
+    }
+
+    let command_path = Path::new(command);
+    if command_path.is_absolute() || command.contains(std::path::MAIN_SEPARATOR) {
+        return executable_file(command_path);
+    }
+
+    roko_cli::config::command_on_path(command)
+}
+
+fn executable_file(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn format_provider_rows(rows: &[ProviderListRow]) -> String {
+    let mut widths = [
+        "Provider".len(),
+        "Kind".len(),
+        "Base URL".len(),
+        "Status".len(),
+    ];
+
+    for row in rows {
+        widths[0] = widths[0].max(row.provider.len());
+        widths[1] = widths[1].max(row.kind.len());
+        widths[2] = widths[2].max(row.base_url.len());
+        widths[3] = widths[3].max(row.status.len());
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "{:<provider_w$}  {:<kind_w$}  {:<base_w$}  {:<status_w$}",
+        "Provider",
+        "Kind",
+        "Base URL",
+        "Status",
+        provider_w = widths[0],
+        kind_w = widths[1],
+        base_w = widths[2],
+        status_w = widths[3],
+    );
+
+    for row in rows {
+        let _ = writeln!(
+            out,
+            "{:<provider_w$}  {:<kind_w$}  {:<base_w$}  {:<status_w$}",
+            row.provider,
+            row.kind,
+            row.base_url,
+            row.status,
+            provider_w = widths[0],
+            kind_w = widths[1],
+            base_w = widths[2],
+            status_w = widths[3],
+        );
+    }
+
+    out
+}
+
+fn build_model_list_row(model_name: &str, profile: &ModelProfile) -> ModelListRow {
+    ModelListRow {
+        model: model_name.to_string(),
+        provider: profile.provider.clone(),
+        slug: profile.slug.clone(),
+        context: format_context_window(profile.context_window),
+        tools: format_bool_capability(profile.supports_tools).to_string(),
+        thinking: format_bool_capability(profile.supports_thinking).to_string(),
+        vision: format_bool_capability(profile.supports_vision).to_string(),
+        cost: format_model_cost(profile),
+    }
+}
+
+fn format_model_rows(rows: &[ModelListRow]) -> String {
+    let mut widths = [
+        "Model".len(),
+        "Provider".len(),
+        "Slug".len(),
+        "Context".len(),
+        "Tools".len(),
+        "Thinking".len(),
+        "Vision".len(),
+        "Cost (in/out)".len(),
+    ];
+
+    for row in rows {
+        widths[0] = widths[0].max(row.model.len());
+        widths[1] = widths[1].max(row.provider.len());
+        widths[2] = widths[2].max(row.slug.len());
+        widths[3] = widths[3].max(row.context.len());
+        widths[4] = widths[4].max(row.tools.len());
+        widths[5] = widths[5].max(row.thinking.len());
+        widths[6] = widths[6].max(row.vision.len());
+        widths[7] = widths[7].max(row.cost.len());
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "{:<model_w$}  {:<provider_w$}  {:<slug_w$}  {:<context_w$}  {:<tools_w$}  {:<thinking_w$}  {:<vision_w$}  {:<cost_w$}",
+        "Model",
+        "Provider",
+        "Slug",
+        "Context",
+        "Tools",
+        "Thinking",
+        "Vision",
+        "Cost (in/out)",
+        model_w = widths[0],
+        provider_w = widths[1],
+        slug_w = widths[2],
+        context_w = widths[3],
+        tools_w = widths[4],
+        thinking_w = widths[5],
+        vision_w = widths[6],
+        cost_w = widths[7],
+    );
+
+    for row in rows {
+        let _ = writeln!(
+            out,
+            "{:<model_w$}  {:<provider_w$}  {:<slug_w$}  {:<context_w$}  {:<tools_w$}  {:<thinking_w$}  {:<vision_w$}  {:<cost_w$}",
+            row.model,
+            row.provider,
+            row.slug,
+            row.context,
+            row.tools,
+            row.thinking,
+            row.vision,
+            row.cost,
+            model_w = widths[0],
+            provider_w = widths[1],
+            slug_w = widths[2],
+            context_w = widths[3],
+            tools_w = widths[4],
+            thinking_w = widths[5],
+            vision_w = widths[6],
+            cost_w = widths[7],
+        );
+    }
+
+    out
+}
+
+fn format_context_window(tokens: u64) -> String {
+    if tokens >= 1_000_000 && tokens % 1_000_000 == 0 {
+        format!("{}M", tokens / 1_000_000)
+    } else if tokens >= 1_000 {
+        let whole_thousands = tokens / 1_000;
+        if tokens % 1_000 == 0 {
+            format!("{whole_thousands}K")
+        } else {
+            let value = tokens as f64 / 1_000.0;
+            format!("{value:.1}K")
+        }
+    } else {
+        tokens.to_string()
+    }
+}
+
+fn format_bool_capability(value: bool) -> &'static str {
+    if value { "✓" } else { "✗" }
+}
+
+fn format_model_cost(profile: &ModelProfile) -> String {
+    match (profile.cost_input_per_m, profile.cost_output_per_m) {
+        (Some(input), Some(output)) => format!("${input:.2}/${output:.2}"),
+        (Some(input), None) => format!("${input:.2}/—"),
+        (None, Some(output)) => format!("—/${output:.2}"),
+        (None, None) => "—".to_string(),
+    }
+}
+
+fn provider_health_path(workdir: &Path) -> PathBuf {
+    RokoLayout::for_project(workdir)
+        .learn_dir()
+        .join("provider-health.json")
+}
+
+fn latency_stats_path(workdir: &Path) -> PathBuf {
+    RokoLayout::for_project(workdir)
+        .learn_dir()
+        .join("latency-stats.json")
+}
+
+fn load_provider_health_snapshot(path: &Path) -> Result<HashMap<String, ProviderHealth>> {
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+
+    let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let snapshot: ProviderHealthSnapshot =
+        serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
+    Ok(snapshot.providers)
+}
+
+fn load_latency_stats_by_provider(path: &Path) -> Result<HashMap<String, ProviderLatencySummary>> {
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+
+    let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let snapshot: LatencyStatsSnapshot =
+        serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
+
+    let mut providers = HashMap::new();
+    for entry in snapshot.entries {
+        providers
+            .entry(entry.provider)
+            .or_insert_with(ProviderLatencySummary::default)
+            .record(&entry.stats);
+    }
+
+    Ok(providers)
+}
+
+fn build_provider_health_row(
+    provider: &str,
+    health: Option<&ProviderHealth>,
+    latency: Option<&ProviderLatencySummary>,
+    now_ms: i64,
+    health_file_ms: Option<i64>,
+    latency_file_ms: Option<i64>,
+) -> ProviderHealthRow {
+    let state = health
+        .map(|snapshot| effective_circuit_state(snapshot, now_ms))
+        .unwrap_or(CircuitState::Closed);
+    let fails = health
+        .map(|snapshot| {
+            format!(
+                "{}/{}",
+                snapshot.consecutive_failures, PROVIDER_FAILURE_THRESHOLD
+            )
+        })
+        .unwrap_or_else(|| format!("0/{PROVIDER_FAILURE_THRESHOLD}"));
+    let cooldown = format_cooldown(health, state, now_ms);
+    let latency_p50 = latency
+        .and_then(ProviderLatencySummary::p50_ms)
+        .map(format_latency_p50)
+        .unwrap_or_else(|| "—".to_string());
+    let error_rate = health
+        .filter(|snapshot| snapshot.total_requests > 0)
+        .map(|snapshot| {
+            format!(
+                "{:.1}%",
+                (snapshot.total_failures as f64 * 100.0) / snapshot.total_requests as f64
+            )
+        })
+        .unwrap_or_else(|| "—".to_string());
+
+    let mut last_check_ms = health.and_then(|snapshot| snapshot.last_failure_at);
+    if health.is_some() {
+        last_check_ms = max_timestamp(last_check_ms, health_file_ms);
+    }
+    if latency.is_some() {
+        last_check_ms = max_timestamp(last_check_ms, latency_file_ms);
+    }
+
+    ProviderHealthRow {
+        provider: provider.to_string(),
+        state: format_circuit_state(state).to_string(),
+        fails,
+        cooldown,
+        latency_p50,
+        error_rate,
+        last_check: last_check_ms
+            .map(|timestamp_ms| format_timestamp_age(timestamp_ms, now_ms))
+            .unwrap_or_else(|| "—".to_string()),
+    }
+}
+
+fn effective_circuit_state(health: &ProviderHealth, now_ms: i64) -> CircuitState {
+    match health.state {
+        CircuitState::Open if health.cooldown_until.is_some_and(|until| now_ms >= until) => {
+            CircuitState::HalfOpen
+        }
+        state => state,
+    }
+}
+
+fn format_circuit_state(state: CircuitState) -> &'static str {
+    match state {
+        CircuitState::Closed => "CLOSED",
+        CircuitState::Open => "OPEN",
+        CircuitState::HalfOpen => "HALF-OPEN",
+    }
+}
+
+fn format_cooldown(health: Option<&ProviderHealth>, state: CircuitState, now_ms: i64) -> String {
+    let Some(health) = health else {
+        return "—".to_string();
+    };
+
+    if state != CircuitState::Open {
+        return "—".to_string();
+    }
+
+    health
+        .cooldown_until
+        .map(|until| until.saturating_sub(now_ms))
+        .filter(|remaining_ms| *remaining_ms > 0)
+        .map(format_remaining_ms)
+        .unwrap_or_else(|| "—".to_string())
+}
+
+fn format_provider_health_rows(rows: &[ProviderHealthRow]) -> String {
+    let mut widths = [
+        "Provider".len(),
+        "State".len(),
+        "Fails".len(),
+        "Cooldown".len(),
+        "Latency p50".len(),
+        "Error Rate".len(),
+        "Last Check".len(),
+    ];
+
+    for row in rows {
+        widths[0] = widths[0].max(row.provider.len());
+        widths[1] = widths[1].max(row.state.len());
+        widths[2] = widths[2].max(row.fails.len());
+        widths[3] = widths[3].max(row.cooldown.len());
+        widths[4] = widths[4].max(row.latency_p50.len());
+        widths[5] = widths[5].max(row.error_rate.len());
+        widths[6] = widths[6].max(row.last_check.len());
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "{:<provider_w$}  {:<state_w$}  {:<fails_w$}  {:<cooldown_w$}  {:<latency_w$}  {:<error_w$}  {:<last_w$}",
+        "Provider",
+        "State",
+        "Fails",
+        "Cooldown",
+        "Latency p50",
+        "Error Rate",
+        "Last Check",
+        provider_w = widths[0],
+        state_w = widths[1],
+        fails_w = widths[2],
+        cooldown_w = widths[3],
+        latency_w = widths[4],
+        error_w = widths[5],
+        last_w = widths[6],
+    );
+
+    for row in rows {
+        let _ = writeln!(
+            out,
+            "{:<provider_w$}  {:<state_w$}  {:<fails_w$}  {:<cooldown_w$}  {:<latency_w$}  {:<error_w$}  {:<last_w$}",
+            row.provider,
+            row.state,
+            row.fails,
+            row.cooldown,
+            row.latency_p50,
+            row.error_rate,
+            row.last_check,
+            provider_w = widths[0],
+            state_w = widths[1],
+            fails_w = widths[2],
+            cooldown_w = widths[3],
+            latency_w = widths[4],
+            error_w = widths[5],
+            last_w = widths[6],
+        );
+    }
+
+    out
+}
+
+fn format_latency_p50(ms: f64) -> String {
+    if ms >= 500.0 {
+        format!("{:.1}s", ms / 1000.0)
+    } else {
+        format!("{ms:.0}ms")
+    }
+}
+
+fn format_remaining_ms(ms: i64) -> String {
+    let secs = (ms.max(0) + 999) / 1000;
+    format!("{} left", format_compact_duration(secs))
+}
+
+fn format_timestamp_age(timestamp_ms: i64, now_ms: i64) -> String {
+    let secs = now_ms.saturating_sub(timestamp_ms).max(0) / 1000;
+    format!("{} ago", format_compact_duration(secs))
+}
+
+fn format_compact_duration(secs: i64) -> String {
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m", secs / 60),
+        3600..=86_399 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86_400),
+    }
+}
+
+fn file_modified_ms(path: &Path) -> Option<i64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    system_time_to_ms(modified)
+}
+
+fn system_time_to_ms(timestamp: SystemTime) -> Option<i64> {
+    timestamp
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+}
+
+fn unix_ms_now() -> i64 {
+    system_time_to_ms(SystemTime::now()).unwrap_or(0)
+}
+
+fn max_timestamp(left: Option<i64>, right: Option<i64>) -> Option<i64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    }
+}
+
+async fn dispatch_config(cmd: ConfigCmd) -> Result<()> {
     match cmd {
         ConfigCmd::Init {
             yes,
@@ -1463,6 +2972,14 @@ fn dispatch_config(cmd: ConfigCmd) -> Result<()> {
         ConfigCmd::CheckSecrets { workdir } => {
             let wd = workdir.unwrap_or_else(|| PathBuf::from("."));
             config_cmd::cmd_check_secrets(&wd)
+        }
+        ConfigCmd::Validate { workdir } => {
+            let wd = workdir.unwrap_or_else(|| PathBuf::from("."));
+            config_cmd::cmd_validate(&wd).await
+        }
+        ConfigCmd::Migrate { workdir, dry_run } => {
+            let wd = workdir.unwrap_or_else(|| PathBuf::from("."));
+            config_cmd::cmd_migrate(&wd, dry_run)
         }
     }
 }
@@ -3546,6 +5063,8 @@ fn parse_dashboard_page(input: &str) -> Option<PageId> {
         "parameters" => PageId::Parameters,
         "experiments" => PageId::Experiments,
         "optimizer" => PageId::Optimizer,
+        "provider-health" | "providerhealth" => PageId::ProviderHealth,
+        "model-comparison" | "modelcomparison" => PageId::ModelComparison,
         "agent-status" | "agentstatus" | "agent-activity" | "agentactivity" => PageId::AgentStatus,
         "plan-view" | "planview" => PageId::PlanView,
         "log-view" | "logview" => PageId::LogView,
@@ -3564,6 +5083,8 @@ fn dashboard_page_slugs() -> Vec<&'static str> {
         PageId::Parameters,
         PageId::Experiments,
         PageId::Optimizer,
+        PageId::ProviderHealth,
+        PageId::ModelComparison,
         PageId::AgentStatus,
         PageId::PlanView,
         PageId::LogView,
@@ -3936,6 +5457,284 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_experiment_model_create_subcommand() {
+        let cli = Cli::try_parse_from([
+            "roko",
+            "experiment",
+            "model",
+            "create",
+            "--id",
+            "glm-vs-kimi-impl",
+            "--role",
+            "implementer",
+            "--variant",
+            "glm-5-1:glm-5.1:zai",
+            "--variant",
+            "kimi-k2-5:kimi-k2.5:moonshot",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Experiment {
+                cmd: ExperimentCmd::Model { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_parses_provider_list_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "provider", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Provider {
+                cmd: ProviderCmd::List { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_parses_provider_health_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "provider", "health"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Provider {
+                cmd: ProviderCmd::Health { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_parses_provider_test_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "provider", "test", "zai"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Provider {
+                cmd: ProviderCmd::Test { provider, .. }
+            }) if provider == "zai"
+        ));
+    }
+
+    #[test]
+    fn cli_parses_model_list_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "model", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Model {
+                cmd: ModelCmd::List { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_parses_model_route_subcommand() {
+        let cli = Cli::try_parse_from([
+            "roko",
+            "model",
+            "route",
+            "glm-5-1",
+            "--explain",
+            "--role",
+            "implementer",
+            "--complexity",
+            "integrative",
+        ])
+        .unwrap();
+        assert_eq!(cli.role.as_deref(), Some("implementer"));
+        assert!(matches!(
+            cli.command,
+            Some(Command::Model {
+                cmd: ModelCmd::Route {
+                    model,
+                    explain: true,
+                    complexity: Some(complexity),
+                    ..
+                }
+            }) if model == "glm-5-1" && complexity == "integrative"
+        ));
+    }
+
+    #[test]
+    fn select_provider_test_model_prefers_default_model() {
+        let mut config = RokoConfig::default();
+        config.agent.default_model = "glm-5-1".to_string();
+        config.models.insert(
+            "glm-5-1".to_string(),
+            ModelProfile {
+                provider: "zai".to_string(),
+                slug: "glm-5.1".to_string(),
+                context_window: 200_000,
+                max_output: Some(131_072),
+                supports_tools: true,
+                supports_thinking: true,
+                supports_vision: false,
+                supports_web_search: false,
+                supports_mcp_tools: false,
+                supports_partial: false,
+                provider_routing: None,
+                tool_format: "openai_json".to_string(),
+                cost_input_per_m: Some(1.40),
+                cost_output_per_m: Some(4.40),
+                cost_cache_read_per_m: None,
+                cost_cache_write_per_m: None,
+                max_tools: None,
+                tokenizer_ratio: None,
+            },
+        );
+        config.models.insert(
+            "glm-5-1-alt".to_string(),
+            ModelProfile {
+                provider: "zai".to_string(),
+                slug: "glm-5.1-air".to_string(),
+                context_window: 128_000,
+                max_output: Some(8_192),
+                supports_tools: true,
+                supports_thinking: false,
+                supports_vision: false,
+                supports_web_search: false,
+                supports_mcp_tools: false,
+                supports_partial: false,
+                provider_routing: None,
+                tool_format: "openai_json".to_string(),
+                cost_input_per_m: Some(1.0),
+                cost_output_per_m: Some(2.0),
+                cost_cache_read_per_m: None,
+                cost_cache_write_per_m: None,
+                max_tools: None,
+                tokenizer_ratio: None,
+            },
+        );
+
+        let selected = select_provider_test_model(&config, "zai").expect("selected model");
+        assert_eq!(selected.0, "glm-5-1");
+        assert_eq!(selected.1.slug, "glm-5.1");
+    }
+
+    #[test]
+    fn format_provider_rows_renders_headers_and_rows() {
+        let output = format_provider_rows(&[ProviderListRow {
+            provider: "anthropic".to_string(),
+            kind: "claude_cli".to_string(),
+            base_url: "(cli: claude)".to_string(),
+            status: "ok (cli found)".to_string(),
+        }]);
+
+        assert!(output.contains("Provider"));
+        assert!(output.contains("Base URL"));
+        assert!(output.contains("anthropic"));
+        assert!(output.contains("ok (cli found)"));
+    }
+
+    #[test]
+    fn format_model_rows_renders_headers_and_rows() {
+        let output = format_model_rows(&[ModelListRow {
+            model: "glm-5-1".to_string(),
+            provider: "zai".to_string(),
+            slug: "glm-5.1".to_string(),
+            context: "200K".to_string(),
+            tools: "✓".to_string(),
+            thinking: "✓".to_string(),
+            vision: "✗".to_string(),
+            cost: "$1.40/$4.40".to_string(),
+        }]);
+
+        assert!(output.contains("Model"));
+        assert!(output.contains("Cost (in/out)"));
+        assert!(output.contains("glm-5-1"));
+        assert!(output.contains("$1.40/$4.40"));
+    }
+
+    #[test]
+    fn build_model_list_row_formats_capabilities_and_costs() {
+        let row = build_model_list_row(
+            "kimi-k2-5",
+            &ModelProfile {
+                provider: "moonshot".to_string(),
+                slug: "kimi-k2.5".to_string(),
+                context_window: 256_000,
+                max_output: Some(128_000),
+                supports_tools: true,
+                supports_thinking: true,
+                supports_vision: true,
+                supports_web_search: false,
+                supports_mcp_tools: false,
+                supports_partial: false,
+                provider_routing: None,
+                tool_format: "openai_json".to_string(),
+                cost_input_per_m: Some(0.60),
+                cost_output_per_m: Some(3.00),
+                cost_cache_read_per_m: None,
+                cost_cache_write_per_m: None,
+                max_tools: None,
+                tokenizer_ratio: None,
+            },
+        );
+
+        assert_eq!(row.model, "kimi-k2-5");
+        assert_eq!(row.provider, "moonshot");
+        assert_eq!(row.slug, "kimi-k2.5");
+        assert_eq!(row.context, "256K");
+        assert_eq!(row.tools, "✓");
+        assert_eq!(row.thinking, "✓");
+        assert_eq!(row.vision, "✓");
+        assert_eq!(row.cost, "$0.60/$3.00");
+    }
+
+    #[test]
+    fn build_provider_health_row_formats_state_latency_and_error_rate() {
+        let health = ProviderHealth {
+            provider_id: "zai".to_string(),
+            state: CircuitState::Open,
+            consecutive_failures: 3,
+            total_requests: 20,
+            total_failures: 3,
+            last_failure_at: Some(90_000),
+            cooldown_until: Some(108_000),
+            failure_window: Vec::new(),
+        };
+        let latency = ProviderLatencySummary {
+            recent_latencies: vec![800.0, 1_200.0, 600.0],
+            weighted_latency_ms: 0.0,
+            observations: 0,
+        };
+
+        let row = build_provider_health_row(
+            "zai",
+            Some(&health),
+            Some(&latency),
+            100_000,
+            Some(95_000),
+            Some(99_000),
+        );
+
+        assert_eq!(row.provider, "zai");
+        assert_eq!(row.state, "OPEN");
+        assert_eq!(row.fails, "3/3");
+        assert_eq!(row.cooldown, "8s left");
+        assert_eq!(row.latency_p50, "0.8s");
+        assert_eq!(row.error_rate, "15.0%");
+        assert_eq!(row.last_check, "1s ago");
+    }
+
+    #[test]
+    fn format_provider_health_rows_renders_headers_and_rows() {
+        let output = format_provider_health_rows(&[ProviderHealthRow {
+            provider: "openrouter".to_string(),
+            state: "CLOSED".to_string(),
+            fails: "0/3".to_string(),
+            cooldown: "—".to_string(),
+            latency_p50: "0.8s".to_string(),
+            error_rate: "0.0%".to_string(),
+            last_check: "5m ago".to_string(),
+        }]);
+
+        assert!(output.contains("Provider"));
+        assert!(output.contains("Latency p50"));
+        assert!(output.contains("Error Rate"));
+        assert!(output.contains("openrouter"));
+        assert!(output.contains("0.8s"));
+    }
+
+    #[test]
     fn cli_parses_dashboard_subcommand() {
         let cli = Cli::try_parse_from(["roko", "dashboard", "--page", "plan-view", "--list-pages"])
             .unwrap();
@@ -3972,6 +5771,14 @@ mod tests {
         );
         assert_eq!(parse_dashboard_page("plan_view"), Some(PageId::PlanView));
         assert_eq!(parse_dashboard_page("learning"), Some(PageId::Learning));
+        assert_eq!(
+            parse_dashboard_page("provider health"),
+            Some(PageId::ProviderHealth)
+        );
+        assert_eq!(
+            parse_dashboard_page("model comparison"),
+            Some(PageId::ModelComparison)
+        );
     }
 
     #[test]
@@ -4062,6 +5869,79 @@ mod tests {
         .join("\n")
             + "\n";
         fs::write(&cfactor_path, cfactor_history).await.unwrap();
+
+        let provider_health_path = learn_dir.join("provider-health.json");
+        let provider_health = serde_json::json!({
+            "providers": {
+                "anthropic": {
+                    "provider_id": "anthropic",
+                    "state": "Closed",
+                    "consecutive_failures": 0,
+                    "total_requests": 12,
+                    "total_failures": 1,
+                    "last_failure_at": null,
+                    "cooldown_until": null,
+                    "failure_window": []
+                },
+                "zai": {
+                    "provider_id": "zai",
+                    "state": "HalfOpen",
+                    "consecutive_failures": 3,
+                    "total_requests": 8,
+                    "total_failures": 2,
+                    "last_failure_at": 1710000000000i64,
+                    "cooldown_until": 1710000005000i64,
+                    "failure_window": []
+                }
+            }
+        });
+        fs::write(
+            &provider_health_path,
+            serde_json::to_string_pretty(&provider_health).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let latency_stats_path = learn_dir.join("latency-stats.json");
+        let latency_stats = serde_json::json!({
+            "entries": [
+                {
+                    "provider": "anthropic",
+                    "stats": {
+                        "model_slug": "claude-opus-4-6",
+                        "provider_id": "anthropic",
+                        "ttft_ema_ms": 0.0,
+                        "total_latency_ema_ms": 0.0,
+                        "tokens_per_second_ema": 0.0,
+                        "observations": 3,
+                        "recent_latencies": [800.0, 1200.0, 600.0]
+                    }
+                }
+            ]
+        });
+        fs::write(
+            &latency_stats_path,
+            serde_json::to_string_pretty(&latency_stats).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let cascade_router_path = learn_dir.join("cascade-router.json");
+        let cascade_router = serde_json::json!({
+            "model_slugs": ["kimi-k2.5", "glm-5.1", "claude-sonnet-4-6", "claude-opus-4-6"],
+            "confidence_stats": {
+                "kimi-k2.5": { "trials": 145, "successes": 113 },
+                "glm-5.1": { "trials": 203, "successes": 166 },
+                "claude-sonnet-4-6": { "trials": 312, "successes": 250 },
+                "claude-opus-4-6": { "trials": 47, "successes": 44 }
+            }
+        });
+        fs::write(
+            &cascade_router_path,
+            serde_json::to_string_pretty(&cascade_router).unwrap(),
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -4101,6 +5981,32 @@ mod tests {
         assert!(trends.contains("avg iterations per plan: 1.00"));
         assert!(trends.contains("avg cost per plan: $2.0000"));
         assert!(trends.contains("haiku share: 50.0%"));
+
+        let provider_health = dashboard_output(
+            &cli,
+            Some(dir.path().to_path_buf()),
+            Some("provider-health".to_string()),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(provider_health.contains("Provider Health (provider-health)"));
+        assert!(provider_health.contains("anthropic"));
+        assert!(provider_health.contains("● CLOSED"));
+        assert!(provider_health.contains("p50: 0.8s"));
+        assert!(provider_health.contains("summary: 20 requests, 3 failures"));
+
+        let model_comparison = dashboard_output(
+            &cli,
+            Some(dir.path().to_path_buf()),
+            Some("model-comparison".to_string()),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(model_comparison.contains("Model Comparison (model-comparison)"));
+        assert!(model_comparison.contains("Pareto frontier:"));
+        assert!(model_comparison.contains("claude-sonnet-4-6 dominated by glm-5.1"));
 
         let fallback = dashboard_output(
             &cli,

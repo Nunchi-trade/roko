@@ -1,9 +1,12 @@
+mod mock_provider;
+
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use roko_agent::Agent;
 use roko_agent::codex_agent::CodexAgent;
 use roko_agent::http::{HttpPostError, HttpPoster};
+use roko_agent::openai_agent::OpenAiAgent;
 use roko_agent::provider::{AgentOptions, create_agent_for_model};
 use roko_core::agent::ProviderKind;
 use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
@@ -16,6 +19,37 @@ use std::time::Duration;
 
 fn prompt(text: &str) -> Signal {
     Signal::builder(Kind::Prompt).body(Body::text(text)).build()
+}
+
+#[tokio::test]
+async fn mock_provider_openai_compat_responds_to_chat_completion_requests() {
+    let (server, base_url) = mock_provider::mock_openai_compat().await;
+
+    let agent = OpenAiAgent::new("test-key", "glm-5.1").with_base_url(base_url);
+    let result = agent
+        .run(&prompt("Reply with the single word pong."), &Context::now())
+        .await;
+
+    assert!(
+        result.success,
+        "{}",
+        result.output.body.as_text().unwrap_or("unknown")
+    );
+    assert_eq!(result.output.body.as_text().unwrap_or(""), "Mock response");
+    assert_eq!(result.usage.input_tokens, 10);
+    assert_eq!(result.usage.output_tokens, 5);
+
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].url.path(), "/chat/completions");
+
+    let request_body: Value =
+        serde_json::from_slice(&requests[0].body).expect("captured request body json");
+    assert_eq!(request_body["model"], "glm-5.1");
+    assert_eq!(
+        request_body["messages"][0]["content"],
+        "Reply with the single word pong."
+    );
 }
 
 fn zai_provider_config(base_url: impl Into<String>) -> ProviderConfig {

@@ -38,11 +38,15 @@
 //!
 //! # Thread safety
 //!
-//! All mutable state is behind a [`parking_lot::Mutex`] so the router can
-//! be shared across async tasks via `Arc<LinUCBRouter>`.
+//! All mutable state is behind a [`parking_lot::RwLock`] so the router can
+//! be shared across async tasks via `Arc<LinUCBRouter>` while allowing
+//! concurrent read-side routing.
 
-use parking_lot::Mutex;
+use crate::cost_table::CostTable;
+use parking_lot::RwLock;
+use rand::Rng;
 use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
+pub use roko_core::config::schema::RewardWeights;
 use roko_core::task::{TaskCategory, TaskComplexityBand};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -66,6 +70,8 @@ const ALPHA_MAX: f64 = 1.0;
 /// `exp(-200/60) ~ 0.036`, giving alpha ~ 0.084,
 /// and it effectively converges to `ALPHA_MIN`.
 const ALPHA_TAU: f64 = 60.0;
+/// Default discount factor for Thompson sampling in non-stationary environments.
+const THOMPSON_DEFAULT_DISCOUNT: f64 = 0.99;
 
 // ─── RoutingContext ─────────────────────────────────────────────────────────
 
@@ -205,10 +211,41 @@ pub fn compute_routing_reward(
     normalized_cost: f64,
     normalized_duration: f64,
 ) -> f64 {
+    compute_routing_reward_with_weights(
+        pass_rate,
+        normalized_cost,
+        normalized_duration,
+        &RewardWeights::default(),
+    )
+}
+
+/// Compute the scalarized routing reward using explicit reward weights.
+#[must_use]
+pub fn compute_routing_reward_with_weights(
+    pass_rate: f64,
+    normalized_cost: f64,
+    normalized_duration: f64,
+    weights: &RewardWeights,
+) -> f64 {
     let pr = pass_rate.clamp(0.0, 1.0);
     let nc = normalized_cost.clamp(0.0, 1.0);
     let nd = normalized_duration.clamp(0.0, 1.0);
-    (1.0 - nd).mul_add(0.2, pr.mul_add(0.5, (1.0 - nc) * 0.3))
+    (1.0 - nd).mul_add(
+        weights.latency,
+        pr.mul_add(weights.quality, (1.0 - nc) * weights.cost),
+    )
+}
+
+/// Normalize a model's blended cost against the routing ceiling.
+///
+/// Uses the cost table's blended per-million-token estimate so cost
+/// comparisons stay consistent across providers with different pricing
+/// structures and tokenizers.
+#[must_use]
+pub fn normalized_cost(model_slug: &str, cost_table: &CostTable) -> f64 {
+    let blended = cost_table.blended_cost_per_m(model_slug);
+    let max_blended = 75.0;
+    (blended / max_blended).min(1.0)
 }
 
 /// Compute the composite reward signal using observed latency and an SLA.
@@ -222,16 +259,80 @@ pub fn compute_routing_reward_v2(
     observed_latency_ms: f64,
     latency_sla_ms: f64,
 ) -> f64 {
+    compute_routing_reward_v2_with_weights(
+        pass_rate,
+        normalized_cost,
+        observed_latency_ms,
+        latency_sla_ms,
+        &RewardWeights::default(),
+    )
+}
+
+/// Compute the scalarized reward using observed latency and explicit weights.
+#[must_use]
+pub fn compute_routing_reward_v2_with_weights(
+    pass_rate: f64,
+    normalized_cost: f64,
+    observed_latency_ms: f64,
+    latency_sla_ms: f64,
+    weights: &RewardWeights,
+) -> f64 {
     let normalized_duration = if latency_sla_ms > 0.0 {
         (observed_latency_ms / latency_sla_ms).min(1.0)
     } else {
         1.0
     };
 
-    compute_routing_reward(pass_rate, normalized_cost, normalized_duration)
+    compute_routing_reward_with_weights(pass_rate, normalized_cost, normalized_duration, weights)
 }
 
 // ─── Per-arm state ──────────────────────────────────────────────────────────
+
+/// Per-arm reward vector statistics for multi-objective routing.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MultiObjectiveStats {
+    /// Sum of observed quality rewards.
+    pub quality_sum: f64,
+    /// Sum of squared quality rewards.
+    pub quality_sq_sum: f64,
+    /// Sum of observed normalized costs.
+    pub cost_sum: f64,
+    /// Sum of squared normalized costs.
+    pub cost_sq_sum: f64,
+    /// Sum of observed normalized latencies.
+    pub latency_sum: f64,
+    /// Sum of squared normalized latencies.
+    pub latency_sq_sum: f64,
+    /// Number of multi-objective observations recorded.
+    pub observations: u64,
+}
+
+impl MultiObjectiveStats {
+    /// Record one quality / cost / latency observation.
+    pub fn observe(&mut self, quality: f64, cost: f64, latency: f64) {
+        let quality = quality.clamp(0.0, 1.0);
+        let cost = cost.clamp(0.0, 1.0);
+        let latency = latency.clamp(0.0, 1.0);
+
+        self.quality_sum += quality;
+        self.quality_sq_sum += quality * quality;
+        self.cost_sum += cost;
+        self.cost_sq_sum += cost * cost;
+        self.latency_sum += latency;
+        self.latency_sq_sum += latency * latency;
+        self.observations += 1;
+    }
+
+    /// Convert the accumulated vector into a scalar reward using `weights`.
+    #[must_use]
+    pub fn scalarize(&self, weights: &RewardWeights) -> f64 {
+        let observations = self.observations.max(1) as f64;
+        let q = self.quality_sum / observations;
+        let c = 1.0 - (self.cost_sum / observations);
+        let l = 1.0 - (self.latency_sum / observations);
+        q * weights.quality + c * weights.cost + l * weights.latency
+    }
+}
 
 /// Serializable state for one `LinUCB` arm.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -244,6 +345,22 @@ pub struct ArmState {
     pub b_vector: Vec<f64>,
     /// Number of observations for this arm.
     pub observations: u64,
+    /// Multi-objective reward history for this arm.
+    #[serde(default)]
+    pub reward_stats: MultiObjectiveStats,
+}
+
+/// Debug score for one candidate arm under a specific routing context.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CandidateArmScore {
+    /// Model slug this score belongs to.
+    pub slug: String,
+    /// Full LinUCB score (`exploitation + exploration`).
+    pub score: f64,
+    /// Learned mean-reward estimate (`theta^T * x`).
+    pub exploitation: f64,
+    /// Uncertainty bonus added for exploration.
+    pub exploration: f64,
 }
 
 impl ArmState {
@@ -258,7 +375,71 @@ impl ArmState {
             a_matrix: a,
             b_vector: vec![0.0; dim],
             observations: 0,
+            reward_stats: MultiObjectiveStats::default(),
         }
+    }
+}
+
+/// Serializable state for one Thompson-sampling arm.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThompsonArm {
+    /// Model slug this arm represents.
+    pub slug: String,
+    /// Success count plus Beta prior.
+    pub alpha: f64,
+    /// Failure count plus Beta prior.
+    pub beta: f64,
+    /// Running reward sum for future continuous Thompson variants.
+    pub sum_reward: f64,
+    /// Running squared reward sum for future continuous Thompson variants.
+    pub sum_reward_sq: f64,
+    /// Number of observations recorded for this arm.
+    pub observations: u64,
+    /// Discount factor applied before each update for non-stationarity.
+    pub discount: f64,
+}
+
+impl ThompsonArm {
+    /// Create a fresh Thompson arm with Beta(1, 1) priors.
+    #[must_use]
+    pub fn new(slug: impl Into<String>) -> Self {
+        Self {
+            slug: slug.into(),
+            alpha: 1.0,
+            beta: 1.0,
+            sum_reward: 0.0,
+            sum_reward_sq: 0.0,
+            observations: 0,
+            discount: THOMPSON_DEFAULT_DISCOUNT,
+        }
+    }
+
+    /// Sample a Bernoulli success rate from the arm's Beta posterior.
+    #[must_use]
+    pub fn sample(&self) -> f64 {
+        let mut rng = rand::thread_rng();
+        self.sample_with_rng(&mut rng)
+    }
+
+    /// Update the posterior with a new reward and success outcome.
+    pub fn update(&mut self, reward: f64, success: bool) {
+        self.alpha = 1.0 + self.discount * (self.alpha - 1.0);
+        self.beta = 1.0 + self.discount * (self.beta - 1.0);
+
+        if success {
+            self.alpha += 1.0;
+        } else {
+            self.beta += 1.0;
+        }
+
+        self.sum_reward += reward;
+        self.sum_reward_sq += reward * reward;
+        self.observations += 1;
+    }
+
+    #[must_use]
+    fn sample_with_rng<R: Rng + ?Sized>(&self, rng: &mut R) -> f64 {
+        sample_beta(self.alpha, self.beta, rng).clamp(0.0, 1.0)
     }
 }
 
@@ -274,6 +455,60 @@ fn mat_vec_mul(a: &[Vec<f64>], x: &[f64]) -> Vec<f64> {
 /// Dot product of two vectors.
 fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(ai, bi)| ai * bi).sum()
+}
+
+fn sample_beta<R: Rng + ?Sized>(alpha: f64, beta: f64, rng: &mut R) -> f64 {
+    let x = sample_gamma(alpha.max(f64::MIN_POSITIVE), rng);
+    let y = sample_gamma(beta.max(f64::MIN_POSITIVE), rng);
+    let total = x + y;
+    if total <= 0.0 { 0.5 } else { x / total }
+}
+
+fn sample_gamma<R: Rng + ?Sized>(shape: f64, rng: &mut R) -> f64 {
+    if shape <= 0.0 {
+        return 0.0;
+    }
+
+    if shape < 1.0 {
+        let u = sample_open_unit(rng);
+        return sample_gamma(shape + 1.0, rng) * u.powf(1.0 / shape);
+    }
+
+    if (shape - 1.0).abs() < f64::EPSILON {
+        return -sample_open_unit(rng).ln();
+    }
+
+    let d = shape - (1.0 / 3.0);
+    let c = (1.0 / (9.0 * d)).sqrt();
+
+    loop {
+        let x = sample_standard_normal(rng);
+        let v = 1.0 + c * x;
+        if v <= 0.0 {
+            continue;
+        }
+
+        let v_cubed = v * v * v;
+        let u = sample_open_unit(rng);
+
+        if u < 1.0 - 0.0331 * x.powi(4) {
+            return d * v_cubed;
+        }
+
+        if u.ln() < 0.5 * x * x + d * (1.0 - v_cubed + v_cubed.ln()) {
+            return d * v_cubed;
+        }
+    }
+}
+
+fn sample_standard_normal<R: Rng + ?Sized>(rng: &mut R) -> f64 {
+    let u1 = sample_open_unit(rng);
+    let u2 = sample_open_unit(rng);
+    (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+}
+
+fn sample_open_unit<R: Rng + ?Sized>(rng: &mut R) -> f64 {
+    rng.gen_range(f64::MIN_POSITIVE..1.0)
 }
 
 /// Compute the inverse of a positive-definite matrix using Cholesky decomposition.
@@ -354,14 +589,14 @@ struct RouterSnapshot {
 ///
 /// Thread-safe: wrap in `Arc` for shared access.
 pub struct LinUCBRouter {
-    state: Mutex<RouterState>,
+    state: RwLock<RouterState>,
     /// Filesystem path for persistence (optional).
     persist_path: Option<PathBuf>,
     /// Static fallback table: tier -> model slug.
     static_table: HashMap<ModelTier, String>,
 }
 
-/// Interior mutable state protected by the mutex.
+/// Interior mutable state protected by the read-write lock.
 #[derive(Debug, Clone)]
 struct RouterState {
     arms: Vec<ArmState>,
@@ -385,7 +620,7 @@ impl LinUCBRouter {
             .map(|slug| ArmState::new(slug, CONTEXT_DIM))
             .collect();
         Self {
-            state: Mutex::new(RouterState {
+            state: RwLock::new(RouterState {
                 arms,
                 total_observations: 0,
             }),
@@ -413,19 +648,19 @@ impl LinUCBRouter {
     /// `alpha = ALPHA_MIN + (ALPHA_MAX - ALPHA_MIN) * exp(-observations / ALPHA_TAU)`
     #[must_use]
     pub fn current_alpha(&self) -> f64 {
-        let obs = self.state.lock().total_observations;
+        let obs = self.state.read().total_observations;
         alpha_for_observations(obs)
     }
 
     /// Total observations recorded.
     #[must_use]
     pub fn total_observations(&self) -> u64 {
-        self.state.lock().total_observations
+        self.state.read().total_observations
     }
 
     /// Override the total observation count (used when restoring from persisted state).
     pub fn set_total_observations(&self, count: u64) {
-        self.state.lock().total_observations = count;
+        self.state.write().total_observations = count;
     }
 
     /// Select the best model for the given context.
@@ -433,7 +668,7 @@ impl LinUCBRouter {
     /// If `total_observations < COLD_START_THRESHOLD`, returns the static
     /// fallback model for the context's complexity band tier.
     pub fn select_model(&self, ctx: &RoutingContext) -> ModelSpec {
-        let state = self.state.lock();
+        let state = self.state.read();
 
         // Cold start: use static routing.
         if state.total_observations < COLD_START_THRESHOLD {
@@ -470,7 +705,7 @@ impl LinUCBRouter {
     /// This is the lower-level entry point used by the cascade router when it
     /// already has the encoded feature vector.
     pub fn select_features(&self, x: &[f64]) -> ModelSpec {
-        let state = self.state.lock();
+        let state = self.state.read();
 
         // Cold start: use static routing.
         if state.total_observations < COLD_START_THRESHOLD {
@@ -511,7 +746,7 @@ impl LinUCBRouter {
         candidate_slugs: &[String],
     ) -> ModelSpec {
         let alpha = {
-            let state = self.state.lock();
+            let state = self.state.read();
             alpha_for_observations(state.total_observations)
         };
         self.select_features_from_candidates_with_alpha_adjuster(ctx, candidate_slugs, |_| alpha)
@@ -535,7 +770,7 @@ impl LinUCBRouter {
             return self.select_model(ctx);
         }
 
-        let state = self.state.lock();
+        let state = self.state.read();
 
         // Cold start: use the filtered static table.
         if state.total_observations < COLD_START_THRESHOLD {
@@ -585,6 +820,30 @@ impl LinUCBRouter {
         self.update_features(&x, model_idx, reward);
     }
 
+    /// Update the router with explicit multi-objective reward components.
+    pub fn update_with_metrics(
+        &self,
+        ctx: &RoutingContext,
+        model_slug: &str,
+        quality: f64,
+        normalized_cost: f64,
+        normalized_latency: f64,
+        weights: &RewardWeights,
+    ) {
+        let x = ctx.to_features_for_model(Some(model_slug));
+        let Some(model_idx) = self.model_index(model_slug) else {
+            return;
+        };
+        self.update_features_multi_objective(
+            &x,
+            model_idx,
+            quality,
+            normalized_cost,
+            normalized_latency,
+            weights,
+        );
+    }
+
     /// Update the arm identified by `model_idx` with a precomputed feature vector.
     ///
     /// This is the lower-level observation entry point used by the cascade router
@@ -594,12 +853,46 @@ impl LinUCBRouter {
     /// saved to disk after each update. Save errors are silently ignored so
     /// that a filesystem hiccup never breaks the update flow.
     pub fn update_features(&self, x: &[f64], model_idx: usize, reward: f64) {
+        self.update_features_internal(x, model_idx, reward, None);
+    }
+
+    /// Update the router and track the underlying reward vector.
+    pub fn update_features_multi_objective(
+        &self,
+        x: &[f64],
+        model_idx: usize,
+        quality: f64,
+        normalized_cost: f64,
+        normalized_latency: f64,
+        weights: &RewardWeights,
+    ) {
+        let reward = compute_routing_reward_with_weights(
+            quality,
+            normalized_cost,
+            normalized_latency,
+            weights,
+        );
+        self.update_features_internal(
+            x,
+            model_idx,
+            reward,
+            Some((quality, normalized_cost, normalized_latency)),
+        );
+    }
+
+    fn update_features_internal(
+        &self,
+        x: &[f64],
+        model_idx: usize,
+        reward: f64,
+        reward_vector: Option<(f64, f64, f64)>,
+    ) {
         if x.len() != CONTEXT_DIM {
             return;
         }
 
         {
-            let mut state = self.state.lock();
+            let mut state = self.state.write();
             let Some(arm) = state.arms.get_mut(model_idx) else {
                 return;
             };
@@ -613,6 +906,9 @@ impl LinUCBRouter {
             // b = b + reward * x
             for (bi, xi) in arm.b_vector.iter_mut().zip(x) {
                 *bi += reward * xi;
+            }
+            if let Some((quality, cost, latency)) = reward_vector {
+                arm.reward_stats.observe(quality, cost, latency);
             }
             arm.observations += 1;
             state.total_observations += 1;
@@ -628,7 +924,7 @@ impl LinUCBRouter {
     #[must_use]
     pub fn model_index(&self, model_slug: &str) -> Option<usize> {
         self.state
-            .lock()
+            .read()
             .arms
             .iter()
             .position(|arm| slugs_match(&arm.slug, model_slug))
@@ -636,7 +932,49 @@ impl LinUCBRouter {
 
     /// Snapshot of all arm statistics (clone under lock).
     pub fn arm_stats(&self) -> Vec<ArmState> {
-        self.state.lock().arms.clone()
+        self.state.read().arms.clone()
+    }
+
+    /// Score the supplied candidates for the given routing context.
+    ///
+    /// This mirrors the internal LinUCB selection math without selecting a
+    /// winner, so debugging surfaces can show how each arm compared.
+    pub fn score_candidates_with_alpha_adjuster<F>(
+        &self,
+        ctx: &RoutingContext,
+        candidate_slugs: &[String],
+        mut alpha_for_slug: F,
+    ) -> Vec<CandidateArmScore>
+    where
+        F: FnMut(&str) -> f64,
+    {
+        if candidate_slugs.is_empty() {
+            return Vec::new();
+        }
+
+        let state = self.state.read();
+        let mut scores = Vec::new();
+
+        for arm in &state.arms {
+            if !candidate_slugs
+                .iter()
+                .any(|candidate| slugs_match(&arm.slug, candidate))
+            {
+                continue;
+            }
+
+            let x = ctx.to_features_for_model(Some(&arm.slug));
+            let alpha = alpha_for_slug(&arm.slug);
+            let (exploitation, exploration) = linucb_score_components(arm, &x, alpha);
+            scores.push(CandidateArmScore {
+                slug: arm.slug.clone(),
+                score: exploitation + exploration,
+                exploitation,
+                exploration,
+            });
+        }
+
+        scores
     }
 
     /// Persist router state to the configured path.
@@ -652,7 +990,7 @@ impl LinUCBRouter {
             .ok_or_else(|| std::io::Error::other("LinUCBRouter: no persist_path set"))?;
 
         let snapshot = {
-            let state = self.state.lock();
+            let state = self.state.read();
             RouterSnapshot {
                 arms: state.arms.clone(),
                 total_observations: state.total_observations,
@@ -709,7 +1047,7 @@ impl LinUCBRouter {
         let total_observations = arms.iter().map(|a| a.observations).sum();
 
         Ok(Self {
-            state: Mutex::new(RouterState {
+            state: RwLock::new(RouterState {
                 arms,
                 total_observations,
             }),
@@ -726,10 +1064,16 @@ impl LinUCBRouter {
 /// If matrix inversion fails (should not happen for a well-formed A with
 /// identity initialization), returns the mean reward estimate only.
 fn linucb_score(arm: &ArmState, x: &[f64], alpha: f64) -> f64 {
+    let (exploitation, exploration) = linucb_score_components(arm, x, alpha);
+    exploitation + exploration
+}
+
+/// Compute the LinUCB exploitation and exploration components separately.
+fn linucb_score_components(arm: &ArmState, x: &[f64], alpha: f64) -> (f64, f64) {
     let Some(a_inv) = cholesky_inverse(&arm.a_matrix) else {
         // Fallback: use mean reward only (no exploration bonus).
         // theta ~ A_inv * b is undefined if A is singular.
-        return 0.0;
+        return (0.0, 0.0);
     };
 
     // theta = A_inv * b
@@ -740,7 +1084,7 @@ fn linucb_score(arm: &ArmState, x: &[f64], alpha: f64) -> f64 {
     let a_inv_x = mat_vec_mul(&a_inv, x);
     let exploration = alpha * dot(x, &a_inv_x).max(0.0).sqrt();
 
-    exploitation + exploration
+    (exploitation, exploration)
 }
 
 /// Compute alpha (exploration parameter) from observation count.
@@ -840,6 +1184,10 @@ use crate::cascade_router::slug_family;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
+    use std::sync::{Arc, Barrier, mpsc};
+    use std::time::Duration;
 
     fn test_slugs() -> Vec<String> {
         vec![
@@ -1065,6 +1413,70 @@ mod tests {
         );
     }
 
+    #[test]
+    fn multi_objective_routing_default_weights_match_legacy_formula() {
+        let legacy = compute_routing_reward(0.75, 0.2, 0.4);
+        let weighted =
+            compute_routing_reward_with_weights(0.75, 0.2, 0.4, &RewardWeights::default());
+        assert!(
+            (legacy - weighted).abs() < 1e-12,
+            "default weights should preserve legacy reward, got {legacy} vs {weighted}"
+        );
+    }
+
+    #[test]
+    fn multi_objective_routing_scalarize_respects_weights() {
+        let mut stats = MultiObjectiveStats::default();
+        stats.observe(0.9, 0.2, 0.4);
+        stats.observe(0.7, 0.4, 0.6);
+
+        let cost_sensitive = RewardWeights {
+            quality: 0.3,
+            cost: 0.6,
+            latency: 0.1,
+        };
+        let quality_sensitive = RewardWeights {
+            quality: 0.8,
+            cost: 0.1,
+            latency: 0.1,
+        };
+
+        let cost_score = stats.scalarize(&cost_sensitive);
+        let quality_score = stats.scalarize(&quality_sensitive);
+
+        assert!(
+            cost_score < quality_score,
+            "quality-sensitive weights should favor this arm more: {cost_score} vs {quality_score}"
+        );
+    }
+
+    // ── Cost normalization uses blended pricing ───────────────────────
+
+    #[test]
+    fn normalized_cost_uses_blended_pricing() {
+        let table = CostTable {
+            models: HashMap::new(),
+        }
+        .with_defaults();
+
+        let glm_5_1 = normalized_cost("glm-5.1", &table);
+        let claude_opus = normalized_cost("claude-opus-4-6", &table);
+        let kimi_k2_5 = normalized_cost("kimi-k2.5", &table);
+
+        assert!(
+            (glm_5_1 - 0.0301).abs() < 0.001,
+            "glm-5.1 normalized cost should be close to 0.0301, got {glm_5_1}"
+        );
+        assert!(
+            (claude_opus - 0.4).abs() < 0.001,
+            "claude-opus normalized cost should be close to 0.4, got {claude_opus}"
+        );
+        assert!(
+            (kimi_k2_5 - 0.0157).abs() < 0.001,
+            "kimi-k2.5 normalized cost should be close to 0.0157, got {kimi_k2_5}"
+        );
+    }
+
     // ── Latency-aware reward prefers faster models ─────────────────────
 
     #[test]
@@ -1096,6 +1508,36 @@ mod tests {
             .find(|a| a.slug == "claude-sonnet-4-5")
             .unwrap();
         assert_eq!(sonnet.observations, 2);
+    }
+
+    #[test]
+    fn multi_objective_routing_tracks_per_arm_reward_vectors() {
+        let router = LinUCBRouter::new(test_slugs());
+        let ctx = default_ctx();
+        let weights = RewardWeights {
+            quality: 0.3,
+            cost: 0.6,
+            latency: 0.1,
+        };
+
+        router.update_with_metrics(&ctx, "claude-sonnet-4-5", 1.0, 0.2, 0.4, &weights);
+        router.update_with_metrics(&ctx, "claude-sonnet-4-5", 0.8, 0.3, 0.5, &weights);
+
+        let stats = router.arm_stats();
+        let sonnet = stats
+            .iter()
+            .find(|a| a.slug == "claude-sonnet-4-5")
+            .unwrap();
+
+        assert_eq!(sonnet.observations, 2);
+        assert_eq!(sonnet.reward_stats.observations, 2);
+        assert!((sonnet.reward_stats.quality_sum - 1.8).abs() < 1e-10);
+        assert!((sonnet.reward_stats.cost_sum - 0.5).abs() < 1e-10);
+        assert!((sonnet.reward_stats.latency_sum - 0.9).abs() < 1e-10);
+        assert!(
+            sonnet.reward_stats.scalarize(&weights) > 0.0,
+            "scalarized multi-objective reward should stay positive"
+        );
     }
 
     // ── Test 16: update modifies A and b ────────────────────────────────
@@ -1327,6 +1769,42 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_routing_allows_parallel_readers() {
+        let router = Arc::new(LinUCBRouter::new(test_slugs()));
+        router.set_total_observations(COLD_START_THRESHOLD);
+
+        let barrier = Arc::new(Barrier::new(11));
+        let (tx, rx) = mpsc::channel();
+        let held_read_guard = router.state.read();
+
+        for _ in 0..10 {
+            let router = Arc::clone(&router);
+            let barrier = Arc::clone(&barrier);
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                let model = router.select_features(&default_ctx().to_features());
+                tx.send(model.slug).expect("send selected model");
+            });
+        }
+        drop(tx);
+
+        barrier.wait();
+
+        for _ in 0..10 {
+            let selected = rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("concurrent select_features should complete while a reader holds the lock");
+            assert!(
+                !selected.is_empty(),
+                "selected model slug should not be empty"
+            );
+        }
+
+        drop(held_read_guard);
+    }
+
+    #[test]
     fn cascade_router_glm_selects_glm_when_present() {
         let router =
             LinUCBRouter::new(vec!["claude-sonnet-4-6".to_string(), "glm-5.1".to_string()]);
@@ -1417,5 +1895,104 @@ mod tests {
             }
             assert!((arm.b_vector[i]).abs() < f64::EPSILON);
         }
+    }
+
+    #[test]
+    fn thompson_arm_sample_beta_in_unit_interval() {
+        let arm = ThompsonArm {
+            slug: "test".to_string(),
+            alpha: 3.0,
+            beta: 2.0,
+            sum_reward: 0.0,
+            sum_reward_sq: 0.0,
+            observations: 0,
+            discount: THOMPSON_DEFAULT_DISCOUNT,
+        };
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+
+        for _ in 0..256 {
+            let sample = arm.sample_with_rng(&mut rng);
+            assert!(
+                (0.0..=1.0).contains(&sample),
+                "beta sample should stay in [0, 1], got {sample}"
+            );
+        }
+    }
+
+    #[test]
+    fn thompson_arm_posterior_shifts_toward_more_successes() {
+        let success_arm = ThompsonArm {
+            slug: "success".to_string(),
+            alpha: 9.0,
+            beta: 2.0,
+            sum_reward: 0.0,
+            sum_reward_sq: 0.0,
+            observations: 0,
+            discount: THOMPSON_DEFAULT_DISCOUNT,
+        };
+        let failure_arm = ThompsonArm {
+            slug: "failure".to_string(),
+            alpha: 2.0,
+            beta: 9.0,
+            sum_reward: 0.0,
+            sum_reward_sq: 0.0,
+            observations: 0,
+            discount: THOMPSON_DEFAULT_DISCOUNT,
+        };
+        let mut success_rng = ChaCha8Rng::seed_from_u64(11);
+        let mut failure_rng = ChaCha8Rng::seed_from_u64(29);
+
+        #[allow(clippy::cast_precision_loss)]
+        let success_mean = (0..1024)
+            .map(|_| success_arm.sample_with_rng(&mut success_rng))
+            .sum::<f64>()
+            / 1024.0;
+        #[allow(clippy::cast_precision_loss)]
+        let failure_mean = (0..1024)
+            .map(|_| failure_arm.sample_with_rng(&mut failure_rng))
+            .sum::<f64>()
+            / 1024.0;
+
+        assert!(
+            success_mean > failure_mean,
+            "posterior with more successes should sample higher on average: {success_mean} vs {failure_mean}"
+        );
+        assert!(
+            success_mean > 0.5,
+            "success-heavy posterior should skew above 0.5"
+        );
+        assert!(
+            failure_mean < 0.5,
+            "failure-heavy posterior should skew below 0.5"
+        );
+    }
+
+    #[test]
+    fn thompson_arm_update_applies_discount_and_accumulates_reward() {
+        let mut arm = ThompsonArm {
+            slug: "test".to_string(),
+            alpha: 5.0,
+            beta: 3.0,
+            sum_reward: 1.5,
+            sum_reward_sq: 1.25,
+            observations: 4,
+            discount: 0.99,
+        };
+
+        arm.update(0.8, true);
+
+        assert!((arm.alpha - 5.96).abs() < 1e-10, "alpha = {}", arm.alpha);
+        assert!((arm.beta - 2.98).abs() < 1e-10, "beta = {}", arm.beta);
+        assert!(
+            (arm.sum_reward - 2.3).abs() < 1e-10,
+            "sum_reward = {}",
+            arm.sum_reward
+        );
+        assert!(
+            (arm.sum_reward_sq - 1.89).abs() < 1e-10,
+            "sum_reward_sq = {}",
+            arm.sum_reward_sq
+        );
+        assert_eq!(arm.observations, 5);
     }
 }

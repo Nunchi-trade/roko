@@ -21,6 +21,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod agent;
+pub mod chat_types;
 pub mod claude_agent;
 pub mod claude_cli_agent;
 pub mod codex_agent;
@@ -37,22 +38,32 @@ pub mod ollama;
 pub mod ollama_agent;
 pub mod ollama_backend;
 pub mod openai_agent;
+pub mod openai_compat_backend;
 pub mod pointer;
 pub mod pool;
 pub mod process;
 pub mod provider;
+pub mod rate_limit;
 pub mod safety;
+pub mod streaming;
+pub mod task_runner;
 pub mod tool_loop;
 pub mod translate;
 pub mod usage;
 
 pub use agent::{Agent, AgentResult};
+pub use chat_types::{ChatRequest, RequestOptions, ResponseFormat, ToolChoice};
 pub use claude_cli_agent::ClaudeCliAgent;
 pub use exec::ExecAgent;
 pub use mock::MockAgent;
 pub use multi_pool::MultiAgentPool;
 pub use ollama_backend::OllamaLlmBackend;
+pub use openai_compat_backend::OpenAiCompatLlmBackend;
 pub use pool::{AgentInstanceId, AgentPool};
 pub use provider::{ProviderAdapter, adapter_for_kind, create_agent_for_model};
+pub use rate_limit::ProviderRateLimiter;
 pub use safety::SafetyLayer;
+pub use streaming::{StreamAccumulator, StreamChunk};
+pub use task_runner::{TaskResult, TaskRunner};
+pub use tool_loop::ToolLoopAgent;
 pub use usage::Usage;

@@ -9,9 +9,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicUsize, Ordering},
-    OnceLock,
 };
 use std::time::{Duration, Instant};
 
@@ -20,6 +19,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use parking_lot::{Mutex, RwLock};
 use regex::Regex;
+use roko_agent::chat_types::FinishReason;
 use roko_agent::mcp::{McpConfig, McpServerConfig, find_mcp_config};
 use roko_agent::provider::{AgentOptions, create_agent_for_model};
 use roko_agent::{Agent, AgentResult};
@@ -33,10 +33,11 @@ use roko_core::tool::role_allowlist::role_allowlist;
 use roko_core::{Body, Context as RokoContext, Kind, Provenance, Signal};
 use roko_core::{ContentHash, Verdict};
 use roko_daimon::{AffectEngine as _, AffectEvent};
-use roko_learn::cascade_router::CascadeRouter;
 use roko_learn::anomaly::{Anomaly, AnomalyDetector};
+use roko_learn::cascade_router::CascadeRouter;
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage as EpisodeUsage};
+use roko_learn::events::{AgentEvent, EventBus as LearningEventBus};
 use roko_learn::prompt_experiment::ExperimentStore;
 use roko_neuro::spawn_episode_distillation;
 use roko_std::tool::StaticToolRegistry;
@@ -434,10 +435,11 @@ async fn run_anomaly_preflight(
     .await?;
 
     let prompt_hash = prompt_hash_u64(dispatch_signal);
-    if let Some(Anomaly::PromptLoop { repeated_count }) = with_dispatch_anomaly_session(
-        session_root,
-        |session| session.detector.check_prompt(prompt_hash),
-    ) {
+    if let Some(Anomaly::PromptLoop { repeated_count }) =
+        with_dispatch_anomaly_session(session_root, |session| {
+            session.detector.check_prompt(prompt_hash)
+        })
+    {
         return Err(anyhow::anyhow!(
             "prompt loop detected after {} identical prompts",
             repeated_count
@@ -445,10 +447,11 @@ async fn run_anomaly_preflight(
     }
 
     let budget_limit = f64::from(effective_config.budget.max_plan_usd);
-    if let Some(Anomaly::BudgetExhausted { used, limit }) = with_dispatch_anomaly_session(
-        session_root,
-        |session| session.detector.check_budget(budget_limit),
-    ) {
+    if let Some(Anomaly::BudgetExhausted { used, limit }) =
+        with_dispatch_anomaly_session(session_root, |session| {
+            session.detector.check_budget(budget_limit)
+        })
+    {
         let _ = (used, limit);
         return Err(anyhow::anyhow!(
             "session budget exhausted: ${used:.2} >= ${limit:.2}"
@@ -2084,27 +2087,113 @@ async fn append_dispatch_episode(
         .unwrap_or_else(|| state.workdir.clone());
     spawn_episode_distillation(distill_workdir, episode.clone());
 
-    if let Err(err) = record_cascade_router_outcome_with_layout(
+    if let Err(err) = publish_dispatch_learning_feedback(
         state,
         &recording_template,
-        outcome.result.success,
+        signal,
         repo_layout,
+        &template.name,
+        turns,
+        tokens_used,
+        outcome,
     )
     .await
     {
-        warn!(error = %err, template = %template.name, "failed to record cascade router outcome");
+        warn!(error = %err, template = %template.name, "failed to apply learning events");
+    }
+}
+
+async fn publish_dispatch_learning_feedback(
+    state: &Arc<AppState>,
+    template: &AgentTemplate,
+    signal: &Signal,
+    repo_layout: Option<&RokoLayout>,
+    template_name: &str,
+    turns: u64,
+    tokens_used: u64,
+    outcome: &DispatchOutcome,
+) -> Result<()> {
+    let event_bus = LearningEventBus::new(16);
+    let mut rx = event_bus.subscribe();
+    let provider = outcome
+        .result
+        .output
+        .tag("agent")
+        .map_or_else(|| "roko-serve".to_string(), ToString::to_string);
+
+    event_bus.publish(AgentEvent::TurnStarted {
+        task_id: signal.id.to_hex(),
+        model: template.model.clone(),
+        provider,
+        timestamp_ms: signal.created_at_ms,
+    });
+    event_bus.publish(AgentEvent::TurnCompleted {
+        turn: turns.min(u64::from(u32::MAX)) as u32,
+        usage: outcome.result.usage,
+        tool_call_count: 0,
+        gate_passed: Some(outcome.success),
+        finish_reason: if outcome.success {
+            FinishReason::Stop
+        } else {
+            FinishReason::Error("dispatch failed".to_string())
+        },
+    });
+
+    drain_dispatch_learning_events(
+        &mut rx,
+        state,
+        template,
+        repo_layout,
+        template_name,
+        turns,
+        tokens_used,
+        outcome,
+    )
+    .await
+}
+
+async fn drain_dispatch_learning_events(
+    rx: &mut tokio::sync::broadcast::Receiver<AgentEvent>,
+    state: &Arc<AppState>,
+    template: &AgentTemplate,
+    repo_layout: Option<&RokoLayout>,
+    template_name: &str,
+    turns: u64,
+    tokens_used: u64,
+    outcome: &DispatchOutcome,
+) -> Result<()> {
+    loop {
+        match rx.try_recv() {
+            Ok(AgentEvent::TurnCompleted { .. }) => {
+                record_cascade_router_outcome_with_layout(
+                    state,
+                    template,
+                    outcome.result.success,
+                    repo_layout,
+                )
+                .await?;
+
+                let efficiency = match repo_layout {
+                    Some(layout) => EfficiencyTracker::for_layout(layout),
+                    None => EfficiencyTracker::new(&state.workdir),
+                };
+                efficiency
+                    .record_event(template_name, turns, tokens_used, outcome.success)
+                    .await?;
+            }
+            Ok(_) => {}
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            | Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
+                warn!(
+                    skipped,
+                    "dispatch learning feedback lagged behind event stream"
+                );
+            }
+        }
     }
 
-    let efficiency = match repo_layout {
-        Some(layout) => EfficiencyTracker::for_layout(layout),
-        None => EfficiencyTracker::new(&state.workdir),
-    };
-    if let Err(err) = efficiency
-        .record_event(&template.name, turns, tokens_used, outcome.success)
-        .await
-    {
-        warn!(error = %err, template = %template.name, "failed to record efficiency event");
-    }
+    Ok(())
 }
 
 fn apply_affect_signature(state: &AppState, episode: &mut Episode) {

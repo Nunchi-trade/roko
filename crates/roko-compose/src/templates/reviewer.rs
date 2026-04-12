@@ -117,7 +117,7 @@ impl RolePromptTemplate for ReviewerTemplate {
         sections.push(
             PromptSection::new("agents_instructions", &input.agents_md)
                 .with_priority(SectionPriority::Critical)
-                .with_cache_layer(CacheLayer::System)
+                .with_cache_layer(CacheLayer::Role)
                 .with_placement(Placement::Start),
         );
 
@@ -125,7 +125,7 @@ impl RolePromptTemplate for ReviewerTemplate {
         sections.push(
             PromptSection::new("plan_spec", truncate(&input.plan.content, 50_000))
                 .with_priority(SectionPriority::Critical)
-                .with_cache_layer(CacheLayer::Session)
+                .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Start)
                 .with_hard_cap(50_000),
         );
@@ -137,7 +137,7 @@ impl RolePromptTemplate for ReviewerTemplate {
                 truncate(&input.filtered_workspace_map, 6_000),
             )
             .with_priority(SectionPriority::High)
-            .with_cache_layer(CacheLayer::Session)
+            .with_cache_layer(CacheLayer::Workspace)
             .with_placement(Placement::Middle)
             .with_hard_cap(6_000),
         );
@@ -146,7 +146,7 @@ impl RolePromptTemplate for ReviewerTemplate {
         sections.push(
             PromptSection::new("prd2_extract", truncate(&input.prd2_extract, 6_000))
                 .with_priority(SectionPriority::High)
-                .with_cache_layer(CacheLayer::Session)
+                .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Middle)
                 .with_hard_cap(6_000),
         );
@@ -155,7 +155,7 @@ impl RolePromptTemplate for ReviewerTemplate {
         sections.push(
             PromptSection::new("brief", truncate(&input.brief, 4_000))
                 .with_priority(SectionPriority::High)
-                .with_cache_layer(CacheLayer::Session)
+                .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Middle)
                 .with_hard_cap(4_000),
         );
@@ -170,7 +170,7 @@ impl RolePromptTemplate for ReviewerTemplate {
         sections.push(
             PromptSection::new("reviewer_criteria", criteria)
                 .with_priority(SectionPriority::Normal)
-                .with_cache_layer(CacheLayer::System)
+                .with_cache_layer(CacheLayer::Role)
                 .with_placement(Placement::End),
         );
 
@@ -180,7 +180,7 @@ impl RolePromptTemplate for ReviewerTemplate {
             sections.push(
                 PromptSection::new("files_changed", text)
                     .with_priority(SectionPriority::High)
-                    .with_cache_layer(CacheLayer::Task)
+                    .with_cache_layer(CacheLayer::Plan)
                     .with_placement(Placement::End),
             );
         }
@@ -190,7 +190,7 @@ impl RolePromptTemplate for ReviewerTemplate {
             sections.push(
                 PromptSection::new("prior_findings", truncate(findings, 15_000))
                     .with_priority(SectionPriority::High)
-                    .with_cache_layer(CacheLayer::Dynamic)
+                    .with_cache_layer(CacheLayer::Volatile)
                     .with_placement(Placement::End)
                     .with_hard_cap(15_000),
             );
@@ -280,10 +280,10 @@ mod tests {
         );
 
         // Cache layers match spec
-        assert_eq!(sections[0].cache_layer, CacheLayer::System); // agents_instructions
-        assert_eq!(sections[1].cache_layer, CacheLayer::Session); // plan_spec
-        assert_eq!(sections[2].cache_layer, CacheLayer::Session); // workspace_map
-        assert_eq!(sections[5].cache_layer, CacheLayer::System); // reviewer_criteria
+        assert_eq!(sections[0].cache_layer, CacheLayer::Role); // agents_instructions
+        assert_eq!(sections[1].cache_layer, CacheLayer::Workspace); // plan_spec
+        assert_eq!(sections[2].cache_layer, CacheLayer::Workspace); // workspace_map
+        assert_eq!(sections[5].cache_layer, CacheLayer::Role); // reviewer_criteria
 
         // Hard caps match spec — reviewer budgets are smaller
         assert_eq!(sections[1].hard_cap, Some(50_000)); // plan_spec

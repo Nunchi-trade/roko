@@ -107,7 +107,7 @@ impl PromptAssembler {
             0,
             PromptSection::new("role_identity", role_identity)
                 .with_priority(SectionPriority::Critical)
-                .with_cache_layer(CacheLayer::System)
+                .with_cache_layer(CacheLayer::Role)
                 .with_placement(Placement::Start),
         );
 
@@ -116,7 +116,7 @@ impl PromptAssembler {
             sections.push(
                 PromptSection::new("context_layout", CONTEXT_LAYOUT_STANZA)
                     .with_priority(SectionPriority::Low)
-                    .with_cache_layer(CacheLayer::System)
+                    .with_cache_layer(CacheLayer::Role)
                     .with_placement(Placement::Middle),
             );
         }
@@ -124,7 +124,7 @@ impl PromptAssembler {
             sections.push(
                 PromptSection::new("mcp_tools", MCP_TOOLS_STANZA)
                     .with_priority(SectionPriority::Low)
-                    .with_cache_layer(CacheLayer::System)
+                    .with_cache_layer(CacheLayer::Role)
                     .with_placement(Placement::Middle),
             );
         }

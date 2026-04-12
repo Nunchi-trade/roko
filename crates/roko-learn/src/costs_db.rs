@@ -15,6 +15,7 @@
 //! Thread-safe: all read/write access is lock-protected.
 
 use parking_lot::RwLock;
+use roko_agent::Usage;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -462,6 +463,49 @@ impl Default for CostsDb {
     }
 }
 
+// ─── Record construction ───────────────────────────────────────────────────
+
+/// Create a [`CostRecord`], falling back to token-based pricing when the
+/// agent did not self-report a cost.
+#[must_use]
+pub fn create_cost_record(
+    timestamp: String,
+    model: &str,
+    provider: &str,
+    role: &str,
+    plan_id: &str,
+    task_id: &str,
+    complexity_band: &str,
+    usage: &Usage,
+    cost_table: &crate::cost_table::CostTable,
+    duration_ms: u64,
+    success: bool,
+    session_id: &str,
+) -> CostRecord {
+    let cost_usd = if usage.cost_usd > 0.0 {
+        f64::from(usage.cost_usd)
+    } else {
+        cost_table.calculate(model, usage)
+    };
+
+    CostRecord {
+        timestamp,
+        model: model.to_string(),
+        provider: provider.to_string(),
+        role: role.to_string(),
+        plan_id: plan_id.to_string(),
+        task_id: task_id.to_string(),
+        complexity_band: complexity_band.to_string(),
+        input_tokens: u64::from(usage.input_tokens),
+        output_tokens: u64::from(usage.output_tokens),
+        cached_tokens: u64::from(usage.cache_read_tokens),
+        cost_usd,
+        duration_ms,
+        success,
+        session_id: session_id.to_string(),
+    }
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 /// Create a test fixture [`CostRecord`].
@@ -497,6 +541,8 @@ fn make_test_record(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roko_agent::Usage;
+    use std::collections::HashMap;
 
     #[test]
     fn glm_cost_table() {
@@ -554,6 +600,59 @@ mod tests {
             .expect("anthropic/claude-opus-4-6 pricing");
         assert!((claude_opus.input_per_m - 15.00).abs() < 1e-9);
         assert!((claude_opus.output_per_m - 75.00).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cost_record_calculation() {
+        let cost_table = crate::cost_table::CostTable {
+            models: HashMap::new(),
+        }
+        .with_defaults();
+
+        let usage = Usage {
+            input_tokens: 1_000,
+            output_tokens: 200,
+            cache_read_tokens: 100,
+            cache_create_tokens: 50,
+            cost_usd: 0.0,
+            wall_ms: 1_234,
+        };
+
+        let calculated = create_cost_record(
+            "2026-04-06T12:00:00Z".to_string(),
+            "glm-5.1",
+            "zai",
+            "Implementer",
+            "plan-1",
+            "t1",
+            "standard",
+            &usage,
+            &cost_table,
+            1_234,
+            true,
+            "session-1",
+        );
+        assert!((calculated.cost_usd - 0.002_393_5).abs() < 1e-12);
+
+        let reported_usage = Usage {
+            cost_usd: 0.123,
+            ..usage
+        };
+        let reported = create_cost_record(
+            "2026-04-06T12:00:00Z".to_string(),
+            "glm-5.1",
+            "zai",
+            "Implementer",
+            "plan-1",
+            "t1",
+            "standard",
+            &reported_usage,
+            &cost_table,
+            1_234,
+            true,
+            "session-1",
+        );
+        assert_eq!(reported.cost_usd, f64::from(reported_usage.cost_usd));
     }
 
     #[test]

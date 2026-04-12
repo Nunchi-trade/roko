@@ -1,16 +1,17 @@
 //! Unified `RokoConfig` schema with hierarchical sections.
 //!
 //! Every section is a separate struct so callers can destructure just the
-//! slice they need. All fields carry serde defaults so a bare `schema_version = 2`
-//! produces a fully-populated config.
+//! slice they need. All fields carry serde defaults so a bare config still
+//! produces a fully-populated `RokoConfig`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use crate::agent::{AgentBackend, ProviderKind};
 use crate::tool::{ToolFormat, profile_for_model};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Current schema version. Bump on incompatible changes.
 pub const CURRENT_SCHEMA_VERSION: u32 = 2;
@@ -20,6 +21,7 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 /// Root configuration for the Roko runtime.
 ///
 /// ```toml
+/// config_version = 2
 /// schema_version = 2
 ///
 /// [project]
@@ -31,9 +33,15 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 /// [agent.roles.implementer]
 /// model = "claude-opus-4-6"
 /// ```
+pub const CURRENT_CONFIG_VERSION: u32 = 2;
+
 #[allow(clippy::derive_partial_eq_without_eq)] // contains f32 via BudgetConfig
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RokoConfig {
+    /// Config layout version for migration tooling.
+    #[serde(default = "default_config_version")]
+    pub config_version: u32,
+
     /// Schema version for migration tooling.
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
@@ -65,6 +73,10 @@ pub struct RokoConfig {
     /// Model routing configuration.
     #[serde(default)]
     pub routing: RoutingConfig,
+
+    /// Complexity-to-pipeline mapping for orchestration stages.
+    #[serde(default)]
+    pub pipeline: PipelineConfig,
 
     /// Spend / token budgets.
     #[serde(default)]
@@ -115,9 +127,14 @@ const fn default_schema_version() -> u32 {
     CURRENT_SCHEMA_VERSION
 }
 
+const fn default_config_version() -> u32 {
+    1
+}
+
 impl Default for RokoConfig {
     fn default() -> Self {
         Self {
+            config_version: CURRENT_CONFIG_VERSION,
             schema_version: CURRENT_SCHEMA_VERSION,
             project: ProjectConfig::default(),
             prd: PrdConfig::default(),
@@ -126,6 +143,7 @@ impl Default for RokoConfig {
             models: HashMap::new(),
             gates: GatesConfig::default(),
             routing: RoutingConfig::default(),
+            pipeline: PipelineConfig::default(),
             budget: BudgetConfig::default(),
             conductor: ConductorConfig::default(),
             watcher: WatcherConfig::default(),
@@ -151,6 +169,7 @@ impl RokoConfig {
             out,
             "# Delete any section you don't need; defaults apply.\n"
         );
+        let _ = writeln!(out, "config_version = {CURRENT_CONFIG_VERSION}");
         let _ = writeln!(out, "schema_version = {CURRENT_SCHEMA_VERSION}\n");
     }
 
@@ -200,6 +219,8 @@ impl RokoConfig {
         let _ = writeln!(out, "# -- Model routing --");
         let _ = writeln!(out, "[routing]");
         let _ = writeln!(out, "mode = \"{}\"", cfg.routing.mode);
+        let _ = writeln!(out, "algorithm = \"{}\"", cfg.routing.algorithm.label());
+        let _ = writeln!(out, "discount_factor = {}", cfg.routing.discount_factor);
         let _ = writeln!(out, "fast_task_model = \"{}\"", cfg.routing.fast_task_model);
         let _ = writeln!(
             out,
@@ -211,6 +232,59 @@ impl RokoConfig {
             "complex_task_model = \"{}\"\n",
             cfg.routing.complex_task_model
         );
+        let _ = writeln!(out, "[routing.weights]");
+        let _ = writeln!(out, "quality = {}", cfg.routing.weights.default.quality);
+        let _ = writeln!(out, "cost = {}", cfg.routing.weights.default.cost);
+        let _ = writeln!(out, "latency = {}\n", cfg.routing.weights.default.latency);
+        let mechanical = cfg.routing.weights.for_tier("mechanical");
+        let _ = writeln!(out, "[routing.weights.mechanical]");
+        let _ = writeln!(out, "quality = {}", mechanical.quality);
+        let _ = writeln!(out, "cost = {}", mechanical.cost);
+        let _ = writeln!(out, "latency = {}\n", mechanical.latency);
+    }
+
+    fn write_example_pipeline(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "# -- Complexity-to-pipeline mapping --");
+
+        let mechanical = cfg.pipeline.mechanical;
+        let _ = writeln!(out, "[pipeline.mechanical]");
+        let _ = writeln!(out, "strategist = {}", mechanical.strategist);
+        let _ = writeln!(out, "reviewers = {}", mechanical.reviewers);
+        let _ = writeln!(
+            out,
+            "reviewer_mode = \"{}\"",
+            mechanical.reviewer_mode.label()
+        );
+        let _ = writeln!(out, "max_iterations = {}\n", mechanical.max_iterations);
+
+        let focused = cfg.pipeline.focused;
+        let _ = writeln!(out, "[pipeline.focused]");
+        let _ = writeln!(out, "strategist = {}", focused.strategist);
+        let _ = writeln!(out, "reviewers = {}", focused.reviewers);
+        let _ = writeln!(out, "reviewer_mode = \"{}\"", focused.reviewer_mode.label());
+        let _ = writeln!(out, "max_iterations = {}\n", focused.max_iterations);
+
+        let integrative = cfg.pipeline.integrative;
+        let _ = writeln!(out, "[pipeline.integrative]");
+        let _ = writeln!(out, "strategist = {}", integrative.strategist);
+        let _ = writeln!(out, "reviewers = {}", integrative.reviewers);
+        let _ = writeln!(
+            out,
+            "reviewer_mode = \"{}\"",
+            integrative.reviewer_mode.label()
+        );
+        let _ = writeln!(out, "max_iterations = {}\n", integrative.max_iterations);
+
+        let architectural = cfg.pipeline.architectural;
+        let _ = writeln!(out, "[pipeline.architectural]");
+        let _ = writeln!(out, "strategist = {}", architectural.strategist);
+        let _ = writeln!(out, "reviewers = {}", architectural.reviewers);
+        let _ = writeln!(
+            out,
+            "reviewer_mode = \"{}\"",
+            architectural.reviewer_mode.label()
+        );
+        let _ = writeln!(out, "max_iterations = {}\n", architectural.max_iterations);
     }
 
     fn write_example_budget(out: &mut String, cfg: &Self) {
@@ -334,7 +408,13 @@ impl RokoConfig {
 
     /// Parse from a TOML string.
     pub fn from_toml(s: &str) -> Result<Self, toml::de::Error> {
-        toml::from_str(s)
+        let config: Self = toml::from_str(s)?;
+        if config.config_version == 1 {
+            tracing::warn!(
+                "roko.toml uses config version 1 (no [providers] section)\n  hint: run `roko config migrate` to upgrade"
+            );
+        }
+        Ok(config)
     }
 
     /// Render to a TOML string.
@@ -580,6 +660,7 @@ impl RokoConfig {
         Self::write_example_agent(&mut out, &cfg);
         Self::write_example_gates(&mut out, &cfg);
         Self::write_example_routing(&mut out, &cfg);
+        Self::write_example_pipeline(&mut out, &cfg);
         Self::write_example_budget(&mut out, &cfg);
         Self::write_example_conductor(&mut out, &cfg);
         Self::write_example_learning(&mut out, &cfg);
@@ -592,11 +673,172 @@ impl RokoConfig {
     }
 }
 
+/// Non-fatal config warnings emitted by semantic reference validation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ValidationWarning {
+    /// A model points at a provider key that does not exist.
+    UnknownProvider {
+        /// Model registry key that contains the bad reference.
+        model: String,
+        /// Unknown provider reference from the model profile.
+        provider: String,
+        /// Closest matching provider key, if one is close enough to suggest.
+        similar: Option<String>,
+    },
+    /// A field points at a model key that does not exist.
+    UnknownModel {
+        /// Fully-qualified config field name.
+        field: String,
+        /// Unknown model key referenced by that field.
+        model: String,
+    },
+}
+
+impl fmt::Display for ValidationWarning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownProvider {
+                model,
+                provider,
+                similar,
+            } => {
+                write!(
+                    f,
+                    "Model '{model}' references missing provider '{provider}'"
+                )?;
+                if let Some(similar) = similar {
+                    write!(f, " (did you mean '{similar}'?)")?;
+                }
+                Ok(())
+            }
+            Self::UnknownModel { field, model } => {
+                write!(f, "{field} references missing model '{model}'")
+            }
+        }
+    }
+}
+
+/// Validate cross-reference integrity for provider and model keys.
+#[must_use]
+pub fn validate_references(config: &RokoConfig) -> Vec<ValidationWarning> {
+    let providers = config.effective_providers();
+    let provider_keys = providers.keys().map(String::as_str).collect::<HashSet<_>>();
+
+    let mut warnings = Vec::new();
+
+    let mut model_entries = config.models.iter().collect::<Vec<_>>();
+    model_entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+    for (model_key, profile) in model_entries {
+        let provider = profile.provider.trim();
+        if !provider_keys.contains(provider) {
+            warnings.push(ValidationWarning::UnknownProvider {
+                model: model_key.clone(),
+                provider: profile.provider.clone(),
+                similar: find_similar(provider, provider_keys.iter().copied()),
+            });
+        }
+    }
+
+    let explicit_model_keys = config
+        .models
+        .keys()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let effective_models = config.effective_models();
+
+    if let Some(fallback_model) = config
+        .agent
+        .fallback_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|fallback_model| !fallback_model.is_empty())
+    {
+        let model_exists = if explicit_model_keys.is_empty() {
+            effective_models.contains_key(fallback_model)
+        } else {
+            explicit_model_keys.contains(fallback_model)
+        };
+        if !model_exists {
+            warnings.push(ValidationWarning::UnknownModel {
+                field: "agent.fallback_model".to_string(),
+                model: fallback_model.to_string(),
+            });
+        }
+    }
+
+    if !explicit_model_keys.is_empty() {
+        let mut tier_entries = config.agent.tier_models.iter().collect::<Vec<_>>();
+        tier_entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+        for (tier, model_key) in tier_entries {
+            let model_key = model_key.trim();
+            if model_key.is_empty() || explicit_model_keys.contains(model_key) {
+                continue;
+            }
+            warnings.push(ValidationWarning::UnknownModel {
+                field: format!("agent.tier_models.{tier}"),
+                model: model_key.to_string(),
+            });
+        }
+    }
+
+    warnings
+}
+
 fn parse_bool_env(s: &str) -> bool {
     matches!(
         s.trim().to_ascii_lowercase().as_str(),
         "1" | "true" | "yes" | "on"
     )
+}
+
+fn find_similar<'a>(needle: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    let needle = needle.trim();
+    if needle.is_empty() {
+        return None;
+    }
+
+    let mut best_match = None;
+    let mut best_distance = usize::MAX;
+
+    for candidate in candidates {
+        let distance = edit_distance(needle, candidate);
+        if distance < best_distance {
+            best_distance = distance;
+            best_match = Some(candidate);
+        }
+    }
+
+    (best_distance <= 3).then(|| best_match.expect("distance implies candidate").to_string())
+}
+
+fn edit_distance(left: &str, right: &str) -> usize {
+    if left == right {
+        return 0;
+    }
+    if left.is_empty() {
+        return right.chars().count();
+    }
+    if right.is_empty() {
+        return left.chars().count();
+    }
+
+    let right_chars = right.chars().collect::<Vec<_>>();
+    let mut costs = (0..=right_chars.len()).collect::<Vec<_>>();
+
+    for (left_idx, left_ch) in left.chars().enumerate() {
+        let mut previous_diagonal = costs[0];
+        costs[0] = left_idx + 1;
+
+        for (right_idx, right_ch) in right_chars.iter().copied().enumerate() {
+            let insertion = costs[right_idx + 1] + 1;
+            let deletion = costs[right_idx] + 1;
+            let substitution = previous_diagonal + usize::from(left_ch != right_ch);
+            previous_diagonal = costs[right_idx + 1];
+            costs[right_idx + 1] = insertion.min(deletion).min(substitution);
+        }
+    }
+
+    *costs.last().unwrap_or(&0)
 }
 
 #[cfg(test)]
@@ -1078,14 +1320,365 @@ impl Default for GatesConfig {
     }
 }
 
+// ---- [pipeline] ---------------------------------------------------------
+
+/// Reviewer composition for a pipeline band.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PipelineReviewerMode {
+    /// Single quick-pass reviewer.
+    Quick,
+    /// Full review suite (architect, auditor, scribe).
+    Full,
+}
+
+impl PipelineReviewerMode {
+    /// Stable config label used in TOML.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Quick => "quick",
+            Self::Full => "full",
+        }
+    }
+}
+
+impl Default for PipelineReviewerMode {
+    fn default() -> Self {
+        Self::Quick
+    }
+}
+
+/// Effective pipeline settings for one complexity band.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PipelineBandConfig {
+    /// Whether the strategist stage runs before implementation.
+    #[serde(default)]
+    pub strategist: bool,
+    /// Whether reviewer agents run after implementation.
+    #[serde(default)]
+    pub reviewers: bool,
+    /// Which reviewer composition to use when reviewers are enabled.
+    #[serde(default)]
+    pub reviewer_mode: PipelineReviewerMode,
+    /// Maximum implementation-review iterations before stopping.
+    #[serde(default = "default_pipeline_band_iterations")]
+    pub max_iterations: u32,
+}
+
+const fn default_pipeline_band_iterations() -> u32 {
+    1
+}
+
+impl PipelineBandConfig {
+    /// Defaults for the `mechanical` tier.
+    #[must_use]
+    pub const fn mechanical() -> Self {
+        Self {
+            strategist: false,
+            reviewers: false,
+            reviewer_mode: PipelineReviewerMode::Quick,
+            max_iterations: 1,
+        }
+    }
+
+    /// Defaults for the `focused` tier.
+    #[must_use]
+    pub const fn focused() -> Self {
+        Self {
+            strategist: false,
+            reviewers: false,
+            reviewer_mode: PipelineReviewerMode::Quick,
+            max_iterations: 2,
+        }
+    }
+
+    /// Defaults for the `integrative` tier.
+    #[must_use]
+    pub const fn integrative() -> Self {
+        Self {
+            strategist: true,
+            reviewers: true,
+            reviewer_mode: PipelineReviewerMode::Quick,
+            max_iterations: 2,
+        }
+    }
+
+    /// Defaults for the `architectural` tier.
+    #[must_use]
+    pub const fn architectural() -> Self {
+        Self {
+            strategist: true,
+            reviewers: true,
+            reviewer_mode: PipelineReviewerMode::Full,
+            max_iterations: 3,
+        }
+    }
+}
+
+impl Default for PipelineBandConfig {
+    fn default() -> Self {
+        Self::mechanical()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+struct PipelineBandConfigOverride {
+    #[serde(default)]
+    strategist: Option<bool>,
+    #[serde(default)]
+    reviewers: Option<bool>,
+    #[serde(default)]
+    reviewer_mode: Option<PipelineReviewerMode>,
+    #[serde(default)]
+    max_iterations: Option<u32>,
+}
+
+impl PipelineBandConfigOverride {
+    fn resolve(self, defaults: PipelineBandConfig) -> PipelineBandConfig {
+        PipelineBandConfig {
+            strategist: self.strategist.unwrap_or(defaults.strategist),
+            reviewers: self.reviewers.unwrap_or(defaults.reviewers),
+            reviewer_mode: self.reviewer_mode.unwrap_or(defaults.reviewer_mode),
+            max_iterations: self.max_iterations.unwrap_or(defaults.max_iterations),
+        }
+    }
+}
+
+fn deserialize_pipeline_band_with_defaults<'de, D>(
+    deserializer: D,
+    defaults: PipelineBandConfig,
+) -> Result<PipelineBandConfig, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let override_cfg = PipelineBandConfigOverride::deserialize(deserializer)?;
+    Ok(override_cfg.resolve(defaults))
+}
+
+fn default_mechanical_pipeline() -> PipelineBandConfig {
+    PipelineBandConfig::mechanical()
+}
+
+fn deserialize_mechanical_pipeline<'de, D>(deserializer: D) -> Result<PipelineBandConfig, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_pipeline_band_with_defaults(deserializer, PipelineBandConfig::mechanical())
+}
+
+fn default_focused_pipeline() -> PipelineBandConfig {
+    PipelineBandConfig::focused()
+}
+
+fn deserialize_focused_pipeline<'de, D>(deserializer: D) -> Result<PipelineBandConfig, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_pipeline_band_with_defaults(deserializer, PipelineBandConfig::focused())
+}
+
+fn default_integrative_pipeline() -> PipelineBandConfig {
+    PipelineBandConfig::integrative()
+}
+
+fn deserialize_integrative_pipeline<'de, D>(deserializer: D) -> Result<PipelineBandConfig, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_pipeline_band_with_defaults(deserializer, PipelineBandConfig::integrative())
+}
+
+fn default_architectural_pipeline() -> PipelineBandConfig {
+    PipelineBandConfig::architectural()
+}
+
+fn deserialize_architectural_pipeline<'de, D>(
+    deserializer: D,
+) -> Result<PipelineBandConfig, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_pipeline_band_with_defaults(deserializer, PipelineBandConfig::architectural())
+}
+
+/// Complexity-to-pipeline mapping.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PipelineConfig {
+    /// Mechanical tasks: skip strategist and reviewers.
+    #[serde(
+        default = "default_mechanical_pipeline",
+        deserialize_with = "deserialize_mechanical_pipeline"
+    )]
+    pub mechanical: PipelineBandConfig,
+    /// Focused tasks: implement directly, allow one extra loop.
+    #[serde(
+        default = "default_focused_pipeline",
+        deserialize_with = "deserialize_focused_pipeline"
+    )]
+    pub focused: PipelineBandConfig,
+    /// Integrative tasks: strategist plus a quick reviewer.
+    #[serde(
+        default = "default_integrative_pipeline",
+        deserialize_with = "deserialize_integrative_pipeline"
+    )]
+    pub integrative: PipelineBandConfig,
+    /// Architectural tasks: strategist plus the full reviewer suite.
+    #[serde(
+        default = "default_architectural_pipeline",
+        deserialize_with = "deserialize_architectural_pipeline"
+    )]
+    pub architectural: PipelineBandConfig,
+}
+
+impl PipelineConfig {
+    /// Resolve the pipeline settings for a named complexity tier.
+    #[must_use]
+    pub fn for_tier(&self, tier: &str) -> PipelineBandConfig {
+        match tier {
+            "mechanical" => self.mechanical,
+            "focused" => self.focused,
+            "integrative" => self.integrative,
+            "architectural" => self.architectural,
+            _ => self.focused,
+        }
+    }
+}
+
+impl Default for PipelineConfig {
+    fn default() -> Self {
+        Self {
+            mechanical: PipelineBandConfig::mechanical(),
+            focused: PipelineBandConfig::focused(),
+            integrative: PipelineBandConfig::integrative(),
+            architectural: PipelineBandConfig::architectural(),
+        }
+    }
+}
+
 // ---- [routing] -----------------------------------------------------------
 
+/// Routing algorithm for model selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RoutingAlgorithm {
+    /// Contextual bandit using upper-confidence bounds.
+    LinUcb,
+    /// Discounted Thompson sampling for non-stationary routing.
+    Thompson,
+}
+
+impl RoutingAlgorithm {
+    /// Stable config label used in TOML.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::LinUcb => "linucb",
+            Self::Thompson => "thompson",
+        }
+    }
+}
+
+impl Default for RoutingAlgorithm {
+    fn default() -> Self {
+        Self::LinUcb
+    }
+}
+
+/// Reward weights used to scalarize quality, cost, and latency signals.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RewardWeights {
+    /// Relative weight for quality / success.
+    #[serde(default = "default_reward_weight_quality")]
+    pub quality: f64,
+    /// Relative weight for low cost.
+    #[serde(default = "default_reward_weight_cost")]
+    pub cost: f64,
+    /// Relative weight for low latency.
+    #[serde(default = "default_reward_weight_latency")]
+    pub latency: f64,
+}
+
+const fn default_reward_weight_quality() -> f64 {
+    0.5
+}
+
+const fn default_reward_weight_cost() -> f64 {
+    0.3
+}
+
+const fn default_reward_weight_latency() -> f64 {
+    0.2
+}
+
+impl Default for RewardWeights {
+    fn default() -> Self {
+        Self {
+            quality: default_reward_weight_quality(),
+            cost: default_reward_weight_cost(),
+            latency: default_reward_weight_latency(),
+        }
+    }
+}
+
+/// Per-tier reward-weight overrides for routing.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RoutingRewardWeightsConfig {
+    /// Default weights used when a tier has no explicit override.
+    #[serde(flatten)]
+    pub default: RewardWeights,
+    /// Optional override for mechanical tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mechanical: Option<RewardWeights>,
+    /// Optional override for focused tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focused: Option<RewardWeights>,
+    /// Optional override for integrative tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integrative: Option<RewardWeights>,
+    /// Optional override for architectural tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub architectural: Option<RewardWeights>,
+}
+
+impl RoutingRewardWeightsConfig {
+    /// Resolve the effective weights for a task tier.
+    #[must_use]
+    pub fn for_tier(&self, tier: &str) -> RewardWeights {
+        match tier {
+            "mechanical" => self.mechanical.unwrap_or(self.default),
+            "focused" => self.focused.unwrap_or(self.default),
+            "integrative" => self.integrative.unwrap_or(self.default),
+            "architectural" => self.architectural.unwrap_or(self.default),
+            _ => self.default,
+        }
+    }
+}
+
+impl Default for RoutingRewardWeightsConfig {
+    fn default() -> Self {
+        Self {
+            default: RewardWeights::default(),
+            mechanical: None,
+            focused: None,
+            integrative: None,
+            architectural: None,
+        }
+    }
+}
+
 /// Model routing configuration.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RoutingConfig {
     /// Routing mode (`"auto_override"`).
     #[serde(default = "default_routing_mode")]
     pub mode: String,
+    /// Online learning algorithm used by the router.
+    #[serde(default)]
+    pub algorithm: RoutingAlgorithm,
+    /// Discount factor for Thompson sampling in non-stationary environments.
+    #[serde(default = "default_routing_discount_factor")]
+    pub discount_factor: f64,
     /// Model for low-complexity tasks.
     #[serde(default = "default_fast_model")]
     pub fast_task_model: String,
@@ -1095,6 +1688,9 @@ pub struct RoutingConfig {
     /// Model for high-complexity / retry tasks.
     #[serde(default = "default_complex_model")]
     pub complex_task_model: String,
+    /// Reward scalarization weights with optional per-tier overrides.
+    #[serde(default)]
+    pub weights: RoutingRewardWeightsConfig,
     /// Context strategy (`"mcp_first"`, `"hybrid"`, `"inline_heavy"`).
     #[serde(default = "default_context_strategy")]
     pub context_strategy: String,
@@ -1120,13 +1716,20 @@ fn default_context_strategy() -> String {
     "mcp_first".into()
 }
 
+const fn default_routing_discount_factor() -> f64 {
+    0.99
+}
+
 impl Default for RoutingConfig {
     fn default() -> Self {
         Self {
             mode: default_routing_mode(),
+            algorithm: RoutingAlgorithm::default(),
+            discount_factor: default_routing_discount_factor(),
             fast_task_model: default_fast_model(),
             standard_task_model: default_standard_model(),
             complex_task_model: default_complex_model(),
+            weights: RoutingRewardWeightsConfig::default(),
             context_strategy: default_context_strategy(),
         }
     }
@@ -1803,6 +2406,61 @@ impl Default for DeployConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone, Default)]
+    struct SharedLogBuffer {
+        inner: Arc<Mutex<Vec<u8>>>,
+    }
+
+    struct SharedLogWriter {
+        inner: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl SharedLogBuffer {
+        fn into_string(self) -> String {
+            String::from_utf8(self.inner.lock().expect("lock log buffer").clone())
+                .expect("log output should be utf-8")
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for SharedLogBuffer {
+        type Writer = SharedLogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedLogWriter {
+                inner: Arc::clone(&self.inner),
+            }
+        }
+    }
+
+    impl Write for SharedLogWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.inner
+                .lock()
+                .expect("lock log writer")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_warn_logs<T>(f: impl FnOnce() -> T) -> (T, String) {
+        let buffer = SharedLogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(buffer.clone())
+            .finish();
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let value = tracing::dispatcher::with_default(&dispatch, f);
+        (value, buffer.into_string())
+    }
 
     fn assert_error_contains(err: toml::de::Error, expected: &[&str]) {
         let message = err.to_string();
@@ -1825,7 +2483,71 @@ mod tests {
     #[test]
     fn empty_toml_uses_all_defaults() {
         let cfg = RokoConfig::from_toml("").expect("parse empty");
-        assert_eq!(cfg, RokoConfig::default());
+        let expected = RokoConfig {
+            config_version: 1,
+            ..RokoConfig::default()
+        };
+        assert_eq!(cfg, expected);
+    }
+
+    #[test]
+    fn config_version_defaults_to_legacy() {
+        let cfg = RokoConfig::from_toml("").expect("parse");
+        assert_eq!(cfg.config_version, 1);
+    }
+
+    #[test]
+    fn default_config_uses_current_config_version() {
+        let cfg = RokoConfig::default();
+        assert_eq!(cfg.config_version, CURRENT_CONFIG_VERSION);
+    }
+
+    #[test]
+    fn config_version_detection_warns_for_legacy_configs() {
+        let (cfg, logs) = capture_warn_logs(|| {
+            RokoConfig::from_toml(
+                r#"
+[agent]
+default_model = "claude-sonnet-4-6"
+"#,
+            )
+            .expect("parse")
+        });
+
+        assert_eq!(cfg.config_version, 1);
+        assert!(logs.contains("roko.toml uses config version 1 (no [providers] section)"));
+        assert!(logs.contains("hint: run `roko config migrate` to upgrade"));
+    }
+
+    #[test]
+    fn config_version_detection_is_silent_for_current_configs() {
+        let (cfg, logs) = capture_warn_logs(|| {
+            RokoConfig::from_toml(
+                r#"
+config_version = 2
+schema_version = 2
+
+[agent]
+default_model = "glm-5-1"
+
+[providers.zai]
+kind = "openai_compat"
+base_url = "https://api.z.ai/api/paas/v4"
+api_key_env = "ZAI_API_KEY"
+
+[models.glm-5-1]
+provider = "zai"
+slug = "glm-5.1"
+"#,
+            )
+            .expect("parse")
+        });
+
+        assert_eq!(cfg.config_version, 2);
+        assert!(
+            logs.trim().is_empty(),
+            "expected no deprecation warning, got `{logs}`"
+        );
     }
 
     #[test]
@@ -2444,6 +3166,158 @@ context_strategy = "inline_heavy"
     }
 
     #[test]
+    fn routing_algorithm_config() {
+        let default_cfg = RokoConfig::from_toml("").expect("parse defaults");
+        assert_eq!(default_cfg.routing.algorithm, RoutingAlgorithm::LinUcb);
+        assert!((default_cfg.routing.discount_factor - 0.99).abs() < f64::EPSILON);
+        assert_eq!(
+            default_cfg.routing.weights.default,
+            RewardWeights::default()
+        );
+
+        let thompson_toml = r#"
+[routing]
+algorithm = "thompson"
+discount_factor = 0.95
+"#;
+        let thompson_cfg = RokoConfig::from_toml(thompson_toml).expect("parse");
+        assert_eq!(thompson_cfg.routing.algorithm, RoutingAlgorithm::Thompson);
+        assert!((thompson_cfg.routing.discount_factor - 0.95).abs() < f64::EPSILON);
+
+        let linucb_toml = r#"
+[routing]
+algorithm = "linucb"
+"#;
+        let linucb_cfg = RokoConfig::from_toml(linucb_toml).expect("parse");
+        assert_eq!(linucb_cfg.routing.algorithm, RoutingAlgorithm::LinUcb);
+    }
+
+    #[test]
+    fn pipeline_config_parses_complexity_mapping() {
+        let default_cfg = RokoConfig::from_toml("").expect("parse defaults");
+        assert_eq!(
+            default_cfg.pipeline.mechanical,
+            PipelineBandConfig::mechanical()
+        );
+        assert_eq!(default_cfg.pipeline.focused, PipelineBandConfig::focused());
+        assert_eq!(
+            default_cfg.pipeline.integrative,
+            PipelineBandConfig::integrative()
+        );
+        assert_eq!(
+            default_cfg.pipeline.architectural,
+            PipelineBandConfig::architectural()
+        );
+
+        let toml = r#"
+[pipeline.mechanical]
+strategist = false
+reviewers = false
+max_iterations = 1
+
+[pipeline.focused]
+strategist = false
+reviewers = false
+max_iterations = 2
+
+[pipeline.integrative]
+strategist = true
+reviewers = true
+reviewer_mode = "quick"
+max_iterations = 2
+
+[pipeline.architectural]
+strategist = true
+reviewers = true
+reviewer_mode = "full"
+max_iterations = 3
+"#;
+        let cfg = RokoConfig::from_toml(toml).expect("parse");
+
+        assert_eq!(cfg.pipeline.mechanical, PipelineBandConfig::mechanical());
+        assert_eq!(cfg.pipeline.focused, PipelineBandConfig::focused());
+        assert_eq!(cfg.pipeline.integrative, PipelineBandConfig::integrative());
+        assert_eq!(
+            cfg.pipeline.architectural,
+            PipelineBandConfig::architectural()
+        );
+
+        let mechanical = cfg.pipeline.for_tier("mechanical");
+        assert!(!mechanical.strategist);
+        assert!(!mechanical.reviewers);
+        assert_eq!(mechanical.max_iterations, 1);
+    }
+
+    #[test]
+    fn pipeline_config_partial_override_keeps_band_defaults() {
+        let toml = r#"
+[pipeline.architectural]
+max_iterations = 4
+"#;
+        let cfg = RokoConfig::from_toml(toml).expect("parse");
+
+        assert_eq!(
+            cfg.pipeline.architectural,
+            PipelineBandConfig {
+                strategist: true,
+                reviewers: true,
+                reviewer_mode: PipelineReviewerMode::Full,
+                max_iterations: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn routing_reward_weights_config() {
+        let toml = r#"
+[routing.weights]
+quality = 0.5
+cost = 0.3
+latency = 0.2
+
+[routing.weights.mechanical]
+quality = 0.3
+cost = 0.6
+latency = 0.1
+
+[routing.weights.architectural]
+quality = 0.8
+cost = 0.1
+latency = 0.1
+"#;
+        let cfg = RokoConfig::from_toml(toml).expect("parse");
+
+        assert_eq!(
+            cfg.routing.weights.default,
+            RewardWeights {
+                quality: 0.5,
+                cost: 0.3,
+                latency: 0.2,
+            }
+        );
+        assert_eq!(
+            cfg.routing.weights.for_tier("mechanical"),
+            RewardWeights {
+                quality: 0.3,
+                cost: 0.6,
+                latency: 0.1,
+            }
+        );
+        assert_eq!(
+            cfg.routing.weights.for_tier("architectural"),
+            RewardWeights {
+                quality: 0.8,
+                cost: 0.1,
+                latency: 0.1,
+            }
+        );
+        assert_eq!(
+            cfg.routing.weights.for_tier("focused"),
+            RewardWeights::default()
+        );
+    }
+
+    #[test]
     fn budget_section_parses() {
         let toml = r#"
 [budget]
@@ -2673,6 +3547,7 @@ port = 3000
         assert!(example.contains("[agent]"));
         assert!(example.contains("[gates]"));
         assert!(example.contains("[routing]"));
+        assert!(example.contains("[pipeline.mechanical]"));
         assert!(example.contains("[budget]"));
         assert!(example.contains("[conductor]"));
         assert!(example.contains("[learning]"));
@@ -2733,6 +3608,115 @@ port = 3000
             let model = cfg.models.get(model_key).expect("openrouter model");
             assert_eq!(model.provider, "openrouter");
         }
+    }
+
+    #[test]
+    fn validate_references_warns_on_unknown_provider_with_suggestion() {
+        let mut cfg = RokoConfig::default();
+        cfg.providers.insert(
+            "openrouter".to_string(),
+            ProviderConfig {
+                kind: ProviderKind::OpenAiCompat,
+                base_url: Some("https://openrouter.ai/api/v1".to_string()),
+                api_key_env: Some("OPENROUTER_API_KEY".to_string()),
+                command: None,
+                args: None,
+                timeout_ms: None,
+                extra_headers: None,
+                max_concurrent: None,
+            },
+        );
+        cfg.models.insert(
+            "glm-5-1".to_string(),
+            ModelProfile {
+                provider: "openruoter".to_string(),
+                slug: "z-ai/glm-5.1".to_string(),
+                context_window: 200_000,
+                max_output: None,
+                supports_tools: true,
+                supports_thinking: true,
+                supports_vision: false,
+                supports_web_search: false,
+                supports_mcp_tools: false,
+                supports_partial: false,
+                provider_routing: None,
+                tool_format: "openai_json".to_string(),
+                cost_input_per_m: None,
+                cost_output_per_m: None,
+                cost_cache_read_per_m: None,
+                cost_cache_write_per_m: None,
+                max_tools: None,
+                tokenizer_ratio: None,
+            },
+        );
+
+        let warnings = validate_references(&cfg);
+
+        assert_eq!(
+            warnings,
+            vec![ValidationWarning::UnknownProvider {
+                model: "glm-5-1".to_string(),
+                provider: "openruoter".to_string(),
+                similar: Some("openrouter".to_string()),
+            }]
+        );
+        assert_eq!(
+            warnings[0].to_string(),
+            "Model 'glm-5-1' references missing provider 'openruoter' (did you mean 'openrouter'?)"
+        );
+    }
+
+    #[test]
+    fn validate_references_warns_on_unknown_fallback_model() {
+        let mut cfg = RokoConfig::default();
+        cfg.models.insert(
+            "glm-5-1".to_string(),
+            ModelProfile {
+                provider: "claude_cli".to_string(),
+                slug: "glm-5.1".to_string(),
+                context_window: 200_000,
+                max_output: None,
+                supports_tools: true,
+                supports_thinking: false,
+                supports_vision: false,
+                supports_web_search: false,
+                supports_mcp_tools: false,
+                supports_partial: false,
+                provider_routing: None,
+                tool_format: "openai_json".to_string(),
+                cost_input_per_m: None,
+                cost_output_per_m: None,
+                cost_cache_read_per_m: None,
+                cost_cache_write_per_m: None,
+                max_tools: None,
+                tokenizer_ratio: None,
+            },
+        );
+        cfg.agent.fallback_model = Some("missing-model".to_string());
+
+        let warnings = validate_references(&cfg);
+
+        assert!(warnings.contains(&ValidationWarning::UnknownModel {
+            field: "agent.fallback_model".to_string(),
+            model: "missing-model".to_string(),
+        }));
+    }
+
+    #[test]
+    fn validate_references_allows_legacy_fallback_model() {
+        let mut cfg = RokoConfig::default();
+        cfg.agent.default_model = "claude-sonnet-4-6".to_string();
+        cfg.agent
+            .tier_models
+            .insert("mechanical".to_string(), "claude-haiku-4-5".to_string());
+        cfg.agent.fallback_model = Some("claude-haiku-4-5".to_string());
+
+        let warnings = validate_references(&cfg);
+
+        assert!(
+            warnings.is_empty(),
+            "expected no warnings, got {warnings:?}"
+        );
     }
 
     #[test]

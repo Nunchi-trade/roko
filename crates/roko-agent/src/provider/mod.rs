@@ -404,4 +404,41 @@ mod tests {
 
         handle.join().expect("server thread");
     }
+
+    #[test]
+    fn retry_policy_maps_error_classes() {
+        assert_eq!(
+            should_retry(&ProviderError::RateLimit {
+                retry_after_ms: Some(1_250),
+            }),
+            RetryAction::WaitAndRetry { delay_ms: 1_250 }
+        );
+        assert_eq!(
+            should_retry(&ProviderError::RateLimit {
+                retry_after_ms: None,
+            }),
+            RetryAction::WaitAndRetry { delay_ms: 5_000 }
+        );
+        assert_eq!(should_retry(&ProviderError::AuthFailure), RetryAction::Skip);
+        assert_eq!(
+            should_retry(&ProviderError::Timeout),
+            RetryAction::TryFallback
+        );
+        assert_eq!(
+            should_retry(&ProviderError::ServerError(503)),
+            RetryAction::TryFallback
+        );
+        assert_eq!(
+            should_retry(&ProviderError::ContentPolicy),
+            RetryAction::Skip
+        );
+        assert_eq!(
+            should_retry(&ProviderError::ContextOverflow),
+            RetryAction::TryWithSmallerContext
+        );
+        assert_eq!(
+            should_retry(&ProviderError::Other("x".to_string())),
+            RetryAction::TryFallback
+        );
+    }
 }

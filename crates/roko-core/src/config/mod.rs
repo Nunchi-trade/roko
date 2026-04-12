@@ -19,9 +19,10 @@ pub use compat::from_mori_toml;
 pub use presets::Preset;
 pub use schema::{
     AgentConfig, AgentRoleToggles, BudgetConfig, CURRENT_SCHEMA_VERSION, ConductorConfig,
-    GatesConfig, LearningConfig, PrdConfig, ProjectConfig, RokoConfig, RoleOverride, RoutingConfig,
-    SchedulerConfig, SchedulerCronConfig, ServeAuthConfig, ServeConfig, ServeDeployConfig,
-    ServeDeployWebhookConfig, ServerConfig, TuiConfig, WatcherConfig, WatcherPathConfig,
+    GatesConfig, LearningConfig, PrdConfig, ProjectConfig, RewardWeights, RokoConfig, RoleOverride,
+    RoutingAlgorithm, RoutingConfig, RoutingRewardWeightsConfig, SchedulerConfig,
+    SchedulerCronConfig, ServeAuthConfig, ServeConfig, ServeDeployConfig, ServeDeployWebhookConfig,
+    ServerConfig, TuiConfig, WatcherConfig, WatcherPathConfig,
 };
 
 /// Error returned when loading a `roko.toml` file from disk.

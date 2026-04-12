@@ -7,7 +7,9 @@
 //! real agents, gates, and git, then feeds results back as events.
 
 use std::cmp::Ordering;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -16,16 +18,23 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context as _, Result, anyhow};
 use bardo_runtime::cancel::CancelToken;
 use bardo_runtime::process::ProcessSupervisor;
+use roko_agent::chat_types::FinishReason;
 use roko_agent::mcp::{McpConfig, McpServerConfig};
 use roko_agent::provider::{AgentOptions, create_agent_for_model};
+use roko_agent::task_runner::{
+    AnomalyDetector as RunnerAnomalyDetector, BudgetGuardrail as RunnerBudgetGuardrail,
+    ConductorBandit as RunnerConductorBandit, CostTable as RunnerCostTable,
+    EventBus as RunnerEventBus, ModelPricing as RunnerModelPricing, TaskRunner, TaskRunnerError,
+};
 use roko_agent::translate::{ClaudeTranslator, RenderedTools, Translator};
 use roko_agent::{Agent, AgentResult, ClaudeCliAgent, ExecAgent};
 use roko_compose::{
     ContextProvider, Placement, PlanArtifacts, PromptComposer, PromptSection, RoleSystemPromptSpec,
     SectionPriority, TaskContext,
 };
-use roko_conductor::diagnosis::DiagnosisEngine;
+use roko_conductor::diagnosis::{DiagnosisEngine, ErrorCategory};
 use roko_conductor::{Conductor, ConductorDecision};
+use roko_core::agent::resolve_model;
 use roko_core::config::schema::RokoConfig;
 use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::obs::health::{AlwaysUpProbe, ProbeRegistry};
@@ -46,10 +55,22 @@ use roko_gate::{
     adaptive_threshold::AdaptiveThresholds, clippy_gate::ClippyGate, compile::CompileGate,
     payload::GatePayload, test_gate::TestGate,
 };
+use roko_learn::anomaly::AnomalyDetector;
+use roko_learn::budget::{BudgetAction, BudgetGuardrail};
+use roko_learn::conductor::{
+    ConductorAction as RetryConductorAction, ConductorBandit,
+    ConductorState as RetryConductorState, ErrorPattern as RetryErrorPattern, HintType,
+};
 use roko_learn::costs_db::CostRecord;
 use roko_learn::efficiency::{AgentEfficiencyEvent, FleetCFactor, compute_fleet_cfactor};
 use roko_learn::episode_logger::{Episode, GateVerdict, Usage};
+use roko_learn::events::{AgentEvent, EventBus as LearningEventBus};
+use roko_learn::latency::LatencyRegistry;
+use roko_learn::model_experiment::ModelExperimentStore;
 use roko_learn::playbook::{Playbook, PlaybookStore};
+use roko_learn::routing_log::{
+    RoutingDecisionLog, RoutingDecisionLogStore, RoutingDecisionMeta, RoutingLogger,
+};
 use roko_learn::runtime_feedback::{
     CompletedRunInput, LearningRuntime, LearningUpdate, read_efficiency_events,
     refresh_cfactor_snapshot,
@@ -82,8 +103,142 @@ const WATCHER_SIGNAL_TAIL: usize = 200;
 const EFFICIENCY_SIGNAL_TAIL: usize = 256;
 const GHOST_TURN_SIGNAL_KIND: &str = "conductor.ghost_turn";
 
+fn model_experiments_path(workdir: &Path) -> PathBuf {
+    workdir
+        .join(".roko")
+        .join("learn")
+        .join("model-experiments.json")
+}
+
 fn daimon_state_path(workdir: &Path) -> PathBuf {
     workdir.join(".roko").join("daimon").join("affect.json")
+}
+
+fn latency_registry_path(workdir: &Path) -> PathBuf {
+    workdir
+        .join(".roko")
+        .join("learn")
+        .join("latency-stats.json")
+}
+
+fn routing_log_path(workdir: &Path) -> PathBuf {
+    RokoLayout::for_project(workdir)
+        .learn_dir()
+        .join("routing.jsonl")
+}
+
+fn conductor_policy_path(workdir: &Path) -> PathBuf {
+    workdir.join(".roko").join("learn").join("conductor.json")
+}
+
+#[derive(Debug, Clone)]
+struct TurnLearningFeedback {
+    task_id: String,
+    model: String,
+    provider: String,
+    timestamp_ms: i64,
+    prompt_hash: u64,
+    ttft_ms: u64,
+    total_ms: u64,
+    output_tokens: u64,
+    cost_usd: f64,
+    usage: roko_agent::Usage,
+    success: bool,
+}
+
+fn publish_turn_learning_feedback(
+    event_bus: &LearningEventBus,
+    latency_registry: &LatencyRegistry,
+    anomaly_detector: &mut AnomalyDetector,
+    feedback: TurnLearningFeedback,
+) {
+    let mut rx = event_bus.subscribe();
+    event_bus.publish(AgentEvent::TurnStarted {
+        task_id: feedback.task_id.clone(),
+        model: feedback.model.clone(),
+        provider: feedback.provider.clone(),
+        timestamp_ms: feedback.timestamp_ms,
+    });
+    event_bus.publish(AgentEvent::TurnCompleted {
+        turn: 1,
+        usage: feedback.usage,
+        tool_call_count: 0,
+        gate_passed: Some(feedback.success),
+        finish_reason: if feedback.success {
+            FinishReason::Stop
+        } else {
+            FinishReason::Error("agent failed".to_string())
+        },
+    });
+    event_bus.publish(AgentEvent::CostRecorded {
+        model: feedback.model.clone(),
+        provider: feedback.provider.clone(),
+        cost_usd: feedback.cost_usd,
+        tokens: u64::from(feedback.usage.total_tokens()),
+    });
+
+    drain_turn_learning_events(&mut rx, latency_registry, anomaly_detector, &feedback);
+}
+
+fn drain_turn_learning_events(
+    rx: &mut tokio::sync::broadcast::Receiver<AgentEvent>,
+    latency_registry: &LatencyRegistry,
+    anomaly_detector: &mut AnomalyDetector,
+    feedback: &TurnLearningFeedback,
+) {
+    loop {
+        match rx.try_recv() {
+            Ok(AgentEvent::TurnStarted { .. }) => {
+                if let Some(anomaly) = anomaly_detector.check_prompt(feedback.prompt_hash) {
+                    tracing::warn!(
+                        model = %feedback.model,
+                        provider = %feedback.provider,
+                        ?anomaly,
+                        "learning anomaly detected from prompt"
+                    );
+                }
+            }
+            Ok(AgentEvent::TurnCompleted { .. }) => {
+                latency_registry.record(
+                    &feedback.model,
+                    &feedback.provider,
+                    feedback.ttft_ms as f64,
+                    feedback.total_ms as f64,
+                    feedback.output_tokens,
+                );
+                tracing::info!(
+                    model = %feedback.model,
+                    provider = %feedback.provider,
+                    ttft_ms = feedback.ttft_ms,
+                    total_ms = feedback.total_ms,
+                    output_tokens = feedback.output_tokens,
+                    "learning latency recorded"
+                );
+            }
+            Ok(AgentEvent::CostRecorded { .. }) => {
+                if let Some(anomaly) = anomaly_detector.check_cost(feedback.cost_usd) {
+                    tracing::warn!(
+                        model = %feedback.model,
+                        provider = %feedback.provider,
+                        ?anomaly,
+                        "learning anomaly detected from cost"
+                    );
+                } else {
+                    tracing::info!(
+                        model = %feedback.model,
+                        provider = %feedback.provider,
+                        "learning anomaly scan complete"
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            | Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
+                tracing::warn!(skipped, "learning feedback lagged behind event stream");
+            }
+        }
+    }
 }
 
 fn install_episode_distillation_hook(learning: &mut LearningRuntime, workdir: &Path) {
@@ -110,6 +265,31 @@ fn frequency_label(frequency: OperatingFrequency) -> &'static str {
         OperatingFrequency::Theta => "theta",
         OperatingFrequency::Delta => "delta",
     }
+}
+
+fn mechanical_tier_model(tier_models: &HashMap<String, String>) -> String {
+    tier_models
+        .get("mechanical")
+        .cloned()
+        .unwrap_or_else(|| "claude-haiku-4-5".into())
+}
+
+fn task_runner_cost_table(resolved: &roko_core::agent::ResolvedModel) -> RunnerCostTable {
+    let mut cost_table = RunnerCostTable::default();
+
+    if let Some(profile) = resolved.profile.as_ref() {
+        cost_table.insert(
+            resolved.slug.clone(),
+            RunnerModelPricing {
+                input_per_m: profile.cost_input_per_m.unwrap_or(0.0),
+                output_per_m: profile.cost_output_per_m.unwrap_or(0.0),
+                cache_read_per_m: profile.cost_cache_read_per_m.unwrap_or(0.0),
+                cache_write_per_m: profile.cost_cache_write_per_m.unwrap_or(0.0),
+            },
+        );
+    }
+
+    cost_table
 }
 
 // ─── ContextAttributionTracker ────────────────────────────────────────────
@@ -565,6 +745,12 @@ struct LearnedContext {
     experiment_variant_id: Option<String>,
 }
 
+struct SelectedModelExperiment {
+    experiment_id: String,
+    variant_id: String,
+    model_slug: String,
+}
+
 /// Background checker that tails `.roko/signals.jsonl` and periodically
 /// runs the conductor against the most recent signals.
 struct WatcherRunner {
@@ -955,6 +1141,8 @@ pub struct PlanRunner {
     conductor: Arc<Conductor>,
     /// Signals accumulated during the current plan run for conductor evaluation.
     conductor_signals: Vec<Signal>,
+    /// Learned intervention policy for failed task dispatch / verification retries.
+    retry_conductor: ConductorBandit,
     /// Context attribution tracker for per-(tier, source_type) demotion decisions.
     attribution_tracker: ContextAttributionTracker,
     /// Rolling EMA of reference rates per (task_tier, context_source_type).
@@ -981,6 +1169,12 @@ pub struct PlanRunner {
     health_probes: ProbeRegistry,
     /// Adaptive gate thresholds for retry budgeting.
     adaptive_thresholds: AdaptiveThresholds,
+    /// Rolling latency registry for routed model/provider pairs.
+    latency_registry: LatencyRegistry,
+    /// Session-local anomaly detector for runaway loops and cost spikes.
+    anomaly_detector: AnomalyDetector,
+    /// Event bus used to publish post-turn learning signals.
+    learning_event_bus: LearningEventBus,
     /// In-memory efficiency events collected during this run.
     efficiency_events: Vec<AgentEfficiencyEvent>,
     /// Optional event bus sender for HTTP API event streaming.
@@ -1931,6 +2125,7 @@ impl PlanRunner {
             task_trackers,
             conductor: Arc::new(Conductor::new()),
             conductor_signals: Vec::new(),
+            retry_conductor: ConductorBandit::load_or_new(&conductor_policy_path(workdir)),
             attribution_tracker: ContextAttributionTracker::load(
                 &workdir.join(".roko").join("context-attribution.jsonl"),
             ),
@@ -1965,6 +2160,9 @@ impl PlanRunner {
                     .join("learn")
                     .join("gate-thresholds.json"),
             ),
+            latency_registry: LatencyRegistry::load_or_new(&latency_registry_path(workdir)),
+            anomaly_detector: AnomalyDetector::new(chrono::Utc::now().timestamp_millis()),
+            learning_event_bus: LearningEventBus::new(256),
             efficiency_events: Vec::new(),
             server_event_bus: None,
             state_hub_sender: None,
@@ -2039,6 +2237,7 @@ impl PlanRunner {
             task_trackers,
             conductor: Arc::new(Conductor::new()),
             conductor_signals: Vec::new(),
+            retry_conductor: ConductorBandit::load_or_new(&conductor_policy_path(workdir)),
             attribution_tracker: ContextAttributionTracker::load(
                 &workdir.join(".roko").join("context-attribution.jsonl"),
             ),
@@ -2073,6 +2272,9 @@ impl PlanRunner {
                     .join("learn")
                     .join("gate-thresholds.json"),
             ),
+            latency_registry: LatencyRegistry::load_or_new(&latency_registry_path(workdir)),
+            anomaly_detector: AnomalyDetector::new(chrono::Utc::now().timestamp_millis()),
+            learning_event_bus: LearningEventBus::new(256),
             efficiency_events: Vec::new(),
             server_event_bus: None,
             state_hub_sender: None,
@@ -2151,6 +2353,7 @@ impl PlanRunner {
             task_trackers,
             conductor: Arc::new(Conductor::new()),
             conductor_signals: Vec::new(),
+            retry_conductor: ConductorBandit::load_or_new(&conductor_policy_path(workdir)),
             attribution_tracker: ContextAttributionTracker::load(
                 &workdir.join(".roko").join("context-attribution.jsonl"),
             ),
@@ -2185,6 +2388,9 @@ impl PlanRunner {
                     .join("learn")
                     .join("gate-thresholds.json"),
             ),
+            latency_registry: LatencyRegistry::load_or_new(&latency_registry_path(workdir)),
+            anomaly_detector: AnomalyDetector::new(chrono::Utc::now().timestamp_millis()),
+            learning_event_bus: LearningEventBus::new(256),
             efficiency_events: Vec::new(),
             server_event_bus: None,
             state_hub_sender: None,
@@ -3889,7 +4095,7 @@ impl PlanRunner {
     async fn handle_implementing_single(&mut self, plan_id: &str, task_id: &str) {
         tracing::info!("[orchestrate] Implementing {plan_id}: dispatching task {task_id}");
 
-        let task_phase = self
+        let task_def = self
             .task_trackers
             .get(plan_id)
             .and_then(|tracker| {
@@ -3899,6 +4105,9 @@ impl PlanRunner {
                     .iter()
                     .find(|task| task.id == task_id)
             })
+            .cloned();
+        let task_phase = task_def
+            .as_ref()
             .map(|task| task.status.as_str())
             .unwrap_or("unknown");
         let _span = info_span!("task", plan_id = %plan_id, task_id = %task_id, phase = %task_phase)
@@ -3912,8 +4121,21 @@ impl PlanRunner {
         let wt_id = format!("{plan_id}-{task_id}");
         let started = std::time::Instant::now();
         let max_retries = 2u32;
+        let max_dispatches = max_retries + 1;
         let mut succeeded = false;
         let mut budget_aborted = false;
+        let mut total_dispatches = 0u32;
+        let mut retry_iteration = 0u32;
+        let mut consecutive_failures = 0u32;
+        let task_complexity = task_def
+            .as_ref()
+            .map(|task| task.tier.clone())
+            .unwrap_or_else(|| "focused".to_string());
+        let base_retry_model = self.task_retry_model(plan_id, task_id);
+        let mut retry_model = base_retry_model.clone();
+        let mut retry_prompt_override: Option<String> = None;
+        let mut pending_feedback: Option<(RetryConductorState, RetryConductorAction)> = None;
+        let mut terminal_error: Option<anyhow::Error> = None;
         let exec_dir = match self.task_exec_dir(plan_id, task_id).await {
             Ok(dir) => dir,
             Err(e) => {
@@ -3934,26 +4156,36 @@ impl PlanRunner {
             }
         };
 
-        for attempt in 0..=max_retries {
-            if attempt > 0 {
+        while total_dispatches < max_dispatches {
+            if total_dispatches > 0 {
                 tracing::info!(
-                    "[orchestrate] Retry {attempt}/{max_retries} for {plan_id}/{task_id}"
+                    "[orchestrate] Retry {}/{} for {plan_id}/{task_id} (model={retry_model})",
+                    total_dispatches,
+                    max_retries
                 );
             }
+
+            let prompt_override = retry_prompt_override.take();
+            let model_override = prompt_override.as_ref().map(|_| retry_model.clone());
+            total_dispatches += 1;
 
             match self
                 .dispatch_agent_with(
                     plan_id,
                     AgentRole::Implementer,
                     task_id,
-                    None,
-                    None,
+                    prompt_override,
+                    model_override,
                     Some(exec_dir.clone()),
                     None,
                 )
                 .await
             {
                 Ok(result) => {
+                    if let Some((state, action)) = pending_feedback.take() {
+                        self.retry_conductor.record_outcome(&state, action, true);
+                        self.persist_retry_conductor();
+                    }
                     match self
                         .record_task_success(plan_id, task_id, &result, &started)
                         .await
@@ -4026,16 +4258,115 @@ impl PlanRunner {
                     break;
                 }
                 Err(e) => {
+                    if let Some((state, action)) = pending_feedback.take() {
+                        self.retry_conductor.record_outcome(&state, action, false);
+                        self.persist_retry_conductor();
+                    }
+
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    let failure_gate = Self::retry_failure_gate(&e);
+                    let failure_context = format!("{e:#}");
+                    let state = RetryConductorState {
+                        iteration: retry_iteration.saturating_add(1),
+                        consecutive_failures,
+                        error_pattern: Self::retry_error_pattern(&e),
+                        elapsed_ms: u64::try_from(started.elapsed().as_millis())
+                            .unwrap_or(u64::MAX),
+                        cost_so_far_usd: self.task_spent(plan_id, task_id),
+                        model_tier: Self::retry_model_tier_label(&retry_model),
+                        task_complexity: task_complexity.clone(),
+                    };
+                    let action = self.retry_conductor.select_action(&state);
                     tracing::error!(
                         "[orchestrate] task {task_id} failed (attempt {}): {e}",
-                        attempt + 1
+                        total_dispatches
                     );
-                    if attempt == max_retries {
-                        self.record_task_failure(plan_id, task_id, None, None, &e, &started, None)
-                            .await;
+
+                    tracing::info!(
+                        plan_id = %plan_id,
+                        task_id = %task_id,
+                        ?action,
+                        iteration = state.iteration,
+                        consecutive_failures = state.consecutive_failures,
+                        error_pattern = ?state.error_pattern,
+                        "[orchestrate] conductor selected retry action"
+                    );
+
+                    if matches!(action, RetryConductorAction::Abort)
+                        || total_dispatches >= max_dispatches
+                    {
+                        self.retry_conductor.record_outcome(&state, action, false);
+                        self.persist_retry_conductor();
+                        terminal_error = Some(e);
+                        break;
+                    }
+
+                    match action {
+                        RetryConductorAction::Continue => {
+                            retry_prompt_override = (retry_model != base_retry_model).then(|| {
+                                self.build_conductor_retry_prompt(
+                                    plan_id,
+                                    task_id,
+                                    task_def.as_ref(),
+                                    &failure_context,
+                                    failure_gate.as_deref(),
+                                    None,
+                                )
+                            });
+                            retry_iteration = retry_iteration.saturating_add(1);
+                            pending_feedback = Some((state, action));
+                        }
+                        RetryConductorAction::InjectHint(hint) => {
+                            retry_prompt_override = Some(self.build_conductor_retry_prompt(
+                                plan_id,
+                                task_id,
+                                task_def.as_ref(),
+                                &failure_context,
+                                failure_gate.as_deref(),
+                                Some(hint),
+                            ));
+                            retry_iteration = retry_iteration.saturating_add(1);
+                            pending_feedback = Some((state, action));
+                        }
+                        RetryConductorAction::SwitchModel => {
+                            retry_model = self.next_tier_model_slug(&retry_model);
+                            retry_prompt_override = Some(self.build_conductor_retry_prompt(
+                                plan_id,
+                                task_id,
+                                task_def.as_ref(),
+                                &failure_context,
+                                failure_gate.as_deref(),
+                                None,
+                            ));
+                            retry_iteration = retry_iteration.saturating_add(1);
+                            pending_feedback = Some((state, action));
+                        }
+                        RetryConductorAction::Restart => {
+                            retry_model = base_retry_model.clone();
+                            retry_prompt_override = None;
+                            retry_iteration = 0;
+                            consecutive_failures = 0;
+                            pending_feedback = Some((state, action));
+                        }
+                        RetryConductorAction::Abort => {
+                            unreachable!("abort handled above");
+                        }
                     }
                 }
             }
+        }
+
+        if let Some(error) = terminal_error.as_ref() {
+            self.record_task_failure(
+                plan_id,
+                task_id,
+                None,
+                Some(retry_model.as_str()),
+                error,
+                &started,
+                None,
+            )
+            .await;
         }
 
         if self.cloud_execution.is_none() {
@@ -4310,10 +4641,11 @@ impl PlanRunner {
         gate_passed: Option<bool>,
         iteration: u32,
     ) -> CompletedRunInput {
+        let provider = self.provider_id_for_model(model);
         let cost = CostRecord {
             timestamp: chrono::Utc::now().to_rfc3339(),
             model: model.to_string(),
-            provider: "anthropic".to_string(),
+            provider: provider.clone(),
             role: role.to_string(),
             plan_id: plan_id.to_string(),
             task_id: task_id.to_string(),
@@ -4328,7 +4660,7 @@ impl PlanRunner {
         };
 
         let mut input = CompletedRunInput::from_episode(ep).with_cost_record(cost);
-        input.provider = Some(model.to_string());
+        input.provider = Some(provider);
 
         // Flow matched skill/rule/experiment IDs from the task tracker so
         // record_completed_run can update confidence scores and experiment outcomes.
@@ -4373,6 +4705,277 @@ impl PlanRunner {
             .model
             .clone()
             .unwrap_or_else(|| "claude-sonnet-4-6".into())
+    }
+
+    fn task_retry_model(&self, plan_id: &str, task_id: &str) -> String {
+        self.task_trackers
+            .get(plan_id)
+            .and_then(|tracker| {
+                tracker
+                    .tasks_file
+                    .tasks
+                    .iter()
+                    .find(|task| task.id == task_id)
+            })
+            .map(|task| {
+                task.effective_model(
+                    self.config
+                        .agent
+                        .model
+                        .as_deref()
+                        .unwrap_or("claude-sonnet-4-6"),
+                    Some(&self.config.agent.tier_models),
+                )
+            })
+            .unwrap_or_else(|| self.effective_model())
+    }
+
+    fn retry_model_tier_label(model_slug: &str) -> String {
+        if model_slug.contains("haiku") || model_slug.contains("mini") {
+            "fast".to_string()
+        } else if model_slug.contains("opus") || model_slug.contains("gpt-5") {
+            "premium".to_string()
+        } else {
+            "standard".to_string()
+        }
+    }
+
+    fn retry_failure_gate(error: &anyhow::Error) -> Option<String> {
+        error
+            .chain()
+            .find_map(|cause| cause.to_string().strip_prefix("gate=").map(str::to_owned))
+            .or_else(|| {
+                let chain = format!("{error:#}");
+                chain
+                    .lines()
+                    .find_map(|line| line.trim().strip_prefix("gate="))
+                    .map(str::trim)
+                    .filter(|gate| !gate.is_empty())
+                    .map(ToOwned::to_owned)
+            })
+    }
+
+    fn retry_error_pattern(error: &anyhow::Error) -> RetryErrorPattern {
+        let gate = Self::retry_failure_gate(error);
+        if gate
+            .as_deref()
+            .is_some_and(|gate| matches!(gate, "compile" | "clippy"))
+        {
+            return RetryErrorPattern::Compile;
+        }
+        if gate
+            .as_deref()
+            .is_some_and(|gate| matches!(gate, "test" | "integration"))
+        {
+            return RetryErrorPattern::Test;
+        }
+
+        let chain = format!("{error:#}");
+        if chain.contains(GHOST_TURN_SIGNAL_KIND) {
+            return RetryErrorPattern::LoopDetected;
+        }
+        if chain.to_ascii_lowercase().contains("tool") {
+            return RetryErrorPattern::ToolCall;
+        }
+
+        let diagnosis = DiagnosisEngine::default().diagnose(&chain);
+        diagnosis
+            .first()
+            .map(|match_| match match_.category {
+                ErrorCategory::CompileError
+                | ErrorCategory::ClippyWarning
+                | ErrorCategory::DependencyError
+                | ErrorCategory::TypeMismatch
+                | ErrorCategory::BorrowCheckerError
+                | ErrorCategory::LifetimeError
+                | ErrorCategory::ImportError => RetryErrorPattern::Compile,
+                ErrorCategory::TestFailure => RetryErrorPattern::Test,
+                ErrorCategory::TimeoutError => RetryErrorPattern::Timeout,
+                ErrorCategory::LlmRateLimit => RetryErrorPattern::RateLimit,
+                ErrorCategory::LlmContextOverflow => RetryErrorPattern::ContextOverflow,
+                ErrorCategory::LlmRefusal => RetryErrorPattern::Refusal,
+                ErrorCategory::LoopDetected => RetryErrorPattern::LoopDetected,
+                ErrorCategory::GitConflict
+                | ErrorCategory::MissingFile
+                | ErrorCategory::PermissionDenied
+                | ErrorCategory::NetworkError
+                | ErrorCategory::OomError
+                | ErrorCategory::DiskFull
+                | ErrorCategory::ProcessCrash => RetryErrorPattern::Infrastructure,
+                _ => RetryErrorPattern::Unknown,
+            })
+            .unwrap_or(RetryErrorPattern::Unknown)
+    }
+
+    fn build_conductor_retry_hint(
+        &self,
+        plan_id: &str,
+        task_id: &str,
+        task_def: Option<&crate::task_parser::TaskDef>,
+        hint: HintType,
+        error_output: &str,
+    ) -> String {
+        match hint {
+            HintType::ErrorDigest => format!(
+                "## Retry Guidance\n\nUse the failing gate output below as the primary constraint and fix the concrete issue before making broader changes.\n\n```text\n{}\n```",
+                truncate_output(error_output)
+            ),
+            HintType::SkillSuggestion => {
+                let task_files = task_def.map(|task| task.files.clone()).unwrap_or_default();
+                let task_tier = task_def.map(|task| task.tier.as_str()).unwrap_or("");
+                let task_text = task_def
+                    .map(|task| task.build_prompt(plan_id, &self.workdir))
+                    .unwrap_or_else(|| format!("Plan: {plan_id}\nTask ID: {task_id}\n"));
+                let symbols = extract_task_symbols(&task_text);
+                let skills: Vec<_> = self
+                    .skill_library
+                    .query(&task_files, task_tier, &symbols)
+                    .into_iter()
+                    .filter(|skill| skill.success_rate > 0.5)
+                    .take(1)
+                    .collect();
+
+                if skills.is_empty() {
+                    "## Retry Guidance\n\nReuse the simplest prior-success pattern available in this area instead of inventing a new approach.".to_string()
+                } else {
+                    format!(
+                        "## Retry Guidance\n\nApply the strongest matching prior skill before changing other parts of the codebase.\n\n{}",
+                        render_prior_experience(&skills)
+                    )
+                }
+            }
+            HintType::SimplifyApproach => "## Retry Guidance\n\nTake the smallest path that makes the failing verification pass. Avoid refactors, new abstractions, and unrelated cleanup on this retry.".to_string(),
+        }
+    }
+
+    fn build_conductor_retry_prompt(
+        &self,
+        plan_id: &str,
+        task_id: &str,
+        task_def: Option<&crate::task_parser::TaskDef>,
+        error_output: &str,
+        gate: Option<&str>,
+        hint: Option<HintType>,
+    ) -> String {
+        let gate = gate.unwrap_or("verify");
+        let base_prompt = task_def
+            .map(|task| task.build_prompt(plan_id, &self.workdir))
+            .unwrap_or_else(|| {
+                format!("Plan: {plan_id}\nTask: {task_id}\n\nImplement the task described above.")
+            });
+        let prompt = task_def
+            .map(|task| task.build_fix_prompt(&base_prompt, gate, error_output))
+            .unwrap_or_else(|| {
+                format!(
+                    "{base_prompt}\n\n---\n\n## Verification Failed\n\nPhase: {gate}\n\nError output:\n```text\n{}\n```",
+                    truncate_output(error_output)
+                )
+            });
+
+        match hint {
+            Some(hint) => format!(
+                "{prompt}\n\n---\n\n{}",
+                self.build_conductor_retry_hint(plan_id, task_id, task_def, hint, error_output)
+            ),
+            None => prompt,
+        }
+    }
+
+    fn persist_retry_conductor(&self) {
+        if let Err(err) = self
+            .retry_conductor
+            .save(&conductor_policy_path(&self.workdir))
+        {
+            tracing::warn!("[orchestrate] failed to persist conductor policy: {err}");
+        }
+    }
+
+    /// Resolve the runtime provider id for a model slug using `roko.toml`.
+    fn provider_id_for_model(&self, model_slug: &str) -> String {
+        let Ok(routing_config) = load_roko_config(&self.workdir) else {
+            return model_slug.to_string();
+        };
+        let resolved = resolve_model(&routing_config, model_slug);
+        resolved
+            .profile
+            .as_ref()
+            .map(|profile| profile.provider.clone())
+            .or_else(|| {
+                resolved
+                    .provider_config
+                    .as_ref()
+                    .map(|provider| provider.kind.label().to_string())
+            })
+            .unwrap_or_else(|| resolved.slug.clone())
+    }
+
+    fn record_model_experiment_outcome(
+        &self,
+        selected_experiment: Option<&SelectedModelExperiment>,
+        gate_passed: bool,
+        result: &AgentResult,
+    ) -> Result<()> {
+        let Some(selected_experiment) = selected_experiment else {
+            return Ok(());
+        };
+
+        let experiment_path = model_experiments_path(&self.workdir);
+        let mut experiment_store = ModelExperimentStore::load_or_new(&experiment_path);
+        experiment_store.record_outcome(
+            &selected_experiment.experiment_id,
+            &selected_experiment.variant_id,
+            gate_passed,
+            f64::from(result.usage.cost_usd),
+            u64::from(result.usage.input_tokens) + u64::from(result.usage.output_tokens),
+            result.usage.wall_ms,
+        );
+        experiment_store
+            .save(&experiment_path)
+            .with_context(|| format!("save model experiments to {}", experiment_path.display()))
+            .map_err(Into::into)
+    }
+
+    /// Record post-turn latency and anomaly feedback before any later early return.
+    fn record_turn_learning_feedback(
+        &mut self,
+        prompt: &Signal,
+        model: &str,
+        result: &AgentResult,
+    ) {
+        let provider_id = self.provider_id_for_model(model);
+
+        let prompt_hash = {
+            let mut hasher = DefaultHasher::new();
+            prompt.id.to_hex().hash(&mut hasher);
+            hasher.finish()
+        };
+
+        let ttft_source_ms = result
+            .trace
+            .first()
+            .map(|signal| signal.created_at_ms)
+            .unwrap_or(result.output.created_at_ms);
+        let ttft_ms = ttft_source_ms.saturating_sub(prompt.created_at_ms).max(0) as u64;
+        let total_ms = result.usage.wall_ms;
+        let output_tokens = u64::from(result.usage.output_tokens);
+        publish_turn_learning_feedback(
+            &self.learning_event_bus,
+            &self.latency_registry,
+            &mut self.anomaly_detector,
+            TurnLearningFeedback {
+                task_id: prompt.id.to_hex(),
+                model: model.to_string(),
+                provider: provider_id,
+                timestamp_ms: prompt.created_at_ms,
+                prompt_hash,
+                ttft_ms,
+                total_ms,
+                output_tokens,
+                cost_usd: f64::from(result.usage.cost_usd),
+                usage: result.usage,
+                success: result.success,
+            },
+        );
     }
 
     /// Record a LinUCB observation for the implementer task route.
@@ -4592,7 +5195,8 @@ impl PlanRunner {
         // ── Observe cascade router for bandit learning (§9) ─────────
         if result.success {
             use roko_core::TaskComplexityBand;
-            use roko_learn::model_router::{CONTEXT_DIM, compute_routing_reward};
+            use roko_core::config::schema::RewardWeights;
+            use roko_learn::model_router::CONTEXT_DIM;
 
             let model = self.effective_model();
             if let Some(model_idx) = self.learning.cascade_router().model_index_for_slug(&model) {
@@ -4656,11 +5260,18 @@ impl PlanRunner {
                         0.0
                     }
                 };
-                let reward = compute_routing_reward(1.0, normalized_cost, normalized_duration);
+                let reward_weights = load_roko_config(&self.workdir)
+                    .map(|cfg| cfg.routing.weights.for_tier(task_tier))
+                    .unwrap_or_else(|_| RewardWeights::default());
 
-                self.learning
-                    .cascade_router()
-                    .observe(context_vec, model_idx, reward);
+                self.learning.cascade_router().observe_multi_objective(
+                    context_vec,
+                    model_idx,
+                    1.0,
+                    normalized_cost,
+                    normalized_duration,
+                    &reward_weights,
+                );
                 cascade_router_observed = true;
             } else {
                 tracing::debug!(
@@ -6968,11 +7579,32 @@ impl PlanRunner {
             (text, model)
         };
 
+        let requested_model = selected_model.clone();
+        let mut routing_stage = "static".to_string();
+        let mut routing_reason = "configured_default".to_string();
+        let mut routing_explanation: Option<roko_learn::cascade_router::CascadeRouteExplanation> =
+            None;
+        let mut routing_log_store: Option<RoutingDecisionLogStore> = None;
+        let mut routing_log_record: Option<RoutingDecisionLog> = None;
+
         // ── Adaptive model selection via CascadeRouter ───────────────
+        let mut selected_model_experiment = None;
         if let Some(td) = task_def.as_ref() {
             let cascade_router = self.learning.cascade_router();
             let routing_ctx = cascade_routing_context(self, plan_id, task, role, Some(td));
             let agent_id = format!("{role:?}");
+            routing_explanation = Some(cascade_router.explain_route(&routing_ctx, None));
+            if let Some(explanation) = routing_explanation.as_ref() {
+                routing_stage = explanation.stage.label().to_string();
+                routing_reason = match explanation.stage {
+                    roko_learn::cascade_router::CascadeStage::Static => "role_default",
+                    roko_learn::cascade_router::CascadeStage::Confidence => {
+                        "highest_confidence_score"
+                    }
+                    roko_learn::cascade_router::CascadeStage::Ucb => "highest_ucb_score",
+                }
+                .to_string();
+            }
             let cfactor_snapshot = match self.learning.latest_cfactor().await {
                 Ok(snapshot) => snapshot,
                 Err(err) => {
@@ -6981,27 +7613,74 @@ impl PlanRunner {
                 }
             };
 
-            match cascade_router.select_for_frequency(
-                frequency,
-                Some(&routing_ctx),
-                cfactor_snapshot.as_ref(),
-                Some(agent_id.as_str()),
+            let experiment_store =
+                ModelExperimentStore::load_or_new(&model_experiments_path(&self.workdir));
+            if let Some((experiment_id, variant)) = experiment_store.assign_model_with_experiment(
+                routing_ctx.role.label(),
+                routing_ctx.task_category.label(),
             ) {
-                Some(model) => {
-                    tracing::info!(
-                        "[orchestrate] frequency={} model={} (selected via cascade)",
-                        frequency_label(frequency),
-                        model.slug
-                    );
-                    selected_model = model.slug;
-                }
-                None => {
-                    tracing::info!(
-                        "[orchestrate] frequency={} (reactive; bypassing model selection)",
-                        frequency_label(frequency)
-                    );
+                tracing::info!(
+                    experiment_id = %experiment_id,
+                    variant_id = %variant.id,
+                    model = %variant.slug,
+                    "[orchestrate] model experiment override selected variant"
+                );
+                selected_model_experiment = Some(SelectedModelExperiment {
+                    experiment_id,
+                    variant_id: variant.id.clone(),
+                    model_slug: variant.slug.clone(),
+                });
+                selected_model = variant.slug;
+                routing_reason = "experiment_override".to_string();
+            } else {
+                match cascade_router.select_for_frequency(
+                    frequency,
+                    Some(&routing_ctx),
+                    cfactor_snapshot.as_ref(),
+                    Some(agent_id.as_str()),
+                ) {
+                    Some(model) => {
+                        tracing::info!(
+                            "[orchestrate] frequency={} model={} (selected via cascade)",
+                            frequency_label(frequency),
+                            model.slug
+                        );
+                        selected_model = model.slug;
+                    }
+                    None => {
+                        tracing::info!(
+                            "[orchestrate] frequency={} (reactive; bypassing model selection)",
+                            frequency_label(frequency)
+                        );
+                        routing_reason = "reactive_bypass".to_string();
+                    }
                 }
             }
+        }
+
+        // ── Budget guardrail before dispatch ───────────────────────
+        let mut budget = BudgetGuardrail::new(
+            self.config.budget.max_task_usd,
+            self.config.budget.max_session_usd,
+            self.config.budget.max_plan_usd,
+            f64::from(self.config.budget.warn_at_percent) / 100.0,
+        );
+        let last_cost_usd = self.task_spent(plan_id, task);
+        match budget.record_cost(last_cost_usd, "task") {
+            BudgetAction::Block => {
+                return Err(anyhow!(
+                    "task {plan_id}/{task} budget exhausted: ${last_cost_usd:.2} >= max_task_usd ${:.2}",
+                    self.config.budget.max_task_usd
+                ));
+            }
+            BudgetAction::RouteToCheaper => {
+                selected_model = mechanical_tier_model(&self.config.agent.tier_models);
+                routing_reason = "budget_guardrail".to_string();
+            }
+            BudgetAction::Warn { percent_used, .. } => {
+                tracing::warn!(pct = percent_used, "budget warning");
+            }
+            _ => {}
         }
 
         // ── Dispatch-time skill hint from successful prior tasks ──────
@@ -7056,7 +7735,12 @@ impl PlanRunner {
         };
 
         // ── Provider health check ────────────────────────────────────
-        let selected_model = if !self.learning.provider_health().is_healthy(&selected_model) {
+        let selected_provider = self.provider_id_for_model(&selected_model);
+        let selected_model = if !self
+            .learning
+            .provider_health()
+            .is_healthy(&selected_provider)
+        {
             let fallback = self
                 .config
                 .agent
@@ -7064,15 +7748,17 @@ impl PlanRunner {
                 .clone()
                 .unwrap_or_else(|| "claude-sonnet-4-6".into());
             tracing::warn!(
-                unhealthy_model = %selected_model,
+                unhealthy_provider = %selected_provider,
                 fallback_model = %fallback,
                 "model marked unhealthy by ProviderHealthTracker, falling back"
             );
+            routing_reason = "provider_unhealthy".to_string();
             fallback
         } else {
             selected_model
         };
 
+        let pre_daimon_model = selected_model.clone();
         let mut dispatch_params =
             DispatchParams::new(selected_model.clone(), frequency.turn_limit());
         dispatch_params.effort = self.config.agent.effort.clone();
@@ -7080,6 +7766,80 @@ impl PlanRunner {
         let selected_model = dispatch_params.model;
         let dispatch_turn_limit = dispatch_params.turn_limit;
         let dispatch_effort = dispatch_params.effort.clone();
+        if selected_model != pre_daimon_model {
+            routing_reason = "fallback".to_string();
+        }
+        if selected_model_experiment
+            .as_ref()
+            .is_some_and(|selection| selection.model_slug != selected_model)
+        {
+            tracing::info!(
+                actual_model = %selected_model,
+                "[orchestrate] clearing model experiment assignment after downstream model override"
+            );
+            selected_model_experiment = None;
+        }
+
+        let candidate_models = routing_explanation
+            .as_ref()
+            .map(|explanation| {
+                explanation
+                    .candidates
+                    .iter()
+                    .map(|candidate| candidate.slug.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut model_providers = candidate_models
+            .iter()
+            .map(|model| (model.clone(), self.provider_id_for_model(model)))
+            .collect::<HashMap<_, _>>();
+        model_providers
+            .entry(selected_model.clone())
+            .or_insert_with(|| self.provider_id_for_model(&selected_model));
+        let disqualifications = model_providers
+            .iter()
+            .filter_map(|(model, provider)| {
+                (!self.learning.provider_health().is_healthy(provider))
+                    .then_some((model.clone(), "provider_unhealthy".to_string()))
+            })
+            .collect::<HashMap<_, _>>();
+        let routing_meta = RoutingDecisionMeta {
+            trace_id: Self::trace_id_for(plan_id, task).to_hex(),
+            task_id: task.to_string(),
+            requested_model: requested_model.clone(),
+            role: role.label().to_string(),
+            task_complexity: task_def
+                .as_ref()
+                .map(|td| td.tier.clone())
+                .unwrap_or_else(|| "unknown".to_string()),
+            routing_stage: routing_stage.clone(),
+            routing_reason: routing_reason.clone(),
+        };
+        match RoutingLogger::open_creating(routing_log_path(&self.workdir)) {
+            Ok(logger) => {
+                let logger = logger
+                    .with_model_providers(model_providers)
+                    .with_disqualifications(disqualifications);
+                match self.learning.cascade_router().append_routing_log(
+                    &logger,
+                    &routing_meta,
+                    &selected_model,
+                    routing_explanation.as_ref(),
+                ) {
+                    Ok(routing_log) => {
+                        routing_log_record = Some(routing_log);
+                        routing_log_store = Some(logger.store());
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "failed to append routing decision log");
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to open routing decision log");
+            }
+        }
 
         // ── Build context via tiered ContextProvider ───────────────
         let context_sections = if let Some(ref td) = task_def {
@@ -7315,6 +8075,16 @@ impl PlanRunner {
             .map_err(|e| anyhow!("persist prompt: {e}"))?;
 
         // ── Run the agent with per-task model selection ─────────────
+        let ctx = ctx
+            .with_attr("task_id", task)
+            .with_attr(
+                "task_complexity",
+                task_def
+                    .as_ref()
+                    .map(|td| td.tier.as_str())
+                    .unwrap_or("focused"),
+            )
+            .with_attr("model_tier", Self::retry_model_tier_label(&selected_model));
         let result: AgentResult = if self.config.agent.command == "claude" {
             let task_role = task_def
                 .as_ref()
@@ -7363,7 +8133,50 @@ impl PlanRunner {
                 },
             )
             .map_err(|e| anyhow!("create agent for model {selected_model}: {e}"))?;
-            agent.run(&prompt, &ctx).await
+            let resolved = resolve_model(&roko_config, &selected_model);
+            let cost_table = task_runner_cost_table(&resolved);
+            let mut runner_budget = RunnerBudgetGuardrail::new(
+                self.config.budget.max_task_usd,
+                self.config.budget.max_session_usd,
+                self.config.budget.max_plan_usd,
+                f64::from(self.config.budget.warn_at_percent) / 100.0,
+            );
+            let task_spend = self.task_spent(plan_id, task);
+            let _ = runner_budget.record_cost(task_spend, "task");
+            let _ = runner_budget.record_cost(self.plan_costs.values().sum::<f64>(), "session");
+
+            let mut runner = TaskRunner {
+                agent,
+                event_bus: RunnerEventBus::new(16),
+                anomaly: RunnerAnomalyDetector::new(self.anomaly_detector.session_start_ms()),
+                budget: runner_budget,
+                conductor: RunnerConductorBandit::new(),
+                cost_table,
+                model_slug: resolved.slug.clone(),
+                provider_id: resolved.provider_kind.label().to_string(),
+                // Orchestrate still owns cross-attempt retry/escalation logic.
+                max_iterations: 1,
+            };
+            let task_result = runner.run_task(&prompt, &ctx).await.map_err(|err| match err {
+                TaskRunnerError::BudgetExhausted => anyhow!(
+                    "task {plan_id}/{task} budget exhausted while running {selected_model}"
+                ),
+                TaskRunnerError::Anomaly(anomaly) => anyhow!(
+                    "task {plan_id}/{task} anomaly detected while running {selected_model}: {anomaly:?}"
+                ),
+                TaskRunnerError::ModelEscalation => anyhow!(
+                    "task {plan_id}/{task} requested model escalation while running {selected_model}"
+                ),
+            })?;
+
+            let mut usage = task_result.total_usage;
+            usage.cost_usd = task_result.total_cost_usd as f32;
+            AgentResult {
+                output: task_result.output,
+                trace: Vec::new(),
+                usage,
+                success: task_result.gate_passed,
+            }
         } else {
             let task_role = task_def
                 .as_ref()
@@ -7383,8 +8196,67 @@ impl PlanRunner {
             for (k, v) in &self.config.agent.env {
                 agent = agent.with_env_var(k, v);
             }
-            agent.run(&prompt, &ctx).await
+            let mut runner_budget = RunnerBudgetGuardrail::new(
+                self.config.budget.max_task_usd,
+                self.config.budget.max_session_usd,
+                self.config.budget.max_plan_usd,
+                f64::from(self.config.budget.warn_at_percent) / 100.0,
+            );
+            let task_spend = self.task_spent(plan_id, task);
+            let _ = runner_budget.record_cost(task_spend, "task");
+            let _ = runner_budget.record_cost(self.plan_costs.values().sum::<f64>(), "session");
+
+            let mut runner = TaskRunner {
+                agent: Box::new(agent),
+                event_bus: RunnerEventBus::new(16),
+                anomaly: RunnerAnomalyDetector::new(self.anomaly_detector.session_start_ms()),
+                budget: runner_budget,
+                conductor: RunnerConductorBandit::new(),
+                cost_table: RunnerCostTable::default(),
+                model_slug: selected_model.clone(),
+                provider_id: self.provider_id_for_model(&selected_model),
+                // Orchestrate still owns cross-attempt retry/escalation logic.
+                max_iterations: 1,
+            };
+            let task_result = runner
+                .run_task(&prompt, &ctx)
+                .await
+                .map_err(|err| match err {
+                    TaskRunnerError::BudgetExhausted => anyhow!(
+                        "task {plan_id}/{task} budget exhausted while running {}",
+                        self.config.agent.command
+                    ),
+                    TaskRunnerError::Anomaly(anomaly) => anyhow!(
+                        "task {plan_id}/{task} anomaly detected while running {}: {anomaly:?}",
+                        self.config.agent.command
+                    ),
+                    TaskRunnerError::ModelEscalation => anyhow!(
+                        "task {plan_id}/{task} requested model escalation while running {}",
+                        self.config.agent.command
+                    ),
+                })?;
+
+            let mut usage = task_result.total_usage;
+            usage.cost_usd = task_result.total_cost_usd as f32;
+            AgentResult {
+                output: task_result.output,
+                trace: Vec::new(),
+                usage,
+                success: task_result.gate_passed,
+            }
         };
+
+        self.record_turn_learning_feedback(&prompt, &selected_model, &result);
+        if let (Some(store), Some(record)) = (&routing_log_store, routing_log_record.as_ref()) {
+            let completed = record.clone().with_outcome(
+                result.success,
+                f64::from(result.usage.cost_usd),
+                result.usage.wall_ms,
+            );
+            if let Err(err) = store.append(&completed).await {
+                tracing::warn!(error = %err, "failed to append completed routing decision log");
+            }
+        }
 
         let task_cost = f64::from(result.usage.cost_usd);
         self.add_task_spend(plan_id, task, task_cost);
@@ -7538,6 +8410,11 @@ impl PlanRunner {
         }
 
         if !result.success {
+            self.record_model_experiment_outcome(
+                selected_model_experiment.as_ref(),
+                false,
+                &result,
+            )?;
             self.observe_cascade_router(plan_id, task, task_def.as_ref(), &selected_model, 0.0);
             let task_phase = task_def
                 .as_ref()
@@ -7737,7 +8614,23 @@ impl PlanRunner {
         .await;
 
         self.release_task_mcp_servers(&mcp_lease).await;
-        post_result?;
+        match post_result {
+            Ok(()) => {
+                self.record_model_experiment_outcome(
+                    selected_model_experiment.as_ref(),
+                    true,
+                    &result,
+                )?;
+            }
+            Err(err) => {
+                self.record_model_experiment_outcome(
+                    selected_model_experiment.as_ref(),
+                    false,
+                    &result,
+                )?;
+                return Err(err);
+            }
+        }
 
         Ok(result)
     }
@@ -9518,6 +10411,123 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    #[test]
+    fn event_bus_wiring_records_turn_feedback() {
+        let tmp = TempDir::new().expect("tempdir");
+        let latency_path = tmp.path().join("latency-stats.json");
+        let latency_registry = LatencyRegistry::load_or_new(&latency_path);
+        let mut anomaly_detector = AnomalyDetector::new(1_700_000_000_000);
+        let event_bus = LearningEventBus::new(16);
+
+        for _ in 0..5 {
+            publish_turn_learning_feedback(
+                &event_bus,
+                &latency_registry,
+                &mut anomaly_detector,
+                TurnLearningFeedback {
+                    task_id: "task-2k23".to_string(),
+                    model: "glm-5.1".to_string(),
+                    provider: "zai".to_string(),
+                    timestamp_ms: 1_700_000_000_000,
+                    prompt_hash: 42,
+                    ttft_ms: 120,
+                    total_ms: 900,
+                    output_tokens: 64,
+                    cost_usd: 0.05,
+                    usage: roko_agent::Usage {
+                        input_tokens: 128,
+                        output_tokens: 64,
+                        cost_usd: 0.05,
+                        wall_ms: 900,
+                        ..Default::default()
+                    },
+                    success: true,
+                },
+            );
+        }
+
+        let stats = latency_registry
+            .get("glm-5.1", "zai")
+            .expect("latency stats should be recorded");
+        assert_eq!(stats.observations, 5);
+        assert_eq!(stats.recent_latencies, vec![900.0; 5]);
+
+        assert!(matches!(
+            anomaly_detector.check_prompt(42),
+            Some(roko_learn::anomaly::Anomaly::PromptLoop { repeated_count })
+                if repeated_count >= 5
+        ));
+    }
+
+    #[test]
+    fn conductor_wiring_persists_learned_switch_model_policy() {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = conductor_policy_path(tmp.path());
+        let state = RetryConductorState {
+            iteration: 2,
+            consecutive_failures: 2,
+            error_pattern: RetryErrorPattern::Compile,
+            elapsed_ms: 45_000,
+            cost_so_far_usd: 0.08,
+            model_tier: "fast".to_string(),
+            task_complexity: "architectural".to_string(),
+        };
+        let mut bandit = ConductorBandit::new();
+
+        for _ in 0..64 {
+            bandit.record_outcome(&state, RetryConductorAction::Continue, false);
+            bandit.record_outcome(&state, RetryConductorAction::SwitchModel, true);
+        }
+
+        bandit.save(&path).expect("save conductor policy");
+        let reloaded = ConductorBandit::load_or_new(&path);
+
+        let mut switch_model_count = 0;
+        for _ in 0..32 {
+            if reloaded.select_action(&state) == RetryConductorAction::SwitchModel {
+                switch_model_count += 1;
+            }
+        }
+
+        assert!(
+            switch_model_count >= 24,
+            "expected persisted policy to prefer switch_model, got {switch_model_count}/32"
+        );
+    }
+
+    #[test]
+    fn conductor_wiring_maps_compile_gate_failures_to_compile_pattern() {
+        let error = with_task_failure_context(
+            anyhow!("verify failed for T1: cargo check -p roko-cli"),
+            "T1",
+            "ready",
+            "compile",
+            None,
+        );
+
+        assert_eq!(
+            PlanRunner::retry_failure_gate(&error).as_deref(),
+            Some("compile")
+        );
+        assert_eq!(
+            PlanRunner::retry_error_pattern(&error),
+            RetryErrorPattern::Compile
+        );
+    }
+
+    #[test]
+    fn budget_enforcement_routes_to_mechanical_model() {
+        let mut guardrail = BudgetGuardrail::new(1.0, 50.0, 10.0, 0.8);
+        assert_eq!(
+            guardrail.record_cost(0.81, "task"),
+            BudgetAction::RouteToCheaper
+        );
+
+        let mut tier_models = HashMap::new();
+        tier_models.insert("mechanical".to_string(), "claude-haiku-4-5".to_string());
+        assert_eq!(mechanical_tier_model(&tier_models), "claude-haiku-4-5");
+    }
 
     #[test]
     fn orchestration_report_all_succeeded() {

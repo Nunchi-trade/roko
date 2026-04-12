@@ -7,6 +7,40 @@ use super::{PageId, PageScaffold, WidgetScaffold};
 pub fn scaffold_pages() -> Vec<PageScaffold> {
     vec![
         PageScaffold::new(
+            PageId::ProviderHealth,
+            "Provider Health",
+            "Provider circuit state, latency, error rate, and recorded request totals.",
+            vec![
+                WidgetScaffold::new(
+                    "provider_status",
+                    "Provider Status",
+                    "Per-provider circuit state, latency p50, error rate, and recorded cost placeholder.",
+                ),
+                WidgetScaffold::new(
+                    "provider_summary",
+                    "Provider Summary",
+                    "Aggregate request and failure totals across recorded providers.",
+                ),
+            ],
+        ),
+        PageScaffold::new(
+            PageId::ModelComparison,
+            "Model Comparison",
+            "Cross-model pass rate, estimated cost, and Pareto frontier from cascade-router observations.",
+            vec![
+                WidgetScaffold::new(
+                    "comparison_table",
+                    "Model Comparison Table",
+                    "Per-model pass rate, estimated average cost, cost per success, and observation counts.",
+                ),
+                WidgetScaffold::new(
+                    "pareto_frontier",
+                    "Pareto Frontier",
+                    "Non-dominated models and dominated-model notes from the cascade snapshot.",
+                ),
+            ],
+        ),
+        PageScaffold::new(
             PageId::AgentStatus,
             "Agent Activity",
             "Live active-agent roster, model mix, and session cost breakdown.",

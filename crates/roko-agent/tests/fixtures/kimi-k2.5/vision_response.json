@@ -1,0 +1,22 @@
+{
+  "id": "chatcmpl-kimi-vision-1",
+  "object": "chat.completion",
+  "created": 1760000105,
+  "model": "kimi-k2.5",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "The image shows a dashboard with a red error banner and three status cards."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 240,
+    "completion_tokens": 32,
+    "total_tokens": 272,
+    "cached_tokens": 0
+  }
+}

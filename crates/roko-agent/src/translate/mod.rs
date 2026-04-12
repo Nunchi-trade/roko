@@ -33,6 +33,7 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+pub use crate::chat_types::{ChatResponse, FinishReason, ResponseMetadata, SessionState};
 use crate::usage::Usage;
 use roko_core::tool::{ToolCall, ToolDef, ToolFormat, ToolResult};
 
@@ -49,38 +50,6 @@ pub use claude::ClaudeTranslator;
 pub use ollama::OllamaTranslator;
 pub use openai::OpenAiTranslator;
 pub use react::ReActTranslator;
-
-/// Canonical response from any provider, after adapter parsing.
-#[derive(Debug, Clone, Default)]
-pub struct ChatResponse {
-    pub content: String,
-    pub reasoning: Option<String>,
-    pub tool_calls: Vec<ToolCall>,
-    pub usage: Usage,
-    pub finish_reason: FinishReason,
-    pub metadata: ResponseMetadata,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ResponseMetadata {
-    pub response_id: Option<String>,
-    pub model_used: Option<String>,
-    pub cached_tokens: Option<u64>,
-    pub content_filter: Option<serde_json::Value>,
-    pub web_search: Option<serde_json::Value>,
-    pub provider_latency_ms: Option<u64>,
-    pub raw_finish_reason: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum FinishReason {
-    #[default]
-    Stop,
-    Length,
-    ToolCalls,
-    ContentFilter,
-    Error(String),
-}
 
 /// Normalize provider-specific finish reasons into canonical [`FinishReason`] values.
 #[must_use]
@@ -226,6 +195,15 @@ impl BackendResponse {
                 if buf.is_empty() { None } else { Some(buf) }
             }
             Self::Text(_) => None,
+        }
+    }
+
+    /// Extract token usage metadata when the backend reports it.
+    #[must_use]
+    pub fn extract_usage(&self) -> Usage {
+        match self {
+            Self::Json(v) => openai::parse_usage(v),
+            Self::StreamJson(_) | Self::Text(_) => Usage::default(),
         }
     }
 }
@@ -398,6 +376,28 @@ mod tests {
             }),
         ]);
         assert_eq!(r.extract_reasoning(), Some("step 1 step 2".to_string()));
+    }
+
+    #[test]
+    fn backend_response_extract_usage_from_openai_json() {
+        let r = BackendResponse::Json(serde_json::json!({
+            "usage": {
+                "prompt_tokens": 12,
+                "completion_tokens": 5,
+                "prompt_tokens_details": {
+                    "cached_tokens": 3
+                }
+            }
+        }));
+        assert_eq!(
+            r.extract_usage(),
+            Usage {
+                input_tokens: 12,
+                output_tokens: 5,
+                cache_read_tokens: 3,
+                ..Default::default()
+            }
+        );
     }
 
     #[test]

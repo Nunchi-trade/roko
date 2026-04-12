@@ -292,7 +292,7 @@ fn elapsed_ms(started: Instant) -> u64 {
 }
 
 /// Normalize a module path: collapse whitespace around `::` separators.
-fn normalize_path(path: &str) -> String {
+pub(crate) fn normalize_path(path: &str) -> String {
     path.split("::")
         .map(str::trim)
         .collect::<Vec<_>>()
@@ -419,7 +419,7 @@ fn collect_rust_files(root: &Path) -> Vec<PathBuf> {
 /// E.g. `root=src/`, `path=src/foo/bar.rs` → `Some("foo::bar")`.
 /// `src/foo/mod.rs` and `src/foo.rs` both map to `"foo"`.
 /// `src/lib.rs` and `src/main.rs` map to `""` (crate root).
-fn rust_module_path(path: &Path, root: &Path) -> Option<String> {
+pub(crate) fn rust_module_path(path: &Path, root: &Path) -> Option<String> {
     let rel = path.strip_prefix(root).ok()?;
     let mut segments: Vec<String> = Vec::new();
     for component in rel.components() {
@@ -478,7 +478,8 @@ fn extract_symbols(source: &str, module_path: &str) -> Vec<DiscoveredSymbol> {
     out
 }
 
-fn parse_visibility(line: &str) -> (Visibility, &str) {
+/// Parse the leading Rust visibility modifier from a source line.
+pub(crate) fn parse_visibility(line: &str) -> (Visibility, &str) {
     if let Some(rest) = line.strip_prefix("pub(crate)") {
         return (Visibility::PubCrate, rest.trim_start());
     }
@@ -508,7 +509,7 @@ fn parse_visibility(line: &str) -> (Visibility, &str) {
 /// Note: a bare `const NAME: …` item is itself a `Const` item — we do NOT
 /// strip `const` in that case. We tell the two apart by peeking the token
 /// after `const `: if it's `fn`, we strip; otherwise we leave it.
-fn skip_modifiers(rest: &str) -> &str {
+pub(crate) fn skip_modifiers(rest: &str) -> &str {
     let mut cur = rest;
     loop {
         let trimmed = cur.trim_start();
@@ -541,7 +542,8 @@ fn skip_modifiers(rest: &str) -> &str {
     }
 }
 
-fn first_identifier(s: &str) -> Option<&str> {
+/// Extract the first Rust identifier from the start of a string.
+pub(crate) fn first_identifier(s: &str) -> Option<&str> {
     let s = s.trim_start();
     let bytes = s.as_bytes();
     if bytes.is_empty() {

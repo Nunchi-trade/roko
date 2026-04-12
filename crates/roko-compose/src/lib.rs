@@ -17,6 +17,7 @@
 
 pub mod agents_md;
 pub mod budget;
+pub mod compaction;
 pub mod context_assembler;
 pub mod context_provider;
 pub mod conventions;
@@ -29,9 +30,11 @@ pub mod symbol_resolver;
 pub mod system_prompt_builder;
 pub mod task_brief;
 pub mod templates;
+pub mod token_counter;
 
 pub use agents_md::AgentsMd;
 pub use budget::{AdjustedBudget, Complexity, adjusted_budget_for};
+pub use compaction::{ChatMessage, CompactionPolicy, compact_history};
 pub use context_assembler::{ContextAssembler, ContextChunk, PadState};
 pub use context_provider::{
     ContextBudgets, ContextProvider, ContextSection, ContextSource, ContextTier, PlanArtifacts,
@@ -55,3 +58,4 @@ pub use templates::{
     QuickReviewerTemplate, Reviewer, ReviewerInput, ReviewerTemplate, RolePromptTemplate,
     ScribeInput, ScribeTemplate, budget_for, scribe::ScribeVariant,
 };
+pub use token_counter::TokenCounter;

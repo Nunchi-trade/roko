@@ -1,0 +1,98 @@
+# References — Master Citation Index
+
+> Complete academic bibliography for the Roko cognitive agent architecture. Every citation referenced in any Roko PRD document has an entry here, organized by domain with annotations linking each paper to the specific subsystem it grounds.
+
+**Topic**: References
+**Layer**: Cross-cutting
+**Crates**: All
+
+---
+
+## Overview
+
+This reference collection catalogs **200+ academic citations** across 24 research domains that ground Roko's cognitive architecture. Each citation appears in exactly one domain sub-doc, with cross-references to related domains. Every citation includes:
+
+1. Standard academic format (authors, year, title, venue, arXiv ID when available)
+2. A 1-2 sentence annotation explaining which Roko subsystem the paper grounds and how
+
+### Methodology
+
+Citations were collected from:
+- **Primary sources**: `bardo-backup/prd/02-mortality/14-research-foundations.md` (130+ papers), `bardo-backup/prd/02-mortality/15-references.md` (162 citations), `bardo-backup/prd/shared/citations.md` (master index, 40 categories)
+- **Implementation research**: `bardo-backup/tmp/agent-chain/08-references.md`, `bardo-backup/tmp/agent-chain/14-academic-foundations.md`, `bardo-backup/tmp/mori-agents/12-references.md`
+- **Refactoring PRD**: All 12 refactoring-prd files scanned for inline citations
+- **Implementation plans**: `tmp/implementation-plans/modelrouting/11-research-context.md`, `tmp/implementation-plans/12a-cognitive-layer.md`
+
+All mortality-era citations are preserved with reframed annotations: "because the agent is dying" → "because the agent's budget/confidence/time is constrained."
+
+---
+
+## Sub-documents by Domain
+
+| # | Domain | File | Key Citations | Count |
+|---|---|---|---|---|
+| 00 | [Lifecycle and Finite Agency](./00-lifecycle-and-finite-agency.md) | Resource-bounded cognition, plasticity loss, evolutionary computing | Ray 1991, Dohare 2024, Shuvaev 2024, Hinton 2022 | ~30 |
+| 01 | [Memory Consolidation](./01-memory-consolidation.md) | CLS theory, forgetting, retrieval, replay, agent memory | McClelland 1995, Ebbinghaus 1885, Park 2023, Mem0 | ~25 |
+| 02 | [Affective Computing](./02-affective-computing.md) | PAD model, somatic markers, mood-congruent retrieval, ALMA | Mehrabian 1996, Damasio 1994, Zhang SIGDIAL 2024 | ~20 |
+| 03 | [Dreams and Offline Learning](./03-dreams-and-offline-learning.md) | Hypnagogia, world models, sleep-time compute, wake-sleep | Lacaux 2021, DreamerV3, Lin 2025, WSCL 2024 | ~16 |
+| 04 | [Coordination and Multi-Agent](./04-coordination-and-multi-agent.md) | Stigmergy, cooperation, pheromone field, mesh coordination | Grassé 1959, Dorigo 1997, Kreps 1982, Simard 2012 | ~18 |
+| 05 | [Biological Analogues](./05-biological-analogues.md) | Foraging, immune selection, niche construction, morphogenesis | Charnov 1976, Kauffman 1993, Turing 1952, Hölldobler 2008 | ~16 |
+| 06 | [Self-Learning Systems](./06-self-learning-systems.md) | Reflexion, ExpeL, Voyager, Meta-Harness, EvoSkills, ADAS | Lee 2026, Shinn 2023, Hu 2025, DSPy | ~20 |
+| 07 | [Context Engineering](./07-context-engineering.md) | ACE, CSO, ACON, RAG, context position, compression | ACE 2026, Liu 2024, Lewis 2020, Wei 2022 | ~16 |
+| 08 | [Security and Provenance](./08-security-and-provenance.md) | CaMeL, OWASP, safe interruptibility, content provenance | Debenedetti 2025, Cohen 1987, C2PA, Orseau 2016 | ~16 |
+| 09 | [HDC and VSA](./09-hdc-vsa.md) | Binary Spatter Codes, learned hashing, resonator networks | Kanerva 1988/2009, Kleyko 2022, JL 1984, Ganesan 2021 | ~16 |
+| 10 | [Market Microstructure](./10-market-microstructure.md) | AMM theory, vault mechanisms, risk/decision theory | Milionis 2023, Kelly 1956, Peters 2019, Taleb 2012 | ~12 |
+| 11 | [Streaming Algorithms](./11-streaming-algorithms.md) | Adaptive windowing, calibration, distributional RL | Bifet 2007, Farquhar 2024, Dabney 2018/2020 | ~10 |
+| 12 | [Signal Processing](./12-signal-processing.md) | TDA, information theory, computational thermodynamics | Shannon 1948, Carlsson 2009, Landauer 1961 | ~12 |
+| 13 | [Philosophy](./13-philosophy.md) | Temporality, hauntology, embodiment, agency, narrative | Heidegger 1927, Derrida 1993, Camus 1942, Merleau-Ponty | ~18 |
+| 14 | [Agent Harnesses and Tool Use](./14-agent-harnesses-and-tool-use.md) | Meta-Harness, SWE-agent, Aider, benchmarks | Lee 2026, Yang 2024, SWE-bench, RAGAS | ~14 |
+| 15 | [Cybernetics and VSM](./15-cybernetics-and-vsm.md) | VSM, Good Regulator, autopoiesis, OODA, triple-loop | Beer 1972, Conant-Ashby 1970, Ashby 1956, Wiener 1948 | ~18 |
+| 16 | [Active Inference](./16-active-inference.md) | FEP, Expected Free Energy, Bayesian surprise, pymdp | Friston 2006/2010/2015, Parr 2022, Rao 1999 | ~12 |
+| 17 | [Process Reward Models](./17-process-reward-models.md) | Step-level verification, generation-verification gap | Lightman 2024, Song 2025, Huang 2024 | ~8 |
+| 18 | [Collective Intelligence](./18-collective-intelligence.md) | C-Factor, network effects, Thousand Brains, swarm | Woolley 2010, Metcalfe, Hawkins 2017, Holland 1995 | ~12 |
+| 19 | [Regulatory Compliance](./19-regulatory-compliance.md) | EU AI Act, SEC/CFTC, GDPR, SOX, C2PA | EU AI Act 2024, MiFID II, HIPAA, GDPR | ~8 |
+| 20 | [Cognitive Architectures](./20-cognitive-architectures.md) | CoALA, dual-process, ACT-R, SOAR, CLARION | Sumers 2023, Kahneman 2011, Anderson 1993 | ~12 |
+| 21 | [Mechanism Design](./21-mechanism-design.md) | VCG auctions, reputation, demurrage, commons | Vickrey 1961, Clarke 1971, Groves 1973, Ostrom 1990 | ~14 |
+| 22 | [Protocol Standards](./22-protocol-standards.md) | ERC-8004, x402, ERC-4337, ERC-721, cryptographic | ERC-8004, x402, Merkle 1987, Goldwasser 1985 | ~16 |
+| 23 | [Generational and Evolutionary](./23-generational-and-evolutionary.md) | Digital evolution, memetics, cultural transmission | Ray 1991, Dawkins 1976, Price 1970, Baldwin 1896 | ~18 |
+
+**Total**: ~200+ unique citations across 24 domains.
+
+---
+
+## Citation Format
+
+Each citation uses standard academic format:
+
+```
+Author(s) (YYYY). Title. _Venue_, Volume(Issue), Pages. arXiv:ID.
+  *Grounds: <subsystem> — <concept>.*
+```
+
+The `*Grounds:*` annotation links the paper to the specific Roko subsystem and concept it validates. This creates a traceable chain from academic research to architectural decision.
+
+---
+
+## Cross-Domain Papers
+
+Some papers are foundational to multiple domains. These appear in their primary domain with cross-references:
+
+- **Damasio (1994)** — Primary: [02-affective-computing](./02-affective-computing.md), Cross-ref: [13-philosophy](./13-philosophy.md)
+- **Derrida (1993)** — Primary: [13-philosophy](./13-philosophy.md), Cross-ref: [03-dreams](./03-dreams-and-offline-learning.md)
+- **Park (2023) Generative Agents** — Primary: [01-memory](./01-memory-consolidation.md), Cross-ref: [03-dreams](./03-dreams-and-offline-learning.md), [14-harnesses](./14-agent-harnesses-and-tool-use.md)
+- **Lee et al. (2026) Meta-Harness** — Primary: [14-harnesses](./14-agent-harnesses-and-tool-use.md), Cross-ref: [06-self-learning](./06-self-learning-systems.md)
+- **Friston (2010) FEP** — Primary: [16-active-inference](./16-active-inference.md), Cross-ref: [15-cybernetics](./15-cybernetics-and-vsm.md)
+
+---
+
+## Naming Conventions
+
+All citations use the updated Roko terminology:
+- **Golem** → **Agent**
+- **Grimoire** → **NeuroStore**
+- **Styx** → **Agent Mesh**
+- **Clade** → **Collective**
+- **GNOS** → **KORAI** (mainnet) / **DAEJI** (testnet)
+- **Bardo** → **Roko**
+
+Legacy citations that referenced mortality mechanisms are preserved with reframed annotations per `refactoring-prd/08-translation-guide.md`.

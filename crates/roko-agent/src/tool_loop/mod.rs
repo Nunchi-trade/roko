@@ -12,19 +12,27 @@
 //! - [`result_msg`] — tool-result message construction (§36.56).
 //! - [`checkpoint`] — resumable state (§36.57).
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use roko_core::tool::{ToolCall, ToolContext, ToolDef};
+use tokio::sync::mpsc;
 
 use crate::dispatcher::ToolDispatcher;
-use crate::translate::{BackendResponse, RenderedTools, Translator};
+use crate::streaming::StreamChunk;
+use crate::translate::{BackendResponse, RenderedTools, SessionState, Translator};
+use crate::usage::Usage;
 
+pub mod agent_wrapper;
+pub mod backends;
 pub mod checkpoint;
 pub mod max_iter;
 pub mod prune;
 pub mod result_msg;
 
+pub use agent_wrapper::ToolLoopAgent;
+pub use backends::OpenAiCompatBackend;
 pub use checkpoint::Checkpoint;
 pub use max_iter::DEFAULT_MAX_ITERATIONS;
 pub use prune::DEFAULT_CONTEXT_TOKEN_LIMIT;
@@ -50,7 +58,28 @@ pub trait LlmBackend: Send + Sync {
         &self,
         messages: &[serde_json::Value],
         tools: &RenderedTools,
+        session: &SessionState,
     ) -> Result<BackendResponse, LlmError>;
+
+    /// Extract provider-issued session or conversation identifiers from a turn response.
+    fn extract_session(&self, response: &BackendResponse) -> SessionState {
+        let _ = response;
+        SessionState::default()
+    }
+
+    /// Send the current conversation state to the backend in streaming mode.
+    ///
+    /// Backends that do not implement streaming fall back to [`send_turn`](Self::send_turn).
+    async fn send_turn_streaming(
+        &self,
+        messages: &[serde_json::Value],
+        tools: &RenderedTools,
+        session: &SessionState,
+        event_tx: mpsc::UnboundedSender<StreamChunk>,
+    ) -> Result<BackendResponse, LlmError> {
+        let _ = event_tx;
+        self.send_turn(messages, tools, session).await
+    }
 }
 
 /// Errors from an [`LlmBackend`].
@@ -88,6 +117,8 @@ pub struct ToolLoopOutput {
     pub iterations: usize,
     /// All tool calls dispatched across every iteration.
     pub tool_calls: Vec<ToolCall>,
+    /// Aggregated usage across every backend turn in the loop.
+    pub total_usage: Usage,
     /// Why the loop stopped.
     pub stop_reason: StopReason,
     /// Resumable snapshot — populated when `stop_reason != Stop`.
@@ -101,12 +132,14 @@ pub struct ToolLoopOutput {
 /// Drives the `prompt -> LLM -> tool_calls -> dispatch -> results -> LLM`
 /// cycle until the LLM stops calling tools, the iteration cap is
 /// reached, the cancel token fires, or the backend errors.
+#[derive(Clone)]
 pub struct ToolLoop {
     translator: Arc<dyn Translator>,
     dispatcher: Arc<ToolDispatcher>,
     backend: Arc<dyn LlmBackend>,
     max_iterations: usize,
     context_token_limit: usize,
+    checkpoint_path: Option<PathBuf>,
 }
 
 impl ToolLoop {
@@ -123,6 +156,7 @@ impl ToolLoop {
             backend,
             max_iterations: DEFAULT_MAX_ITERATIONS,
             context_token_limit: DEFAULT_CONTEXT_TOKEN_LIMIT,
+            checkpoint_path: None,
         }
     }
 
@@ -140,6 +174,13 @@ impl ToolLoop {
         self
     }
 
+    /// Persist resumable checkpoints at the provided path.
+    #[must_use]
+    pub fn with_checkpoint_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.checkpoint_path = Some(path.into());
+        self
+    }
+
     /// Run a fresh tool loop from an initial system + user prompt.
     pub async fn run(
         &self,
@@ -148,8 +189,50 @@ impl ToolLoop {
         tools: &[ToolDef],
         ctx: &ToolContext,
     ) -> ToolLoopOutput {
+        if let Some(path) = self.checkpoint_path.as_deref().filter(|path| path.exists()) {
+            match Checkpoint::load(path) {
+                Ok(cp) => return self.resume(cp, tools, ctx).await,
+                Err(err) => {
+                    return ToolLoopOutput {
+                        final_text: String::new(),
+                        iterations: 0,
+                        tool_calls: Vec::new(),
+                        total_usage: Usage::default(),
+                        stop_reason: StopReason::BackendError(format!(
+                            "checkpoint load {}: {err}",
+                            path.display()
+                        )),
+                        checkpoint: None,
+                    };
+                }
+            }
+        }
+
         let messages = result_msg::initial_messages(system, user);
-        self.run_inner(messages, 0, Vec::new(), tools, ctx).await
+        self.run_inner(messages, 0, Vec::new(), Usage::default(), tools, ctx, None)
+            .await
+    }
+
+    /// Run a fresh tool loop and forward streaming chunks as each backend turn arrives.
+    pub async fn run_streaming(
+        &self,
+        system: &str,
+        user: &str,
+        tools: &[ToolDef],
+        ctx: &ToolContext,
+        event_tx: mpsc::UnboundedSender<StreamChunk>,
+    ) -> ToolLoopOutput {
+        let messages = result_msg::initial_messages(system, user);
+        self.run_inner(
+            messages,
+            0,
+            Vec::new(),
+            Usage::default(),
+            tools,
+            ctx,
+            Some(event_tx),
+        )
+        .await
     }
 
     /// Resume a tool loop from a previously saved [`Checkpoint`].
@@ -159,8 +242,16 @@ impl ToolLoop {
         tools: &[ToolDef],
         ctx: &ToolContext,
     ) -> ToolLoopOutput {
-        self.run_inner(cp.messages, cp.iterations, cp.tool_calls, tools, ctx)
-            .await
+        self.run_inner(
+            cp.messages,
+            cp.iterations,
+            cp.tool_calls,
+            Usage::default(),
+            tools,
+            ctx,
+            None,
+        )
+        .await
     }
 
     /// Core loop shared by [`run`](Self::run) and [`resume`](Self::resume).
@@ -169,10 +260,13 @@ impl ToolLoop {
         mut messages: Vec<serde_json::Value>,
         mut iterations: usize,
         mut all_calls: Vec<ToolCall>,
+        mut total_usage: Usage,
         tools: &[ToolDef],
         ctx: &ToolContext,
+        event_tx: Option<mpsc::UnboundedSender<StreamChunk>>,
     ) -> ToolLoopOutput {
         let rendered_tools = self.translator.render_tools(tools);
+        let mut session = SessionState::default();
 
         loop {
             // §36.54 — iteration cap.
@@ -182,6 +276,7 @@ impl ToolLoop {
                     final_text: String::new(),
                     iterations,
                     tool_calls: all_calls,
+                    total_usage,
                     stop_reason: StopReason::MaxIterations,
                     checkpoint: Some(cp),
                 };
@@ -194,13 +289,25 @@ impl ToolLoop {
                     final_text: String::new(),
                     iterations,
                     tool_calls: all_calls,
+                    total_usage,
                     stop_reason: StopReason::Cancelled,
                     checkpoint: Some(cp),
                 };
             }
 
             // Send current conversation to the backend.
-            let response = match self.backend.send_turn(&messages, &rendered_tools).await {
+            let response = match match &event_tx {
+                Some(event_tx) => {
+                    self.backend
+                        .send_turn_streaming(&messages, &rendered_tools, &session, event_tx.clone())
+                        .await
+                }
+                None => {
+                    self.backend
+                        .send_turn(&messages, &rendered_tools, &session)
+                        .await
+                }
+            } {
                 Ok(r) => r,
                 Err(e) => {
                     let cp = Checkpoint::new(iterations, all_calls.clone(), messages);
@@ -208,11 +315,14 @@ impl ToolLoop {
                         final_text: String::new(),
                         iterations,
                         tool_calls: all_calls,
+                        total_usage,
                         stop_reason: StopReason::BackendError(e.to_string()),
                         checkpoint: Some(cp),
                     };
                 }
             };
+            merge_session_state(&mut session, self.backend.extract_session(&response));
+            total_usage.add(&response.extract_usage());
 
             // Parse tool calls from the response.
             let calls = match self.translator.parse_calls(&response) {
@@ -223,6 +333,7 @@ impl ToolLoop {
                         final_text: String::new(),
                         iterations,
                         tool_calls: all_calls,
+                        total_usage,
                         stop_reason: StopReason::BackendError(format!("parse: {e}")),
                         checkpoint: Some(cp),
                     };
@@ -231,11 +342,13 @@ impl ToolLoop {
 
             // No tool calls -> final answer.
             if calls.is_empty() {
+                self.clear_checkpoint_file();
                 let final_text = response.extract_text();
                 return ToolLoopOutput {
                     final_text,
                     iterations,
                     tool_calls: all_calls,
+                    total_usage,
                     stop_reason: StopReason::Stop,
                     checkpoint: None,
                 };
@@ -258,7 +371,56 @@ impl ToolLoop {
             prune::prune_if_needed(&mut messages, self.context_token_limit);
 
             iterations += 1;
+            self.save_checkpoint_snapshot(iterations, &all_calls, &messages);
         }
+    }
+}
+
+impl ToolLoop {
+    fn save_checkpoint_snapshot(
+        &self,
+        iterations: usize,
+        all_calls: &[ToolCall],
+        messages: &[serde_json::Value],
+    ) {
+        let Some(path) = self.checkpoint_path.as_deref() else {
+            return;
+        };
+
+        let cp = Checkpoint::new(iterations, all_calls.to_vec(), messages.to_vec());
+        if let Err(err) = cp.save(path) {
+            tracing::warn!(path = %path.display(), error = %err, "failed to persist tool loop checkpoint");
+        }
+    }
+
+    fn clear_checkpoint_file(&self) {
+        let Some(path) = self.checkpoint_path.as_deref() else {
+            return;
+        };
+
+        if let Err(err) = remove_checkpoint_file(path) {
+            tracing::warn!(path = %path.display(), error = %err, "failed to clear tool loop checkpoint");
+        }
+    }
+}
+
+fn remove_checkpoint_file(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+fn merge_session_state(current: &mut SessionState, next: SessionState) {
+    if next.session_id.is_some() {
+        current.session_id = next.session_id;
+    }
+    if next.thread_id.is_some() {
+        current.thread_id = next.thread_id;
+    }
+    if next.conversation_id.is_some() {
+        current.conversation_id = next.conversation_id;
     }
 }
 
@@ -350,6 +512,16 @@ mod tests {
                 .collect();
             RenderedResults::JsonMessages(serde_json::json!(msgs))
         }
+
+        fn render_assistant_message(
+            &self,
+            response: &BackendResponse,
+        ) -> Option<serde_json::Value> {
+            let BackendResponse::Json(ref v) = *response else {
+                return None;
+            };
+            v.get("assistant_message").cloned()
+        }
     }
 
     // ─── Mock handler ────────────────────────────────────────────────
@@ -379,6 +551,7 @@ mod tests {
             &self,
             _messages: &[serde_json::Value],
             _tools: &RenderedTools,
+            _session: &SessionState,
         ) -> Result<BackendResponse, LlmError> {
             Ok(BackendResponse::Json(
                 serde_json::json!({"message": {"content": self.text}}),
@@ -395,6 +568,7 @@ mod tests {
             &self,
             _messages: &[serde_json::Value],
             _tools: &RenderedTools,
+            _session: &SessionState,
         ) -> Result<BackendResponse, LlmError> {
             Ok(BackendResponse::Json(serde_json::json!({
                 "tool_calls": [{"id": "c1", "name": "echo", "arguments": {}}]
@@ -421,6 +595,7 @@ mod tests {
             &self,
             _messages: &[serde_json::Value],
             _tools: &RenderedTools,
+            _session: &SessionState,
         ) -> Result<BackendResponse, LlmError> {
             let n = self.call_count.fetch_add(1, Ordering::SeqCst);
             if n == 0 {
@@ -444,6 +619,7 @@ mod tests {
             &self,
             _messages: &[serde_json::Value],
             _tools: &RenderedTools,
+            _session: &SessionState,
         ) -> Result<BackendResponse, LlmError> {
             Err(LlmError::Backend("server error".into()))
         }
@@ -468,6 +644,7 @@ mod tests {
             &self,
             _messages: &[serde_json::Value],
             _tools: &RenderedTools,
+            _session: &SessionState,
         ) -> Result<BackendResponse, LlmError> {
             let n = self.call_count.fetch_add(1, Ordering::SeqCst);
             if n == 0 {
@@ -506,6 +683,7 @@ mod tests {
             &self,
             messages: &[serde_json::Value],
             _tools: &RenderedTools,
+            _session: &SessionState,
         ) -> Result<BackendResponse, LlmError> {
             self.captured.lock().push(messages.to_vec());
             let n = self.call_count.fetch_add(1, Ordering::SeqCst);
@@ -518,6 +696,105 @@ mod tests {
                     serde_json::json!({"message": {"content": "final"}}),
                 ))
             }
+        }
+    }
+
+    struct SessionTrackingBackend {
+        call_count: AtomicUsize,
+        extracted_sessions: AtomicUsize,
+    }
+
+    impl SessionTrackingBackend {
+        fn new() -> Self {
+            Self {
+                call_count: AtomicUsize::new(0),
+                extracted_sessions: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmBackend for SessionTrackingBackend {
+        async fn send_turn(
+            &self,
+            _messages: &[serde_json::Value],
+            _tools: &RenderedTools,
+            _session: &SessionState,
+        ) -> Result<BackendResponse, LlmError> {
+            let turn = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if turn == 0 {
+                Ok(BackendResponse::Json(serde_json::json!({
+                    "id": "chatcmpl-turn-1",
+                    "tool_calls": [{"id": "c1", "name": "echo", "arguments": {"x": 1}}]
+                })))
+            } else {
+                Ok(BackendResponse::Json(serde_json::json!({
+                    "id": "chatcmpl-turn-2",
+                    "message": {"content": "final answer"}
+                })))
+            }
+        }
+
+        fn extract_session(&self, _response: &BackendResponse) -> SessionState {
+            self.extracted_sessions.fetch_add(1, Ordering::SeqCst);
+            SessionState {
+                conversation_id: Some("conversation-1".to_string()),
+                ..Default::default()
+            }
+        }
+    }
+
+    /// Captures each request and emits three thinking tool-call turns before
+    /// returning a final answer.
+    struct ReasoningCaptureBackend {
+        call_count: AtomicUsize,
+        captured: parking_lot::Mutex<Vec<Vec<serde_json::Value>>>,
+    }
+
+    impl ReasoningCaptureBackend {
+        fn new() -> Self {
+            Self {
+                call_count: AtomicUsize::new(0),
+                captured: parking_lot::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmBackend for ReasoningCaptureBackend {
+        async fn send_turn(
+            &self,
+            messages: &[serde_json::Value],
+            _tools: &RenderedTools,
+            _session: &SessionState,
+        ) -> Result<BackendResponse, LlmError> {
+            self.captured.lock().push(messages.to_vec());
+
+            let turn = self.call_count.fetch_add(1, Ordering::SeqCst) + 1;
+            let response = match turn {
+                1..=3 => serde_json::json!({
+                    "assistant_message": {
+                        "role": "assistant",
+                        "content": "",
+                        "reasoning_content": format!("reasoning turn {turn}"),
+                        "tool_calls": [{
+                            "id": format!("call-{turn}"),
+                            "name": "echo",
+                            "arguments": { "turn": turn }
+                        }]
+                    },
+                    "tool_calls": [{
+                        "id": format!("call-{turn}"),
+                        "name": "echo",
+                        "arguments": { "turn": turn }
+                    }]
+                }),
+                _ => serde_json::json!({
+                    "message": { "content": "final" }
+                }),
+            };
+
+            Ok(BackendResponse::Json(response))
         }
     }
 
@@ -549,6 +826,84 @@ mod tests {
         let dispatcher = Arc::new(ToolDispatcher::new(registry, resolver));
         let translator: Arc<dyn Translator> = Arc::new(MockTranslator);
         ToolLoop::new(translator, dispatcher, backend).with_max_iterations(max_iterations)
+    }
+
+    struct SessionContinuityBackend {
+        call_count: AtomicUsize,
+        seen_sessions: parking_lot::Mutex<Vec<SessionState>>,
+    }
+
+    impl SessionContinuityBackend {
+        fn new() -> Self {
+            Self {
+                call_count: AtomicUsize::new(0),
+                seen_sessions: parking_lot::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    struct CheckpointPersistenceBackend;
+
+    #[async_trait]
+    impl LlmBackend for CheckpointPersistenceBackend {
+        async fn send_turn(
+            &self,
+            messages: &[serde_json::Value],
+            _tools: &RenderedTools,
+            _session: &SessionState,
+        ) -> Result<BackendResponse, LlmError> {
+            let resumed = messages
+                .iter()
+                .any(|message| message["role"] == "tool" && message.get("tool_call_id").is_some());
+
+            if resumed {
+                Ok(BackendResponse::Json(
+                    serde_json::json!({"message": {"content": "resumed final answer"}}),
+                ))
+            } else {
+                Ok(BackendResponse::Json(serde_json::json!({
+                    "tool_calls": [{
+                        "id": "persist-1",
+                        "name": "echo",
+                        "arguments": {"step": 1}
+                    }]
+                })))
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmBackend for SessionContinuityBackend {
+        async fn send_turn(
+            &self,
+            _messages: &[serde_json::Value],
+            _tools: &RenderedTools,
+            session: &SessionState,
+        ) -> Result<BackendResponse, LlmError> {
+            self.seen_sessions.lock().push(session.clone());
+            let turn = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if turn == 0 {
+                Ok(BackendResponse::Json(serde_json::json!({
+                    "tool_calls": [{"id": "c1", "name": "echo", "arguments": {"x": 1}}]
+                })))
+            } else {
+                Ok(BackendResponse::Json(
+                    serde_json::json!({"message": {"content": "final answer"}}),
+                ))
+            }
+        }
+
+        fn extract_session(&self, response: &BackendResponse) -> SessionState {
+            let turn = response
+                .extract_text()
+                .is_empty()
+                .then_some("session-1")
+                .map(str::to_string);
+            SessionState {
+                session_id: turn,
+                ..Default::default()
+            }
+        }
     }
 
     // ─── Tests ───────────────────────────────────────────────────────
@@ -735,6 +1090,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_extraction_runs_after_each_turn() {
+        let backend = Arc::new(SessionTrackingBackend::new());
+        let tl = make_tool_loop(backend.clone(), 25);
+        let ctx = ToolContext::testing("/tmp");
+
+        let out = tl.run("system", "user", &test_tools(), &ctx).await;
+
+        assert_eq!(out.stop_reason, StopReason::Stop);
+        assert_eq!(backend.extracted_sessions.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn session_continuity_passes_previous_state_into_next_turn() {
+        let backend = Arc::new(SessionContinuityBackend::new());
+        let tl = make_tool_loop(backend.clone(), 25);
+        let ctx = ToolContext::testing("/tmp");
+
+        let out = tl.run("system", "user", &test_tools(), &ctx).await;
+
+        assert_eq!(out.stop_reason, StopReason::Stop);
+
+        let seen_sessions = backend.seen_sessions.lock();
+        assert_eq!(seen_sessions.len(), 2);
+        assert_eq!(seen_sessions[0].session_id, None);
+        assert_eq!(seen_sessions[1].session_id.as_deref(), Some("session-1"));
+    }
+
+    #[tokio::test]
+    async fn reasoning_preservation_across_loop_turns() {
+        let capturing = Arc::new(ReasoningCaptureBackend::new());
+        let backend = capturing.clone() as Arc<dyn LlmBackend>;
+        let tl = make_tool_loop(backend, 25);
+        let ctx = ToolContext::testing("/tmp");
+
+        let out = tl.run("system", "user", &test_tools(), &ctx).await;
+
+        assert_eq!(out.stop_reason, StopReason::Stop);
+        assert_eq!(out.iterations, 3);
+        assert_eq!(out.final_text, "final");
+
+        let captured = capturing.captured.lock();
+        assert_eq!(captured.len(), 4, "backend should be called four times");
+
+        let fourth_turn_msgs = &captured[3];
+        let reasoning_values: Vec<&str> = fourth_turn_msgs
+            .iter()
+            .filter(|message| message["role"] == "assistant")
+            .filter_map(|message| message["reasoning_content"].as_str())
+            .collect();
+        assert_eq!(
+            reasoning_values,
+            vec!["reasoning turn 1", "reasoning turn 2", "reasoning turn 3"]
+        );
+    }
+
+    #[tokio::test]
     async fn resume_continues_from_checkpoint() {
         // Run a loop that hits max iterations at 3.
         let backend = Arc::new(AlwaysToolCallBackend);
@@ -756,6 +1167,42 @@ mod tests {
         assert_eq!(out2.iterations, 5);
         // 3 from the first run (in the checkpoint) + 2 new ones.
         assert_eq!(out2.tool_calls.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_persistence_survives_restart() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let checkpoint_path = dir
+            .path()
+            .join(".roko")
+            .join("state")
+            .join("tool-loop-task-1.json");
+        let ctx = ToolContext::testing(dir.path());
+
+        let first = make_tool_loop(Arc::new(CheckpointPersistenceBackend), 1)
+            .with_checkpoint_path(checkpoint_path.clone());
+        let out1 = first.run("system", "user", &test_tools(), &ctx).await;
+
+        assert_eq!(out1.stop_reason, StopReason::MaxIterations);
+        assert!(checkpoint_path.exists(), "checkpoint should be persisted");
+
+        let persisted = Checkpoint::load(&checkpoint_path).expect("load persisted checkpoint");
+        assert_eq!(persisted.iterations, 1);
+        assert_eq!(persisted.tool_calls.len(), 1);
+        assert_eq!(persisted.tool_calls[0].id, "persist-1");
+
+        let resumed = make_tool_loop(Arc::new(CheckpointPersistenceBackend), 5)
+            .with_checkpoint_path(checkpoint_path.clone());
+        let out2 = resumed.run("ignored", "ignored", &test_tools(), &ctx).await;
+
+        assert_eq!(out2.stop_reason, StopReason::Stop);
+        assert_eq!(out2.iterations, 1);
+        assert_eq!(out2.tool_calls.len(), 1);
+        assert_eq!(out2.final_text, "resumed final answer");
+        assert!(
+            !checkpoint_path.exists(),
+            "successful completion should clear the persisted checkpoint"
+        );
     }
 
     #[tokio::test]

@@ -23,24 +23,42 @@
 pub mod anomaly;
 pub mod bandits;
 pub mod baseline;
+/// Budget tracking and enforcement guardrails for routing decisions.
+pub mod budget;
 pub mod cascade_router;
 pub mod cfactor;
+/// Learned intervention policy for conductor retries and aborts.
+pub mod conductor;
 pub mod context_pack_cache;
+pub mod cost_table;
 pub mod costs_db;
 pub mod costs_log;
+pub mod drift;
 pub mod efficiency;
 pub mod episode_logger;
+/// Cheap pre-processing of noisy gate failures into retry-ready diagnoses.
+pub mod error_enrichment;
+/// Event subscriber that fans runtime events into learning subsystems.
+pub mod event_subscriber;
+/// Unified learning events emitted by routing, evaluation, and runtime feedback.
+pub mod events;
 pub mod hdc_clustering;
 /// Rolling latency EMAs and percentiles for routing feedback.
 pub mod latency;
+pub mod model_experiment;
 pub mod model_router;
 pub mod pareto;
 pub mod pattern_discovery;
 pub mod playbook;
 pub mod playbook_rules;
+pub mod prediction;
 pub mod prompt_experiment;
 pub mod provider_health;
+pub mod quality_judge;
 pub mod regression;
+/// Append-only routing-decision audit log for explainability and dashboards.
+pub mod routing_log;
 pub mod runtime_feedback;
+pub mod section_effect;
 pub mod skill_library;
 pub mod task_metric;

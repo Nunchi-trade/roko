@@ -1,0 +1,7 @@
+{
+  "error": {
+    "message": "Rate limit exceeded for the current account tier.",
+    "type": "request_limit",
+    "code": "1302"
+  }
+}

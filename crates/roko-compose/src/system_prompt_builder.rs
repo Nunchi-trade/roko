@@ -13,7 +13,7 @@
 //! | 6. Anti-patterns | What NOT to do | Session (semi-stable) |
 //! | 7. Affect guidance | Emotional tone and focus | Dynamic |
 //!
-//! The builder emits sections in this exact order, with optional cache
+//! The builder emits sections in cache-layer order, with optional cache
 //! alignment markers between stability tiers. Layers 1 + 2 + 5 form the
 //! prefix-cacheable "system" tier; layers 3 + 6 form the "session" tier;
 //! layer 4 is per-task; layer 7 is dynamic tone/focus guidance.
@@ -29,6 +29,9 @@
 
 use crate::PadState;
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
+use crate::token_counter::TokenCounter;
+use roko_core::tool::ToolDef;
+use roko_learn::section_effect::{PriorityChange, SectionEffectivenessRegistry};
 
 /// A composable system prompt built from 7 layers.
 ///
@@ -61,6 +64,38 @@ pub struct SystemPromptBuilder {
     affect_state: Option<PadState>,
     /// Whether to insert cache alignment markers between tiers.
     cache_markers: bool,
+    /// Optional token budget enforced by [`build_with_counter`](Self::build_with_counter).
+    token_budget: Option<usize>,
+    /// Learned section-effectiveness data scoped to one role.
+    section_effectiveness: Option<SectionEffectivenessConfig>,
+}
+
+#[derive(Clone)]
+struct SectionEffectivenessConfig {
+    role: String,
+    registry: SectionEffectivenessRegistry,
+}
+
+/// Normalize prompt text so logically-identical content yields identical bytes.
+#[must_use]
+pub fn normalize_for_caching(content: &str) -> String {
+    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
+    normalized
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .replace('\t', "    ")
+}
+
+/// Canonicalize tool definition order before rendering prompt/tool payloads.
+pub fn canonical_tool_order(tools: &mut [ToolDef]) {
+    tools.sort_by(|a, b| a.name.cmp(&b.name));
+}
+
+fn normalize_owned(content: impl Into<String>) -> String {
+    let content = content.into();
+    normalize_for_caching(&content)
 }
 
 impl SystemPromptBuilder {
@@ -71,7 +106,7 @@ impl SystemPromptBuilder {
     #[must_use]
     pub fn new(role_identity: impl Into<String>) -> Self {
         Self {
-            role_identity: role_identity.into(),
+            role_identity: normalize_owned(role_identity),
             conventions: None,
             domain: None,
             context: None,
@@ -80,55 +115,57 @@ impl SystemPromptBuilder {
             anti_patterns: Vec::new(),
             affect_state: None,
             cache_markers: false,
+            token_budget: None,
+            section_effectiveness: None,
         }
     }
 
     /// Set layer 2: project conventions (coding standards, naming, etc.).
     #[must_use]
     pub fn with_conventions(mut self, conventions: impl Into<String>) -> Self {
-        self.conventions = Some(conventions.into());
+        self.conventions = Some(normalize_owned(conventions));
         self
     }
 
     /// Set layer 3: domain context (project-specific knowledge).
     #[must_use]
     pub fn with_domain(mut self, domain: impl Into<String>) -> Self {
-        self.domain = Some(domain.into());
+        self.domain = Some(normalize_owned(domain));
         self
     }
 
     /// Set layer 3b: relevant assembled context for the current task.
     #[must_use]
     pub fn with_context(mut self, context: impl Into<String>) -> Self {
-        self.context = Some(context.into());
+        self.context = Some(normalize_owned(context));
         self
     }
 
     /// Set layer 4: task context (current task details).
     #[must_use]
     pub fn with_task(mut self, task: impl Into<String>) -> Self {
-        self.task = Some(task.into());
+        self.task = Some(normalize_owned(task));
         self
     }
 
     /// Set layer 5: tool instructions (available tools and usage guidance).
     #[must_use]
     pub fn with_tools(mut self, tools: impl Into<String>) -> Self {
-        self.tools = Some(tools.into());
+        self.tools = Some(normalize_owned(tools));
         self
     }
 
     /// Set layer 6: anti-patterns (things the agent must NOT do).
     #[must_use]
     pub fn with_anti_patterns(mut self, patterns: Vec<String>) -> Self {
-        self.anti_patterns = patterns;
+        self.anti_patterns = patterns.into_iter().map(normalize_owned).collect();
         self
     }
 
     /// Add a single anti-pattern to layer 6.
     #[must_use]
     pub fn add_anti_pattern(mut self, pattern: impl Into<String>) -> Self {
-        self.anti_patterns.push(pattern.into());
+        self.anti_patterns.push(normalize_owned(pattern));
         self
     }
 
@@ -150,81 +187,103 @@ impl SystemPromptBuilder {
         self
     }
 
+    /// Enforce a token budget when building via [`build_with_counter`](Self::build_with_counter).
+    #[must_use]
+    pub const fn with_token_budget(mut self, token_budget: usize) -> Self {
+        self.token_budget = Some(token_budget);
+        self
+    }
+
+    /// Apply learned section-effectiveness adjustments for `role`.
+    #[must_use]
+    pub fn with_section_effectiveness(
+        mut self,
+        role: impl Into<String>,
+        registry: &SectionEffectivenessRegistry,
+    ) -> Self {
+        self.section_effectiveness = Some(SectionEffectivenessConfig {
+            role: role.into(),
+            registry: registry.clone(),
+        });
+        self
+    }
+
     /// Build the final system prompt as a single string.
     ///
-    /// Layers are emitted in order 1-7, with cache markers between
+    /// Sections are emitted in cache-layer order, with markers between
     /// stability tiers if enabled. Empty layers are skipped.
     #[must_use]
     pub fn build(&self) -> String {
-        let mut parts: Vec<String> = Vec::with_capacity(10);
+        normalize_for_caching(&assemble_sections(
+            self.build_sections(),
+            self.cache_markers,
+        ))
+    }
 
-        // ── Layer 1: Role Identity (System tier) ──
-        parts.push(self.role_identity.clone());
+    /// Build the final system prompt under the configured token budget.
+    ///
+    /// If no budget was configured with [`with_token_budget`](Self::with_token_budget),
+    /// this falls back to [`build`](Self::build).
+    #[must_use]
+    pub fn build_with_counter(&self, counter: &TokenCounter) -> String {
+        let Some(token_budget) = self.token_budget else {
+            return self.build();
+        };
 
-        // ── Layer 2: Conventions (System tier) ──
-        if let Some(ref conv) = self.conventions {
-            if !conv.is_empty() {
-                parts.push(format!("## Project Conventions\n\n{conv}"));
+        let rendered_sections = self
+            .build_sections()
+            .into_iter()
+            .map(|section| RenderedSection {
+                rendered: render_section(&section),
+                section,
+            })
+            .collect::<Vec<_>>();
+
+        let mut kept = vec![None; rendered_sections.len()];
+        let mut selection_order = (0..rendered_sections.len()).collect::<Vec<_>>();
+        selection_order.sort_by(|&a, &b| {
+            rendered_sections[b]
+                .section
+                .priority
+                .cmp(&rendered_sections[a].section.priority)
+                .then_with(|| {
+                    rendered_sections[a]
+                        .section
+                        .cache_layer
+                        .cmp(&rendered_sections[b].section.cache_layer)
+                })
+                .then_with(|| a.cmp(&b))
+        });
+
+        for index in selection_order {
+            let rendered = &rendered_sections[index].rendered;
+            if candidate_fits(
+                &rendered_sections,
+                &kept,
+                index,
+                rendered,
+                self.cache_markers,
+                token_budget,
+                counter,
+            ) {
+                kept[index] = Some(rendered.clone());
+                continue;
+            }
+
+            if rendered_sections[index].section.priority == SectionPriority::Critical {
+                kept[index] = truncate_to_fit(
+                    &rendered_sections,
+                    &kept,
+                    index,
+                    rendered,
+                    self.cache_markers,
+                    token_budget,
+                    counter,
+                );
             }
         }
 
-        // ── Layer 5: Tool Instructions (System tier — grouped with 1+2 for cache) ──
-        if let Some(ref tools) = self.tools {
-            if !tools.is_empty() {
-                parts.push(format!("## Tool Instructions\n\n{tools}"));
-            }
-        }
-
-        // Cache break: end of System tier.
-        if self.cache_markers {
-            parts.push("<!-- cache:system -->".to_string());
-        }
-
-        // ── Layer 3: Domain Context (Session tier) ──
-        if let Some(ref domain) = self.domain {
-            if !domain.is_empty() {
-                parts.push(format!("## Domain Context\n\n{domain}"));
-            }
-        }
-
-        // ── Layer 3b: Relevant Context (Session tier) ──
-        if let Some(ref context) = self.context {
-            if !context.is_empty() {
-                parts.push(format!("## Relevant Context\n\n{context}"));
-            }
-        }
-
-        // ── Layer 6: Anti-Patterns (Session tier — grouped with 3) ──
-        if !self.anti_patterns.is_empty() {
-            let mut anti = String::from("## Anti-Patterns\n\nDo NOT:\n");
-            for pattern in &self.anti_patterns {
-                anti.push_str("- ");
-                anti.push_str(pattern);
-                anti.push('\n');
-            }
-            parts.push(anti);
-        }
-
-        // ── Layer 7: Affect Guidance (Dynamic tier) ──
-        if let Some(affect) = self.affect_guidance() {
-            parts.push(format!("## Affect Guidance\n\n{affect}"));
-        }
-
-        // Cache break: end of Session tier.
-        if self.cache_markers
-            && (self.domain.is_some() || self.context.is_some() || !self.anti_patterns.is_empty())
-        {
-            parts.push("<!-- cache:session -->".to_string());
-        }
-
-        // ── Layer 4: Task Context (Task tier — most volatile) ──
-        if let Some(ref task) = self.task {
-            if !task.is_empty() {
-                parts.push(format!("## Current Task\n\n{task}"));
-            }
-        }
-
-        parts.join("\n\n")
+        assemble_selected_sections(&rendered_sections, &kept, self.cache_markers)
     }
 
     /// Build the system prompt as a vector of [`PromptSection`]s.
@@ -240,8 +299,8 @@ impl SystemPromptBuilder {
         // Layer 1: Role Identity
         sections.push(
             PromptSection::new("role_identity", &self.role_identity)
-                .with_priority(SectionPriority::Critical)
-                .with_cache_layer(CacheLayer::System)
+                .with_priority(self.effective_priority("role_identity", SectionPriority::Critical))
+                .with_cache_layer(CacheLayer::Role)
                 .with_placement(Placement::Start),
         );
 
@@ -250,8 +309,10 @@ impl SystemPromptBuilder {
             if !conv.is_empty() {
                 sections.push(
                     PromptSection::new("conventions", conv)
-                        .with_priority(SectionPriority::High)
-                        .with_cache_layer(CacheLayer::System)
+                        .with_priority(
+                            self.effective_priority("conventions", SectionPriority::High),
+                        )
+                        .with_cache_layer(CacheLayer::Role)
                         .with_placement(Placement::Start),
                 );
             }
@@ -262,8 +323,10 @@ impl SystemPromptBuilder {
             if !tools.is_empty() {
                 sections.push(
                     PromptSection::new("tool_instructions", tools)
-                        .with_priority(SectionPriority::Normal)
-                        .with_cache_layer(CacheLayer::System)
+                        .with_priority(
+                            self.effective_priority("tool_instructions", SectionPriority::Normal),
+                        )
+                        .with_cache_layer(CacheLayer::Role)
                         .with_placement(Placement::Middle),
                 );
             }
@@ -274,8 +337,10 @@ impl SystemPromptBuilder {
             if !domain.is_empty() {
                 sections.push(
                     PromptSection::new("domain_context", domain)
-                        .with_priority(SectionPriority::High)
-                        .with_cache_layer(CacheLayer::Session)
+                        .with_priority(
+                            self.effective_priority("domain_context", SectionPriority::High),
+                        )
+                        .with_cache_layer(CacheLayer::Workspace)
                         .with_placement(Placement::Middle),
                 );
             }
@@ -286,8 +351,10 @@ impl SystemPromptBuilder {
             if !context.is_empty() {
                 sections.push(
                     PromptSection::new("context_layer", format!("## Relevant Context\n{context}"))
-                        .with_priority(SectionPriority::High)
-                        .with_cache_layer(CacheLayer::Session)
+                        .with_priority(
+                            self.effective_priority("context_layer", SectionPriority::High),
+                        )
+                        .with_cache_layer(CacheLayer::Workspace)
                         .with_placement(Placement::Middle),
                 );
             }
@@ -303,8 +370,8 @@ impl SystemPromptBuilder {
                 .join("\n");
             sections.push(
                 PromptSection::new("anti_patterns", format!("Do NOT:\n{anti_text}"))
-                    .with_priority(SectionPriority::High)
-                    .with_cache_layer(CacheLayer::Session)
+                    .with_priority(self.effective_priority("anti_patterns", SectionPriority::High))
+                    .with_cache_layer(CacheLayer::Workspace)
                     .with_placement(Placement::End),
             );
         }
@@ -313,8 +380,10 @@ impl SystemPromptBuilder {
         if let Some(affect) = self.affect_guidance() {
             sections.push(
                 PromptSection::new("affect_guidance", affect)
-                    .with_priority(SectionPriority::Normal)
-                    .with_cache_layer(CacheLayer::Dynamic)
+                    .with_priority(
+                        self.effective_priority("affect_guidance", SectionPriority::Normal),
+                    )
+                    .with_cache_layer(CacheLayer::Volatile)
                     .with_placement(Placement::End),
             );
         }
@@ -324,13 +393,16 @@ impl SystemPromptBuilder {
             if !task.is_empty() {
                 sections.push(
                     PromptSection::new("task_context", task)
-                        .with_priority(SectionPriority::Critical)
-                        .with_cache_layer(CacheLayer::Task)
+                        .with_priority(
+                            self.effective_priority("task_context", SectionPriority::Critical),
+                        )
+                        .with_cache_layer(CacheLayer::Plan)
                         .with_placement(Placement::End),
                 );
             }
         }
 
+        sort_sections(&mut sections);
         sections
     }
 
@@ -372,11 +444,202 @@ impl SystemPromptBuilder {
             None
         }
     }
+
+    fn effective_priority(&self, section: &str, base_priority: SectionPriority) -> SectionPriority {
+        let Some(config) = &self.section_effectiveness else {
+            return base_priority;
+        };
+        section_priority_from_u8(adjusted_priority(
+            base_priority as u8,
+            section,
+            &config.role,
+            &config.registry,
+        ))
+    }
+}
+
+fn adjusted_priority(
+    base_priority: u8,
+    section: &str,
+    role: &str,
+    registry: &SectionEffectivenessRegistry,
+) -> u8 {
+    match registry.recommend_priority_change(section, role) {
+        PriorityChange::Increase => base_priority.saturating_add(1),
+        PriorityChange::Decrease => base_priority.saturating_sub(1),
+        PriorityChange::NoChange | PriorityChange::InsufficientData => base_priority,
+    }
+}
+
+const fn section_priority_from_u8(priority: u8) -> SectionPriority {
+    match priority {
+        0 => SectionPriority::Low,
+        1 => SectionPriority::Normal,
+        2 => SectionPriority::High,
+        _ => SectionPriority::Critical,
+    }
+}
+
+#[derive(Clone)]
+struct RenderedSection {
+    section: PromptSection,
+    rendered: String,
+}
+
+fn sort_sections(sections: &mut [PromptSection]) {
+    sections.sort_by(|a, b| {
+        a.cache_layer
+            .cmp(&b.cache_layer)
+            .then_with(|| b.priority.cmp(&a.priority))
+    });
+}
+
+fn assemble_sections(mut sections: Vec<PromptSection>, cache_markers: bool) -> String {
+    sort_sections(&mut sections);
+
+    let rendered = sections
+        .into_iter()
+        .map(|section| RenderedSection {
+            rendered: render_section(&section),
+            section,
+        })
+        .collect::<Vec<_>>();
+    let kept = rendered
+        .iter()
+        .map(|section| Some(section.rendered.clone()))
+        .collect::<Vec<_>>();
+    assemble_selected_sections(&rendered, &kept, cache_markers)
+}
+
+fn render_section(section: &PromptSection) -> String {
+    match section.name.as_str() {
+        "role_identity" => section.content.clone(),
+        "conventions" => format!("## Project Conventions\n\n{}", section.content),
+        "tool_instructions" => format!("## Tool Instructions\n\n{}", section.content),
+        "domain_context" => format!("## Domain Context\n\n{}", section.content),
+        "anti_patterns" => format!("## Anti-Patterns\n\n{}", section.content),
+        "affect_guidance" => format!("## Affect Guidance\n\n{}", section.content),
+        "task_context" => format!("## Current Task\n\n{}", section.content),
+        _ => section.content.clone(),
+    }
+}
+
+fn assemble_selected_sections(
+    sections: &[RenderedSection],
+    kept: &[Option<String>],
+    cache_markers: bool,
+) -> String {
+    let selected_indices = kept
+        .iter()
+        .enumerate()
+        .filter_map(|(index, rendered)| rendered.as_ref().map(|_| index))
+        .collect::<Vec<_>>();
+
+    let mut parts = Vec::with_capacity(selected_indices.len().saturating_mul(2));
+
+    for (position, index) in selected_indices.iter().copied().enumerate() {
+        if let Some(rendered) = &kept[index] {
+            parts.push(rendered.clone());
+        }
+
+        if !cache_markers {
+            continue;
+        }
+
+        let current = sections[index].section.cache_layer;
+        let next = selected_indices
+            .get(position + 1)
+            .map(|next_index| sections[*next_index].section.cache_layer);
+        if next != Some(current) {
+            if let Some(marker) = cache_marker(current) {
+                parts.push(marker.to_string());
+            }
+        }
+    }
+
+    normalize_for_caching(&parts.join("\n\n"))
+}
+
+fn candidate_fits(
+    sections: &[RenderedSection],
+    kept: &[Option<String>],
+    index: usize,
+    candidate: &str,
+    cache_markers: bool,
+    token_budget: usize,
+    counter: &TokenCounter,
+) -> bool {
+    let mut next = kept.to_vec();
+    next[index] = Some(candidate.to_string());
+    counter.count(&assemble_selected_sections(sections, &next, cache_markers)) <= token_budget
+}
+
+fn truncate_to_fit(
+    sections: &[RenderedSection],
+    kept: &[Option<String>],
+    index: usize,
+    rendered: &str,
+    cache_markers: bool,
+    token_budget: usize,
+    counter: &TokenCounter,
+) -> Option<String> {
+    let mut boundaries = rendered
+        .char_indices()
+        .map(|(boundary, _)| boundary)
+        .collect::<Vec<_>>();
+    boundaries.push(rendered.len());
+
+    let mut low = 0usize;
+    let mut high = boundaries.len();
+    let mut best = None;
+
+    while low < high {
+        let mid = (low + high) / 2;
+        let candidate = &rendered[..boundaries[mid]];
+
+        if !candidate.is_empty()
+            && candidate_fits(
+                sections,
+                kept,
+                index,
+                candidate,
+                cache_markers,
+                token_budget,
+                counter,
+            )
+        {
+            best = Some(candidate.to_string());
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+
+    best
+}
+
+const fn cache_marker(layer: CacheLayer) -> Option<&'static str> {
+    match layer {
+        CacheLayer::Role => Some("<!-- cache:system -->"),
+        CacheLayer::Workspace => Some("<!-- cache:session -->"),
+        CacheLayer::Plan | CacheLayer::Volatile => None,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roko_core::tool::{ToolCategory, ToolPermission};
+    use roko_learn::section_effect::SectionEffectivenessRegistry;
+
+    fn test_tool(name: &str) -> ToolDef {
+        ToolDef::new(
+            name,
+            format!("{name} description"),
+            ToolCategory::Read,
+            ToolPermission::read_only(),
+        )
+    }
 
     #[test]
     fn build_with_all_layers() {
@@ -429,20 +692,17 @@ mod tests {
         let pos_domain = prompt.find("LAYER3_DOMAIN").unwrap();
         let pos_context = prompt.find("LAYER3B_CONTEXT").unwrap();
         let pos_anti = prompt.find("LAYER6_ANTI").unwrap();
-        let pos_affect = prompt.find("time pressure").unwrap();
         let pos_task = prompt.find("LAYER4_TASK").unwrap();
+        let pos_affect = prompt.find("time pressure").unwrap();
 
-        // Order: role(1) -> conv(2) -> tools(5) -> domain(3) -> context(3b) -> anti(6) -> affect(7) -> task(4)
+        // Cache order: role -> workspace -> plan -> volatile.
         assert!(pos_role < pos_conv, "role before conventions");
         assert!(pos_conv < pos_tools, "conventions before tools");
         assert!(pos_tools < pos_domain, "tools before domain");
         assert!(pos_domain < pos_context, "domain before context");
         assert!(pos_context < pos_anti, "context before anti-patterns");
-        assert!(
-            pos_anti < pos_affect,
-            "anti-patterns before affect guidance"
-        );
-        assert!(pos_affect < pos_task, "affect guidance before task");
+        assert!(pos_anti < pos_task, "workspace sections before task");
+        assert!(pos_task < pos_affect, "task before affect guidance");
     }
 
     #[test]
@@ -514,41 +774,41 @@ mod tests {
         // Layer 1: role_identity
         assert_eq!(sections[0].name, "role_identity");
         assert_eq!(sections[0].priority, SectionPriority::Critical);
-        assert_eq!(sections[0].cache_layer, CacheLayer::System);
+        assert_eq!(sections[0].cache_layer, CacheLayer::Role);
         assert_eq!(sections[0].placement, Placement::Start);
 
         // Layer 2: conventions
         assert_eq!(sections[1].name, "conventions");
         assert_eq!(sections[1].priority, SectionPriority::High);
-        assert_eq!(sections[1].cache_layer, CacheLayer::System);
+        assert_eq!(sections[1].cache_layer, CacheLayer::Role);
 
         // Layer 5: tool_instructions (before domain in output order)
         assert_eq!(sections[2].name, "tool_instructions");
-        assert_eq!(sections[2].cache_layer, CacheLayer::System);
+        assert_eq!(sections[2].cache_layer, CacheLayer::Role);
 
         // Layer 3: domain_context
         assert_eq!(sections[3].name, "domain_context");
-        assert_eq!(sections[3].cache_layer, CacheLayer::Session);
+        assert_eq!(sections[3].cache_layer, CacheLayer::Workspace);
 
         // Layer 3b: context_layer
         assert_eq!(sections[4].name, "context_layer");
-        assert_eq!(sections[4].cache_layer, CacheLayer::Session);
+        assert_eq!(sections[4].cache_layer, CacheLayer::Workspace);
 
         // Layer 6: anti_patterns
         assert_eq!(sections[5].name, "anti_patterns");
-        assert_eq!(sections[5].cache_layer, CacheLayer::Session);
+        assert_eq!(sections[5].cache_layer, CacheLayer::Workspace);
         assert_eq!(sections[5].placement, Placement::End);
 
-        // Layer 7: affect_guidance
-        assert_eq!(sections[6].name, "affect_guidance");
-        assert_eq!(sections[6].priority, SectionPriority::Normal);
-        assert_eq!(sections[6].cache_layer, CacheLayer::Dynamic);
+        // Layer 4: task_context
+        assert_eq!(sections[6].name, "task_context");
+        assert_eq!(sections[6].priority, SectionPriority::Critical);
+        assert_eq!(sections[6].cache_layer, CacheLayer::Plan);
         assert_eq!(sections[6].placement, Placement::End);
 
-        // Layer 4: task_context
-        assert_eq!(sections[7].name, "task_context");
-        assert_eq!(sections[7].priority, SectionPriority::Critical);
-        assert_eq!(sections[7].cache_layer, CacheLayer::Task);
+        // Layer 7: affect_guidance
+        assert_eq!(sections[7].name, "affect_guidance");
+        assert_eq!(sections[7].priority, SectionPriority::Normal);
+        assert_eq!(sections[7].cache_layer, CacheLayer::Volatile);
         assert_eq!(sections[7].placement, Placement::End);
     }
 
@@ -721,5 +981,224 @@ mod tests {
         assert!(prompt.contains("<!-- cache:system -->"));
         // No session marker because domain and anti_patterns are empty.
         assert!(!prompt.contains("<!-- cache:session -->"));
+    }
+
+    #[test]
+    fn section_cache_order_keeps_stable_sections_before_task_content() {
+        let sections = SystemPromptBuilder::new("Role")
+            .with_conventions("Conv")
+            .with_domain("Domain")
+            .with_task("Task")
+            .with_tools("Tools")
+            .with_affect_state(Some(PadState::new(0.0, 0.8, 0.0)))
+            .build_sections();
+
+        let ordered: Vec<_> = sections
+            .iter()
+            .map(|section| section.name.as_str())
+            .collect();
+        assert_eq!(
+            ordered,
+            vec![
+                "role_identity",
+                "conventions",
+                "tool_instructions",
+                "domain_context",
+                "task_context",
+                "affect_guidance",
+            ]
+        );
+
+        let prompt = SystemPromptBuilder::new("Role")
+            .with_conventions("Conv")
+            .with_domain("Domain")
+            .with_task("Task")
+            .with_tools("Tools")
+            .with_affect_state(Some(PadState::new(0.0, 0.8, 0.0)))
+            .build();
+
+        assert!(prompt.find("Role").unwrap() < prompt.find("Task").unwrap());
+        assert!(prompt.find("Domain").unwrap() < prompt.find("Task").unwrap());
+        assert!(prompt.find("Task").unwrap() < prompt.find("time pressure").unwrap());
+    }
+
+    #[test]
+    fn section_priority_adjustment_increases_positive_lift_sections() {
+        let mut registry = SectionEffectivenessRegistry::new();
+        for _ in 0..24 {
+            registry.record_outcome("conventions", "Implementer", true, true);
+        }
+        for _ in 0..6 {
+            registry.record_outcome("conventions", "Implementer", true, false);
+        }
+        for _ in 0..2 {
+            registry.record_outcome("conventions", "Implementer", false, true);
+        }
+        for _ in 0..8 {
+            registry.record_outcome("conventions", "Implementer", false, false);
+        }
+
+        let sections = SystemPromptBuilder::new("Role")
+            .with_conventions("Use snake_case")
+            .with_section_effectiveness("Implementer", &registry)
+            .build_sections();
+
+        let conventions = sections
+            .iter()
+            .find(|section| section.name == "conventions");
+        assert_eq!(
+            conventions.map(|section| section.priority),
+            Some(SectionPriority::Critical)
+        );
+    }
+
+    #[test]
+    fn section_priority_adjustment_decreases_negative_lift_sections() {
+        let mut registry = SectionEffectivenessRegistry::new();
+        for _ in 0..5 {
+            registry.record_outcome("anti_patterns", "Implementer", true, true);
+        }
+        for _ in 0..20 {
+            registry.record_outcome("anti_patterns", "Implementer", true, false);
+        }
+        for _ in 0..8 {
+            registry.record_outcome("anti_patterns", "Implementer", false, true);
+        }
+        for _ in 0..2 {
+            registry.record_outcome("anti_patterns", "Implementer", false, false);
+        }
+
+        let sections = SystemPromptBuilder::new("Role")
+            .add_anti_pattern("No unwrap()")
+            .with_section_effectiveness("Implementer", &registry)
+            .build_sections();
+
+        let anti_patterns = sections
+            .iter()
+            .find(|section| section.name == "anti_patterns");
+        assert_eq!(
+            anti_patterns.map(|section| section.priority),
+            Some(SectionPriority::Normal)
+        );
+    }
+
+    #[test]
+    fn section_priority_adjustment_ignores_insufficient_data() {
+        let mut registry = SectionEffectivenessRegistry::new();
+        for _ in 0..5 {
+            registry.record_outcome("tool_instructions", "Implementer", true, true);
+            registry.record_outcome("tool_instructions", "Implementer", false, false);
+        }
+
+        let sections = SystemPromptBuilder::new("Role")
+            .with_tools("Read, Edit, Bash")
+            .with_section_effectiveness("Implementer", &registry)
+            .build_sections();
+
+        let tools = sections
+            .iter()
+            .find(|section| section.name == "tool_instructions");
+        assert_eq!(
+            tools.map(|section| section.priority),
+            Some(SectionPriority::Normal)
+        );
+    }
+
+    #[test]
+    fn prompt_normalization_whitespace_variants_produce_identical_output() {
+        let prompt_a = SystemPromptBuilder::new("Role\tIdentity  \r\n")
+            .with_conventions("Use snake_case.\t\r\nKeep changes minimal.   ")
+            .with_task("Implement cache normalization.\t")
+            .build();
+        let prompt_b = SystemPromptBuilder::new("Role    Identity\n")
+            .with_conventions("Use snake_case.    \nKeep changes minimal.")
+            .with_task("Implement cache normalization.")
+            .build();
+
+        assert_eq!(prompt_a, prompt_b);
+        assert!(!prompt_a.contains('\r'));
+        assert!(!prompt_a.contains('\t'));
+    }
+
+    #[test]
+    fn prompt_normalization_canonical_tool_order_produces_identical_output() {
+        let mut tools_a = vec![
+            test_tool("write_file"),
+            test_tool("bash"),
+            test_tool("read_file"),
+        ];
+        let mut tools_b = vec![
+            test_tool("read_file"),
+            test_tool("write_file"),
+            test_tool("bash"),
+        ];
+        canonical_tool_order(&mut tools_a);
+        canonical_tool_order(&mut tools_b);
+
+        let tools_a = tools_a
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let tools_b = tools_b
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let prompt_a = SystemPromptBuilder::new("Role")
+            .with_tools(format!("Available tools:\n{tools_a}\t"))
+            .build();
+        let prompt_b = SystemPromptBuilder::new("Role")
+            .with_tools(format!("Available tools:\r\n{tools_b}"))
+            .build();
+
+        assert_eq!(prompt_a, prompt_b);
+        assert!(prompt_a.contains("bash, read_file, write_file"));
+    }
+
+    #[test]
+    fn budget_enforcement_never_exceeds_token_budget() {
+        let counter = TokenCounter::Heuristic {
+            chars_per_token: 1.0,
+        };
+        let builder = SystemPromptBuilder::new("ROLE")
+            .with_conventions("HIGH")
+            .with_tools("normal tools that should be dropped")
+            .with_task("critical task")
+            .with_token_budget(70);
+
+        let prompt = builder.build_with_counter(&counter);
+
+        assert!(
+            counter.count(&prompt) <= 70,
+            "prompt exceeded budget: {} > 70",
+            counter.count(&prompt)
+        );
+        assert!(prompt.contains("ROLE"));
+        assert!(prompt.contains("HIGH"));
+        assert!(prompt.contains("critical task"));
+        assert!(!prompt.contains("normal tools"));
+    }
+
+    #[test]
+    fn budget_enforcement_truncates_critical_sections_to_fit() {
+        let counter = TokenCounter::Heuristic {
+            chars_per_token: 1.0,
+        };
+        let builder = SystemPromptBuilder::new("ROLE")
+            .with_task("task details that are too long for the remaining budget")
+            .with_token_budget(24);
+
+        let prompt = builder.build_with_counter(&counter);
+
+        assert!(
+            counter.count(&prompt) <= 24,
+            "prompt exceeded budget: {} > 24",
+            counter.count(&prompt)
+        );
+        assert!(prompt.contains("ROLE"));
+        assert!(prompt.contains("## Current Task"));
+        assert!(!prompt.contains("remaining budget"));
     }
 }

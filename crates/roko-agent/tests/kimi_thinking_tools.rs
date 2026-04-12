@@ -5,7 +5,9 @@ use async_trait::async_trait;
 use roko_agent::dispatcher::ToolDispatcher;
 use roko_agent::http::{HttpPostError, HttpPoster};
 use roko_agent::tool_loop::{LlmBackend, LlmError, StopReason, ToolLoop};
-use roko_agent::translate::{BackendResponse, OpenAiTranslator, RenderedTools, Translator};
+use roko_agent::translate::{
+    BackendResponse, OpenAiTranslator, RenderedTools, SessionState, Translator,
+};
 use roko_core::tool::{ToolContext, ToolDef};
 use roko_std::tool::builtin::read_file;
 use roko_std::tool::handlers::handler_for;
@@ -103,6 +105,7 @@ impl LlmBackend for KimiHttpBackend {
         &self,
         messages: &[Value],
         tools: &RenderedTools,
+        _session: &SessionState,
     ) -> Result<BackendResponse, LlmError> {
         let RenderedTools::JsonArray(tools) = tools else {
             return Err(LlmError::Backend("expected json tool array".into()));

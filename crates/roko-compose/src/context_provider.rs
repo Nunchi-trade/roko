@@ -273,9 +273,9 @@ impl ResolvedContext {
     pub fn into_prompt_sections(mut self) -> Vec<PromptSection> {
         // Sort: cache layer ascending (stable layers first), then placement, then priority desc
         self.sections.sort_by(|a, b| {
-            let ca = a.section.cache_layer as u8;
-            let cb = b.section.cache_layer as u8;
-            ca.cmp(&cb)
+            a.section
+                .cache_layer
+                .cmp(&b.section.cache_layer)
                 .then(placement_ord(a.section.placement).cmp(&placement_ord(b.section.placement)))
                 .then((b.section.priority as u8).cmp(&(a.section.priority as u8)))
         });
@@ -325,18 +325,9 @@ fn apply_attention_curve_placements(sections: &mut [ContextSection]) {
 fn attention_rank_cmp(a: &ContextSection, b: &ContextSection) -> std::cmp::Ordering {
     (b.section.priority as u8)
         .cmp(&(a.section.priority as u8))
-        .then(cache_layer_rank(b.section.cache_layer).cmp(&cache_layer_rank(a.section.cache_layer)))
+        .then(b.section.cache_layer.cmp(&a.section.cache_layer))
         .then(a.estimated_tokens().cmp(&b.estimated_tokens()))
         .then_with(|| a.section.name.cmp(&b.section.name))
-}
-
-const fn cache_layer_rank(layer: CacheLayer) -> u8 {
-    match layer {
-        CacheLayer::System => 0,
-        CacheLayer::Session => 1,
-        CacheLayer::Task => 2,
-        CacheLayer::Dynamic => 3,
-    }
 }
 
 // ─── Context provider config ───────────────────────────────────────────────
@@ -734,7 +725,7 @@ impl ContextProvider {
             sections.push(ContextSection {
                 section: PromptSection::new(&label, &formatted)
                     .with_priority(SectionPriority::High)
-                    .with_cache_layer(CacheLayer::Task)
+                    .with_cache_layer(CacheLayer::Plan)
                     .with_placement(Placement::Middle),
                 source: ContextSource::InlineFile {
                     path: rf.path.clone(),
@@ -763,7 +754,7 @@ impl ContextProvider {
                 sections.push(ContextSection {
                     section: PromptSection::new("symbols", &content)
                         .with_priority(SectionPriority::High)
-                        .with_cache_layer(CacheLayer::Task)
+                        .with_cache_layer(CacheLayer::Plan)
                         .with_placement(Placement::Middle),
                     source: ContextSource::SymbolSignature {
                         symbol: task.symbols.join(", "),
@@ -789,7 +780,7 @@ fn add_anti_patterns(sections: &mut Vec<ContextSection>, task: &TaskInput) {
         sections.push(ContextSection {
             section: PromptSection::new("anti_patterns", &formatted)
                 .with_priority(SectionPriority::High)
-                .with_cache_layer(CacheLayer::Task)
+                .with_cache_layer(CacheLayer::Plan)
                 .with_placement(Placement::End),
             source: ContextSource::AntiPattern,
         });
@@ -811,7 +802,7 @@ fn add_prior_failures(sections: &mut Vec<ContextSection>, task: &TaskInput) {
         sections.push(ContextSection {
             section: PromptSection::new("prior_failures", &formatted)
                 .with_priority(SectionPriority::High)
-                .with_cache_layer(CacheLayer::Dynamic)
+                .with_cache_layer(CacheLayer::Volatile)
                 .with_placement(Placement::End),
             source: ContextSource::AntiPattern, // reusing for failures
         });
@@ -836,7 +827,7 @@ fn add_verification(sections: &mut Vec<ContextSection>, task: &TaskInput) {
         sections.push(ContextSection {
             section: PromptSection::new("verification", &formatted)
                 .with_priority(SectionPriority::High)
-                .with_cache_layer(CacheLayer::Task)
+                .with_cache_layer(CacheLayer::Plan)
                 .with_placement(Placement::End),
             source: ContextSource::Verification,
         });
@@ -852,7 +843,7 @@ fn add_verification(sections: &mut Vec<ContextSection>, task: &TaskInput) {
         sections.push(ContextSection {
             section: PromptSection::new("acceptance", &formatted)
                 .with_priority(SectionPriority::High)
-                .with_cache_layer(CacheLayer::Task)
+                .with_cache_layer(CacheLayer::Plan)
                 .with_placement(Placement::End),
             source: ContextSource::Verification,
         });
@@ -880,7 +871,7 @@ impl ContextProvider {
             sections.push(ContextSection {
                 section: PromptSection::new("task_brief", &brief)
                     .with_priority(SectionPriority::Normal)
-                    .with_cache_layer(CacheLayer::Task)
+                    .with_cache_layer(CacheLayer::Plan)
                     .with_placement(Placement::Middle)
                     .with_hard_cap(3_000),
                 source: ContextSource::TaskBrief,
@@ -913,7 +904,7 @@ impl ContextProvider {
             sections.push(ContextSection {
                 section: PromptSection::new("siblings", &formatted)
                     .with_priority(SectionPriority::Low)
-                    .with_cache_layer(CacheLayer::Session)
+                    .with_cache_layer(CacheLayer::Workspace)
                     .with_placement(Placement::Middle)
                     .with_hard_cap(1_500),
                 source: ContextSource::SiblingTasks,
@@ -936,7 +927,7 @@ impl ContextProvider {
             sections.push(ContextSection {
                 section: PromptSection::new("prior_outputs", &formatted)
                     .with_priority(SectionPriority::Normal)
-                    .with_cache_layer(CacheLayer::Dynamic)
+                    .with_cache_layer(CacheLayer::Volatile)
                     .with_placement(Placement::Middle)
                     .with_hard_cap(4_000),
                 source: ContextSource::PriorTaskOutput {
@@ -956,7 +947,7 @@ impl ContextProvider {
                 sections.push(ContextSection {
                     section: PromptSection::new("prd_extract", format!("## PRD context\n{scoped}"))
                         .with_priority(SectionPriority::Low)
-                        .with_cache_layer(CacheLayer::Session)
+                        .with_cache_layer(CacheLayer::Workspace)
                         .with_placement(Placement::Middle)
                         .with_hard_cap(2_000),
                     source: ContextSource::PrdExtract,
@@ -1031,7 +1022,7 @@ fn add_full_context(
         sections.push(ContextSection {
             section: PromptSection::new("plan_brief", format!("## Plan brief\n{brief}"))
                 .with_priority(SectionPriority::Normal)
-                .with_cache_layer(CacheLayer::Session)
+                .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Middle)
                 .with_hard_cap(6_000),
             source: ContextSource::PlanBrief,
@@ -1043,7 +1034,7 @@ fn add_full_context(
         sections.push(ContextSection {
             section: PromptSection::new("research", format!("## Research memo\n{research}"))
                 .with_priority(SectionPriority::Low)
-                .with_cache_layer(CacheLayer::Session)
+                .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Middle)
                 .with_hard_cap(4_000),
             source: ContextSource::ResearchMemo,
@@ -1055,7 +1046,7 @@ fn add_full_context(
         sections.push(ContextSection {
             section: PromptSection::new("invariants", format!("## Invariants & rubric\n{rubric}"))
                 .with_priority(SectionPriority::Normal)
-                .with_cache_layer(CacheLayer::Session)
+                .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Middle)
                 .with_hard_cap(3_000),
             source: ContextSource::Invariants,
@@ -1067,7 +1058,7 @@ fn add_full_context(
         sections.push(ContextSection {
             section: PromptSection::new("cross_plan", format!("## Cross-plan context\n{cross}"))
                 .with_priority(SectionPriority::Low)
-                .with_cache_layer(CacheLayer::Session)
+                .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Middle)
                 .with_hard_cap(3_000),
             source: ContextSource::CrossPlanContext,
@@ -1079,7 +1070,7 @@ fn add_full_context(
         sections.push(ContextSection {
             section: PromptSection::new("decomposition", format!("## Decomposition\n{decomp}"))
                 .with_priority(SectionPriority::Low)
-                .with_cache_layer(CacheLayer::Session)
+                .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Middle)
                 .with_hard_cap(3_000),
             source: ContextSource::Decomposition,
@@ -1411,19 +1402,19 @@ mod tests {
             sections: vec![
                 ContextSection {
                     section: PromptSection::new("task", "task content")
-                        .with_cache_layer(CacheLayer::Task)
+                        .with_cache_layer(CacheLayer::Plan)
                         .with_placement(Placement::End),
                     source: ContextSource::Verification,
                 },
                 ContextSection {
                     section: PromptSection::new("session", "session content")
-                        .with_cache_layer(CacheLayer::Session)
+                        .with_cache_layer(CacheLayer::Workspace)
                         .with_placement(Placement::Middle),
                     source: ContextSource::PlanBrief,
                 },
                 ContextSection {
                     section: PromptSection::new("system", "system content")
-                        .with_cache_layer(CacheLayer::System)
+                        .with_cache_layer(CacheLayer::Role)
                         .with_placement(Placement::Start),
                     source: ContextSource::AntiPattern,
                 },
@@ -1446,14 +1437,14 @@ mod tests {
                 ContextSection {
                     section: PromptSection::new("critical", "critical context")
                         .with_priority(SectionPriority::Critical)
-                        .with_cache_layer(CacheLayer::Task)
+                        .with_cache_layer(CacheLayer::Plan)
                         .with_placement(Placement::Middle),
                     source: ContextSource::Verification,
                 },
                 ContextSection {
                     section: PromptSection::new("high", "high value")
                         .with_priority(SectionPriority::High)
-                        .with_cache_layer(CacheLayer::Dynamic)
+                        .with_cache_layer(CacheLayer::Volatile)
                         .with_placement(Placement::Middle),
                     source: ContextSource::PriorTaskOutput {
                         task_id: "T1".into(),
@@ -1462,14 +1453,14 @@ mod tests {
                 ContextSection {
                     section: PromptSection::new("normal", "normal value")
                         .with_priority(SectionPriority::Normal)
-                        .with_cache_layer(CacheLayer::Session)
+                        .with_cache_layer(CacheLayer::Workspace)
                         .with_placement(Placement::Middle),
                     source: ContextSource::PlanBrief,
                 },
                 ContextSection {
                     section: PromptSection::new("low", "low value")
                         .with_priority(SectionPriority::Low)
-                        .with_cache_layer(CacheLayer::System)
+                        .with_cache_layer(CacheLayer::Role)
                         .with_placement(Placement::Middle),
                     source: ContextSource::ResearchMemo,
                 },

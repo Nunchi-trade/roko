@@ -8,7 +8,12 @@
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 /// Rolling latency statistics for one model routed through one provider.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -96,7 +101,17 @@ struct LatencyRegistryEntry {
 
 /// Centralized latency registry keyed by `(model, provider)`.
 pub struct LatencyRegistry {
-    stats: Mutex<HashMap<(String, String), LatencyStats>>,
+    stats: Arc<Mutex<HashMap<(String, String), LatencyStats>>>,
+    save_tx: Option<Sender<PersistCommand>>,
+    save_worker: Option<JoinHandle<()>>,
+}
+
+const LATENCY_SAVE_DEBOUNCE: Duration = Duration::from_millis(100);
+
+#[derive(Debug, Clone, Copy)]
+enum PersistCommand {
+    Dirty,
+    FlushAndStop,
 }
 
 impl LatencyRegistry {
@@ -104,7 +119,9 @@ impl LatencyRegistry {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            stats: Mutex::new(HashMap::new()),
+            stats: Arc::new(Mutex::new(HashMap::new())),
+            save_tx: None,
+            save_worker: None,
         }
     }
 
@@ -118,6 +135,8 @@ impl LatencyRegistry {
             ..Default::default()
         });
         entry.record(ttft_ms, total_ms, tokens);
+        drop(stats);
+        self.schedule_persist();
     }
 
     /// Return the recorded stats for a `(model, provider)` pair.
@@ -144,17 +163,7 @@ impl LatencyRegistry {
         entries.sort_by(|a, b| a.model.cmp(&b.model).then(a.provider.cmp(&b.provider)));
 
         let snapshot = LatencyRegistrySnapshot { entries };
-        let json = serde_json::to_string_pretty(&snapshot)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let tmp_path = path.with_extension("json.tmp");
-        std::fs::write(&tmp_path, json)?;
-        std::fs::rename(&tmp_path, path)?;
-        Ok(())
+        save_snapshot(path, &snapshot)
     }
 
     /// Load the registry from `path`, or return an empty registry.
@@ -170,11 +179,25 @@ impl LatencyRegistry {
                 for entry in snapshot.entries {
                     stats.insert((entry.model, entry.provider), entry.stats);
                 }
-                Self {
-                    stats: Mutex::new(stats),
-                }
+                Self::with_persistence(path.to_path_buf(), stats)
             }
-            None => Self::new(),
+            None => Self::with_persistence(path.to_path_buf(), HashMap::new()),
+        }
+    }
+
+    fn with_persistence(path: PathBuf, stats: HashMap<(String, String), LatencyStats>) -> Self {
+        let stats = Arc::new(Mutex::new(stats));
+        let (save_tx, save_worker) = spawn_save_worker(path, Arc::clone(&stats));
+        Self {
+            stats,
+            save_tx: Some(save_tx),
+            save_worker: Some(save_worker),
+        }
+    }
+
+    fn schedule_persist(&self) {
+        if let Some(tx) = &self.save_tx {
+            let _ = tx.send(PersistCommand::Dirty);
         }
     }
 }
@@ -185,10 +208,107 @@ impl Default for LatencyRegistry {
     }
 }
 
+impl Drop for LatencyRegistry {
+    fn drop(&mut self) {
+        if let Some(tx) = self.save_tx.take() {
+            let _ = tx.send(PersistCommand::FlushAndStop);
+        }
+        if let Some(handle) = self.save_worker.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn spawn_save_worker(
+    path: PathBuf,
+    stats: Arc<Mutex<HashMap<(String, String), LatencyStats>>>,
+) -> (Sender<PersistCommand>, JoinHandle<()>) {
+    let (tx, rx) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        loop {
+            match rx.recv() {
+                Ok(PersistCommand::Dirty) => loop {
+                    match rx.recv_timeout(LATENCY_SAVE_DEBOUNCE) {
+                        Ok(PersistCommand::Dirty) => continue,
+                        Ok(PersistCommand::FlushAndStop) => {
+                            let snapshot = snapshot_from_stats(&stats);
+                            let _ = save_snapshot(&path, &snapshot);
+                            return;
+                        }
+                        Err(RecvTimeoutError::Timeout) => {
+                            let snapshot = snapshot_from_stats(&stats);
+                            let _ = save_snapshot(&path, &snapshot);
+                            break;
+                        }
+                        Err(RecvTimeoutError::Disconnected) => {
+                            let snapshot = snapshot_from_stats(&stats);
+                            let _ = save_snapshot(&path, &snapshot);
+                            return;
+                        }
+                    }
+                },
+                Ok(PersistCommand::FlushAndStop) => {
+                    let snapshot = snapshot_from_stats(&stats);
+                    let _ = save_snapshot(&path, &snapshot);
+                    return;
+                }
+                Err(_) => return,
+            }
+        }
+    });
+    (tx, handle)
+}
+
+fn snapshot_from_stats(
+    stats: &Arc<Mutex<HashMap<(String, String), LatencyStats>>>,
+) -> LatencyRegistrySnapshot {
+    let mut entries: Vec<_> = stats
+        .lock()
+        .iter()
+        .map(|((model, provider), stats)| LatencyRegistryEntry {
+            model: model.clone(),
+            provider: provider.clone(),
+            stats: stats.clone(),
+        })
+        .collect();
+    entries.sort_by(|a, b| a.model.cmp(&b.model).then(a.provider.cmp(&b.provider)));
+    LatencyRegistrySnapshot { entries }
+}
+
+fn save_snapshot(path: &Path, snapshot: &LatencyRegistrySnapshot) -> std::io::Result<()> {
+    let json = serde_json::to_string_pretty(snapshot)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let tmp_path = unique_tmp_path(path);
+    std::fs::write(&tmp_path, json)?;
+    std::fs::rename(&tmp_path, path)?;
+    Ok(())
+}
+
+fn unique_tmp_path(path: &Path) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("latency-stats.json");
+    parent.join(format!(".{stem}.tmp-{stamp}-{seq}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{LatencyRegistry, LatencyStats};
     use std::collections::VecDeque;
+    use std::time::Duration;
     use tempfile::tempdir;
 
     fn assert_close(actual: f64, expected: f64) {
@@ -280,5 +400,36 @@ mod tests {
         assert_eq!(anthropic.provider_id, "anthropic");
         assert_eq!(anthropic.observations, 1);
         assert_eq!(anthropic.recent_latencies, VecDeque::from(vec![160.0]));
+    }
+
+    /// Persisted latency stats survive a restart without a manual save.
+    #[test]
+    fn latency_health_persistence_round_trip() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join(".roko/learn/latency-stats.json");
+
+        {
+            let registry = LatencyRegistry::load_or_new(&path);
+            registry.record("glm-5.1", "zai", 120.0, 240.0, 60);
+            registry.record("claude-sonnet-4-6", "anthropic", 80.0, 160.0, 40);
+
+            std::thread::sleep(Duration::from_millis(250));
+            assert!(path.exists(), "debounced autosave should create the file");
+
+            let loaded = LatencyRegistry::load_or_new(&path);
+            let zai = loaded.get("glm-5.1", "zai").expect("zai stats");
+            let anthropic = loaded
+                .get("claude-sonnet-4-6", "anthropic")
+                .expect("anthropic stats");
+
+            assert_eq!(zai.model_slug, "glm-5.1");
+            assert_eq!(zai.provider_id, "zai");
+            assert_eq!(zai.observations, 1);
+            assert_eq!(zai.recent_latencies, vec![240.0]);
+            assert_eq!(anthropic.model_slug, "claude-sonnet-4-6");
+            assert_eq!(anthropic.provider_id, "anthropic");
+            assert_eq!(anthropic.observations, 1);
+            assert_eq!(anthropic.recent_latencies, vec![160.0]);
+        }
     }
 }

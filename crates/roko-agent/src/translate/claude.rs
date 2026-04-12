@@ -17,8 +17,12 @@
 
 use roko_core::tool::aliases::{canonical_of_claude, claude_of_canonical};
 use roko_core::tool::{ToolCall, ToolDef, ToolFormat, ToolResult};
+use serde_json::{Value, json};
 
 use super::{BackendResponse, RenderedResults, RenderedTools, Translator, TranslatorError};
+
+const ROLE_CACHE_MARKER: &str = "<!-- cache:system -->";
+const WORKSPACE_CACHE_MARKER: &str = "<!-- cache:session -->";
 
 /// Translator for the Anthropic Claude CLI backend.
 ///
@@ -88,6 +92,89 @@ impl Translator for ClaudeTranslator {
 
     fn render_results(&self, _results: &[(ToolCall, ToolResult)]) -> RenderedResults {
         RenderedResults::HandledByBackend
+    }
+}
+
+fn next_cache_marker(text: &str) -> Option<(usize, usize)> {
+    [ROLE_CACHE_MARKER, WORKSPACE_CACHE_MARKER]
+        .iter()
+        .filter_map(|marker| text.find(marker).map(|index| (index, marker.len())))
+        .min_by_key(|(index, _)| *index)
+}
+
+fn normalized_segment(segment: &str) -> Option<String> {
+    let trimmed = segment.trim_matches(['\n', '\r']);
+    (!trimmed.trim().is_empty()).then(|| trimmed.to_string())
+}
+
+fn cache_marked_blocks(text: &str) -> Option<Vec<Value>> {
+    let mut remaining = text;
+    let mut saw_marker = false;
+    let mut blocks = Vec::new();
+
+    while let Some((index, marker_len)) = next_cache_marker(remaining) {
+        saw_marker = true;
+
+        if let Some(segment) = normalized_segment(&remaining[..index]) {
+            blocks.push(json!({
+                "type": "text",
+                "text": segment,
+                "cache_control": { "type": "ephemeral" },
+            }));
+        } else if let Some(last) = blocks.last_mut() {
+            last["cache_control"] = json!({ "type": "ephemeral" });
+        }
+
+        remaining = &remaining[index + marker_len..];
+    }
+
+    if let Some(segment) = normalized_segment(remaining) {
+        blocks.push(json!({
+            "type": "text",
+            "text": segment,
+        }));
+    }
+
+    saw_marker.then_some(blocks)
+}
+
+pub(crate) fn inject_cache_markers_into_content(content: &mut Value) -> bool {
+    match content {
+        Value::String(text) => {
+            let Some(blocks) = cache_marked_blocks(text) else {
+                return false;
+            };
+            *content = Value::Array(blocks);
+            true
+        }
+        Value::Array(items) => {
+            let mut changed = false;
+            let mut expanded = Vec::with_capacity(items.len());
+
+            for item in std::mem::take(items) {
+                if item.get("type").and_then(Value::as_str) == Some("text")
+                    && let Some(text) = item.get("text").and_then(Value::as_str)
+                    && let Some(blocks) = cache_marked_blocks(text)
+                {
+                    expanded.extend(blocks);
+                    changed = true;
+                    continue;
+                }
+                expanded.push(item);
+            }
+
+            *items = expanded;
+            changed
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn inject_cache_markers(messages: &mut Vec<Value>) {
+    for message in messages {
+        if let Some(content) = message.get_mut("content") {
+            let _ = inject_cache_markers_into_content(content);
+        }
     }
 }
 
@@ -387,5 +474,44 @@ mod tests {
     #[test]
     fn format_returns_anthropic_blocks() {
         assert_eq!(ClaudeTranslator.format(), ToolFormat::AnthropicBlocks);
+    }
+
+    #[test]
+    fn anthropic_cache_markers_split_string_content_into_blocks() {
+        let mut content = json!(
+            "Role instructions\n\n<!-- cache:system -->\n\nWorkspace context\n\n<!-- cache:session -->\n\nTask details"
+        );
+
+        assert!(inject_cache_markers_into_content(&mut content));
+
+        let blocks = content.as_array().expect("content array");
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0]["text"], "Role instructions");
+        assert_eq!(blocks[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(blocks[1]["text"], "Workspace context");
+        assert_eq!(blocks[1]["cache_control"]["type"], "ephemeral");
+        assert_eq!(blocks[2]["text"], "Task details");
+        assert!(blocks[2].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn anthropic_cache_markers_update_message_content_only_when_present() {
+        let mut messages = vec![
+            json!({
+                "role": "user",
+                "content": "Stable prefix\n\n<!-- cache:system -->\n\nLive tail"
+            }),
+            json!({
+                "role": "assistant",
+                "content": "No markers here"
+            }),
+        ];
+
+        inject_cache_markers(&mut messages);
+
+        let cached = messages[0]["content"].as_array().expect("cached content");
+        assert_eq!(cached.len(), 2);
+        assert_eq!(cached[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(messages[1]["content"], "No markers here");
     }
 }

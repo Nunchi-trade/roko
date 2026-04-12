@@ -22,7 +22,7 @@
 //! and the arguments decoding differ.
 
 use crate::usage::Usage;
-use roko_core::tool::{ToolCall, ToolCategory, ToolDef, ToolFormat, ToolResult};
+use roko_core::tool::{ToolCall, ToolDef, ToolFormat, ToolResult};
 
 use super::{BackendResponse, RenderedResults, RenderedTools, Translator, TranslatorError};
 
@@ -141,11 +141,6 @@ fn render_tool(t: &ToolDef) -> serde_json::Value {
             "type": "retrieval",
             "retrieval": t.parameters.as_value(),
         }),
-        ToolKind::McpTool => serde_json::json!({
-            "type": "mcp",
-            // GLM expects the native MCP envelope here, not a function schema.
-            "mcp": t.parameters.as_value(),
-        }),
     }
 }
 
@@ -154,14 +149,12 @@ enum ToolKind {
     Function,
     WebSearch,
     Retrieval,
-    McpTool,
 }
 
 fn tool_kind(tool: &ToolDef) -> ToolKind {
     match tool.name.as_str() {
         "web_search" => ToolKind::WebSearch,
         "retrieval" => ToolKind::Retrieval,
-        _ if matches!(tool.category, ToolCategory::Mcp) => ToolKind::McpTool,
         _ => ToolKind::Function,
     }
 }
