@@ -760,6 +760,45 @@ impl TuiState {
             );
         }
 
+        // Populate agent output from episodes (Task 2)
+        for episode in data.episodes() {
+            // Populate the HashMap-based agent state
+            if let Some(agent) = self.agents_by_id.get_mut(&episode.agent_id) {
+                let output_text = extract_episode_output(episode);
+                if !output_text.is_empty() {
+                    agent.output_lines = output_text.lines().map(String::from).collect();
+                }
+            }
+            // Populate the Vec-based agent roster last_output_line
+            if let Some(row) = self.agents.iter_mut().find(|a| a.id == episode.agent_id) {
+                let output_text = extract_episode_output(episode);
+                if let Some(last_line) = output_text.lines().last() {
+                    row.last_output_line = last_line.to_string();
+                }
+                // Also populate model and task from episode
+                if !episode.model.is_empty() {
+                    row.model = episode.model.clone();
+                }
+                if !episode.task_id.is_empty() {
+                    row.current_task = episode.task_id.clone();
+                }
+                row.input_tokens = row.input_tokens.max(episode.usage.input_tokens);
+                row.output_tokens = row.output_tokens.max(episode.usage.output_tokens);
+            }
+        }
+
+        // Supplement agent output from task-outputs files (Task 2 continued)
+        for (task_id, lines) in data.task_outputs() {
+            // Find agent working on this task and add output if empty
+            if let Some(row) = self.agents.iter_mut().find(|a| a.current_task == *task_id) {
+                if row.last_output_line.is_empty() {
+                    if let Some(last) = lines.last() {
+                        row.last_output_line = last.clone();
+                    }
+                }
+            }
+        }
+
         // Cost from efficiency summary
         self.cumulative_cost_usd = data.efficiency.total_cost_usd;
         self.cumulative_input_tokens = data.efficiency.total_input_tokens;
@@ -771,26 +810,11 @@ impl TuiState {
         // Build phase_pipeline from canonical phases + active_tasks
         self.phase_pipeline = build_phase_pipeline(&data.active_tasks);
 
-        // Build current_task_checklist from active_tasks
-        self.current_task_checklist = data
-            .active_tasks
-            .iter()
-            .map(|t| {
-                let status = match t.status.as_str() {
-                    "done" | "completed" | "passed" => TaskRowStatus::Done,
-                    "running" | "active" | "executing" => TaskRowStatus::Active,
-                    "failed" | "error" => TaskRowStatus::Failed,
-                    "blocked" => TaskRowStatus::Blocked,
-                    _ => TaskRowStatus::Pending,
-                };
-                TaskRow {
-                    id: t.task_id.clone(),
-                    title: t.task_id.clone(), // use task_id as title fallback
-                    status,
-                    elapsed_secs: 0.0,
-                }
-            })
-            .collect();
+        // Populate phase elapsed times from episodes (Task 7)
+        populate_phase_elapsed(&mut self.phase_pipeline, data.episodes());
+
+        // Build current_task_checklist from active_tasks + task-trackers (Task 3)
+        self.current_task_checklist = build_task_checklist_from_execution(data);
 
         // Build execution_waves — group plans by wave if available, else wave 0
         self.execution_waves = build_execution_waves(&self.plans);
@@ -977,6 +1001,183 @@ fn build_execution_waves(plans: &[PlanEntry]) -> Vec<Wave> {
             }
         })
         .collect()
+}
+
+/// Extract output text from an episode's extra fields.
+fn extract_episode_output(episode: &roko_learn::episode_logger::Episode) -> String {
+    for key in [
+        "stderr",
+        "agent_stderr",
+        "output",
+        "stdout",
+        "agent_output",
+        "output_tail",
+        "detail",
+        "text",
+    ] {
+        if let Some(serde_json::Value::String(text)) = episode.extra.get(key) {
+            if !text.trim().is_empty() {
+                return text.clone();
+            }
+        }
+    }
+    episode
+        .failure_reason
+        .as_deref()
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Build the task checklist using plan execution + task-tracker data (Task 3).
+///
+/// If a `PlanExecutionSnapshot` is available, uses its task rows which
+/// already reflect task-tracker completed/failed status. Falls back to
+/// `active_tasks` when no execution snapshot exists.
+fn build_task_checklist_from_execution(
+    data: &super::dashboard::DashboardData,
+) -> Vec<TaskRow> {
+    // Prefer the PlanExecutionSnapshot which already incorporates tracker data
+    if let Some(exec) = &data.current_plan_execution {
+        return exec
+            .tasks
+            .iter()
+            .map(|t| {
+                let status = match t.phase.to_ascii_lowercase().as_str() {
+                    "done" => TaskRowStatus::Done,
+                    "failed" => TaskRowStatus::Failed,
+                    "implementing" | "gating" | "verifying" | "reviewing"
+                    | "doc revision" | "auto fixing" | "regenerating verify" => {
+                        TaskRowStatus::Active
+                    }
+                    "queued" => TaskRowStatus::Pending,
+                    _ if t.is_current => TaskRowStatus::Active,
+                    _ => TaskRowStatus::Pending,
+                };
+                let elapsed_secs = parse_duration_to_secs(&t.duration);
+                TaskRow {
+                    id: t.task_id.clone(),
+                    title: t.title.clone(),
+                    status,
+                    elapsed_secs,
+                }
+            })
+            .collect();
+    }
+
+    // Fallback: build from active_tasks
+    data.active_tasks
+        .iter()
+        .map(|t| {
+            let status = match t.status.as_str() {
+                "done" | "completed" | "passed" => TaskRowStatus::Done,
+                "running" | "active" | "executing" => TaskRowStatus::Active,
+                "failed" | "error" => TaskRowStatus::Failed,
+                "blocked" => TaskRowStatus::Blocked,
+                _ => TaskRowStatus::Pending,
+            };
+            TaskRow {
+                id: t.task_id.clone(),
+                title: t.task_id.clone(),
+                status,
+                elapsed_secs: 0.0,
+            }
+        })
+        .collect()
+}
+
+/// Parse a duration string like "5s", "2m 30s", "120ms" into seconds.
+fn parse_duration_to_secs(duration: &str) -> f64 {
+    if duration == "--" || duration.is_empty() {
+        return 0.0;
+    }
+    if let Some(ms) = duration.strip_suffix("ms") {
+        return ms.parse::<f64>().unwrap_or(0.0) / 1000.0;
+    }
+    let mut total = 0.0;
+    for part in duration.split_whitespace() {
+        if let Some(m) = part.strip_suffix('m') {
+            total += m.parse::<f64>().unwrap_or(0.0) * 60.0;
+        } else if let Some(s) = part.strip_suffix('s') {
+            total += s.parse::<f64>().unwrap_or(0.0);
+        }
+    }
+    total
+}
+
+/// Populate phase_pipeline elapsed times from episode timestamps (Task 7).
+fn populate_phase_elapsed(
+    pipeline: &mut [PhaseStep],
+    episodes: &[roko_learn::episode_logger::Episode],
+) {
+    if episodes.is_empty() || pipeline.is_empty() {
+        return;
+    }
+
+    // Compute per-phase elapsed from episodes that have a matching trigger_kind
+    // or kind. Map episode kinds to canonical phase names.
+    let mut phase_durations: std::collections::HashMap<String, f64> =
+        std::collections::HashMap::new();
+
+    for episode in episodes {
+        let phase_name = episode_to_phase_name(episode);
+        if !phase_name.is_empty() {
+            *phase_durations.entry(phase_name).or_default() += episode.duration_secs;
+        }
+    }
+
+    for step in pipeline.iter_mut() {
+        if let Some(&elapsed) = phase_durations.get(&step.name) {
+            step.elapsed_secs = elapsed;
+        }
+    }
+}
+
+/// Map an episode's kind/trigger to a canonical phase name.
+fn episode_to_phase_name(episode: &roko_learn::episode_logger::Episode) -> String {
+    let kind = episode.kind.to_ascii_lowercase();
+    let trigger = episode.trigger_kind.to_ascii_lowercase();
+    let template = episode.agent_template.to_ascii_lowercase();
+
+    // Direct kind matches
+    match kind.as_str() {
+        "preflight" => return "preflight".to_string(),
+        "compile" | "compile-gate" | "compile_gate" => return "compile-gate".to_string(),
+        "test" | "test-gate" | "test_gate" => return "test-gate".to_string(),
+        "review" | "reviewing" | "critic-review" | "critic_review" => {
+            return "reviewing".to_string()
+        }
+        "verdict" => return "verdict".to_string(),
+        "commit" | "committing" => return "committing".to_string(),
+        _ => {}
+    }
+
+    // Template-based inference
+    if template.contains("strategist") {
+        return "strategist".to_string();
+    }
+    if template.contains("implementer") || template.contains("implement") {
+        return "implementer".to_string();
+    }
+    if template.contains("reviewer") || template.contains("critic") {
+        return "critic-review".to_string();
+    }
+
+    // Trigger-based inference
+    if trigger.contains("gate") {
+        if trigger.contains("compile") {
+            return "compile-gate".to_string();
+        }
+        if trigger.contains("test") {
+            return "test-gate".to_string();
+        }
+    }
+
+    // Agent turn episodes map to implementer by default
+    if kind == "agent_turn" {
+        return "implementer".to_string();
+    }
+
+    String::new()
 }
 
 #[cfg(test)]

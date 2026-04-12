@@ -400,6 +400,21 @@ pub struct DashboardSummary {
     pub widget_count: usize,
 }
 
+/// An entry in the orchestrator event log.
+#[derive(Debug, Clone, Default)]
+pub struct EventLogEntry {
+    /// Epoch milliseconds when the event occurred.
+    pub timestamp_ms: u64,
+    /// Event kind (e.g. "task_started", "gate_passed").
+    pub event_type: String,
+    /// Plan the event belongs to.
+    pub plan_id: String,
+    /// Task the event belongs to.
+    pub task_id: String,
+    /// Human-readable event description.
+    pub message: String,
+}
+
 /// Shared dashboard data loaded from `.roko/`.
 #[derive(Debug, Clone, Default)]
 pub struct DashboardData {
@@ -459,6 +474,14 @@ pub struct DashboardData {
     cfactor_stamp: FileStamp,
     /// Cascade router file metadata.
     cascade_router_stamp: FileStamp,
+    /// Per-task agent output tail (last 50 lines per task) from `.roko/task-outputs/`.
+    pub task_outputs: HashMap<String, Vec<String>>,
+    /// Last observed task-outputs directory metadata.
+    task_outputs_stamp: FileStamp,
+    /// Orchestrator event log from `.roko/state/events.json`.
+    pub event_log: Vec<EventLogEntry>,
+    /// Last observed events file metadata.
+    event_log_stamp: FileStamp,
 }
 
 impl DashboardData {
@@ -512,8 +535,29 @@ impl DashboardData {
             .collect();
         let cfactor = load_latest_jsonl_value::<CFactor>(&cfactor_path);
         let cfactor_stamp = file_stamp(&cfactor_path);
-        let current_plan_execution = load_current_plan_execution(&root, &state, &episodes);
+        let current_plan_execution = load_current_plan_execution(
+            &root,
+            &state,
+            &episodes,
+            &HashMap::new(), // task_outputs not yet loaded
+        );
         let efficiency_stamp = file_stamp(&efficiency_path);
+
+        // Load task outputs from .roko/task-outputs/
+        let task_outputs_dir = roko_dir.join("task-outputs");
+        let task_outputs = load_task_outputs(&task_outputs_dir);
+        let task_outputs_stamp = file_stamp(&task_outputs_dir);
+
+        // Backfill agent_output_tail from task-outputs if episode didn't provide it
+        let current_plan_execution = backfill_agent_output_tail(
+            current_plan_execution,
+            &task_outputs,
+        );
+
+        // Load event log from .roko/state/events.json
+        let events_path = roko_dir.join("state").join("events.json");
+        let event_log = load_event_log(&events_path);
+        let event_log_stamp = file_stamp(&events_path);
 
         Self {
             root,
@@ -544,6 +588,10 @@ impl DashboardData {
             cfactor,
             cfactor_stamp,
             cascade_router_stamp,
+            task_outputs,
+            task_outputs_stamp,
+            event_log,
+            event_log_stamp,
         }
     }
 
@@ -629,13 +677,36 @@ impl DashboardData {
             self.cfactor = load_latest_jsonl_value::<CFactor>(&cfactor_path);
         }
 
+        // Refresh task outputs
+        let task_outputs_dir = roko_dir.join("task-outputs");
+        let stamp = file_stamp(&task_outputs_dir);
+        if stamp != self.task_outputs_stamp {
+            self.task_outputs_stamp = stamp;
+            self.task_outputs = load_task_outputs(&task_outputs_dir);
+        }
+
+        // Refresh event log
+        let events_path = roko_dir.join("state").join("events.json");
+        let stamp = file_stamp(&events_path);
+        if stamp != self.event_log_stamp {
+            self.event_log_stamp = stamp;
+            self.event_log = load_event_log(&events_path);
+        }
+
         if state_changed {
             self.plans = load_plan_summaries(&self.root, &self.executor_state);
             self.active_tasks = load_active_tasks(&self.executor_state);
             self.agents = load_agents(&self.executor_state);
             self.gate_results = load_gate_results(&self.executor_state, &self.signal_gate_results);
-            self.current_plan_execution =
-                load_current_plan_execution(&self.root, &self.executor_state, &self.episodes);
+            self.current_plan_execution = backfill_agent_output_tail(
+                load_current_plan_execution(
+                    &self.root,
+                    &self.executor_state,
+                    &self.episodes,
+                    &self.task_outputs,
+                ),
+                &self.task_outputs,
+            );
         }
 
         Ok(())
@@ -707,8 +778,15 @@ impl DashboardData {
             stamp,
             offset: stamp.len,
         };
-        self.current_plan_execution =
-            load_current_plan_execution(&self.root, &self.executor_state, &self.episodes);
+        self.current_plan_execution = backfill_agent_output_tail(
+            load_current_plan_execution(
+                &self.root,
+                &self.executor_state,
+                &self.episodes,
+                &self.task_outputs,
+            ),
+            &self.task_outputs,
+        );
     }
 
     fn rebuild_signal_dependent_fields(&mut self) {
@@ -739,6 +817,12 @@ impl DashboardData {
     #[must_use]
     pub(crate) fn episodes(&self) -> &[Episode] {
         &self.episodes
+    }
+
+    /// Per-task agent output tails.
+    #[must_use]
+    pub(crate) fn task_outputs(&self) -> &HashMap<String, Vec<String>> {
+        &self.task_outputs
     }
 }
 
@@ -1397,6 +1481,114 @@ impl ExperimentSummary {
     }
 }
 
+/// Load per-task agent output from `.roko/task-outputs/*.txt` (last 50 lines each).
+fn load_task_outputs(task_outputs_dir: &Path) -> HashMap<String, Vec<String>> {
+    let mut task_outputs = HashMap::new();
+    if !task_outputs_dir.is_dir() {
+        return task_outputs;
+    }
+    let Ok(entries) = std::fs::read_dir(task_outputs_dir) else {
+        return task_outputs;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().map_or(false, |e| e == "txt") {
+            let task_id = path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                let lines: Vec<String> = content
+                    .lines()
+                    .rev()
+                    .take(50)
+                    .map(String::from)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
+                task_outputs.insert(task_id, lines);
+            }
+        }
+    }
+    task_outputs
+}
+
+/// Load orchestrator event log from `.roko/state/events.json`.
+fn load_event_log(events_path: &Path) -> Vec<EventLogEntry> {
+    let Some(value) = read_json_value(events_path) else {
+        return Vec::new();
+    };
+    let Some(entries) = value.as_array() else {
+        // Try as JSONL-style (one object = single event)
+        return parse_event_entry(&value).into_iter().collect();
+    };
+    entries.iter().filter_map(parse_event_entry).collect()
+}
+
+fn parse_event_entry(value: &Value) -> Option<EventLogEntry> {
+    Some(EventLogEntry {
+        timestamp_ms: value
+            .get("timestamp_ms")
+            .and_then(Value::as_u64)
+            .or_else(|| value.get("timestamp").and_then(Value::as_u64))
+            .unwrap_or_default(),
+        event_type: value
+            .get("event_type")
+            .or_else(|| value.get("type"))
+            .or_else(|| value.get("kind"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string(),
+        plan_id: value
+            .get("plan_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        task_id: value
+            .get("task_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        message: value
+            .get("message")
+            .or_else(|| value.get("detail"))
+            .or_else(|| value.get("description"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+    })
+}
+
+/// Backfill `agent_output_tail` from task-outputs when episodes didn't provide it.
+fn backfill_agent_output_tail(
+    mut snapshot: Option<PlanExecutionSnapshot>,
+    task_outputs: &HashMap<String, Vec<String>>,
+) -> Option<PlanExecutionSnapshot> {
+    let exec = snapshot.as_mut()?;
+    if exec.agent_output_tail.is_empty() {
+        // Try current task first
+        if let Some(detail) = &exec.current_task {
+            if let Some(output) = task_outputs.get(&detail.task_id) {
+                exec.agent_output_tail = output.clone();
+            }
+        }
+        // If still empty, try any task in the execution that has output
+        if exec.agent_output_tail.is_empty() {
+            for task_row in exec.tasks.iter().rev() {
+                if let Some(output) = task_outputs.get(&task_row.task_id) {
+                    if !output.is_empty() {
+                        exec.agent_output_tail = output.clone();
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    snapshot
+}
+
 fn load_plan_summaries(root: &Path, state: &Value) -> Vec<PlanSummary> {
     let mut ids = std::collections::BTreeSet::new();
     if let Some(plan_states) = state.get("plan_states").and_then(Value::as_object) {
@@ -1442,12 +1634,26 @@ fn load_plan_summaries(root: &Path, state: &Value) -> Vec<PlanSummary> {
             })
             .unwrap_or(false);
 
+        let last_error = state
+            .get("plan_states")
+            .and_then(Value::as_object)
+            .and_then(|plans| plans.get(&id))
+            .and_then(|plan_state| {
+                plan_state
+                    .get("last_error")
+                    .and_then(Value::as_str)
+                    .or_else(|| plan_state.pointer("/error/message").and_then(Value::as_str))
+                    .or_else(|| plan_state.get("error").and_then(Value::as_str))
+            })
+            .map(ToOwned::to_owned);
+
         summaries.push(PlanSummary {
             id,
             title,
             task_count,
             completed,
             old_format: false,
+            last_error,
         });
     }
 
@@ -1631,6 +1837,7 @@ fn load_current_plan_execution(
     root: &Path,
     state: &Value,
     episodes: &[Episode],
+    task_outputs: &HashMap<String, Vec<String>>,
 ) -> Option<PlanExecutionSnapshot> {
     let plan_states = state.get("plan_states").and_then(Value::as_object)?;
     let trackers = load_task_trackers(root);

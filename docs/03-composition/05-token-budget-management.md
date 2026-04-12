@@ -248,7 +248,111 @@ The general principle: replace every LLM call you can with a deterministic opera
 
 ---
 
-## 10. Current Status and Gaps
+## 10. Budget conflict resolution
+
+When multiple sections compete for a limited token budget, the system resolves conflicts through a strict priority ordering and a set of truncation strategies.
+
+### 10.1 Priority ordering
+
+Sections are allocated budget in this order. Higher-priority sections are guaranteed allocation before lower-priority sections are considered:
+
+| Priority | Category | Sections | Drop policy |
+|---|---|---|---|
+| 0 (Critical) | Identity and safety | Role identity, safety constraints, task description | Never drop, never truncate |
+| 1 (High) | Recent failures | Gate errors, iteration context | Truncate to last N errors if over budget |
+| 2 (High) | Source code | File context | Truncate from bottom (keep imports + signatures) |
+| 3 (Medium) | Task context | Task brief, PRD extract | Truncate from bottom (keep requirements section) |
+| 4 (Medium) | Structure | Workspace map | Truncate deep nodes (keep top-level tree) |
+| 5 (Low) | History | Cross-plan context, learning pack | Drop entirely before truncating higher sections |
+
+When a priority tie occurs (two sections at the same level), the section with higher actual token count is allocated first. This prevents a small section from starving a large section that needs a minimum allocation to be useful.
+
+### 10.2 Truncation strategies
+
+Each section type has a truncation strategy that preserves the most valuable content:
+
+```
+Section truncation strategies:
+
+  Gate errors:
+    Keep the N most recent errors (LIFO).
+    N = floor(budget / avg_error_tokens).
+    Rationale: the latest error is the most relevant.
+
+  File context:
+    Keep: imports, struct/enum definitions, function signatures.
+    Drop: function bodies (largest token consumer).
+    If still over budget: keep only the file most recently modified by the agent.
+
+  PRD extract:
+    Keep: Requirements section, success criteria.
+    Drop: Background, rationale, alternatives considered.
+    Rationale: agents need to know WHAT, not WHY.
+
+  Workspace map:
+    Keep: top 2 levels of directory tree.
+    Drop: deeper levels, file-level entries.
+    If still over budget: keep only the crate(s) relevant to the task.
+
+  Task brief:
+    Keep: What/How sections.
+    Drop: Why/Context sections.
+
+  Learning pack:
+    Drop: entire section if budget is < min_tokens (2,000).
+    Rationale: partially truncated learning content is actively harmful
+    (from the "Sufficient Context" finding: bad context makes the model 6x worse).
+```
+
+### 10.3 Conflict resolution algorithm
+
+```
+fn resolve_budget_conflicts(sections: &mut [AvailableSection], total_budget: usize) {
+    // Phase 1: Sort by priority (lower number = higher priority)
+    sections.sort_by_key(|s| s.priority);
+
+    let mut remaining = total_budget;
+
+    // Phase 2: Allocate critical sections (priority 0) unconditionally
+    for section in sections.iter_mut().filter(|s| s.priority == 0) {
+        let alloc = section.actual_tokens;
+        section.allocated = alloc;
+        remaining = remaining.saturating_sub(alloc);
+    }
+
+    // Phase 3: Allocate remaining sections in priority order
+    for section in sections.iter_mut().filter(|s| s.priority > 0) {
+        if remaining < section.min_tokens {
+            // Not enough budget for a useful version of this section
+            section.allocated = 0;
+            section.dropped = true;
+            continue;
+        }
+
+        let alloc = section.actual_tokens.min(section.max_tokens).min(remaining);
+        if alloc < section.actual_tokens {
+            // Budget is tight: apply section-specific truncation
+            section.content = truncate(&section.content, alloc, section.strategy);
+        }
+        section.allocated = alloc;
+        remaining = remaining.saturating_sub(alloc);
+    }
+}
+```
+
+### 10.4 Edge cases
+
+| Scenario | Resolution |
+|---|---|
+| Critical sections exceed total budget | Truncate task description (never truncate role/safety). This should not happen with budgets >= 2,000 tokens. |
+| All non-critical sections dropped and budget remains | Expand file context allocation (source code is the most useful non-critical content). |
+| Two sections at same priority, both need full allocation | Allocate to the section with higher `max_tokens` first. The other gets whatever remains. |
+| Section content is empty | Skip without deducting budget. |
+| Total budget is 0 | Return only role identity (hardcoded ~200 tokens). |
+
+---
+
+## 11. Current Status and Gaps
 
 | Aspect | Status |
 |--------|--------|

@@ -469,6 +469,372 @@ The index is rebuilt from scratch when:
 
 ---
 
+## Content-based change detection: BLAKE3 algorithm
+
+The incremental update pipeline uses BLAKE3 for content-addressable change detection. BLAKE3 is 3-5x faster than SHA-256 and produces 256-bit hashes.
+
+```rust
+use blake3;
+use std::path::Path;
+
+/// Compute BLAKE3 hash of a file's content.
+/// Returns the 32-byte hash.
+pub fn content_hash(path: &Path) -> anyhow::Result<blake3::Hash> {
+    let content = std::fs::read(path)?;
+    Ok(blake3::hash(&content))
+}
+
+/// Compare a file's current content hash against the stored hash.
+/// Returns true if the file has changed.
+pub fn file_changed(
+    path: &Path,
+    stored_hash: &[u8; 32],
+) -> anyhow::Result<bool> {
+    let current = content_hash(path)?;
+    Ok(current.as_bytes() != stored_hash)
+}
+```
+
+**Why BLAKE3 over timestamp-based detection:**
+
+| Scenario | Timestamp | BLAKE3 |
+|----------|-----------|--------|
+| `git checkout` (new timestamps, same content) | Re-indexes (wrong) | Skips (correct) |
+| IDE write-then-rename (stale timestamp) | Skips (wrong) | Re-indexes (correct) |
+| Same content across branches | Re-indexes (wrong) | Skips (correct) |
+| Modified content | Re-indexes (correct) | Re-indexes (correct) |
+
+---
+
+## Incremental update algorithm (diff-based)
+
+```
+incremental_update(db, workspace_root, providers):
+    # Phase 1: Enumerate and hash disk files.
+    disk_files = {}
+    for provider in providers:
+        for file in enumerate_files(workspace_root, provider.extensions()):
+            hash = blake3::hash(read(file))
+            disk_files[file.path] = (hash, provider)
+
+    # Phase 2: Load DB state.
+    db_files = db.query("SELECT path, content_hash, id FROM files")
+    db_lookup = {row.path: row for row in db_files}
+
+    # Phase 3: Diff.
+    to_add = []     # New files (on disk, not in DB)
+    to_update = []  # Changed files (on disk, hash differs from DB)
+    to_delete = []  # Removed files (in DB, not on disk)
+
+    for path, (hash, provider) in disk_files:
+        if path not in db_lookup:
+            to_add.append((path, hash, provider))
+        elif db_lookup[path].content_hash != hash:
+            to_update.append((path, hash, provider, db_lookup[path].id))
+
+    for path, row in db_lookup:
+        if path not in disk_files:
+            to_delete.append(row.id)
+
+    # Phase 4: Apply changes in a single transaction.
+    tx = db.begin()
+
+    for (path, hash, provider) in to_add:
+        content = read(path)
+        symbols = provider.parse(content)
+        file_id = tx.insert_file(path, hash, provider.language())
+        for sym in symbols:
+            tx.insert_symbol(file_id, sym)
+        tx.insert_fingerprint(file_id, compute_fingerprint(symbols))
+
+    for (path, hash, provider, file_id) in to_update:
+        # Delete old data, insert new.
+        tx.delete_file_data(file_id)
+        content = read(path)
+        symbols = provider.parse(content)
+        tx.update_file(file_id, hash)
+        for sym in symbols:
+            tx.insert_symbol(file_id, sym)
+        tx.insert_fingerprint(file_id, compute_fingerprint(symbols))
+
+    for file_id in to_delete:
+        tx.delete_file_data(file_id)  # CASCADE deletes symbols, edges, fingerprints
+
+    # Phase 5: Rebuild edges and recompute PageRank if graph changed.
+    if len(to_add) + len(to_update) + len(to_delete) > 0:
+        rebuild_import_edges(tx)
+        recompute_pagerank(tx)  # See PageRank section below.
+        update_fts_index(tx)
+
+    tx.commit()
+
+    return UpdateStats {
+        added: len(to_add),
+        updated: len(to_update),
+        deleted: len(to_delete),
+        unchanged: len(disk_files) - len(to_add) - len(to_update),
+    }
+```
+
+---
+
+## PageRank recomputation
+
+PageRank scores indicate which symbols are most central to the codebase. Recomputation triggers after any graph change.
+
+### Trigger condition
+
+PageRank recomputes when `added + updated + deleted > 0` during incremental update. For performance, if fewer than 10 files changed, only recompute scores for symbols within 2 hops of the changed symbols (local PageRank approximation). For larger changes, full recomputation runs.
+
+### Algorithm
+
+```
+pagerank(graph, damping=0.85, iterations=20, tolerance=1e-6):
+    N = graph.node_count()
+    scores = {node: 1.0 / N for node in graph.nodes()}
+
+    for _ in 0..iterations:
+        new_scores = {}
+        for node in graph.nodes():
+            rank = (1.0 - damping) / N
+            for parent in graph.incoming(node):
+                rank += damping * scores[parent] / graph.out_degree(parent)
+            new_scores[node] = rank
+
+        # Check convergence.
+        delta = sum(abs(new_scores[n] - scores[n]) for n in graph.nodes())
+        scores = new_scores
+        if delta < tolerance:
+            break
+
+    # Persist to DB.
+    for node, score in scores:
+        db.upsert_pagerank(node.symbol_id, score, now())
+
+    return scores
+```
+
+**Configuration:**
+
+```toml
+[index.pagerank]
+damping_factor = 0.85          # Standard damping factor. Range: 0.5..0.99.
+max_iterations = 20            # Maximum iterations. Range: 5..100.
+convergence_tolerance = 1e-6   # Stop when total delta drops below this.
+local_recompute_threshold = 10 # Files changed below this use local approximation.
+```
+
+---
+
+## FTS5 search interface
+
+### Query syntax
+
+FTS5 supports several query types:
+
+```sql
+-- Prefix search: find symbols starting with "process"
+SELECT * FROM symbols_fts WHERE symbols_fts MATCH 'process*';
+
+-- Phrase search: "build graph" as an exact phrase
+SELECT * FROM symbols_fts WHERE symbols_fts MATCH '"build graph"';
+
+-- Boolean AND: both terms must appear
+SELECT * FROM symbols_fts WHERE symbols_fts MATCH 'graph AND build';
+
+-- Boolean OR: either term
+SELECT * FROM symbols_fts WHERE symbols_fts MATCH 'graph OR tree';
+
+-- Column-specific: search only in name column
+SELECT * FROM symbols_fts WHERE symbols_fts MATCH 'name:process';
+
+-- Negation: has "graph" but not "test"
+SELECT * FROM symbols_fts WHERE symbols_fts MATCH 'graph NOT test';
+```
+
+### BM25 ranking
+
+FTS5 uses BM25 ranking by default. The `rank` column in results gives the relevance score (more negative = more relevant):
+
+```sql
+SELECT s.*, symbols_fts.rank
+FROM symbols s
+JOIN symbols_fts ON symbols_fts.rowid = s.id
+WHERE symbols_fts MATCH ?
+ORDER BY symbols_fts.rank
+LIMIT ?;
+```
+
+BM25 parameters are configured at FTS5 table creation. Defaults are adequate for code search.
+
+---
+
+## Schema migration system
+
+```rust
+/// Current schema version. Increment on every schema change.
+const CURRENT_SCHEMA_VERSION: i64 = 1;
+
+/// Migration scripts stored as embedded SQL.
+static MIGRATIONS: &[(i64, &str)] = &[
+    // (target_version, sql)
+    (2, include_str!("migrations/002_add_embeddings.sql")),
+    (3, include_str!("migrations/003_add_edge_weight.sql")),
+    (4, include_str!("migrations/004_add_file_language_index.sql")),
+];
+
+/// Run pending migrations.
+fn migrate(db: &Connection) -> Result<()> {
+    let current_version: i64 = db.query_row(
+        "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'schema_version'",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(1);
+
+    for &(target, sql) in MIGRATIONS {
+        if current_version < target {
+            tracing::info!("Running migration to schema version {}", target);
+            db.execute_batch(sql)?;
+            db.execute(
+                "UPDATE meta SET value = CAST(? AS TEXT) WHERE key = 'schema_version'",
+                [target],
+            )?;
+        }
+    }
+
+    Ok(())
+}
+```
+
+**Migration rules:**
+- Migrations are additive (add columns, tables, indexes). Never drop columns.
+- Each migration is idempotent (uses `IF NOT EXISTS` where possible).
+- On incompatible schema changes, drop and rebuild the entire index (it's a cache, not source of truth).
+
+---
+
+## Feature-flag architecture details
+
+```toml
+# crates/roko-index/Cargo.toml
+[features]
+default = []
+sqlite = ["dep:rusqlite", "dep:r2d2", "dep:r2d2_sqlite"]
+embedding = ["dep:fastembed", "sqlite"]  # Requires sqlite.
+snapshot = ["dep:rkyv", "dep:memmap2"]
+salsa-memo = ["dep:salsa"]
+```
+
+**Compile-time conditional logic:**
+
+```rust
+/// The CodeIndex enum dispatches to the appropriate backend.
+pub enum CodeIndex {
+    /// In-memory only (no features enabled).
+    InMemory(InMemoryIndex),
+
+    #[cfg(feature = "sqlite")]
+    /// SQLite-backed persistent index.
+    Sqlite(SqliteIndex),
+
+    #[cfg(feature = "snapshot")]
+    /// Zero-copy rkyv snapshot.
+    Snapshot(SnapshotIndex),
+}
+
+impl CodeIndex {
+    pub fn open(workspace: &Path) -> Result<Self> {
+        #[cfg(feature = "sqlite")]
+        {
+            let db_path = workspace.join(".roko/index.db");
+            if db_path.exists() || std::env::var("ROKO_INDEX_SQLITE").is_ok() {
+                return Ok(CodeIndex::Sqlite(SqliteIndex::open(&db_path)?));
+            }
+        }
+
+        #[cfg(feature = "snapshot")]
+        {
+            let snap_path = workspace.join(".roko/index.snap");
+            if snap_path.exists() {
+                return Ok(CodeIndex::Snapshot(SnapshotIndex::load(&snap_path)?));
+            }
+        }
+
+        Ok(CodeIndex::InMemory(InMemoryIndex::new()))
+    }
+}
+```
+
+---
+
+## Index CLI commands
+
+```
+roko index build [--workspace <path>]
+    Build or rebuild the full index.
+    Reads all source files, parses symbols, builds graph, computes fingerprints.
+    Persists to .roko/index.db (if sqlite feature enabled).
+
+roko index stats
+    Print index statistics: file count, symbol count, edge count,
+    language breakdown, top symbols by PageRank, last indexed timestamp.
+
+roko index rebuild [--force]
+    Drop and rebuild the entire index from scratch.
+    Use after schema version incompatibility or suspected corruption.
+    --force skips the confirmation prompt.
+```
+
+---
+
+## WAL mode configuration
+
+SQLite Write-Ahead Logging (WAL) mode enables concurrent reads during writes. The index database is configured for WAL at creation:
+
+```rust
+fn configure_database(db: &Connection) -> Result<()> {
+    // WAL mode: concurrent reads during writes.
+    db.pragma_update(None, "journal_mode", "WAL")?;
+
+    // Synchronous=NORMAL: safe for WAL mode, faster than FULL.
+    db.pragma_update(None, "synchronous", "NORMAL")?;
+
+    // 64MB cache: keeps frequently accessed pages in memory.
+    db.pragma_update(None, "cache_size", "-65536")?; // negative = KB
+
+    // Foreign keys enabled.
+    db.pragma_update(None, "foreign_keys", "ON")?;
+
+    // Busy timeout: wait up to 5 seconds for write lock.
+    db.pragma_update(None, "busy_timeout", "5000")?;
+
+    Ok(())
+}
+```
+
+**WAL mode trade-offs:**
+- Reads never block writes, writes never block reads
+- Write throughput is slightly lower than rollback journal mode
+- The `-wal` and `-shm` files must be on the same filesystem as the main DB
+- Checkpoint runs automatically when the WAL file exceeds 1000 pages (~4MB)
+
+### Test criteria
+
+- BLAKE3 content hashing detects modified files and skips unchanged ones
+- Incremental update adds new files, updates changed files, and deletes removed files in a single transaction
+- FTS5 queries return results ranked by BM25 relevance
+- FTS5 tokenizer splits `camelCase` and `snake_case` identifiers into component words
+- PageRank recomputes after graph changes and converges within 20 iterations
+- Schema migration runs pending migrations and skips already-applied ones
+- Feature-gated code compiles with any combination of features enabled/disabled
+- `roko index build` creates `.roko/index.db` with correct schema
+- `roko index stats` reports accurate file and symbol counts
+- WAL mode allows concurrent read queries during an active write transaction
+- Busy timeout prevents immediate failure when the write lock is held
+- `symbols_fts` table stays synchronized with the `symbols` table after incremental updates
+
+---
+
 ## Current Status and Gaps
 
 ### Built

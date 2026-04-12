@@ -464,6 +464,315 @@ The server manages the code index lifecycle:
 
 ---
 
+## MCP server binary entry point
+
+```rust
+use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+/// Entry point for the MCP context server binary.
+/// Launched by the orchestrator as: `roko mcp code-intelligence`
+pub async fn run_mcp_server(workspace_root: &Path) -> anyhow::Result<()> {
+    // Step 1: Load or build the index.
+    let index = load_or_build_index(workspace_root).await?;
+    let graph = Arc::new(build_symbol_graph(&index)?);
+    let server = Arc::new(CodeIntelligenceServer {
+        index: Arc::new(index),
+        graph,
+        config: ServerConfig::from_env()?,
+    });
+
+    // Step 2: Start background file watcher for incremental updates.
+    let index_ref = Arc::clone(&server.index);
+    let watcher_handle = tokio::spawn(async move {
+        watch_and_reindex(workspace_root, index_ref).await
+    });
+
+    // Step 3: Read JSON-RPC requests from stdin, write responses to stdout.
+    let stdin = BufReader::new(tokio::io::stdin());
+    let mut stdout = tokio::io::stdout();
+    let mut lines = stdin.lines();
+
+    while let Some(line) = lines.next_line().await? {
+        let request: JsonRpcRequest = serde_json::from_str(&line)?;
+
+        let response = match request.method.as_str() {
+            "tools/list" => server.list_tools(),
+            "tools/call" => {
+                let tool_name = request.params["name"].as_str()
+                    .ok_or_else(|| anyhow::anyhow!("Missing tool name"))?;
+                let arguments = &request.params["arguments"];
+                server.handle_tool_call(tool_name, arguments.clone()).await
+            }
+            _ => Err(anyhow::anyhow!("Unknown method: {}", request.method)),
+        };
+
+        let json_response = match response {
+            Ok(result) => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request.id,
+                "result": result
+            }),
+            Err(e) => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request.id,
+                "error": { "code": -1, "message": e.to_string() }
+            }),
+        };
+
+        stdout.write_all(json_response.to_string().as_bytes()).await?;
+        stdout.write_all(b"\n").await?;
+        stdout.flush().await?;
+    }
+
+    watcher_handle.abort();
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct JsonRpcRequest {
+    jsonrpc: String,
+    id: serde_json::Value,
+    method: String,
+    params: serde_json::Value,
+}
+```
+
+### Full implementation spec for all 10 MCP tools
+
+Each tool handler validates input, queries the index, and returns structured JSON:
+
+```rust
+impl CodeIntelligenceServer {
+    /// Tool 1: search_code -- multi-strategy code search.
+    pub async fn search_code(&self, params: serde_json::Value) -> Result<serde_json::Value> {
+        let query: String = required_field(&params, "query")?;
+        let strategy = optional_field(&params, "strategy").unwrap_or("hybrid".into());
+        let max_results = optional_field::<u64>(&params, "max_results").unwrap_or(10);
+        let file_pattern = optional_field::<String>(&params, "file_pattern");
+        let kind_filter = optional_field::<String>(&params, "kind_filter");
+
+        validate_max_results(max_results, 100)?;
+
+        let results = match strategy.as_str() {
+            "keyword" => self.index.search_keyword(&query, max_results)?,
+            "structural" => self.index.search_structural(&query, max_results)?,
+            "hdc" => self.index.search_hdc(&query, max_results)?,
+            "embedding" => self.index.search_embedding(&query, max_results)?,
+            "hybrid" => self.index.search_rrf(&query, max_results)?,
+            _ => anyhow::bail!("Unknown strategy: {}", strategy),
+        };
+
+        // Apply filters.
+        let filtered = results.into_iter()
+            .filter(|r| file_pattern.as_ref().map_or(true, |p| glob_match(p, &r.file)))
+            .filter(|r| kind_filter.as_ref().map_or(true, |k| r.kind == *k))
+            .collect::<Vec<_>>();
+
+        Ok(serde_json::to_value(filtered)?)
+    }
+
+    /// Tool 2: get_symbol_context -- detailed symbol information.
+    pub async fn get_symbol_context(&self, params: serde_json::Value) -> Result<serde_json::Value> {
+        let name: String = required_field(&params, "symbol_name")?;
+        let file_path = optional_field::<String>(&params, "file_path");
+        let include_deps = optional_field::<bool>(&params, "include_dependencies").unwrap_or(true);
+        let include_callers = optional_field::<bool>(&params, "include_callers").unwrap_or(true);
+        let depth = optional_field::<u32>(&params, "expansion_depth").unwrap_or(1);
+
+        let symbol = self.index.resolve_symbol(&name, file_path.as_deref())?;
+        let mut context = SymbolContext::from(&symbol);
+
+        if include_deps {
+            context.dependencies = self.graph.forward_edges(&symbol.id, depth)?;
+        }
+        if include_callers {
+            context.callers = self.graph.reverse_edges(&symbol.id, depth)?;
+        }
+        context.pagerank = self.graph.pagerank_score(&symbol.id);
+
+        Ok(serde_json::to_value(context)?)
+    }
+
+    /// Tool 3: get_file_ast -- file structure overview.
+    pub async fn get_file_ast(&self, params: serde_json::Value) -> Result<serde_json::Value> {
+        let file_path: String = required_field(&params, "file_path")?;
+        validate_workspace_path(&file_path, &self.config.workspace_root)?;
+        let include_bodies = optional_field::<bool>(&params, "include_bodies").unwrap_or(false);
+        let symbols = self.index.symbols_in_file(&file_path)?;
+        Ok(serde_json::to_value(symbols)?)
+    }
+
+    /// Tool 4: find_similar_patterns -- HDC similarity search.
+    pub async fn find_similar(&self, params: serde_json::Value) -> Result<serde_json::Value> {
+        let reference: String = required_field(&params, "reference")?;
+        let min_sim = optional_field::<f64>(&params, "min_similarity").unwrap_or(0.6);
+        let max_results = optional_field::<u64>(&params, "max_results").unwrap_or(10);
+        let results = self.index.find_similar(&reference, min_sim, max_results)?;
+        Ok(serde_json::to_value(results)?)
+    }
+
+    /// Tool 5: get_index_stats -- index health and coverage.
+    pub async fn get_stats(&self, _params: serde_json::Value) -> Result<serde_json::Value> {
+        let stats = self.index.stats()?;
+        Ok(serde_json::to_value(stats)?)
+    }
+
+    /// Tool 6: find_references -- symbol usage sites.
+    pub async fn find_refs(&self, params: serde_json::Value) -> Result<serde_json::Value> {
+        let name: String = required_field(&params, "symbol_name")?;
+        let file_path = optional_field::<String>(&params, "file_path");
+        let include_defs = optional_field::<bool>(&params, "include_definitions").unwrap_or(false);
+        let refs = self.graph.references(&name, file_path.as_deref(), include_defs)?;
+        Ok(serde_json::to_value(refs)?)
+    }
+
+    /// Tool 7: find_implementations -- trait/interface implementations.
+    pub async fn find_impls(&self, params: serde_json::Value) -> Result<serde_json::Value> {
+        let trait_name: String = required_field(&params, "trait_name")?;
+        let include_methods = optional_field::<bool>(&params, "include_methods").unwrap_or(true);
+        let impls = self.graph.implementations(&trait_name, include_methods)?;
+        Ok(serde_json::to_value(impls)?)
+    }
+
+    /// Tool 8: get_callers -- call graph traversal.
+    pub async fn get_callers(&self, params: serde_json::Value) -> Result<serde_json::Value> {
+        let name: String = required_field(&params, "function_name")?;
+        let file_path = optional_field::<String>(&params, "file_path");
+        let transitive = optional_field::<bool>(&params, "transitive").unwrap_or(false);
+        let max_depth = optional_field::<u32>(&params, "max_depth").unwrap_or(2);
+        let callers = self.graph.callers(&name, file_path.as_deref(), transitive, max_depth)?;
+        Ok(serde_json::to_value(callers)?)
+    }
+
+    /// Tool 9: workspace_map -- structural overview.
+    pub async fn workspace_map(&self, params: serde_json::Value) -> Result<serde_json::Value> {
+        let depth = optional_field::<String>(&params, "depth").unwrap_or("module".into());
+        let focus = optional_field::<String>(&params, "focus_path");
+        let map = self.index.workspace_map(&depth, focus.as_deref())?;
+        Ok(serde_json::to_value(map)?)
+    }
+
+    /// Tool 10: get_context -- automated context assembly.
+    pub async fn get_context(&self, params: serde_json::Value) -> Result<serde_json::Value> {
+        let task: String = required_field(&params, "task")?;
+        let budget = optional_field::<u64>(&params, "token_budget").unwrap_or(40_000);
+        let include_tests = optional_field::<bool>(&params, "include_tests").unwrap_or(false);
+        validate_token_budget(budget, 200_000)?;
+        let context = self.index.assemble_context(&task, budget, include_tests)?;
+        Ok(serde_json::to_value(context)?)
+    }
+}
+```
+
+### Index lifecycle management
+
+```rust
+/// Load index from snapshot or build fresh.
+async fn load_or_build_index(workspace_root: &Path) -> Result<CodeIndex> {
+    let db_path = workspace_root.join(".roko/index.db");
+
+    if db_path.exists() {
+        // Load existing index, run incremental update.
+        let index = CodeIndex::open(&db_path)?;
+        let stats = index.incremental_update(workspace_root)?;
+        tracing::info!(
+            added = stats.added,
+            updated = stats.updated,
+            unchanged = stats.unchanged,
+            "Incremental index update complete"
+        );
+        Ok(index)
+    } else {
+        // Full build.
+        let index = CodeIndex::create(&db_path)?;
+        let stats = index.full_build(workspace_root)?;
+        tracing::info!(
+            files = stats.added,
+            symbols = stats.total_symbols,
+            "Full index build complete"
+        );
+        Ok(index)
+    }
+}
+
+/// Watch for file changes and re-index incrementally.
+async fn watch_and_reindex(
+    workspace_root: &Path,
+    index: Arc<CodeIndex>,
+) -> Result<()> {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(256);
+    let mut watcher = notify::recommended_watcher(move |event| {
+        let _ = tx.blocking_send(event);
+    })?;
+
+    watcher.watch(workspace_root, notify::RecursiveMode::Recursive)?;
+
+    // Debounce: wait 500ms after last change before re-indexing.
+    let mut last_change = Instant::now();
+    let debounce = Duration::from_millis(500);
+
+    loop {
+        tokio::select! {
+            Some(Ok(_event)) = rx.recv() => {
+                last_change = Instant::now();
+            }
+            _ = tokio::time::sleep(debounce) => {
+                if last_change.elapsed() >= debounce {
+                    if let Err(e) = index.incremental_update(workspace_root) {
+                        tracing::warn!("Re-index failed: {}", e);
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+### Index sharing between concurrent agents
+
+Multiple agents can query the same index concurrently. The MCP server uses `Arc<CodeIndex>` with internal `RwLock` for thread-safe access:
+
+```rust
+pub struct CodeIndex {
+    /// SQLite connection pool (r2d2).
+    /// Multiple readers, one writer (WAL mode).
+    pool: r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>,
+    /// In-memory caches (symbol graph, fingerprints).
+    cache: parking_lot::RwLock<IndexCache>,
+}
+
+impl CodeIndex {
+    /// Read operations acquire a shared read lock.
+    /// Multiple agents can read concurrently.
+    pub fn search_rrf(&self, query: &str, limit: u64) -> Result<Vec<SearchResult>> {
+        let conn = self.pool.get()?;
+        let cache = self.cache.read();
+        // ... search logic using conn + cache
+    }
+
+    /// Write operations (re-indexing) acquire an exclusive write lock.
+    /// Blocks readers briefly during commit.
+    pub fn incremental_update(&self, workspace_root: &Path) -> Result<UpdateStats> {
+        let conn = self.pool.get()?;
+        let mut cache = self.cache.write();
+        // ... update logic
+    }
+}
+```
+
+**Configuration:**
+
+```toml
+[mcp.code_intelligence]
+max_concurrent_queries = 16    # Connection pool size. Range: 1..64.
+query_timeout_ms = 5000        # Per-query timeout. Range: 1000..30000.
+rate_limit_per_agent = 100     # Queries per minute per agent. Range: 10..1000.
+debounce_ms = 500              # File change debounce. Range: 100..5000.
+```
+
+---
+
 ## Security Considerations
 
 ### Input validation
@@ -481,12 +790,96 @@ The MCP server respects the privacy configuration from the context overlay syste
 - Symbols matching `blocked_symbols` are never returned in results
 - Content matching `redact_patterns` is stripped from output
 
-### Rate limiting
+### Input validation implementation
 
-To prevent agent runaway loops that spam the index server:
-- Per-agent rate limit: 100 queries per minute
-- Per-query timeout: 5 seconds
-- Total concurrent queries: configurable (default: 16)
+```rust
+/// Validate that a file path is within the workspace.
+fn validate_workspace_path(path: &str, workspace_root: &Path) -> Result<()> {
+    let canonical = workspace_root.join(path).canonicalize()
+        .map_err(|_| anyhow::anyhow!("Invalid path: {}", path))?;
+    if !canonical.starts_with(workspace_root) {
+        anyhow::bail!("Path traversal blocked: {} escapes workspace", path);
+    }
+    Ok(())
+}
+
+/// Validate max_results is within bounds.
+fn validate_max_results(max: u64, cap: u64) -> Result<()> {
+    if max > cap {
+        anyhow::bail!("max_results {} exceeds cap {}", max, cap);
+    }
+    Ok(())
+}
+
+/// Validate token budget is within bounds.
+fn validate_token_budget(budget: u64, cap: u64) -> Result<()> {
+    if budget > cap {
+        anyhow::bail!("token_budget {} exceeds cap {}", budget, cap);
+    }
+    Ok(())
+}
+
+/// Sanitize FTS5 query to prevent SQL injection.
+/// FTS5 queries use a restricted syntax; strip anything that looks like SQL.
+fn sanitize_fts_query(query: &str) -> String {
+    // Allow alphanumeric, spaces, quotes, asterisks (prefix search), dashes.
+    // Strip semicolons, parentheses used for SQL subqueries, etc.
+    query.chars()
+        .filter(|c| c.is_alphanumeric() || " \"*-_.:".contains(*c))
+        .collect()
+}
+```
+
+### Rate limiting per agent
+
+```rust
+/// Per-agent rate limiter using a sliding window counter.
+pub struct AgentRateLimiter {
+    /// Limits per agent ID.
+    windows: parking_lot::Mutex<HashMap<String, SlidingWindow>>,
+    /// Maximum queries per minute per agent.
+    max_per_minute: u64,
+}
+
+struct SlidingWindow {
+    timestamps: VecDeque<Instant>,
+}
+
+impl AgentRateLimiter {
+    pub fn check(&self, agent_id: &str) -> bool {
+        let mut windows = self.windows.lock();
+        let window = windows.entry(agent_id.to_string())
+            .or_insert_with(|| SlidingWindow { timestamps: VecDeque::new() });
+
+        let one_min_ago = Instant::now() - Duration::from_secs(60);
+        while window.timestamps.front().map_or(false, |t| *t < one_min_ago) {
+            window.timestamps.pop_front();
+        }
+
+        if window.timestamps.len() as u64 >= self.max_per_minute {
+            return false;
+        }
+        window.timestamps.push_back(Instant::now());
+        true
+    }
+}
+```
+
+### Test criteria
+
+- `search_code` with strategy "hybrid" returns results ranked by RRF score
+- `search_code` with `file_pattern` filters results to matching files
+- `get_symbol_context` resolves ambiguous symbol names when `file_path` is provided
+- `get_file_ast` rejects paths outside the workspace root (path traversal prevention)
+- `get_context` respects `token_budget` -- assembled context does not exceed the budget
+- `find_references` returns both definitions and usages when `include_definitions` is true
+- `find_implementations` lists all trait implementors with correct method signatures
+- `get_callers` with `transitive: true` traverses the call graph to `max_depth`
+- `workspace_map` at "crate" depth lists all workspace crates with dependency edges
+- Rate limiter blocks the 101st query within a minute from a single agent
+- File watcher debounces rapid changes into a single re-index call
+- Index loads from snapshot on startup when `.roko/index.db` exists
+- Concurrent read queries do not block each other under WAL mode
 
 ---
 

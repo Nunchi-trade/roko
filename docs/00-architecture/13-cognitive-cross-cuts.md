@@ -236,6 +236,133 @@ and the cycle continues.
 
 ---
 
+## 6. Cross-cut arbitration protocol
+
+When two or more cross-cuts produce conflicting signals for the same decision, an arbitration protocol resolves the conflict.
+
+### 6.1 Priority hierarchy
+
+Cross-cuts have a fixed priority ordering:
+
+| Priority | Cross-cut | Rationale |
+|---|---|---|
+| 1 (highest) | **Daimon** (safety) | Safety constraints override all other concerns |
+| 2 | **Neuro** (knowledge) | Factual knowledge overrides learned preferences |
+| 3 (lowest) | **Dreams** (hypotheses) | Dream-generated hypotheses are speculative |
+
+When Daimon's safety constraints conflict with a Neuro heuristic, Daimon wins. When Neuro's validated knowledge conflicts with a Dreams hypothesis, Neuro wins.
+
+### 6.2 Conflict scenarios and resolutions
+
+**Scenario 1: Daimon vs Neuro -- risk tolerance**
+
+Daimon's PAD vector indicates low dominance (low confidence), so it wants to escalate to T2 (slow, deliberate reasoning). Neuro has a Persistent heuristic that says "this task type always succeeds at T0 (fast, automatic)."
+
+Resolution: Daimon wins. The agent escalates to T2. Safety-driven caution overrides historical success patterns because the PAD vector reflects the current state, which may differ from historical conditions.
+
+```
+fn resolve_tier_conflict(daimon: TierRecommendation, neuro: TierRecommendation) -> Tier {
+    // Daimon's safety assessment always overrides
+    if daimon.safety_critical {
+        return daimon.tier;
+    }
+    // Otherwise, use the more cautious recommendation
+    daimon.tier.max(neuro.tier) // higher tier = more deliberate
+}
+```
+
+**Scenario 2: Neuro vs Dreams -- contradictory knowledge**
+
+Neuro has a Consolidated knowledge entry: "alloy requires rustc 1.91+." Dreams generated a hypothesis during REM imagination: "alloy might work with rustc 1.85 using feature flags."
+
+Resolution: Neuro wins. Consolidated knowledge (validated by gate verdicts) overrides Dream hypotheses (speculative). The Dreams hypothesis is stored as a candidate for testing but does not influence the current task.
+
+```
+fn resolve_knowledge_conflict(neuro: &KnowledgeEntry, dream: &DreamHypothesis) -> Action {
+    if neuro.tier >= KnowledgeTier::Consolidated {
+        // Validated knowledge wins; queue dream for future testing
+        Action::UseNeuro { queue_dream: true }
+    } else {
+        // Low-tier neuro knowledge: dream may be worth testing
+        Action::TestDream { fallback: neuro }
+    }
+}
+```
+
+**Scenario 3: Daimon vs Dreams -- emotional state**
+
+Daimon is in the Struggling state (P-, A+, D-) and wants shorter Theta cadence (more frequent reflection). Dreams has just completed consolidation and wants to transition to Resting (low arousal, consolidation mode).
+
+Resolution: Daimon wins. Active task performance takes priority over consolidation scheduling. Dreams consolidation is deferred until Daimon's state stabilizes.
+
+### 6.3 VCG auction as tiebreaker
+
+When the priority hierarchy does not cleanly resolve a conflict (two signals at the same priority, or a borderline case), the system falls back to a VCG (Vickrey-Clarke-Groves) attention auction.
+
+Each cross-cut bids for influence on the decision. The bid is the cross-cut's confidence in its recommendation:
+
+```
+fn vcg_tiebreak(bids: &[(CrossCut, f32, Action)]) -> Action {
+    // Sort by bid value (confidence) descending
+    let mut sorted = bids.to_vec();
+    sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+    // Winner pays the second-highest bid (VCG mechanism)
+    // This incentivizes truthful confidence reporting
+    let winner = &sorted[0];
+    let second_price = if sorted.len() > 1 { sorted[1].1 } else { 0.0 };
+
+    // The "payment" is logged as attention cost for the winning cross-cut
+    log_attention_cost(winner.0, second_price);
+
+    winner.2.clone()
+}
+```
+
+The VCG mechanism ensures truthful reporting: a cross-cut gains nothing by inflating its confidence, because the price it pays is determined by the second-highest bid, not its own.
+
+This tiebreaker is invoked only when:
+- Two cross-cuts are at the same priority level
+- Both have confidence > 0.5
+- The conflict affects a Router or Composer decision (not safety)
+
+### 6.4 Arbitration configuration
+
+| Parameter | Default | Range | Description |
+|---|---|---|---|
+| `safety_always_wins` | true | bool | Daimon safety override cannot be disabled |
+| `vcg_min_confidence` | 0.5 | 0.1 - 0.9 | Minimum confidence to participate in VCG |
+| `knowledge_tier_threshold` | Consolidated | Transient - Persistent | Minimum Neuro tier to override Dreams |
+| `dream_testing_enabled` | true | bool | Whether Dreams hypotheses are queued for testing |
+
+### 6.5 Integration wiring
+
+The arbitration protocol lives at the Router level (L1 Framework), where cross-cut signals converge:
+
+```
+Cross-cut signals arrive at Router:
+    Daimon.recommend_tier(task) -> TierRecommendation
+    Neuro.query_relevant(task)  -> Vec<KnowledgeEntry>
+    Dreams.recent_hypotheses()  -> Vec<DreamHypothesis>
+        |
+        v
+    Arbitrator.resolve(daimon, neuro, dreams) -> Decision
+        |
+        v
+    Router uses Decision to select model and parameters
+```
+
+### 6.6 Test criteria
+
+1. Daimon safety override always wins regardless of Neuro confidence.
+2. Consolidated Neuro knowledge overrides Dreams hypothesis.
+3. Transient Neuro knowledge does not override Dreams hypothesis with confidence > 0.8.
+4. VCG tiebreaker selects the higher-confidence signal.
+5. VCG payment equals the second-highest bid (not the winner's bid).
+6. Arbitration logs include the conflict type, participants, and resolution.
+
+---
+
 ## Academic Foundations
 
 | Citation | Contribution |
