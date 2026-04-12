@@ -13,6 +13,7 @@ use ratatui::Frame;
 
 use super::ViewState;
 use crate::tui::dashboard::{DashboardData, Theme};
+use crate::tui::state::TuiState;
 
 /// Sub-tabs within the dashboard detail panel.
 const SUB_TAB_LABELS: &[&str] = &[
@@ -30,6 +31,7 @@ pub fn render(
     frame: &mut Frame<'_>,
     area: Rect,
     data: &DashboardData,
+    _tui_state: &TuiState,
     view_state: &ViewState,
     theme: &Theme,
 ) {

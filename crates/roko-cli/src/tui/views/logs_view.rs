@@ -11,6 +11,7 @@ use ratatui::Frame;
 
 use super::ViewState;
 use crate::tui::dashboard::{DashboardData, Theme};
+use crate::tui::state::TuiState;
 
 /// A parsed log entry.
 #[derive(Debug, Clone)]
@@ -56,6 +57,7 @@ pub fn render(
     frame: &mut Frame<'_>,
     area: Rect,
     data: &DashboardData,
+    _tui_state: &TuiState,
     view_state: &ViewState,
     theme: &Theme,
 ) {

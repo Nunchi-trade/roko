@@ -16,6 +16,7 @@ use ratatui::layout::Rect;
 use ratatui::Frame;
 
 use super::dashboard::{DashboardData, Theme};
+use super::state::TuiState;
 use super::tabs::Tab;
 
 /// Per-view scroll and selection state.
@@ -43,16 +44,17 @@ pub fn render_tab_content(
     area: Rect,
     tab: Tab,
     data: &DashboardData,
+    tui_state: &TuiState,
     view_state: &ViewState,
     theme: &Theme,
 ) {
     match tab {
-        Tab::Dashboard => dashboard_view::render(frame, area, data, view_state, theme),
-        Tab::Plans => plans_view::render(frame, area, data, view_state, theme),
-        Tab::Agents => agents_view::render(frame, area, data, view_state, theme),
-        Tab::Git => git_view::render(frame, area, data, view_state, theme),
-        Tab::Logs => logs_view::render(frame, area, data, view_state, theme),
-        Tab::Config => config_view::render(frame, area, data, view_state, theme),
-        Tab::Inspect => context_view::render(frame, area, data, view_state, theme),
+        Tab::Dashboard => dashboard_view::render(frame, area, data, tui_state, view_state, theme),
+        Tab::Plans => plans_view::render(frame, area, data, tui_state, view_state, theme),
+        Tab::Agents => agents_view::render(frame, area, data, tui_state, view_state, theme),
+        Tab::Git => git_view::render(frame, area, data, tui_state, view_state, theme),
+        Tab::Logs => logs_view::render(frame, area, data, tui_state, view_state, theme),
+        Tab::Config => config_view::render(frame, area, data, tui_state, view_state, theme),
+        Tab::Inspect => context_view::render(frame, area, data, tui_state, view_state, theme),
     }
 }

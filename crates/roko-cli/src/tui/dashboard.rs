@@ -1397,10 +1397,14 @@ fn load_plan_summaries(root: &Path, state: &Value) -> Vec<PlanSummary> {
         ids.extend(plan_states.keys().cloned());
     }
     if ids.is_empty() {
-        if let Ok(entries) = std::fs::read_dir(plans_dir(root)) {
-            for entry in entries.flatten() {
-                if entry.path().is_dir() {
-                    ids.insert(entry.file_name().to_string_lossy().into_owned());
+        let pdir = plans_dir(root);
+        if pdir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&pdir) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.is_dir() && p.join("tasks.toml").exists() {
+                        ids.insert(entry.file_name().to_string_lossy().into_owned());
+                    }
                 }
             }
         }

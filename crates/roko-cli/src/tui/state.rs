@@ -271,6 +271,20 @@ pub struct TuiState {
     // -- token history --
     /// Token burn history per role (role -> entries).
     pub token_burn_history: HashMap<String, Vec<TokenBurnEntry>>,
+
+    // -- wave navigation --
+    /// Selected wave index for wave prev/next navigation.
+    pub selected_wave_idx: usize,
+
+    // -- config navigation --
+    /// Selected row in the config view.
+    pub config_selected: usize,
+    /// Scroll offset in the config view.
+    pub config_scroll: usize,
+
+    // -- agent pane --
+    /// Active agent pane display group (cycles through available groups).
+    pub agent_pane_group: usize,
 }
 
 impl Default for TuiState {
@@ -339,6 +353,13 @@ impl Default for TuiState {
             cumulative_output_tokens: 0,
 
             token_burn_history: HashMap::new(),
+
+            selected_wave_idx: 0,
+
+            config_selected: 0,
+            config_scroll: 0,
+
+            agent_pane_group: 0,
         }
     }
 }

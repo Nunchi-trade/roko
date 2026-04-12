@@ -30,7 +30,7 @@ use super::atmosphere::Atmosphere;
 use super::dashboard::{DashboardData, DashboardScaffold, Theme};
 use super::effects_config::EffectsConfig;
 use super::event::{Event, EventHandler};
-use super::input::{self, FocusZone, InputMode, TuiAction};
+use super::input::{self, ConfirmAction, FocusZone, InputMode, TuiAction};
 use super::modals::{self, ModalState};
 use super::pages::{PageId, PageRegistry};
 use super::state::TuiState;
@@ -262,6 +262,7 @@ impl App {
             main_layout[1],
             self.tui_state.active_tab,
             &self.data,
+            &self.tui_state,
             &view_state,
             &theme,
         );
@@ -554,12 +555,91 @@ impl App {
                     self.notifications.remove(0);
                 }
             }
-            TuiAction::ToggleAgentPaneGroup => {}
-            TuiAction::DrillIn | TuiAction::DrillOut => {}
-            TuiAction::WaveNext | TuiAction::WavePrev => {}
-            TuiAction::RestartPhase | TuiAction::RestartPlan => {}
-            TuiAction::ForceAdvance | TuiAction::ResetPlanState | TuiAction::ReverifyPlan => {}
-            TuiAction::ConfigUp | TuiAction::ConfigDown => {}
+            TuiAction::ToggleAgentPaneGroup => {
+                self.tui_state.agent_pane_group = (self.tui_state.agent_pane_group + 1) % 2;
+            }
+            TuiAction::DrillIn => {
+                if let Some(plan) = self.tui_state.plans.get_mut(self.tui_state.selected_plan_idx) {
+                    plan.expanded = true;
+                }
+            }
+            TuiAction::DrillOut => {
+                if let Some(plan) = self.tui_state.plans.get_mut(self.tui_state.selected_plan_idx) {
+                    plan.expanded = false;
+                }
+            }
+            TuiAction::WaveNext => {
+                let max = self.tui_state.plans.len().max(1);
+                self.tui_state.selected_wave_idx = (self.tui_state.selected_wave_idx + 1) % max;
+            }
+            TuiAction::WavePrev => {
+                let max = self.tui_state.plans.len().max(1);
+                self.tui_state.selected_wave_idx =
+                    self.tui_state.selected_wave_idx.checked_sub(1).unwrap_or(max - 1);
+            }
+            TuiAction::RestartPhase => {
+                self.tui_state.input_mode = InputMode::Confirm;
+                self.tui_state.pending_confirm = Some(ConfirmAction::RestartPhase);
+                let modal_action = modals::ConfirmAction::Custom {
+                    message: "Restart current phase?".to_string(),
+                };
+                self.active_modal = Some(ModalState::Confirm { action: modal_action });
+            }
+            TuiAction::RestartPlan => {
+                if let Some(plan) = self.tui_state.plans.get(self.tui_state.selected_plan_idx) {
+                    let plan_id = plan.id.clone();
+                    self.tui_state.input_mode = InputMode::Confirm;
+                    self.tui_state.pending_confirm =
+                        Some(ConfirmAction::ResetSelectedPlan(plan_id.clone()));
+                    let modal_action = modals::ConfirmAction::Custom {
+                        message: format!("Restart plan '{plan_id}'?"),
+                    };
+                    self.active_modal = Some(ModalState::Confirm { action: modal_action });
+                }
+            }
+            TuiAction::ForceAdvance => {
+                if let Some(plan) = self.tui_state.plans.get(self.tui_state.selected_plan_idx) {
+                    let plan_id = plan.id.clone();
+                    self.tui_state.input_mode = InputMode::Confirm;
+                    self.tui_state.pending_confirm =
+                        Some(ConfirmAction::ForceAdvance(plan_id.clone()));
+                    let modal_action = modals::ConfirmAction::Custom {
+                        message: format!("Force-advance plan '{plan_id}'?"),
+                    };
+                    self.active_modal = Some(ModalState::Confirm { action: modal_action });
+                }
+            }
+            TuiAction::ResetPlanState => {
+                if let Some(plan) = self.tui_state.plans.get(self.tui_state.selected_plan_idx) {
+                    let plan_id = plan.id.clone();
+                    self.tui_state.input_mode = InputMode::Confirm;
+                    self.tui_state.pending_confirm =
+                        Some(ConfirmAction::ResetSelectedPlan(plan_id.clone()));
+                    let modal_action = modals::ConfirmAction::Custom {
+                        message: format!("Reset state for plan '{plan_id}'?"),
+                    };
+                    self.active_modal = Some(ModalState::Confirm { action: modal_action });
+                }
+            }
+            TuiAction::ReverifyPlan => {
+                if let Some(plan) = self.tui_state.plans.get(self.tui_state.selected_plan_idx) {
+                    let plan_id = plan.id.clone();
+                    self.tui_state.input_mode = InputMode::Confirm;
+                    self.tui_state.pending_confirm =
+                        Some(ConfirmAction::ReverifyPlan(plan_id.clone()));
+                    let modal_action = modals::ConfirmAction::Custom {
+                        message: format!("Re-verify plan '{plan_id}'?"),
+                    };
+                    self.active_modal = Some(ModalState::Confirm { action: modal_action });
+                }
+            }
+            TuiAction::ConfigUp => {
+                self.tui_state.config_selected = self.tui_state.config_selected.saturating_sub(1);
+            }
+            TuiAction::ConfigDown => {
+                self.tui_state.config_selected = self.tui_state.config_selected.saturating_add(1);
+            }
+            // TODO: wire config editing when config view supports inline edits
             TuiAction::ConfigLeft | TuiAction::ConfigRight | TuiAction::ConfigSelect => {}
             TuiAction::MouseClick { x, y } => {
                 // Use hit_test to determine zone
