@@ -1143,10 +1143,9 @@ async fn cmd_dashboard(
     let initial_page = initial_page.transpose()?;
 
     if !text && !list_pages && std::io::stdout().is_terminal() {
-        // Use the new async 60fps renderer with StateHub support.
+        // Use the Mori-style interactive TUI with 60fps event loop.
         if App::new_with_page(&workdir, initial_page)
-            .run_with_state_hub(None)
-            .await
+            .run()
             .is_ok()
         {
             return Ok(EXIT_SUCCESS);

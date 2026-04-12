@@ -7,40 +7,6 @@ use super::{PageId, PageScaffold, WidgetScaffold};
 pub fn scaffold_pages() -> Vec<PageScaffold> {
     vec![
         PageScaffold::new(
-            PageId::ProviderHealth,
-            "Provider Health",
-            "Provider circuit state, latency, error rate, and recorded request totals.",
-            vec![
-                WidgetScaffold::new(
-                    "provider_status",
-                    "Provider Status",
-                    "Per-provider circuit state, latency p50, error rate, and recorded cost placeholder.",
-                ),
-                WidgetScaffold::new(
-                    "provider_summary",
-                    "Provider Summary",
-                    "Aggregate request and failure totals across recorded providers.",
-                ),
-            ],
-        ),
-        PageScaffold::new(
-            PageId::ModelComparison,
-            "Model Comparison",
-            "Cross-model pass rate, estimated cost, and Pareto frontier from cascade-router observations.",
-            vec![
-                WidgetScaffold::new(
-                    "comparison_table",
-                    "Model Comparison Table",
-                    "Per-model pass rate, estimated average cost, cost per success, and observation counts.",
-                ),
-                WidgetScaffold::new(
-                    "pareto_frontier",
-                    "Pareto Frontier",
-                    "Non-dominated models and dominated-model notes from the cascade snapshot.",
-                ),
-            ],
-        ),
-        PageScaffold::new(
             PageId::AgentStatus,
             "Agent Activity",
             "Live active-agent roster, model mix, and session cost breakdown.",
@@ -128,6 +94,40 @@ pub fn scaffold_pages() -> Vec<PageScaffold> {
                     "source_tags",
                     "Source Tags",
                     "Default/global/project/CLI override origin.",
+                ),
+            ],
+        ),
+        PageScaffold::new(
+            PageId::ProviderHealth,
+            "Provider Health",
+            "Per-provider circuit breaker state, latency, and error rates.",
+            vec![
+                WidgetScaffold::new(
+                    "provider_table",
+                    "Provider Status",
+                    "Provider name, state (open/half-open/closed), p50/p99 latency, error rate.",
+                ),
+                WidgetScaffold::new(
+                    "request_summary",
+                    "Request Summary",
+                    "Total requests, failures, and circuit breaker trips.",
+                ),
+            ],
+        ),
+        PageScaffold::new(
+            PageId::ModelComparison,
+            "Model Comparison",
+            "Side-by-side model performance, cost, and quality metrics.",
+            vec![
+                WidgetScaffold::new(
+                    "model_table",
+                    "Model Metrics",
+                    "Model ID, provider, cost/M tokens, latency, gate pass rate.",
+                ),
+                WidgetScaffold::new(
+                    "cost_comparison",
+                    "Cost Comparison",
+                    "Relative cost per task across models.",
                 ),
             ],
         ),

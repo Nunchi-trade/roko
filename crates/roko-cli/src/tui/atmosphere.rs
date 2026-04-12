@@ -1,90 +1,100 @@
-//! Animated UI elements for the dashboard TUI.
-//!
-//! Provides heartbeat pulsing, breathing effects, and spinner frames
-//! for loading indicators.
+//! Time-based animation state for TUI effects.
 
-use std::f64::consts::TAU;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-/// Heartbeat state for pulsing UI elements.
-pub struct Heartbeat {
-    start: Instant,
-    period: Duration,
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::style::Color;
+
+/// Tracks elapsed time and frame count for driving animations.
+#[derive(Debug, Clone)]
+pub struct Atmosphere {
+    start_time: Instant,
+    /// Seconds since start.
+    pub elapsed: f64,
+    /// Total frames rendered.
+    pub frame_count: u64,
 }
 
-impl Heartbeat {
-    /// Create a new heartbeat with the given period.
-    #[must_use]
-    pub fn new(period: Duration) -> Self {
+impl Default for Atmosphere {
+    fn default() -> Self {
         Self {
-            start: Instant::now(),
-            period,
+            start_time: Instant::now(),
+            elapsed: 0.0,
+            frame_count: 0,
         }
-    }
-
-    /// Returns a value in `[0.0, 1.0]` following a sine wave over the period.
-    #[must_use]
-    pub fn pulse(&self) -> f64 {
-        let elapsed = self.start.elapsed().as_secs_f64();
-        let period = self.period.as_secs_f64();
-        if period == 0.0 {
-            return 0.5;
-        }
-        let t = (elapsed / period).fract();
-        (t * TAU).sin() * 0.5 + 0.5
     }
 }
 
-/// Compute a breathing alpha value from a normalized time `t` in `[0.0, 1.0]`.
-///
-/// Returns a `u8` in `[1, 255]` following a sine curve.
-#[must_use]
-pub fn breathing_alpha(t: f64) -> u8 {
-    let t = t.clamp(0.0, 1.0);
-    let v = (t * TAU).sin();
-    // Map [-1, 1] to [1, 255].
-    ((v * 127.0) + 128.0).clamp(1.0, 255.0) as u8
-}
+impl Atmosphere {
+    /// Advance the clock. Call once per frame.
+    pub fn tick(&mut self) {
+        self.elapsed = self.start_time.elapsed().as_secs_f64();
+        self.frame_count += 1;
+    }
 
-/// Spinner frames for loading indicators.
-pub struct Spinner {
-    frames: &'static [&'static str],
-    start: Instant,
-    interval: Duration,
-}
-
-impl Spinner {
-    /// A dots-style spinner.
+    /// Breathing brightness oscillation (sine wave, range 0.8..1.0).
     #[must_use]
-    pub fn dots() -> Self {
-        Self {
-            frames: &[".", "..", "...", ".."],
-            start: Instant::now(),
-            interval: Duration::from_millis(250),
+    pub fn breathing_brightness(&self) -> f64 {
+        let phase = (self.elapsed * std::f64::consts::PI * 0.5).sin();
+        0.9 + 0.1 * phase
+    }
+
+    /// Double-pulse heartbeat pattern.
+    /// Returns a value in 0.0..1.0 representing beat intensity.
+    #[must_use]
+    pub fn heartbeat(&self) -> f64 {
+        // Two quick pulses per ~1.5s cycle
+        let t = (self.elapsed % 1.5) / 1.5;
+        if t < 0.1 {
+            // First beat: quick rise
+            (t / 0.1).min(1.0)
+        } else if t < 0.2 {
+            // First beat: quick fall
+            1.0 - ((t - 0.1) / 0.1)
+        } else if t < 0.3 {
+            // Second beat: quick rise
+            ((t - 0.2) / 0.1).min(1.0) * 0.7
+        } else if t < 0.4 {
+            // Second beat: quick fall
+            0.7 * (1.0 - ((t - 0.3) / 0.1))
+        } else {
+            // Rest
+            0.0
         }
     }
 
-    /// A braille-style spinner.
-    #[must_use]
-    pub fn braille() -> Self {
-        Self {
-            frames: &[
-                "\u{2800}", "\u{2801}", "\u{2803}", "\u{2807}", "\u{280f}", "\u{281f}", "\u{283f}",
-                "\u{287f}",
-            ],
-            start: Instant::now(),
-            interval: Duration::from_millis(100),
+    /// Apply a full-frame bloom post-processing pass.
+    /// Brightens cells whose luminance exceeds `threshold` by `intensity`.
+    pub fn apply(&self, area: Rect, buf: &mut Buffer) {
+        let brightness = self.breathing_brightness();
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    if let Some(Color::Rgb(r, g, b)) = cell.style().fg {
+                        let lum = luminance(r, g, b);
+                        if lum > 180 {
+                            let factor = brightness;
+                            let nr = scale_channel(r, factor);
+                            let ng = scale_channel(g, factor);
+                            let nb = scale_channel(b, factor);
+                            cell.set_fg(Color::Rgb(nr, ng, nb));
+                        }
+                    }
+                }
+            }
         }
     }
+}
 
-    /// Return the current frame string.
-    #[must_use]
-    pub fn frame(&self) -> &str {
-        let elapsed = self.start.elapsed();
-        let interval_ms = self.interval.as_millis().max(1);
-        let idx = (elapsed.as_millis() / interval_ms) as usize % self.frames.len();
-        self.frames[idx]
-    }
+/// Scale a color channel by a factor, clamping to 255.
+fn scale_channel(c: u8, factor: f64) -> u8 {
+    ((c as f64) * factor).round().min(255.0).max(0.0) as u8
+}
+
+/// Approximate perceptual luminance (0..255).
+fn luminance(r: u8, g: u8, b: u8) -> u8 {
+    ((r as u16 * 77 + g as u16 * 150 + b as u16 * 29) >> 8) as u8
 }
 
 #[cfg(test)]
@@ -92,35 +102,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn heartbeat_range() {
-        let hb = Heartbeat::new(Duration::from_millis(100));
-        let v = hb.pulse();
-        assert!((0.0..=1.0).contains(&v));
+    fn breathing_in_range() {
+        let atm = Atmosphere::default();
+        let b = atm.breathing_brightness();
+        assert!(b >= 0.79 && b <= 1.01, "breathing={b}");
     }
 
     #[test]
-    fn breathing_alpha_range() {
-        for i in 0..=100 {
-            let t = i as f64 / 100.0;
-            let a = breathing_alpha(t);
-            assert!(a >= 1);
-        }
+    fn heartbeat_in_range() {
+        let atm = Atmosphere::default();
+        let h = atm.heartbeat();
+        assert!(h >= 0.0 && h <= 1.0, "heartbeat={h}");
     }
 
     #[test]
-    fn spinner_dots_returns_frame() {
-        let s = Spinner::dots();
-        let f = s.frame();
-        assert!(
-            [".", "..", "...", ".."].contains(&f),
-            "unexpected frame: {f}"
-        );
+    fn luminance_black_is_zero() {
+        assert_eq!(luminance(0, 0, 0), 0);
     }
 
     #[test]
-    fn spinner_braille_returns_frame() {
-        let s = Spinner::braille();
-        let f = s.frame();
-        assert!(!f.is_empty());
+    fn luminance_white_is_max() {
+        let l = luminance(255, 255, 255);
+        assert!(l > 250);
     }
 }

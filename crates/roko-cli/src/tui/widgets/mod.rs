@@ -1,22 +1,14 @@
 //! Reusable widgets for the dashboard TUI.
 
-pub mod agent_grid;
-pub mod agent_output;
-pub mod agent_pool;
-pub mod braille;
-pub mod command_output;
-pub mod error_digest;
-pub mod header_bar;
-pub mod phase_bar;
-pub mod phase_compact;
-pub mod plan_tree;
-pub mod scrollbar;
-pub mod status_bar;
-pub mod sys_metrics;
-pub mod task_progress;
-pub mod token_bar;
-pub mod token_sparkline;
-pub mod wave_progress;
+pub mod branch_tree;
+pub mod context_gauge;
+pub mod diff_panel;
+pub mod parallel_pool;
+pub mod phase_timeline;
+pub mod plan_list;
+pub mod status_badge;
+pub mod tab_bar;
+pub mod wave_bar;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -31,15 +23,14 @@ use ratatui::widgets::{
     Wrap,
 };
 use roko_core::task::{TaskCategory, TaskComplexityBand};
-use roko_learn::cfactor::trend_arrow as cfactor_trend_arrow;
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::prompt_experiment::{ExperimentStatus, ExperimentStore};
 use serde_json::Value;
 
 use super::dashboard::{
-    AgentActivitySnapshot, CascadeRouterState, DashboardData, DashboardScaffold, GateFailureRow,
-    GateSummaryRow, GateThresholdRow, GateTrend, PlanExecutionSnapshot, SignalSummary, Theme,
-    build_agent_activity_snapshot, operating_frequency_label, read_json_value, read_jsonl_values,
+    AgentActivitySnapshot, CFactor, CascadeRouterState, DashboardData, DashboardScaffold,
+    GateFailureRow, GateSummaryRow, GateThresholdRow, GateTrend, PlanExecutionSnapshot,
+    SignalSummary, Theme, build_agent_activity_snapshot, read_json_value, read_jsonl_values,
 };
 use super::pages::{PageId, PageRegistry};
 
@@ -242,7 +233,7 @@ fn render_agent_activity_page(frame: &mut Frame<'_>, area: Rect, data: &Dashboar
     ])
     .split(inner);
 
-    render_active_agents_table(frame, sections[0], &snapshot.active_agents, data);
+    render_active_agents_table(frame, sections[0], &snapshot.active_agents);
     render_model_distribution_chart(frame, sections[1], &snapshot);
     render_model_cost_breakdown(frame, sections[2], &snapshot);
 }
@@ -1453,7 +1444,6 @@ fn render_active_agents_table(
     frame: &mut Frame<'_>,
     area: Rect,
     rows: &[super::dashboard::AgentActivityRow],
-    data: &DashboardData,
 ) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1476,13 +1466,7 @@ fn render_active_agents_table(
     let table_rows: Vec<Row<'_>> = rows
         .iter()
         .map(|row| {
-            let affect = row
-                .plan_id
-                .as_deref()
-                .map(|plan_id| data.affect_indicator(plan_id))
-                .unwrap_or_else(|| data.affect_indicator(&row.agent_id));
             Row::new(vec![
-                Cell::from(affect),
                 Cell::from(truncate_text(&row.agent_id, 20)),
                 Cell::from(truncate_text(&row.model, 14)),
                 Cell::from(truncate_text(&row.task, 16)),
@@ -1498,7 +1482,6 @@ fn render_active_agents_table(
     let table = Table::new(
         table_rows,
         [
-            Constraint::Length(3),
             Constraint::Length(20),
             Constraint::Length(14),
             Constraint::Length(16),
@@ -1511,7 +1494,6 @@ fn render_active_agents_table(
     )
     .header(
         Row::new(vec![
-            Cell::from("aff"),
             Cell::from("agent ID"),
             Cell::from("model"),
             Cell::from("task"),
@@ -1700,11 +1682,8 @@ fn render_plan_execution_page(
     };
 
     let title_label = format!(
-        "{}  {}  [{}/{}]",
-        execution.plan_title,
-        data.affect_indicator(&execution.plan_id),
-        execution.tasks_done,
-        execution.tasks_total
+        "{}  [{}/{}]",
+        execution.plan_title, execution.tasks_done, execution.tasks_total
     );
     let progress = if execution.tasks_total == 0 {
         0.0
@@ -1765,7 +1744,6 @@ fn render_plan_execution_table(
                 Cell::from(task.task_id.clone()),
                 Cell::from(truncate_text(&task.title, 40)),
                 Cell::from(Span::styled(task.phase.clone(), phase_style)),
-                Cell::from(operating_frequency_label(task.frequency)),
                 Cell::from(task.model.clone()),
                 Cell::from(task.duration.clone()),
             ])
@@ -1779,7 +1757,6 @@ fn render_plan_execution_table(
             Constraint::Length(12),
             Constraint::Min(24),
             Constraint::Length(14),
-            Constraint::Length(10),
             Constraint::Length(18),
             Constraint::Length(10),
         ],
@@ -1789,7 +1766,6 @@ fn render_plan_execution_table(
             Cell::from("task id"),
             Cell::from("title"),
             Cell::from("phase"),
-            Cell::from("frequency"),
             Cell::from("model"),
             Cell::from("duration"),
         ])
@@ -1860,26 +1836,6 @@ fn render_plan_execution_sidebar(
         ),
         Span::raw(": "),
         Span::raw(&task.task_id),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(
-            "plan affect",
-            Style::default()
-                .fg(Color::Gray)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(": "),
-        Span::raw(data.affect_indicator(&execution.plan_id)),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(
-            "frequency",
-            Style::default()
-                .fg(Color::Gray)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(": "),
-        Span::raw(operating_frequency_label(task.frequency)),
     ]));
     lines.push(Line::from(vec![
         Span::styled(
@@ -2054,7 +2010,6 @@ fn render_health_indicators(frame: &mut Frame<'_>, area: Rect, data: &DashboardD
     let panels = Layout::vertical([
         Constraint::Length(5),
         Constraint::Length(5),
-        Constraint::Length(5),
         Constraint::Min(0),
     ])
     .split(inner);
@@ -2062,12 +2017,6 @@ fn render_health_indicators(frame: &mut Frame<'_>, area: Rect, data: &DashboardD
     let gate_series = gate_pass_rate_series(data.root());
     let cost_series = cost_trend_series(data);
     let c_factor_series = cfactor_series(data);
-    let current_cfactor = data
-        .cfactor
-        .as_ref()
-        .map(|snapshot| snapshot.overall)
-        .unwrap_or(0.0);
-    let trend = cfactor_trend(data);
 
     let gate = Sparkline::default()
         .block(
@@ -2089,13 +2038,11 @@ fn render_health_indicators(frame: &mut Frame<'_>, area: Rect, data: &DashboardD
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(format!("C-Factor 7d: {:.2} {}", current_cfactor, trend)),
+                .title("C-Factor score"),
         )
         .data(&c_factor_series)
         .style(Style::default().fg(Color::Cyan));
     frame.render_widget(cfactor, panels[2]);
-
-    render_cfactor_breakdown(frame, panels[3], data, trend);
 }
 
 fn render_alerts(frame: &mut Frame<'_>, area: Rect, data: &DashboardData) {
@@ -2145,78 +2092,6 @@ fn render_summary_bar(frame: &mut Frame<'_>, area: Rect, data: &DashboardData) {
         .alignment(Alignment::Center)
         .block(Block::default().borders(Borders::TOP));
     frame.render_widget(paragraph, area);
-}
-
-fn render_cfactor_breakdown(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, trend: &str) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("C-Factor breakdown");
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let Some(snapshot) = data.cfactor.as_ref() else {
-        let empty = Paragraph::new("no C-Factor snapshot")
-            .style(Style::default().fg(Color::DarkGray))
-            .alignment(Alignment::Center);
-        frame.render_widget(empty, inner);
-        return;
-    };
-
-    let lines = vec![
-        Line::from(vec![
-            Span::styled(
-                "current",
-                Style::default()
-                    .fg(Color::Gray)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(": "),
-            Span::styled(
-                format!("{:.2} {}", snapshot.overall, trend),
-                Style::default().fg(Color::Cyan),
-            ),
-        ]),
-        Line::from(format!(
-            "gate pass rate: {}",
-            format_pct(snapshot.components.gate_pass_rate)
-        )),
-        Line::from(format!(
-            "cost efficiency: {}",
-            format_pct(snapshot.components.cost_efficiency)
-        )),
-        Line::from(format!("speed: {}", format_pct(snapshot.components.speed))),
-        Line::from(format!(
-            "information flow rate: {}",
-            format_pct(snapshot.components.information_flow_rate)
-        )),
-        Line::from(format!(
-            "first-try rate: {}",
-            format_pct(snapshot.components.first_try_rate)
-        )),
-        Line::from(format!(
-            "knowledge growth: {}",
-            format_pct(snapshot.components.knowledge_growth)
-        )),
-        Line::from(format!(
-            "knowledge integration rate: {}",
-            format_pct(snapshot.components.knowledge_integration_rate)
-        )),
-        Line::from(format!(
-            "convergence velocity: {}",
-            format_pct(snapshot.components.convergence_velocity)
-        )),
-        Line::from(format!(
-            "turn-taking equality: {}",
-            format_pct(snapshot.components.turn_taking_equality)
-        )),
-        Line::from(format!(
-            "social sensitivity: {}",
-            format_pct(snapshot.components.social_sensitivity)
-        )),
-    ];
-
-    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-    frame.render_widget(paragraph, inner);
 }
 
 fn collect_plan_rows(data: &DashboardData) -> Vec<PlanRow> {
@@ -2426,38 +2301,63 @@ fn load_efficiency_events(root: &Path) -> Vec<AgentEfficiencyEvent> {
 }
 
 fn cfactor_series(data: &DashboardData) -> Vec<u64> {
-    let today = Utc::now().date_naive();
-    let mut buckets: BTreeMap<i64, (f64, u64)> = BTreeMap::new();
+    let path = data
+        .root()
+        .join(".roko")
+        .join("learn")
+        .join("c-factor.jsonl");
+    let history = read_jsonl_values(&path)
+        .into_iter()
+        .filter_map(|entry| serde_json::from_value::<CFactor>(entry).ok())
+        .collect::<Vec<_>>();
+    let source = if history.is_empty() {
+        data.cfactor.clone().into_iter().collect::<Vec<_>>()
+    } else {
+        history
+    };
 
-    for snapshot in &data.cfactor_history {
-        let day = snapshot.computed_at.date_naive();
-        let age = today.signed_duration_since(day).num_days();
-        if !(0..7).contains(&age) {
-            continue;
-        }
-        let bucket = buckets.entry(age).or_default();
-        bucket.0 += snapshot.overall;
-        bucket.1 += 1;
-    }
-
-    (0..7)
+    let mut series = source
+        .into_iter()
         .rev()
-        .map(|age| {
-            let (sum, count) = buckets.get(&age).copied().unwrap_or_default();
-            if count == 0 {
-                0
-            } else {
-                ((sum / count as f64) * 100.0).round().max(0.0) as u64
-            }
-        })
-        .collect()
+        .take(7)
+        .map(|snapshot| (snapshot.overall * 100.0).round().max(0.0) as u64)
+        .collect::<Vec<_>>();
+    series.reverse();
+    if series.is_empty() {
+        series.push(0);
+    }
+    series
 }
 
 fn cfactor_trend(data: &DashboardData) -> &'static str {
-    cfactor_trend_arrow(
-        &data.cfactor_history,
-        std::time::Duration::from_secs(7 * 24 * 60 * 60),
-    )
+    let path = data
+        .root()
+        .join(".roko")
+        .join("learn")
+        .join("c-factor.jsonl");
+    let history = read_jsonl_values(&path)
+        .into_iter()
+        .filter_map(|entry| serde_json::from_value::<CFactor>(entry).ok())
+        .collect::<Vec<_>>();
+    if history.len() >= 2 {
+        let latest = history[history.len() - 1].overall;
+        let previous = history[history.len() - 2].overall;
+        if latest > previous {
+            "↑"
+        } else if latest < previous {
+            "↓"
+        } else {
+            "→"
+        }
+    } else if data
+        .cfactor
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.overall >= 0.5)
+    {
+        "↑"
+    } else {
+        "↓"
+    }
 }
 
 fn gate_passed_from_value(value: &Value) -> bool {

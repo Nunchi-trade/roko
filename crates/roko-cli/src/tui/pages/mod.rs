@@ -27,10 +27,6 @@ pub enum PageId {
     Experiments,
     /// Efficiency optimizer loop.
     Optimizer,
-    /// Provider circuit breaker and latency status.
-    ProviderHealth,
-    /// Cross-model cost/quality comparison from cascade stats.
-    ModelComparison,
     /// Live per-agent status.
     AgentStatus,
     /// Plan DAG/progress view.
@@ -41,6 +37,10 @@ pub enum PageId {
     Signals,
     /// Effective config view.
     ConfigView,
+    /// Provider health monitoring.
+    ProviderHealth,
+    /// Model comparison metrics.
+    ModelComparison,
 }
 
 impl PageId {
@@ -56,13 +56,13 @@ impl PageId {
             Self::Parameters => "Parameters",
             Self::Experiments => "Experiments",
             Self::Optimizer => "Optimizer",
-            Self::ProviderHealth => "Provider Health",
-            Self::ModelComparison => "Model Comparison",
             Self::AgentStatus => "Agent Activity",
             Self::PlanView => "Plan View",
             Self::LogView => "Log View",
             Self::Signals => "Signals",
             Self::ConfigView => "Config View",
+            Self::ProviderHealth => "Provider Health",
+            Self::ModelComparison => "Model Comparison",
         }
     }
 
@@ -78,13 +78,13 @@ impl PageId {
             Self::Parameters => "parameters",
             Self::Experiments => "experiments",
             Self::Optimizer => "optimizer",
-            Self::ProviderHealth => "provider-health",
-            Self::ModelComparison => "model-comparison",
             Self::AgentStatus => "agent-status",
             Self::PlanView => "plan-view",
             Self::LogView => "log-view",
             Self::Signals => "signals",
             Self::ConfigView => "config-view",
+            Self::ProviderHealth => "provider-health",
+            Self::ModelComparison => "model-comparison",
         }
     }
 
@@ -100,13 +100,13 @@ impl PageId {
             | Self::Parameters
             | Self::Experiments
             | Self::Optimizer => "efficiency",
-            Self::ProviderHealth
-            | Self::ModelComparison
-            | Self::AgentStatus
+            Self::AgentStatus
             | Self::PlanView
             | Self::LogView
             | Self::Signals
-            | Self::ConfigView => "operations",
+            | Self::ConfigView
+            | Self::ProviderHealth
+            | Self::ModelComparison => "operations",
         }
     }
 }
@@ -393,8 +393,6 @@ mod tests {
         assert_eq!(PageId::Health.group(), "efficiency");
         assert_eq!(PageId::PlanView.group(), "operations");
         assert_eq!(PageId::Learning.group(), "efficiency");
-        assert_eq!(PageId::ProviderHealth.group(), "operations");
-        assert_eq!(PageId::ModelComparison.group(), "operations");
     }
 
     #[test]
