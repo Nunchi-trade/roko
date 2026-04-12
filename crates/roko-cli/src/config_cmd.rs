@@ -344,8 +344,8 @@ pub async fn cmd_validate(workdir: &Path) -> Result<()> {
 pub fn cmd_migrate(workdir: &Path, dry_run: bool) -> Result<()> {
     let paths = resolve_paths(workdir);
     let config_path = validate_config_path(&paths, workdir)?;
-    let text =
-        fs::read_to_string(&config_path).with_context(|| format!("read {}", config_path.display()))?;
+    let text = fs::read_to_string(&config_path)
+        .with_context(|| format!("read {}", config_path.display()))?;
     let plan = build_config_migration_plan(&text)?;
 
     match plan {
@@ -921,7 +921,9 @@ fn legacy_model_profiles(
     }
 
     if model_keys.is_empty() {
-        return Err(anyhow!("legacy config has no agent.model or agent.tier_models to migrate"));
+        return Err(anyhow!(
+            "legacy config has no agent.model or agent.tier_models to migrate"
+        ));
     }
 
     Ok(model_keys
@@ -1663,11 +1665,13 @@ mechanical = "claude-haiku-4-5"
         assert_eq!(plan.provider.command.as_deref(), Some("claude"));
         assert_eq!(
             plan.provider.args.as_deref(),
-            Some(&[
-                "--print".to_string(),
-                "--output-format".to_string(),
-                "stream-json".to_string(),
-            ][..])
+            Some(
+                &[
+                    "--print".to_string(),
+                    "--output-format".to_string(),
+                    "stream-json".to_string(),
+                ][..]
+            )
         );
         assert_eq!(plan.provider.timeout_ms, Some(300_000));
         assert_eq!(plan.models.len(), 2);
@@ -1704,9 +1708,10 @@ model = "gpt-5"
 "#;
 
         let err = build_config_migration_plan(text).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("legacy agent.command 'mods' cannot be migrated safely"));
+        assert!(
+            err.to_string()
+                .contains("legacy agent.command 'mods' cannot be migrated safely")
+        );
     }
 
     #[test]

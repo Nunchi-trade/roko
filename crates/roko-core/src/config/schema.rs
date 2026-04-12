@@ -1,8 +1,8 @@
 //! Unified `RokoConfig` schema with hierarchical sections.
 //!
 //! Every section is a separate struct so callers can destructure just the
-//! slice they need. All fields carry serde defaults so a bare `schema_version = 2`
-//! produces a fully-populated config.
+//! slice they need. All fields carry serde defaults so a bare config still
+//! produces a fully-populated `RokoConfig`.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -21,6 +21,7 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 /// Root configuration for the Roko runtime.
 ///
 /// ```toml
+/// config_version = 2
 /// schema_version = 2
 ///
 /// [project]
@@ -32,9 +33,15 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 /// [agent.roles.implementer]
 /// model = "claude-opus-4-6"
 /// ```
+pub const CURRENT_CONFIG_VERSION: u32 = 2;
+
 #[allow(clippy::derive_partial_eq_without_eq)] // contains f32 via BudgetConfig
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RokoConfig {
+    /// Config layout version for migration tooling.
+    #[serde(default = "default_config_version")]
+    pub config_version: u32,
+
     /// Schema version for migration tooling.
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
@@ -120,9 +127,14 @@ const fn default_schema_version() -> u32 {
     CURRENT_SCHEMA_VERSION
 }
 
+const fn default_config_version() -> u32 {
+    1
+}
+
 impl Default for RokoConfig {
     fn default() -> Self {
         Self {
+            config_version: CURRENT_CONFIG_VERSION,
             schema_version: CURRENT_SCHEMA_VERSION,
             project: ProjectConfig::default(),
             prd: PrdConfig::default(),
@@ -157,6 +169,7 @@ impl RokoConfig {
             out,
             "# Delete any section you don't need; defaults apply.\n"
         );
+        let _ = writeln!(out, "config_version = {CURRENT_CONFIG_VERSION}");
         let _ = writeln!(out, "schema_version = {CURRENT_SCHEMA_VERSION}\n");
     }
 
@@ -395,7 +408,13 @@ impl RokoConfig {
 
     /// Parse from a TOML string.
     pub fn from_toml(s: &str) -> Result<Self, toml::de::Error> {
-        toml::from_str(s)
+        let config: Self = toml::from_str(s)?;
+        if config.config_version == 1 {
+            tracing::warn!(
+                "roko.toml uses config version 1 (no [providers] section)\n  hint: run `roko config migrate` to upgrade"
+            );
+        }
+        Ok(config)
     }
 
     /// Render to a TOML string.
@@ -2368,6 +2387,61 @@ impl Default for DeployConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone, Default)]
+    struct SharedLogBuffer {
+        inner: Arc<Mutex<Vec<u8>>>,
+    }
+
+    struct SharedLogWriter {
+        inner: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl SharedLogBuffer {
+        fn into_string(self) -> String {
+            String::from_utf8(self.inner.lock().expect("lock log buffer").clone())
+                .expect("log output should be utf-8")
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for SharedLogBuffer {
+        type Writer = SharedLogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedLogWriter {
+                inner: Arc::clone(&self.inner),
+            }
+        }
+    }
+
+    impl Write for SharedLogWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.inner
+                .lock()
+                .expect("lock log writer")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_warn_logs<T>(f: impl FnOnce() -> T) -> (T, String) {
+        let buffer = SharedLogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(buffer.clone())
+            .finish();
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let value = tracing::dispatcher::with_default(&dispatch, f);
+        (value, buffer.into_string())
+    }
 
     fn assert_error_contains(err: toml::de::Error, expected: &[&str]) {
         let message = err.to_string();
@@ -2390,7 +2464,71 @@ mod tests {
     #[test]
     fn empty_toml_uses_all_defaults() {
         let cfg = RokoConfig::from_toml("").expect("parse empty");
-        assert_eq!(cfg, RokoConfig::default());
+        let expected = RokoConfig {
+            config_version: 1,
+            ..RokoConfig::default()
+        };
+        assert_eq!(cfg, expected);
+    }
+
+    #[test]
+    fn config_version_defaults_to_legacy() {
+        let cfg = RokoConfig::from_toml("").expect("parse");
+        assert_eq!(cfg.config_version, 1);
+    }
+
+    #[test]
+    fn default_config_uses_current_config_version() {
+        let cfg = RokoConfig::default();
+        assert_eq!(cfg.config_version, CURRENT_CONFIG_VERSION);
+    }
+
+    #[test]
+    fn config_version_detection_warns_for_legacy_configs() {
+        let (cfg, logs) = capture_warn_logs(|| {
+            RokoConfig::from_toml(
+                r#"
+[agent]
+default_model = "claude-sonnet-4-6"
+"#,
+            )
+            .expect("parse")
+        });
+
+        assert_eq!(cfg.config_version, 1);
+        assert!(logs.contains("roko.toml uses config version 1 (no [providers] section)"));
+        assert!(logs.contains("hint: run `roko config migrate` to upgrade"));
+    }
+
+    #[test]
+    fn config_version_detection_is_silent_for_current_configs() {
+        let (cfg, logs) = capture_warn_logs(|| {
+            RokoConfig::from_toml(
+                r#"
+config_version = 2
+schema_version = 2
+
+[agent]
+default_model = "glm-5-1"
+
+[providers.zai]
+kind = "openai_compat"
+base_url = "https://api.z.ai/api/paas/v4"
+api_key_env = "ZAI_API_KEY"
+
+[models.glm-5-1]
+provider = "zai"
+slug = "glm-5.1"
+"#,
+            )
+            .expect("parse")
+        });
+
+        assert_eq!(cfg.config_version, 2);
+        assert!(
+            logs.trim().is_empty(),
+            "expected no deprecation warning, got `{logs}`"
+        );
     }
 
     #[test]

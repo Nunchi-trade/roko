@@ -97,6 +97,7 @@ pub fn from_mori_toml(text: &str) -> Result<RokoConfig, toml::de::Error> {
 
 fn convert(m: &MoriConfig) -> RokoConfig {
     RokoConfig {
+        config_version: 1,
         schema_version: CURRENT_SCHEMA_VERSION,
         project: convert_project(m),
         prd: PrdConfig::default(),
