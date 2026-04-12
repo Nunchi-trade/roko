@@ -243,6 +243,44 @@ impl Default for ToolSchema {
     }
 }
 
+// ─── ToolSource ───────────────────────────────────────────────────────────
+
+/// Provenance information for a tool definition.
+///
+/// This allows translators and future config-driven registries to
+/// distinguish built-ins from MCP, native web-search, retrieval, and
+/// plugin-provided tools without changing the rest of the tool surface.
+#[allow(clippy::derive_partial_eq_without_eq)] // serde_json::Value isn't Eq (has f64)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolSource {
+    /// Tool compiled into Roko's built-in registry.
+    #[default]
+    Builtin,
+    /// Tool discovered from an MCP server.
+    Mcp {
+        /// MCP server identifier that supplied the tool.
+        server: String,
+    },
+    /// Native web-search capability exposed by a provider.
+    WebSearch {
+        /// Provider family or implementation name.
+        provider: String,
+        /// Provider-specific native web-search configuration payload.
+        config: serde_json::Value,
+    },
+    /// Native retrieval capability exposed by a provider.
+    Retrieval {
+        /// Retrieval knowledge-base identifier.
+        knowledge_id: String,
+    },
+    /// Tool exposed by an external plugin.
+    Plugin {
+        /// Plugin name that supplied the tool.
+        name: String,
+    },
+}
+
 // ─── ToolDef ──────────────────────────────────────────────────────────────
 
 /// Schema + metadata for one callable tool.
@@ -275,6 +313,12 @@ pub struct ToolDef {
     /// Whether calling the tool twice with identical arguments has no
     /// additional side effects (e.g. `read_file` is idempotent, `bash` is not).
     pub idempotent: bool,
+    /// Where this tool definition originated from.
+    #[serde(default)]
+    pub source: ToolSource,
+    /// Extra source-specific data reserved for future extension.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
 }
 
 impl ToolDef {
@@ -299,6 +343,8 @@ impl ToolDef {
             timeout_ms: 60_000,
             concurrency: ToolConcurrency::Parallel,
             idempotent: false,
+            source: ToolSource::Builtin,
+            metadata: None,
         }
     }
 
@@ -414,6 +460,8 @@ mod tests {
         assert_eq!(t.timeout_ms, 60_000);
         assert_eq!(t.concurrency, ToolConcurrency::Parallel);
         assert!(!t.idempotent);
+        assert_eq!(t.source, ToolSource::Builtin);
+        assert_eq!(t.metadata, None);
     }
 
     #[test]
@@ -446,5 +494,58 @@ mod tests {
         let json = serde_json::to_string(&t).unwrap();
         let decoded: ToolDef = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, t);
+    }
+
+    #[test]
+    fn tool_def_source_defaults_for_legacy_json() {
+        let legacy = serde_json::json!({
+            "name": "read_file",
+            "description": "Read a UTF-8 file",
+            "parameters": {"type": "object"},
+            "category": "read",
+            "permission": {
+                "read": true,
+                "write": false,
+                "exec": false,
+                "git": false,
+                "network": false
+            },
+            "timeout_ms": 60_000,
+            "concurrency": "parallel",
+            "idempotent": true
+        });
+
+        let decoded: ToolDef = serde_json::from_value(legacy).unwrap();
+        assert_eq!(decoded.source, ToolSource::Builtin);
+        assert_eq!(decoded.metadata, None);
+    }
+
+    #[test]
+    fn tool_def_source_web_search_serializes() {
+        let mut tool = ToolDef::new(
+            "web_search",
+            "Search the web",
+            ToolCategory::Network,
+            ToolPermission::networked(),
+        );
+        tool.source = ToolSource::WebSearch {
+            provider: "glm".to_string(),
+            config: serde_json::json!({
+                "search_context_size": "high"
+            }),
+        };
+
+        let encoded = serde_json::to_value(&tool).unwrap();
+        assert_eq!(
+            encoded["source"],
+            serde_json::json!({
+                "type": "web_search",
+                "provider": "glm",
+                "config": {
+                    "search_context_size": "high"
+                }
+            })
+        );
+        assert!(encoded.get("metadata").is_none());
     }
 }

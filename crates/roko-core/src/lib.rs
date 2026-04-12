@@ -113,8 +113,8 @@ pub use tool::{
     ProfileBandit, RewardConfig, ToolCall, ToolCategory, ToolConcurrency, ToolContext, ToolDef,
     ToolError, ToolFormat, ToolFormatProfile, ToolHandler, ToolMetrics, ToolOutcome,
     ToolPermission, ToolRegistry, ToolRelevanceScorer, ToolResult, ToolSchema, ToolTrace,
-    ToolTraceEvent, TraceBuilder, TraceId, TraceSink, TraceStep, VecToolRegistry, compute_reward,
-    galileo_tsq, profile_for_model,
+    ToolTraceEvent, TraceBuilder, TraceId, TraceSink, TraceStep, ToolSource, VecToolRegistry,
+    compute_reward, galileo_tsq, profile_for_model,
 };
 pub use traits::{Composer, Gate, Policy, Router, Scorer, Substrate};
 pub use verdict::{Outcome, Selection, TestCount, Verdict};
