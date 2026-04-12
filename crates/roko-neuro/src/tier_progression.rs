@@ -693,7 +693,8 @@ fn playbook_source_model(rules: &[HeuristicRule]) -> Option<String> {
 }
 
 fn playbook_model_generality(rules: &[HeuristicRule]) -> f64 {
-    rules.iter()
+    rules
+        .iter()
         .map(|rule| rule.model_generality)
         .reduce(f64::min)
         .unwrap_or_else(default_model_generality)

@@ -79,12 +79,12 @@ pub fn scaffold_pages() -> Vec<PageScaffold> {
         PageScaffold::new(
             PageId::Learning,
             "Learning",
-            "Cascade routing, active experiments, and efficiency trends.",
+            "Learning subsystem interactions, update counts, and feedback loop status.",
             vec![
                 WidgetScaffold::new(
-                    "cascade_router",
-                    "Cascade Router",
-                    "Model weights, recommendation counts, and UCB scores.",
+                    "learning_system_status",
+                    "Learning System Status",
+                    "Stage transitions, subsystem freshness, and missing feedback loops.",
                 ),
                 WidgetScaffold::new(
                     "active_experiments",

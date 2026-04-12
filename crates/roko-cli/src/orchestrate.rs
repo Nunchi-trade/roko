@@ -1094,7 +1094,11 @@ fn select_playbook_heuristics(
 ) -> Vec<KnowledgeEntry> {
     let query = playbook_heuristic_query(role, task_def, task_text);
     knowledge_store
-        .query_kind(&query, KnowledgeKind::Playbook, limit.saturating_mul(3).max(limit))
+        .query_kind(
+            &query,
+            KnowledgeKind::Playbook,
+            limit.saturating_mul(3).max(limit),
+        )
         .unwrap_or_default()
         .into_iter()
         .filter(|entry| entry.confidence > 0.0)
@@ -5198,8 +5202,7 @@ impl PlanRunner {
             task_def,
             task_text,
             current_model,
-        )
-        {
+        ) {
             parts.push(playbook_heuristics);
         }
 
