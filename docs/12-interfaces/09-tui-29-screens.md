@@ -2,6 +2,9 @@
 
 > Complete inventory of all 29 screens across 6 window regions — navigation, agent detail, plan detail, knowledge, collective intelligence, and system monitoring.
 
+
+> **Implementation**: Scaffold
+
 **Topic**: [12-interfaces](./INDEX.md)
 **Prerequisites**: [08-tui-main-layout.md](./08-tui-main-layout.md), [07-rosedust-design-language.md](./07-rosedust-design-language.md)
 **Key sources**: `refactoring-prd/06-interfaces.md` §4, `roko-cli/src/tui/`, `bardo-backup/prd/18-interfaces/03-tui.md`, `bardo-backup/prd/18-interfaces/01-cli.md`
@@ -1276,5 +1279,5 @@ Region 6 (System)       ──Esc──▸ Region 1, Agent List
 - See [07-rosedust-design-language.md](./07-rosedust-design-language.md) for the color palette
 - See [10-spectre-creature-visualization.md](./10-spectre-creature-visualization.md) for Spectre rendering
 - See topic [09-daimon](../09-daimon/INDEX.md) for behavioral states and PAD vector
-- See topic [07-cfactor](../07-cfactor/INDEX.md) for C-Factor computation
-- See topic [11-neuro](../11-neuro/INDEX.md) for the knowledge tier system
+- See topic [07-cfactor](../14-identity-economy/INDEX.md) for C-Factor computation
+- See topic [11-neuro](../06-neuro/INDEX.md) for the knowledge tier system

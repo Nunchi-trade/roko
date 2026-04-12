@@ -5,6 +5,9 @@
 > defines the subscription configuration format in `roko.toml`, the three trigger types (cron,
 > file watch, webhook), per-repo overrides, and the subscription lifecycle.
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview

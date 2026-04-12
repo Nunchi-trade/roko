@@ -8,6 +8,9 @@
 >
 > **Prerequisites**: [00-defense-in-depth.md](00-defense-in-depth.md), [08-threat-model.md](08-threat-model.md)
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview
@@ -710,6 +713,245 @@ pub trait Gate: Send + Sync {
 ```
 
 Where `Signal` will be renamed to `Engram` in Tier 0D of the implementation plan.
+
+### Timeout handling per stage with fallback logic
+
+Each pipeline stage has a time budget. When a stage times out, the pipeline records a partial result and moves on. The overall verification level reflects the deepest stage that completed.
+
+```rust
+/// Run the five-stage verification pipeline with per-stage timeouts.
+/// Returns the highest VerificationLevel achieved before timeout or failure.
+pub async fn run_pipeline(
+    config: &PipelineConfig,
+    target: &VerificationTarget,
+) -> VerificationResult {
+    let mut level = VerificationLevel::Unknown;
+    let mut findings: Vec<Finding> = Vec::new();
+    let mut stages_run = 0u32;
+
+    // Stage 1: Heimdall decompilation.
+    match tokio::time::timeout(
+        Duration::from_secs(10),
+        heimdall.decompile(&target.address),
+    )
+    .await
+    {
+        Ok(Ok(decompiled)) => {
+            level = VerificationLevel::Decompiled;
+            stages_run += 1;
+        }
+        Ok(Err(e)) => {
+            findings.push(Finding::error("heimdall", e));
+            // Cannot proceed without decompilation.
+            return VerificationResult { level, findings, stages_run };
+        }
+        Err(_timeout) => {
+            findings.push(Finding::timeout("heimdall", 10));
+            return VerificationResult { level, findings, stages_run };
+        }
+    }
+
+    // Stage 2: Slither static analysis.
+    match tokio::time::timeout(
+        config.slither_timeout,
+        slither.analyze(&target.source_path),
+    )
+    .await
+    {
+        Ok(Ok(output)) => {
+            let critical = SlitherRunner::critical_findings(&output);
+            if critical.is_empty() {
+                level = VerificationLevel::StaticClean;
+            } else {
+                findings.extend(critical.iter().map(|d| Finding::from_slither(d)));
+                // Critical Slither findings: skip deeper analysis, report.
+                return VerificationResult { level, findings, stages_run };
+            }
+            stages_run += 1;
+        }
+        Ok(Err(e)) => {
+            findings.push(Finding::error("slither", e));
+            // Slither failed, but we can still try fuzzing.
+        }
+        Err(_timeout) => {
+            findings.push(Finding::timeout("slither", config.slither_timeout.as_secs()));
+            // Timeout: skip to next stage.
+        }
+    }
+
+    // Stage 3: Echidna fuzzing.
+    match tokio::time::timeout(
+        config.echidna_time_budget + Duration::from_secs(5), // grace period
+        echidna.run(&target.source_path, &target.contract_name),
+    )
+    .await
+    {
+        Ok(Ok(results)) => {
+            let violations = echidna.find_violations(&results);
+            if violations.is_empty() {
+                let iterations = results.iter().map(|r| config.echidna_iterations).sum();
+                level = VerificationLevel::FuzzPassed { iterations };
+            } else {
+                findings.extend(violations.iter().map(|r| Finding::from_echidna(r)));
+            }
+            stages_run += 1;
+        }
+        Ok(Err(e)) => findings.push(Finding::error("echidna", e)),
+        Err(_timeout) => findings.push(Finding::timeout("echidna", config.echidna_time_budget.as_secs())),
+    }
+
+    // Stage 4: hevm symbolic execution.
+    match tokio::time::timeout(
+        config.hevm_solver_timeout + Duration::from_secs(10),
+        hevm.prove(&target.project_dir, &target.contract_name),
+    )
+    .await
+    {
+        Ok(Ok(results)) => {
+            let proved: Vec<String> = results
+                .iter()
+                .filter(|r| r.outcome == HevmOutcome::Proved)
+                .map(|r| r.property.clone())
+                .collect();
+            if !proved.is_empty() {
+                level = VerificationLevel::SymbolicProved { properties: proved };
+            }
+            let counterexamples: Vec<_> = results
+                .iter()
+                .filter(|r| r.outcome == HevmOutcome::Counterexample)
+                .collect();
+            findings.extend(counterexamples.iter().map(|r| Finding::from_hevm(r)));
+            stages_run += 1;
+        }
+        Ok(Err(e)) => findings.push(Finding::error("hevm", e)),
+        Err(_timeout) => findings.push(Finding::timeout("hevm", config.hevm_solver_timeout.as_secs())),
+    }
+
+    // Stage 5: Certora (opt-in).
+    if config.certora_enabled {
+        // Certora runs are long (5-30 min). Run asynchronously
+        // and return result via callback.
+        findings.push(Finding::info("certora", "Certora verification queued"));
+    }
+
+    VerificationResult { level, findings, stages_run }
+}
+
+/// Result of the pipeline run.
+pub struct VerificationResult {
+    /// Highest verification level achieved.
+    pub level: VerificationLevel,
+    /// All findings across all stages.
+    pub findings: Vec<Finding>,
+    /// Number of stages that completed.
+    pub stages_run: u32,
+}
+
+pub struct Finding {
+    pub stage: String,
+    pub severity: FindingSeverity,
+    pub message: String,
+}
+
+pub enum FindingSeverity {
+    Info,
+    Warning,
+    Error,
+    Timeout,
+}
+```
+
+### Five-stage pipeline as a Gate implementation
+
+```rust
+/// Verification pipeline wrapped as a Gate.
+/// Runs the five-stage pipeline and produces a Verdict.
+pub struct VerificationPipelineGate {
+    config: PipelineConfig,
+    heimdall: HeimdallRunner,
+    slither: SlitherRunner,
+    echidna: EchidnaRunner,
+    hevm: HevmRunner,
+}
+
+#[async_trait]
+impl Gate for VerificationPipelineGate {
+    async fn verify(&self, engram: &Signal) -> Result<Verdict> {
+        let target = extract_verification_target(engram)?;
+        let result = run_pipeline(&self.config, &target).await;
+
+        let confidence = match &result.level {
+            VerificationLevel::Unknown => 0.0,
+            VerificationLevel::Decompiled => 0.2,
+            VerificationLevel::StaticClean => 0.5,
+            VerificationLevel::FuzzPassed { iterations } => {
+                // Confidence scales logarithmically with iterations.
+                0.6 + 0.15 * (*iterations as f64).log10().min(5.0) / 5.0
+            }
+            VerificationLevel::SymbolicProved { properties } => {
+                0.8 + 0.1 * (properties.len() as f64).min(10.0) / 10.0
+            }
+            VerificationLevel::FormallyVerified { rules } => {
+                0.95 + 0.05 * (rules.len() as f64).min(20.0) / 20.0
+            }
+        };
+
+        if result.findings.iter().any(|f| matches!(f.severity, FindingSeverity::Error)) {
+            Ok(Verdict::Fail {
+                confidence,
+                message: format!(
+                    "Verification pipeline found {} issues at level {:?}",
+                    result.findings.len(),
+                    result.level
+                ),
+                violations: vec![], // Detailed findings in the Engram body.
+            })
+        } else {
+            Ok(Verdict::Pass {
+                confidence,
+                message: format!(
+                    "Verification pipeline passed {} stages, level: {:?}",
+                    result.stages_run, result.level
+                ),
+            })
+        }
+    }
+}
+```
+
+### mirage-rs fork state sharing
+
+The pipeline shares forked EVM state with mirage-rs (Roko's in-process EVM simulator) through a common Anvil/Reth node. Both Echidna and hevm connect to the same RPC endpoint, ensuring they verify against identical state.
+
+```
+orchestrate.rs
+  |
+  +--> mirage-rs: fork mainnet state at block N
+  |      starts local Anvil instance at rpc_url
+  |
+  +--> VerificationPipelineGate::verify()
+         |
+         +--> HeimdallRunner: decompile bytecode (no RPC needed for disassembly)
+         +--> SlitherRunner: static analysis of source (no RPC needed)
+         +--> EchidnaRunner: fuzz against rpc_url (same Anvil instance)
+         +--> HevmRunner: symbolic execution against rpc_url (same Anvil instance)
+```
+
+State consistency: both mirage-rs simulation and formal verification analyze the same block. This prevents the TOCTOU (time-of-check-time-of-use) issue where state changes between simulation and verification.
+
+### Test criteria
+
+- `HeimdallRunner::decompile()` returns non-empty output for a known contract address
+- `SlitherRunner::analyze()` parses JSON output and reports detections with severity levels
+- `SlitherRunner::critical_findings()` filters to only high-impact, high-confidence results
+- `EchidnaRunner::run()` returns results with `Passed` or `Failed` status per property
+- `HevmRunner::prove()` returns `Proved` for a tautological property and `Counterexample` for a violated one
+- `HevmRunner::check_equivalence()` returns `Proved` for identical bytecodes
+- Pipeline timeout at each stage produces a `Finding::Timeout` without crashing the pipeline
+- Pipeline continues past a Slither error to attempt Echidna fuzzing
+- Pipeline stops at critical Slither findings (does not fuzz a contract with unprotected selfdestruct)
+- `VerificationPipelineGate` produces `Verdict::Pass` with confidence scaling from 0.0 to 1.0
+- mirage-rs and the pipeline share the same Anvil RPC endpoint
 
 ---
 

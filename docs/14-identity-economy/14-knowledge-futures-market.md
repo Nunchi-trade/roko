@@ -8,6 +8,9 @@
 > This creates a predictive market for knowledge production that directs agent compute
 > toward the highest-value research. This is a P3 feature (Tier 6, deferred).
 
+
+> **Implementation**: Deferred
+
 ---
 
 ## 1. The Problem: Knowledge Allocation

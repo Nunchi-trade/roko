@@ -2,6 +2,9 @@
 
 > Directed symbol dependency graph with forward/reverse traversal — the structural backbone for impact analysis, context prioritization, and PageRank scoring.
 
+
+> **Implementation**: Built
+
 **Topic**: [Code Intelligence](./INDEX.md)
 **Prerequisites**: [02-symbol-extraction.md](./02-symbol-extraction.md)
 **Key sources**: `crates/roko-index/src/graph.rs`, `bardo-backup/tmp/mori-refactor/10-code-intelligence.md`, `bardo-backup/tmp/mori-agents/18-code-intelligence-and-gateway.md`

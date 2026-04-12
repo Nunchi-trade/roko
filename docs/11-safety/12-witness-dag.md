@@ -8,6 +8,9 @@
 >
 > **Prerequisites**: [02-audit-chain.md](02-audit-chain.md), [11-temporal-logic.md](11-temporal-logic.md)
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview
@@ -466,6 +469,161 @@ This integrates with `roko-fs`, which already provides `FileSubstrate` (JSONL-ba
 
 ---
 
+## SQLite schema: complete definition
+
+```sql
+-- Core vertex storage.
+CREATE TABLE vertices (
+    hash         BLOB PRIMARY KEY,    -- 32-byte BLAKE3 commitment hash
+    content_hash BLOB NOT NULL,       -- 32-byte BLAKE3 content hash
+    vertex_type  INTEGER NOT NULL,    -- 0=Observation, 1=Prediction, 2=Decision,
+                                      -- 3=Resolution, 4=NeuroEntry
+    timestamp    INTEGER NOT NULL,    -- Unix timestamp in milliseconds
+    content      BLOB NOT NULL,       -- Serialized vertex data (MessagePack)
+    depth        INTEGER NOT NULL DEFAULT 1, -- DAG depth at this vertex
+    pruned       INTEGER NOT NULL DEFAULT 0, -- 1 if content has been replaced by summary
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Directed edges: parent -> child.
+CREATE TABLE edges (
+    parent_hash  BLOB NOT NULL,
+    child_hash   BLOB NOT NULL,
+    edge_type    INTEGER NOT NULL DEFAULT 0, -- 0=data_flow, 1=knowledge_feedback
+    PRIMARY KEY (parent_hash, child_hash),
+    FOREIGN KEY (parent_hash) REFERENCES vertices(hash),
+    FOREIGN KEY (child_hash)  REFERENCES vertices(hash)
+);
+
+-- Indexes for common query patterns.
+CREATE INDEX idx_edges_child     ON edges(child_hash);
+CREATE INDEX idx_vertices_type   ON vertices(vertex_type, timestamp);
+CREATE INDEX idx_vertices_depth  ON vertices(depth);
+CREATE INDEX idx_vertices_pruned ON vertices(pruned, timestamp);
+
+-- Summary vertices replace pruned subtrees.
+CREATE TABLE summaries (
+    root_hash       BLOB PRIMARY KEY,   -- Commitment hash of the pruned subtree root
+    vertex_count    INTEGER NOT NULL,    -- Total vertices in the pruned subtree
+    obs_count       INTEGER NOT NULL,    -- Observation vertices in the subtree
+    pred_count      INTEGER NOT NULL,    -- Prediction vertices
+    decision_count  INTEGER NOT NULL,    -- Decision vertices
+    resolution_count INTEGER NOT NULL,   -- Resolution vertices
+    neuro_count     INTEGER NOT NULL,    -- NeuroEntry vertices
+    pred_accuracy   REAL,                -- Prediction accuracy over the subtree
+    neuro_hashes    BLOB,                -- MessagePack-encoded Vec<Hash> of NeuroEntry
+                                         -- vertices whose provenance passes through
+    compressed_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- On-chain anchor records.
+CREATE TABLE anchors (
+    anchor_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    dag_root     BLOB NOT NULL,         -- 32-byte BLAKE3 root hash at time of anchor
+    tick_number  INTEGER NOT NULL,      -- Tick number when anchored
+    tx_hash      BLOB,                  -- On-chain transaction hash (null if not yet confirmed)
+    chain_id     INTEGER NOT NULL DEFAULT 1, -- Chain ID (1=Korai mainnet)
+    anchored_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_anchors_tick ON anchors(tick_number);
+```
+
+---
+
+## DAG construction: integration into the 9-step Synapse Loop
+
+Each step of the Synapse Loop calls into `WitnessDAG::append()` at specific points. The integration happens in `orchestrate.rs` as part of the per-task execution path.
+
+```rust
+/// Pseudocode for DAG vertex creation during one Synapse Loop iteration.
+fn synapse_loop_tick(dag: &WitnessDAG, /* ... */) {
+    // Step 1: PERCEIVE -- create Observation vertices (roots).
+    let observations: Vec<Hash> = perceive()
+        .into_iter()
+        .map(|obs| {
+            let v = Vertex::new(
+                VertexType::Observation,
+                now_ms(),
+                serialize(&obs),
+                vec![], // no parents: observations are roots
+            );
+            dag.append(v)
+        })
+        .collect();
+
+    // Step 2: EVALUATE -- no new vertices. Scoring metadata
+    // is attached to existing observation Engrams.
+
+    // Step 3: ATTEND -- create Prediction vertices.
+    let neuro_entries_used = retrieve_relevant_neuro();
+    let neuro_hashes: Vec<Hash> = neuro_entries_used
+        .iter()
+        .map(|g| g.commitment_hash)
+        .collect();
+
+    let predictions: Vec<Hash> = attend(&observations, &neuro_entries_used)
+        .into_iter()
+        .map(|pred| {
+            // Parents: observations used + neuro entries consulted.
+            let mut parents = observations.clone();
+            parents.extend(neuro_hashes.clone());
+            let v = Vertex::new(
+                VertexType::Prediction,
+                now_ms(),
+                serialize(&pred),
+                parents,
+            );
+            dag.append(v)
+        })
+        .collect();
+
+    // Steps 4-6: INTEGRATE/ACT/VERIFY -- create Decision vertex.
+    if let Some(action) = compose(&predictions) {
+        let decision_hash = dag.append(Vertex::new(
+            VertexType::Decision,
+            now_ms(),
+            serialize(&action),
+            predictions.clone(), // parents: predictions that informed this decision
+        ));
+
+        // Step 5: ACT -- execute the action.
+        let outcome = execute(action);
+
+        // Step 6: VERIFY -- Gate pipeline runs here.
+        let verdict = gate_pipeline.verify(&outcome).await;
+
+        // Step 7: PERSIST -- store in Substrate.
+        substrate.write(&outcome);
+
+        // Step 8: ADAPT -- create Resolution vertex.
+        let resolution_hash = dag.append(Vertex::new(
+            VertexType::Resolution,
+            now_ms(),
+            serialize(&verdict),
+            vec![decision_hash], // parent: the decision that produced this outcome
+        ));
+
+        // Step 9: META-COGNIZE -- create NeuroEntry if lesson learned.
+        if let Some(lesson) = meta_cognize(&verdict) {
+            dag.append(Vertex::new(
+                VertexType::NeuroEntry,
+                now_ms(),
+                serialize(&lesson),
+                // Parents: predictions, resolutions, and decisions that
+                // contributed to this learned knowledge.
+                vec![decision_hash, resolution_hash]
+                    .into_iter()
+                    .chain(predictions.iter().copied())
+                    .collect(),
+            ));
+        }
+    }
+}
+```
+
+---
+
 ## Pruning and Compression
 
 The full DAG grows linearly with ticks. Each tick produces 5-20 vertices. At one tick per ~10 seconds (gamma speed), that is ~8,640 ticks per day, or 43,000-172,000 vertices per day.
@@ -488,6 +646,177 @@ The full DAG grows linearly with ticks. Each tick produces 5-20 vertices. At one
 - A 7-day rolling window is ~140 MB
 - After compression, historical data adds ~1 MB/day
 - One year of compressed history: ~365 MB
+
+### Pruning algorithm (pseudocode)
+
+```
+prune_dag(dag: &WitnessDAG, db: &SqliteDb, config: &PruneConfig):
+    cutoff = now_ms() - config.rolling_window_ms  // default: 7 days
+
+    # Step 1: Identify vertices outside the rolling window.
+    old_vertices = db.query(
+        "SELECT hash, vertex_type FROM vertices
+         WHERE timestamp < ? AND pruned = 0",
+        [cutoff]
+    )
+
+    # Step 2: Group into subtrees by finding connected components
+    # among old vertices. Each component becomes one summary.
+    components = find_connected_components(old_vertices, db)
+
+    for component in components:
+        # Step 3: Check Neuro provenance preservation.
+        # NeuroEntry vertices whose provenance passes through
+        # this component retain their hash chain.
+        neuro_hashes = []
+        for vertex in component:
+            children = db.query(
+                "SELECT child_hash FROM edges WHERE parent_hash = ?",
+                [vertex.hash]
+            )
+            for child in children:
+                if child.vertex_type == NeuroEntry && child.timestamp >= cutoff:
+                    neuro_hashes.push(child.hash)
+
+        # Step 4: Compute aggregate statistics.
+        summary = Summary {
+            root_hash: component.root().commitment_hash,
+            vertex_count: component.len(),
+            obs_count: component.count_type(Observation),
+            pred_count: component.count_type(Prediction),
+            decision_count: component.count_type(Decision),
+            resolution_count: component.count_type(Resolution),
+            neuro_count: component.count_type(NeuroEntry),
+            pred_accuracy: compute_pred_accuracy(component),
+            neuro_hashes: neuro_hashes,
+        }
+
+        # Step 5: Replace content with summary, preserve hashes.
+        db.insert_summary(summary)
+        for vertex in component:
+            db.execute(
+                "UPDATE vertices SET pruned = 1, content = X''
+                 WHERE hash = ?",
+                [vertex.hash]
+            )
+            // Edges are preserved -- hash chain remains verifiable.
+```
+
+**Configuration:**
+
+```toml
+[safety.witness_dag]
+rolling_window_days = 7          # Full DAG retention. Range: 1..90.
+prune_interval_hours = 6         # How often pruning runs. Range: 1..24.
+anchor_interval_ticks = 720      # Ticks between on-chain anchors. Range: 100..10000.
+max_vertices_in_memory = 500000  # When exceeded, evict oldest to SQLite. Range: 10000..5000000.
+sqlite_wal_mode = true           # Use WAL mode for concurrent reads.
+```
+
+### ZK proof generation: plonky2 integration path
+
+ZK proofs run off the hot path -- they are generated on demand for auditing, not for real-time verification. The integration uses plonky2 (Polygon's recursive SNARK library) as the backend.
+
+```rust
+use plonky2::field::goldilocks_field::GoldilocksField;
+use plonky2::plonk::circuit_builder::CircuitBuilder;
+use plonky2::plonk::config::PoseidonGoldilocksConfig;
+
+type F = GoldilocksField;
+type C = PoseidonGoldilocksConfig;
+
+/// ZK proof types supported by the Witness DAG.
+pub enum WitnessProofType {
+    /// Prove decision D was based on >= N observations and >= M predictions.
+    DecisionGrounding {
+        decision_hash: blake3::Hash,
+        min_observations: u32,
+        min_predictions: u32,
+    },
+    /// Prove NeuroEntry traces back to >= K observations.
+    KnowledgeProvenance {
+        neuro_hash: blake3::Hash,
+        min_observations: u32,
+    },
+    /// Prove prediction accuracy >= X% over time window.
+    PredictionAccuracy {
+        start_tick: u64,
+        end_tick: u64,
+        min_accuracy_pct: u32,
+    },
+    /// Prove all commitment hashes in subtree are valid.
+    ReasoningConsistency {
+        root_hash: blake3::Hash,
+    },
+}
+
+/// Generate a ZK proof for a WitnessProofType.
+///
+/// Returns the serialized proof (typically 100-500 bytes for plonky2).
+/// Generation time: 1-5 seconds for typical subgraphs (10-20 vertices).
+pub fn generate_proof(
+    dag: &WitnessDAG,
+    proof_type: WitnessProofType,
+) -> anyhow::Result<Vec<u8>> {
+    match proof_type {
+        WitnessProofType::DecisionGrounding {
+            decision_hash,
+            min_observations,
+            min_predictions,
+        } => {
+            // Walk DAG backward from decision, count vertex types.
+            let ancestors = dag.provenance(&decision_hash);
+            let obs_count = ancestors
+                .iter()
+                .filter(|v| v.vertex_type == VertexType::Observation)
+                .count() as u32;
+            let pred_count = ancestors
+                .iter()
+                .filter(|v| v.vertex_type == VertexType::Prediction)
+                .count() as u32;
+
+            // Build circuit: prove obs_count >= min and pred_count >= min
+            // without revealing the actual vertices.
+            let config = plonky2::plonk::circuit_data::CircuitConfig::standard_recursion_config();
+            let mut builder = CircuitBuilder::<F, 2>::new(config);
+
+            // Circuit wires commitment hash chain verification
+            // and vertex type counting into a single proof.
+            // (Full circuit construction omitted for brevity --
+            //  the circuit has ~500 gates for a 20-vertex subgraph.)
+
+            let data = builder.build::<C>();
+            let proof = data.prove(/* witness */)?;
+            Ok(proof.to_bytes())
+        }
+        // Other proof types follow the same pattern:
+        // walk DAG, build circuit, generate proof.
+        _ => todo!("Implement remaining proof types"),
+    }
+}
+```
+
+**Performance estimates:**
+
+| Proof type | Subgraph size | Circuit gates | Generation time | Proof size |
+|-----------|--------------|---------------|----------------|------------|
+| DecisionGrounding | 10-20 vertices | ~500 | 1-2 sec | ~200 bytes |
+| KnowledgeProvenance | 20-50 vertices | ~1,200 | 2-4 sec | ~300 bytes |
+| PredictionAccuracy | 100-500 pairs | ~5,000 | 4-8 sec | ~400 bytes |
+| ReasoningConsistency | 50-200 vertices | ~2,000 | 3-5 sec | ~350 bytes |
+
+### Test criteria
+
+- `WitnessDAG::append()` produces deterministic commitment hashes (same inputs, same hash)
+- `WitnessDAG::verify()` returns false if any byte in content is modified after insertion
+- `WitnessDAG::provenance()` returns the complete ancestor set via BFS
+- `WitnessDAG::observation_provenance()` filters to only Observation vertices
+- `WitnessDAG::prediction_resolution_pairs()` pairs predictions with their resolutions correctly
+- SQLite schema supports concurrent reads under WAL mode
+- Pruning preserves hash chain integrity: `verify()` passes for pruned vertices (hashes remain, content cleared)
+- Summary statistics match recomputation from the original subtree
+- ZK proof for DecisionGrounding verifies with the plonky2 verifier
+- DAG integration with the Synapse Loop creates vertices at the correct steps (Observation at PERCEIVE, Prediction at ATTEND, etc.)
 
 ---
 

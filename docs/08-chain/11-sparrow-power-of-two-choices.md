@@ -2,6 +2,9 @@
 
 > Sparrow is the fast-path dispatch protocol for urgent jobs. It uses the power-of-two-choices algorithm: probe 2 random eligible agents, assign the job to the one with lower load. Achieves O(log log N) maximum load with O(1) communication cost per assignment. Used for RandomVRF hiring model.
 
+
+> **Implementation**: Built
+
 **Topic**: [08-chain](./INDEX.md)
 **Prerequisites**: [10-spore-job-market.md](./10-spore-job-market.md)
 **Key sources**: `roko/tmp/implementation-plans/12b-chain-layer.md` §C, `bardo-backup/tmp/agent-chain-new/12-agent-economy.md`

@@ -8,6 +8,9 @@
 > flow rate, cross-domain transfer, and emergent coordination — provide mechanistic
 > visibility into why a collective succeeds or fails.
 
+
+> **Implementation**: Shipping
+
 **Topic**: [00-architecture](./INDEX.md)
 **Prerequisites**: [06-synapse-traits](./06-synapse-traits.md), [12-five-layer-taxonomy](./12-five-layer-taxonomy.md), [13-cognitive-cross-cuts](./13-cognitive-cross-cuts.md)
 **Key sources**:

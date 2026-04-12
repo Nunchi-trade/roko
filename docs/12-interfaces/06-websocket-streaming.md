@@ -2,6 +2,9 @@
 
 > Real-time event streaming via WebSocket and Server-Sent Events — live agent output, C-Factor updates, and Spectre creature state.
 
+
+> **Implementation**: Scaffold
+
 **Topic**: [12-interfaces](./INDEX.md)
 **Prerequisites**: [05-http-api-roko-serve.md](./05-http-api-roko-serve.md)
 **Key sources**: `refactoring-prd/06-interfaces.md` §2, `roko-serve/src/routes/ws.rs`, `roko-serve/src/routes/sse.rs`, `roko-serve/src/event_bus.rs`

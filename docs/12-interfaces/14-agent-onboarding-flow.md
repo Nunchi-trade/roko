@@ -2,6 +2,9 @@
 
 > The journey from "new agent" to "fully operational Spectre-bearing cognitive agent" — domain selection, template instantiation, model routing, knowledge bootstrapping, Spectre generation, and first-task execution.
 
+
+> **Implementation**: Scaffold
+
 **Topic**: [12-interfaces](./INDEX.md)
 **Prerequisites**: [00-cli-overview.md](./00-cli-overview.md), [04-configuration-layered-resolution.md](./04-configuration-layered-resolution.md), [10-spectre-creature-visualization.md](./10-spectre-creature-visualization.md)
 **Key sources**: `refactoring-prd/06-interfaces.md` §3, `refactoring-prd/10-developer-guide.md`, `bardo-backup/prd/18-interfaces/00-portal.md`
@@ -536,5 +539,5 @@ When multiple developers work on the same roko project:
 - See [04-configuration-layered-resolution.md](./04-configuration-layered-resolution.md) for the configuration system
 - See [10-spectre-creature-visualization.md](./10-spectre-creature-visualization.md) for Spectre generation
 - See [13-web-portal.md](./13-web-portal.md) for the Portal wizard
-- See topic [04-harness](../04-harness/INDEX.md) for the gate pipeline
-- See topic [06-learning](../06-learning/INDEX.md) for the CascadeRouter
+- See topic [04-harness](../04-verification/INDEX.md) for the gate pipeline
+- See topic [06-learning](../05-learning/INDEX.md) for the CascadeRouter

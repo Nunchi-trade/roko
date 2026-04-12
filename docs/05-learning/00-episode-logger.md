@@ -5,6 +5,9 @@
 > **Wiring:** `LearningRuntime::record_completed_run()` → `EpisodeLogger::append()`
 > **Cross-references:** [04-cascade-router](04-cascade-router.md), [05-pattern-discovery-trigram](05-pattern-discovery-trigram.md), [06-task-metrics-and-baselines](06-task-metrics-and-baselines.md)
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Purpose

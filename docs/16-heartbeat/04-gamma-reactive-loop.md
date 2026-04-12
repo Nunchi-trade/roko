@@ -2,6 +2,9 @@
 
 > The fastest cognitive frequency — perception, gating, and action at the speed of environmental change.
 
+
+> **Implementation**: Specified
+
 **Topic**: [16-heartbeat](./INDEX.md)
 **Prerequisites**: [00-coala-9-step-pipeline.md](./00-coala-9-step-pipeline.md), [03-three-cognitive-speeds.md](./03-three-cognitive-speeds.md)
 **Key sources**: `refactoring-prd/02-five-layers.md` §Adaptive Clock, legacy `bardo-backup/prd/01-golem/02-heartbeat.md` §S3, `bardo-backup/prd/01-golem/18-cortical-state.md` §Adaptive Clock, `implementation-plans/12a-cognitive-layer.md` §I1

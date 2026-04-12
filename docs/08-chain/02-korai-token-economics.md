@@ -2,6 +2,9 @@
 
 > KORAI: a demurrage token where stale knowledge decays economically just as it decays in the NeuroStore. Earning rewards quality; spending prevents spam.
 
+
+> **Implementation**: Built
+
 **Topic**: [08-chain](./INDEX.md)
 **Prerequisites**: [00-vision-and-framing.md](./00-vision-and-framing.md), [01-korai-chain-spec.md](./01-korai-chain-spec.md)
 **Key sources**: `refactoring-prd/04-knowledge-and-mesh.md`, `bardo-backup/tmp/agent-chain/06-tokenomics.md`, `roko/tmp/implementation-plans/12b-chain-layer.md` §L

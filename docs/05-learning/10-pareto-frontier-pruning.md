@@ -5,6 +5,9 @@
 > **Implementation plan:** `modelrouting/08-learning-loops.md` (task 2G.11)
 > **Cross-references:** [03-bandits-ucb-thompson-linucb](03-bandits-ucb-thompson-linucb.md), [04-cascade-router](04-cascade-router.md), [08-cost-normalization](08-cost-normalization.md)
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Purpose

@@ -7,6 +7,9 @@
 >
 > **Prerequisites**: `00-stigmergy-theory.md` (core stigmergy definitions)
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview

@@ -9,6 +9,9 @@
 > **Prerequisites**: `00-stigmergy-theory.md` (coordination fundamentals),
 > `10-exponential-flywheel.md` (what the metrics should detect)
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview

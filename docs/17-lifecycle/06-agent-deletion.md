@@ -6,6 +6,9 @@
 >
 > **Synapse traits**: Substrate (Neuro store flushed and closed), Policy (deletion event emitted to Mesh), Router (model routing torn down), Composer (pending context discarded)
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview

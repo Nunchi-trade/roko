@@ -6,6 +6,9 @@
 >
 > **Synapse traits**: This document provides the academic grounding for all six Synapse traits as they relate to knowledge lifecycle, decay, transfer, and collective intelligence.
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview

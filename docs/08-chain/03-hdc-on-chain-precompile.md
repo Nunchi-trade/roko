@@ -2,6 +2,9 @@
 
 > 10,240-bit hyperdimensional vectors via native EVM precompile: ~400 gas for top-K=20 similarity search, three-tier search architecture, same encoding locally and on-chain.
 
+
+> **Implementation**: Built
+
 **Topic**: [08-chain](./INDEX.md)
 **Prerequisites**: [01-korai-chain-spec.md](./01-korai-chain-spec.md)
 **Key sources**: `refactoring-prd/04-knowledge-and-mesh.md`, `refactoring-prd/09-innovations.md` §XIX.D, `bardo-backup/tmp/agent-chain/04-hdc.md`, `bardo-backup/prd/shared/hdc-vsa.md`

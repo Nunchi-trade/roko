@@ -4,6 +4,9 @@
 > Status: **Implemented** — Placement enum in `roko-compose::prompt`
 > Canonical source: Liu et al., TACL 2024 [arXiv:2307.03172]
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Abstract

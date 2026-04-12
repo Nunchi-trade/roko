@@ -6,6 +6,9 @@
 > `MultiAgentPool` (parallel, multi-role) execution managers, their lifecycle
 > states, warm-pool pre-spawning, and how the orchestrator uses them.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Two Pool Types

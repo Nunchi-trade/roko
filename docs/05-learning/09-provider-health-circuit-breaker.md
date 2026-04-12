@@ -5,6 +5,9 @@
 > **Implementation plan:** `modelrouting/08-learning-loops.md` (tasks 2G.01–2G.06)
 > **Cross-references:** [04-cascade-router](04-cascade-router.md), [08-cost-normalization](08-cost-normalization.md), [13-8-missing-feedback-loops](13-8-missing-feedback-loops.md)
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Purpose

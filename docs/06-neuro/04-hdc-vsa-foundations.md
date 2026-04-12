@@ -2,6 +2,9 @@
 
 > Hyperdimensional Computing (HDC) and Vector Symbolic Architectures (VSA) provide the mathematical substrate for Neuro's similarity search, knowledge encoding, and cross-domain transfer — using 10,240-bit binary vectors with algebraic operations that run in nanoseconds.
 
+
+> **Implementation**: Built
+
 **Topic**: [Neuro — Cognitive Knowledge Layer](./INDEX.md)
 **Prerequisites**: [00-vision-and-grimoire-rename.md](./00-vision-and-grimoire-rename.md) for Neuro context
 **Key sources**:
@@ -287,6 +290,704 @@ Neuro uses HDC for **structural similarity** — detecting when two knowledge en
 
 ---
 
+## Implementation Details
+
+### BundleAccumulator with vote tracking
+
+`BundleAccumulator` maintains per-bit integer vote counts for incremental bundling. Because majority vote is not associative over binary vectors, you cannot incrementally bundle by XOR. The accumulator tracks the running tally and collapses to a binary vector on demand.
+
+```rust
+use crate::HdcVector;
+
+const HDC_BITS: usize = 10_240;
+
+/// Incremental majority-vote accumulator for HDC bundling.
+///
+/// Stores per-bit vote counts as i32. Each `add()` contributes +1 (bit set)
+/// or -1 (bit unset) per position. `finish()` thresholds at zero to produce
+/// the final binary vector.
+///
+/// Memory: 40 KB (10,240 x 4 bytes). Heap-allocate in hot paths.
+pub struct BundleAccumulator {
+    /// Per-bit vote tally. Positive = majority 1, negative = majority 0.
+    votes: Vec<i32>,
+    /// Number of vectors added so far.
+    pub count: usize,
+}
+
+impl BundleAccumulator {
+    /// Create a fresh accumulator with all votes at zero.
+    pub fn new() -> Self {
+        Self {
+            votes: vec![0i32; HDC_BITS],
+            count: 0,
+        }
+    }
+
+    /// Add a vector to the accumulator.
+    ///
+    /// For each bit position: +1 if the bit is set, -1 if unset.
+    /// Cost: O(D) = 10,240 iterations over the bit array.
+    pub fn add(&mut self, hv: &HdcVector) {
+        self.count += 1;
+        for word_idx in 0..160 {
+            let word = hv.bits[word_idx];
+            for bit in 0..64 {
+                let pos = word_idx * 64 + bit;
+                if (word >> bit) & 1 == 1 {
+                    self.votes[pos] += 1;
+                } else {
+                    self.votes[pos] -= 1;
+                }
+            }
+        }
+    }
+
+    /// Add a vector with integer weight.
+    ///
+    /// Equivalent to calling `add()` `weight` times, but in a single pass.
+    /// Negative weights invert the contribution (subtract instead of add).
+    ///
+    /// Use cases:
+    /// - Weighted consensus (trusted agents get weight > 1)
+    /// - Recency weighting (recent entries get higher weight)
+    /// - Undo (weight = -1 reverses a previous `add`)
+    pub fn add_weighted(&mut self, hv: &HdcVector, weight: i32) {
+        self.count += weight.unsigned_abs() as usize;
+        for word_idx in 0..160 {
+            let word = hv.bits[word_idx];
+            for bit in 0..64 {
+                let pos = word_idx * 64 + bit;
+                if (word >> bit) & 1 == 1 {
+                    self.votes[pos] += weight;
+                } else {
+                    self.votes[pos] -= weight;
+                }
+            }
+        }
+    }
+
+    /// Collapse votes to a binary vector via majority threshold.
+    ///
+    /// Bit i = 1 if votes[i] > 0, else 0. Ties (votes[i] == 0) break to 0
+    /// for determinism. Does not consume the accumulator — you can continue
+    /// adding vectors after calling `finish()`.
+    pub fn finish(&self) -> HdcVector {
+        let mut bits = [0u64; 160];
+        for word_idx in 0..160 {
+            let mut word = 0u64;
+            for bit in 0..64 {
+                let pos = word_idx * 64 + bit;
+                if self.votes[pos] > 0 {
+                    word |= 1u64 << bit;
+                }
+            }
+            bits[word_idx] = word;
+        }
+        HdcVector { bits }
+    }
+
+    /// Apply exponential decay to all vote counts.
+    ///
+    /// Multiplies every vote by `factor` (typically 0.90-0.99) and truncates
+    /// toward zero. This implements controlled forgetting: older contributions
+    /// lose influence while newer ones retain full weight.
+    ///
+    /// After decay, the accumulator's `count` is NOT adjusted — it still
+    /// reflects the total number of `add()` calls. Use `count` for bookkeeping
+    /// only; the votes themselves determine the output.
+    ///
+    /// # Panics
+    /// Panics if `factor` is negative.
+    pub fn decay(&mut self, factor: f32) {
+        assert!(factor >= 0.0, "decay factor must be non-negative");
+        for vote in self.votes.iter_mut() {
+            *vote = (*vote as f32 * factor) as i32;
+        }
+    }
+}
+```
+
+**Configuration parameters**:
+
+| Parameter | Default | Range | Notes |
+|---|---|---|---|
+| `HDC_BITS` | 10,240 | 8,192 - 16,384 | Must match `HdcVector` dimension |
+| Decay factor | 0.95 | 0.80 - 0.99 | Lower = faster forgetting. 0.95 halves influence after ~14 decays |
+| Weight range | -100 to 100 | arbitrary i32 | Extreme weights skew the bundle; keep below count/2 |
+
+**Error handling**: `add()` and `add_weighted()` cannot fail — they operate on fixed-size arrays. `decay()` panics on negative factor (programming error, not runtime condition). `finish()` is pure and infallible.
+
+**Test criteria**:
+- `finish()` on an empty accumulator returns `HdcVector::zeros()`
+- `add()` followed by `finish()` with a single vector returns that vector exactly
+- `add()` three copies of A and two copies of B: `finish()` returns A (majority wins)
+- `add_weighted(A, 3)` followed by `add_weighted(B, 2)`: same result as above
+- `decay(0.0)` followed by `finish()` returns `HdcVector::zeros()`
+- `decay(1.0)` does not change the output of `finish()`
+
+### ItemMemory codebook
+
+`ItemMemory` is a codebook that maps named concepts to their HDC vectors. It provides nearest-neighbor lookup: given an unknown vector, find the closest named concept.
+
+```rust
+use crate::HdcVector;
+use std::collections::HashMap;
+
+/// A codebook mapping named concepts to HDC vectors.
+///
+/// Supports insertion, exact lookup by name, and nearest-neighbor search
+/// by similarity. For codebooks under ~10K entries, brute-force search
+/// runs in <130us and no index is needed.
+pub struct ItemMemory {
+    /// Maps concept name to its deterministic HDC vector.
+    entries: HashMap<String, HdcVector>,
+    /// Cached sorted keys for deterministic iteration order.
+    sorted_keys: Vec<String>,
+    /// Whether sorted_keys needs rebuilding.
+    dirty: bool,
+}
+
+impl ItemMemory {
+    pub fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            sorted_keys: Vec::new(),
+            dirty: false,
+        }
+    }
+
+    /// Insert a named concept. Generates its vector via `HdcVector::from_seed()`.
+    /// Overwrites if the name already exists.
+    pub fn insert(&mut self, name: &str, hv: HdcVector) {
+        self.entries.insert(name.to_string(), hv);
+        self.dirty = true;
+    }
+
+    /// Insert a concept with a deterministic seed-based vector.
+    pub fn insert_seeded(&mut self, name: &str) {
+        let hv = HdcVector::from_seed(name.as_bytes());
+        self.insert(name, hv);
+    }
+
+    /// Look up a concept by exact name.
+    pub fn get(&self, name: &str) -> Option<&HdcVector> {
+        self.entries.get(name)
+    }
+
+    /// Find the K nearest concepts to the query vector.
+    ///
+    /// Returns (name, similarity) pairs sorted by descending similarity.
+    /// Brute-force scan: O(N) where N = codebook size.
+    pub fn top_k(&self, query: &HdcVector, k: usize) -> Vec<(&str, f32)> {
+        let mut scored: Vec<(&str, f32)> = self.entries.iter()
+            .map(|(name, hv)| (name.as_str(), query.similarity(hv)))
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(k);
+        scored
+    }
+
+    /// Find the single nearest concept. Returns None if the codebook is empty.
+    pub fn nearest(&self, query: &HdcVector) -> Option<(&str, f32)> {
+        self.top_k(query, 1).into_iter().next()
+    }
+
+    /// Number of concepts in the codebook.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the codebook is empty.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+```
+
+**Codebook generation**: Role codebooks are built at startup by seeding standard role names:
+
+```rust
+fn build_role_codebook() -> ItemMemory {
+    let mut codebook = ItemMemory::new();
+    for role in &[
+        "role:domain", "role:topic", "role:type", "role:content", "role:tag",
+        "role:risk_factor", "role:response", "role:pattern", "role:severity",
+        "role:temporal", "role:confidence",
+    ] {
+        codebook.insert_seeded(role);
+    }
+    codebook
+}
+```
+
+Domain concept codebooks are built incrementally as new concepts appear during knowledge ingestion. The `dirty` flag tracks when `sorted_keys` needs rebuilding for deterministic serialization.
+
+**Test criteria**:
+- `insert_seeded("rust")` followed by `get("rust")` returns `Some(hv)` matching `HdcVector::from_seed(b"rust")`
+- `nearest()` on a query identical to a codebook entry returns that entry with similarity 1.0
+- `top_k(query, 3)` returns exactly 3 entries in descending similarity order
+- `nearest()` on an empty codebook returns `None`
+
+### ResonatorNetwork (Frady et al. 2020)
+
+Resonator networks solve the factor decomposition problem: given a composite vector `z = bind(x1, x2, ..., xF)` and a codebook for each factor, recover the original factors through iterated projection.
+
+```rust
+use crate::{HdcVector, ItemMemory};
+
+/// Configuration for resonator network convergence.
+pub struct ResonatorConfig {
+    /// Maximum iterations before giving up. Default: 50.
+    pub max_iterations: usize,
+    /// Minimum similarity improvement between iterations to continue.
+    /// Below this threshold, the network has converged. Default: 0.001.
+    pub convergence_threshold: f32,
+    /// Early termination: stop if all factor similarities exceed this. Default: 0.9.
+    pub early_termination_sim: f32,
+}
+
+impl Default for ResonatorConfig {
+    fn default() -> Self {
+        Self {
+            max_iterations: 50,
+            convergence_threshold: 0.001,
+            early_termination_sim: 0.9,
+        }
+    }
+}
+
+/// Result of a resonator network decomposition.
+pub struct ResonatorResult {
+    /// Recovered factor names (one per codebook, in order).
+    pub factors: Vec<String>,
+    /// Similarity of each recovered factor to the best codebook match.
+    pub similarities: Vec<f32>,
+    /// Number of iterations until convergence.
+    pub iterations: usize,
+    /// Whether the network converged within max_iterations.
+    pub converged: bool,
+}
+
+/// Resonator network for factoring composite HDC vectors.
+///
+/// Given composite z = bind(x1, x2, ..., xF) and codebooks C1, C2, ..., CF,
+/// recovers the original factors x1, ..., xF through iterated projection.
+///
+/// Algorithm (Frady et al. 2020):
+///   1. Initialize each factor estimate to a random codebook entry
+///   2. For each factor i:
+///      a. Compute the "clean-up" signal: bind z with all other current estimates
+///      b. Project the clean-up signal onto codebook Ci (nearest neighbor)
+///      c. Update estimate_i to the projection result
+///   3. Repeat until convergence or max_iterations
+pub struct ResonatorNetwork {
+    config: ResonatorConfig,
+}
+
+impl ResonatorNetwork {
+    pub fn new(config: ResonatorConfig) -> Self {
+        Self { config }
+    }
+
+    /// Decompose a composite vector into its constituent factors.
+    ///
+    /// `composite`: the vector to decompose (z = bind(x1, ..., xF))
+    /// `codebooks`: one ItemMemory per factor, in binding order
+    ///
+    /// Returns the best-matching entry from each codebook.
+    pub fn decompose(
+        &self,
+        composite: &HdcVector,
+        codebooks: &[&ItemMemory],
+    ) -> ResonatorResult {
+        let f = codebooks.len();
+        if f == 0 {
+            return ResonatorResult {
+                factors: vec![],
+                similarities: vec![],
+                iterations: 0,
+                converged: true,
+            };
+        }
+
+        // Step 1: Initialize estimates to first codebook entry (or random)
+        let mut estimates: Vec<HdcVector> = codebooks.iter()
+            .map(|cb| {
+                cb.top_k(&HdcVector::from_seed(b"init"), 1)
+                    .first()
+                    .map(|(name, _)| cb.get(name).copied().unwrap())
+                    .unwrap_or_else(HdcVector::zeros)
+            })
+            .collect();
+
+        let mut prev_sims = vec![0.0f32; f];
+        let mut iterations = 0;
+        let mut converged = false;
+
+        // Step 2-3: Iterate until convergence
+        for iter in 0..self.config.max_iterations {
+            iterations = iter + 1;
+            let mut all_above_threshold = true;
+
+            for i in 0..f {
+                // Bind all OTHER factor estimates together
+                let mut other_product = HdcVector::ones();
+                for (j, est) in estimates.iter().enumerate() {
+                    if j != i {
+                        other_product = other_product.bind(est);
+                    }
+                }
+
+                // Unbind from composite to get clean-up signal for factor i
+                let cleanup = composite.bind(&other_product);
+
+                // Project onto codebook i (nearest neighbor)
+                if let Some((best_name, best_sim)) = codebooks[i].nearest(&cleanup) {
+                    estimates[i] = codebooks[i].get(best_name).copied()
+                        .unwrap_or_else(HdcVector::zeros);
+                    prev_sims[i] = best_sim;
+
+                    if best_sim < self.config.early_termination_sim {
+                        all_above_threshold = false;
+                    }
+                }
+            }
+
+            // Early termination: all factors recovered with high confidence
+            if all_above_threshold {
+                converged = true;
+                break;
+            }
+
+            // Convergence check: similarity improvement below threshold
+            // (checked after at least 2 iterations)
+            if iter > 0 {
+                let max_delta: f32 = prev_sims.iter()
+                    .zip(prev_sims.iter())
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0, f32::max);
+                if max_delta < self.config.convergence_threshold {
+                    converged = true;
+                    break;
+                }
+            }
+        }
+
+        // Collect final results
+        let mut factors = Vec::with_capacity(f);
+        let mut similarities = Vec::with_capacity(f);
+        for (i, est) in estimates.iter().enumerate() {
+            if let Some((name, sim)) = codebooks[i].nearest(est) {
+                factors.push(name.to_string());
+                similarities.push(sim);
+            } else {
+                factors.push("<unknown>".to_string());
+                similarities.push(0.0);
+            }
+        }
+
+        ResonatorResult {
+            factors,
+            similarities,
+            iterations,
+            converged,
+        }
+    }
+}
+```
+
+**Configuration parameters**:
+
+| Parameter | Default | Range | Notes |
+|---|---|---|---|
+| `max_iterations` | 50 | 10 - 100 | More factors need more iterations. 50 handles up to ~8 factors |
+| `convergence_threshold` | 0.001 | 0.0001 - 0.01 | Similarity delta below which iteration stops |
+| `early_termination_sim` | 0.9 | 0.8 - 0.95 | All factors above this similarity triggers early exit |
+
+**Error handling**: Returns `converged: false` if the network fails to converge within `max_iterations`. Callers check `converged` and `similarities` to decide whether to trust the result. Empty codebooks produce empty results without error.
+
+**Integration path**: Wire into `NeuroStore::query_structured()` for decomposing retrieved entry vectors into their constituent role-filler pairs.
+
+**Test criteria**:
+- Compose `z = bind(hv_rust, hv_async)`, decompose with two codebooks each containing 100 random entries plus the target. Recovered factors match `hv_rust` and `hv_async`
+- Convergence within 20 iterations for 2-factor decomposition
+- Returns `converged: false` when given a vector not composed from any codebook entries
+- Empty codebook list returns empty result with `converged: true`
+
+### DecayingBundleAccumulator with temporal weighting
+
+`DecayingBundleAccumulator` extends `BundleAccumulator` with automatic per-addition decay. Each call to `add()` first decays existing votes, then adds the new vector. This produces a bundle weighted toward recent additions without manual decay calls.
+
+```rust
+/// Bundle accumulator with automatic temporal decay.
+///
+/// Every `add()` first multiplies existing votes by `decay_factor`,
+/// then adds the new vector's contribution. The result is a recency-weighted
+/// bundle where recent vectors dominate and old vectors fade.
+///
+/// The effective half-life (in additions) is:
+///   half_life = -ln(2) / ln(decay_factor)
+///
+/// At decay_factor = 0.95: half_life ~ 13.5 additions
+/// At decay_factor = 0.99: half_life ~ 69 additions
+pub struct DecayingBundleAccumulator {
+    votes: Vec<f32>,       // Use f32 for smooth decay (vs i32 in BundleAccumulator)
+    pub count: usize,
+    decay_factor: f32,
+}
+
+impl DecayingBundleAccumulator {
+    /// Create a new decaying accumulator.
+    ///
+    /// # Panics
+    /// Panics if `decay_factor` is not in (0.0, 1.0].
+    pub fn new(decay_factor: f32) -> Self {
+        assert!(
+            decay_factor > 0.0 && decay_factor <= 1.0,
+            "decay_factor must be in (0.0, 1.0], got {decay_factor}"
+        );
+        Self {
+            votes: vec![0.0f32; 10_240],
+            count: 0,
+            decay_factor,
+        }
+    }
+
+    /// Add a vector with automatic decay of prior votes.
+    ///
+    /// 1. Multiply all existing votes by decay_factor
+    /// 2. Add +1.0 for set bits, -1.0 for unset bits
+    pub fn add(&mut self, hv: &HdcVector) {
+        self.count += 1;
+        // Decay existing votes
+        for vote in self.votes.iter_mut() {
+            *vote *= self.decay_factor;
+        }
+        // Add new contribution
+        for word_idx in 0..160 {
+            let word = hv.bits[word_idx];
+            for bit in 0..64 {
+                let pos = word_idx * 64 + bit;
+                if (word >> bit) & 1 == 1 {
+                    self.votes[pos] += 1.0;
+                } else {
+                    self.votes[pos] -= 1.0;
+                }
+            }
+        }
+    }
+
+    /// Collapse votes to a binary vector. Threshold at 0.0; ties break to 0.
+    pub fn finish(&self) -> HdcVector {
+        let mut bits = [0u64; 160];
+        for word_idx in 0..160 {
+            let mut word = 0u64;
+            for bit in 0..64 {
+                let pos = word_idx * 64 + bit;
+                if self.votes[pos] > 0.0 {
+                    word |= 1u64 << bit;
+                }
+            }
+            bits[word_idx] = word;
+        }
+        HdcVector { bits }
+    }
+
+    /// Current decay factor.
+    pub fn decay_factor(&self) -> f32 {
+        self.decay_factor
+    }
+
+    /// Effective half-life in number of additions.
+    pub fn half_life(&self) -> f32 {
+        -(2.0_f32.ln()) / self.decay_factor.ln()
+    }
+}
+```
+
+**Configuration parameters**:
+
+| Parameter | Default | Range | Effect |
+|---|---|---|---|
+| `decay_factor` | 0.95 | 0.80 - 0.99 | 0.80 = aggressive forgetting (~3.1 half-life), 0.99 = slow (~69 half-life) |
+
+**Use case**: Episode memory compression. As an agent processes episodes, each episode's vector is added to a `DecayingBundleAccumulator`. The resulting bundle represents "what the agent has been working on recently" with smooth recency weighting. Older episodes fade naturally without explicit pruning.
+
+**Test criteria**:
+- Adding the same vector 100 times produces that exact vector from `finish()`
+- Adding A then B with decay_factor=0.0001: `finish()` returns approximately B (A fully decayed)
+- `half_life()` for decay_factor=0.95 returns approximately 13.5
+- Constructor panics on decay_factor=0.0 and decay_factor=1.5
+
+### SIMD intrinsics strategy
+
+The current `HdcVector` implementation uses scalar loops that LLVM auto-vectorizes on x86-64. Explicit SIMD intrinsics provide guaranteed performance across compilers and targets.
+
+**Strategy**: Explicit AVX-512 with fallback chain.
+
+```
+Tier 1: AVX-512 (512-bit)  — 160 words / 8 = 20 iterations per operation
+Tier 2: AVX2 (256-bit)     — 160 words / 4 = 40 iterations per operation
+Tier 3: Scalar (64-bit)    — 160 iterations per operation (current)
+```
+
+**Implementation approach**:
+
+```rust
+#[cfg(target_arch = "x86_64")]
+mod simd {
+    use std::arch::x86_64::*;
+
+    /// XOR-bind two vectors using AVX-512.
+    /// 20 iterations over 512-bit lanes vs 160 scalar iterations.
+    #[target_feature(enable = "avx512f")]
+    pub unsafe fn bind_avx512(a: &[u64; 160], b: &[u64; 160], out: &mut [u64; 160]) {
+        let a_ptr = a.as_ptr() as *const __m512i;
+        let b_ptr = b.as_ptr() as *const __m512i;
+        let out_ptr = out.as_mut_ptr() as *mut __m512i;
+        for i in 0..20 {
+            let va = _mm512_loadu_si512(a_ptr.add(i));
+            let vb = _mm512_loadu_si512(b_ptr.add(i));
+            let result = _mm512_xor_si512(va, vb);
+            _mm512_storeu_si512(out_ptr.add(i), result);
+        }
+    }
+
+    /// Hamming distance via AVX-512 VPOPCNT (Ice Lake+).
+    #[target_feature(enable = "avx512vpopcntdq")]
+    pub unsafe fn hamming_avx512(a: &[u64; 160], b: &[u64; 160]) -> u32 {
+        let mut total = _mm512_setzero_si512();
+        let a_ptr = a.as_ptr() as *const __m512i;
+        let b_ptr = b.as_ptr() as *const __m512i;
+        for i in 0..20 {
+            let va = _mm512_loadu_si512(a_ptr.add(i));
+            let vb = _mm512_loadu_si512(b_ptr.add(i));
+            let xored = _mm512_xor_si512(va, vb);
+            let popcnt = _mm512_popcnt_epi64(xored);
+            total = _mm512_add_epi64(total, popcnt);
+        }
+        // Horizontal sum of 8 x u64 lanes
+        let stored: [u64; 8] = std::mem::transmute(total);
+        stored.iter().sum::<u64>() as u32
+    }
+}
+```
+
+**Runtime detection**: Use `std::is_x86_feature_detected!()` at init time to select the fastest available path. Cache the decision in a static `AtomicU8` flag (0 = scalar, 1 = AVX2, 2 = AVX-512).
+
+**Why not rely on auto-vectorization alone**: LLVM's auto-vectorizer handles the XOR loop well but struggles with the majority-vote `bundle()` loop (conditional per-bit logic with counters). Explicit SIMD for `bind()` and `similarity()` guarantees performance; `bundle()` stays scalar until profiling shows it is a bottleneck.
+
+**Expected speedups**:
+
+| Operation | Scalar | AVX2 | AVX-512 |
+|---|---|---|---|
+| `bind()` | ~5 ns | ~2 ns | ~1 ns |
+| `similarity()` | ~13 ns | ~6 ns | ~2 ns |
+| `bundle(10)` | ~800 ns | ~800 ns* | ~800 ns* |
+
+*Bundle is dominated by per-bit counting logic, not XOR. SIMD helps less here.
+
+### Three-tier search algorithm
+
+The three-tier search strategy (Bloom, approximate, exact) reduces query time over large knowledge bases from O(N) brute force to approximately O(N^0.1) expected work.
+
+```rust
+use crate::HdcVector;
+
+/// Three-tier search index for large HDC vector collections.
+///
+/// Tier 1: Bloom filter with LSH for fast rejection (~95% of entries eliminated)
+/// Tier 2: Reduced-precision Hamming on first 2,048 bits (~90% of survivors eliminated)
+/// Tier 3: Full 10,240-bit exact comparison on final candidates
+pub struct ThreeTierIndex {
+    /// LSH-based Bloom filter. Each vector is hashed into `num_hash_functions`
+    /// buckets using random hyperplane projections.
+    bloom: BloomFilter,
+    /// All stored vectors, indexed by insertion order.
+    vectors: Vec<HdcVector>,
+    /// Configuration.
+    config: ThreeTierConfig,
+}
+
+pub struct ThreeTierConfig {
+    /// Number of LSH hash functions for the Bloom filter. Default: 8.
+    pub num_hash_functions: usize,
+    /// Bloom filter size in bits. Default: 1,048,576 (128 KB).
+    pub bloom_bits: usize,
+    /// Number of u64 words to compare in Tier 2. Default: 32 (2,048 bits).
+    pub approx_words: usize,
+    /// Tier 2 similarity threshold (candidates below this are pruned). Default: 0.51.
+    pub approx_threshold: f32,
+}
+
+impl Default for ThreeTierConfig {
+    fn default() -> Self {
+        Self {
+            num_hash_functions: 8,
+            bloom_bits: 1 << 20,    // 1M bits = 128 KB
+            approx_words: 32,       // 2,048 bits = 20% of full vector
+            approx_threshold: 0.51,
+        }
+    }
+}
+
+struct BloomFilter {
+    bits: Vec<u64>,
+    num_hashes: usize,
+    /// Random hyperplanes for LSH. Each hyperplane is an HdcVector.
+    /// A vector's hash for hyperplane h = popcount(vector AND h) > D/2 ? 1 : 0
+    hyperplanes: Vec<HdcVector>,
+}
+```
+
+**Algorithm pseudocode**:
+
+```
+fn top_k(query: &HdcVector, k: usize) -> Vec<(usize, f32)>:
+    // Tier 1: Bloom filter
+    hash = lsh_hash(query, hyperplanes)
+    candidates = bloom_lookup(hash)  // indices of potential matches
+    // Expected: ~5-10% of total entries survive
+
+    // Tier 2: Approximate similarity (first 32 words only)
+    survivors = []
+    for idx in candidates:
+        approx_sim = hamming_similarity_partial(query, vectors[idx], approx_words)
+        if approx_sim >= approx_threshold:
+            survivors.push(idx)
+    // Expected: ~0.5-1% of total entries survive
+
+    // Tier 3: Exact top-K on survivors
+    scored = []
+    for idx in survivors:
+        exact_sim = query.similarity(&vectors[idx])
+        scored.push((idx, exact_sim))
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1))
+    scored.truncate(k)
+    scored
+```
+
+**Configuration parameters**:
+
+| Parameter | Default | Range | Trade-off |
+|---|---|---|---|
+| `num_hash_functions` | 8 | 4 - 16 | More = fewer false positives but higher Bloom FP rate |
+| `bloom_bits` | 1M | 256K - 16M | Larger = lower FP rate but more memory |
+| `approx_words` | 32 | 16 - 80 | More = better pruning but slower Tier 2 |
+| `approx_threshold` | 0.51 | 0.50 - 0.53 | Higher = more aggressive pruning, risk of missing true positives |
+
+**Error handling**: The search never errors. Bloom filter false positives are handled by Tier 2/3. If all entries are pruned by Tier 2, the result is an empty vec. The caller should fall back to brute-force if the result set is unexpectedly empty and the query is known to have matches.
+
+**Test criteria**:
+- Top-1 on a 10K index with the query vector present returns that vector with similarity 1.0
+- Results match brute-force for all queries above threshold 0.526
+- Tier 1 eliminates >90% of entries on a 100K random vector set
+- Tier 2 eliminates >80% of Tier 1 survivors
+- Index with 0 entries returns empty results without panic
+
+---
+
 ## Current Status and Gaps
 
 **Implemented**:
@@ -301,12 +1002,12 @@ Neuro uses HDC for **structural similarity** — detecting when two knowledge en
 - K-medoids (PAM) clustering over `HdcVector` in `roko-learn/src/hdc_clustering.rs`
 
 **Missing**:
-- `BundleAccumulator` (designed in spec but not in current `bardo-primitives`; vote tracking for incremental bundling)
-- `ItemMemory` / codebook (designed in spec; not implemented)
-- `ResonatorNetwork` (Frady et al. 2020; designed in spec; not implemented)
-- `DecayingBundleAccumulator` (designed in spec; vote decay for controlled forgetting)
-- AVX-512/AVX2 SIMD intrinsics (current implementation uses scalar loops; auto-vectorization may apply)
-- Three-tier search (Bloom filter → approximate → exact)
+- `BundleAccumulator` (designed above; not in current `bardo-primitives`)
+- `ItemMemory` / codebook (designed above; not implemented)
+- `ResonatorNetwork` (Frady et al. 2020; designed above; not implemented)
+- `DecayingBundleAccumulator` (designed above; vote decay for controlled forgetting)
+- AVX-512/AVX2 SIMD intrinsics (strategy above; current implementation uses scalar loops)
+- Three-tier search (designed above; Bloom filter, approximate, exact)
 - On-chain HDC precompile for Korai
 
 ---

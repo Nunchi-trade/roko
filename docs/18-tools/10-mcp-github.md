@@ -3,6 +3,9 @@
 > 17 GitHub API tools: PR operations, issue management, repository tools, CI integration.
 > Full JSON Schema specifications.
 
+
+> **Implementation**: Scaffold
+
 ---
 
 ## Overview
@@ -423,3 +426,255 @@ GitHub API rate limits are handled transparently by the MCP server:
 | Search API | 30 requests/minute | Per token |
 
 The server implements exponential backoff with jitter for rate-limited responses (HTTP 429).
+
+### Rate limit backoff strategy
+
+```rust
+use std::time::Duration;
+
+/// Exponential backoff with full jitter for GitHub API rate limits.
+pub struct RateLimitBackoff {
+    /// Base delay for first retry.
+    base_delay: Duration,
+    /// Maximum delay cap.
+    max_delay: Duration,
+    /// Maximum number of retries before giving up.
+    max_retries: u32,
+    /// Current retry count.
+    current_retry: u32,
+}
+
+impl RateLimitBackoff {
+    /// Default: 1s base, 60s max, 5 retries.
+    pub fn new() -> Self {
+        Self {
+            base_delay: Duration::from_secs(1),
+            max_delay: Duration::from_secs(60),
+            max_retries: 5,
+            current_retry: 0,
+        }
+    }
+
+    /// Compute the next backoff delay with full jitter.
+    /// Full jitter (AWS recommendation): uniform random in [0, min(cap, base * 2^attempt)].
+    /// This distributes retry storms across time.
+    pub fn next_delay(&mut self) -> Option<Duration> {
+        if self.current_retry >= self.max_retries {
+            return None; // Give up.
+        }
+        let exp_delay = self.base_delay.as_millis() as u64
+            * 2u64.saturating_pow(self.current_retry);
+        let capped = exp_delay.min(self.max_delay.as_millis() as u64);
+        let jittered = rand::random::<u64>() % (capped + 1);
+        self.current_retry += 1;
+        Some(Duration::from_millis(jittered))
+    }
+
+    /// Reset after a successful request.
+    pub fn reset(&mut self) {
+        self.current_retry = 0;
+    }
+}
+```
+
+**Configuration:**
+
+```toml
+[mcp.github.rate_limit]
+base_delay_ms = 1000       # Base delay for first retry. Range: 100..5000.
+max_delay_ms = 60000       # Maximum delay cap. Range: 5000..300000.
+max_retries = 5            # Maximum retries before failure. Range: 1..10.
+respect_retry_after = true # Use GitHub's Retry-After header when present.
+```
+
+### Error response differentiation
+
+The server distinguishes GitHub API error codes to provide actionable feedback to agents:
+
+```rust
+/// GitHub API error classification.
+pub enum GitHubApiError {
+    /// 401 Unauthorized: token expired or invalid.
+    /// Action: re-authenticate or report to operator.
+    Unauthorized { message: String },
+
+    /// 403 Forbidden: permission denied or secondary rate limit.
+    /// Two sub-cases:
+    /// - Rate limit exceeded (check X-RateLimit-Remaining header)
+    /// - Insufficient permissions (token lacks required scope)
+    Forbidden {
+        is_rate_limit: bool,
+        rate_limit_reset: Option<u64>, // Unix timestamp when limit resets.
+        required_scope: Option<String>,
+        message: String,
+    },
+
+    /// 404 Not Found: resource doesn't exist or is private.
+    /// Agent should not retry.
+    NotFound { resource_type: String, identifier: String },
+
+    /// 422 Unprocessable Entity: validation error.
+    /// Agent should fix the request parameters.
+    ValidationError { errors: Vec<ValidationDetail> },
+
+    /// 429 Too Many Requests: primary rate limit hit.
+    /// Agent should back off.
+    RateLimited {
+        retry_after_secs: Option<u64>,
+    },
+
+    /// 5xx Server Error: GitHub is having issues.
+    /// Agent should retry with backoff.
+    ServerError { status: u16, message: String },
+}
+
+pub struct ValidationDetail {
+    pub field: String,
+    pub code: String,  // "missing", "invalid", "already_exists"
+    pub message: String,
+}
+```
+
+```rust
+/// Classify a GitHub API response into an actionable error.
+pub fn classify_error(status: u16, headers: &Headers, body: &str) -> GitHubApiError {
+    match status {
+        401 => GitHubApiError::Unauthorized {
+            message: parse_message(body),
+        },
+        403 => {
+            let remaining = headers.get("x-ratelimit-remaining")
+                .and_then(|v| v.parse::<u64>().ok());
+            let reset = headers.get("x-ratelimit-reset")
+                .and_then(|v| v.parse::<u64>().ok());
+            GitHubApiError::Forbidden {
+                is_rate_limit: remaining == Some(0),
+                rate_limit_reset: reset,
+                required_scope: extract_required_scope(body),
+                message: parse_message(body),
+            }
+        }
+        404 => GitHubApiError::NotFound {
+            resource_type: extract_resource_type(body),
+            identifier: extract_identifier(body),
+        },
+        422 => GitHubApiError::ValidationError {
+            errors: parse_validation_errors(body),
+        },
+        429 => GitHubApiError::RateLimited {
+            retry_after_secs: headers.get("retry-after")
+                .and_then(|v| v.parse::<u64>().ok()),
+        },
+        500..=599 => GitHubApiError::ServerError {
+            status,
+            message: parse_message(body),
+        },
+        _ => GitHubApiError::ServerError {
+            status,
+            message: format!("Unexpected status {}: {}", status, body),
+        },
+    }
+}
+```
+
+### Rust handler signatures and octocrab API mapping
+
+Each tool maps to one or more `octocrab` API calls:
+
+```rust
+use octocrab::Octocrab;
+
+pub struct GitHubMcpServer {
+    client: Octocrab,
+    default_repo: Option<(String, String)>, // (owner, repo)
+    backoff: RateLimitBackoff,
+}
+
+impl GitHubMcpServer {
+    // PR tools
+    pub async fn get_pr(&self, repo: &str, number: u64, include_diff: bool, include_comments: bool)
+        -> Result<serde_json::Value>;
+        // octocrab: client.pulls(owner, repo).get(number)
+        //           + client.pulls(owner, repo).get_diff(number) if include_diff
+        //           + client.pulls(owner, repo).list_comments(number) if include_comments
+
+    pub async fn create_pr(&self, repo: &str, title: &str, head: &str, base: &str, body: &str, draft: bool)
+        -> Result<serde_json::Value>;
+        // octocrab: client.pulls(owner, repo).create(title, head, base).body(body).draft(draft)
+
+    pub async fn review_pr(&self, repo: &str, number: u64, event: &str, body: &str, comments: Vec<ReviewComment>)
+        -> Result<serde_json::Value>;
+        // octocrab: client.pulls(owner, repo).create_review(number, event, body, comments)
+
+    pub async fn merge_pr(&self, repo: &str, number: u64, method: &str, title: Option<&str>, message: Option<&str>)
+        -> Result<serde_json::Value>;
+        // octocrab: client.pulls(owner, repo).merge(number).method(method)
+
+    pub async fn update_pr(&self, repo: &str, number: u64, title: Option<&str>, body: Option<&str>, base: Option<&str>)
+        -> Result<serde_json::Value>;
+        // octocrab: client.pulls(owner, repo).update(number).title(title).body(body)
+
+    pub async fn list_prs(&self, repo: &str, state: &str, author: Option<&str>, label: Option<&str>, limit: u64)
+        -> Result<serde_json::Value>;
+        // octocrab: client.pulls(owner, repo).list().state(state).per_page(limit)
+
+    // Issue tools
+    pub async fn get_issue(&self, repo: &str, number: u64, include_comments: bool)
+        -> Result<serde_json::Value>;
+        // octocrab: client.issues(owner, repo).get(number)
+
+    pub async fn create_issue(&self, repo: &str, title: &str, body: &str, labels: Vec<String>, assignees: Vec<String>)
+        -> Result<serde_json::Value>;
+        // octocrab: client.issues(owner, repo).create(title).body(body).labels(labels)
+
+    pub async fn update_issue(&self, repo: &str, number: u64, state: Option<&str>, labels: Option<Vec<String>>,
+                              assignees: Option<Vec<String>>, title: Option<&str>, body: Option<&str>)
+        -> Result<serde_json::Value>;
+        // octocrab: client.issues(owner, repo).update(number)
+
+    pub async fn list_issues(&self, repo: &str, state: &str, labels: Option<&str>, assignee: Option<&str>, limit: u64)
+        -> Result<serde_json::Value>;
+        // octocrab: client.issues(owner, repo).list().state(state).per_page(limit)
+
+    pub async fn comment_issue(&self, repo: &str, number: u64, body: &str)
+        -> Result<serde_json::Value>;
+        // octocrab: client.issues(owner, repo).create_comment(number, body)
+
+    pub async fn search_issues(&self, query: &str, limit: u64)
+        -> Result<serde_json::Value>;
+        // octocrab: client.search().issues_and_pull_requests(query).per_page(limit)
+
+    // Repository tools
+    pub async fn get_file(&self, repo: &str, path: &str, git_ref: &str)
+        -> Result<serde_json::Value>;
+        // octocrab: client.repos(owner, repo).get_content().path(path).r#ref(git_ref)
+
+    pub async fn search_code(&self, query: &str, repo: Option<&str>, language: Option<&str>, limit: u64)
+        -> Result<serde_json::Value>;
+        // octocrab: client.search().code(query).per_page(limit)
+
+    pub async fn list_branches(&self, repo: &str, limit: u64)
+        -> Result<serde_json::Value>;
+        // octocrab: client.repos(owner, repo).list_branches().per_page(limit)
+
+    pub async fn get_tree(&self, repo: &str, path: &str, git_ref: &str, recursive: bool)
+        -> Result<serde_json::Value>;
+        // octocrab: client.repos(owner, repo).get_content().path(path).r#ref(git_ref)
+
+    // CI tools
+    pub async fn get_check_status(&self, repo: &str, git_ref: &str)
+        -> Result<serde_json::Value>;
+        // octocrab: client.checks(owner, repo).list_for_ref(git_ref)
+}
+```
+
+### Test criteria
+
+- Each tool validates required input fields and returns a clear error for missing fields
+- `classify_error()` correctly distinguishes 401/403/404/422/429/5xx responses
+- Rate limit backoff delay increases exponentially and respects the max_delay cap
+- Backoff resets to zero after a successful request
+- 403 with `X-RateLimit-Remaining: 0` is classified as rate limit, not permission error
+- 404 for a private repo is not retried
+- All 17 tools return valid JSON matching their output schema
+- `merge_pr` fails with a clear message when checks have not passed

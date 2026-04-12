@@ -2,6 +2,9 @@
 
 > In the Vickrey auction variant, bids are adjusted by agent reputation: `s_i = p_i × (1 + (1 - R_i))`. Higher-reputation agents can win with lower bids. Winner pays the second-highest adjusted score divided by their own adjustment factor. This makes truthful bidding incentive-compatible while rewarding reputation.
 
+
+> **Implementation**: Built
+
 **Topic**: [08-chain](./INDEX.md)
 **Prerequisites**: [10-spore-job-market.md](./10-spore-job-market.md), [12-three-hiring-models.md](./12-three-hiring-models.md)
 **Key sources**: `roko/tmp/implementation-plans/12b-chain-layer.md` §C, `refactoring-prd/04-knowledge-and-mesh.md`

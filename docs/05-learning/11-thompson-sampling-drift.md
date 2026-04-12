@@ -4,6 +4,9 @@
 > **Academic basis:** Thompson 1933; Garivier & Moulines 2011 (discounted Thompson Sampling)
 > **Cross-references:** [03-bandits-ucb-thompson-linucb](03-bandits-ucb-thompson-linucb.md), [04-cascade-router](04-cascade-router.md), [14-stability-mechanisms](14-stability-mechanisms.md)
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Purpose

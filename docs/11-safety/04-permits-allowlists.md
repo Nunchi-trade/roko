@@ -8,6 +8,9 @@
 >
 > **Prerequisites**: [00-defense-in-depth.md](00-defense-in-depth.md), [01-capability-tokens.md](01-capability-tokens.md)
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Overview

@@ -2,6 +2,9 @@
 
 > 10,240-bit hyperdimensional computing vectors that encode code structure into fixed-width binary fingerprints — enabling sub-microsecond similarity search without neural embeddings.
 
+
+> **Implementation**: Built
+
 **Topic**: [Code Intelligence](./INDEX.md)
 **Prerequisites**: [02-symbol-extraction.md](./02-symbol-extraction.md)
 **Key sources**: `crates/roko-index/src/hdc.rs`, `bardo-backup/tmp/mori-refactor/10-code-intelligence.md`, `bardo-backup/tmp/death/tools/02-code-index.md`, `bardo-backup/tmp/death/docs/30-index-performance.md`

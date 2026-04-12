@@ -5,6 +5,9 @@
 > covers the server mode, the HTTP API surface, authentication, multi-project management,
 > webhook integration, the local-to-remote transition, and the `roko-serve` crate.
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview

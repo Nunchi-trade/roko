@@ -6,6 +6,9 @@
 > **Academic basis:** Wang et al. 2023 ("Voyager: An Open-Ended Embodied Agent with Large Language Models")
 > **Cross-references:** [00-episode-logger](00-episode-logger.md), [01-playbook-system](01-playbook-system.md), [13-8-missing-feedback-loops](13-8-missing-feedback-loops.md)
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Purpose

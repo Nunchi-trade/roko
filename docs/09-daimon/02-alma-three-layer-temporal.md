@@ -2,6 +2,9 @@
 
 > The three-layer emotional architecture: Emotion (seconds), Mood (hours), and Personality (lifetime) — how they interact and update within the Daimon.
 
+
+> **Implementation**: Built
+
 **Topic**: [Daimon](./INDEX.md)
 **Prerequisites**: [01-pad-vector.md](./01-pad-vector.md)
 **Key sources**: `bardo-backup/prd/03-daimon/00-overview.md`, `refactoring-prd/03-cognitive-subsystems.md` §2, `roko-daimon/src/lib.rs`

@@ -2,6 +2,9 @@
 
 > Knowledge entries decay exponentially following the Ebbinghaus forgetting curve, with the effective half-life determined by the multiplicative composition of type base half-life and tier multiplier.
 
+
+> **Implementation**: Built
+
 **Topic**: [Neuro — Cognitive Knowledge Layer](./INDEX.md)
 **Prerequisites**: [02-four-validation-tiers.md](./02-four-validation-tiers.md), [03-type-half-lives.md](./03-type-half-lives.md)
 **Key sources**:

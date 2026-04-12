@@ -7,6 +7,9 @@
 > **Prerequisites**: `00-stigmergy-theory.md` (stigmergy fundamentals),
 > `06-agent-mesh-sync.md` (transport layer)
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview

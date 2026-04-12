@@ -3,7 +3,7 @@
 > Academic foundations for stigmergic coordination, collective intelligence, multi-agent cooperation, and mesh-based knowledge sharing in Roko's Agent Mesh and Pheromone Field subsystems.
 
 **Topic**: [References](./INDEX.md)
-**Prerequisites**: [Architecture](../00-architecture/INDEX.md), [Agent Mesh](../07-mesh/INDEX.md)
+**Prerequisites**: [Architecture](../00-architecture/INDEX.md), [Agent Mesh](../13-coordination/INDEX.md)
 **Key sources**: `bardo-backup/prd/02-mortality/14-research-foundations.md` §5, `bardo-backup/prd/shared/citations.md` §22, `bardo-backup/tmp/agent-chain/08-references.md`
 
 ---
@@ -100,4 +100,4 @@ Agents do not operate in isolation. A group of agents owned by one user is a Col
 - See [00-lifecycle-and-finite-agency.md](./00-lifecycle-and-finite-agency.md) for cooperation under resource constraints
 - See [15-cybernetics-and-vsm.md](./15-cybernetics-and-vsm.md) for Beer's VSM mapping to agent coordination
 - See [18-collective-intelligence.md](./18-collective-intelligence.md) for Woolley et al. C-Factor
-- See topic [07-mesh](../07-mesh/INDEX.md) for full Agent Mesh design
+- See topic [07-mesh](../13-coordination/INDEX.md) for full Agent Mesh design

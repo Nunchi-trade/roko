@@ -2,6 +2,9 @@
 
 > A comprehensive assessment of what exists, what's missing, and the implementation roadmap for completing code intelligence in Roko.
 
+
+> **Implementation**: Built
+
 **Topic**: [Code Intelligence](./INDEX.md)
 **Prerequisites**: All previous sub-docs
 **Key sources**: `crates/roko-index/`, `crates/roko-lang-rust/`, `crates/roko-lang-typescript/`, `crates/roko-lang-go/`, `bardo-backup/tmp/mori-refactor/10-code-intelligence.md`, `bardo-backup/tmp/mori-agents/18-code-intelligence-and-gateway.md`

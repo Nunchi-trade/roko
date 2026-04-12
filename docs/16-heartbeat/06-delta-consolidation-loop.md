@@ -2,6 +2,9 @@
 
 > The slowest cognitive frequency — offline learning, dream replay, knowledge promotion, and meta-cognition during idle time.
 
+
+> **Implementation**: Specified
+
 **Topic**: [16-heartbeat](./INDEX.md)
 **Prerequisites**: [03-three-cognitive-speeds.md](./03-three-cognitive-speeds.md), [05-theta-reflective-loop.md](./05-theta-reflective-loop.md)
 **Key sources**: `refactoring-prd/03-cognitive-subsystems.md` §Dreams, `refactoring-prd/09-innovations.md` §V, legacy `bardo-backup/prd/01-golem/18-cortical-state.md` §Three Concurrent Scales, `implementation-plans/12a-cognitive-layer.md` §I3

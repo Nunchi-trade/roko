@@ -10,6 +10,9 @@
 > **Prerequisites**: `00-stigmergy-theory.md` (stigmergy theory),
 > `01-stigmergy-beyond-termites.md` (generalized stigmergy)
 
+
+> **Implementation**: Specified
+
 ---
 
 ## What Are Digital Pheromones?

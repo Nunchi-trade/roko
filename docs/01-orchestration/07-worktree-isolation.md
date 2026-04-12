@@ -5,6 +5,9 @@
 > **Tests**: 20+ tests covering creation, removal, health checks, idle
 > reclamation, budget enforcement
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Overview

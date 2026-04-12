@@ -3,7 +3,7 @@
 > Academic foundations for group intelligence, C-Factor measurement, superlinear scaling, and turn-taking equality in Roko's Collective system.
 
 **Topic**: [References](./INDEX.md)
-**Prerequisites**: [Architecture](../00-architecture/INDEX.md), [Agent Mesh](../07-mesh/INDEX.md)
+**Prerequisites**: [Architecture](../00-architecture/INDEX.md), [Agent Mesh](../13-coordination/INDEX.md)
 **Key sources**: `bardo-backup/prd/shared/citations.md`, `refactoring-prd/09-innovations.md` §VI
 
 ---

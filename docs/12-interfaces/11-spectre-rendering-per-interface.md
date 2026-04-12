@@ -2,6 +2,9 @@
 
 > How the Spectre creature is rendered across four interfaces: TUI ASCII art, Web Portal WebGL, CLI inline, and API JSON state. Same data model, four renderers.
 
+
+> **Implementation**: Scaffold
+
 **Topic**: [12-interfaces](./INDEX.md)
 **Prerequisites**: [10-spectre-creature-visualization.md](./10-spectre-creature-visualization.md), [07-rosedust-design-language.md](./07-rosedust-design-language.md)
 **Key sources**: `refactoring-prd/06-interfaces.md` §5, `bardo-backup/prd/18-interfaces/28-creature-system.md`, `roko-cli/src/tui/widgets/braille.rs`

@@ -6,6 +6,9 @@
 >
 > **Synapse traits**: This document provides context for all six traits — Substrate (knowledge storage), Scorer (knowledge rating), Gate (ground-truth verification), Router (candidate selection), Composer (budget-aware assembly), Policy (stream observation and Engram emission) — because the lifecycle model determines when and how each trait is instantiated and torn down.
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview

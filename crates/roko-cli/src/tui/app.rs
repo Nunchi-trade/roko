@@ -1354,4 +1354,107 @@ mod tests {
         assert_eq!(app.tui_state.active_tab, Tab::Dashboard);
         assert_eq!(app.tui_state.input_mode, InputMode::Normal);
     }
+
+    #[test]
+    fn full_frame_render_no_panic() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let dir = tempdir().unwrap();
+        let app = App::new(dir.path());
+        let backend = TestBackend::new(160, 50);
+        let mut terminal = Terminal::new(backend).unwrap();
+        // The real test: does a full frame render without panicking?
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+    }
+
+    #[test]
+    fn all_tabs_render_without_panic() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path());
+
+        for tab in Tab::ALL {
+            app.tui_state.active_tab = tab;
+            let backend = TestBackend::new(160, 50);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| app.draw(frame))
+                .unwrap_or_else(|e| panic!("Tab {:?} failed to render: {e}", tab));
+        }
+    }
+
+    #[test]
+    fn keybinding_o_switches_to_output_subtab() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path());
+        assert_eq!(app.tui_state.plan_detail_tab, 0); // starts on Agents
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        assert_eq!(app.tui_state.plan_detail_tab, 1); // switched to Output
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert_eq!(app.tui_state.plan_detail_tab, 2); // switched to Diff
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        assert_eq!(app.tui_state.plan_detail_tab, 3); // switched to Errors
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        assert_eq!(app.tui_state.plan_detail_tab, 4); // switched to Git
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+        assert_eq!(app.tui_state.plan_detail_tab, 5); // switched to MCP
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert_eq!(app.tui_state.plan_detail_tab, 0); // back to Agents
+    }
+
+    #[test]
+    fn keybinding_f_keys_switch_tabs() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path());
+        assert_eq!(app.tui_state.active_tab, Tab::Dashboard);
+
+        app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+        assert_eq!(app.tui_state.active_tab, Tab::Plans);
+
+        app.handle_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
+        assert_eq!(app.tui_state.active_tab, Tab::Agents);
+
+        app.handle_key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE));
+        assert_eq!(app.tui_state.active_tab, Tab::Git);
+
+        app.handle_key(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE));
+        assert_eq!(app.tui_state.active_tab, Tab::Logs);
+
+        app.handle_key(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE));
+        assert_eq!(app.tui_state.active_tab, Tab::Config);
+
+        app.handle_key(KeyEvent::new(KeyCode::F(7), KeyModifiers::NONE));
+        assert_eq!(app.tui_state.active_tab, Tab::Inspect);
+
+        app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+        assert_eq!(app.tui_state.active_tab, Tab::Dashboard);
+    }
+
+    #[test]
+    fn keybinding_help_toggle() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path());
+        assert!(!app.tui_state.show_help);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert!(app.tui_state.show_help);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert!(!app.tui_state.show_help);
+    }
 }

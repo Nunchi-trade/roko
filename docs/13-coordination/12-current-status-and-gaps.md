@@ -7,6 +7,9 @@
 >
 > **Prerequisites**: All preceding sub-docs in `13-coordination/`
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview

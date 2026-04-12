@@ -4,6 +4,9 @@
 > Status: **Scaffold** — Framework specified, partial implementation
 > Canonical sources: `refactoring-prd/09-innovations.md` §XV, Karpathy (2025)
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Abstract

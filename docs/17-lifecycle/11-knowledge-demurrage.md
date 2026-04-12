@@ -6,6 +6,9 @@
 >
 > **Synapse traits**: Substrate (knowledge store subject to demurrage), Scorer (confidence reduced by demurrage), Policy (demurrage cycles emitted as observability events)
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview

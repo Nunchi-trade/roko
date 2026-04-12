@@ -2,6 +2,9 @@
 
 > Somatic TA uses Damasio's somatic marker hypothesis to create "gut feelings" about TA patterns. Emergent multiscale intelligence measures integrated information (IIT Phi) across the TA subsystems, detecting when the whole is greater than the sum of its parts.
 
+
+> **Implementation**: Specified
+
 **Topic**: [Technical Analysis](./INDEX.md)
 **Prerequisites**: [06-hyperdimensional-ta](./06-hyperdimensional-ta.md) for HDC encoding, [08-adaptive-signal-metabolism](./08-adaptive-signal-metabolism.md) for signal ecosystem
 **Key sources**: `bardo-backup/prd/23-ta/09-somatic-technical-analysis.md`, `bardo-backup/prd/23-ta/10-emergent-multiscale-intelligence.md`
@@ -485,6 +488,304 @@ Somatic markers and multiscale intelligence interact bidirectionally:
    - Somatic valence → Pleasure dimension
    - Phi value → Dominance dimension (high integration = high confidence)
    - Synergy detection → Arousal dimension (novel synergy = surprise)
+
+---
+
+## Implementation details
+
+### PAD encoding: AffectCodebook generation
+
+The AffectCodebook uses the same deterministic generation as other HDC codebooks (see [06-hyperdimensional-ta.md](./06-hyperdimensional-ta.md)), seeded with domain = "affect":
+
+```rust
+/// AffectCodebook for PAD encoding in HDC space.
+///
+/// Generated deterministically from seed "affect".
+/// Three role vectors for the three PAD dimensions.
+/// One shared QuantizedCodebook for value encoding (range [-1.0, 1.0]).
+pub struct AffectCodebook {
+    /// Role vector for the Pleasure dimension.
+    pub pleasure_role: HdcVector,
+    /// Role vector for the Arousal dimension.
+    pub arousal_role: HdcVector,
+    /// Role vector for the Dominance dimension.
+    pub dominance_role: HdcVector,
+    /// Shared quantized codebook for PAD values.
+    /// Range: [-1.0, 1.0], n_levels: 32.
+    pub value_codebook: QuantizedCodebook,
+}
+
+impl AffectCodebook {
+    pub fn new(dim: usize) -> Self {
+        let gen = CodebookGenerator::new("affect", dim);
+        Self {
+            pleasure_role: gen.generate_role(0),
+            arousal_role: gen.generate_role(1),
+            dominance_role: gen.generate_role(2),
+            value_codebook: gen.generate_quantized(100, 32, -1.0, 1.0),
+        }
+    }
+}
+```
+
+**Configuration parameters**:
+
+| Parameter | Default | Range | Notes |
+|---|---|---|---|
+| `dim` | 10,240 | Must match global HDC dimensionality | Shared with all other codebooks. |
+| `n_levels` | 32 | 16 - 64 | 32 gives ~6.25% resolution per PAD dimension. Sufficient for affect encoding. |
+| `value_range` | [-1.0, 1.0] | Fixed | Matches Mehrabian-Russell PAD range. |
+
+The quantization levels are generated via thermometer construction: each adjacent level differs by `dim / (2 * 32) = 160` bits. Two PAD states differing by 0.1 on one dimension have similarity ~0.975 on that dimension's component.
+
+### Somatic retrieval: k-d tree in 8D
+
+The somatic map can contain thousands of markers. Linear scan is adequate for < 5,000 markers (~315 microseconds at 63ns/comparison). For larger collections, use a k-d tree on the PAD+pattern summary space:
+
+```rust
+/// Somatic marker index for fast retrieval.
+///
+/// Each marker is projected into an 8-dimensional space:
+///   [pleasure, arousal, dominance,         // 3 PAD dims
+///    pattern_pca_0, ..., pattern_pca_4]    // 5 PCA dims of pattern vector
+///
+/// The PCA projection compresses the 10,240-bit pattern vector into
+/// 5 f64 dimensions that capture the most variance. This loses some
+/// information but enables tree-based spatial indexing.
+///
+/// Build cost: O(n * log(n)) where n = marker count.
+/// Query cost: O(log(n)) average, O(n) worst case (high-dimensional curse).
+/// For n = 10,000 markers: ~10x faster than linear scan.
+pub struct SomaticIndex {
+    /// k-d tree over the 8D projection space.
+    tree: KdTree<f64, usize, 8>,
+
+    /// PCA projection matrix (10,240 -> 5 dimensions).
+    pca_matrix: [[f64; 5]; 10_240],
+
+    /// The underlying markers (indexed by position in this vec).
+    markers: Vec<SomaticMarker>,
+}
+
+impl SomaticIndex {
+    /// Build the index from a collection of markers.
+    pub fn build(markers: Vec<SomaticMarker>) -> Self {
+        let pca_matrix = compute_pca_projection(&markers, 5);
+        let mut tree = KdTree::new(8);
+
+        for (idx, marker) in markers.iter().enumerate() {
+            let point = Self::project(marker, &pca_matrix);
+            tree.add(point, idx).unwrap();
+        }
+
+        Self { tree, pca_matrix, markers }
+    }
+
+    /// Query: find k nearest markers to a pattern + PAD query.
+    pub fn query_nearest(
+        &self,
+        pattern: &HdcVector,
+        pad_hint: (f64, f64, f64),
+        k: usize,
+    ) -> Vec<(f64, &SomaticMarker)> {
+        let query_point = self.project_query(pattern, pad_hint);
+        self.tree.nearest(&query_point, k, &squared_euclidean)
+            .unwrap()
+            .into_iter()
+            .map(|(dist, &idx)| (dist.sqrt(), &self.markers[idx]))
+            .collect()
+    }
+}
+```
+
+**Distance metric**: Squared Euclidean in the 8D projection space. The PAD dimensions and PCA dimensions are on different scales, so normalize each dimension to unit variance before building the tree.
+
+**Unbinding operation**: To compare just the pattern component of a somatic marker (ignoring affect), unbind by XORing the marker vector with its affect vector: `pattern_component = marker_hv XOR affect_hv`. This recovers the approximate pattern vector (XOR is its own inverse in BSC).
+
+### Phi computation: information flow matrix
+
+The 9x9 information flow matrix `flow_matrix[i][j]` measures how much information flows from subsystem i to subsystem j:
+
+```rust
+/// Compute the information flow matrix across TA subsystems.
+///
+/// Method: for each pair (i, j), compute the transfer entropy
+/// from subsystem i's output time series to subsystem j's output
+/// time series over the last window_size observations.
+///
+/// Transfer entropy T(i -> j) measures the reduction in uncertainty
+/// about j's next state when knowing i's past states, beyond what
+/// j's own past provides.
+///
+///   T(i->j) = H(j_t | j_{t-1..t-k}) - H(j_t | j_{t-1..t-k}, i_{t-1..t-k})
+///
+/// where H is conditional entropy and k is the lag order.
+pub struct FlowMatrixComputer {
+    /// Number of lag steps for transfer entropy.
+    pub lag_order: usize,          // default: 3
+    /// Observation window size.
+    pub window_size: usize,        // default: 100
+    /// Number of histogram bins for entropy estimation.
+    pub n_bins: usize,             // default: 10
+}
+
+impl FlowMatrixComputer {
+    pub fn compute(
+        &self,
+        subsystem_outputs: &[[f64]; 9],
+    ) -> [[f64; 9]; 9] {
+        let mut flow = [[0.0; 9]; 9];
+        for i in 0..9 {
+            for j in 0..9 {
+                if i != j {
+                    flow[i][j] = transfer_entropy(
+                        &subsystem_outputs[i],
+                        &subsystem_outputs[j],
+                        self.lag_order,
+                        self.n_bins,
+                    );
+                }
+            }
+        }
+        flow
+    }
+}
+```
+
+**Temporal lag model**: Transfer entropy uses lag_order = 3 by default (looks 3 time steps back). At Theta frequency (~75s), this covers ~225s of history. For subsystems that communicate at different speeds (e.g., HDC is instantaneous, TDA requires batch computation), the lag order should be adjusted per pair.
+
+### Minimum information bipartition: algorithm for n = 9
+
+With 9 subsystems, there are `2^9 - 2 = 510` non-trivial bipartitions. This is small enough for exhaustive enumeration:
+
+```rust
+/// Enumerate all 510 bipartitions and find the MIB.
+///
+/// For each bipartition (A, B):
+///   1. Compute I(whole) = sum of all transfer entropies in the flow matrix.
+///   2. Compute I(A) = sum of transfer entropies within subsystems in A.
+///   3. Compute I(B) = sum of transfer entropies within subsystems in B.
+///   4. delta_I = I(whole) - I(A) - I(B).
+///   5. Track the bipartition with minimum delta_I.
+///
+/// Cost: 510 iterations, each O(81) operations on the flow matrix.
+/// Total: ~41K arithmetic operations. Negligible (< 1ms).
+pub fn find_mib(flow_matrix: &[[f64; 9]; 9]) -> (u16, u16, f64) {
+    let n = 9;
+    let i_whole: f64 = flow_matrix.iter().flat_map(|row| row.iter()).sum();
+    let mut min_delta = f64::MAX;
+    let mut min_mask = (0u16, 0u16);
+
+    for mask in 1u16..(1 << n) - 1 {
+        let complement = ((1u16 << n) - 1) ^ mask;
+
+        let i_a: f64 = (0..n).flat_map(|i| (0..n).map(move |j| (i, j)))
+            .filter(|(i, j)| mask & (1 << i) != 0 && mask & (1 << j) != 0)
+            .map(|(i, j)| flow_matrix[i][j])
+            .sum();
+
+        let i_b: f64 = (0..n).flat_map(|i| (0..n).map(move |j| (i, j)))
+            .filter(|(i, j)| complement & (1 << i) != 0 && complement & (1 << j) != 0)
+            .map(|(i, j)| flow_matrix[i][j])
+            .sum();
+
+        let delta = i_whole - i_a - i_b;
+        if delta < min_delta {
+            min_delta = delta;
+            min_mask = (mask, complement);
+        }
+    }
+
+    (min_mask.0, min_mask.1, min_delta)
+}
+```
+
+**Scalability note**: For n = 9, exhaustive enumeration is trivial. For n > 20, the number of bipartitions exceeds 10^6 and heuristic search (e.g., spectral bisection on the flow matrix) becomes necessary. This is not an issue for the current 9-subsystem architecture.
+
+### Partial information decomposition: algorithm and bias correction
+
+The PID implementation uses the Williams-Beer I_min (minimum specific information) approach:
+
+```rust
+/// PID computation using Williams-Beer I_min.
+///
+/// For two sources S1, S2 and target T:
+///   Redundancy = I_min(S1; T) where I_min is the minimum specific info.
+///   I_min is computed over all realizations t of T:
+///     I_min(S1, S2; T) = sum_t p(t) * min(I_spec(S1; t), I_spec(S2; t))
+///   where I_spec(S; t) = sum_s p(s|t) * log(p(s|t) / p(s)).
+///
+/// Sample size requirement: at least 5 * n_bins^2 observations
+/// to avoid severe estimation bias.
+pub struct PidConfig {
+    /// Number of histogram bins per variable.
+    pub n_bins: usize,         // default: 5
+    /// Minimum sample size: 5 * n_bins^2 = 125 with default.
+    pub min_samples: usize,    // derived: 5 * n_bins * n_bins
+    /// Bias correction method.
+    pub bias_correction: BiasCorrection,
+}
+
+pub enum BiasCorrection {
+    /// No correction (raw plugin estimator).
+    None,
+    /// Miller-Madow correction: subtract (|alphabet| - 1) / (2 * n).
+    MillerMadow,
+    /// Jackknife resampling: leave-one-out estimate of bias.
+    /// More accurate but O(n) times more expensive.
+    Jackknife,
+}
+```
+
+**Recommended settings**: Use `n_bins = 5` and `MillerMadow` bias correction for routine monitoring. Switch to `Jackknife` for publication-quality Phi/PID estimates. The Miller-Madow correction subtracts `(k - 1) / (2n)` from each entropy estimate, where k is the number of non-empty bins and n is the sample size.
+
+### State machine: Phi/somatic markers feeding Daimon updates
+
+The Phi computation and somatic assessment update the Daimon on a schedule:
+
+```
+THETA TICK (every ~75s):
+  1. Evaluate somatic assessment for the current TA state.
+     -> If somatic valence is strong (|pleasure| > 0.5):
+        Update Daimon.pleasure += 0.3 * somatic_pleasure.
+  2. No Phi computation (too expensive for Theta frequency).
+
+DELTA TICK (every few hours):
+  1. Compute the 9x9 information flow matrix from recent Theta outputs.
+  2. Find MIB and compute Phi.
+  3. Compute PID for all 36 subsystem pairs.
+  4. Update Daimon:
+     - Phi > 0.5 -> Daimon.dominance += 0.2 (high integration = high confidence)
+     - New synergy detected (PID synergy > 0.1 for a pair that was
+       previously < 0.05) -> Daimon.arousal += 0.3 (surprise)
+  5. Form somatic markers at synergistic boundaries:
+     - For each high-synergy pair (i, j), encode the joint activation
+       pattern and bind it with the positive affect of discovery.
+     - These markers enable fast future detection of similar synergistic
+       conditions at Theta frequency (avoiding the expensive Phi computation).
+  6. Log Phi value and MIB partition to .roko/learn/phi.jsonl.
+```
+
+**Computation frequency**: Phi is computed at Delta frequency only. At Theta, somatic markers serve as fast proxies for the Phi-derived state. This two-speed design keeps Theta ticks cheap while still incorporating multiscale intelligence insights.
+
+### Error handling
+
+- **Empty somatic map**: If no markers exist, somatic retrieval returns a neutral assessment (pleasure = 0.0, arousal = 0.0, dominance = 0.0, confidence = 0.0).
+- **All markers expired**: Same as empty map. Log a warning suggesting that either the system is too new or the decay rate is too aggressive.
+- **Zero weight in somatic aggregation**: If total weight is zero (all matched markers have zero strength), return neutral assessment.
+- **Degenerate flow matrix**: If all transfer entropies are zero (no inter-subsystem communication), Phi = 0 and MIB is arbitrary. This indicates the subsystems are operating independently.
+- **Insufficient data for PID**: If sample count < `min_samples`, skip PID computation and report `synergy = NaN` with a warning.
+- **PCA failure in somatic index**: If the marker set has fewer than 5 unique patterns, reduce PCA dimensions to match. If fewer than 2, fall back to linear scan.
+
+### Test criteria
+
+- **PAD encoding round-trip**: Encode PAD (0.5, -0.3, 0.8) as HDC vector, then decode by unbinding each role. The decoded values should be within 0.1 of the originals (limited by quantization).
+- **Somatic retrieval correctness**: Store a marker for pattern A with positive pleasure. Query with a pattern similar to A. The assessment should have positive valence.
+- **Contrarian retrieval**: Somatic retrieval always returns at least `ceil(n_matches * 0.15)` contrarian markers when available.
+- **Phi monotonicity**: Adding a strong inter-subsystem connection (increasing one flow_matrix entry by 1.0) does not decrease Phi.
+- **MIB exhaustiveness**: For n = 9, exactly 510 bipartitions are evaluated.
+- **PID non-negativity**: Redundancy, unique_s1, unique_s2 are all >= 0. Synergy can be negative (indicates suppression).
+- **State machine scheduling**: Phi is never computed at Theta frequency. Somatic assessment is computed at every Theta tick.
 
 ---
 

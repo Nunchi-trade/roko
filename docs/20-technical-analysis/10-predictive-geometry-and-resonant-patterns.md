@@ -2,6 +2,9 @@
 
 > Topological Data Analysis (TDA) extracts shape from time series. Persistence landscapes provide a Banach space for pattern comparison. Resonant patterns are living organisms with HDC genomes that compete for attention via VCG auction.
 
+
+> **Implementation**: Specified
+
 **Topic**: [Technical Analysis](./INDEX.md)
 **Prerequisites**: [06-hyperdimensional-ta](./06-hyperdimensional-ta.md) for HDC encoding, [08-adaptive-signal-metabolism](./08-adaptive-signal-metabolism.md) for evolutionary dynamics
 **Key sources**: `bardo-backup/prd/23-ta/05-predictive-geometry.md`, `bardo-backup/prd/23-ta/06-resonant-pattern-ecosystem.md`
@@ -453,6 +456,342 @@ pub fn price_equation(
     }
 }
 ```
+
+---
+
+## Implementation details
+
+### Rips filtration: point cloud sizing and memory
+
+The Rips filtration builds a simplicial complex from a point cloud. The critical cost constraint is the O(n^2) distance matrix:
+
+```rust
+/// Rips filtration configuration.
+pub struct RipsFiltrationConfig {
+    /// Maximum number of points in the point cloud.
+    /// Memory cost: O(n^2) for the distance matrix.
+    ///   n = 1,000:  ~8 MB (f64 distances)
+    ///   n = 5,000:  ~200 MB
+    ///   n = 10,000: ~800 MB
+    /// Default: 2,000 (keeps memory under 32 MB).
+    pub max_points: usize,
+
+    /// Distance metric for the point cloud.
+    pub distance_metric: DistanceMetric,
+
+    /// Maximum filtration scale (distances beyond this are ignored).
+    /// Default: f64::MAX (no cutoff). Set lower to reduce computation.
+    pub max_scale: f64,
+
+    /// Maximum homological dimension to compute.
+    /// 0 = connected components only. 1 = + loops. 2 = + voids.
+    /// Default: 1 (components and loops). Higher dimensions are
+    /// exponentially more expensive.
+    pub max_dimension: usize,
+}
+
+pub enum DistanceMetric {
+    /// Euclidean distance: sqrt(sum((x_i - y_i)^2)).
+    /// Standard choice for delay-embedded time series.
+    Euclidean,
+    /// Maximum norm: max(|x_i - y_i|).
+    /// Cheaper to compute, produces similar persistence diagrams.
+    Chebyshev,
+    /// Correlation distance: 1 - pearson_correlation(x, y).
+    /// Use when magnitudes are uninformative (scale-invariant).
+    Correlation,
+}
+```
+
+For point clouds exceeding `max_points`, subsample uniformly at random. The persistence diagram is stable under subsampling: the bottleneck distance between the full and subsampled diagrams is bounded by 2 * the Hausdorff distance of the subsample (stability theorem, Cohen-Steiner et al., 2007).
+
+### Persistence computation: algorithm selection
+
+```rust
+/// Persistence algorithm configuration.
+pub struct PersistenceConfig {
+    /// Algorithm choice.
+    pub algorithm: PersistenceAlgorithm,
+    /// Rust library for computation.
+    /// Recommended: `ripser` crate (Rust port of Ripser).
+    /// Fallback: `gudhi-rs` bindings if available.
+    pub backend: PersistenceBackend,
+}
+
+pub enum PersistenceAlgorithm {
+    /// Ripser (Bauer, 2021): optimized for Rips complexes.
+    /// Uses implicit representations to avoid storing the full complex.
+    /// Memory: O(n^2) for the distance matrix only.
+    /// Speed: fastest known algorithm for Rips persistence.
+    Ripser,
+    /// Standard persistence via matrix reduction.
+    /// Memory: O(m) where m = number of simplices (can be huge).
+    /// Use only for non-Rips filtrations.
+    MatrixReduction,
+    /// Cohomology-based algorithm (de Silva et al., 2011).
+    /// Faster than matrix reduction for high-dimensional features.
+    /// Good choice when max_dimension >= 2.
+    Cohomology,
+}
+
+pub enum PersistenceBackend {
+    /// Pure Rust Ripser port.
+    RipserRs,
+    /// GUDHI bindings (requires C++ library).
+    GudhiBindings,
+}
+```
+
+**Recommendation**: Use `Ripser` + `RipserRs` for all standard use cases. Switch to `Cohomology` only when computing dimension >= 2 persistence on large point clouds.
+
+### Delay embedding: dynamic parameter selection
+
+Takens' embedding theorem requires choosing `embedding_dim` and `delay`. These are selected dynamically from the data:
+
+```rust
+/// Select delay embedding parameters from the time series.
+///
+/// delay: first minimum of the average mutual information (AMI).
+///   AMI measures nonlinear dependence between x(t) and x(t+tau).
+///   The first minimum gives the smallest tau where the lagged values
+///   provide maximally independent information.
+///
+/// embedding_dim: smallest d where the false nearest neighbors (FNN)
+///   fraction drops below 1%. FNN counts how many "close" points in
+///   d dimensions are no longer close in d+1 dimensions.
+pub struct DelayEmbeddingSelector {
+    /// Maximum lag to test for AMI minimum.
+    pub max_delay: usize,          // default: 50
+    /// Maximum dimension to test for FNN.
+    pub max_dim: usize,            // default: 10
+    /// FNN threshold: stop when FNN fraction < this.
+    pub fnn_threshold: f64,        // default: 0.01
+}
+
+impl DelayEmbeddingSelector {
+    pub fn select(&self, series: &[f64]) -> (usize, usize) {
+        let delay = self.first_ami_minimum(series);
+        let dim = self.fnn_dimension(series, delay);
+        (dim, delay)
+    }
+
+    fn first_ami_minimum(&self, series: &[f64]) -> usize {
+        let mut prev_ami = f64::MAX;
+        for tau in 1..=self.max_delay.min(series.len() / 4) {
+            let ami = average_mutual_information(series, tau);
+            if ami > prev_ami {
+                return tau - 1; // previous tau was the minimum
+            }
+            prev_ami = ami;
+        }
+        self.max_delay // no minimum found, use max
+    }
+
+    fn fnn_dimension(&self, series: &[f64], delay: usize) -> usize {
+        for d in 1..=self.max_dim {
+            let fnn_frac = false_nearest_neighbors(series, d, delay);
+            if fnn_frac < self.fnn_threshold {
+                return d;
+            }
+        }
+        self.max_dim // no clean embedding, use max
+    }
+}
+```
+
+**Detrending**: Before delay embedding, remove trends to prevent non-stationarity from dominating the topology. Apply first-order differencing: `x'(t) = x(t) - x(t-1)`. For strongly trending series, apply second-order differencing.
+
+### Persistence landscape: discretization and construction
+
+The persistence landscape is discretized on a uniform grid for practical computation:
+
+```rust
+/// Discretize a persistence landscape on a uniform grid.
+///
+/// The grid spans [t_min, t_max] with n_grid points.
+/// At each grid point, evaluate the k-th layer function.
+pub struct LandscapeDiscretization {
+    /// Grid resolution (number of points).
+    pub n_grid: usize,           // default: 500
+    /// Number of landscape layers to compute.
+    pub n_layers: usize,         // default: 5
+    /// Grid range (auto-detected from diagram if not specified).
+    pub t_min: Option<f64>,
+    pub t_max: Option<f64>,
+}
+
+/// Construct discretized landscape from a persistence diagram.
+///
+/// For each (b, d) pair in the diagram, create a tent function:
+///   f(t) = t - b        for b <= t <= (b+d)/2
+///   f(t) = d - t        for (b+d)/2 <= t <= d
+///   f(t) = 0            otherwise
+///
+/// Layer k at grid point t is the k-th largest tent function value at t.
+pub fn discretize_landscape(
+    diagram: &PersistenceDiagram,
+    config: &LandscapeDiscretization,
+) -> Vec<Vec<f64>> {
+    let (t_min, t_max) = match (config.t_min, config.t_max) {
+        (Some(a), Some(b)) => (a, b),
+        _ => {
+            let births: Vec<f64> = diagram.points.iter().map(|(b, _)| *b).collect();
+            let deaths: Vec<f64> = diagram.points.iter().map(|(_, d)| *d).collect();
+            (*births.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap_or(&0.0),
+             *deaths.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap_or(&1.0))
+        }
+    };
+
+    let step = (t_max - t_min) / config.n_grid as f64;
+    let mut layers = vec![vec![0.0; config.n_grid]; config.n_layers];
+
+    for grid_idx in 0..config.n_grid {
+        let t = t_min + grid_idx as f64 * step;
+        let mut values: Vec<f64> = diagram.points.iter()
+            .map(|(b, d)| {
+                let mid = (b + d) / 2.0;
+                if t >= *b && t <= mid {
+                    t - b
+                } else if t > mid && t <= *d {
+                    d - t
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        values.sort_by(|a, b| b.partial_cmp(a).unwrap());
+
+        for k in 0..config.n_layers.min(values.len()) {
+            layers[k][grid_idx] = values[k];
+        }
+    }
+
+    layers
+}
+```
+
+### Pattern niche: center and specificity
+
+The niche center is computed as the weighted mean of recent activation states. Specificity measures how narrow the niche is:
+
+```rust
+/// Compute niche from activation history.
+///
+/// center = weighted mean of states where the pattern activated,
+///          weighted by activation strength.
+///
+/// specificity = 1.0 / (1.0 + normalized_variance_of_activation_states).
+///   specificity near 1.0: narrow specialist (activates in similar conditions).
+///   specificity near 0.0: broad generalist (activates everywhere).
+pub fn compute_niche(activation_history: &[(Vec<f64>, f64)]) -> PatternNiche {
+    let total_weight: f64 = activation_history.iter().map(|(_, w)| w).sum();
+    let dim = activation_history[0].0.len();
+
+    let center: Vec<f64> = (0..dim).map(|d| {
+        activation_history.iter()
+            .map(|(state, w)| state[d] * w / total_weight)
+            .sum()
+    }).collect();
+
+    let variance: f64 = activation_history.iter()
+        .map(|(state, w)| {
+            let dist_sq: f64 = state.iter().zip(&center)
+                .map(|(s, c)| (s - c).powi(2))
+                .sum();
+            dist_sq * w / total_weight
+        })
+        .sum();
+
+    let radius = variance.sqrt();
+    let specificity = 1.0 / (1.0 + variance / dim as f64);
+
+    PatternNiche { center, radius, specificity }
+}
+```
+
+### VCG auction: auctioneer, payment, zero-bid prevention
+
+The auctioneer is the heartbeat's Theta-frequency tick. At each Theta tick, active patterns bid for inclusion in the cognitive context (limited to `budget` slots).
+
+**Payment mechanism**: Each winning pattern pays the externality it imposes -- the decrease in total welfare that others experience because this pattern occupies a slot. In practice, this equals the bid of the highest-ranked excluded pattern:
+
+```rust
+/// VCG payment computation.
+///
+/// For winner i with bid b_i, payment = optimal welfare without i minus
+/// welfare of others when i wins.
+///
+/// With single-item-per-slot allocation, this simplifies to:
+/// payment_i = bid of the (budget+1)-th ranked pattern.
+///
+/// Zero-bid prevention: patterns with weight < min_bid are excluded
+/// from the auction entirely.
+pub struct AuctionConfig {
+    /// Maximum patterns in the cognitive context.
+    pub budget: usize,           // default: 10
+    /// Minimum bid to participate.
+    pub min_bid: f64,            // default: 0.001
+}
+```
+
+If fewer than `budget` patterns have bids above `min_bid`, all qualifying patterns win and pay zero (no competition).
+
+### Lotka-Volterra: sensitivity analysis and domain calibration
+
+The four Lotka-Volterra parameters have domain-specific interpretations:
+
+| Parameter | Symbol | Chain domain | Coding domain | Default |
+|---|---|---|---|---|
+| Resource growth rate | alpha | How fast arbitrage opportunity regenerates | How fast new code surfaces bugs | 0.1 |
+| Exploitation impact | beta | How much trading depletes the opportunity | How much testing reveals bugs | 0.02 |
+| Benefit from exploitation | delta | Profit per unit of opportunity exploited | Information gain per bug found | 0.01 |
+| Natural decay | gamma | Strategy obsolescence rate (MEV competition) | Bug fix rate (resolves the opportunity) | 0.05 |
+
+**Sensitivity analysis**: The system has a stable equilibrium at:
+- `resource* = gamma / delta`
+- `exploitation* = alpha / beta`
+
+Small perturbations around equilibrium oscillate with period `T = 2*pi / sqrt(alpha * gamma)`. With defaults: `T = 2*pi / sqrt(0.005) ~= 89` time units.
+
+If `alpha * gamma` is too small, oscillations are slow and the system appears static. If `beta * delta` is too large relative to `alpha * gamma`, the system collapses (exploitation exceeds recovery).
+
+**Calibration procedure**: Observe real resource recovery rates and exploitation impact over 20+ Theta cycles. Fit alpha, beta, delta, gamma via least-squares on the observed trajectories.
+
+### Error handling
+
+- **Empty persistence diagram**: If the point cloud produces no persistent features, return an empty PersistenceLandscape with zero layers.
+- **Auction with zero patterns**: Return empty winners list.
+- **Lotka-Volterra negative values**: Clamp resource and exploitation to `[0.0, max_resource]`. Log a warning if clamping occurs.
+- **Delay embedding on short series**: If `series.len() < embedding_dim * delay`, fall back to `embedding_dim = 2, delay = 1`.
+- **NaN in niche computation**: If all activation weights are zero, return a niche with center at the origin and radius = infinity (universal generalist).
+
+### Integration wiring
+
+```
+Oracle::predict()
+  -> collect recent time series (last 2000 points)
+  -> DelayEmbeddingSelector::select() for dynamic dim/delay
+  -> delay_embedding() to produce point cloud
+  -> RipsFiltration with Ripser backend
+  -> PersistenceDiagram -> PersistenceLandscape
+  -> TopologyToTrajectory::predict() for topological constraints
+  -> ResonantPattern ecosystem:
+       -> pattern_auction() at Theta frequency
+       -> lotka_volterra_update() for resource dynamics
+       -> reproduce() for top patterns at Delta frequency
+  -> encode landscape features as HDC vector
+  -> emit as Engram
+```
+
+### Test criteria
+
+- **Takens embedding**: Delay-embedding a sine wave with period P recovers a circle-like point cloud. The H1 persistence diagram has one dominant point with lifetime proportional to the amplitude.
+- **Persistence stability**: Adding Gaussian noise with stddev sigma shifts the bottleneck distance by at most O(sigma).
+- **Landscape linearity**: `landscape(A + B) == landscape(A).add(landscape(B))` for diagrams A, B.
+- **VCG truthfulness**: No pattern benefits from bidding other than its true value.
+- **Lotka-Volterra equilibrium**: Starting from equilibrium with default parameters, the system stays within 1% of equilibrium for 1000 steps with dt=0.1.
+- **Niche convergence**: After 100 activations in similar states, the niche center is within 5% of the true activation centroid.
+- **Memory budget**: 2000-point Rips filtration completes within 32 MB memory.
 
 ---
 

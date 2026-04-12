@@ -2,6 +2,9 @@
 
 > Per-domain reputation with EMA smoothing, adaptive alpha, 30-day half-life decay, 4 discipline states (good standing → probation → suspension → banned), 7 base domains, and configurable slash rates by violation type. Reputation is the primary trust signal in the Korai marketplace.
 
+
+> **Implementation**: Deferred
+
 **Topic**: [08-chain](./INDEX.md)
 **Prerequisites**: [06-erc-8004-registries.md](./06-erc-8004-registries.md), [04-korai-passport-erc-721-soulbound.md](./04-korai-passport-erc-721-soulbound.md)
 **Key sources**: `roko/tmp/implementation-plans/12b-chain-layer.md` §K, `refactoring-prd/04-knowledge-and-mesh.md`
@@ -262,4 +265,4 @@ The network health metric connects to the C-Factor (collective intelligence fact
 - See [13-vickrey-reputation-auction.md](./13-vickrey-reputation-auction.md) for how reputation affects auction competitiveness
 - See [04-korai-passport-erc-721-soulbound.md](./04-korai-passport-erc-721-soulbound.md) for tier progression requirements based on reputation
 - See [05-ventriloquist-defense.md](./05-ventriloquist-defense.md) for prompt change penalties that affect reputation
-- See topic [12-learn](../12-learn/INDEX.md) for the learning system that uses reputation feedback
+- See topic [12-learn](../05-learning/INDEX.md) for the learning system that uses reputation feedback

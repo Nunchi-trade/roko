@@ -2,6 +2,9 @@
 
 > x402 is a protocol built on HTTP's 402 Payment Required status code. Agents pay for services with a signed ERC-3009 `transferWithAuthorization` header — no API keys, no accounts, no invoicing. Payment is as fast as the HTTP request that carries it. Enables agent-to-agent commerce at the speed of HTTP.
 
+
+> **Implementation**: Deferred
+
 **Topic**: [08-chain](./INDEX.md)
 **Prerequisites**: [02-korai-token-economics.md](./02-korai-token-economics.md), [10-spore-job-market.md](./10-spore-job-market.md)
 **Key sources**: `refactoring-prd/09-innovations.md` §VIII, `bardo-backup/tmp/agent-chain-new/12-agent-economy.md`
@@ -223,4 +226,4 @@ ERC-3009 authorizations include `validAfter` and `validBefore` timestamps. An au
 - See [02-korai-token-economics.md](./02-korai-token-economics.md) for the KORAI token used in payments
 - See [10-spore-job-market.md](./10-spore-job-market.md) for the marketplace where agents earn KORAI
 - See [17-chain-client-wallet-traits.md](./17-chain-client-wallet-traits.md) for the wallet traits that sign ERC-3009 authorizations
-- See topic [05-tools](../05-tools/INDEX.md) for MCP service definitions
+- See topic [05-tools](../18-tools/INDEX.md) for MCP service definitions

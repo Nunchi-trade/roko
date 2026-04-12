@@ -8,6 +8,9 @@
 >
 > **Prerequisites**: [01-three-phase-cycle.md](01-three-phase-cycle.md), [02-nrem-replay.md](02-nrem-replay.md), [03-rem-imagination.md](03-rem-imagination.md)
 
+
+> **Implementation**: Scaffold
+
 ---
 
 ## What Consolidation Does
@@ -298,4 +301,4 @@ Dream outputs are subject to the same safety constraints as waking actions:
 | [02-nrem-replay.md](02-nrem-replay.md) | NREM outputs that enter the staging buffer |
 | [03-rem-imagination.md](03-rem-imagination.md) | REM outputs that enter the staging buffer |
 | [05-dream-evolution.md](05-dream-evolution.md) | EVOLUTION phase that operates on promoted knowledge |
-| [../03-neuro/INDEX.md](../03-neuro/INDEX.md) | NeuroStore where promoted entries are persisted |
+| [../03-neuro/INDEX.md](../06-neuro/INDEX.md) | NeuroStore where promoted entries are persisted |

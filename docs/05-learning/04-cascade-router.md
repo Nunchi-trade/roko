@@ -5,6 +5,9 @@
 > **Wiring:** `LearningRuntime` → `CascadeRouter::select()` (called from orchestrate.rs)
 > **Cross-references:** [03-bandits-ucb-thompson-linucb](03-bandits-ucb-thompson-linucb.md), [09-provider-health-circuit-breaker](09-provider-health-circuit-breaker.md), [10-pareto-frontier-pruning](10-pareto-frontier-pruning.md), [08-cost-normalization](08-cost-normalization.md)
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Purpose

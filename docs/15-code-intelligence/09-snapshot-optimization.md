@@ -2,6 +2,9 @@
 
 > Zero-copy rkyv snapshots and memory-mapped index files for sub-millisecond startup — eliminating the cold-start penalty for code intelligence.
 
+
+> **Implementation**: Built
+
 **Topic**: [Code Intelligence](./INDEX.md)
 **Prerequisites**: [08-index-db-scaling.md](./08-index-db-scaling.md)
 **Key sources**: `bardo-backup/tmp/death/docs/30-index-performance.md`, `bardo-backup/tmp/death/tools/02-code-index.md`, `bardo-backup/tmp/mori-refactor/10-code-intelligence.md`

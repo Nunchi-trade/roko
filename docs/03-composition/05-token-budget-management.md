@@ -4,6 +4,9 @@
 > Status: **Implemented** — `roko-compose::budget` (270 lines) + `roko-compose::templates::common` (347 lines)
 > Canonical source: `crates/roko-compose/src/budget.rs`, `crates/roko-compose/src/templates/common.rs`
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Abstract

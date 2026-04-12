@@ -5,6 +5,9 @@
 > what works in WASM, what does not, the MemorySubstrate alternative to filesystem access,
 > HDC vector compatibility, and the target experience for browser-based agents.
 
+
+> **Implementation**: Specified
+
 ---
 
 ## WASM Target Overview

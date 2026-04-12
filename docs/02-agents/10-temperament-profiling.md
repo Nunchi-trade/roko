@@ -6,6 +6,9 @@
 > dial that controls agent behavior across verbosity, tool selection, gate
 > strictness, review depth, and model routing.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## The Temperament Concept

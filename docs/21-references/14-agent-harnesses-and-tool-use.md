@@ -3,7 +3,7 @@
 > Academic foundations for agent scaffolding, harness engineering, tool interfaces, and coding agent systems that inform Roko's framework and harness layers.
 
 **Topic**: [References](./INDEX.md)
-**Prerequisites**: [Architecture](../00-architecture/INDEX.md), [Framework](../01-framework/INDEX.md), [Harness](../03-harness/INDEX.md)
+**Prerequisites**: [Architecture](../00-architecture/INDEX.md), [Framework](../00-architecture/INDEX.md), [Harness](../04-verification/INDEX.md)
 **Key sources**: `bardo-backup/tmp/mori-agents/12-references.md`, `bardo-backup/prd/shared/citations.md` §3
 
 ---

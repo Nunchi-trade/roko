@@ -4,6 +4,9 @@
 > that wraps them into a periodic self-assessment: "Am I stuck?
 > Am I thrashing? Should I escalate?"
 
+
+> **Implementation**: Built
+
 ---
 
 ## The Stuck Problem

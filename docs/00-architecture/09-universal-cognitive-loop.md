@@ -8,6 +8,9 @@
 > (Conant & Ashby 1970). This document specifies the loop, maps each step to its trait,
 > shows the shipping implementation, and explains how the loop runs at three cognitive speeds.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## 1. The 9-Step Loop

@@ -10,6 +10,9 @@
 > **Prerequisites**: `00-stigmergy-theory.md` (stigmergy fundamentals),
 > `01-stigmergy-beyond-termites.md` (generalized stigmergy)
 
+
+> **Implementation**: Specified
+
 ---
 
 ## The Repository as a Stigmergic Environment

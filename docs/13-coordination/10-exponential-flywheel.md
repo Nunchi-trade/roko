@@ -9,6 +9,9 @@
 > `03-digital-pheromones.md` (pheromone mechanics),
 > `09-stigmergy-scaling.md` (coordination scaling)
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview

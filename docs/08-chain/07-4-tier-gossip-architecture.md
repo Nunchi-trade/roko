@@ -2,6 +2,9 @@
 
 > Four gossip tiers span the latency spectrum: GossipSub v1.1 (milliseconds), MiroFish simulation (seconds–minutes), FABRIC TEE aggregation (epoch-level), and Canonical Event Bus (block-finalized). Each tier carries different message types at different trust levels.
 
+
+> **Implementation**: Built
+
 **Topic**: [08-chain](./INDEX.md)
 **Prerequisites**: [01-korai-chain-spec.md](./01-korai-chain-spec.md), [04-korai-passport-erc-721-soulbound.md](./04-korai-passport-erc-721-soulbound.md)
 **Key sources**: `roko/tmp/implementation-plans/12b-chain-layer.md` §B, `refactoring-prd/04-knowledge-and-mesh.md`, `bardo-backup/tmp/agent-chain-new/02-coordination-theory.md`
@@ -14,7 +17,7 @@ Agent coordination requires communication at multiple timescales. A flash loan e
 
 The Korai chain uses a 4-tier gossip architecture that separates messages by latency requirement and trust level. Each tier has different delivery guarantees, message formats, and security properties. Messages flow upward from fast-but-tentative to slow-but-canonical. The lower tiers are optimistic; the upper tiers are authoritative.
 
-This architecture is inspired by the multi-speed cognitive model in Roko's Synapse architecture (see topic [01-synapse](../01-synapse/INDEX.md)), where Gamma (fast), Theta (medium), and Delta (slow) processing speeds handle different types of decisions. The gossip tiers are the network-level analog: fast tentative messages, medium simulation results, slow aggregated proofs, and canonical finalized state.
+This architecture is inspired by the multi-speed cognitive model in Roko's Synapse architecture (see topic [01-synapse](../00-architecture/INDEX.md)), where Gamma (fast), Theta (medium), and Delta (slow) processing speeds handle different types of decisions. The gossip tiers are the network-level analog: fast tentative messages, medium simulation results, slow aggregated proofs, and canonical finalized state.
 
 ---
 
@@ -274,4 +277,4 @@ An agent's Gamma tick processes T0 messages (heartbeats, alerts). Its Theta tick
 - See [09-peer-scoring-3-layer.md](./09-peer-scoring-3-layer.md) for how gossip behavior affects peer reputation
 - See [18-mirage-rs-evm-simulator.md](./18-mirage-rs-evm-simulator.md) for the T1 simulation backend
 - See [22-valhalla-privacy-layer.md](./22-valhalla-privacy-layer.md) for TEE integration in T2 aggregation
-- See topic [01-synapse](../01-synapse/INDEX.md) for the Gamma/Theta/Delta cognitive speed model
+- See topic [01-synapse](../00-architecture/INDEX.md) for the Gamma/Theta/Delta cognitive speed model

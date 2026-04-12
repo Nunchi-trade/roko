@@ -5,6 +5,9 @@
 > images on ghcr.io. This document covers the full release pipeline from commit to installable
 > artifact.
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Distribution Philosophy

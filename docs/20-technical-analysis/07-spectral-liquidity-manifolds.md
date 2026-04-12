@@ -2,6 +2,9 @@
 
 > Riemannian geometry applied to DeFi execution costs. Liquidity pools form a curved manifold where geodesics are optimal execution paths and curvature indicates structural risk.
 
+
+> **Implementation**: Specified
+
 **Topic**: [Technical Analysis](./INDEX.md)
 **Prerequisites**: [02-chain-oracles](./02-chain-oracles.md) for chain TA primitives, [06-hyperdimensional-ta](./06-hyperdimensional-ta.md) for pattern encoding
 **Key sources**: `bardo-backup/prd/23-ta/02-spectral-liquidity-manifolds.md`
@@ -482,6 +485,245 @@ impl MetricTensor {
     }
 }
 ```
+
+---
+
+## Implementation details
+
+### Metric tensor computation: Hessian of price impact
+
+The metric tensor `g_ij` at a point is the Hessian of the total execution cost function with respect to portfolio state variables. Since analytical Hessians are unavailable for arbitrary pool types, the implementation uses central finite differences:
+
+```rust
+/// Compute the metric tensor via numerical differentiation.
+///
+/// Uses central finite differences on the execution cost function:
+///   g_ij = d²C / dx_i dx_j
+///        ≈ [C(x+ε_i+ε_j) - C(x+ε_i-ε_j) - C(x-ε_i+ε_j) + C(x-ε_i-ε_j)] / (4ε²)
+///
+/// The step size ε is adaptive: ε = max(|x_i| * relative_eps, absolute_eps).
+pub struct MetricTensorComputer {
+    /// Relative step size for finite differences.
+    pub relative_eps: f64,   // default: 1e-4
+    /// Absolute step size floor (prevents division by near-zero).
+    pub absolute_eps: f64,   // default: 1e-8
+    /// The execution cost function C(x) for a given pool configuration.
+    pub cost_fn: Box<dyn Fn(&[f64], &[PoolState]) -> f64 + Send + Sync>,
+}
+
+impl MetricTensorComputer {
+    /// Compute g_ij at a point using central finite differences.
+    pub fn compute(&self, point: &ManifoldPoint, pools: &[PoolState]) -> MetricTensor {
+        let dim = point.coordinates.len();
+        let mut g = vec![vec![0.0; dim]; dim];
+        let x = &point.coordinates;
+
+        for i in 0..dim {
+            let eps_i = (x[i].abs() * self.relative_eps).max(self.absolute_eps);
+            for j in i..dim {
+                let eps_j = (x[j].abs() * self.relative_eps).max(self.absolute_eps);
+
+                let mut x_pp = x.clone(); x_pp[i] += eps_i; x_pp[j] += eps_j;
+                let mut x_pm = x.clone(); x_pm[i] += eps_i; x_pm[j] -= eps_j;
+                let mut x_mp = x.clone(); x_mp[i] -= eps_i; x_mp[j] += eps_j;
+                let mut x_mm = x.clone(); x_mm[i] -= eps_i; x_mm[j] -= eps_j;
+
+                let c_pp = (self.cost_fn)(&x_pp, pools);
+                let c_pm = (self.cost_fn)(&x_pm, pools);
+                let c_mp = (self.cost_fn)(&x_mp, pools);
+                let c_mm = (self.cost_fn)(&x_mm, pools);
+
+                g[i][j] = (c_pp - c_pm - c_mp + c_mm) / (4.0 * eps_i * eps_j);
+                g[j][i] = g[i][j]; // symmetric
+            }
+        }
+
+        MetricTensor { components: g, dim }
+    }
+}
+```
+
+**Configuration parameters**:
+
+| Parameter | Default | Range | Notes |
+|---|---|---|---|
+| `relative_eps` | 1e-4 | 1e-6 - 1e-2 | Smaller = more accurate but noisier. 1e-4 balances accuracy and numerical noise for f64. |
+| `absolute_eps` | 1e-8 | 1e-12 - 1e-4 | Floor for coordinates near zero. |
+
+### Christoffel symbol finite difference parameters
+
+The Christoffel symbols require first derivatives of the metric tensor. These are also computed via central finite differences:
+
+```rust
+/// Compute ∂_l g_{ij} via central finite differences on the metric.
+///
+///   ∂_l g_{ij} ≈ [g_{ij}(x + ε_l) - g_{ij}(x - ε_l)] / (2ε_l)
+///
+/// This requires 2*dim metric tensor evaluations (each itself O(dim²) cost evaluations).
+/// Total cost: O(dim³) cost function evaluations per Christoffel computation.
+pub fn metric_derivatives(
+    computer: &MetricTensorComputer,
+    point: &ManifoldPoint,
+    pools: &[PoolState],
+) -> Vec<MetricTensor> {
+    let dim = point.coordinates.len();
+    let mut derivs = Vec::with_capacity(dim);
+
+    for l in 0..dim {
+        let eps_l = (point.coordinates[l].abs() * computer.relative_eps)
+            .max(computer.absolute_eps);
+
+        let mut x_plus = point.clone();
+        x_plus.coordinates[l] += eps_l;
+        let g_plus = computer.compute(&x_plus, pools);
+
+        let mut x_minus = point.clone();
+        x_minus.coordinates[l] -= eps_l;
+        let g_minus = computer.compute(&x_minus, pools);
+
+        let mut dg = vec![vec![0.0; dim]; dim];
+        for i in 0..dim {
+            for j in 0..dim {
+                dg[i][j] = (g_plus.components[i][j] - g_minus.components[i][j])
+                    / (2.0 * eps_l);
+            }
+        }
+
+        derivs.push(MetricTensor { components: dg, dim });
+    }
+
+    derivs
+}
+```
+
+The step size for Christoffel computation should match the metric tensor step size. Using a different scale introduces inconsistency between the metric and its derivatives.
+
+### Geodesic solver: dynamic step count and error tolerance
+
+The geodesic solver uses adaptive 4th-order Runge-Kutta (RK4) with dynamic step count:
+
+```rust
+/// Adaptive geodesic solver with error-controlled step sizing.
+///
+/// Starts with `n_steps` uniform steps. After initial solve,
+/// estimates local truncation error by comparing RK4 with RK2.
+/// Doubles step count in regions where error exceeds tolerance.
+pub struct GeodesicSolverConfig {
+    /// Initial step count.
+    pub initial_n_steps: usize,     // default: 100
+    /// Maximum step count (prevents runaway refinement).
+    pub max_n_steps: usize,         // default: 10_000
+    /// Local truncation error tolerance per step.
+    pub error_tolerance: f64,       // default: 1e-6
+    /// Maximum geodesic parameter length (prevents infinite geodesics).
+    pub max_parameter: f64,         // default: 10.0
+    /// Singular point detection threshold (eigenvalue ratio).
+    pub singularity_threshold: f64, // default: 1e-10
+}
+
+impl GeodesicSolverConfig {
+    /// Detect singular points where the metric degenerates.
+    ///
+    /// A point is singular if the metric tensor's condition number
+    /// exceeds 1/singularity_threshold, or if any eigenvalue is
+    /// negative (the metric is no longer positive-definite).
+    pub fn is_singular(&self, metric: &MetricTensor) -> bool {
+        let spectral = metric.spectral_decomposition();
+        let min_eigenvalue = spectral.eigenvalues.first().copied().unwrap_or(0.0);
+        min_eigenvalue < self.singularity_threshold
+            || spectral.condition_number > 1.0 / self.singularity_threshold
+    }
+}
+```
+
+**Singular point handling**: When the solver encounters a singular point (degenerate metric), it:
+
+1. Halves the step size and retries.
+2. If still singular after 3 retries, records a `GeodesicIncomplete` result with the last valid point.
+3. Logs the singular location for manifold diagnostics.
+
+### Exponential and logarithmic map parameters
+
+```rust
+/// Exponential map configuration.
+pub struct ExpMapConfig {
+    /// Number of geodesic integration steps.
+    pub n_steps: usize,       // default: 100
+    /// Error tolerance for integration.
+    pub tolerance: f64,        // default: 1e-6
+}
+
+/// Logarithmic map configuration (shooting method).
+///
+/// The shooting method solves: find v such that exp_p(v) = q.
+/// It iterates by adjusting v based on the error exp_p(v) - q.
+pub struct LogMapConfig {
+    /// Maximum Newton iterations for the shooting method.
+    pub max_iterations: usize,     // default: 20
+    /// Convergence tolerance: ||exp_p(v) - q|| < tolerance.
+    pub convergence_tolerance: f64, // default: 1e-6
+    /// Line search parameters (backtracking Armijo).
+    pub armijo_c: f64,              // default: 1e-4
+    pub armijo_tau: f64,            // default: 0.5
+    /// Initial step size for Newton line search.
+    pub initial_step: f64,          // default: 1.0
+    /// Minimum step size before declaring failure.
+    pub min_step: f64,              // default: 1e-10
+}
+```
+
+The Newton line search in the logarithmic map uses backtracking Armijo conditions: accept a step if `f(x + alpha*d) <= f(x) + c*alpha*grad_f . d`, where `c = 1e-4` (sufficient decrease) and `alpha` is halved each backtrack attempt (`tau = 0.5`). Maximum backtracks: `ceil(log2(initial_step / min_step))`.
+
+### Ricci scalar thresholds for market fragility
+
+| Ricci scalar range | Interpretation | Agent response |
+|---|---|---|
+| R > 1.0 | Strongly self-correcting. Trades have predictable costs. | Execute normally. |
+| 0.0 < R <= 1.0 | Mildly stable. Some cost variation. | Execute with wider slippage tolerance. |
+| -0.5 <= R <= 0.0 | Neutral to mildly fragile. | Reduce position sizes by 50%. |
+| -2.0 <= R < -0.5 | Fragile. Small trades amplify. | Reduce position sizes by 80%. Alert Daimon (raise Arousal). |
+| R < -2.0 | Critically fragile. Market structure unstable. | Suppress all execution. Escalate to T2. |
+
+These thresholds are configurable per protocol. Concentrated liquidity AMMs (Uniswap V3) tend toward higher curvature magnitude than constant-product AMMs (Uniswap V2), so adjust accordingly.
+
+### Failure modes
+
+1. **Degenerate manifold**: The metric tensor has zero or negative eigenvalues. Cause: a liquidity pool is empty or nearly so. Mitigation: skip the degenerate dimension (project out the null eigenspace) or mark the pool as unavailable.
+
+2. **Disconnected components**: The manifold splits into disconnected regions (e.g., two isolated liquidity pools with no bridge). Geodesics between disconnected components do not exist. The solver returns `GeodesicIncomplete` with the reason `DisconnectedComponents`.
+
+3. **Numerical instability in Christoffel symbols**: When the metric changes rapidly (high curvature), finite differences amplify truncation error. Mitigation: reduce `eps` by 10x in high-curvature regions (detected when eigenvalue ratio > 100).
+
+4. **Ill-conditioned metric inverse**: Required for Christoffel computation. When condition number > 1e8, use pseudoinverse (SVD with eigenvalue floor at 1e-10).
+
+5. **Geodesic divergence**: RK4 integration can diverge near singular points. The adaptive solver detects divergence when `||velocity|| > 1e6` and terminates early.
+
+### Integration wiring
+
+The spectral liquidity manifold integrates into the chain oracle prediction pipeline:
+
+```
+ChainOracle::predict()
+  -> query on-chain pool states (via alloy provider)
+  -> construct ManifoldPoint from portfolio state
+  -> MetricTensorComputer::compute() at current point
+  -> SpectralDecomposition for eigenvalue analysis
+  -> ricci_scalar() for fragility assessment
+  -> if R > threshold: compute_geodesic() for optimal execution path
+  -> if R < threshold: suppress execution, raise Daimon arousal
+  -> encode manifold features as HDC vector (via DeFiCodebook)
+  -> emit as Engram to the witness pipeline
+```
+
+### Test criteria
+
+- **Metric symmetry**: `g[i][j] == g[j][i]` for all i, j (within f64 epsilon).
+- **Metric positive-definiteness**: All eigenvalues of a well-formed metric are positive.
+- **Geodesic consistency**: `exp_p(log_p(q)) == q` within convergence tolerance.
+- **Christoffel symmetry**: `Gamma[k][i][j] == Gamma[k][j][i]` (lower indices are symmetric).
+- **Ricci scalar sign**: For a known constant-product AMM with deep liquidity, R > 0. For a pool at 99% depletion, R < 0.
+- **Adaptive step refinement**: Halving error tolerance halves the integration error (4th-order convergence).
+- **Singular point detection**: A pool with zero liquidity triggers `is_singular() == true`.
 
 ---
 

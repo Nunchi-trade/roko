@@ -2,6 +2,9 @@
 
 > Knowledge reliability is tracked through four validation tiers — Transient, Working, Consolidated, Persistent — each with a multiplicative effect on the base half-life of the knowledge type.
 
+
+> **Implementation**: Built
+
 **Topic**: [Neuro — Cognitive Knowledge Layer](./INDEX.md)
 **Prerequisites**: [01-six-knowledge-types.md](./01-six-knowledge-types.md) for knowledge type definitions
 **Key sources**:

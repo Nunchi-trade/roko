@@ -6,6 +6,9 @@
 > specifies the ISFR protocol, the clearing engine, the ClearingCertificate with KKT
 > optimality proof, the fallback ladder, escrow lifecycle, and settlement mechanics.
 
+
+> **Implementation**: Deferred
+
 ---
 
 ## 1. ISFR — Intersubjective Fact Registry

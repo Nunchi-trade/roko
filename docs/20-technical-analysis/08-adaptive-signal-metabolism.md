@@ -2,6 +2,9 @@
 
 > Signals are living organisms. They compete for attention, reproduce when useful, die when obsolete, and evolve through mutation and selection. The TA subsystem is an ecological system governed by Hebbian learning and replicator dynamics.
 
+
+> **Implementation**: Specified
+
 **Topic**: [Technical Analysis](./INDEX.md)
 **Prerequisites**: [06-hyperdimensional-ta](./06-hyperdimensional-ta.md) for HDC encoding, [05-witness-as-ta-generalized](./05-witness-as-ta-generalized.md) for the witness pipeline
 **Key sources**: `bardo-backup/prd/23-ta/03-adaptive-signal-metabolism.md`
@@ -411,6 +414,223 @@ pub struct ResearchSignalContext {
     pub granularity: Duration,
 }
 ```
+
+---
+
+## Implementation details
+
+### Replicator dynamics: dt semantics and numerical stability
+
+The `dt` parameter in `replicator_update()` represents the elapsed time in arbitrary units since the last update. In practice:
+
+- At **Theta frequency** (~75s): `dt = 1.0` (one Theta tick = one evolutionary time unit).
+- At **Delta frequency** (hours): `dt` accumulates missed Theta ticks if replicator was not called at Theta, but this is not recommended. Run replicator at every Theta tick.
+
+**Numerical stability**: The replicator equation `dw_i/dt = w_i * (f_i - f_bar)` is solved via forward Euler. This is adequate when `dt * max(|f_i - f_bar|) < 1.0`. If this condition fails, weights can go negative.
+
+```rust
+/// Safe replicator update with stability check.
+///
+/// Forward Euler is stable when dt * max_fitness_deviation < 1.0.
+/// If this condition fails, subdivide the step.
+pub fn replicator_update_safe(registry: &mut SignalRegistry, dt: f64) {
+    let signals: Vec<(SignalId, f64, f64)> = registry.iter()
+        .map(|s| (s.id, s.weight, s.fitness()))
+        .collect();
+
+    let total_weight: f64 = signals.iter().map(|(_, w, _)| w).sum();
+    let avg_fitness: f64 = signals.iter()
+        .map(|(_, w, f)| w * f / total_weight)
+        .sum();
+
+    let max_deviation = signals.iter()
+        .map(|(_, _, f)| (f - avg_fitness).abs())
+        .fold(0.0f64, f64::max);
+
+    // Subdivide if Euler would be unstable
+    let n_substeps = ((dt * max_deviation).ceil() as usize).max(1);
+    let sub_dt = dt / n_substeps as f64;
+
+    for _ in 0..n_substeps {
+        for (id, weight, fitness) in &signals {
+            let delta = weight * (fitness - avg_fitness) * sub_dt;
+            if let Some(signal) = registry.get_mut(id) {
+                signal.weight = (signal.weight + delta).max(0.001);
+            }
+        }
+    }
+
+    registry.normalize_weights();
+}
+```
+
+RK4 is an alternative but provides negligible benefit here because the replicator dynamics are evaluated at coarse (Theta) intervals and the forward Euler error is dominated by the discretization of the fitness landscape, not the integrator.
+
+### Speciation: adaptive mutation rate
+
+The mutation rate adapts based on Red Queen pressure and Fisher's variance:
+
+```rust
+/// Compute adaptive mutation rate.
+///
+/// When Fisher's variance is low (ensemble converged), increase mutation
+/// to inject diversity. When variance is high (actively evolving),
+/// reduce mutation to let selection operate.
+///
+/// The formula incorporates Red Queen pressure: in adversarial domains
+/// (chain), mutation rate has a higher floor.
+///
+///   mutation_rate = base_rate * (1.0 + rq_pressure) / (1.0 + fisher_v / fisher_scale)
+///
+/// where:
+///   base_rate:    0.05 (default)
+///   rq_pressure:  0.0 (coding) to 1.0 (chain, adversarial)
+///   fisher_v:     current Fisher's variance
+///   fisher_scale: 0.1 (normalizing constant)
+pub fn adaptive_mutation_rate(
+    base_rate: f64,
+    red_queen_pressure: f64,
+    fisher_variance: f64,
+) -> f64 {
+    let fisher_scale = 0.1;
+    let rate = base_rate * (1.0 + red_queen_pressure) / (1.0 + fisher_variance / fisher_scale);
+    rate.clamp(0.01, 0.3) // never below 1% or above 30%
+}
+```
+
+### HdcVector::random_with_density() distribution
+
+`random_with_density(density, rng)` generates a 10,240-bit vector where each bit is independently set to 1 with probability `density`:
+
+- `density = 0.5`: standard dense random vector (used for codebook generation).
+- `density = 0.05`: sparse noise vector (used for mutation). On average, 512 bits are flipped.
+- `density = 0.001`: very sparse noise (used for fine-tuning). On average, ~10 bits are flipped.
+
+The distribution is Bernoulli per bit. Implementation uses `rng.gen::<f64>() < density` per bit (slow) or batch generation via geometric distribution of inter-bit gaps (fast, O(density * dim) expected operations).
+
+### Fitness computation
+
+`s.fitness()` returns a composite score combining prediction accuracy and information value:
+
+```rust
+impl AdaptiveSignal {
+    /// Compute fitness for replicator dynamics.
+    ///
+    /// fitness = accuracy_ema * (1.0 + information_ratio)
+    ///
+    /// accuracy_ema:      exponential moving average of |prediction - outcome|,
+    ///                    inverted so higher accuracy = higher fitness.
+    ///                    Specifically: 1.0 - accuracy.value() where accuracy
+    ///                    tracks mean absolute error.
+    ///
+    /// information_ratio: how much unique information this signal provides
+    ///                    beyond what other signals already cover.
+    ///                    Computed as 1.0 - max_correlation_with_other_signals.
+    ///                    Range: [0.0, 1.0]. Higher = more unique.
+    pub fn fitness(&self) -> f64 {
+        let accuracy_score = 1.0 - self.accuracy.value().min(1.0);
+        let info_ratio = self.information_ratio.unwrap_or(0.5);
+        accuracy_score * (1.0 + info_ratio)
+    }
+}
+```
+
+**Range**: `[0.0, 2.0]`. A signal with perfect accuracy and completely unique information scores 2.0. A signal with zero accuracy scores 0.0 regardless of uniqueness.
+
+### Heartbeat integration state machine
+
+Signal metabolism integrates with the heartbeat via a three-state machine:
+
+```
+State: GAMMA (read-only)
+  Entry: heartbeat tick at Gamma frequency (~5-15s)
+  Action: evaluate all signals, collect predictions. No weight updates.
+  Transition: on Theta tick -> THETA
+
+State: THETA (learning)
+  Entry: heartbeat tick at Theta frequency (~75s)
+  Action:
+    1. Resolve predictions from last Theta cycle.
+    2. Hebbian update of signal confidence.
+    3. Replicator dynamics update of signal weights.
+    4. Update Fisher's variance.
+  Transition: on Delta tick -> DELTA
+               on Gamma tick -> GAMMA
+
+State: DELTA (evolution)
+  Entry: heartbeat tick at Delta frequency (hours)
+  Action:
+    1. Run full replicator update with accumulated dt.
+    2. Speciate: mutate top-k signals (k = 5, mutation_rate from adaptive formula).
+    3. Extinction: remove signals with weight < extinction_threshold (default: 0.001).
+    4. Red Queen pressure: decay all weights by decay_rate (default: 0.001).
+    5. Enforce population cap (default: 500).
+    6. Analyze fitness landscape for stagnation.
+    7. If Fisher's variance < 0.001: inject 10 random signals to restore diversity.
+  Transition: on Gamma tick -> GAMMA
+```
+
+### Oja's rule learning rate calibration
+
+The learning rate `eta` for Oja's rule should be calibrated per domain:
+
+| Domain | Recommended eta | Rationale |
+|---|---|---|
+| Chain (DeFi) | 0.01 | High noise, slow learning prevents overfit to flash events. |
+| Coding | 0.05 | Lower noise, faster adaptation to codebase changes. |
+| Research | 0.02 | Moderate noise, medium adaptation speed. |
+
+The learning rate can be made adaptive: `eta = base_eta / (1.0 + 0.01 * evaluation_count)`. This annealing schedule reduces learning rate as the signal accumulates more observations, following the Robbins-Monro conditions for stochastic approximation convergence.
+
+### normalize_weights() semantics
+
+`normalize_weights()` rescales all signal weights so they sum to 1.0:
+
+```rust
+impl SignalRegistry {
+    /// Normalize weights so they sum to 1.0.
+    ///
+    /// Preserves relative proportions. Does NOT preserve absolute magnitudes.
+    /// After normalization, each weight represents the signal's share of the
+    /// total attention budget.
+    ///
+    /// If total weight is zero (all signals extinct), distributes weight
+    /// uniformly: each signal gets 1.0 / n.
+    pub fn normalize_weights(&mut self) {
+        let total: f64 = self.signals.values().map(|s| s.weight).sum();
+        if total < 1e-12 {
+            // All weights near zero: reset to uniform
+            let uniform = 1.0 / self.signals.len() as f64;
+            for s in self.signals.values_mut() {
+                s.weight = uniform;
+            }
+        } else {
+            for s in self.signals.values_mut() {
+                s.weight /= total;
+            }
+        }
+    }
+}
+```
+
+The sum-to-1.0 convention means weights are interpretable as probability distributions over signals. This is consistent with the replicator dynamics formulation where weights are population shares.
+
+### Error handling
+
+- **Division by zero in replicator**: If `total_weight == 0`, skip the replicator step and log a warning. This can only happen if all signals were externally removed.
+- **NaN in Hebbian update**: If prediction or outcome is NaN, skip the update for that signal.
+- **Population collapse**: If signal count drops below `min_population` (default: 10) after extinction, inject `min_population - current` random signals.
+- **Infinite fitness**: Clamp fitness to `[0.0, 10.0]` to prevent a single signal from dominating.
+
+### Test criteria
+
+- **Replicator conservation**: After `replicator_update()`, total weight is unchanged (before normalization).
+- **Replicator stability**: With `dt = 1.0` and fitness deviations < 1.0, no weight goes negative.
+- **Hebbian convergence**: A signal that always predicts correctly converges to confidence ~1.0 within 100 updates.
+- **Speciation diversity**: After speciation, `hamming_similarity(parent, child)` is between 0.9 and 0.99 for mutation_rate = 0.05.
+- **Extinction threshold**: After `evolve_step()`, no signal has weight < `extinction_threshold` (they are removed).
+- **Fisher's variance monotonicity**: When all signals have identical fitness, Fisher's variance is 0.0.
+- **Normalize idempotence**: Calling `normalize_weights()` twice produces the same result.
 
 ---
 

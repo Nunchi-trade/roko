@@ -5,6 +5,9 @@
 > **Implementation plan:** `modelrouting/09-cost-normalization.md` (tasks 2H.01–2H.10)
 > **Cross-references:** [04-cascade-router](04-cascade-router.md), [06-task-metrics-and-baselines](06-task-metrics-and-baselines.md), [09-provider-health-circuit-breaker](09-provider-health-circuit-breaker.md)
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Purpose

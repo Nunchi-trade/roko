@@ -5,6 +5,9 @@
 > key implementations, and role in the cognitive loop. The Substrate trait is covered
 > separately in [07-substrate-trait.md](07-substrate-trait.md).
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## 1. Scorer — Rate Engrams

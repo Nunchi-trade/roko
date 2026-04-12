@@ -2,6 +2,9 @@
 
 > ChainWitness is the agent's eyes on the chain. One Tokio task per configured chain maintains a WebSocket connection, ingests block headers, pre-screens with a Binary Fuse filter (8.7 bits/entry, <1% FPR), and feeds relevant blocks to the triage pipeline. Over 90% of blocks are skipped in O(1) time with zero false negatives.
 
+
+> **Implementation**: Built
+
 **Topic**: [08-chain](./INDEX.md)
 **Prerequisites**: [01-korai-chain-spec.md](./01-korai-chain-spec.md)
 **Key sources**: `bardo-backup/prd/14-chain/01-witness.md`, `bardo-backup/prd/14-chain/00-architecture.md`, `roko/tmp/implementation-plans/12b-chain-layer.md` §H

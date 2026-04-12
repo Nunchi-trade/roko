@@ -8,6 +8,9 @@
 >
 > **Prerequisites**: [03-rem-imagination.md](03-rem-imagination.md)
 
+
+> **Implementation**: Scaffold
+
 ---
 
 ## What HDC Counterfactual Synthesis Is
@@ -231,6 +234,317 @@ D ≥ 8 × ln(100,000) / 0.01 = 8 × 11.51 / 0.01 = 9,210
 | Johnson & Lindenstrauss (1984), "Extensions of Lipschitz mappings into a Hilbert space" | Dimensionality requirements for distance preservation |
 | Frady et al. (2021), "Resonator networks for factorization and advanced retrieval" | Advanced HDC retrieval techniques |
 | Lewis et al. (2020), NeurIPS, arXiv:2005.11401, "Retrieval-Augmented Generation" | RAG for knowledge-intensive NLP — HDC index is a decentralized RAG |
+
+---
+
+## Implementation details
+
+### HdcVector permutation
+
+Permutation performs a cyclic left-shift on the 10,240-bit vector. A shift of `n` moves every bit `n` positions to the left, with overflow wrapping to the right end.
+
+```rust
+impl HdcVector {
+    /// Cyclic left-shift permutation.
+    ///
+    /// Shift direction: LEFT (toward MSB). Bits shifted past the MSB
+    /// wrap around to the LSB. This matches the convention in Kanerva (2009)
+    /// where permutation encodes sequence position.
+    ///
+    /// The inverse of `permute(n)` is `permute(DIMENSION - n)`.
+    pub fn permute(&self, shift: usize) -> Self {
+        let effective_shift = shift % Self::DIMENSION; // 10,240
+        if effective_shift == 0 {
+            return self.clone();
+        }
+
+        let mut result = Self::zeros();
+
+        // For each u64 word in the internal representation:
+        // shift bits left by effective_shift, OR in the wrapped bits.
+        // Implementation operates on the underlying [u64; 160] array.
+        let word_shift = effective_shift / 64;
+        let bit_shift = effective_shift % 64;
+
+        for i in 0..Self::N_WORDS {
+            let src_word = (i + Self::N_WORDS - word_shift) % Self::N_WORDS;
+            if bit_shift == 0 {
+                result.words[i] = self.words[src_word];
+            } else {
+                let prev_word = (src_word + Self::N_WORDS - 1) % Self::N_WORDS;
+                result.words[i] = (self.words[src_word] << bit_shift)
+                    | (self.words[prev_word] >> (64 - bit_shift));
+            }
+        }
+
+        result
+    }
+
+    /// Inverse permutation: undo a previous `permute(shift)`.
+    pub fn unpermute(&self, shift: usize) -> Self {
+        self.permute(Self::DIMENSION - (shift % Self::DIMENSION))
+    }
+}
+```
+
+Key properties:
+- `permute(0)` returns the original vector (identity).
+- `permute(n).unpermute(n)` returns the original vector (inverse).
+- `permute(n)` produces a vector nearly orthogonal to the original for `n >= 1`. Similarity between a vector and its permuted version is approximately 0.50 (random baseline) for any non-zero shift.
+- Permutation is O(N/64) where N is the vector dimension. For 10,240 bits this is 160 word operations — approximately 100 ns.
+
+Wraparound semantics: bits shifted past position 0 (leftmost) reappear at position 10,239 (rightmost). This is a closed group operation — no information is lost, and the operation is perfectly invertible.
+
+### Weighted bundling
+
+The `counterfactual_blend` function uses replication-based weighting. For binary vectors, there is no concept of "multiply by 0.7" — a bit is either 0 or 1. The replication method approximates continuous weights through vote counting:
+
+```rust
+fn counterfactual_blend(
+    entry_a: &HdcVector,
+    entry_b: &HdcVector,
+    blend_ratio: f32,  // 0.0 = pure A, 1.0 = pure B
+) -> HdcVector {
+    // Scale to integer copies. Higher resolution = better precision.
+    let total_copies = 10; // configurable, range: 4 - 100
+    let b_copies = (blend_ratio * total_copies as f32).round() as usize;
+    let a_copies = total_copies - b_copies;
+
+    let mut refs: Vec<&HdcVector> = Vec::with_capacity(total_copies);
+    for _ in 0..a_copies { refs.push(entry_a); }
+    for _ in 0..b_copies { refs.push(entry_b); }
+
+    HdcVector::bundle(&refs)
+}
+```
+
+Precision analysis for binary vectors with float `blend_ratio`:
+
+| `total_copies` | Effective resolution | Max blend error | Bundle time (2 vectors) |
+|-----------------|---------------------|-----------------|-------------------------|
+| 4 | 0.25 steps | 12.5% | ~0.5 us |
+| 10 | 0.10 steps | 5.0% | ~1.0 us |
+| 20 | 0.05 steps | 2.5% | ~2.0 us |
+| 100 | 0.01 steps | 0.5% | ~10.0 us |
+
+The default of 10 copies gives 10% resolution — sufficient for dream exploration where the sweep is coarse. For fine-grained knowledge space mapping (during EVOLUTION), increase to 20-100.
+
+The fundamental precision loss: `bundle` uses majority vote. With an even total and a 50/50 split, ties are broken by a deterministic rule (bit position parity). This introduces a slight bias toward one input, but the bias is uniformly distributed across bit positions and averages out across multiple blend operations.
+
+### Anti-correlated retrieval
+
+`HdcVector::ones()` returns a vector with all 10,240 bits set to 1:
+
+```rust
+impl HdcVector {
+    /// All-ones vector (1,280 bytes of 0xFF).
+    ///
+    /// XOR with ones inverts every bit, producing the "opposite" vector.
+    /// For any vector V: V.bind(ones()) has similarity ~0.0 to V
+    /// (each bit is flipped, so Hamming distance is maximal).
+    pub fn ones() -> Self {
+        let mut v = Self::zeros();
+        for word in v.words.iter_mut() {
+            *word = u64::MAX;
+        }
+        v
+    }
+}
+```
+
+Cost analysis:
+
+| Operation | Cost | Notes |
+|-----------|------|-------|
+| `HdcVector::ones()` construction | ~20 ns | Fills 160 u64 words with MAX |
+| `focus.bind(&ones())` (inversion) | ~150 ns | XOR all 160 words |
+| Nearest-neighbor scan (N entries) | N * 200 ns | One similarity comparison per entry |
+| **Total anti-correlated retrieval** | ~170 ns + N * 200 ns | For 1,000 entries: ~200 us |
+
+The inversion is exact, not approximate. Every bit is flipped. The resulting anti-focus vector has similarity 0.0 to the original focus vector (maximum Hamming distance = all bits differ). Entries similar to the anti-focus are, by construction, dissimilar to the original focus.
+
+For large knowledge stores (>10,000 entries), a pre-built locality-sensitive hash (LSH) index can reduce the scan from O(N) to O(log N), but the sub-millisecond performance of brute-force scan makes this unnecessary for current scale targets.
+
+### K-medoids clustering
+
+#### Automatic K selection
+
+K is selected automatically using the silhouette method when the caller does not specify a fixed K:
+
+```rust
+pub struct KMedoidsConfig {
+    /// Fixed K, or None for automatic selection.
+    pub k: Option<usize>,
+    /// Maximum K to test during automatic selection.
+    pub max_k: usize,             // default: 12, range: 2 - 20
+    /// Maximum iterations per K-medoids run.
+    pub max_iterations: usize,    // default: 50, range: 10 - 200
+    /// Convergence tolerance: stop when total cost decreases by less than this.
+    pub convergence_epsilon: f64, // default: 1e-4
+}
+
+fn auto_select_k(
+    vectors: &[HdcVector],
+    config: &KMedoidsConfig,
+) -> usize {
+    let max_k = config.max_k.min(vectors.len() - 1);
+    let mut best_k = 2;
+    let mut best_silhouette = f64::NEG_INFINITY;
+
+    for k in 2..=max_k {
+        let result = k_medoids_inner(vectors, k, config.max_iterations, config.convergence_epsilon);
+        let silhouette = mean_silhouette_score(vectors, &result);
+        if silhouette > best_silhouette {
+            best_silhouette = silhouette;
+            best_k = k;
+        }
+    }
+
+    best_k
+}
+```
+
+The silhouette score for each point measures how well-separated its cluster is:
+
+```
+silhouette(i) = (b(i) - a(i)) / max(a(i), b(i))
+
+where:
+  a(i) = mean distance from point i to all other points in the same cluster
+  b(i) = mean distance from point i to all points in the nearest other cluster
+```
+
+Silhouette ranges from -1.0 (wrong cluster) to +1.0 (well-separated). A mean silhouette above 0.5 indicates good clustering. Below 0.25 suggests the data has no clear cluster structure.
+
+#### Initialization
+
+K-medoids uses BUILD initialization (the PAM algorithm's standard initialization), not k-means++. The difference matters because K-medoids operates on Hamming distance, not Euclidean distance, and BUILD is specifically designed for arbitrary distance metrics:
+
+```
+BUILD initialization:
+1. Select the point that minimizes total distance to all other points as first medoid
+2. For each subsequent medoid:
+   a. For each non-medoid point, compute the reduction in total cost if it were added
+   b. Select the point that produces the largest cost reduction
+```
+
+This is O(N^2 * K) which is acceptable for the episode counts involved (typically <1,000).
+
+#### Distance metric
+
+Hamming distance, computed as `1.0 - similarity`:
+
+```rust
+fn hamming_distance(a: &HdcVector, b: &HdcVector) -> f64 {
+    1.0 - a.similarity(b) as f64
+}
+```
+
+This gives a distance in [0.0, 1.0] where 0.0 = identical and 0.5 = random. Values above 0.5 indicate anti-correlation.
+
+#### Convergence
+
+The SWAP phase iterates until one of these conditions is met:
+
+1. No swap reduces total cost (global optimum for the current K)
+2. Total cost reduction in the last iteration is below `convergence_epsilon`
+3. `max_iterations` is reached
+
+```rust
+fn k_medoids_inner(
+    vectors: &[HdcVector],
+    k: usize,
+    max_iterations: usize,
+    epsilon: f64,
+) -> KMedoidsResult {
+    let mut medoids = build_initialize(vectors, k);
+    let mut assignments = assign_to_nearest(vectors, &medoids);
+    let mut total_cost = compute_total_cost(vectors, &medoids, &assignments);
+
+    for _iter in 0..max_iterations {
+        let mut improved = false;
+
+        for m in 0..k {
+            for candidate in non_medoids(vectors.len(), &medoids) {
+                // Try swapping medoid m with candidate
+                let mut trial_medoids = medoids.clone();
+                trial_medoids[m] = candidate;
+                let trial_assignments = assign_to_nearest(vectors, &trial_medoids);
+                let trial_cost = compute_total_cost(vectors, &trial_medoids, &trial_assignments);
+
+                if trial_cost < total_cost - epsilon {
+                    medoids = trial_medoids;
+                    assignments = trial_assignments;
+                    total_cost = trial_cost;
+                    improved = true;
+                }
+            }
+        }
+
+        if !improved {
+            break; // converged
+        }
+    }
+
+    KMedoidsResult { medoids, assignments, total_cost }
+}
+```
+
+### Error handling
+
+| Error condition | Handling |
+|-----------------|----------|
+| Input vector count < K | Reduce K to `vectors.len() - 1` |
+| Single input vector | Return it as the sole cluster; skip clustering |
+| Empty input | Return empty result |
+| K-medoids does not converge within `max_iterations` | Return best result found so far; log warning with iteration count and final cost |
+| All vectors are identical | Returns K=1 clustering regardless of requested K |
+| `blend_ratio` outside [0.0, 1.0] | Clamp to valid range |
+| `ones()` called on non-standard dimension | Compile-time guarantee via const generic `DIMENSION` |
+
+### Integration wiring
+
+HDC counterfactual operations are called from multiple points in the dream cycle:
+
+```
+DreamCycle::run()
+  ├─ run_hypnagogia()
+  │    └─ thalamic_gate_retrieval()        // anti-correlated retrieval
+  │         └─ HdcVector::bind(&ones())    // vector inversion
+  │         └─ NeuroStore::nearest_neighbors()
+  │
+  ├─ run_nrem()
+  │    ├─ encode_episodes()                // episode -> HdcVector
+  │    ├─ compute_recent_centroid()        // bundling
+  │    ├─ k_medoids()                      // compressed batch replay
+  │    └─ CrossEpisodeConsolidator::discover()
+  │         └─ k_medoids()                 // pattern clustering
+  │
+  ├─ run_rem()
+  │    ├─ combinational_creativity()
+  │    │    └─ HdcVector::similarity()     // dissimilarity check for pair selection
+  │    ├─ counterfactual_blend()           // weighted bundling for space exploration
+  │    │    └─ HdcVector::bundle()
+  │    └─ explore_neighborhood()           // permutation-based exploration
+  │         └─ HdcVector::permute()
+  │
+  └─ run_evolution()                       // periodic knowledge recombination
+       └─ k_medoids()                      // knowledge domain mapping
+       └─ HdcVector::permute()             // knowledge recombination
+```
+
+### Test criteria
+
+1. **Permutation invertibility**: for any vector V and shift N, `V.permute(N).unpermute(N) == V`.
+2. **Permutation orthogonality**: `V.similarity(V.permute(1))` is within [0.48, 0.52] for random V.
+3. **Ones inversion**: `V.bind(HdcVector::ones()).similarity(V)` is within [0.0, 0.02] for random V.
+4. **Anti-correlated retrieval**: given a knowledge store with one entry matching the focus and one opposite, anti-correlated retrieval returns the opposite entry.
+5. **Blend continuity**: `counterfactual_blend(A, B, 0.0).similarity(A) > 0.95` and `counterfactual_blend(A, B, 1.0).similarity(B) > 0.95`.
+6. **Blend interpolation**: for `ratio` in {0.2, 0.4, 0.6, 0.8}, the blended vector's similarity to A decreases monotonically as ratio increases.
+7. **K-medoids with planted clusters**: 4 groups of 25 vectors each (generated from 4 distinct seeds with small perturbations) produces K=4 with silhouette > 0.6.
+8. **K-medoids convergence**: algorithm terminates in fewer than `max_iterations` for well-separated clusters.
+9. **Auto K selection**: given data with 3 clear clusters, `auto_select_k` returns K=3.
+10. **Edge cases**: single vector returns single cluster. Empty input returns empty result. K > N reduces K.
 
 ---
 

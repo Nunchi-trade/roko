@@ -5,6 +5,9 @@
 > distorting incentives. This document specifies the auction formula, the truthfulness
 > proof, the reputation adjustment, worked examples, and the three hiring models available.
 
+
+> **Implementation**: Deferred
+
 ---
 
 ## 1. The Vickrey Auction

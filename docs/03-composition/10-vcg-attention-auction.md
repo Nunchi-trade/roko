@@ -4,6 +4,9 @@
 > Status: **Design** — Specified in PRD, not yet implemented
 > Canonical sources: `refactoring-prd/09-innovations.md` §II, §XIX.E
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Abstract

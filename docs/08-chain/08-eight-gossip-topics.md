@@ -2,6 +2,9 @@
 
 > The 4-tier gossip network carries eight distinct topics: knowledge, reputation, job, heartbeat, anomaly, simulation, governance, and peer-discovery. Each topic has defined message schemas, TTL policies, and subscription rules.
 
+
+> **Implementation**: Built
+
 **Topic**: [08-chain](./INDEX.md)
 **Prerequisites**: [07-4-tier-gossip-architecture.md](./07-4-tier-gossip-architecture.md)
 **Key sources**: `roko/tmp/implementation-plans/12b-chain-layer.md` §B, `bardo-backup/tmp/agent-chain-new/02-coordination-theory.md`

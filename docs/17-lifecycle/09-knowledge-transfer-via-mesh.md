@@ -6,6 +6,9 @@
 >
 > **Synapse traits**: Substrate (shared knowledge store queried across agents), Policy (governs sharing thresholds and publication rules), Scorer (scores shared Engrams from other agents), Gate (validates received Engrams before adoption)
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview

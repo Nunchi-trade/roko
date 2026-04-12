@@ -2,6 +2,9 @@
 
 > SQLite-backed persistent index with FTS5, BLAKE3 content hashing, and tiered storage — scaling code intelligence from single-crate projects to enterprise monorepos.
 
+
+> **Implementation**: Built
+
 **Topic**: [Code Intelligence](./INDEX.md)
 **Prerequisites**: [02-symbol-extraction.md](./02-symbol-extraction.md), [03-dependency-graph.md](./03-dependency-graph.md)
 **Key sources**: `bardo-backup/tmp/death/tools/02-code-index.md`, `bardo-backup/tmp/death/docs/30-index-performance.md`, `bardo-backup/tmp/mori-refactor/10-code-intelligence.md`

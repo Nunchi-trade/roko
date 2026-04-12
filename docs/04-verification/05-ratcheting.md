@@ -4,6 +4,9 @@
 > **Crate**: `roko-gate` (`crates/roko-gate/src/ratchet.rs`)
 > **Status**: Implemented (207 lines)
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## 1. Overview

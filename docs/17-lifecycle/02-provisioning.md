@@ -6,6 +6,9 @@
 >
 > **Synapse traits**: Substrate (initialized during provisioning to hold Neuro store), Router (configured for model selection), Gate (configured for verification pipeline)
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview

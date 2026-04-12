@@ -5,6 +5,9 @@
 > "Know Your Agent" problem. This document specifies the full contract architecture,
 > data structures, and interaction patterns.
 
+
+> **Implementation**: Deferred
+
 ---
 
 ## 1. Design Philosophy

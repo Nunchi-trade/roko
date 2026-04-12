@@ -4,6 +4,9 @@
 > 19-deployment section, the port allocation table for all Roko services, and the Tier 3H
 > roadmap for deployment-related work items.
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Implementation Status Overview

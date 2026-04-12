@@ -2,6 +2,9 @@
 
 > Applying the PageRank algorithm to code dependency graphs to identify the most important symbols in a workspace — guiding context allocation and token budget prioritization.
 
+
+> **Implementation**: Built
+
 **Topic**: [Code Intelligence](./INDEX.md)
 **Prerequisites**: [03-dependency-graph.md](./03-dependency-graph.md)
 **Key sources**: `crates/roko-index/src/graph.rs`, `bardo-backup/tmp/mori-agents/18-code-intelligence-and-gateway.md`, `bardo-backup/tmp/mori-refactor/10-code-intelligence.md`

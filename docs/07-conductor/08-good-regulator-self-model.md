@@ -6,6 +6,9 @@
 > The Conductor is Roko's self-model. It represents the system's
 > understanding of what healthy execution looks like.
 
+
+> **Implementation**: Built
+
 ---
 
 ## The Theorem

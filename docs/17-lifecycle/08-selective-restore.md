@@ -6,6 +6,9 @@
 >
 > **Synapse traits**: Substrate (receives restored Engrams), Scorer (rescores restored Engrams with confidence decay), Gate (validates restored Engrams against current context), Policy (monitors restore process, emits ingestion events)
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview

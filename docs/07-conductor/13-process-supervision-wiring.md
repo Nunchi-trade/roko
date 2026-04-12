@@ -5,6 +5,9 @@
 > Unsupervised processes become orphans. Orphans consume resources
 > silently until they starve the system.
 
+
+> **Implementation**: Built
+
 ---
 
 ## The Problem: Unsupervised Processes

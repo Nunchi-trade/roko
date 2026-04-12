@@ -8,6 +8,17 @@
 > struct in full detail, explains each field, describes the content-addressing scheme,
 > and shows how Engrams flow through the Synapse Architecture.
 
+
+> **Implementation**: Shipping
+
+> **Code ↔ Docs Naming:** In the Rust codebase (`roko-core`), the universal data type is
+> called **`Signal`** (struct `Signal` in `crates/roko-core/src/signal.rs`). In these PRD
+> documents, the same concept is called **Engram**. The names are synonymous — "Engram"
+> emphasizes the cognitive/neuroscience framing, while "Signal" is the Rust identifier.
+> When reading code, `Signal` = Engram. When reading docs, Engram = `Signal`. The six
+> verb traits (`Substrate`, `Scorer`, `Gate`, `Router`, `Composer`, `Policy`) operate on
+> `Signal` in code and on "Engram" in documentation.
+
 ---
 
 ## 1. Why One Universal Type

@@ -6,6 +6,9 @@
 >
 > **Prerequisites**: [07-hypnagogia-engine.md](07-hypnagogia-engine.md), [08-divergence-and-alpha.md](08-divergence-and-alpha.md)
 
+
+> **Implementation**: Scaffold
+
 ---
 
 ## The Hauntological Frame

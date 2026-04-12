@@ -48,16 +48,16 @@ This topic builds on:
 
 | Topic | What it provides |
 |---|---|
-| [01-core](../01-core/INDEX.md) | Engram data model, Synapse traits |
-| [03-scaffold](../03-scaffold/INDEX.md) | Context engineering, prompt assembly |
-| [04-harness](../04-harness/INDEX.md) | Gate pipeline (displayed in TUI) |
-| [05-orchestration](../05-orchestration/INDEX.md) | Plan DAG (displayed in TUI, Portal) |
-| [06-learning](../06-learning/INDEX.md) | CascadeRouter, episodes, predictions |
-| [07-cfactor](../07-cfactor/INDEX.md) | C-Factor metrics (displayed in all interfaces) |
-| [08-mesh](../08-mesh/INDEX.md) | Agent Mesh, pheromones, stigmergy |
+| [01-core](../00-architecture/INDEX.md) | Engram data model, Synapse traits |
+| [03-scaffold](../01-orchestration/INDEX.md) | Context engineering, prompt assembly |
+| [04-harness](../04-verification/INDEX.md) | Gate pipeline (displayed in TUI) |
+| [05-orchestration](../01-orchestration/INDEX.md) | Plan DAG (displayed in TUI, Portal) |
+| [06-learning](../05-learning/INDEX.md) | CascadeRouter, episodes, predictions |
+| [07-cfactor](../14-identity-economy/INDEX.md) | C-Factor metrics (displayed in all interfaces) |
+| [08-mesh](../13-coordination/INDEX.md) | Agent Mesh, pheromones, stigmergy |
 | [09-daimon](../09-daimon/INDEX.md) | PAD vector, behavioral states |
 | [10-dreams](../10-dreams/INDEX.md) | Dreams consolidation (reflected in Spectre Resting state) |
-| [11-neuro](../11-neuro/INDEX.md) | Knowledge store, tier progression |
+| [11-neuro](../06-neuro/INDEX.md) | Knowledge store, tier progression |
 
 ---
 

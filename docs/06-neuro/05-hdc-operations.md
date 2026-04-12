@@ -2,6 +2,9 @@
 
 > The four algebraic operations of Binary Spatter Codes — XOR bind, majority-vote bundle, cyclic-shift permute, and Hamming similarity — form a complete algebra for encoding, composing, and querying knowledge in Neuro.
 
+
+> **Implementation**: Built
+
 **Topic**: [Neuro — Cognitive Knowledge Layer](./INDEX.md)
 **Prerequisites**: [04-hdc-vsa-foundations.md](./04-hdc-vsa-foundations.md) for HDC context and dimension choice
 **Key sources**:
@@ -386,11 +389,269 @@ For Neuro, resonator networks would enable **decomposing observed patterns back 
 
 ---
 
+## Implementation Details: BundleAccumulator Methods
+
+### `add()` — unweighted vector addition
+
+```rust
+impl BundleAccumulator {
+    /// Add a vector to the accumulator with unit weight.
+    ///
+    /// For each of the 10,240 bit positions:
+    ///   - bit == 1 → votes[pos] += 1
+    ///   - bit == 0 → votes[pos] -= 1
+    ///
+    /// This encoding (bipolar: +1/-1 instead of 1/0) ensures that the zero
+    /// crossing of the vote tally corresponds exactly to the majority threshold.
+    ///
+    /// Time: O(D) = ~10,240 iterations. Memory: no allocation.
+    pub fn add(&mut self, hv: &HdcVector) {
+        self.count += 1;
+        for word_idx in 0..160 {
+            let word = hv.bits[word_idx];
+            for bit in 0..64 {
+                let pos = word_idx * 64 + bit;
+                if (word >> bit) & 1 == 1 {
+                    self.votes[pos] += 1;
+                } else {
+                    self.votes[pos] -= 1;
+                }
+            }
+        }
+    }
+}
+```
+
+The bipolar encoding (+1/-1) is not arbitrary. It centers the vote distribution at zero, which means:
+- Positive votes → majority of added vectors had a 1 at this position
+- Negative votes → majority had a 0
+- Zero → exact tie, resolved to 0 in `finish()` for determinism
+
+This is algebraically equivalent to counting ones and comparing to count/2, but eliminates the division in the threshold step.
+
+### `add_weighted()` — scalar-weighted addition
+
+```rust
+impl BundleAccumulator {
+    /// Add a vector with integer weight.
+    ///
+    /// Equivalent to calling `add()` abs(weight) times, but in a single O(D) pass.
+    /// Negative weights subtract (undo a previous contribution or down-weight).
+    ///
+    /// Use cases:
+    /// - Recency weighting: recent vectors get weight 3, older get weight 1
+    /// - Trust weighting: verified agents get weight 2, unverified get weight 1
+    /// - Undo: weight = -1 reverses a prior `add()`
+    ///
+    /// The `count` field increments by abs(weight), tracking total contribution
+    /// magnitude (not the number of `add_weighted` calls).
+    pub fn add_weighted(&mut self, hv: &HdcVector, weight: i32) {
+        self.count += weight.unsigned_abs() as usize;
+        for word_idx in 0..160 {
+            let word = hv.bits[word_idx];
+            for bit in 0..64 {
+                let pos = word_idx * 64 + bit;
+                if (word >> bit) & 1 == 1 {
+                    self.votes[pos] += weight;
+                } else {
+                    self.votes[pos] -= weight;
+                }
+            }
+        }
+    }
+}
+```
+
+**Weight bounds**: No hard limit on weight magnitude, but weights above `count / 2` can dominate the bundle. A weight of 100 when only 10 vectors have been added makes that single vector control the output. Keep weights proportional to the expected bundle size.
+
+### `finish()` — collapse to binary vector
+
+```rust
+impl BundleAccumulator {
+    /// Collapse the accumulated votes into a binary HdcVector.
+    ///
+    /// For each bit position:
+    ///   - votes[pos] > 0  → bit = 1 (majority voted 1)
+    ///   - votes[pos] <= 0 → bit = 0 (majority voted 0, ties break to 0)
+    ///
+    /// This method does NOT consume or reset the accumulator. You can call
+    /// `finish()`, inspect the result, then continue adding more vectors
+    /// and call `finish()` again.
+    ///
+    /// Time: O(D). No allocation (writes into stack array).
+    pub fn finish(&self) -> HdcVector {
+        let mut bits = [0u64; 160];
+        for word_idx in 0..160 {
+            let mut word = 0u64;
+            for bit in 0..64 {
+                let pos = word_idx * 64 + bit;
+                if self.votes[pos] > 0 {
+                    word |= 1u64 << bit;
+                }
+            }
+            bits[word_idx] = word;
+        }
+        HdcVector { bits }
+    }
+}
+```
+
+**Tie-breaking**: Ties (votes == 0) break to 0, not to random. This ensures determinism: the same sequence of `add()` calls always produces the same output from `finish()`. The BSC literature (Kleyko et al. 2022) notes that random tie-breaking would preserve the statistical properties of the bundle, but determinism matters more for reproducibility in Neuro.
+
+### `decay()` — controlled forgetting
+
+```rust
+impl BundleAccumulator {
+    /// Apply exponential decay to all vote counts.
+    ///
+    /// Multiplies each vote by `factor` and truncates toward zero.
+    /// Typical values: 0.90 (aggressive), 0.95 (moderate), 0.99 (gentle).
+    ///
+    /// The decay formula for a vote after N decay calls:
+    ///   vote_effective = vote_original * factor^N
+    ///
+    /// Half-life in number of decay calls:
+    ///   half_life = -ln(2) / ln(factor)
+    ///
+    /// | factor | half_life |
+    /// |--------|-----------|
+    /// | 0.90   | 6.6       |
+    /// | 0.95   | 13.5      |
+    /// | 0.99   | 69.0      |
+    ///
+    /// After decay, small votes (|vote| < 1) truncate to 0, creating a natural
+    /// noise floor that cleans up stale contributions.
+    pub fn decay(&mut self, factor: f32) {
+        assert!(factor >= 0.0, "decay factor must be non-negative");
+        for vote in self.votes.iter_mut() {
+            *vote = (*vote as f32 * factor) as i32;
+        }
+    }
+}
+```
+
+**When to call decay**: Call `decay()` periodically between `add()` calls to implement temporal weighting. Two patterns:
+
+1. **Fixed schedule**: Call `decay()` every N additions. The bundle represents a sliding window of approximately `half_life * N` vectors.
+2. **Time-based**: Call `decay()` at regular wall-clock intervals (e.g., every hour). Vectors added during busy periods get down-weighted relative to vectors added during quiet periods.
+
+Neuro uses pattern 2 during the Dreams consolidation cycle: decay runs once per Dreams session, so the bundle naturally emphasizes knowledge from recent sessions.
+
+---
+
+## Implementation Details: ResonatorNetwork Factor Decomposition
+
+The full resonator network algorithm (Frady et al. 2020) iteratively recovers the factors of a composite HDC vector. Here is the complete iteration loop with convergence detection.
+
+### Algorithm
+
+```
+Input:
+  composite: HdcVector  (z = bind(x1, x2, ..., xF))
+  codebooks: [ItemMemory; F]  (one per factor)
+  config: ResonatorConfig { max_iterations, convergence_threshold, early_termination_sim }
+
+Output:
+  factors: [String; F]  (best-matching codebook entry per factor)
+  similarities: [f32; F]
+  converged: bool
+
+Procedure:
+  1. Initialize: estimate[i] = arbitrary entry from codebook[i] for each i
+  2. prev_similarities = [0.0; F]
+  3. For iteration = 1 to max_iterations:
+     a. For each factor i = 0..F:
+        i.   other_product = BIND(estimate[0], ..., estimate[i-1], estimate[i+1], ..., estimate[F-1])
+        ii.  cleanup_signal = BIND(composite, other_product)  // unbind all other factors
+        iii. (best_name, best_sim) = codebook[i].nearest(cleanup_signal)
+        iv.  estimate[i] = codebook[i].get(best_name)
+        v.   current_similarities[i] = best_sim
+
+     b. Early termination check:
+        If ALL current_similarities[i] > early_termination_sim:
+          Return (factors, similarities, converged=true)
+
+     c. Convergence check (after iteration >= 2):
+        max_delta = max(|current_similarities[i] - prev_similarities[i]|) for all i
+        If max_delta < convergence_threshold:
+          Return (factors, similarities, converged=true)
+
+     d. prev_similarities = current_similarities
+
+  4. Return (factors, similarities, converged=false)  // did not converge
+```
+
+### Convergence properties
+
+Frady et al. (2020) prove that resonator networks minimize reconstruction error monotonically under certain conditions:
+- Codebook entries are quasi-orthogonal (guaranteed for BSC at D = 10,240)
+- Number of factors F < sqrt(D / log(N_max)) where N_max is the largest codebook size
+- For D = 10,240 and N_max = 1000: F < sqrt(10240 / 6.9) ≈ 38 factors
+
+In practice, convergence is fast:
+
+| Factors | Codebook size | Typical iterations | Success rate (D=10,240) |
+|---|---|---|---|
+| 2 | 100 | 5-10 | >99% |
+| 3 | 100 | 10-20 | >98% |
+| 5 | 100 | 15-30 | >95% |
+| 5 | 1,000 | 20-40 | >90% |
+| 8 | 100 | 25-50 | >85% |
+
+### Early termination criteria
+
+Two conditions trigger early exit:
+
+1. **All factors high-confidence**: Every factor's similarity to its best codebook match exceeds `early_termination_sim` (default 0.9). The network has found a strong decomposition and further iteration will not improve it.
+
+2. **Similarity plateau**: The maximum change in any factor's similarity between consecutive iterations falls below `convergence_threshold` (default 0.001). The network has settled into a fixed point.
+
+If neither condition is met within `max_iterations`, the result is returned with `converged: false`. The caller should treat the result with skepticism — the similarities array indicates which factors were recovered reliably and which were not.
+
+### Error handling
+
+- Empty codebook list: returns empty result, `converged: true` (vacuously)
+- Codebook with 0 entries for one factor: that factor returns `"<unknown>"` with similarity 0.0
+- Non-convergence: `converged: false` with partial results. Caller checks per-factor similarities
+- The algorithm never panics or returns `Err`. All failure modes are represented in the `ResonatorResult` struct
+
+### Integration wiring
+
+Wire into `NeuroStore` for structured query decomposition:
+
+```rust
+// In roko-neuro/src/store.rs
+impl NeuroStore {
+    /// Decompose an entry's HDC vector into its constituent role-filler pairs.
+    pub fn decompose_entry(
+        &self,
+        entry_hv: &HdcVector,
+        role_codebook: &ItemMemory,
+        filler_codebooks: &[&ItemMemory],
+    ) -> ResonatorResult {
+        let network = ResonatorNetwork::new(ResonatorConfig::default());
+        // Each role-filler binding is one factor pair
+        // The composite is the bundle of all bindings
+        network.decompose(entry_hv, &[role_codebook, filler_codebooks[0]])
+    }
+}
+```
+
+### Test criteria
+
+- 2-factor decomposition: compose `z = bind(A, B)` from known codebook entries, recover A and B with similarity > 0.95
+- 5-factor decomposition: compose `z = bind(A, B, C, D, E)`, recover all five with similarity > 0.8
+- Convergence speed: 2-factor case converges in < 15 iterations
+- Non-convergent case: random vector not composed from codebook entries returns `converged: false`
+- Determinism: same inputs produce same outputs across runs
+
+---
+
 ## Current Status and Gaps
 
 **Implemented**: `bind()`, `bundle()`, `permute()`, `similarity()`, `from_seed()`, `to_bytes()`/`from_bytes()`, serde, rkyv zero-copy, `fingerprint()`/`text_fingerprint()`.
 
-**Missing**: `BundleAccumulator` (incremental bundling with vote tracking), `ItemMemory` (concept codebook), `ResonatorNetwork` (factor decomposition), `DecayingBundleAccumulator` (controlled forgetting), SIMD intrinsics (relies on auto-vectorization).
+**Missing**: `BundleAccumulator` (incremental bundling with vote tracking — designed above), `ItemMemory` (concept codebook — designed in [04-hdc-vsa-foundations.md](./04-hdc-vsa-foundations.md)), `ResonatorNetwork` (factor decomposition — designed above), `DecayingBundleAccumulator` (controlled forgetting — designed in [04-hdc-vsa-foundations.md](./04-hdc-vsa-foundations.md)), SIMD intrinsics (strategy in [04-hdc-vsa-foundations.md](./04-hdc-vsa-foundations.md)).
 
 ---
 

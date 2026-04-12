@@ -4,6 +4,9 @@
 > **Crate**: `roko-gate` (`crates/roko-gate/src/gate_pipeline.rs`)
 > **Status**: Implemented (593 lines), wired into orchestrate.rs
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## 1. Overview

@@ -3,6 +3,9 @@
 > Ten independent detectors, each focused on one failure mode,
 > each implementing the `Policy` trait, each testable in isolation.
 
+
+> **Implementation**: Built
+
 ---
 
 ## The Policy Trait

@@ -5,6 +5,9 @@
 > the fly.toml configuration per service, the deploy scripts, secret management, scaling,
 > cost estimates, the web terminal console service, and the deploy command workflow.
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Architecture on Fly.io

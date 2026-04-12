@@ -8,6 +8,9 @@
 > current workaround. It also documents the canonical response types and
 > their relationship to provider-specific wire formats.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## The Layer Problem

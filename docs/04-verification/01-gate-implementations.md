@@ -4,6 +4,9 @@
 > **Crate**: `roko-gate` (`crates/roko-gate/src/`)
 > **Status**: 11 gate implementations, 7 wired into the rung selector
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## 1. Overview

@@ -2,6 +2,9 @@
 
 > ERC-8004 defines three on-chain registries for agent identity: Identity Registry (passport issuance, soulbound ERC-721), Reputation Registry (authorized feedback, per-domain EMA scores), and Validation Registry (work verification proofs, clearing certificates). Together they form the trust infrastructure of the Korai agent marketplace.
 
+
+> **Implementation**: Deferred
+
 **Topic**: [08-chain](./INDEX.md)
 **Prerequisites**: [04-korai-passport-erc-721-soulbound.md](./04-korai-passport-erc-721-soulbound.md), [05-ventriloquist-defense.md](./05-ventriloquist-defense.md)
 **Key sources**: `roko/tmp/implementation-plans/12b-chain-layer.md` §A, `refactoring-prd/04-knowledge-and-mesh.md` §ERC-8004, `bardo-backup/prd/shared/chains.md`
@@ -287,7 +290,7 @@ struct WorkProof {
 A work proof is a compact on-chain record that an agent completed a job and what the outcomes were:
 
 - **`deliverableMerkleRoot`**: Merkle root of the work output (code, analysis, knowledge entries). The full deliverable is stored off-chain (IPFS, local storage, or mesh). The Merkle root enables verification without storing the full output on-chain.
-- **`gateResults`**: Array of pass/fail results from the gate pipeline (compile, test, lint, diff, etc.). See topic [04-gates](../04-gates/INDEX.md) for gate definitions.
+- **`gateResults`**: Array of pass/fail results from the gate pipeline (compile, test, lint, diff, etc.). See topic [04-gates](../04-verification/INDEX.md) for gate definitions.
 - **`clearingCert`**: For marketplace jobs that go through clearing and settlement, the clearing certificate with KKT optimality proof (see [21-isfr-clearing-settlement.md](./21-isfr-clearing-settlement.md)).
 
 ### Auditability

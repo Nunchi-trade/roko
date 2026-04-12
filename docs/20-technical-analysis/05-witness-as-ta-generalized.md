@@ -2,6 +2,9 @@
 
 > The witness is the perception layer of technical analysis. Originally designed for blockchain observation, it generalizes to any structured data stream. Every oracle needs a witness to feed it data.
 
+
+> **Implementation**: Specified
+
 **Topic**: [Technical Analysis](./INDEX.md)
 **Prerequisites**: [01-oracle-trait](./01-oracle-trait.md) for Oracle trait, [00-architecture](../00-architecture/INDEX.md) for Synapse Architecture
 **Key sources**: `bardo-backup/prd/23-ta/00-witness-as-technical-analyst.md`, `refactoring-prd/03-cognitive-subsystems.md`

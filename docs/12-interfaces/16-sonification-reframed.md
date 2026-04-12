@@ -2,6 +2,9 @@
 
 > Ambient generative music driven by agent behavioral states — the Eno mandate, five musical layers, behavioral state presets, and the emotional harmonic vocabulary. No mortality, no requiem. Music reflects cognitive engagement, not lifecycle endings.
 
+
+> **Implementation**: Scaffold
+
 **Topic**: [12-interfaces](./INDEX.md)
 **Prerequisites**: [07-rosedust-design-language.md](./07-rosedust-design-language.md), [10-spectre-creature-visualization.md](./10-spectre-creature-visualization.md)
 **Key sources**: `refactoring-prd/06-interfaces.md` §8, `refactoring-prd/08-translation-guide.md` §sonification, `bardo-backup/prd/24-sonification/05-musical-language.md`, `bardo-backup/prd/24-sonification/06-preset-catalog.md`
@@ -443,5 +446,5 @@ The following legacy sonification elements have been removed as part of the mort
 - See [10-spectre-creature-visualization.md](./10-spectre-creature-visualization.md) for the breathing system that Layer 2 tracks
 - See [07-rosedust-design-language.md](./07-rosedust-design-language.md) for the design philosophy shared with sonification
 - See topic [09-daimon](../09-daimon/INDEX.md) for behavioral states and PAD vector
-- See topic [07-cfactor](../07-cfactor/INDEX.md) for C-Factor that modulates Layer 1 and Layer 4
+- See topic [07-cfactor](../14-identity-economy/INDEX.md) for C-Factor that modulates Layer 1 and Layer 4
 - See [13-web-portal.md](./13-web-portal.md) for the Web Audio context in the Portal

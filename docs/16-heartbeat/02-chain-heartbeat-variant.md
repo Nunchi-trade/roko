@@ -2,6 +2,9 @@
 
 > Chain agents add SIMULATE (mirage-rs pre-flight) and VALIDATE (position limits) steps between ATTEND and ACT because chain actions are financially irreversible.
 
+
+> **Implementation**: Specified
+
 **Topic**: [16-heartbeat](./INDEX.md)
 **Prerequisites**: [00-coala-9-step-pipeline.md](./00-coala-9-step-pipeline.md), [01-universal-loop-mapping.md](./01-universal-loop-mapping.md)
 **Key sources**: `refactoring-prd/05-agent-types.md` §3, legacy `bardo-backup/prd/01-golem/02-heartbeat.md`

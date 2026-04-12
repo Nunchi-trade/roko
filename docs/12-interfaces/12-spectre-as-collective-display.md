@@ -2,6 +2,9 @@
 
 > How multiple Spectre creatures compose into a collective visualization — mesh topology, filament connections, pheromone fields, breathing synchronization, and C-Factor harmony encoding.
 
+
+> **Implementation**: Scaffold
+
 **Topic**: [12-interfaces](./INDEX.md)
 **Prerequisites**: [10-spectre-creature-visualization.md](./10-spectre-creature-visualization.md), [11-spectre-rendering-per-interface.md](./11-spectre-rendering-per-interface.md)
 **Key sources**: `refactoring-prd/06-interfaces.md` §5, `bardo-backup/prd/18-interfaces/28-creature-system.md`
@@ -398,6 +401,6 @@ For > 8 agents, the TUI reduces rendering detail:
 
 - See [10-spectre-creature-visualization.md](./10-spectre-creature-visualization.md) for individual Spectre specification
 - See [11-spectre-rendering-per-interface.md](./11-spectre-rendering-per-interface.md) for per-renderer implementation
-- See topic [07-cfactor](../07-cfactor/INDEX.md) for C-Factor computation details
-- See topic [08-mesh](../08-mesh/INDEX.md) for mesh topology and pheromone system
+- See topic [07-cfactor](../14-identity-economy/INDEX.md) for C-Factor computation details
+- See topic [08-mesh](../13-coordination/INDEX.md) for mesh topology and pheromone system
 - See [09-tui-29-screens.md](./09-tui-29-screens.md) Screen 5.3 (Pheromone Landscape) and Screen 6.4 (Spectre Gallery)

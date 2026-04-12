@@ -6,6 +6,9 @@
 >
 > **Synapse traits**: Composer (budget-aware context assembly under token/cost constraints), Router (tier selection driven by budget availability), Policy (budget monitoring and intervention emission)
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview

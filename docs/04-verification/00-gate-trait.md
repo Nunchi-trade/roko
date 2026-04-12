@@ -4,6 +4,9 @@
 > **Crate**: `roko-core` (`crates/roko-core/src/traits.rs`)
 > **Status**: Stable, implemented
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## 1. Overview

@@ -2,6 +2,9 @@
 
 > Every knowledge entry in Neuro is classified into one of six semantic categories, each with a distinct half-life, retrieval behavior, and role in the agent's cognitive lifecycle.
 
+
+> **Implementation**: Built
+
 **Topic**: [Neuro — Cognitive Knowledge Layer](./INDEX.md)
 **Prerequisites**: [00-vision-and-grimoire-rename.md](./00-vision-and-grimoire-rename.md) for Neuro context
 **Key sources**:

@@ -2,6 +2,9 @@
 
 > The visual identity of Roko: rose tones on deep violet-black, glass morphism, luxury motion, dark-only — shared across TUI, Web Portal, and Spectre visualization.
 
+
+> **Implementation**: Scaffold
+
 **Topic**: [12-interfaces](./INDEX.md)
 **Prerequisites**: None
 **Key sources**: `refactoring-prd/06-interfaces.md` §3, `roko-cli/src/tui/theme.rs`, `roko-cli/src/tui/color.rs`, `bardo-backup/prd/shared/branding.md` §5.2

@@ -3,6 +3,9 @@
 > Generic MCP stdio scaffold: protocol handler, tool registration,
 > base implementation for building custom MCP servers.
 
+
+> **Implementation**: Scaffold
+
 ---
 
 ## Overview

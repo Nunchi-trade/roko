@@ -2,6 +2,9 @@
 
 > Korai chain is ONE domain plugin for agent coordination — not the default framing, not the center of the architecture. The core cognitive system is domain-agnostic.
 
+
+> **Implementation**: Built
+
 **Topic**: [08-chain](./INDEX.md)
 **Prerequisites**: [00-architecture](../00-architecture/INDEX.md), [06-neuro](../06-neuro/INDEX.md)
 **Key sources**: `refactoring-prd/04-knowledge-and-mesh.md`, `refactoring-prd/07-implementation-priorities.md`, `bardo-backup/tmp/agent-chain/01-overview.md`

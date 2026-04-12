@@ -2,6 +2,9 @@
 
 > 16 deterministic probes that run on every gamma tick with zero LLM cost — the foundation of the 80% T0 suppression rate that makes high-frequency agent cognition economically viable.
 
+
+> **Implementation**: Specified
+
 **Topic**: [16-heartbeat](./INDEX.md)
 **Prerequisites**: [08-dual-process-t0-t1-t2.md](./08-dual-process-t0-t1-t2.md), [04-gamma-reactive-loop.md](./04-gamma-reactive-loop.md)
 **Key sources**: `refactoring-prd/09-innovations.md` §I, legacy `bardo-backup/prd/01-golem/02-heartbeat.md` §S3

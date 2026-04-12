@@ -4,6 +4,9 @@
 > Status: **Implemented** — `roko-compose::role_prompts` (462 lines) + `roko-compose::templates` (603 lines)
 > Canonical source: `crates/roko-compose/src/role_prompts.rs`, `crates/roko-compose/src/templates/`
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Abstract

@@ -4,6 +4,9 @@
 > **Key type**: `PlanRunner`
 > **CLI entry**: `roko plan run <dir>` → calls `PlanRunner::run()`
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Overview

@@ -2,6 +2,9 @@
 
 > A comprehensive assessment of what exists in the roko-neuro codebase today, what is scaffolded, and what remains to be built — mapped against the refactoring-prd design and the implementation plan.
 
+
+> **Implementation**: Built
+
 **Topic**: [Neuro — Cognitive Knowledge Layer](./INDEX.md)
 **Prerequisites**: [00-vision-and-grimoire-rename.md](./00-vision-and-grimoire-rename.md)
 **Key sources**:

@@ -6,6 +6,9 @@
 > document specifies the protocol mechanics, session lifecycle, budget delegation via SPTs,
 > and multi-rail payment support.
 
+
+> **Implementation**: Deferred
+
 ---
 
 ## 1. Protocol Stack

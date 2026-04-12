@@ -5,6 +5,9 @@
 > **Background checker**: `WatcherRunner` (tails signals, runs conductor every
 > 30 seconds)
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Overview

@@ -8,6 +8,9 @@
 >
 > **Prerequisites**: [01-three-phase-cycle.md](01-three-phase-cycle.md), [13-scheduling-and-triggers.md](13-scheduling-and-triggers.md)
 
+
+> **Implementation**: Scaffold
+
 ---
 
 ## The Sleep-Time Compute Thesis

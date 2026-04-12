@@ -2,6 +2,9 @@
 
 > What's built, what's scaffolded, what's specified but unimplemented, and which legacy files were deliberately skipped.
 
+
+> **Implementation**: Built
+
 **Topic**: [Daimon](./INDEX.md)
 **Prerequisites**: All previous sub-docs
 **Key sources**: `roko-daimon/src/lib.rs`, `roko-golem/src/daimon.rs`, `refactoring-prd/07-implementation-priorities.md`

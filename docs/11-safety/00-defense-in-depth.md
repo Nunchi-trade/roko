@@ -8,6 +8,9 @@
 >
 > **Prerequisites**: [01-capability-tokens.md](01-capability-tokens.md), [02-audit-chain.md](02-audit-chain.md)
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Overview

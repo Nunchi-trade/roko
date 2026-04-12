@@ -5,6 +5,9 @@
 > **Runtime harness**: `roko-cli/src/orchestrate.rs`
 > **Status**: Wired end-to-end. Plan-execute-gate-persist loop operational.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Purpose

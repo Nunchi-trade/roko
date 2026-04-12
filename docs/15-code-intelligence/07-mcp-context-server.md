@@ -2,6 +2,9 @@
 
 > Exposing code intelligence to agents via Model Context Protocol (MCP) tools — the agent-facing API for code search, symbol navigation, impact analysis, and context retrieval.
 
+
+> **Implementation**: Built
+
 **Topic**: [Code Intelligence](./INDEX.md)
 **Prerequisites**: [06-context-assembly-from-code.md](./06-context-assembly-from-code.md)
 **Key sources**: `bardo-backup/tmp/mori-refactor/10-code-intelligence.md`, `bardo-backup/tmp/mori-agents/18-code-intelligence-and-gateway.md`, `bardo-backup/tmp/death/tools/02-code-index.md`

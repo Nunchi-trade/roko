@@ -3,6 +3,9 @@
 > Four-layer testing: session shim, unit tests, property-based tests, evaluation tests,
 > red-team tests. mirage-rs integration, CI pipeline.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Overview

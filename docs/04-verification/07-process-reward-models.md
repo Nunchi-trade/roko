@@ -4,6 +4,9 @@
 > **Crate**: `roko-learn` (planned integration), `roko-gate` (data source)
 > **Status**: Design, informed by active gate infrastructure
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## 1. Overview

@@ -2,6 +2,9 @@
 
 > Named after EEG frequency bands, three concurrent timescales govern all agent cognition — reactive perception, reflective planning, and offline consolidation.
 
+
+> **Implementation**: Specified
+
 **Topic**: [16-heartbeat](./INDEX.md)
 **Prerequisites**: [00-coala-9-step-pipeline.md](./00-coala-9-step-pipeline.md)
 **Key sources**: `refactoring-prd/01-synapse-architecture.md` §Three Cognitive Speeds, `refactoring-prd/02-five-layers.md` §Adaptive Clock, `implementation-plans/12a-cognitive-layer.md` §I

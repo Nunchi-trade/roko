@@ -4,6 +4,9 @@
 > **Crate**: `roko-gate` (`crates/roko-gate/src/adaptive_threshold.rs`)
 > **Status**: Implemented (215 lines), persists to `.roko/learn/gate-thresholds.json`
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## 1. Overview

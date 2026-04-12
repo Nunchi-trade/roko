@@ -2,6 +2,9 @@
 
 > Preventing mood-congruent echo chambers: mandatory opposite-valence retrieval based on Bower's (1981) associative network theory.
 
+
+> **Implementation**: Built
+
 **Topic**: [Daimon](./INDEX.md)
 **Prerequisites**: [06-somatic-markers-damasio.md](./06-somatic-markers-damasio.md), [01-pad-vector.md](./01-pad-vector.md)
 **Key sources**: `bardo-backup/prd/03-daimon/02-emotion-memory.md`, `refactoring-prd/09-innovations.md` §III, `refactoring-prd/03-cognitive-subsystems.md` §2
@@ -250,4 +253,4 @@ Mind wandering is a default mode network (DMN) analog. The DMN activates during 
 - See [06-somatic-markers-damasio.md](./06-somatic-markers-damasio.md) for somatic landscape query protocol
 - See [09-mood-congruent-memory.md](./09-mood-congruent-memory.md) for full four-factor retrieval model
 - See [02-alma-three-layer-temporal.md](./02-alma-three-layer-temporal.md) for PAD decay as loop-breaking mechanism
-- See topic [03-dreams](../03-dreams/INDEX.md) for REM depotentiation
+- See topic [03-dreams](../10-dreams/INDEX.md) for REM depotentiation

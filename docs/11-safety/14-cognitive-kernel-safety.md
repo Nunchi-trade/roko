@@ -8,6 +8,9 @@
 >
 > **Prerequisites**: [00-defense-in-depth.md](00-defense-in-depth.md), [04-permits-allowlists.md](04-permits-allowlists.md), [06-sandboxing.md](06-sandboxing.md)
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview
@@ -348,6 +351,416 @@ This maps to the defense-in-depth architecture described in [00-defense-in-depth
 | SELinux/AppArmor (MAC) | Mandatory access control | SafetyLayer (composite Policy) | Mandatory safety checks |
 
 The analogy is structural, not superficial. Roko's Cognitive Kernel Primitives solve the same problems for agents that Linux kernel primitives solve for processes: isolation, control, fair scheduling, and mediated access.
+
+---
+
+## CognitiveNamespace: full struct
+
+```rust
+use std::sync::Arc;
+use std::collections::HashSet;
+
+/// Unique identifier for a namespace.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NamespaceId(pub String);
+
+/// Agent role for access control.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AgentRole(pub String);
+
+/// Engram kind for channel filtering.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Kind(pub String);
+
+/// A cognitive namespace: an isolated knowledge domain.
+pub struct CognitiveNamespace {
+    /// Unique identifier for this namespace.
+    pub id: NamespaceId,
+    /// The Substrate (storage) backing this namespace.
+    /// Each namespace has its own Substrate instance.
+    pub substrate: Arc<dyn Substrate>,
+    /// Access control list: who can read/write.
+    pub acl: AccessControlList,
+    /// Explicit cross-namespace channels.
+    /// Knowledge flows between namespaces only through these.
+    pub channels: Vec<NamespaceChannel>,
+    /// Maximum Engrams stored in this namespace.
+    /// When exceeded, oldest Engrams are evicted per decay policy.
+    pub capacity: usize,
+    /// Namespace creation timestamp.
+    pub created_at: std::time::Instant,
+}
+
+impl CognitiveNamespace {
+    /// Check whether an agent with the given role can read from this namespace.
+    pub fn can_read(&self, role: &AgentRole) -> bool {
+        self.acl.allow_anonymous_read || self.acl.readers.contains(role)
+    }
+
+    /// Check whether an agent with the given role can write to this namespace.
+    pub fn can_write(&self, role: &AgentRole) -> bool {
+        self.acl.writers.contains(role)
+    }
+
+    /// Find a channel from this namespace to a target namespace.
+    /// Returns None if no channel exists (transfer is blocked).
+    pub fn channel_to(&self, target: &NamespaceId) -> Option<&NamespaceChannel> {
+        self.channels.iter().find(|c| c.to == *target)
+    }
+}
+```
+
+### NamespaceChannel with ACL enforcement
+
+```rust
+/// A channel between two namespaces with explicit transfer rules.
+pub struct NamespaceChannel {
+    /// Source namespace.
+    pub from: NamespaceId,
+    /// Destination namespace.
+    pub to: NamespaceId,
+    /// Filter: which Engram kinds can flow through.
+    pub allowed_kinds: HashSet<Kind>,
+    /// Whether transfers are logged to the audit chain.
+    pub audit_transfers: bool,
+    /// Maximum transfer rate (Engrams per second).
+    /// None = unlimited (not recommended for production).
+    pub rate_limit: Option<f64>,
+    /// Sliding window counter for rate limiting.
+    rate_window: parking_lot::Mutex<RateWindow>,
+}
+
+struct RateWindow {
+    count: u64,
+    window_start: std::time::Instant,
+    window_duration: std::time::Duration,
+}
+
+impl NamespaceChannel {
+    /// Check whether a specific Engram kind can flow through this channel.
+    pub fn permits_kind(&self, kind: &Kind) -> bool {
+        self.allowed_kinds.is_empty() || self.allowed_kinds.contains(kind)
+    }
+
+    /// Check and consume one unit of rate limit.
+    /// Returns false if rate limit exceeded.
+    pub fn check_rate_limit(&self) -> bool {
+        let Some(limit) = self.rate_limit else {
+            return true;
+        };
+        let mut window = self.rate_window.lock();
+        let now = std::time::Instant::now();
+        if now.duration_since(window.window_start) > window.window_duration {
+            // Reset window.
+            window.count = 0;
+            window.window_start = now;
+        }
+        let max_count = (limit * window.window_duration.as_secs_f64()) as u64;
+        if window.count >= max_count {
+            return false;
+        }
+        window.count += 1;
+        true
+    }
+
+    /// Transfer an Engram through the channel.
+    /// Checks kind filter, rate limit, and optionally logs to audit chain.
+    pub fn transfer(
+        &self,
+        engram: &Signal,
+        audit_chain: Option<&dyn Substrate>,
+    ) -> Result<(), ChannelError> {
+        let kind = Kind(engram.kind().to_string());
+        if !self.permits_kind(&kind) {
+            return Err(ChannelError::KindBlocked(kind));
+        }
+        if !self.check_rate_limit() {
+            return Err(ChannelError::RateLimited);
+        }
+        if self.audit_transfers {
+            if let Some(chain) = audit_chain {
+                chain.write(&create_transfer_audit(
+                    &self.from, &self.to, engram,
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+pub enum ChannelError {
+    KindBlocked(Kind),
+    RateLimited,
+    TargetNamespaceNotFound,
+}
+```
+
+---
+
+## CognitiveSignal: full enum and delivery
+
+```rust
+/// Typed interrupts for cognitive agents.
+/// All variants are non-destructive: no signal causes
+/// abrupt termination with state loss.
+#[derive(Debug, Clone)]
+pub enum CognitiveSignal {
+    /// Suspend reasoning, serialize state to disk.
+    Pause,
+    /// Resume from serialized state.
+    Resume,
+    /// Change current task priority.
+    Reprioritize(TaskId),
+    /// Add context mid-reasoning without interrupting.
+    InjectContext(Box<Signal>), // Engram injected into active context.
+    /// Switch to stronger model immediately.
+    Escalate,
+    /// Reduce arousal, slow down.
+    Cooldown,
+    /// Switch to exploratory mode.
+    Explore,
+    /// Graceful termination.
+    Shutdown,
+}
+
+/// Priority ordering for signal preemption.
+/// Lower number = higher priority.
+impl CognitiveSignal {
+    pub fn priority(&self) -> u8 {
+        match self {
+            CognitiveSignal::Shutdown => 1,
+            CognitiveSignal::Pause => 2,
+            CognitiveSignal::Escalate => 3,
+            CognitiveSignal::Cooldown => 4,
+            CognitiveSignal::Reprioritize(_) => 5,
+            CognitiveSignal::InjectContext(_) => 6,
+            CognitiveSignal::Explore => 7,
+            CognitiveSignal::Resume => 8,
+        }
+    }
+}
+```
+
+### Signal delivery queue and processing order
+
+```rust
+use std::collections::BinaryHeap;
+use std::cmp::Ordering;
+
+/// A queued signal with priority ordering.
+struct QueuedSignal {
+    signal: CognitiveSignal,
+    queued_at: std::time::Instant,
+    /// Timeout: if not acknowledged within this duration,
+    /// escalate (e.g., Pause -> Shutdown).
+    timeout: std::time::Duration,
+}
+
+impl Ord for QueuedSignal {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Lower priority number = higher priority in the heap.
+        other
+            .signal
+            .priority()
+            .cmp(&self.signal.priority())
+            .then_with(|| self.queued_at.cmp(&other.queued_at))
+    }
+}
+
+/// Signal delivery queue. Signals are processed in priority order.
+/// Higher-priority signals preempt lower-priority ones.
+pub struct SignalQueue {
+    queue: parking_lot::Mutex<BinaryHeap<QueuedSignal>>,
+    /// Default timeout per signal type.
+    default_timeouts: HashMap<u8, Duration>,
+}
+
+impl SignalQueue {
+    /// Enqueue a signal for delivery.
+    pub fn send(&self, signal: CognitiveSignal) {
+        let priority = signal.priority();
+        let timeout = self
+            .default_timeouts
+            .get(&priority)
+            .copied()
+            .unwrap_or(Duration::from_secs(30));
+
+        self.queue.lock().push(QueuedSignal {
+            signal,
+            queued_at: std::time::Instant::now(),
+            timeout,
+        });
+    }
+
+    /// Dequeue the highest-priority signal.
+    /// Returns None if the queue is empty.
+    pub fn recv(&self) -> Option<CognitiveSignal> {
+        self.queue.lock().pop().map(|qs| qs.signal)
+    }
+
+    /// Check for timed-out signals and escalate them.
+    /// Pause -> Shutdown, Cooldown -> Pause, etc.
+    pub fn check_timeouts(&self) -> Vec<CognitiveSignal> {
+        let mut escalations = Vec::new();
+        let mut queue = self.queue.lock();
+        let now = std::time::Instant::now();
+
+        // Collect timed-out signals.
+        let mut remaining = BinaryHeap::new();
+        while let Some(qs) = queue.pop() {
+            if now.duration_since(qs.queued_at) > qs.timeout {
+                // Escalate.
+                let escalated = match qs.signal {
+                    CognitiveSignal::Cooldown => CognitiveSignal::Pause,
+                    CognitiveSignal::Pause => CognitiveSignal::Shutdown,
+                    CognitiveSignal::Reprioritize(_) => CognitiveSignal::Pause,
+                    other => other, // Shutdown cannot escalate further.
+                };
+                escalations.push(escalated);
+            } else {
+                remaining.push(qs);
+            }
+        }
+        *queue = remaining;
+        escalations
+    }
+}
+```
+
+**Configuration:**
+
+```toml
+[runtime.signals]
+pause_timeout_secs = 30      # Time before Pause escalates to Shutdown. Range: 5..300.
+cooldown_timeout_secs = 60   # Time before Cooldown escalates to Pause. Range: 10..600.
+reprioritize_timeout_secs = 15 # Time before Reprioritize escalates. Range: 5..120.
+default_timeout_secs = 30    # Default for unspecified signal types. Range: 5..300.
+```
+
+### Priority inversion prevention (Sha et al. 1990)
+
+When a high-priority signal depends on the completion of a low-priority task, priority inheritance prevents deadlock:
+
+```
+priority_inheritance(high_signal, blocking_task):
+    # Step 1: Detect the dependency.
+    # High-priority signal (e.g., Shutdown) cannot proceed
+    # because the agent is executing a low-priority task
+    # that holds a resource (e.g., a file lock).
+
+    # Step 2: Temporarily elevate the blocking task's priority.
+    original_priority = blocking_task.priority
+    blocking_task.priority = high_signal.priority()
+
+    # Step 3: Execute the blocking task at elevated priority.
+    # The scheduler now treats it as high-priority, preventing
+    # other medium-priority tasks from preempting it.
+    execute(blocking_task)
+
+    # Step 4: Restore original priority after completion.
+    blocking_task.priority = original_priority
+
+    # Step 5: Process the high-priority signal.
+    process(high_signal)
+```
+
+This prevents the classic priority inversion scenario where a Shutdown signal is blocked by a routine task that is itself preempted by medium-priority work.
+
+---
+
+## Policy trait: universal enforcement path
+
+The `Policy` trait is the single enforcement point for all agent actions. Every action passes through `decide()` before execution.
+
+```rust
+/// The four decision modes for the Policy enforcement point.
+#[derive(Debug, Clone)]
+pub enum PolicyDecision {
+    /// Allow the action to proceed. Log the approval.
+    Permit,
+    /// Block the action. Return an error Engram to the agent.
+    Deny { reason: String },
+    /// Allow but alter the action (e.g., reduce scope, scrub secrets).
+    Modify { modified_engram: Signal },
+    /// Allow but create a detailed audit record.
+    Log { detail_level: AuditDetailLevel },
+}
+
+#[derive(Debug, Clone)]
+pub enum AuditDetailLevel {
+    /// Log action type and result only.
+    Summary,
+    /// Log full action parameters and result.
+    Detailed,
+    /// Log everything including context window contents.
+    Forensic,
+}
+
+/// Composite Policy: chains multiple policies.
+/// All policies must agree to Permit; any Deny blocks.
+pub struct CompositPolicy {
+    policies: Vec<Box<dyn Policy>>,
+}
+
+impl Policy for CompositPolicy {
+    fn decide(&self, engrams: &[Signal]) -> Vec<Signal> {
+        let mut all_decisions = Vec::new();
+        for policy in &self.policies {
+            let decisions = policy.decide(engrams);
+            // If any policy emits a Deny Engram, the action is blocked.
+            if decisions.iter().any(|d| is_deny(d)) {
+                return decisions; // Short-circuit on first denial.
+            }
+            all_decisions.extend(decisions);
+        }
+        all_decisions
+    }
+}
+```
+
+**Current composite policy chain** (wired in `roko-agent/src/safety/mod.rs`):
+
+```
+SafetyLayer::check_pre_execution()
+  |
+  +--> BashPolicy::decide()      -- deny dangerous shell commands
+  +--> GitPolicy::decide()        -- deny force-push, protected branches
+  +--> NetworkPolicy::decide()    -- deny private networks, enforce HTTPS
+  +--> PathPolicy::decide()       -- deny paths outside worktree
+  +--> RateLimiter::check()       -- deny if rate limit exceeded
+  |
+  [post-execution]
+  +--> ScrubPolicy::scrub_output() -- modify: redact secrets in output
+```
+
+The universal enforcement path extends this to cover all action types:
+
+```
+[Current: ToolDispatcher only]
+  Tool call -> SafetyLayer -> execute -> ScrubPolicy
+
+[Target: Universal Engram Syscall]
+  Any action -> CompositPolicy::decide() -> execute -> post-check
+    |
+    +--> Tool call: SafetyLayer chain
+    +--> Knowledge post: NamespaceChannel.transfer()
+    +--> Mesh relay: TaintedString.can_flow_to(MeshRelay)
+    +--> File write: PathPolicy + TaintedString check
+    +--> API call: NetworkPolicy + RateLimiter
+```
+
+### Test criteria
+
+- `CognitiveNamespace::can_read()` returns false for unlisted roles when `allow_anonymous_read` is false
+- `CognitiveNamespace::can_write()` returns false for reader-only roles
+- `NamespaceChannel::permits_kind()` blocks non-whitelisted Engram kinds
+- `NamespaceChannel::check_rate_limit()` returns false after exceeding configured rate
+- `NamespaceChannel::transfer()` logs to audit chain when `audit_transfers` is true
+- `CognitiveSignal::priority()` returns 1 for Shutdown (highest) and 8 for Resume (lowest)
+- `SignalQueue` delivers Shutdown before Cooldown regardless of enqueue order
+- `SignalQueue::check_timeouts()` escalates a timed-out Pause to Shutdown
+- `CompositPolicy` short-circuits on the first Deny from any sub-policy
+- Priority inheritance completes: a high-priority signal blocked by a low-priority task eventually proceeds after task elevation
 
 ---
 

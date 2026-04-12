@@ -2,6 +2,9 @@
 
 > The `roko` binary is the primary interface to the Roko cognitive agent framework, supporting five interaction modes from one-shot commands to long-lived daemon services.
 
+
+> **Implementation**: Scaffold
+
 **Topic**: [12-interfaces](./INDEX.md)
 **Prerequisites**: [00-architecture](../00-architecture/INDEX.md) for Engram, Synapse traits, and the universal cognitive loop
 **Key sources**: `refactoring-prd/06-interfaces.md`, `refactoring-prd/10-developer-guide.md`, `roko-cli/src/main.rs`, `roko-cli/src/lib.rs`, `bardo-backup/prd/18-interfaces/01-cli.md`, `bardo-backup/prd/25-mori/mori-interfaces.md`

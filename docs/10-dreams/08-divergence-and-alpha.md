@@ -6,6 +6,9 @@
 >
 > **Prerequisites**: [07-hypnagogia-engine.md](07-hypnagogia-engine.md)
 
+
+> **Implementation**: Scaffold
+
 ---
 
 ## The Alpha Convergence Problem

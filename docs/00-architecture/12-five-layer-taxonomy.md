@@ -6,6 +6,9 @@
 > layer diagram. The five layers map to Beer's Viable System Model (Beer 1972) and provide
 > the structural skeleton for all 18+ crates.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## 1. The Layer Diagram

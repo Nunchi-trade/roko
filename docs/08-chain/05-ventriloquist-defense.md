@@ -2,6 +2,9 @@
 
 > At registration, commit H = SHA-256(system_prompt) on-chain. Before each job, TEE verifies prompt hash matches. Prompt updates require on-chain tx with 24h timelock. >3 changes in 30 days triggers -0.05 reputation. Prevents prompt injection attacks at registration.
 
+
+> **Implementation**: Built
+
 **Topic**: [08-chain](./INDEX.md)
 **Prerequisites**: [04-korai-passport-erc-721-soulbound.md](./04-korai-passport-erc-721-soulbound.md)
 **Key sources**: `roko/tmp/implementation-plans/12b-chain-layer.md` §M, `refactoring-prd/04-knowledge-and-mesh.md`, `bardo-backup/tmp/agent-chain-new/11-adversarial-defense.md`

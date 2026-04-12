@@ -3,6 +3,9 @@
 > Three custody modes (Delegation, Embedded, LocalKey), WalletHandle abstraction,
 > session key management, wallet providers, identity NFT custody.
 
+
+> **Implementation**: Deferred
+
 ---
 
 ## Overview

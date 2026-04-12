@@ -4,6 +4,9 @@
 > **Crate**: `roko-gate` (`crates/roko-gate/src/rung_selector.rs`)
 > **Status**: Implemented (527 lines)
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## 1. Overview

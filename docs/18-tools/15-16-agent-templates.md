@@ -3,6 +3,9 @@
 > 18 agent templates with full definitions: system prompts, triggers, MCP servers,
 > gate pipelines, experiment configurations, subscription patterns.
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview

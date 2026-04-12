@@ -8,6 +8,9 @@
 >
 > **Prerequisites**: [01-three-phase-cycle.md](01-three-phase-cycle.md), [04-consolidation-and-staging.md](04-consolidation-and-staging.md)
 
+
+> **Implementation**: Scaffold
+
 ---
 
 ## The EVOLUTION Phase
@@ -113,4 +116,4 @@ The EVOLUTION phase is **not yet implemented** in `roko-dreams`. The implementat
 |----------|-----------|
 | [04-consolidation-and-staging.md](04-consolidation-and-staging.md) | Promoted entries that EVOLUTION operates on |
 | [06-hdc-counterfactual-synthesis.md](06-hdc-counterfactual-synthesis.md) | HDC operations used for knowledge recombination |
-| [../03-neuro/INDEX.md](../03-neuro/INDEX.md) | NeuroStore where evolved strategies are persisted |
+| [../03-neuro/INDEX.md](../06-neuro/INDEX.md) | NeuroStore where evolved strategies are persisted |

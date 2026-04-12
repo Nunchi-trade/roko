@@ -4,6 +4,9 @@
 > **Crates**: `roko-gate`, `roko-learn`, `roko-conductor`
 > **Status**: Partial (fast loops wired, slow loops designed)
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## 1. Overview

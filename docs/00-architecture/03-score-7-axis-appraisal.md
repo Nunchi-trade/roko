@@ -8,6 +8,9 @@
 > reputation directly scales the result. This document specifies each axis, the effective
 > score formula, score arithmetic, and how Scorers produce and consumers interpret scores.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## 1. Design Rationale

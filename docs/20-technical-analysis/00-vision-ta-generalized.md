@@ -2,6 +2,9 @@
 
 > TA is NOT chain-only. It is a general-purpose prediction framework with domain-specific instances.
 
+
+> **Implementation**: Specified
+
 **Topic**: [Technical Analysis](./INDEX.md)
 **Prerequisites**: [00-architecture](../00-architecture/INDEX.md) for Synapse Architecture, [06-neuro](../06-neuro/INDEX.md) for HDC knowledge encoding
 **Key sources**: `refactoring-prd/03-cognitive-subsystems.md` §4, `bardo-backup/prd/23-ta/00-witness-as-technical-analyst.md`, `refactoring-prd/09-innovations.md`

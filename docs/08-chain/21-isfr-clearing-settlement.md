@@ -2,6 +2,9 @@
 
 > ISFR (Intersubjective Fact Registry) provides collective fact validation and price discovery. The clearing mechanism uses a QP (Quadratic Programming) solver with bisection (O(80n)) to find market-clearing prices. Clearing certificates carry KKT optimality proofs verifiable on-chain.
 
+
+> **Implementation**: Built
+
 **Topic**: [08-chain](./INDEX.md)
 **Prerequisites**: [10-spore-job-market.md](./10-spore-job-market.md), [14-reputation-system-7-domain.md](./14-reputation-system-7-domain.md)
 **Key sources**: `roko/tmp/implementation-plans/12b-chain-layer.md` §N (ISFR), §O (Clearing)

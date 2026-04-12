@@ -2,6 +2,9 @@
 
 > How PAD octants map to discrete behavioral states that modulate compute allocation, model routing, exploration budgets, and retry policies — cyclical, never terminal.
 
+
+> **Implementation**: Built
+
 **Topic**: [Daimon](./INDEX.md)
 **Prerequisites**: [01-pad-vector.md](./01-pad-vector.md), [03-occ-scherer-appraisal.md](./03-occ-scherer-appraisal.md)
 **Key sources**: `refactoring-prd/03-cognitive-subsystems.md` §2, `roko-golem/src/daimon.rs`, `roko-daimon/src/lib.rs`
@@ -318,6 +321,277 @@ The effort label is written to efficiency events (`.roko/learn/efficiency.jsonl`
 **Gap**: The Exploring and Focused states don't have dedicated behavioral profiles in the current code — they fall through to Balanced or Coasting.
 
 **Gap**: Tier bias threshold modulation is specified but not wired to the CascadeRouter. The CascadeRouter has its own prediction error thresholds that don't yet read from the Daimon.
+
+---
+
+## Threshold Calibration Methodology
+
+### Why 0.30 / -0.25?
+
+The thresholds in `classify_behavioral_state()` are not hand-tuned constants. They derive from the appraisal rule magnitudes defined in `03-occ-scherer-appraisal.md`:
+
+| Event | P delta | A delta | D delta | C delta |
+|---|---|---|---|---|
+| Single task failure | -0.20 | +0.10 | -0.15 | -0.15 |
+| Gate check failure | -0.10 | +0.04 | -0.08 | -0.10 |
+| Consecutive failures (3x) | -0.60 | +0.30 | -0.45 | -0.45 |
+
+Starting from a neutral confidence of 0.70 (the midpoint of the working range), two consecutive task failures push confidence to `0.70 - 0.30 = 0.40`, which stays above the 0.30 Struggling threshold. Three consecutive failures push confidence to `0.70 - 0.45 = 0.25`, which crosses 0.30 and triggers Struggling. This produces the desired behavior: the agent tolerates one or two failures without state change, but three consecutive failures trigger intervention.
+
+The dominance threshold of -0.25 follows a parallel logic. A single task failure produces D: -0.15 from neutral 0.0. That keeps the agent in Engaged. Two consecutive failures produce cumulative D: -0.30 (assuming partial decay between ticks), which crosses -0.25 and triggers Struggling through the dominance path.
+
+**Calibration formula**:
+
+```
+threshold = neutral_value - (n_tolerated_failures * per_failure_delta)
+
+confidence_threshold = 0.70 - (2.5 * 0.15) ≈ 0.30
+dominance_threshold  = 0.00 - (2.0 * 0.15) ≈ -0.25 (accounting for partial decay)
+```
+
+The 2.5 and 2.0 multipliers represent the design choice: how many failures should the agent absorb before behavioral state change? Lowering the threshold increases tolerance; raising it makes the agent more reactive.
+
+### Hysteresis: Entry vs. Exit Thresholds
+
+The current implementation uses a single threshold for both entering and exiting a state. This creates oscillation at the boundary: an agent at confidence 0.29 enters Struggling, a single positive outcome pushes it to 0.35, it exits to Engaged, another failure pushes it back below 0.30, and it re-enters Struggling. This rapid cycling produces inconsistent behavior modulation.
+
+The fix is split thresholds with a dead zone:
+
+```rust
+pub struct BehavioralStateThresholds {
+    /// Confidence below this enters Struggling.
+    pub struggling_entry_confidence: f64,   // default: 0.30
+    /// Confidence above this exits Struggling.
+    pub struggling_exit_confidence: f64,    // default: 0.40
+    /// Dominance below this enters Struggling.
+    pub struggling_entry_dominance: f64,    // default: -0.25
+    /// Dominance above this exits Struggling.
+    pub struggling_exit_dominance: f64,     // default: -0.15
+    /// Pleasure above this enters Coasting.
+    pub coasting_entry_pleasure: f64,       // default: 0.35
+    /// Pleasure below this exits Coasting.
+    pub coasting_exit_pleasure: f64,        // default: 0.25
+    /// Arousal below this enters Resting.
+    pub resting_entry_arousal: f64,         // default: -0.20
+    /// Arousal above this exits Resting.
+    pub resting_exit_arousal: f64,          // default: -0.10
+}
+```
+
+The dead zone between entry and exit thresholds (e.g., 0.30 to 0.40 for confidence) prevents oscillation. An agent must improve its confidence by a meaningful margin before exiting Struggling, which requires sustained positive outcomes rather than a single lucky result.
+
+**Pseudocode with hysteresis**:
+
+```
+fn classify_with_hysteresis(state: &AffectState, current: BehavioralState) -> BehavioralState:
+    thresholds = load_thresholds()
+
+    // Use exit thresholds if already in the state, entry thresholds otherwise
+    if current == Struggling:
+        if state.confidence > thresholds.struggling_exit_confidence
+           AND state.pad.dominance > thresholds.struggling_exit_dominance:
+            // Allow exit — re-evaluate for other states
+            pass
+        else:
+            return Struggling  // Stay in Struggling
+    else:
+        if state.confidence < thresholds.struggling_entry_confidence
+           OR state.pad.dominance < thresholds.struggling_entry_dominance:
+            return Struggling  // Enter Struggling
+
+    // Repeat pattern for each state...
+```
+
+### Dwell Time Minimum
+
+Even with hysteresis, rapid PAD swings (e.g., from alternating successes and failures) can produce state changes every few ticks. A minimum dwell time prevents this:
+
+```rust
+pub struct BehavioralStateTracker {
+    pub current_state: BehavioralState,
+    /// Tick at which the current state was entered.
+    pub entered_at: u64,
+    /// Minimum ticks before a state transition is allowed.
+    pub min_dwell_ticks: u64,  // default: 10
+    pub thresholds: BehavioralStateThresholds,
+}
+
+impl BehavioralStateTracker {
+    pub fn update(&mut self, state: &AffectState, current_tick: u64) -> BehavioralState {
+        let candidate = classify_with_hysteresis(state, self.current_state, &self.thresholds);
+        if candidate != self.current_state {
+            let dwell = current_tick.saturating_sub(self.entered_at);
+            if dwell >= self.min_dwell_ticks {
+                self.current_state = candidate;
+                self.entered_at = current_tick;
+            }
+            // Otherwise: suppress the transition, stay in current state
+        }
+        self.current_state
+    }
+}
+```
+
+The default of 10 ticks translates to roughly 10 task cycles. This prevents state flickering while keeping the system responsive to sustained changes.
+
+### Domain-Specific Threshold Variants
+
+Different agent domains have different failure rates and volatility profiles. A coding agent working on well-tested code fails rarely; a chain agent monitoring volatile markets experiences frequent prediction errors. Using the same thresholds for both produces suboptimal behavior.
+
+```toml
+# roko.toml — domain-specific threshold overrides
+[daimon.behavioral_thresholds]
+domain = "coding"
+
+[daimon.behavioral_thresholds.struggling]
+entry_confidence = 0.30
+exit_confidence = 0.40
+entry_dominance = -0.25
+exit_dominance = -0.15
+
+[daimon.behavioral_thresholds.coasting]
+entry_pleasure = 0.35
+exit_pleasure = 0.25
+
+# Chain agents tolerate more volatility before entering Struggling
+# [daimon.behavioral_thresholds]
+# domain = "chain"
+# struggling.entry_confidence = 0.20  # more tolerant
+# struggling.entry_dominance = -0.35  # more tolerant
+# coasting.entry_pleasure = 0.50      # harder to coast in volatile markets
+```
+
+Threshold overrides are loaded from `roko.toml` at startup. If no domain-specific overrides exist, the defaults above apply.
+
+---
+
+## Tier Bias to CascadeRouter Wiring
+
+The tier bias table (above) specifies how behavioral states modulate prediction error thresholds. The CascadeRouter — defined in `roko-learn/src/cascade_router.rs` — owns these thresholds. The wiring path connects the Daimon's behavioral state to the CascadeRouter's threshold adjustment:
+
+```rust
+/// In the dispatch path (orchestrate.rs or dispatcher):
+fn apply_tier_bias(
+    router: &mut CascadeRouter,
+    state: BehavioralState,
+) {
+    let bias = match state {
+        BehavioralState::Struggling => TierBias {
+            t0_threshold_delta: -0.1,  // T0 → T1 sooner
+            t1_threshold_delta: -0.2,  // T1 → T2 sooner
+        },
+        BehavioralState::Coasting => TierBias {
+            t0_threshold_delta: 0.1,   // T0 → T1 later
+            t1_threshold_delta: 0.2,   // T1 → T2 later
+        },
+        BehavioralState::Focused => TierBias {
+            t0_threshold_delta: 0.1,
+            t1_threshold_delta: 0.0,
+        },
+        _ => TierBias::ZERO,
+    };
+    router.set_tier_bias(bias);
+}
+
+pub struct TierBias {
+    /// Added to the T0→T1 prediction error threshold.
+    /// Positive = harder to escalate (stay cheap longer).
+    /// Negative = easier to escalate (use stronger models sooner).
+    pub t0_threshold_delta: f64,
+    /// Added to the T1→T2 prediction error threshold.
+    pub t1_threshold_delta: f64,
+}
+
+impl TierBias {
+    pub const ZERO: Self = Self { t0_threshold_delta: 0.0, t1_threshold_delta: 0.0 };
+}
+```
+
+**Call site**: This runs in the dispatch path, after the Daimon computes the behavioral state and before the CascadeRouter selects a model. The flow is:
+
+```
+AffectEngine::tick() → BehavioralState
+    → apply_tier_bias(&mut cascade_router, state)
+    → CascadeRouter::select_model(prediction_error)  // uses biased thresholds
+    → Dispatcher::dispatch(model, task)
+```
+
+### Effort Label to Budget Tracker
+
+The `DispatchStrategy::effort_label()` method returns `"low"`, `"medium"`, or `"high"`. This feeds into the efficiency event pipeline:
+
+```rust
+/// Written per-task to .roko/learn/efficiency.jsonl
+pub struct EfficiencyEvent {
+    pub task_id: String,
+    pub model_used: String,
+    pub effort_label: String,     // from DispatchStrategy::effort_label()
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    pub wall_time_ms: u64,
+    pub gate_passed: bool,
+}
+```
+
+Over time, the efficiency log enables cost-outcome correlation analysis. If `"high"` effort tasks don't pass gates at a higher rate than `"medium"` effort tasks, the Struggling → Escalating path is wasteful and the thresholds should be adjusted. The adaptive gate thresholds (`.roko/learn/gate-thresholds.json`) already track pass rates per rung; extending this to track pass rates per effort label requires adding a grouping key to the EMA computation.
+
+---
+
+## Full State Transition Table
+
+Every transition requires both a PAD condition (the target state's entry criteria) and satisfaction of the dwell time minimum for the current state:
+
+| From | To | Trigger Condition | Typical Cause |
+|---|---|---|---|
+| **Engaged** | Struggling | C < 0.30 OR D < -0.25 | 3+ consecutive failures |
+| **Engaged** | Coasting | P > 0.35 AND C > 0.65 | Sustained easy successes |
+| **Engaged** | Focused | D > 0.30 AND P > 0.25 | Success in familiar territory |
+| **Engaged** | Resting | A < -0.20 | No tasks in queue, idle period |
+| **Engaged** | Exploring | D < 0.10 AND P > -0.20 | New crate, unfamiliar API |
+| **Struggling** | Engaged | C > 0.40 AND D > -0.15 (exit thresholds) | Successful task after struggle |
+| **Struggling** | Resting | A < -0.20 (arousal decay over time) | Dream depotentiation, idle period |
+| **Coasting** | Engaged | P < 0.25 OR C < 0.65 (exit thresholds) | Harder problem encountered |
+| **Coasting** | Struggling | C < 0.30 OR D < -0.25 | Sudden failure on "easy" task |
+| **Focused** | Engaged | D < 0.30 OR P < 0.25 | Exhausted playbooks, diminishing returns |
+| **Focused** | Coasting | P > 0.35 AND C > 0.65 | Continued success, difficulty drops |
+| **Focused** | Struggling | C < 0.30 OR D < -0.25 | Unexpected failure in "known" territory |
+| **Resting** | Engaged | A > -0.10 (exit threshold) | New task arrives, arousal increases |
+| **Resting** | Exploring | D < 0.10 AND A > -0.10 | Task arrives in unfamiliar area |
+| **Exploring** | Engaged | D > 0.10 OR P < -0.20 | Gained familiarity, or failed exploration |
+| **Exploring** | Focused | D > 0.30 AND P > 0.25 | Exploration succeeded, built mastery |
+| **Exploring** | Struggling | C < 0.30 OR D < -0.25 | Exploration failed repeatedly |
+
+**Priority order**: When multiple states' entry criteria are met simultaneously, the classification function checks in this order: Struggling, Coasting, Focused, Resting, Exploring, Engaged (fallback). Struggling takes priority because it triggers protective measures that should not be delayed.
+
+**Error handling**: If the PAD vector contains NaN or infinite values (from a buggy appraisal rule), `classify_behavioral_state` returns `BehavioralState::Engaged` as the safe default. The Engaged state applies no escalation and no demotion, so a corrupt PAD vector produces baseline behavior rather than runaway escalation.
+
+```rust
+fn classify_behavioral_state(state: &AffectState) -> BehavioralState {
+    // Guard: NaN/Inf → safe default
+    if !state.pad.pleasure.is_finite()
+        || !state.pad.arousal.is_finite()
+        || !state.pad.dominance.is_finite()
+        || !state.confidence.is_finite()
+    {
+        tracing::warn!("non-finite PAD values detected, defaulting to Engaged");
+        return BehavioralState::Engaged;
+    }
+    // ... normal classification
+}
+```
+
+### Test Criteria
+
+| Test | Condition | Expected |
+|---|---|---|
+| Three consecutive failures trigger Struggling | Confidence: 0.70 → 0.55 → 0.40 → 0.25 | State: Engaged → Engaged → Engaged → Struggling |
+| Hysteresis prevents oscillation | Confidence bounces 0.29 → 0.35 → 0.29 | State: Struggling → Struggling → Struggling (exit requires > 0.40) |
+| Dwell time suppresses flickering | State entered 3 ticks ago, new criteria met for Coasting | State: unchanged (min dwell = 10) |
+| NaN PAD defaults to Engaged | `pad.pleasure = f64::NAN` | `BehavioralState::Engaged` |
+| Struggling priority over Coasting | C < 0.30 AND P > 0.35 | Struggling (checked first) |
+| Domain threshold override loads | `roko.toml` sets `struggling.entry_confidence = 0.20` | Agent tolerates 4 failures before Struggling |
+| Tier bias propagates to CascadeRouter | State transitions to Struggling | Router's T1→T2 threshold drops by 0.2 |
+| Effort label written to efficiency log | Escalating strategy dispatched | `efficiency.jsonl` entry has `effort_label: "high"` |
 
 ---
 

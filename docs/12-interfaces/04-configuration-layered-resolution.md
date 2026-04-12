@@ -2,6 +2,9 @@
 
 > `roko.toml` format and the layered resolution system: CLI flags → environment variables → config file → defaults. Minimal config, override only what you need.
 
+
+> **Implementation**: Scaffold
+
 **Topic**: [12-interfaces](./INDEX.md)
 **Prerequisites**: [00-cli-overview.md](./00-cli-overview.md)
 **Key sources**: `refactoring-prd/06-interfaces.md` §1, `refactoring-prd/10-developer-guide.md` §1, `roko-cli/src/config.rs`, `bardo-backup/prd/shared/config-reference.md`

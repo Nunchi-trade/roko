@@ -2,6 +2,9 @@
 
 > Agents create their own UI components — the A2UI (Agent-to-UI) protocol enables cognitive agents to emit structured UI descriptions that render in ROSEDUST across any interface.
 
+
+> **Implementation**: Scaffold
+
 **Topic**: [12-interfaces](./INDEX.md)
 **Prerequisites**: [07-rosedust-design-language.md](./07-rosedust-design-language.md), [05-http-api-roko-serve.md](./05-http-api-roko-serve.md)
 **Key sources**: `refactoring-prd/06-interfaces.md` §7, `refactoring-prd/09-innovations.md` §13

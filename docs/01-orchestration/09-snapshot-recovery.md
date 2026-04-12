@@ -6,6 +6,9 @@
 > **Persistence path**: `.roko/state/executor.json`
 > **CLI flag**: `--resume .roko/state/executor.json`
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Overview

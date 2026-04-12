@@ -131,9 +131,9 @@ All academic citations used across this topic's sub-documents:
 | [00-architecture](../00-architecture/INDEX.md) | Synapse Architecture, Engram struct, 6 traits, 5 layers, Universal Cognitive Loop |
 | [05-learning](../05-learning/INDEX.md) | CascadeRouter (LinUCB, Thompson Sampling), adaptive gate thresholds, cybernetic feedback loops |
 | [06-neuro](../06-neuro/INDEX.md) | HDC encoding (10,240-bit BSC), knowledge tier progression, cross-domain transfer |
-| [07-daimon](../07-daimon/INDEX.md) | PAD vector, behavioral states, somatic landscape, affect modulation of oracle behavior |
-| [08-dreams](../08-dreams/INDEX.md) | NREM replay, REM counterfactuals, hypnagogia, offline consolidation of prediction patterns |
-| [09-innovations](../09-innovations/INDEX.md) | T0 probes, VCG auction, somatic landscape, collective calibration, predictive foraging |
+| [07-daimon](../09-daimon/INDEX.md) | PAD vector, behavioral states, somatic landscape, affect modulation of oracle behavior |
+| [08-dreams](../10-dreams/INDEX.md) | NREM replay, REM counterfactuals, hypnagogia, offline consolidation of prediction patterns |
+| [09-innovations](../20-technical-analysis/INDEX.md) | T0 probes, VCG auction, somatic landscape, collective calibration, predictive foraging |
 
 ---
 

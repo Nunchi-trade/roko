@@ -6,6 +6,9 @@
 >
 > **Synapse traits**: Substrate (initialized during creation to hold the agent's Neuro store), Router (configured during creation for model selection), Policy (configured during creation for behavioral defaults)
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview

@@ -3,6 +3,9 @@
 > Three mechanisms: Cargo workspace (compile-time), config-declared (runtime),
 > MCP discovery (runtime). Lifecycle, validation, and hot-reload.
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview

@@ -7,6 +7,9 @@
 > Attestation field for cryptographic proof of origin. This document specifies both the
 > current Provenance struct and the planned Attestation extension.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## 1. Why Provenance Matters

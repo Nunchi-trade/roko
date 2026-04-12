@@ -2,6 +2,9 @@
 
 > Generate working boilerplate for every Synapse trait, domain plugin, and extension point — every scaffold compiles immediately with passing tests.
 
+
+> **Implementation**: Scaffold
+
 **Topic**: [12-interfaces](./INDEX.md)
 **Prerequisites**: [00-cli-overview.md](./00-cli-overview.md), [00-architecture](../00-architecture/INDEX.md) for Synapse traits
 **Key sources**: `refactoring-prd/06-interfaces.md` §1, `refactoring-prd/10-developer-guide.md` §2-3

@@ -4,6 +4,9 @@
 > Status: **Implemented** — `roko-compose` crate
 > Canonical source: `refactoring-prd/01-synapse-architecture.md`
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Abstract

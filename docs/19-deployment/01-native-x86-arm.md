@@ -5,6 +5,9 @@
 > the host architecture. This document covers build configuration, target triples, feature
 > flags, performance characteristics, and cross-compilation for native platforms.
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Supported Architectures

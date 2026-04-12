@@ -2,6 +2,9 @@
 
 > The Somatic Landscape integrates Damasio's somatic marker hypothesis into Neuro's retrieval pipeline — a k-d tree over an 8-dimensional strategy space that provides fast emotional heuristics for knowledge selection, with mandatory 15% contrarian retrieval to prevent confirmation bias.
 
+
+> **Implementation**: Built
+
 **Topic**: [Neuro — Cognitive Knowledge Layer](./INDEX.md)
 **Prerequisites**: [01-six-knowledge-types.md](./01-six-knowledge-types.md), [06-hdc-knowledge-encoding.md](./06-hdc-knowledge-encoding.md)
 **Key sources**:

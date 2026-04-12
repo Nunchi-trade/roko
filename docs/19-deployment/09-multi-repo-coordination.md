@@ -5,6 +5,9 @@
 > covers the isolation model, shared resources, cross-repo knowledge via the Agent Mesh,
 > scheduling priorities, and the multi-repo loading algorithm.
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview

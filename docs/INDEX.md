@@ -8,6 +8,19 @@ has its own folder with multiple sub-docs. For naming conventions, reframe rules
 and the authoritative source of truth, see `tmp/prd-migration/README.md` and
 `/Users/will/dev/nunchi/roko/refactoring-prd/`.
 
+## Start Here
+
+- **[QUICKSTART.md](QUICKSTART.md)** — 4-level graduated onboarding (60 seconds → deep dive)
+- **[STATUS.md](STATUS.md)** — Implementation status matrix (what's shipping vs. specified)
+- **[COMPARISON.md](COMPARISON.md)** — How Roko compares to LangChain, CrewAI, SWE-Agent, AutoGPT
+
+## Signal / Engram Naming
+
+> **Code ↔ Docs:** The universal data type is called **`Signal`** in the Rust codebase
+> (`crates/roko-core/src/signal.rs`) and **Engram** in these PRD documents. They are the
+> same concept. `Signal` = Engram. See [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md)
+> for the full naming map including all legacy-to-current renames.
+
 ## Topics
 
 - [`00-architecture/`](00-architecture/INDEX.md) — Architecture

@@ -5,6 +5,9 @@
 > **Tests**: 20 tests covering priority ordering, conflict detection, parallel
 > non-conflicting merges, retry logic
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Overview

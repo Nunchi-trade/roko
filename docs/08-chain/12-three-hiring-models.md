@@ -2,6 +2,9 @@
 
 > The Korai marketplace offers three hiring models: Random VRF (fast, cheap, for routine jobs), Blind Auction (competitive, for quality-sensitive jobs), and Direct Hire (guaranteed agent, 1.5× premium, for critical jobs). Each model optimizes for a different point on the speed-quality-cost frontier.
 
+
+> **Implementation**: Built
+
 **Topic**: [08-chain](./INDEX.md)
 **Prerequisites**: [10-spore-job-market.md](./10-spore-job-market.md), [11-sparrow-power-of-two-choices.md](./11-sparrow-power-of-two-choices.md)
 **Key sources**: `roko/tmp/implementation-plans/12b-chain-layer.md` §C, `refactoring-prd/04-knowledge-and-mesh.md`

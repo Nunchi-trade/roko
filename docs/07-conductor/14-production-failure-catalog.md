@@ -5,6 +5,9 @@
 > symptom, root cause, and the Conductor response that detects or
 > prevents recurrence.
 
+
+> **Implementation**: Built
+
 ---
 
 ## Summary

@@ -6,6 +6,9 @@
 > and planned implementations, explains the query model, and covers pruning, idempotence,
 > and concurrency guarantees.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## 1. Role in the Architecture

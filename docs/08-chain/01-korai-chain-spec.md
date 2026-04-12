@@ -2,6 +2,9 @@
 
 > A dedicated EVM chain for agent knowledge coordination: 400ms block time, agents as first-class citizens, HDC native precompile.
 
+
+> **Implementation**: Built
+
 **Topic**: [08-chain](./INDEX.md)
 **Prerequisites**: [00-vision-and-framing.md](./00-vision-and-framing.md)
 **Key sources**: `refactoring-prd/04-knowledge-and-mesh.md`, `bardo-backup/prd/14-chain/00-architecture.md`, `bardo-backup/tmp/agent-chain/02-chain-architecture.md`, `roko/tmp/implementation-plans/12b-chain-layer.md`

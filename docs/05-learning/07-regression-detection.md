@@ -4,6 +4,9 @@
 > **Wiring:** `LearningRuntime::record_completed_run()` → regression check
 > **Cross-references:** [06-task-metrics-and-baselines](06-task-metrics-and-baselines.md), [14-stability-mechanisms](14-stability-mechanisms.md), [15-collective-calibration-31x](15-collective-calibration-31x.md)
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Purpose

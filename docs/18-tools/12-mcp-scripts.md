@@ -3,6 +3,9 @@
 > Config-driven tool wrappers: scripts.toml format, executor, discovery,
 > collaboration scripts, knowledge-base scripts.
 
+
+> **Implementation**: Scaffold
+
 ---
 
 ## Overview

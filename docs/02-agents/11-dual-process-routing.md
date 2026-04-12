@@ -6,6 +6,9 @@
 > as applied to Roko's model tier routing, the CascadeRouter, the LinUCB bandit,
 > Pareto frontier computation, and anomaly detection.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## The Cognitive Model

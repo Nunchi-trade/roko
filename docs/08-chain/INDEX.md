@@ -90,13 +90,13 @@
 | Topic | Relationship |
 |---|---|
 | [00-architecture](../00-architecture/INDEX.md) | 5-layer taxonomy; chain is L2 scaffold + L1 framework |
-| [01-synapse](../01-synapse/INDEX.md) | Universal loop; chain heartbeat is a domain parameterization |
-| [04-gates](../04-gates/INDEX.md) | TxSimGate, WalletGate integrate into gate pipeline |
-| [05-tools](../05-tools/INDEX.md) | MCP services for agent economy, x402 payment |
+| [01-synapse](../00-architecture/INDEX.md) | Universal loop; chain heartbeat is a domain parameterization |
+| [04-gates](../04-verification/INDEX.md) | TxSimGate, WalletGate integrate into gate pipeline |
+| [05-tools](../18-tools/INDEX.md) | MCP services for agent economy, x402 payment |
 | [06-neuro](../06-neuro/INDEX.md) | HDC encoding shared between local NeuroStore and on-chain precompile |
-| [07-daimon](../07-daimon/INDEX.md) | Somatic markers modulate chain agent's ANALYZE step |
-| [09-oracle](../09-oracle/INDEX.md) | Chain predictions calibrated against actual outcomes |
-| [12-learn](../12-learn/INDEX.md) | Learning system uses reputation feedback |
+| [07-daimon](../09-daimon/INDEX.md) | Somatic markers modulate chain agent's ANALYZE step |
+| [09-oracle](../20-technical-analysis/INDEX.md) | Chain predictions calibrated against actual outcomes |
+| [12-learn](../05-learning/INDEX.md) | Learning system uses reputation feedback |
 | [14-identity-economy](../14-identity-economy/INDEX.md) | Broader identity context for Korai Passport |
 
 ---

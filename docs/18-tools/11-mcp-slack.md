@@ -3,6 +3,9 @@
 > 8 Slack API tools: messaging, channels, threads, reactions, files, user lookup.
 > Socket Mode and HTTP Mode operation.
 
+
+> **Implementation**: Scaffold
+
 ---
 
 ## Overview

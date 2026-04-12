@@ -4,6 +4,9 @@
 > **Theoretical basis:** Control theory (hysteresis, frequency separation), Ashby's Law
 > **Cross-references:** [04-cascade-router](04-cascade-router.md), [13-8-missing-feedback-loops](13-8-missing-feedback-loops.md), [07-regression-detection](07-regression-detection.md)
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Purpose

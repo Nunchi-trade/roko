@@ -5,6 +5,9 @@
 > entry requirements, capability grants, rate limits, slashing exposure, upgrade paths,
 > and the economic rationale behind the tier structure.
 
+
+> **Implementation**: Deferred
+
 ---
 
 ## 1. Tier Overview

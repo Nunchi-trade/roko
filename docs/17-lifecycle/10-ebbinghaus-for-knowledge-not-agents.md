@@ -6,6 +6,9 @@
 >
 > **Synapse traits**: Substrate (implements Ebbinghaus decay on stored Engrams), Scorer (confidence as primary score axis, modified by decay), Composer (budget-aware context assembly must account for decayed confidence when selecting Engrams)
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview

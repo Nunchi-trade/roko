@@ -6,6 +6,9 @@
 > scoped secrets per repository, secure storage patterns, Docker and Fly.io secret injection,
 > and the `${VAR}` interpolation system in roko.toml.
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Secret Resolution Order

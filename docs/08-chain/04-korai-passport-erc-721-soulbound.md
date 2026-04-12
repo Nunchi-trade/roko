@@ -2,6 +2,9 @@
 
 > Every agent on Korai has a non-transferable identity NFT: the Korai Passport. It carries capabilities, domain stakes, reputation tracks, TEE attestation, system prompt hash (ventriloquist defense), tier classification, and slash history.
 
+
+> **Implementation**: Built
+
 **Topic**: [08-chain](./INDEX.md)
 **Prerequisites**: [01-korai-chain-spec.md](./01-korai-chain-spec.md), [02-korai-token-economics.md](./02-korai-token-economics.md)
 **Key sources**: `roko/tmp/implementation-plans/12b-chain-layer.md` §A, `refactoring-prd/04-knowledge-and-mesh.md`

@@ -3,6 +3,9 @@
 > Roko's tool system: ToolDef pattern, ToolContext, ToolResult, ToolExecutor, and the
 > principles governing how tools compose within the Synapse Architecture.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Overview

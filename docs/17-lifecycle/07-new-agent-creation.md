@@ -6,6 +6,9 @@
 >
 > **Synapse traits**: Substrate (fresh Neuro store initialized, ready for restore), Router (fresh model routing), Gate (fresh gate pipeline)
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview

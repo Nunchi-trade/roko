@@ -8,6 +8,9 @@
 >
 > **Prerequisites**: [01-three-phase-cycle.md](01-three-phase-cycle.md), [02-nrem-replay.md](02-nrem-replay.md)
 
+
+> **Implementation**: Scaffold
+
 ---
 
 ## What REM Imagination Does
@@ -336,6 +339,353 @@ The REM phase is the most expensive phase of the dream cycle because it requires
 
 ---
 
+## Implementation details
+
+### SCM implementation per level
+
+#### Level 1: Association (seeing)
+
+The association engine scans episode pairs for co-occurrence patterns. It operates on the full episode batch without requiring causal structure.
+
+```rust
+pub struct AssociationEngine {
+    /// Minimum correlation strength to report.
+    strength_threshold: f64,   // default: 0.30, range: 0.10 - 0.80
+    /// Maximum correlations to return per batch.
+    max_correlations: usize,   // default: 20
+    /// Minimum episodes required to establish a correlation.
+    min_support: usize,        // default: 3
+}
+
+/// A detected association between two features across episodes.
+pub struct Association {
+    pub feature_a: String,
+    pub feature_b: String,
+    /// Co-occurrence rate in [0.0, 1.0].
+    pub strength: f64,
+    /// Number of episodes containing both features.
+    pub support: usize,
+    /// Classification: strong (>0.70), moderate (0.30-0.70), weak (<0.30).
+    pub classification: AssociationStrength,
+}
+
+pub enum AssociationStrength {
+    Strong,   // >0.70 co-occurrence
+    Moderate, // 0.30 - 0.70
+    Weak,     // <0.30 — filtered out by default
+}
+```
+
+The engine extracts discrete features from each episode (task type, model, tools used, gate outcomes, error categories) and computes pairwise co-occurrence rates. Correlations below `strength_threshold` are discarded. The correlation limit prevents flooding the staging buffer with low-value statistical noise.
+
+Pseudocode:
+
+```
+for each pair (feature_a, feature_b) in all_features:
+    episodes_with_a = count episodes containing feature_a
+    episodes_with_both = count episodes containing both
+    strength = episodes_with_both / episodes_with_a
+    if strength >= threshold and episodes_with_both >= min_support:
+        emit Association { feature_a, feature_b, strength }
+sort by strength descending
+take top max_correlations
+```
+
+Association outputs enter the staging buffer at confidence 0.20. They represent statistical patterns that may or may not reflect causal relationships.
+
+#### Level 2: Intervention (doing)
+
+The intervention engine builds on Level 1 by adding directionality. It takes a causal model (a directed graph of feature relationships) and simulates the effects of changing one variable while holding others constant.
+
+```rust
+pub struct InterventionEngine {
+    /// Source of causal structure. Built from episode data or loaded from NeuroStore.
+    causal_model: CausalGraph,
+    /// Maximum alternative actions to simulate per episode.
+    max_alternatives: usize,  // default: 3, range: 1 - 10
+}
+
+pub struct CausalGraph {
+    /// Directed edges: (cause, effect, strength).
+    edges: Vec<CausalEdge>,
+}
+
+pub struct CausalEdge {
+    pub cause: String,
+    pub effect: String,
+    pub strength: f64,
+    /// How many episodes support this edge.
+    pub evidence_count: usize,
+}
+```
+
+The causal model is constructed from Level 1 associations by applying temporal ordering: if feature A consistently appears before feature B across episodes, the edge direction is A -> B. Edges with fewer than 3 supporting episodes are excluded.
+
+Alternative action selection picks the top `max_alternatives` actions that the agent could have taken but did not, ranked by:
+
+1. Availability (the agent had access to this action at the time)
+2. Frequency (how often other episodes used this action in similar contexts)
+3. Diversity (at least one alternative should be structurally different from the chosen action)
+
+```rust
+fn select_alternatives(
+    episode: &Episode,
+    causal_graph: &CausalGraph,
+    all_episodes: &[Episode],
+    max_alternatives: usize,
+) -> Vec<AlternativeAction> {
+    let available_actions = infer_available_actions(episode, all_episodes);
+    let chosen = &episode.action;
+
+    available_actions
+        .into_iter()
+        .filter(|a| a != chosen)
+        .map(|action| {
+            let frequency = count_action_in_similar_context(
+                &action, episode, all_episodes
+            );
+            let diversity = action_distance(chosen, &action);
+            AlternativeAction { action, frequency, diversity }
+        })
+        .sorted_by(|a, b| {
+            // Rank by frequency, break ties by diversity
+            b.frequency.cmp(&a.frequency)
+                .then(b.diversity.partial_cmp(&a.diversity).unwrap_or(Ordering::Equal))
+        })
+        .take(max_alternatives)
+        .collect()
+}
+```
+
+Intervention outputs enter the staging buffer at confidence 0.25-0.30, depending on the causal edge strength supporting the prediction.
+
+#### Level 3: Counterfactual (imagining)
+
+The counterfactual engine implements Pearl's abduction-action-prediction framework.
+
+```rust
+pub struct CounterfactualEngine {
+    /// Maximum latent variables to infer during abduction.
+    max_latent_vars: usize,    // default: 5, range: 1 - 20
+    /// Search space pruning: only consider modifications within this
+    /// HDC similarity radius of the original episode.
+    pruning_radius: f32,       // default: 0.40, range: 0.20 - 0.70
+    /// Maximum depth of causal chain to traverse.
+    max_chain_depth: usize,    // default: 4
+}
+```
+
+The abduction algorithm infers latent state by working backward from the observed outcome:
+
+```
+ABDUCTION(episode, causal_graph):
+    observed_outcome = episode.outcome
+    candidate_states = []
+
+    // Walk backward through causal graph from outcome
+    for edge in causal_graph.edges_to(observed_outcome):
+        if edge.cause not in episode.observed_features:
+            // This is a latent variable — infer its value
+            inferred_value = most_likely_value(edge.cause, observed_outcome, causal_graph)
+            candidate_states.push((edge.cause, inferred_value, edge.strength))
+
+    // Rank by causal strength, take top max_latent_vars
+    return candidate_states.sort_by_strength().take(max_latent_vars)
+```
+
+Search space pruning uses HDC similarity to prevent the counterfactual engine from exploring implausible modifications. A modification is only considered if the modified episode's HDC vector remains within `pruning_radius` of the original. This bounds the counterfactual search to "nearby possible worlds" rather than arbitrary fantasies.
+
+```rust
+fn is_plausible_modification(
+    original: &HdcVector,
+    modified: &HdcVector,
+    pruning_radius: f32,
+) -> bool {
+    original.similarity(modified) >= (1.0 - pruning_radius)
+}
+```
+
+A pruning radius of 0.40 means the modified episode must share at least 60% structural similarity with the original. This keeps counterfactuals grounded while still allowing meaningful deviations.
+
+Counterfactual outputs enter the staging buffer at confidence 0.30.
+
+### Creativity modes implementation
+
+#### Combinational creativity
+
+The distance space for episode selection uses HDC Hamming distance. Two episodes are candidates for combinational creativity when their similarity falls below the dissimilarity threshold:
+
+```rust
+pub struct CombinationalConfig {
+    /// Minimum HDC distance between episodes for combination.
+    /// Lower similarity = more distant = higher creative potential.
+    dissimilarity_threshold: f32, // default: 0.55, range: 0.45 - 0.65
+    /// Maximum pairs to evaluate per dream cycle.
+    max_pairs: usize,             // default: 5
+    /// Minimum structural analogies required from the LLM.
+    min_analogies: usize,         // default: 3
+}
+```
+
+The threshold of 0.55 means episodes must share less than 55% structural similarity to be paired. Since random HDC vectors have ~0.50 similarity, this selects episodes that are slightly more related than pure noise — distant enough for creative tension, close enough to have some bridgeable structure.
+
+Episode pair selection:
+
+```
+for each pair (ep_a, ep_b) in replay_batch:
+    sim = ep_a.hdc_vector.similarity(ep_b.hdc_vector)
+    if sim < dissimilarity_threshold:
+        creative_pairs.push((ep_a, ep_b, sim))
+
+sort creative_pairs by similarity ascending  // most distant first
+take top max_pairs
+```
+
+#### Exploratory creativity
+
+The extreme multiplier controls how far parameters are pushed during boundary testing:
+
+```rust
+pub struct ExploratoryConfig {
+    /// Multiplier for "aggressive" exploration (push parameters to extremes).
+    extreme_multiplier: f64,     // default: 3.0, range: 2.0 - 10.0
+    /// Multiplier for "conservative" exploration (reduce parameters to minimums).
+    conservative_divisor: f64,   // default: 3.0, range: 2.0 - 10.0
+    /// Number of heuristics to explore per dream cycle.
+    max_heuristics: usize,       // default: 3
+}
+```
+
+The testing strategy for exploratory outputs uses a two-stage validation:
+
+1. **HDC boundary check**: the explored variant's HDC vector is compared against the original heuristic's vector. If similarity drops below 0.40, the exploration has gone too far — the variant is no longer meaningfully related to the original.
+2. **LLM sanity check**: the Homuncular Observer (from the hypnagogia engine) evaluates whether the extreme variant is coherent enough to test. This is a quick check (haiku-class model, ~50 tokens) that filters obvious nonsense.
+
+#### Transformational creativity
+
+The assumption enumeration algorithm identifies core assumptions by analyzing the heuristic's dependency structure:
+
+```rust
+pub struct TransformationalConfig {
+    /// Maximum assumptions to enumerate per heuristic.
+    max_assumptions: usize,      // default: 5, range: 3 - 10
+    /// Minimum confidence of heuristic to be worth transforming.
+    min_heuristic_confidence: f64, // default: 0.40
+}
+```
+
+Assumption enumeration:
+
+```
+ENUMERATE_ASSUMPTIONS(heuristic):
+    assumptions = []
+
+    // 1. Extract preconditions from the heuristic's content
+    preconditions = LLM_EXTRACT("List the preconditions this heuristic assumes", heuristic)
+
+    // 2. Identify implicit constraints
+    constraints = LLM_EXTRACT("What must be true for this to work?", heuristic)
+
+    // 3. Find environmental dependencies
+    dependencies = LLM_EXTRACT("What external conditions does this depend on?", heuristic)
+
+    // Combine, deduplicate, rank by centrality
+    assumptions = deduplicate(preconditions + constraints + dependencies)
+    rank by how many other assumptions depend on each one
+    return assumptions.take(max_assumptions)
+```
+
+The algorithm uses an LLM call (sonnet-class) to extract assumptions, then ranks them by centrality: assumptions that other assumptions depend on are more fundamental, and violating them produces more radical transformations.
+
+### Emotional depotentiation implementation
+
+Depotentiation applies to the episode's arousal marker, not to the agent's global arousal state. The distinction matters: the Daimon maintains a global PAD state that reflects the agent's current emotional baseline, plus per-episode arousal markers that record how the agent felt during specific experiences.
+
+```rust
+pub struct DepotentiationConfig {
+    /// Minimum depotentiation per cycle.
+    delta_min: f64,        // default: 0.3, range: 0.1 - 0.5
+    /// Maximum depotentiation per cycle.
+    delta_max: f64,        // default: 0.5, range: 0.3 - 0.8
+    /// Floor: arousal never drops below this value.
+    arousal_floor: f64,    // default: 0.05
+}
+
+fn depotentiate_episode(
+    episode: &mut Episode,
+    config: &DepotentiationConfig,
+) {
+    let delta = config.delta_min
+        + (config.delta_max - config.delta_min) * rand::random::<f64>();
+
+    episode.arousal = (episode.arousal - delta).max(config.arousal_floor);
+}
+```
+
+Clamping rules:
+- Arousal never drops below `arousal_floor` (0.05). A fully depotentiated episode still carries a trace of emotional significance.
+- Depotentiation is applied once per dream cycle per episode. An episode processed in multiple cycles receives cumulative depotentiation.
+- The random delta within `[delta_min, delta_max]` prevents uniform flattening — different episodes lose different amounts of emotional charge, preserving relative ordering.
+
+Domain tuning: for coding agents, depotentiation is applied more aggressively to compilation errors (they cause high arousal but teach little after the first occurrence) and less aggressively to novel architectural failures (they remain emotionally salient because they are rare and informative). This is controlled through a domain-specific weight table:
+
+```toml
+[dreams.depotentiation.domain_weights]
+compile_error = 1.5      # depotentiate faster
+test_failure = 1.0       # standard rate
+gate_rejection = 0.8     # slightly slower — gate rejections carry more signal
+architectural_error = 0.5 # preserve emotional weight — these are rare and important
+```
+
+The effective delta is `base_delta * domain_weight`, clamped to `[delta_min, delta_max]`.
+
+### Error handling
+
+| Error condition | Handling |
+|-----------------|----------|
+| No episodes from NREM to process | Skip REM phase, log info-level message, proceed to Integration |
+| Causal graph has no edges | Fall back to Level 1 (association only), skip Levels 2 and 3 |
+| LLM call for creativity mode fails | Retry once; on second failure, skip that mode and continue with remaining modes |
+| HDC deduplication finds all hypotheses are near-duplicates | Return the single highest-novelty hypothesis rather than an empty set |
+| Depotentiation would reduce arousal below floor | Clamp to floor value |
+| Episode has no PAD data | Skip depotentiation for that episode, log warning |
+
+### Integration wiring
+
+REM imagination connects to the runtime through `DreamCycle::run_rem()` in `roko-dreams/src/cycle.rs`:
+
+```
+orchestrate.rs
+  └─ DreamCycle::run()              // entry point
+       └─ DreamCycle::run_rem()     // REM phase
+            ├─ receive nrem_insights from NREM phase
+            ├─ CausalGraph::build_from_episodes()     // construct causal model
+            ├─ AssociationEngine::scan()               // Level 1
+            ├─ InterventionEngine::simulate()          // Level 2
+            ├─ CounterfactualEngine::imagine()         // Level 3
+            ├─ for each creativity_mode:
+            │    ├─ select_inputs()                    // episode pairs / heuristics
+            │    ├─ LlmProvider::generate()            // creative reasoning
+            │    └─ CounterfactualHypothesis::new()    // capture output
+            ├─ depotentiate_episodes()                 // emotional processing
+            ├─ deduplicate_hypotheses()                // HDC novelty filter
+            └─ return Vec<CounterfactualHypothesis>    // to Integration phase
+```
+
+### Test criteria
+
+1. **Association detection**: 10 synthetic episodes with a planted correlation (tool A always co-occurs with success) produces an Association with strength > 0.80.
+2. **Intervention simulation**: given a causal edge A -> B with strength 0.90, simulating the removal of A predicts the absence of B.
+3. **Counterfactual plausibility**: modified episode vectors stay within `pruning_radius` of the original. No counterfactual exceeds the similarity bound.
+4. **Combinational pair selection**: episodes paired for combination have HDC similarity below `dissimilarity_threshold`.
+5. **Exploratory boundary**: explored variants with similarity below 0.40 to the original are rejected by the HDC boundary check.
+6. **Transformational assumption extraction**: a heuristic with 3 known preconditions produces at least 3 enumerated assumptions.
+7. **Depotentiation bounds**: after depotentiation, all episode arousal values are in `[arousal_floor, original_arousal]`.
+8. **Deduplication**: two hypotheses with HDC similarity > 0.85 are merged into one. The surviving hypothesis is the one with higher novelty.
+9. **End-to-end**: a REM cycle with 10 NREM insights and 20 episodes produces at least 5 hypotheses in the staging buffer.
+
+---
+
 ## Cross-References
 
 | Document | Relevance |
@@ -344,4 +694,4 @@ The REM phase is the most expensive phase of the dream cycle because it requires
 | [04-consolidation-and-staging.md](04-consolidation-and-staging.md) | Integration phase evaluates REM hypotheses |
 | [06-hdc-counterfactual-synthesis.md](06-hdc-counterfactual-synthesis.md) | HDC operations for counterfactual vector manipulation |
 | [09-threat-simulation.md](09-threat-simulation.md) | Threat simulation theory and adversarial dreaming |
-| [../04-daimon/INDEX.md](../04-daimon/INDEX.md) | Daimon affect engine that receives depotentiation updates |
+| [../04-daimon/INDEX.md](../09-daimon/INDEX.md) | Daimon affect engine that receives depotentiation updates |

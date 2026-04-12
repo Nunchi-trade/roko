@@ -2,6 +2,9 @@
 
 > The NeuroStore trait defines the storage and retrieval interface for Neuro's persistent knowledge — init, query, ingest, decay, and gc — with the KnowledgeStore JSONL implementation as the primary backend.
 
+
+> **Implementation**: Built
+
 **Topic**: [Neuro — Cognitive Knowledge Layer](./INDEX.md)
 **Prerequisites**: [01-six-knowledge-types.md](./01-six-knowledge-types.md), [07-ebbinghaus-decay-with-tier.md](./07-ebbinghaus-decay-with-tier.md)
 **Key sources**:

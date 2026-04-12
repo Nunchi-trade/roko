@@ -8,6 +8,9 @@
 >
 > **Prerequisites**: [00-defense-in-depth.md](00-defense-in-depth.md)
 
+
+> **Implementation**: Specified
+
 ---
 
 ## The Problem: Runtime Checks Are Fragile

@@ -8,6 +8,9 @@
 >
 > **Prerequisites**: [01-three-phase-cycle.md](01-three-phase-cycle.md)
 
+
+> **Implementation**: Scaffold
+
 ---
 
 ## Trigger Conditions

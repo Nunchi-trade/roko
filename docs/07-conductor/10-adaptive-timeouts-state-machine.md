@@ -3,6 +3,9 @@
 > Phase timeouts by complexity band. Hard timeouts that are law,
 > not suggestions. PhaseTransition records for audit trails.
 
+
+> **Implementation**: Built
+
 ---
 
 ## The State Machine

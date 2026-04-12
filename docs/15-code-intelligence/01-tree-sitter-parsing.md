@@ -2,6 +2,9 @@
 
 > Language-agnostic, incremental AST parsing via tree-sitter grammars — the planned upgrade from heuristic line-by-line parsers to full structural analysis.
 
+
+> **Implementation**: Built
+
 **Topic**: [Code Intelligence](./INDEX.md)
 **Prerequisites**: [00-vision.md](./00-vision.md)
 **Key sources**: `bardo-backup/tmp/mori-refactor/10-code-intelligence.md`, `bardo-backup/tmp/death/tools/02-code-index.md`, `crates/roko-index/src/parser.rs`, `crates/roko-lang-rust/src/lib.rs`

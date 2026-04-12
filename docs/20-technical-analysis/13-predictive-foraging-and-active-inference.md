@@ -2,6 +2,9 @@
 
 > Every knowledge retrieval is a falsifiable prediction. The CalibrationTracker corrects biases at ~50ns per correction. Active inference (factorized discrete POMDP with 90 states) drives context selection via Expected Free Energy. This is the complete prediction-resolution-calibration loop.
 
+
+> **Implementation**: Specified
+
 **Topic**: [Technical Analysis](./INDEX.md)
 **Prerequisites**: [01-oracle-trait](./01-oracle-trait.md) for Oracle trait, [00-vision-ta-generalized](./00-vision-ta-generalized.md) for the universal prediction vision
 **Key sources**: `refactoring-prd/09-innovations.md` §VII, §XIX.A-C, `bardo-backup/tmp/agent-chain/10-predictive-foraging.md`, `tmp/implementation-plans/modelrouting/12-advanced-patterns.md`

@@ -3,7 +3,7 @@
 > Regulatory frameworks, compliance standards, and legal precedents relevant to autonomous agent operation, financial services, and AI governance.
 
 **Topic**: [References](./INDEX.md)
-**Prerequisites**: [Architecture](../00-architecture/INDEX.md), [Harness](../03-harness/INDEX.md)
+**Prerequisites**: [Architecture](../00-architecture/INDEX.md), [Harness](../04-verification/INDEX.md)
 **Key sources**: `bardo-backup/prd/shared/citations.md` §§8, 12, `refactoring-prd/09-innovations.md` §IX
 
 ---

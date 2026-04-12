@@ -9,6 +9,9 @@
 > **Prerequisites**: `03-digital-pheromones.md` (what gets transported),
 > `05-pheromone-scope.md` (Mesh scope definition)
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview
@@ -111,17 +114,151 @@ deltas expire after a configurable TTL (default: 7 days).
 This is critical for asynchronous coordination: an agent that runs overnight should find all
 pheromone signals deposited by daytime agents when it boots in the morning.
 
-### WebSocket Message Types
+### WebSocket message types
 
 | Message Type | Direction | Content |
 |-------------|-----------|---------|
-| `PheromoneSync` | Server → Agent | Batch of pheromone Engrams from Collective peers |
-| `PheromoneImmediate` | Server → Agent | High-priority pheromone (Threat, high-intensity Anomaly) |
-| `PheromoneDelta` | Agent → Server | New pheromone deposits for relay to Collective |
+| `PheromoneSync` | Server -> Agent | Batch of pheromone Engrams from Collective peers |
+| `PheromoneImmediate` | Server -> Agent | High-priority pheromone (Threat, high-intensity Anomaly) |
+| `PheromoneDelta` | Agent -> Server | New pheromone deposits for relay to Collective |
 | `KnowledgeSync` | Bidirectional | NeuroStore entries promoted to Mesh scope |
-| `MorphogeneticBroadcast` | Agent → Server → Peers | Role vector and specialization signals |
-| `VersionVector` | Agent → Server | Sequence numbers for dedup and delta computation |
-| `Heartbeat` | Agent → Server | Liveness signal (every 30s) |
+| `MorphogeneticBroadcast` | Agent -> Server -> Peers | Role vector and specialization signals |
+| `VersionVector` | Agent -> Server | Sequence numbers for dedup and delta computation |
+| `Heartbeat` | Agent -> Server | Liveness signal (every 30s) |
+
+### Message ordering and priority
+
+WebSocket messages are ordered by a two-tier priority queue at the sender. High-priority
+messages (Threat pheromones, role conflict alerts) preempt batched sync messages.
+
+```rust
+/// Priority levels for outbound WebSocket messages.
+/// Lower numeric value = higher priority = sent first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum MeshPriority {
+    /// Threat pheromones, role conflict alerts, niche vacancy alerts.
+    /// Sent immediately, bypassing the batch interval.
+    Critical = 0,
+    /// PheromoneImmediate (intensity > immediate_threshold).
+    High = 1,
+    /// Standard batched sync: PheromoneSync, KnowledgeSync, MorphogeneticBroadcast.
+    Normal = 2,
+    /// Heartbeat, VersionVector exchanges, telemetry.
+    Low = 3,
+}
+
+/// Outbound message queue with priority ordering.
+///
+/// Uses a `BinaryHeap` keyed on `(priority, sequence)` to maintain
+/// FIFO order within the same priority level.
+///
+/// # Flow control
+///
+/// When the queue exceeds `max_pending` messages, the oldest `Low`
+/// priority messages are dropped first, then `Normal`. `Critical` and
+/// `High` messages are never dropped — if the queue is full of critical
+/// messages, backpressure propagates to the caller via `try_send`.
+pub struct PriorityOutbox {
+    queue: BinaryHeap<Reverse<(MeshPriority, u64, MeshMessage)>>,
+    next_seq: u64,
+    /// Maximum pending messages before flow control kicks in.
+    /// Default: 1024. Range: [64, 65536].
+    max_pending: usize,
+}
+
+impl PriorityOutbox {
+    /// Enqueue a message. Returns `Err(QueueFull)` if the queue is at capacity
+    /// and no lower-priority message can be evicted.
+    pub fn enqueue(
+        &mut self,
+        priority: MeshPriority,
+        msg: MeshMessage,
+    ) -> Result<(), QueueFull> {
+        if self.queue.len() >= self.max_pending {
+            // Try to evict lowest-priority message
+            if !self.evict_lowest(priority) {
+                return Err(QueueFull);
+            }
+        }
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        self.queue.push(Reverse((priority, seq, msg)));
+        Ok(())
+    }
+}
+```
+
+**Ordering guarantees**: Messages within the same priority level are delivered in FIFO order
+(sequence number tiebreak). Across priority levels, higher-priority messages are sent first.
+The WebSocket transport itself is ordered (TCP), so server-side delivery order matches the
+sender's priority queue order.
+
+**Flow control on overflow**: When the outbox hits `max_pending`, the sender evicts the oldest
+message at the lowest populated priority level. If only `Critical` messages remain, the
+`enqueue` call returns `Err(QueueFull)` and the caller must decide whether to block or drop.
+In practice, this only happens during sustained network partitions where the WebSocket write
+buffer is full.
+
+### Full message envelope schema
+
+Every message on the wire (both WebSocket and Iroh) uses a common envelope:
+
+```rust
+/// Wire-format envelope for all Mesh messages.
+///
+/// Serialized with postcard (compact binary). The envelope wraps every
+/// message type and provides the fields needed for routing, dedup,
+/// authentication, and priority handling.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeshEnvelope {
+    /// Protocol version. Current: 1. Receivers reject unknown versions.
+    pub version: u8,
+
+    /// Unique message ID (UUIDv7 for time-ordering).
+    pub message_id: [u8; 16],
+
+    /// Sender's agent ID.
+    pub sender: AgentId,
+
+    /// Sender's Collective ID.
+    pub collective_id: CollectiveId,
+
+    /// Monotonically increasing sequence number from this sender.
+    /// Used by version vectors for dedup.
+    pub seq: u64,
+
+    /// Message priority (mapped from MeshPriority enum).
+    pub priority: u8,
+
+    /// Unix timestamp in milliseconds when the message was created.
+    pub timestamp_ms: u64,
+
+    /// Domain this message belongs to (for topic routing).
+    /// Empty string means "all domains" (e.g., heartbeats).
+    pub domain: String,
+
+    /// The payload, tagged by type.
+    pub payload: MeshPayload,
+
+    /// Ed25519 signature over (version || message_id || sender || seq || payload_hash).
+    /// Verified by receivers before processing.
+    pub signature: [u8; 64],
+}
+
+/// Tagged union of all possible message payloads.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MeshPayload {
+    PheromoneDelta(Vec<PheromoneEntry>),
+    PheromoneImmediate(PheromoneEntry),
+    KnowledgeSync(Vec<KnowledgeEntry>),
+    MorphogeneticBroadcast(MorphogeneticPheromone),
+    NicheVacancy(NicheVacancy),
+    RoleConflict(RoleConflict),
+    VersionVector(HashMap<AgentId, u64>),
+    Heartbeat { uptime_secs: u64, load: f32 },
+}
+```
 
 ---
 
@@ -141,13 +278,13 @@ Roko:
 3. **iroh-blobs**: Content-addressed blob transfer using BLAKE3 hashing. Used for knowledge
    bundle exchange.
 
-### Connection Lifecycle
+### Connection lifecycle
 
 1. **Bind**: `Endpoint::builder()` with secret key, ALPN identifier (`roko/mesh/1`), and
    relay configuration. Spawns background tasks for relay connection and hole-punching.
 2. **Publish**: Agent publishes its addressing information via pkarr (DNS-over-HTTPS) so peers
    can resolve its `NodeId` to a network address.
-3. **Accept**: Incoming connections are screened by Collective membership — only agents
+3. **Accept**: Incoming connections are screened by Collective membership -- only agents
    registered in the same Collective (verified via ERC-8004 registry or local config) are
    accepted.
 4. **Connect**: Outbound connections dial peers by `NodeId`. Iroh resolves via pkarr/DNS,
@@ -157,6 +294,53 @@ Roko:
 6. **Gossip**: Joins topic-based gossip channels for pheromone propagation.
 7. **Shutdown**: Close connections, stop accept loop, unpublish from pkarr. 5-second graceful
    timeout.
+
+### Automatic relay fallback
+
+When direct QUIC hole-punching fails (~30% of connections, primarily symmetric NAT), Iroh
+falls back to relay servers automatically. The fallback is transparent to application code.
+
+```rust
+/// Iroh relay configuration.
+///
+/// The relay serves two purposes:
+/// 1. STUN-like address discovery (always used, even for direct connections)
+/// 2. Traffic relay when direct connection fails
+///
+/// Cost model: relay traffic is metered. Each relayed byte counts against
+/// the mesh budget. Direct connections have zero relay cost.
+pub struct IrohRelayConfig {
+    /// Relay mode selection.
+    /// - "default": Use n0's public relay network (free tier: 1GB/month)
+    /// - "custom": Use a self-hosted relay at `relay_url`
+    /// - "disabled": No relay. Direct connections only (LAN-only operation)
+    pub mode: RelayMode,
+
+    /// URL of self-hosted relay server.
+    /// Only used when mode = "custom".
+    /// Example: "https://relay.my-mesh.example.com"
+    pub relay_url: Option<String>,
+
+    /// Maximum relay bandwidth per agent per day (bytes).
+    /// Default: 100 MB (104_857_600). Range: [1_048_576, 10_737_418_240].
+    /// Prevents runaway relay costs from sustained fallback.
+    pub max_relay_bytes_per_day: u64,
+
+    /// Connection timeout before declaring relay fallback.
+    /// Default: 5 seconds. Range: [1, 30] seconds.
+    pub direct_connect_timeout: Duration,
+}
+```
+
+**Fallback sequence**: Iroh attempts direct connection first (UDP hole-punch via STUN). If no
+response arrives within `direct_connect_timeout` (default: 5s), traffic routes through the
+relay. The switch is per-connection, not global -- an agent can have direct connections to
+some peers and relayed connections to others simultaneously.
+
+**Cost model**: Relayed traffic counts against `max_relay_bytes_per_day`. When the limit is
+reached, new relay connections are refused (direct-only or no connection). The daily counter
+resets at midnight UTC. Pheromone messages are small (~200 bytes each), so 100 MB supports
+roughly 500,000 pheromone exchanges per day through the relay -- well above normal operation.
 
 ### Pheromone Propagation via iroh-gossip
 
@@ -174,8 +358,83 @@ topics for domains they operate in, preventing unnecessary message delivery.
 no coordination needed. The existing exponential decay formula applies unchanged.
 
 When gossip receivers fall behind (`Event::Lagged`), the message is dropped and logged at WARN
-level. Pheromone loss is acceptable — signals are fuzzy by nature, and a lost pheromone will
+level. Pheromone loss is acceptable -- signals are fuzzy by nature, and a lost pheromone will
 likely be re-deposited or become irrelevant before its absence matters.
+
+**Domain list management**: Each agent subscribes to gossip topics based on its configured
+domains. The domain list is set at startup from `roko.toml` and can change at runtime when a
+domain plugin is loaded or unloaded.
+
+```rust
+/// Manages gossip topic subscriptions for an agent.
+///
+/// Topic IDs are deterministic: `blake3(format!("roko/pheromone/{domain}/{regime}"))`.
+/// When the agent's domain list changes, the manager subscribes to new topics
+/// and unsubscribes from removed ones.
+pub struct GossipTopicManager {
+    /// Currently subscribed topics, keyed by (domain, regime).
+    active_topics: HashMap<(String, String), TopicSubscription>,
+
+    /// Domains this agent operates in. Set from config, updated at runtime.
+    domains: Vec<String>,
+
+    /// Known regimes per domain. Updated when regime-change pheromones arrive.
+    regimes: HashMap<String, String>,
+}
+
+impl GossipTopicManager {
+    /// Recompute subscriptions after a domain or regime change.
+    ///
+    /// Subscribes to new (domain, regime) pairs. Unsubscribes from
+    /// pairs no longer in the active set. Existing subscriptions
+    /// for unchanged pairs are left alone (no reconnect churn).
+    pub fn reconcile(&mut self, endpoint: &Endpoint) -> Result<(), MeshError> {
+        let desired: HashSet<(String, String)> = self.domains.iter()
+            .flat_map(|d| {
+                let regime = self.regimes.get(d).cloned()
+                    .unwrap_or_else(|| "default".into());
+                vec![(d.clone(), regime)]
+            })
+            .collect();
+
+        // Unsubscribe from removed topics
+        self.active_topics.retain(|key, sub| {
+            if !desired.contains(key) {
+                sub.leave();
+                false
+            } else {
+                true
+            }
+        });
+
+        // Subscribe to new topics
+        for key in &desired {
+            if !self.active_topics.contains_key(key) {
+                let topic_id = Self::topic_id(&key.0, &key.1);
+                let sub = endpoint.join_topic(topic_id)?;
+                self.active_topics.insert(key.clone(), sub);
+            }
+        }
+        Ok(())
+    }
+
+    fn topic_id(domain: &str, regime: &str) -> TopicId {
+        let input = format!("roko/pheromone/{domain}/{regime}");
+        TopicId::from(blake3::hash(input.as_bytes()))
+    }
+}
+```
+
+**Regime detection**: When the Collective detects a regime change (via regime-change pheromones
+from `roko-conductor`), the topic manager creates a new topic for the new regime and begins
+a 60-second overlap period where the agent subscribes to both old and new regime topics. After
+the overlap, the old topic subscription is dropped. This prevents message loss during
+transitions.
+
+**Topic lifecycle**: Topics are created on first subscription and garbage-collected when no
+agents remain subscribed. The underlying HyParView protocol handles peer membership -- when
+the last subscriber leaves, the topic becomes dormant. Rejoining a dormant topic is
+indistinguishable from joining a new one.
 
 ### Knowledge Exchange via iroh-blobs
 
@@ -254,6 +513,76 @@ Cross-collective discovery requires an index:
    gossip topics, discover additional peers through HyParView peer sampling.
 
 Cross-collective discovery is off by default (`config.discovery.cross_collective_enabled = false`).
+
+### Caching strategy and stale data handling
+
+ERC-8004 queries hit an on-chain registry, which is expensive (gas for writes, RPC latency for
+reads). The discovery layer caches Agent Card data locally with a TTL-based invalidation
+strategy.
+
+```rust
+/// Local cache for ERC-8004 Agent Card data.
+///
+/// Reduces on-chain queries to the poll interval (default: 300s).
+/// Stale entries are usable but flagged — an agent whose card hasn't
+/// been refreshed may have changed endpoints or gone offline.
+pub struct AgentCardCache {
+    /// Cached cards, keyed by agent ID.
+    cards: HashMap<AgentId, CachedCard>,
+
+    /// How long a cached card is considered fresh.
+    /// Default: 300 seconds (matches poll interval).
+    /// Range: [60, 3600] seconds.
+    pub fresh_ttl: Duration,
+
+    /// How long a stale card is kept before eviction.
+    /// A stale card is still returned (with a `stale` flag) but triggers
+    /// an async refresh. Default: 3600 seconds. Range: [300, 86400].
+    pub stale_ttl: Duration,
+
+    /// Maximum cached entries. LRU eviction beyond this limit.
+    /// Default: 1000. Range: [100, 100_000].
+    pub max_entries: usize,
+}
+
+struct CachedCard {
+    card: AgentCard,
+    fetched_at: Instant,
+}
+
+impl AgentCardCache {
+    /// Look up an agent's card.
+    ///
+    /// Returns `Fresh(card)` if within fresh_ttl.
+    /// Returns `Stale(card)` if within stale_ttl (triggers async refresh).
+    /// Returns `Miss` if not cached or beyond stale_ttl.
+    pub fn get(&self, agent_id: &AgentId) -> CacheLookup {
+        match self.cards.get(agent_id) {
+            Some(entry) => {
+                let age = entry.fetched_at.elapsed();
+                if age < self.fresh_ttl {
+                    CacheLookup::Fresh(entry.card.clone())
+                } else if age < self.stale_ttl {
+                    CacheLookup::Stale(entry.card.clone())
+                } else {
+                    CacheLookup::Miss
+                }
+            }
+            None => CacheLookup::Miss,
+        }
+    }
+}
+```
+
+**Stale data handling**: When a stale card is returned, the caller proceeds with the cached
+endpoints while an async refresh runs in the background. If the refresh reveals changed
+endpoints (e.g., new Iroh NodeId), existing connections to the old endpoints are drained
+gracefully (5-second timeout) before switching. If the refresh fails (RPC error), the stale
+card remains in use until its `stale_ttl` expires.
+
+**Event-driven invalidation**: In addition to polling, the discovery layer listens for
+ERC-8004 `AgentUpdated` and `AgentRemoved` events via an Ethereum event subscription. These
+events invalidate the cache entry immediately, avoiding stale data between poll intervals.
 
 ---
 
@@ -350,21 +679,94 @@ source:
 
 ```rust
 /// Version vector for deduplication and delta computation.
-/// Maps agent_id → highest_seen_sequence_number.
-type VersionVector = HashMap<AgentId, u64>;
+/// Maps agent_id -> highest_seen_sequence_number.
+///
+/// Sequence numbers are u64, assigned by each agent's local counter.
+/// The counter is persisted to disk so it survives restarts.
+pub struct VersionVector {
+    /// Map from agent_id to highest seen sequence number.
+    entries: HashMap<AgentId, u64>,
+}
+
+/// Per-agent sequence number generator.
+///
+/// Each agent maintains a monotonically increasing counter. The counter
+/// is persisted to `{data_dir}/mesh_seq.u64` (8 bytes, little-endian).
+/// On startup, the counter loads from disk. If the file is missing or
+/// corrupt, the counter resets to 0 — receivers handle this via the
+/// wraparound recovery protocol.
+pub struct SeqGenerator {
+    current: AtomicU64,
+    persist_path: PathBuf,
+}
+
+impl SeqGenerator {
+    /// Allocate the next sequence number.
+    /// The counter increments atomically — safe for concurrent deposits.
+    pub fn next(&self) -> u64 {
+        let seq = self.current.fetch_add(1, Ordering::Relaxed);
+        // Async persist — best effort. If the write fails, the counter
+        // is still correct in memory. It will be re-persisted on the
+        // next successful write.
+        self.persist_async(seq + 1);
+        seq
+    }
+}
 ```
 
-### How Deduplication Works
+### Sequence number assignment
+
+Each outbound message gets a sequence number from the agent's local `SeqGenerator`. The
+number is embedded in the `MeshEnvelope.seq` field. Sequence numbers are per-agent, not
+per-topic or per-message-type: all messages from agent A share a single counter. This keeps
+the version vector compact (one entry per agent, not per topic).
+
+### How deduplication works
 
 1. Agent A deposits pheromone with seq=42
-2. Pheromone arrives via Iroh (fast): Agent B checks version vector, seq 42 is new → process,
+2. Pheromone arrives via Iroh (fast): Agent B checks version vector, seq 42 is new -> process,
    update vector to {A: 42}
 3. Same pheromone arrives via WebSocket (slower): Agent B checks version vector, seq 42
-   already seen → drop silently
+   already seen -> drop silently
 
 This ensures exactly-once processing regardless of how many transports deliver the message.
 
-### Delta Sync on Reconnection
+### Wraparound recovery
+
+A `u64` counter at 1 message per millisecond takes ~584 million years to wrap. In practice,
+wraparound does not happen. The recovery protocol exists for a different scenario: **counter
+reset** after data loss (disk failure, corrupt persist file, fresh deployment with new state).
+
+When agent A's counter resets to 0 but agent B's version vector says `{A: 5000}`, agent B
+would reject all of A's messages as "already seen."
+
+```
+Recovery protocol:
+1. Agent A detects its counter is lower than peers expect (peers send NACK
+   with their last-seen seq for A).
+2. Agent A broadcasts a `SeqReset` message (signed, includes new starting seq = 0
+   and a reset_epoch that increments on each reset).
+3. Receivers update their version vector: set A's entry to 0, record the new
+   reset_epoch. Future messages from A are accepted starting from seq 0.
+4. The reset_epoch prevents replay attacks: a message with an old reset_epoch
+   is rejected even if the seq is valid for the current epoch.
+```
+
+```rust
+/// Sent when an agent's sequence counter resets (data loss, fresh deploy).
+/// Receivers must update their version vector to accept messages from seq 0.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeqReset {
+    pub agent_id: AgentId,
+    /// Monotonically increasing epoch. Each reset increments this.
+    /// Persisted alongside the sequence counter.
+    pub reset_epoch: u64,
+    /// Ed25519 signature over (agent_id || reset_epoch).
+    pub signature: [u8; 64],
+}
+```
+
+### Delta sync on reconnection
 
 When an agent reconnects after being offline:
 

@@ -2,6 +2,9 @@
 
 > The medium cognitive frequency — periodic reflection, plan re-evaluation, and calibration checking.
 
+
+> **Implementation**: Specified
+
 **Topic**: [16-heartbeat](./INDEX.md)
 **Prerequisites**: [03-three-cognitive-speeds.md](./03-three-cognitive-speeds.md), [04-gamma-reactive-loop.md](./04-gamma-reactive-loop.md)
 **Key sources**: `refactoring-prd/02-five-layers.md` §Adaptive Clock, legacy `bardo-backup/prd/01-golem/18-cortical-state.md` §Three Concurrent Scales, `implementation-plans/12a-cognitive-layer.md` §I2

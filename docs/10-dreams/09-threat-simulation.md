@@ -8,6 +8,9 @@
 >
 > **Prerequisites**: [03-rem-imagination.md](03-rem-imagination.md)
 
+
+> **Implementation**: Scaffold
+
 ---
 
 ## Threat Simulation Theory
@@ -149,4 +152,4 @@ The Daimon's affect engine (see `../04-daimon/INDEX.md`) interacts with threat s
 |----------|-----------|
 | [03-rem-imagination.md](03-rem-imagination.md) | REM phase that threat simulation operates within |
 | [04-consolidation-and-staging.md](04-consolidation-and-staging.md) | Staging buffer where threat rehearsal outputs are stored |
-| [../04-daimon/INDEX.md](../04-daimon/INDEX.md) | Daimon affect engine for threat salience and depotentiation |
+| [../04-daimon/INDEX.md](../09-daimon/INDEX.md) | Daimon affect engine for threat salience and depotentiation |

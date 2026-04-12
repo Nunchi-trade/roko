@@ -7,6 +7,9 @@
 > centralization safeguards. This document specifies each model's protocol, on-chain
 > mechanics, agent eligibility, fee structure, and anti-gaming properties.
 
+
+> **Implementation**: Deferred
+
 ---
 
 ## 1. Job Market Architecture

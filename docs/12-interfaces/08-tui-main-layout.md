@@ -2,6 +2,9 @@
 
 > The terminal dashboard layout: agent list, plan list, mesh, health panels, agent detail, gate results, Daimon state, Neuro tiers, predictions, and Spectre viewport.
 
+
+> **Implementation**: Scaffold
+
 **Topic**: [12-interfaces](./INDEX.md)
 **Prerequisites**: [07-rosedust-design-language.md](./07-rosedust-design-language.md)
 **Key sources**: `refactoring-prd/06-interfaces.md` §4, `roko-cli/src/tui/`, `bardo-backup/prd/18-interfaces/03-tui.md`, `bardo-backup/prd/18-interfaces/01-cli.md`

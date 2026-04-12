@@ -2,6 +2,9 @@
 
 > A 90-state tractable model that makes active inference practical — not modeling the world, but modeling the agent's epistemic situation.
 
+
+> **Implementation**: Specified
+
 **Topic**: [16-heartbeat](./INDEX.md)
 **Prerequisites**: [10-active-inference-compute-allocation.md](./10-active-inference-compute-allocation.md)
 **Key sources**: `refactoring-prd/09-innovations.md` §XIX-A, Koudahl et al. 2024 (arXiv:2412.10425), VERSES AI Genius platform

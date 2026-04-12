@@ -2,6 +2,9 @@
 
 > Correlation is not causation. The causal discovery subsystem uses Pearl's structural causal models, Granger causality, and interventional experiments (via mirage-rs simulation) to discover genuine causal relationships in structured domains.
 
+
+> **Implementation**: Specified
+
 **Topic**: [Technical Analysis](./INDEX.md)
 **Prerequisites**: [01-oracle-trait](./01-oracle-trait.md) for prediction integration, [06-hyperdimensional-ta](./06-hyperdimensional-ta.md) for pattern encoding
 **Key sources**: `bardo-backup/prd/23-ta/04-causal-microstructure-discovery.md`
@@ -439,6 +442,325 @@ neuro.store(KnowledgeEntry {
     ..Default::default()
 }).await?;
 ```
+
+---
+
+## Implementation details
+
+### PC algorithm: conditional independence test
+
+The PC algorithm uses the **partial correlation test** as its conditional independence test. For continuous variables X, Y conditioned on set Z:
+
+```rust
+/// Conditional independence test via partial correlation.
+///
+/// Tests H0: X ⊥ Y | Z (X is independent of Y given Z).
+///
+/// Method: Compute partial correlation r_{XY|Z} from the
+/// correlation matrix using recursive formula (Baba et al., 2004).
+/// Convert to a test statistic via Fisher's z-transform:
+///   z = 0.5 * ln((1+r)/(1-r)) * sqrt(n - |Z| - 3)
+///
+/// Under H0, z ~ N(0,1). Reject H0 if |z| > z_{alpha/2}.
+pub fn conditional_independence_test(
+    data: &DataFrame,
+    x: VariableId,
+    y: VariableId,
+    z: &[VariableId],
+    alpha: f64,
+) -> bool {
+    let n = data.n_rows();
+    let r_xy_z = partial_correlation(data, x, y, z);
+    let z_stat = 0.5 * ((1.0 + r_xy_z) / (1.0 - r_xy_z)).ln()
+        * ((n as f64 - z.len() as f64 - 3.0).max(1.0)).sqrt();
+    let critical = normal_quantile(1.0 - alpha / 2.0); // two-sided
+    z_stat.abs() < critical // true = independent
+}
+```
+
+### Significance level adaptation
+
+The significance level `alpha` adapts based on the number of variables and available data:
+
+| n_variables | n_observations | Recommended alpha |
+|---|---|---|
+| < 10 | > 1000 | 0.05 (standard) |
+| 10 - 50 | > 1000 | 0.01 (Bonferroni-style correction) |
+| > 50 | > 1000 | 0.001 |
+| any | < 100 | 0.10 (relaxed, low power) |
+
+```rust
+/// Adapt alpha based on problem scale.
+///
+/// Uses Bonferroni-like correction: alpha_adj = base_alpha / n_tests_estimate.
+/// The n_tests estimate is O(p^2) where p = number of variables.
+pub fn adaptive_alpha(n_variables: usize, n_observations: usize, base_alpha: f64) -> f64 {
+    let n_tests = n_variables * (n_variables - 1) / 2; // upper bound on pairwise tests
+    let bonferroni = base_alpha / n_tests.max(1) as f64;
+    // Floor at 1e-6 to prevent test from never rejecting
+    let alpha = bonferroni.max(1e-6);
+    // Relax if sample size is too small for the correction
+    if n_observations < 10 * n_variables {
+        (alpha * 10.0).min(0.1)
+    } else {
+        alpha
+    }
+}
+```
+
+### Maximum conditioning set formula
+
+The PC algorithm tests conditional independence with conditioning sets of increasing size. The maximum conditioning set size controls the computational cost:
+
+```
+max_conditioning_set = min(
+    max_neighbors - 1,         // can't condition on more than the neighbor count
+    floor(log2(n_observations)) - 1,  // statistical power limit
+    user_max                   // user override (default: 5)
+)
+```
+
+**Rationale**: Conditioning on k variables requires estimating a (k+2)-dimensional distribution. With n observations, you need roughly `2^(k+2)` samples for reliable estimation. So `k < log2(n) - 2` is the practical limit.
+
+### Meek's orientation rules
+
+After v-structure orientation, Meek's four rules orient remaining undirected edges:
+
+```
+Rule 1 (Acyclicity): If X → Y — Z and X and Z are not adjacent, orient Y → Z.
+Rule 2 (Directed path): If X → Y → Z and X — Z, orient X → Z.
+Rule 3 (Two directed paths): If X — Y, X → Z, X → W, Y — Z, Y — W,
+        and Z and W are not adjacent, orient X → Y.
+Rule 4 (Transitive closure): If X — Y, Y → Z, X — Z, orient X → Z.
+```
+
+Apply rules repeatedly until no new orientations are produced. This converges in at most O(p^2) iterations where p is the number of variables.
+
+### Granger causality extensions
+
+#### Time alignment for cross-protocol tests
+
+DeFi protocols produce observations at different cadences. Before running Granger tests, time-align the series:
+
+```rust
+/// Align two time series to a common time grid.
+///
+/// Method: snap each observation to the nearest grid point.
+/// Grid spacing = max(cadence_x, cadence_y).
+/// Missing values are forward-filled (last observation carried forward).
+pub fn time_align(
+    x: &TimeSeries,
+    y: &TimeSeries,
+    grid_spacing: Duration,
+) -> (Vec<f64>, Vec<f64>) {
+    let start = x.start().min(y.start());
+    let end = x.end().max(y.end());
+    let n_points = ((end - start).as_secs_f64() / grid_spacing.as_secs_f64()).ceil() as usize;
+
+    let mut aligned_x = Vec::with_capacity(n_points);
+    let mut aligned_y = Vec::with_capacity(n_points);
+
+    for i in 0..n_points {
+        let t = start + grid_spacing * i as u32;
+        aligned_x.push(x.value_at_or_before(t).unwrap_or(f64::NAN));
+        aligned_y.push(y.value_at_or_before(t).unwrap_or(f64::NAN));
+    }
+
+    (aligned_x, aligned_y)
+}
+```
+
+#### MEV label generation
+
+The MEV-adjusted Granger test requires labels identifying which transactions are MEV-related:
+
+```rust
+/// Heuristic MEV labeling for transaction sequences.
+///
+/// Labels a transaction as MEV if any of:
+/// 1. It is part of a sandwich bundle (buy-victim-sell in same block).
+/// 2. It is a backrun (immediately follows a large swap in the same block).
+/// 3. It interacts with a known MEV relay (Flashbots, MEV-Boost builder).
+/// 4. Its gas price is >3x the block median (priority fee bidding).
+pub fn label_mev_transactions(txs: &[Transaction], block: &Block) -> Vec<bool> {
+    let median_gas = median_gas_price(txs);
+    txs.iter().map(|tx| {
+        is_sandwich_component(tx, txs)
+            || is_backrun(tx, txs)
+            || is_known_mev_relay(&tx.from)
+            || tx.gas_price > median_gas * 3.0
+    }).collect()
+}
+```
+
+#### Bridge latency model for multi-chain tests
+
+Cross-chain Granger tests must account for message propagation delay:
+
+| Bridge type | Typical latency | Model |
+|---|---|---|
+| Native bridge (L1 -> L2) | 1 - 15 minutes | Fixed lag = 10 minutes |
+| Third-party bridge (LayerZero, Wormhole) | 2 - 30 minutes | Fixed lag = 15 minutes |
+| Optimistic rollup -> L1 | 7 days (dispute period) | Fixed lag = 7 days |
+| ZK rollup -> L1 | 1 - 4 hours (proof generation) | Fixed lag = 2 hours |
+
+The Granger test lag order `max_lag` is set to `ceil(bridge_latency / grid_spacing) + 2` to account for the bridge latency plus a buffer.
+
+### Do-operator on code: supported change formats
+
+The coding-domain do-operator supports these intervention types:
+
+```rust
+/// Supported code intervention formats for causal experiments.
+pub enum CodeIntervention {
+    /// Modify a function body.
+    FunctionBody {
+        file: PathBuf,
+        function_name: String,
+        new_body: String,
+    },
+    /// Add/remove a dependency.
+    DependencyChange {
+        crate_name: String,
+        action: DepAction, // Add, Remove, ChangeVersion
+    },
+    /// Modify a configuration value.
+    ConfigChange {
+        key: String,
+        old_value: String,
+        new_value: String,
+    },
+    /// Apply a diff patch.
+    Patch {
+        diff: String, // unified diff format
+    },
+}
+
+/// Observable timing model for coding experiments.
+///
+/// After applying a code change, measure these observables:
+pub struct CodingObservables {
+    pub compile_time_ms: u64,
+    pub test_pass_rate: f64,
+    pub test_duration_ms: u64,
+    pub clippy_warning_count: usize,
+    pub binary_size_bytes: u64,
+}
+```
+
+**Snapshot/restore**: Uses `git stash` for lightweight snapshots. For heavier experiments (dependency changes), creates a temporary git worktree. Restore is `git stash pop` or worktree deletion.
+
+### Backdoor adjustment: handling high-cardinality Z
+
+When the conditioning set Z contains high-cardinality variables (many unique values), direct enumeration of Z values is infeasible. Two mitigation strategies:
+
+1. **Binning**: For continuous Z variables, bin into quantiles (default: 10 bins). This trades precision for tractability.
+
+2. **Propensity score**: Replace Z with a 1-dimensional propensity score `e(Z) = P(X=1|Z)`. The backdoor adjustment becomes `sum over e(Z) bins of P(Y|X, e(Z)) * P(e(Z))`.
+
+```rust
+/// Backdoor adjustment with propensity score dimensionality reduction.
+///
+/// When |Z| > max_cardinality, collapses Z into a propensity score.
+pub fn backdoor_adjustment_propensity(
+    graph: &CausalGraph,
+    x: VariableId,
+    y: VariableId,
+    z: &[VariableId],
+    data: &DataFrame,
+    max_cardinality: usize,  // default: 100
+    n_bins: usize,           // default: 10
+) -> Option<f64> {
+    if !graph.satisfies_backdoor(x, y, z) {
+        return None;
+    }
+
+    let z_cardinality: usize = z.iter()
+        .map(|v| data.n_unique(v))
+        .product();
+
+    if z_cardinality <= max_cardinality {
+        // Direct adjustment
+        return backdoor_adjustment(graph, x, y, z, data);
+    }
+
+    // Propensity score collapse
+    let propensity = logistic_regression(data, x, z);
+    let binned_propensity = quantile_bin(&propensity, n_bins);
+    backdoor_adjustment(graph, x, y, &[binned_propensity], data)
+}
+```
+
+### Adequacy detection for backdoor sets
+
+Automatically find a valid backdoor set (if one exists):
+
+```rust
+/// Find a minimal valid backdoor adjustment set.
+///
+/// Algorithm: start with all non-descendants of X. Test the backdoor
+/// criterion. If valid, greedily remove variables while maintaining
+/// validity. Returns None if no valid backdoor set exists.
+pub fn find_backdoor_set(
+    graph: &CausalGraph,
+    x: VariableId,
+    y: VariableId,
+) -> Option<Vec<VariableId>> {
+    let descendants_x = graph.descendants(x);
+    let candidates: Vec<VariableId> = graph.all_variables()
+        .filter(|v| *v != x && *v != y && !descendants_x.contains(v))
+        .collect();
+
+    // Start with full candidate set and prune
+    let mut z = candidates.clone();
+    if !graph.satisfies_backdoor(x, y, &z) {
+        return None; // no valid backdoor set exists
+    }
+
+    // Greedy minimization
+    for candidate in &candidates {
+        let reduced: Vec<_> = z.iter().filter(|v| *v != candidate).cloned().collect();
+        if graph.satisfies_backdoor(x, y, &reduced) {
+            z = reduced;
+        }
+    }
+
+    Some(z)
+}
+```
+
+### Intervention hypothesis confidence threshold
+
+Hypotheses are accepted when the observed effect matches the predicted effect within a tolerance:
+
+```
+|observed_effect - predicted_effect| < tolerance
+
+tolerance = max(0.1, 0.2 * |predicted_effect|)
+```
+
+The 0.1 absolute floor prevents rejection of hypotheses with small predicted effects due to noise. The 0.2 relative component accounts for model imprecision scaling with effect size.
+
+Confidence updates after each test:
+
+```
+if supported:
+    confidence = confidence + 0.1 * (1.0 - confidence)   // diminishing increase
+if not supported:
+    confidence = confidence * 0.7                         // 30% penalty
+```
+
+A hypothesis is promoted to "confirmed" at confidence >= 0.8 (requires ~5 supporting tests from a neutral prior of 0.5). It is demoted to "rejected" at confidence < 0.1 (requires ~3 consecutive failures from 0.5).
+
+### Test criteria
+
+- **PC algorithm on known DAG**: Given data generated from X -> Y -> Z, the PC algorithm recovers the correct structure.
+- **Conditional independence calibration**: On independent data, the test rejects at rate <= alpha.
+- **Granger test on known causal series**: When X(t) = X(t-1) + noise, Y(t) = 0.5*X(t-1) + Y(t-1) + noise, the test detects X -> Y.
+- **Do-operator correctness**: In a confounded model (X <- Z -> Y, X -> Y), `do(X)` gives a different result than conditioning on X.
+- **Backdoor adjustment**: On synthetic data with known causal effect, the adjusted estimate is within 10% of the true effect.
+- **Coding intervention round-trip**: After applying and restoring a CodeIntervention, the workspace is in its original state.
+- **MEV label accuracy**: On a set of labeled Flashbots bundles, the heuristic achieves >90% recall.
 
 ---
 

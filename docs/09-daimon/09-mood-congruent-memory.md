@@ -2,6 +2,9 @@
 
 > How emotional state biases knowledge retrieval: the four-factor scoring model, emotional tags on Engrams, PAD cosine similarity, and the dream-memory-emotion triangle.
 
+
+> **Implementation**: Built
+
 **Topic**: [Daimon](./INDEX.md)
 **Prerequisites**: [01-pad-vector.md](./01-pad-vector.md), [07-15-percent-contrarian-retrieval.md](./07-15-percent-contrarian-retrieval.md)
 **Key sources**: `bardo-backup/prd/03-daimon/02-emotion-memory.md`, `bardo-backup/prd/03-daimon/06-dream-daimon.md`
@@ -340,5 +343,5 @@ Without dreams, the triangle degenerates: emotional memories accumulate without 
 - See [01-pad-vector.md](./01-pad-vector.md) for PAD vector structure
 - See [07-15-percent-contrarian-retrieval.md](./07-15-percent-contrarian-retrieval.md) for contrarian injection details
 - See [06-somatic-markers-damasio.md](./06-somatic-markers-damasio.md) for somatic landscape integration
-- See topic [03-dreams](../03-dreams/INDEX.md) for dream consolidation and depotentiation
-- See topic [04-knowledge](../04-knowledge/INDEX.md) for Neuro knowledge store integration
+- See topic [03-dreams](../10-dreams/INDEX.md) for dream consolidation and depotentiation
+- See topic [04-knowledge](../06-neuro/INDEX.md) for Neuro knowledge store integration

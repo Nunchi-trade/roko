@@ -3,6 +3,9 @@
 > A plan can fail a maximum of two times. After that, it requires
 > human attention. This is not configurable. This is law.
 
+
+> **Implementation**: Built
+
 ---
 
 ## The Problem It Solves

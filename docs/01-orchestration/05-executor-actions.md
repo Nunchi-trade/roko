@@ -4,6 +4,9 @@
 > **Key type**: `ExecutorAction`
 > **Consumed by**: `PlanRunner` in `roko-cli/src/orchestrate.rs`
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Overview

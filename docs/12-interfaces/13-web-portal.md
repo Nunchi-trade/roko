@@ -2,6 +2,9 @@
 
 > The Roko Portal — a React 19 + Next.js 15.5+ web dashboard for monitoring and controlling cognitive agents. ROSEDUST design language in CSS, glass morphism panels, WebGL Spectre rendering, real-time WebSocket feeds.
 
+
+> **Implementation**: Scaffold
+
 **Topic**: [12-interfaces](./INDEX.md)
 **Prerequisites**: [07-rosedust-design-language.md](./07-rosedust-design-language.md), [05-http-api-roko-serve.md](./05-http-api-roko-serve.md), [06-websocket-streaming.md](./06-websocket-streaming.md)
 **Key sources**: `refactoring-prd/06-interfaces.md` §6, `bardo-backup/prd/18-interfaces/00-portal.md`

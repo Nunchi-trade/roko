@@ -5,6 +5,9 @@
 > **Academic basis:** Auer, Cesa-Bianchi & Fischer 2002 (UCB1); Li et al. 2010 (LinUCB); Garivier & Kaufmann 2016 (Track-and-Stop); Thompson 1933
 > **Cross-references:** [04-cascade-router](04-cascade-router.md), [11-thompson-sampling-drift](11-thompson-sampling-drift.md), [10-pareto-frontier-pruning](10-pareto-frontier-pruning.md)
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Purpose

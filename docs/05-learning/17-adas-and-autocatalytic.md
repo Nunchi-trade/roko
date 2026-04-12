@@ -5,6 +5,9 @@
 > **Legacy sources:** `agent-chain/09-exponential-flywheels.md`, `agent-chain/self-improvement-frameworks.md`
 > **Cross-references:** [02-skill-library-voyager](02-skill-library-voyager.md), [13-8-missing-feedback-loops](13-8-missing-feedback-loops.md), [15-collective-calibration-31x](15-collective-calibration-31x.md)
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Purpose

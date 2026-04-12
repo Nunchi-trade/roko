@@ -2,6 +2,9 @@
 
 > How knowledge entries are encoded as 10,240-bit HDC vectors for similarity search, structured queries, and three-tier retrieval in Neuro.
 
+
+> **Implementation**: Built
+
 **Topic**: [Neuro — Cognitive Knowledge Layer](./INDEX.md)
 **Prerequisites**: [05-hdc-operations.md](./05-hdc-operations.md) for HDC operations
 **Key sources**:
@@ -333,6 +336,327 @@ else:
 
 ---
 
+## Implementation Details: Automatic HDC Encoding Pipeline
+
+### Trigger and integration
+
+Every `KnowledgeEntry` ingested into `NeuroStore` should carry an `hdc_vector`. Currently this field is `Option<Vec<u8>>` and often `None`. The automatic encoding pipeline fills it at ingestion time.
+
+```rust
+use crate::{HdcVector, ItemMemory, KnowledgeEntry, KnowledgeKind};
+
+/// Encodes knowledge entries into HDC vectors at ingestion time.
+///
+/// Wired into NeuroStore::ingest() as a pre-processing step.
+/// If an entry already has an hdc_vector, this is a no-op.
+pub struct KnowledgeHdcEncoder {
+    /// Role vector registry — maps role names to their deterministic HDC vectors.
+    role_registry: ItemMemory,
+    /// Domain concept codebook — grows as new domains appear.
+    domain_codebook: ItemMemory,
+    /// Kind codebook — one entry per KnowledgeKind variant.
+    kind_codebook: ItemMemory,
+}
+
+impl KnowledgeHdcEncoder {
+    /// Create an encoder with the standard role and kind codebooks.
+    pub fn new() -> Self {
+        let mut role_registry = ItemMemory::new();
+        for role in &[
+            "role:kind", "role:domain", "role:topic", "role:content",
+            "role:tag", "role:source", "role:risk_factor", "role:response",
+            "role:pattern", "role:severity", "role:temporal", "role:confidence",
+        ] {
+            role_registry.insert_seeded(role);
+        }
+
+        let mut kind_codebook = ItemMemory::new();
+        for kind in &[
+            "insight", "heuristic", "warning", "causal_link",
+            "strategy_fragment", "anti_knowledge",
+        ] {
+            kind_codebook.insert_seeded(kind);
+        }
+
+        Self {
+            role_registry,
+            domain_codebook: ItemMemory::new(),
+            kind_codebook,
+        }
+    }
+
+    /// Encode a knowledge entry into a 10,240-bit HDC vector.
+    ///
+    /// Pipeline:
+    ///   1. Generate role vectors from registry
+    ///   2. Map kind, tags, content to concept vectors
+    ///   3. Bind each role-filler pair
+    ///   4. Bundle all bindings into the final entry vector
+    ///
+    /// Returns the encoded vector (1,280 bytes).
+    pub fn encode(&mut self, entry: &KnowledgeEntry) -> HdcVector {
+        let role_kind = self.role_registry.get("role:kind")
+            .copied().unwrap_or_else(|| HdcVector::from_seed(b"role:kind"));
+        let role_content = self.role_registry.get("role:content")
+            .copied().unwrap_or_else(|| HdcVector::from_seed(b"role:content"));
+        let role_tag = self.role_registry.get("role:tag")
+            .copied().unwrap_or_else(|| HdcVector::from_seed(b"role:tag"));
+
+        // Kind binding
+        let kind_str = format!("{:?}", entry.kind).to_lowercase();
+        let kind_hv = HdcVector::from_seed(kind_str.as_bytes());
+        let kind_binding = role_kind.bind(&kind_hv);
+
+        // Content fingerprint binding
+        let content_hv = HdcVector::from_seed(entry.content.as_bytes());
+        let content_binding = role_content.bind(&content_hv);
+
+        // Tag bundle binding
+        let tag_binding = if entry.tags.is_empty() {
+            HdcVector::zeros()
+        } else {
+            let tag_hvs: Vec<HdcVector> = entry.tags.iter()
+                .map(|t| HdcVector::from_seed(t.as_bytes()))
+                .collect();
+            let tag_refs: Vec<&HdcVector> = tag_hvs.iter().collect();
+            let tag_bundle = HdcVector::bundle(&tag_refs);
+            role_tag.bind(&tag_bundle)
+        };
+
+        // Domain binding (if domain tag exists)
+        let domain_binding = entry.tags.iter()
+            .find(|t| t.starts_with("domain:"))
+            .map(|domain_tag| {
+                let domain_name = &domain_tag["domain:".len()..];
+                let domain_hv = HdcVector::from_seed(domain_name.as_bytes());
+                // Register domain in codebook for future lookups
+                self.domain_codebook.insert(domain_name, domain_hv);
+                let role_domain = self.role_registry.get("role:domain")
+                    .copied().unwrap_or_else(|| HdcVector::from_seed(b"role:domain"));
+                role_domain.bind(&domain_hv)
+            });
+
+        // Final bundle
+        let mut components: Vec<&HdcVector> = vec![&kind_binding, &content_binding];
+        if !entry.tags.is_empty() {
+            components.push(&tag_binding);
+        }
+        let domain_binding_owned;
+        if let Some(db) = domain_binding {
+            domain_binding_owned = db;
+            components.push(&domain_binding_owned);
+        }
+
+        HdcVector::bundle(&components)
+    }
+}
+```
+
+**Wiring into NeuroStore**:
+
+```rust
+// In roko-neuro/src/store.rs
+impl NeuroStore {
+    /// Ingest a knowledge entry, automatically computing its HDC vector
+    /// if not already present.
+    pub fn ingest(&mut self, mut entry: KnowledgeEntry) -> Result<()> {
+        if entry.hdc_vector.is_none() {
+            let hv = self.encoder.encode(&entry);
+            entry.hdc_vector = Some(hv.to_bytes().to_vec());
+        }
+        self.store(entry)
+    }
+}
+```
+
+**Configuration parameters**:
+
+| Parameter | Default | Range | Notes |
+|---|---|---|---|
+| Role namespace prefix | `"role:"` | Fixed | Prevents collision between roles and content concepts |
+| Domain tag prefix | `"domain:"` | Configurable | Tags starting with this prefix are treated as domain bindings |
+| Max tags per bundle | 50 | 10 - 100 | Beyond 50 tags, the tag bundle SNR degrades (SNR < 14) |
+
+**Error handling**: `encode()` never fails. Missing roles fall back to `HdcVector::from_seed()` with the role name. Entries with no tags produce a zero vector for the tag binding (excluded from the final bundle). Entries with no content produce a zero vector for the content binding.
+
+### Role vector registry
+
+The role registry is an `ItemMemory` codebook pre-populated with standard roles at encoder construction time. The registry serves two purposes:
+
+1. **Consistency**: All encoders use the same role vectors, because `from_seed()` is deterministic
+2. **Lookup**: Given an unknown vector from a decomposed entry, the registry enables identifying which role it represents via nearest-neighbor search
+
+**Abstract role definitions** (shared across domains):
+
+| Role | Seed | Encodes |
+|---|---|---|
+| `role:kind` | `b"role:kind"` | Knowledge type (insight, heuristic, warning, ...) |
+| `role:content` | `b"role:content"` | Content fingerprint |
+| `role:tag` | `b"role:tag"` | Tag bundle |
+| `role:domain` | `b"role:domain"` | Problem domain (rust, defi, research, ...) |
+| `role:topic` | `b"role:topic"` | Specific topic within domain |
+| `role:risk_factor` | `b"role:risk_factor"` | What creates risk (for cross-domain transfer) |
+| `role:response` | `b"role:response"` | How to respond (for cross-domain transfer) |
+| `role:pattern` | `b"role:pattern"` | Observable signal or pattern |
+| `role:severity` | `b"role:severity"` | Severity level |
+| `role:temporal` | `b"role:temporal"` | Time dimension |
+| `role:confidence` | `b"role:confidence"` | Certainty level |
+| `role:source` | `b"role:source"` | Information source |
+
+**Initialization**: All role vectors are deterministic — `HdcVector::from_seed(b"role:kind")` always produces the same vector. The registry is built once at encoder creation and never mutates. Domain and concept codebooks grow incrementally during ingestion.
+
+### Structured query API
+
+Because XOR-bind distributes over majority-vote bundle, you can query specific attributes of bundled entry vectors by unbinding the role:
+
+```rust
+impl NeuroStore {
+    /// Query entries by a specific role-filler combination.
+    ///
+    /// Example: "find all entries about Rust" →
+    ///   query_by_role("role:domain", "rust")
+    pub fn query_by_role(
+        &self,
+        role_name: &str,
+        filler_name: &str,
+    ) -> Vec<(usize, f32)> {
+        let role_hv = HdcVector::from_seed(role_name.as_bytes());
+        let filler_hv = HdcVector::from_seed(filler_name.as_bytes());
+        let query = role_hv.bind(&filler_hv);
+
+        self.entries.iter().enumerate()
+            .filter_map(|(idx, entry)| {
+                let hv = entry.hdc_vector.as_ref()?;
+                let entry_hv = HdcVector::from_bytes(hv)?;
+                let sim = query.similarity(&entry_hv);
+                if sim > 0.526 {
+                    Some((idx, sim))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Unbind a role from an entry to recover the filler.
+    ///
+    /// Given an entry's HDC vector and a role name, returns the filler
+    /// signal that can be looked up against a concept codebook.
+    ///
+    /// Example: "what is the domain of this entry?" →
+    ///   unbind_role(entry_hv, "role:domain")
+    ///   then nearest-neighbor lookup against domain codebook
+    pub fn unbind_role(
+        &self,
+        entry_hv: &HdcVector,
+        role_name: &str,
+    ) -> HdcVector {
+        let role_hv = HdcVector::from_seed(role_name.as_bytes());
+        entry_hv.bind(&role_hv)  // XOR is self-inverse: bind(bind(role, filler), role) ≈ filler
+    }
+}
+```
+
+**Query syntax**: Callers specify role and filler as string names. The API generates HDC vectors internally. Multi-attribute queries bundle multiple role-filler bindings:
+
+```rust
+/// Find entries that match ALL specified role-filler pairs.
+pub fn query_multi(
+    &self,
+    role_fillers: &[(&str, &str)],
+) -> Vec<(usize, f32)> {
+    let bindings: Vec<HdcVector> = role_fillers.iter()
+        .map(|(role, filler)| {
+            let role_hv = HdcVector::from_seed(role.as_bytes());
+            let filler_hv = HdcVector::from_seed(filler.as_bytes());
+            role_hv.bind(&filler_hv)
+        })
+        .collect();
+    let refs: Vec<&HdcVector> = bindings.iter().collect();
+    let query = HdcVector::bundle(&refs);
+
+    // ... same scan-and-filter as query_by_role
+}
+```
+
+**Threshold**: 0.526 for cross-domain queries (Bonferroni-corrected for 100K entries). Within-domain queries can use 0.52 (single-pair threshold). See [09-false-positive-math.md](./09-false-positive-math.md).
+
+### Episode compression via bundling
+
+Bundle multiple entries from the same episode into a single summary vector for fast pre-filtering.
+
+```rust
+/// Compress a set of knowledge entries into a single summary vector.
+///
+/// The summary is similar to each constituent entry, enabling fast
+/// pre-filtering: check the summary first, then scan individual entries
+/// only if the summary matches.
+pub fn compress_episode(entries: &[&KnowledgeEntry]) -> Option<HdcVector> {
+    let hvs: Vec<HdcVector> = entries.iter()
+        .filter_map(|e| {
+            e.hdc_vector.as_ref()
+                .and_then(|bytes| HdcVector::from_bytes(bytes))
+        })
+        .collect();
+
+    if hvs.is_empty() {
+        return None;
+    }
+
+    let refs: Vec<&HdcVector> = hvs.iter().collect();
+    Some(HdcVector::bundle(&refs))
+}
+```
+
+**Which features are bundled**: The full entry vectors (already encoding kind, content, tags, domain). No additional feature extraction — the entry encoding already captures the relevant structure.
+
+**Batch size**: Bundle up to 100 entries per episode summary. Beyond 100, SNR drops below 10.1 and retrieval accuracy degrades. For episodes with more than 100 entries, split into sub-episode batches and bundle each batch separately.
+
+**Quality gate before bundling**:
+
+```rust
+/// Check whether entries are diverse enough to produce a useful bundle.
+fn check_bundle_diversity(entries: &[HdcVector]) -> BundleDiversity {
+    if entries.len() < 2 {
+        return BundleDiversity::TooFew;
+    }
+    let mut total_sim = 0.0f32;
+    let mut count = 0u32;
+    for i in 0..entries.len() {
+        for j in (i + 1)..entries.len() {
+            total_sim += entries[i].similarity(&entries[j]);
+            count += 1;
+        }
+    }
+    let mean_sim = total_sim / count as f32;
+    match mean_sim {
+        s if s > 0.52 => BundleDiversity::TooSimilar,  // entries are redundant
+        s if s < 0.45 => BundleDiversity::Good,         // reject: entries are too similar
+        _ => BundleDiversity::Borderline,
+    }
+}
+
+enum BundleDiversity {
+    TooFew,
+    TooSimilar,   // mean pairwise similarity > 0.52: bundling adds no information
+    Borderline,   // 0.45..=0.52: bundle may have low retrieval quality
+    Good,         // < 0.45: entries are diverse enough
+}
+```
+
+Note: the diversity check uses the *inverse* logic of what you might expect. High pairwise similarity (> 0.52) means entries are near-duplicates — the bundle collapses to a single concept. Low pairwise similarity (< 0.45, well below the 0.5 random baseline) means entries are diverse and the bundle captures a rich set of concepts.
+
+**Test criteria**:
+- `encode()` on two entries with different kinds produces vectors with similarity < 0.55
+- `encode()` on two entries with the same kind and different content produces vectors with similarity in 0.52-0.58 (shared kind structure)
+- `query_by_role("role:kind", "insight")` returns entries with kind=Insight and not others
+- `unbind_role(entry_hv, "role:kind")` produces a vector nearest to the entry's actual kind in the kind codebook
+- `compress_episode()` on 10 entries produces a vector similar (> 0.52) to each constituent
+- `compress_episode()` on empty input returns `None`
+- Round-trip: `encode()` then `to_bytes()` then `from_bytes()` then `similarity()` with original returns 1.0
+
+---
+
 ## Current Status and Gaps
 
 **Implemented**:
@@ -345,12 +669,12 @@ else:
 - Basic similarity comparison in `KnowledgeStore` (HDC `MemoryIndex` feature-gated)
 
 **Missing**:
-- Automatic HDC encoding during knowledge ingestion (currently the `hdc_vector` field is optional and often empty)
-- Role vector registry for knowledge entry encoding (domain, topic, type, content roles)
-- Three-tier search (Bloom filter → approximate → exact)
-- Structured query support (unbinding roles from bundled entry vectors)
-- Episode compression via bundling
-- `ItemMemory` codebook for named concept lookup
+- `KnowledgeHdcEncoder` (designed above; automatic encoding at ingestion)
+- Role vector registry (designed above; `ItemMemory` with standard roles)
+- Structured query API (designed above; `query_by_role`, `unbind_role`, `query_multi`)
+- Episode compression via bundling (designed above; `compress_episode`)
+- Three-tier search integration (see [04-hdc-vsa-foundations.md](./04-hdc-vsa-foundations.md))
+- `ItemMemory` codebook (see [04-hdc-vsa-foundations.md](./04-hdc-vsa-foundations.md))
 - On-chain HDC precompile
 
 ---

@@ -2,6 +2,9 @@
 
 > HDC encodes TA patterns as 10,240-bit vectors. Pattern algebra (bind, bundle, permute) enables nanosecond cross-domain similarity search, temporal composition, and shift-invariant pattern matching.
 
+
+> **Implementation**: Specified
+
 **Topic**: [Technical Analysis](./INDEX.md)
 **Prerequisites**: [06-neuro](../06-neuro/INDEX.md) for HDC basics, [01-oracle-trait](./01-oracle-trait.md) for Oracle integration
 **Key sources**: `bardo-backup/prd/23-ta/01-hyperdimensional-technical-analysis.md`, `refactoring-prd/09-innovations.md` §XIII
@@ -434,6 +437,251 @@ pub fn dream_consolidation(store: &mut PatternStore) {
     store.prune(|p| p.frequency >= 10 && p.reliability < 0.3);
 }
 ```
+
+---
+
+## Implementation details
+
+### Codebook generation algorithm
+
+Codebooks are generated deterministically from a domain-specific seed. This ensures that all agents sharing a seed share the same vector space, enabling direct cross-agent pattern comparison without alignment.
+
+```rust
+/// Generate a domain-specific HDC codebook deterministically.
+///
+/// The seed derives from the domain name via SHA-256. Each role vector
+/// is drawn from the resulting CSPRNG stream. Because the seed is
+/// deterministic, every agent in the same domain produces identical
+/// codebooks without coordination.
+pub struct CodebookGenerator {
+    /// Domain seed (SHA-256 of domain name).
+    seed: [u8; 32],
+    /// Dimensionality of generated vectors (default: 10_240).
+    dim: usize,
+}
+
+impl CodebookGenerator {
+    pub fn new(domain: &str, dim: usize) -> Self {
+        let seed = sha256(domain.as_bytes());
+        Self { seed, dim }
+    }
+
+    /// Generate a role vector at a given index.
+    ///
+    /// Uses ChaCha20 seeded from `self.seed ++ index.to_le_bytes()`.
+    /// Each bit is drawn with P(1) = 0.5 (dense binary).
+    pub fn generate_role(&self, index: u32) -> HdcVector {
+        let mut key = self.seed.to_vec();
+        key.extend_from_slice(&index.to_le_bytes());
+        let mut rng = ChaCha20Rng::from_seed(sha256(&key));
+        HdcVector::random(&mut rng, self.dim)
+    }
+
+    /// Generate a QuantizedCodebook for a value range.
+    ///
+    /// Level vectors use thermometer construction:
+    ///   level_0 = random base vector
+    ///   level_k = level_{k-1} with `flip_count` random bits flipped
+    ///
+    /// `flip_count = dim / (2 * n_levels)` ensures adjacent levels
+    /// have Hamming similarity ~= 1 - 1/(2*n_levels).
+    pub fn generate_quantized(
+        &self,
+        codebook_index: u32,
+        n_levels: usize,
+        min: f64,
+        max: f64,
+    ) -> QuantizedCodebook {
+        let flip_count = self.dim / (2 * n_levels);
+        let base = self.generate_role(codebook_index);
+        let mut levels = vec![base];
+
+        for k in 1..n_levels {
+            let prev = &levels[k - 1];
+            let mut rng = ChaCha20Rng::from_seed(
+                sha256(&[&self.seed[..], &(codebook_index + k as u32).to_le_bytes()].concat())
+            );
+            let flipped = prev.flip_random_bits(flip_count, &mut rng);
+            levels.push(flipped);
+        }
+
+        QuantizedCodebook { levels, min, max, n_levels }
+    }
+}
+```
+
+**Configuration parameters**:
+
+| Parameter | Default | Range | Notes |
+|---|---|---|---|
+| `dim` | 10,240 | 1,024 - 65,536 | Must be multiple of 64 for SIMD alignment. 10,240 = 160 u64 words. |
+| `n_levels` (QuantizedCodebook) | 64 | 8 - 256 | More levels = finer granularity, more memory. 64 gives ~1.5% resolution. |
+| `flip_count` | `dim / (2 * n_levels)` | derived | Controls similarity between adjacent levels. |
+
+### QuantizedCodebook::encode() interpolation
+
+The `encode()` method interpolates between adjacent level vectors via a weighted bundle. The procedure:
+
+1. Normalize the input value to `[0.0, 1.0]` within the codebook's range.
+2. Map to a fractional level index: `level_f = normalized * (n_levels - 1)`.
+3. Identify the two bracketing levels: `lower = floor(level_f)`, `upper = lower + 1`.
+4. Compute interpolation weight: `w = level_f - lower`.
+5. Return `weighted_bundle(levels[lower], levels[upper], 1.0 - w, w)`.
+
+The weighted bundle for two vectors uses probabilistic bit selection: for each bit position, select from `levels[upper]` with probability `w`, else from `levels[lower]`. This produces a vector whose Hamming similarity to each level is proportional to the interpolation weight.
+
+**Error handling**: Values outside `[min, max]` are clamped. If `n_levels` is 1, return the single level vector regardless of input. If the codebook is empty (zero levels), return a zero vector and log a warning.
+
+### Pattern store serialization (CBOR)
+
+The PatternStore serializes to CBOR (RFC 8949) for compact, schema-flexible persistence:
+
+```rust
+/// CBOR schema for PatternStore persistence.
+///
+/// Top-level: CBOR map {
+///   "version": u32,              // schema version (currently 1)
+///   "domains": map {             // keyed by OracleDomain string
+///     "<domain>": array [        // array of StoredPattern
+///       {
+///         "v": bytes(1280),      // HDC vector (10,240 bits = 1,280 bytes)
+///         "src": bytes(32),      // source engram ContentHash
+///         "out": ?i8,            // outcome: -1 (loss), 0 (neutral), 1 (profit), null
+///         "freq": u64,           // observation count
+///         "rel": f32,            // reliability [0.0, 1.0]
+///       },
+///       ...
+///     ]
+///   },
+///   "cross_index": array [       // cross-domain index entries
+///     { "d": string, "v": bytes(1280), "h": bytes(32) },
+///     ...
+///   ]
+/// }
+///
+/// File size estimate: 1,280 bytes per pattern + 45 bytes metadata.
+/// 100K patterns ~= 130 MB. 1M patterns ~= 1.3 GB.
+pub fn serialize_pattern_store(store: &PatternStore) -> Vec<u8> {
+    let mut encoder = CborEncoder::new();
+    encoder.map(3);
+    encoder.text("version").unsigned(1);
+    encoder.text("domains");
+    encoder.map(store.patterns.len());
+    for (domain, patterns) in &store.patterns {
+        encoder.text(&domain.to_string());
+        encoder.array(patterns.len());
+        for p in patterns {
+            encoder.map(5);
+            encoder.text("v").bytes(&p.vector.as_bytes());
+            encoder.text("src").bytes(&p.source_engram.as_bytes());
+            encoder.text("out").optional_i8(p.outcome.map(|o| o as i8));
+            encoder.text("freq").unsigned(p.frequency);
+            encoder.text("rel").float32(p.reliability as f32);
+        }
+    }
+    // ... cross_index similarly
+    encoder.finish()
+}
+```
+
+### Similarity threshold calibration
+
+The default threshold of 0.526 derives from the information-theoretic properties of 10,240-bit BSC vectors. Calibrate it in practice with this procedure:
+
+1. **Generate null distribution**: Create 10,000 random vector pairs. Compute their Hamming similarities. The distribution should be approximately Gaussian with mean 0.500 and stddev ~0.00494.
+2. **Choose significance level**: The default 0.526 corresponds to 5.26 sigma (p < 1e-7). For applications tolerating more false positives, use 0.515 (3 sigma, p < 0.0013).
+3. **Validate on held-out data**: Take known-similar pattern pairs from the domain. Compute their similarity distribution. The threshold should separate the null distribution from the true-positive distribution with <1% overlap.
+4. **Adjust per domain**: If a domain has noisier encodings (fewer role-filler pairs per pattern), increase the threshold. Rule of thumb: add 0.005 per missing role-filler pair below 5.
+
+```rust
+/// Calibrate similarity threshold for a given vector dimensionality.
+///
+/// Returns (mean, stddev, suggested_threshold) based on the null distribution.
+pub fn calibrate_threshold(dim: usize, sigma_level: f64, n_samples: usize) -> (f64, f64, f64) {
+    let mut rng = thread_rng();
+    let mut similarities = Vec::with_capacity(n_samples);
+    for _ in 0..n_samples {
+        let a = HdcVector::random(&mut rng, dim);
+        let b = HdcVector::random(&mut rng, dim);
+        similarities.push(a.hamming_similarity(&b));
+    }
+    let mean = similarities.iter().sum::<f64>() / n_samples as f64;
+    let variance = similarities.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / n_samples as f64;
+    let stddev = variance.sqrt();
+    (mean, stddev, mean + sigma_level * stddev)
+}
+```
+
+### Cross-domain routing protocol
+
+When oracles from different domains want to exchange patterns, the routing protocol works as follows:
+
+```
+1. Source oracle encodes a pattern using its domain codebook.
+2. Source sends (domain_id, pattern_hv, metadata) to the PatternStore.
+3. PatternStore inserts the pattern into the cross_domain_index.
+4. Any oracle can query the cross_domain_index with a pattern vector.
+5. Matches above threshold are returned with their source domain.
+6. The querying oracle decides whether to incorporate the cross-domain match.
+```
+
+No codebook translation is needed because all codebooks share the same vector space (10,240-bit BSC with XOR bind and majority bundle). The cross-domain similarity is structural, not lexical.
+
+**Integration wiring**: `PatternStore::find_similar()` with `domain: None` searches the cross-domain index. The oracle calls this during its Theta-frequency analysis pass.
+
+### Pruning rules
+
+When the pattern count exceeds memory limits, prune according to these rules (applied in order):
+
+1. **Unreliable patterns**: Remove patterns where `reliability < 0.3` and `frequency >= 10`. These have enough observations to confirm they do not predict well.
+2. **Stale patterns**: Remove patterns not matched in the last `max_staleness` duration (default: 72 hours). These are no longer relevant to current market/code conditions.
+3. **Redundant patterns**: For patterns with Hamming similarity > 0.95 to each other, keep only the one with higher reliability. This deduplicates near-identical encodings.
+4. **LRU eviction**: If the store still exceeds `max_patterns`, remove the least-recently-matched patterns until within budget.
+
+```rust
+/// Configuration for pattern store pruning.
+pub struct PruneConfig {
+    /// Maximum patterns per domain before pruning triggers.
+    pub max_patterns_per_domain: usize,  // default: 100_000
+    /// Minimum reliability to survive pruning (with sufficient observations).
+    pub min_reliability: f64,            // default: 0.3
+    /// Minimum observations before reliability-based pruning applies.
+    pub min_frequency: u64,              // default: 10
+    /// Maximum time since last match before staleness pruning.
+    pub max_staleness: Duration,         // default: 72 hours
+    /// Similarity threshold for deduplication.
+    pub dedup_threshold: f64,            // default: 0.95
+}
+```
+
+### Connection to Dreams: reliability updates
+
+During Delta-frequency dream consolidation, the `StoredPattern.reliability` field is updated from dream outcomes:
+
+```
+1. Dreams NREM phase replays high-frequency patterns.
+2. For each replayed pattern, Dreams evaluates: "If this pattern
+   activated now, would the predicted outcome hold?"
+3. The evaluation runs the pattern through the current causal model
+   (from causal microstructure discovery) and compares the predicted
+   outcome to the pattern's stored outcome.
+4. If they agree: reliability += 0.05 (capped at 1.0).
+5. If they disagree: reliability -= 0.10 (floored at 0.0).
+6. During REM recombination, newly generated hypothetical patterns
+   start with reliability = 0.2.
+```
+
+The asymmetric update (slower increase, faster decrease) follows the principle that trust is hard to earn and easy to lose. A pattern must consistently agree with the causal model across multiple dream cycles to reach high reliability.
+
+### Test criteria
+
+- **Codebook determinism**: Two `CodebookGenerator` instances with the same domain and dim produce identical role vectors.
+- **Quantized encoding monotonicity**: For values v1 < v2, `hamming_similarity(encode(v1), encode(v2))` decreases as `|v2 - v1|` increases.
+- **Threshold calibration**: The null distribution mean is within 0.001 of 0.500 for dim = 10,240.
+- **Cross-domain routing**: A pattern stored by one oracle is retrievable by another oracle via `find_similar(domain: None)`.
+- **CBOR round-trip**: `deserialize(serialize(store))` produces an identical PatternStore.
+- **Pruning correctness**: After pruning, no pattern violates the configured thresholds.
+- **Dream reliability update**: After 10 agreeing dream cycles, reliability reaches >= 0.7. After 5 disagreeing cycles from reliability 0.7, reliability drops to <= 0.2.
 
 ---
 

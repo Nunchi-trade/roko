@@ -3,7 +3,7 @@
 > Academic foundations for agent self-improvement, experiential learning, skill evolution, and metacognitive loops in Roko's learning subsystems.
 
 **Topic**: [References](./INDEX.md)
-**Prerequisites**: [Architecture](../00-architecture/INDEX.md), [Learning](../06-learning/INDEX.md)
+**Prerequisites**: [Architecture](../00-architecture/INDEX.md), [Learning](../05-learning/INDEX.md)
 **Key sources**: `bardo-backup/prd/02-mortality/14-research-foundations.md` §7, `bardo-backup/tmp/mori-agents/12-references.md`
 
 ---
@@ -112,4 +112,4 @@ An agent that does not improve is an expensive cron job. The research here estab
 - See [07-context-engineering.md](./07-context-engineering.md) for ACE, CSO, ACON context self-improvement
 - See [14-agent-harnesses-and-tool-use.md](./14-agent-harnesses-and-tool-use.md) for SWE-agent, Aider, and harness engineering
 - See [17-process-reward-models.md](./17-process-reward-models.md) for Lightman and AgentPRM
-- See topic [06-learning](../06-learning/INDEX.md) for full learning subsystem design
+- See topic [06-learning](../05-learning/INDEX.md) for full learning subsystem design

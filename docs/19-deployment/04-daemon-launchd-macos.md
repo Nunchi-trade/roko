@@ -6,6 +6,9 @@
 > generation, lifecycle commands, IPC over Unix socket, log management, and the daemon's
 > event subscription model.
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview

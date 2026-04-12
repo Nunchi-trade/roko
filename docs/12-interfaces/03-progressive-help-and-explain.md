@@ -2,6 +2,9 @@
 
 > Layered disclosure: beginners see three commands; experts see the full trait system. Errors are instructions, not dead ends.
 
+
+> **Implementation**: Scaffold
+
 **Topic**: [12-interfaces](./INDEX.md)
 **Prerequisites**: [00-cli-overview.md](./00-cli-overview.md)
 **Key sources**: `refactoring-prd/10-developer-guide.md` §0-1, §11, `refactoring-prd/06-interfaces.md`

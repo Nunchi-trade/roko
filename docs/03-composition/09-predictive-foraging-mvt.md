@@ -4,6 +4,9 @@
 > Status: **Scaffold** — Formula specified, implementation pending
 > Canonical sources: `refactoring-prd/09-innovations.md` §XIX.C, Charnov (1976)
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Abstract

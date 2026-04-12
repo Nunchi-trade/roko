@@ -3,6 +3,9 @@
 > **Sources:** Academic literature survey, legacy research docs, implementation plans
 > **Cross-references:** [02-skill-library-voyager](02-skill-library-voyager.md), [04-cascade-router](04-cascade-router.md), [17-adas-and-autocatalytic](17-adas-and-autocatalytic.md)
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Purpose

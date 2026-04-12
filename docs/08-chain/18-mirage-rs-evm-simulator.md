@@ -2,6 +2,9 @@
 
 > mirage-rs is a full EVM simulator that runs in-process alongside the agent. It emulates the Korai chain during development, provides transaction simulation for pre-flight checks, and enables deterministic testing of chain interactions. Built on revm, it supports fork mode (clone mainnet state), scenario replay, and Korai-specific chain extensions (HDC precompile, agent registry, reputation registry).
 
+
+> **Implementation**: Shipping
+
 **Topic**: [08-chain](./INDEX.md)
 **Prerequisites**: [01-korai-chain-spec.md](./01-korai-chain-spec.md), [17-chain-client-wallet-traits.md](./17-chain-client-wallet-traits.md)
 **Key sources**: `roko/apps/mirage-rs/src/lib.rs`, `roko/tmp/implementation-plans/12b-chain-layer.md` §Q
@@ -254,4 +257,4 @@ mirage-rs includes 141 tests covering:
 - See [03-hdc-on-chain-precompile.md](./03-hdc-on-chain-precompile.md) for the HDC precompile that mirage-rs emulates
 - See [06-erc-8004-registries.md](./06-erc-8004-registries.md) for the registries that mirage-rs emulates
 - See [01-korai-chain-spec.md](./01-korai-chain-spec.md) for the chain parameters mirage-rs simulates
-- See topic [04-gates](../04-gates/INDEX.md) for `TxSimGate` that uses mirage-rs for pre-flight checks
+- See topic [04-gates](../04-verification/INDEX.md) for `TxSimGate` that uses mirage-rs for pre-flight checks

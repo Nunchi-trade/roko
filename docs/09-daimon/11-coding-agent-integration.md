@@ -2,6 +2,9 @@
 
 > How the Daimon tracks per-crate confidence, error pattern sensitivity, and fatigue detection for software engineering agents.
 
+
+> **Implementation**: Built
+
 **Topic**: [Daimon](./INDEX.md)
 **Prerequisites**: [04-six-behavioral-states.md](./04-six-behavioral-states.md), [10-integration-points.md](./10-integration-points.md)
 **Key sources**: `refactoring-prd/03-cognitive-subsystems.md` §2, `roko-golem/src/daimon.rs`, `roko-daimon/src/lib.rs`

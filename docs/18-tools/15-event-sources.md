@@ -3,6 +3,9 @@
 > Cron, FileWatch, GitHub webhooks, Slack events, generic webhooks.
 > How events trigger agent execution via subscriptions.
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview

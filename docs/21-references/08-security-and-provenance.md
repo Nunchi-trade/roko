@@ -3,7 +3,7 @@
 > Academic foundations for agent safety, adversarial robustness, capability-based security, content provenance, and regulatory compliance in Roko's safety layer.
 
 **Topic**: [References](./INDEX.md)
-**Prerequisites**: [Architecture](../00-architecture/INDEX.md), [Harness](../03-harness/INDEX.md)
+**Prerequisites**: [Architecture](../00-architecture/INDEX.md), [Harness](../04-verification/INDEX.md)
 **Key sources**: `bardo-backup/prd/02-mortality/14-research-foundations.md` §9, `bardo-backup/prd/shared/citations.md` §8
 
 ---
@@ -111,4 +111,4 @@ Agents managing real tasks are attack targets. Memory poisoning (OWASP LLM04:202
 
 - See [19-regulatory-compliance.md](./19-regulatory-compliance.md) for EU AI Act, SEC/CFTC, and compliance frameworks
 - See [22-protocol-standards.md](./22-protocol-standards.md) for ERC-8004 agent identity
-- See topic [03-harness](../03-harness/INDEX.md) for full Harness layer design
+- See topic [03-harness](../04-verification/INDEX.md) for full Harness layer design

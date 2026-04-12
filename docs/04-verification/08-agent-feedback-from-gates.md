@@ -4,6 +4,9 @@
 > **Crate**: `roko-gate` (`crates/roko-gate/src/feedback.rs`)
 > **Status**: Implemented (375 lines)
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## 1. Overview

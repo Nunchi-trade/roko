@@ -3,6 +3,9 @@
 > Model Context Protocol (MCP) — JSON-RPC stdio transport, tool converter,
 > dynamic registry, and how MCP extends the Synapse tool system.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Overview

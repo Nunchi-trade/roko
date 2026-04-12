@@ -8,6 +8,9 @@
 >
 > **Prerequisites**: [00-defense-in-depth.md](00-defense-in-depth.md), [04-permits-allowlists.md](04-permits-allowlists.md)
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Overview

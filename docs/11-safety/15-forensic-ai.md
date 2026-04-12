@@ -8,6 +8,9 @@
 >
 > **Prerequisites**: [02-audit-chain.md](02-audit-chain.md), [12-witness-dag.md](12-witness-dag.md)
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview

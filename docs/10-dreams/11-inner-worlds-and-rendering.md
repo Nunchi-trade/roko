@@ -6,6 +6,9 @@
 >
 > **Prerequisites**: [01-three-phase-cycle.md](01-three-phase-cycle.md), [07-hypnagogia-engine.md](07-hypnagogia-engine.md)
 
+
+> **Implementation**: Scaffold
+
 ---
 
 ## What Dream Rendering Is

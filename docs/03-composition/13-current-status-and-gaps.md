@@ -4,6 +4,9 @@
 > Status: Comprehensive status report as of 2026-04-11
 > Canonical source: `crates/roko-compose/src/`
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Abstract

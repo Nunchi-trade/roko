@@ -4,6 +4,9 @@
 > about its own pipeline — the subsystem that watches execution unfold
 > and asks: is this going where I predicted?
 
+
+> **Implementation**: Built
+
 ---
 
 ## Position in the Five-Layer Architecture

@@ -7,6 +7,9 @@
 > explains how traits compose across layers, and provides the complete Rust signatures from
 > shipping code.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## 1. The Composition Model

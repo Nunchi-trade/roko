@@ -2,6 +2,9 @@
 
 > Extracting structured symbol definitions from source code — the atomic data that feeds dependency graphs, fingerprints, and search.
 
+
+> **Implementation**: Built
+
 **Topic**: [Code Intelligence](./INDEX.md)
 **Prerequisites**: [01-tree-sitter-parsing.md](./01-tree-sitter-parsing.md)
 **Key sources**: `crates/roko-index/src/symbol.rs`, `crates/roko-core/src/language.rs`, `bardo-backup/tmp/mori-refactor/10-code-intelligence.md`, `bardo-backup/tmp/death/tools/02-code-index.md`

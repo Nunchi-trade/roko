@@ -2,6 +2,9 @@
 
 > Research oracles predict source reliability, information completeness, and contradiction risk. The same TA framework that tracks price trends tracks citation momentum. The same adversarial detection that identifies MEV identifies p-hacking.
 
+
+> **Implementation**: Specified
+
 **Topic**: [Technical Analysis](./INDEX.md)
 **Prerequisites**: [01-oracle-trait](./01-oracle-trait.md) for Oracle trait, [02-chain-oracles](./02-chain-oracles.md) and [03-coding-oracles](./03-coding-oracles.md) for domain comparisons
 **Key sources**: `refactoring-prd/03-cognitive-subsystems.md` §4

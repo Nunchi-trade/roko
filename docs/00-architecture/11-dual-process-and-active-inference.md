@@ -8,6 +8,9 @@
 > drives routing, the 16 T0 probes, and how uncertainty emerges from the architecture
 > rather than being manually configured.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## 1. The Three Tiers

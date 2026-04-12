@@ -7,6 +7,9 @@
 > capabilities, pre-certified agent templates, the competitive moat analysis, and the
 > current implementation status of the entire identity-economy layer.
 
+
+> **Implementation**: Deferred
+
 ---
 
 ## 1. Forensic AI — Causal Replay Engine

@@ -6,6 +6,9 @@
 > **Status**: Foundations implemented (content-addressed artifacts, episode logging),
 >   full replay pipeline designed
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## 1. Overview

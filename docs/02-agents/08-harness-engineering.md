@@ -8,6 +8,9 @@
 > Nuance: the "6× gap" cited below refers to ref [46] from the Meta-Harness
 > paper (SWE-bench mobile), not to a general claim about all agent tasks.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## The Meta-Harness Thesis

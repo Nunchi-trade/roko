@@ -9,6 +9,9 @@
 > **Prerequisites**: `13-coordination/INDEX.md` (overview), familiarity with the Engram struct
 > (Roko's content-addressed, scored, decaying unit of cognition)
 
+
+> **Implementation**: Specified
+
 ---
 
 ## What Is Stigmergy?

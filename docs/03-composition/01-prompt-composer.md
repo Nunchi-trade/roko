@@ -4,6 +4,9 @@
 > Status: **Implemented** — `roko-compose::prompt` (772 lines, 18 tests)
 > Canonical source: `crates/roko-compose/src/prompt.rs`
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Abstract

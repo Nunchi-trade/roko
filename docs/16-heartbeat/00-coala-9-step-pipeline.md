@@ -2,6 +2,9 @@
 
 > The Cognitive Architectures for Language Agents (CoALA) framework provides the organizing taxonomy for every agent's decision cycle in Roko.
 
+
+> **Implementation**: Specified
+
 **Topic**: [16-heartbeat](./INDEX.md)
 **Prerequisites**: [00-architecture](../00-architecture/INDEX.md) for Synapse Architecture fundamentals
 **Key sources**: Sumers et al. 2023 (arXiv:2309.02427), legacy `bardo-backup/prd/01-golem/02-heartbeat.md`, `refactoring-prd/01-synapse-architecture.md` §3

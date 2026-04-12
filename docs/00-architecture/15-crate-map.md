@@ -6,6 +6,9 @@
 > assignments, dependency relationships, test coverage, and the dissolution of the legacy
 > `roko-golem` umbrella crate into standalone components.
 
+
+> **Implementation**: Shipping
+
 **Topic**: [00-architecture](./INDEX.md)
 **Prerequisites**: [12-five-layer-taxonomy](./12-five-layer-taxonomy.md), [06-synapse-traits](./06-synapse-traits.md)
 **Key sources**:

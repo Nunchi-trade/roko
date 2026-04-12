@@ -7,6 +7,9 @@
 > schema, the `ProviderConfig` and `ModelProfile` structs, model resolution,
 > and the effective-config merge logic.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Overview

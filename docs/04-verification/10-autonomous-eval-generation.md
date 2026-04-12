@@ -4,6 +4,9 @@
 > **Crates**: `roko-gate` (generated_test_gate, property_test_gate), `roko-agent`
 > **Status**: Scaffold (gate implementations exist, generation pipeline designed)
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## 1. Overview

@@ -2,6 +2,9 @@
 
 > The chain agent's heartbeat is a 9-step cognitive cycle that maps onto the universal Synapse loop: OBSERVE → RETRIEVE → ANALYZE → GATE → SIMULATE → VALIDATE → EXECUTE → VERIFY → REFLECT. The chain heartbeat adds SIMULATE and VALIDATE steps that do not exist in the coding agent's loop — domain-specific safety checks before committing capital.
 
+
+> **Implementation**: Specified
+
 **Topic**: [08-chain](./INDEX.md)
 **Prerequisites**: [15-chainwitness-event-watching.md](./15-chainwitness-event-watching.md), [16-triage-curiosity-midas.md](./16-triage-curiosity-midas.md), [17-chain-client-wallet-traits.md](./17-chain-client-wallet-traits.md)
 **Key sources**: `refactoring-prd/05-agent-types.md` §3, `bardo-backup/tmp/agent-chain/01-overview.md`, `roko/tmp/implementation-plans/12b-chain-layer.md` §H
@@ -10,7 +13,7 @@
 
 ## Abstract
 
-Every Roko agent runs a universal cognitive loop defined by the Synapse architecture (see topic [01-synapse](../01-synapse/INDEX.md)): PERCEIVE → EVALUATE → ATTEND → ACT → VERIFY → ADAPT. The chain agent's heartbeat is a domain-specific parameterization of this loop, expanding it to 9 steps that add chain-specific safety checks.
+Every Roko agent runs a universal cognitive loop defined by the Synapse architecture (see topic [01-synapse](../00-architecture/INDEX.md)): PERCEIVE → EVALUATE → ATTEND → ACT → VERIFY → ADAPT. The chain agent's heartbeat is a domain-specific parameterization of this loop, expanding it to 9 steps that add chain-specific safety checks.
 
 The critical additions are SIMULATE (step 5) and VALIDATE (step 6) — pre-flight checks that do not exist in the coding agent's loop. Before committing capital, the chain agent simulates the proposed action in mirage-rs and validates it against safety policies. These steps are the domain-specific reason chain agents have more complex cognitive cycles than coding agents: capital-at-risk operations demand extra verification before execution.
 
@@ -68,7 +71,7 @@ The agent analyzes the combined observation + context:
 - **Output**: Analysis summary with affect valence and recommended action class
 - **Synapse mapping**: Daimon cross-cut — the agent's affect system modulates analysis
 
-The Daimon (see topic [07-daimon](../07-daimon/INDEX.md)) provides somatic markers — fast heuristic signals based on accumulated experience. If the agent has been burned by similar patterns before, the somatic marker is negative, triggering more cautious downstream behavior (smaller position sizes, stronger simulation requirements).
+The Daimon (see topic [07-daimon](../09-daimon/INDEX.md)) provides somatic markers — fast heuristic signals based on accumulated experience. If the agent has been burned by similar patterns before, the somatic marker is negative, triggering more cautious downstream behavior (smaller position sizes, stronger simulation requirements).
 
 ### Step 4: GATE (Routing)
 
@@ -135,7 +138,7 @@ The agent verifies that the execution matched expectations:
 - **Output**: Verification pass/fail with prediction error measurements
 - **Synapse mapping**: `Gate.verify()` — post-execution verification
 
-Prediction errors are recorded for the Oracle system (see topic [09-oracle](../09-oracle/INDEX.md)). Over time, the agent calibrates its predictions: "My gas estimates are typically 15% too low for Uniswap V3 swaps" → next time, inflate the estimate by 15%.
+Prediction errors are recorded for the Oracle system (see topic [09-oracle](../20-technical-analysis/INDEX.md)). Over time, the agent calibrates its predictions: "My gas estimates are typically 15% too low for Uniswap V3 swaps" → next time, inflate the estimate by 15%.
 
 ### Step 9: REFLECT
 
@@ -224,5 +227,5 @@ slippage_tolerance = 0.005  # 0.5%
 - See [16-triage-curiosity-midas.md](./16-triage-curiosity-midas.md) for step 3 (ANALYZE)
 - See [18-mirage-rs-evm-simulator.md](./18-mirage-rs-evm-simulator.md) for step 5 (SIMULATE)
 - See [17-chain-client-wallet-traits.md](./17-chain-client-wallet-traits.md) for step 7 (EXECUTE)
-- See topic [01-synapse](../01-synapse/INDEX.md) for the universal Synapse loop
-- See topic [07-daimon](../07-daimon/INDEX.md) for the affect system in step 3
+- See topic [01-synapse](../00-architecture/INDEX.md) for the universal Synapse loop
+- See topic [07-daimon](../09-daimon/INDEX.md) for the affect system in step 3

@@ -3,6 +3,9 @@
 > Capability<T> flow, safety hook chain, Revm simulation, WASM sandbox for untrusted tools,
 > TaintedString for sensitive data handling.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Overview

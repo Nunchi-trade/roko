@@ -6,6 +6,9 @@
 > constructed, explains why consolidation into `create_agent_for_model` matters,
 > and tracks the migration status.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## The Problem

@@ -6,7 +6,10 @@
 >
 > **Crate**: `roko-dreams` (standalone crate; see `crates/roko-dreams/`)
 >
-> **Prerequisites**: [01-three-phase-cycle.md](01-three-phase-cycle.md), [../03-neuro/INDEX.md](../03-neuro/INDEX.md) (NeuroStore), [../04-daimon/INDEX.md](../04-daimon/INDEX.md) (affect engine)
+> **Prerequisites**: [01-three-phase-cycle.md](01-three-phase-cycle.md), [../03-neuro/INDEX.md](../06-neuro/INDEX.md) (NeuroStore), [../04-daimon/INDEX.md](../09-daimon/INDEX.md) (affect engine)
+
+
+> **Implementation**: Scaffold
 
 ---
 

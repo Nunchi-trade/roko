@@ -9,6 +9,9 @@
 >
 > **Prerequisites**: `03-digital-pheromones.md` (pheromone fundamentals)
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview
@@ -182,6 +185,95 @@ pub enum PheromoneKind {
 
 ---
 
+## Decay Model
+
+Every pheromone kind decays according to an exponential half-life model. The core formula:
+
+```
+intensity(t) = initial_intensity × 2^(-t / half_life)
+```
+
+Where `t` is elapsed time since deposit (not since last read). Decay is computed lazily: the
+stored intensity is the value at deposit time, and any read computes current intensity from
+the deposit timestamp. This eliminates tick-aligned decay updates and lets pheromones decay
+continuously.
+
+```rust
+/// Compute the current intensity of a pheromone given its age.
+///
+/// Uses base-2 exponential decay: `initial × 2^(-elapsed / half_life)`.
+/// Base-2 is chosen over base-e so that the half-life parameter has an
+/// exact, intuitive meaning: after exactly `half_life` seconds, intensity
+/// is exactly 50% of the initial value. No conversion constants needed.
+///
+/// # Decay start trigger
+///
+/// Decay starts at the moment of deposit (`deposited_at`), not at
+/// first read or first sync. This is critical for distributed consistency:
+/// two agents reading the same pheromone at different times compute
+/// the same intensity for the same wall-clock moment.
+pub fn current_intensity(
+    initial_intensity: f64,
+    half_life: Duration,
+    elapsed: Duration,
+) -> f64 {
+    if half_life.is_zero() {
+        return 0.0;
+    }
+    let exponent = -(elapsed.as_secs_f64() / half_life.as_secs_f64());
+    initial_intensity * 2.0_f64.powf(exponent)
+}
+
+/// Returns true if the pheromone has decayed below the evaporation threshold.
+/// Pheromones below this threshold are eligible for garbage collection.
+///
+/// Default threshold: 0.01 (1% of max intensity).
+pub fn is_evaporated(intensity: f64, threshold: f64) -> bool {
+    intensity < threshold
+}
+```
+
+### Confirmation extension
+
+When another agent confirms a pheromone, the confirming deposit extends the effective
+half-life. The extension formula for standard (non-Alpha) kinds:
+
+```
+half_life_extended = half_life_base × (1 + 0.15 × ln(1 + confirmations))
+```
+
+The logarithmic scaling ensures diminishing returns: the first few confirmations extend the
+half-life meaningfully, but a pheromone cannot live forever through confirmation alone.
+
+| Confirmations | Extension multiplier | Effective half-life (base = 12h) |
+|---------------|---------------------|--------------------------------|
+| 0 | 1.00 | 12.0h |
+| 1 | 1.10 | 13.2h |
+| 3 | 1.21 | 14.5h |
+| 5 | 1.27 | 15.2h |
+| 10 | 1.36 | 16.3h |
+
+The `0.15` coefficient was selected so that 10 confirmations extend half-life by ~36%, which
+keeps even heavily-confirmed pheromones mortal. The logarithmic function `ln(1 + n)` grows
+without bound but slowly enough that no practical confirmation count produces an immortal
+pheromone.
+
+```rust
+/// Compute the confirmation-extended half-life for a standard pheromone kind.
+///
+/// Alpha pheromones use `alpha_effective_half_life()` instead (confirmation
+/// *reduces* their half-life — the Alpha paradox).
+pub fn confirmed_half_life(
+    base_half_life: Duration,
+    confirmations: u32,
+) -> Duration {
+    let multiplier = 1.0 + 0.15 * (1.0 + confirmations as f64).ln();
+    Duration::from_secs_f64(base_half_life.as_secs_f64() * multiplier)
+}
+```
+
+---
+
 ## Universal Kinds in Detail
 
 ### Threat
@@ -295,6 +387,64 @@ the crowd). Roko handles this by applying a negative confirmation weight for Alp
 This means an Alpha with 3 confirmations has 40% of its original half-life — it fades faster
 as more agents discover it, reflecting the real-world dynamics of first-mover advantages.
 
+**Effective half-life derivation**: The formula caps the minimum effective half-life at 50% of
+the base value. The `0.2` coefficient per confirmation was chosen so that:
+
+| Confirmations | Multiplier | Effective half-life (base = 1h) | Rationale |
+|---------------|------------|-------------------------------|-----------|
+| 0 | 1.0 | 60 min | Fresh alpha, full value |
+| 1 | 0.8 | 48 min | One other agent knows |
+| 2 | 0.6 | 36 min | Edge eroding |
+| 3 | 0.4 | 24 min | Crowd discovery threshold |
+| 4 | 0.2 | 12 min | Rapidly decaying |
+| 5+ | 0.5 (floor) | 30 min | Floor prevents instant evaporation |
+
+Note the floor at 5+ confirmations: `max(0.5, 1 - 5 × 0.2) = max(0.5, 0.0) = 0.5`. Without
+this floor, a heavily-confirmed Alpha would vanish instantly. The floor preserves a minimum
+window for agents that have already committed resources to exploit the signal.
+
+```rust
+/// Compute effective half-life for an Alpha pheromone given its confirmation count.
+///
+/// Alpha pheromones decay *faster* with more confirmations (the paradox).
+/// The floor at 0.5 prevents instant evaporation — an Alpha that many agents
+/// have confirmed still persists for at least half its base half-life.
+pub fn alpha_effective_half_life(
+    base_half_life: Duration,
+    confirmations: u32,
+) -> Duration {
+    let multiplier = (1.0 - confirmations as f64 * 0.2).max(0.5);
+    Duration::from_secs_f64(base_half_life.as_secs_f64() * multiplier)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn alpha_paradox_floor() {
+        let base = Duration::from_secs(3600); // 1 hour
+        assert_eq!(
+            alpha_effective_half_life(base, 0),
+            Duration::from_secs(3600),
+        );
+        assert_eq!(
+            alpha_effective_half_life(base, 3),
+            Duration::from_secs(1440), // 24 min
+        );
+        // Floor kicks in at 5+ confirmations
+        assert_eq!(
+            alpha_effective_half_life(base, 5),
+            Duration::from_secs(1800), // 30 min, not 0
+        );
+        assert_eq!(
+            alpha_effective_half_life(base, 10),
+            Duration::from_secs(1800), // Still 30 min
+        );
+    }
+}
+
 ### Pattern
 
 Pattern signals indicate that an agent has detected a recurring structure or regularity. In
@@ -396,10 +546,57 @@ half_life_secs = 7200   # 2 hours
 description = "ML model predictions diverging from observed outcomes"
 ```
 
-### Domain Plugin Pattern
+### Validation and scope isolation
+
+Custom kind identifiers pass through a validation gate at registration and at deposit time.
+
+```rust
+/// Validate a custom pheromone kind identifier.
+///
+/// Rules:
+/// - ASCII alphanumeric and underscores only
+/// - 1..=64 characters
+/// - Must not collide with a built-in kind name (case-insensitive)
+/// - Must not start with `_` (reserved for internal kinds)
+///
+/// Returns `Err` with a human-readable reason on failure.
+pub fn validate_custom_kind(id: &str) -> Result<(), String> {
+    if id.is_empty() || id.len() > 64 {
+        return Err(format!(
+            "custom kind id must be 1-64 chars, got {}",
+            id.len()
+        ));
+    }
+    if id.starts_with('_') {
+        return Err("custom kind ids starting with '_' are reserved".into());
+    }
+    if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err("custom kind id must be ASCII alphanumeric + underscores".into());
+    }
+    let reserved = [
+        "threat", "opportunity", "wisdom", "alpha",
+        "pattern", "anomaly", "consensus",
+    ];
+    if reserved.contains(&id.to_ascii_lowercase().as_str()) {
+        return Err(format!("'{id}' collides with built-in kind name"));
+    }
+    Ok(())
+}
+```
+
+**Scope isolation**: Custom kinds registered by a domain plugin are scoped to that domain's
+namespace. A `Custom("gas_price_surge")` registered by `roko-chain` does not conflict with a
+`Custom("gas_price_surge")` registered by a user plugin in a different domain. The scoping
+key is `(domain, kind_id)`. Two agents in different domains can deposit custom pheromones with
+the same string identifier without interference — they are stored and queried independently.
+
+Within the same domain, custom kinds with the same string identifier are treated as the same
+kind for confirmation, decay, and promotion purposes.
+
+### Domain plugin pattern
 
 Each domain plugin (`roko-chain` for blockchain, user-defined for other domains) can define its
-own custom pheromone kinds. The domain-agnostic kernel doesn't need to know about these kinds —
+own custom pheromone kinds. The domain-agnostic kernel does not need to know about these kinds —
 it handles them generically through the `Custom(String)` variant.
 
 Example domain-specific kinds:
@@ -428,20 +625,109 @@ scope. Agents in threat-response mode should not be distracted by opportunities 
 threat is resolved. This is analogous to how alarm pheromone in ant colonies overrides
 foraging pheromone [Wilson, E.O. "The Insect Societies." Belknap Press, 1971].
 
-### Pattern → Wisdom Promotion
+### Pattern -> Wisdom -> Consensus cascade
 
-When a `Pattern` pheromone accumulates 3+ confirmations and persists for more than 50% of its
-half-life, it becomes eligible for promotion to `Wisdom`. The promotion creates a new
-pheromone with the original Pattern as parent, preserving lineage.
+The full promotion pipeline has three stages, each with explicit thresholds and ownership.
 
-### Anomaly → Threat/Opportunity Resolution
+```
+Pattern ──[3+ confirmations, age > 50% half-life]──> Wisdom
+Wisdom  ──[4+ confirmations]──────────────────────> Consensus
+Consensus ──[5+ confirmations]────────────────────> Permanent Engram (optional)
+```
 
-`Anomaly` pheromones are inherently temporary. They should resolve into either `Threat`
+**Who checks**: The `PheromonePromoter` runs as a background task inside the Curator cycle
+(every 50 ticks). It scans all pheromones in the local store, evaluates promotion eligibility,
+and deposits promoted pheromones with parent linkage.
+
+```rust
+/// Promotion thresholds for the Pattern → Wisdom → Consensus cascade.
+pub struct PromotionConfig {
+    /// Minimum confirmations for Pattern → Wisdom promotion.
+    /// Default: 3. Range: [2, 10].
+    pub pattern_to_wisdom_confirmations: u32,
+
+    /// Minimum age as fraction of half-life for Pattern → Wisdom.
+    /// Default: 0.5 (must survive at least half its half-life).
+    /// Range: [0.1, 1.0].
+    pub pattern_to_wisdom_min_age_fraction: f64,
+
+    /// Minimum confirmations for Wisdom → Consensus promotion.
+    /// Default: 4. Range: [3, 20].
+    pub wisdom_to_consensus_confirmations: u32,
+
+    /// Minimum confirmations for Consensus → permanent Engram.
+    /// Default: 5. Range: [4, 50].
+    pub consensus_to_engram_confirmations: u32,
+
+    /// Whether to auto-promote or require explicit agent action.
+    /// Default: true (auto-promote).
+    pub auto_promote: bool,
+}
+
+impl Default for PromotionConfig {
+    fn default() -> Self {
+        Self {
+            pattern_to_wisdom_confirmations: 3,
+            pattern_to_wisdom_min_age_fraction: 0.5,
+            wisdom_to_consensus_confirmations: 4,
+            consensus_to_engram_confirmations: 5,
+            auto_promote: true,
+        }
+    }
+}
+
+/// Evaluate whether a pheromone is eligible for promotion.
+///
+/// Returns the target kind if promotion is warranted, None otherwise.
+/// The caller is responsible for depositing the promoted pheromone.
+pub fn check_promotion(
+    kind: &PheromoneKind,
+    confirmations: u32,
+    age: Duration,
+    half_life: Duration,
+    config: &PromotionConfig,
+) -> Option<PheromoneKind> {
+    match kind {
+        PheromoneKind::Pattern => {
+            let age_fraction = age.as_secs_f64() / half_life.as_secs_f64();
+            if confirmations >= config.pattern_to_wisdom_confirmations
+                && age_fraction >= config.pattern_to_wisdom_min_age_fraction
+            {
+                Some(PheromoneKind::Wisdom)
+            } else {
+                None
+            }
+        }
+        PheromoneKind::Wisdom => {
+            if confirmations >= config.wisdom_to_consensus_confirmations {
+                Some(PheromoneKind::Consensus)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+```
+
+**In-flight handling**: A pheromone that is mid-promotion (e.g., a Pattern at 2 confirmations
+that receives its 3rd confirmation while the Curator is already scanning) is handled by the
+next Curator cycle. The promotion check is idempotent: if a Wisdom pheromone with the same
+parent hash already exists, the duplicate promotion is skipped. The parent hash provides
+deduplication — two promoters cannot create two Wisdom pheromones from the same Pattern.
+
+**Error handling**: If the promoted pheromone fails to persist (store full, I/O error), the
+promoter logs a warning and retries on the next Curator cycle. The source pheromone is not
+modified; it remains eligible for promotion until either promoted or decayed.
+
+### Anomaly -> Threat/Opportunity resolution
+
+`Anomaly` pheromones are inherently temporary. They resolve into either `Threat`
 (danger confirmed), `Opportunity` (hidden value discovered), or natural decay (noise). An
 Anomaly that persists at high intensity without resolution may trigger escalation to a broader
 scope.
 
-### Consensus Stability
+### Consensus stability
 
 `Consensus` pheromones resist contradiction. To contradict a Consensus pheromone, an agent
 must deposit a `Threat` pheromone of equal or greater intensity with explicit evidence. This

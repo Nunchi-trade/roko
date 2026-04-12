@@ -3,6 +3,9 @@
 > The 16 built-in tools shipped with `roko-std` — the domain-agnostic tool set available to
 > every agent regardless of domain configuration.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Overview

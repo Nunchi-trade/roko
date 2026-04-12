@@ -2,6 +2,9 @@
 
 > Each knowledge type has a base half-life calibrated to the expected staleness rate of that category of knowledge, drawn from memory research and practical agent operation.
 
+
+> **Implementation**: Built
+
 **Topic**: [Neuro — Cognitive Knowledge Layer](./INDEX.md)
 **Prerequisites**: [01-six-knowledge-types.md](./01-six-knowledge-types.md), [02-four-validation-tiers.md](./02-four-validation-tiers.md)
 **Key sources**:

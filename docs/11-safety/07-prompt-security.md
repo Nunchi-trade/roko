@@ -8,6 +8,9 @@
 >
 > **Prerequisites**: [00-defense-in-depth.md](00-defense-in-depth.md), [03-taint-tracking.md](03-taint-tracking.md)
 
+
+> **Implementation**: Specified
+
 ---
 
 ## The Threat: Prompt Injection

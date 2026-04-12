@@ -2,6 +2,9 @@
 
 > The `roko-serve` crate provides the HTTP server exposing REST endpoints, WebSocket streaming, and SSE event feeds for remote control of Roko.
 
+
+> **Implementation**: Scaffold
+
 **Topic**: [12-interfaces](./INDEX.md)
 **Prerequisites**: [00-cli-overview.md](./00-cli-overview.md), [00-architecture](../00-architecture/INDEX.md)
 **Key sources**: `refactoring-prd/06-interfaces.md` §2, `roko-serve/src/lib.rs`, `roko-serve/src/routes/mod.rs`, `bardo-backup/prd/25-mori/mori-interfaces.md`, `implementation-plans/11-sections/phase-0-1.md`

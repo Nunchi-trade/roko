@@ -3,7 +3,7 @@
 > Academic foundations for evolutionary computation, cultural evolution, knowledge compression, and generational learning relevant to Roko's knowledge lifecycle and EvoSkills.
 
 **Topic**: [References](./INDEX.md)
-**Prerequisites**: [Architecture](../00-architecture/INDEX.md), [Learning](../06-learning/INDEX.md)
+**Prerequisites**: [Architecture](../00-architecture/INDEX.md), [Learning](../05-learning/INDEX.md)
 **Key sources**: `bardo-backup/prd/02-mortality/14-research-foundations.md` §§1, 10, `bardo-backup/prd/shared/citations.md` §§9, 35
 
 ---

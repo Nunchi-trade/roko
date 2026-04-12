@@ -5,6 +5,9 @@
 > **Theoretical basis:** Optimal Foraging Theory (MacArthur & Pianka 1966), Calibration (Gneiting & Raftery 2007)
 > **Cross-references:** [04-cascade-router](04-cascade-router.md), [15-collective-calibration-31x](15-collective-calibration-31x.md), [14-stability-mechanisms](14-stability-mechanisms.md)
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Purpose

@@ -2,6 +2,9 @@
 
 > Episodes are distilled into Insights, Insights are promoted to Heuristics, and validated Heuristics are compiled into human-readable PLAYBOOK.md files — a three-stage pipeline implementing Complementary Learning Systems theory.
 
+
+> **Implementation**: Built
+
 **Topic**: [Neuro — Cognitive Knowledge Layer](./INDEX.md)
 **Prerequisites**: [01-six-knowledge-types.md](./01-six-knowledge-types.md), [02-four-validation-tiers.md](./02-four-validation-tiers.md)
 **Key sources**:

@@ -2,6 +2,9 @@
 
 > Neuro is the agent's persistent, tiered, HDC-indexed knowledge system — a semantic wrapper around Substrate that adds knowledge-specific logic for classification, decay, and similarity search.
 
+
+> **Implementation**: Built
+
 **Topic**: [Neuro — Cognitive Knowledge Layer](./INDEX.md)
 **Prerequisites**: [00-architecture](../00-architecture/INDEX.md) for Synapse Architecture concepts (Engrams, 6 traits, Substrate)
 **Key sources**:

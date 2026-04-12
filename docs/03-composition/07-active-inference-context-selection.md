@@ -4,6 +4,9 @@
 > Status: **Scaffold** — Formula specified, implementation pending (E2 in 12a-cognitive-layer.md)
 > Canonical sources: `refactoring-prd/09-innovations.md` §XIX.B, Friston (2022)
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Abstract

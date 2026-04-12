@@ -8,6 +8,9 @@
 > specifies each speed, the adaptive clock scheduler, and the operating frequency selection
 > logic.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## 1. The Three Speeds

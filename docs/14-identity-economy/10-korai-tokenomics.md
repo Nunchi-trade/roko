@@ -8,6 +8,9 @@
 > Solidity implementation, minting/burning mechanics, curation bonds, and equilibrium
 > analysis.
 
+
+> **Implementation**: Deferred
+
 ---
 
 ## 1. Three Problems Tokens Solve

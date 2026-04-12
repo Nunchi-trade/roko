@@ -2,6 +2,9 @@
 
 > The domain-configurable coordinate system that locates every strategy attempt in an 8D space, enabling k-d tree somatic lookup and pattern matching across agent histories.
 
+
+> **Implementation**: Built
+
 **Topic**: [Daimon](./INDEX.md)
 **Prerequisites**: [06-somatic-markers-damasio.md](./06-somatic-markers-damasio.md)
 **Key sources**: `refactoring-prd/09-innovations.md` §XIX.F, `refactoring-prd/03-cognitive-subsystems.md` §2
@@ -176,7 +179,7 @@ Both map to: high_dimension_1 + high_dimension_2 + low_dimension_4
 
 The mapping is coarse — it preserves the shape of the strategy profile (which dimensions are high/low) without preserving the specific meanings. This enables cross-domain somatic transfer: a coding agent's "cautious approach to complex risky tasks" marker can inform a chain agent's "cautious approach to volatile leveraged positions" through structural similarity.
 
-This cross-domain transfer is facilitated by HDC encoding (see topic [04-knowledge](../04-knowledge/INDEX.md)), where the 8D coordinates are encoded as hyperdimensional vectors using bind and permute operations. Structural similarity in the 8D space produces Hamming similarity in the HDC space.
+This cross-domain transfer is facilitated by HDC encoding (see topic [04-knowledge](../06-neuro/INDEX.md)), where the 8D coordinates are encoded as hyperdimensional vectors using bind and permute operations. Structural similarity in the 8D space produces Hamming similarity in the HDC space.
 
 ---
 
@@ -202,5 +205,5 @@ This cross-domain transfer is facilitated by HDC encoding (see topic [04-knowled
 
 - See [06-somatic-markers-damasio.md](./06-somatic-markers-damasio.md) for k-d tree query over strategy space
 - See [07-15-percent-contrarian-retrieval.md](./07-15-percent-contrarian-retrieval.md) for contrarian retrieval in strategy space
-- See topic [04-knowledge](../04-knowledge/INDEX.md) for HDC encoding of strategy coordinates
+- See topic [04-knowledge](../06-neuro/INDEX.md) for HDC encoding of strategy coordinates
 - See [11-coding-agent-integration.md](./11-coding-agent-integration.md) for coding-specific dimension computation

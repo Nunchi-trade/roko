@@ -6,6 +6,9 @@
 > automated image builds, and the docker-compose configuration for running the full stack
 > locally.
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Image Registry and Naming

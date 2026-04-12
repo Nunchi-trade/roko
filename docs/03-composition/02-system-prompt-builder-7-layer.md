@@ -4,6 +4,9 @@
 > Status: **Implemented** — `roko-compose::system_prompt_builder` (726 lines, 12 tests)
 > Canonical source: `crates/roko-compose/src/system_prompt_builder.rs`
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Abstract

@@ -6,6 +6,9 @@
 > generation, restart policies, journal integration, socket activation, and the differences
 > from the macOS launchd path.
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview

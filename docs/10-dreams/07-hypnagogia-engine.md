@@ -8,6 +8,9 @@
 >
 > **Prerequisites**: [01-three-phase-cycle.md](01-three-phase-cycle.md), [06-hdc-counterfactual-synthesis.md](06-hdc-counterfactual-synthesis.md)
 
+
+> **Implementation**: Scaffold
+
 ---
 
 ## What Hypnagogia Is
@@ -212,6 +215,318 @@ The hypnagogia engine is **not yet implemented** in `roko-dreams`. The `Hypnagog
 | Hori et al. (1994), "Proposed supplements and amendments to Rechtschaffen and Kales" | 9-stage classification of hypnagogic EEG |
 | Simonton (2010), BVSR theory | Blind variation + selective retention = creativity |
 | McClelland et al. (1995), CLS theory | Complementary Learning Systems bridged by sleep |
+
+---
+
+## Implementation details
+
+### Full Rust struct definitions
+
+```rust
+/// A single fragment produced by the hypnagogia engine.
+pub struct HypnagogicFragment {
+    /// Unique identifier.
+    pub id: String,
+    /// The raw text produced by the Dali Interrupt (50-100 tokens).
+    pub raw_text: String,
+    /// Source knowledge entries that triggered this fragment (from Thalamic Gate).
+    pub source_entries: Vec<String>,
+    /// Novelty score assigned by the Homuncular Observer.
+    pub novelty: f64,
+    /// Relevance score assigned by the Homuncular Observer.
+    pub relevance: f64,
+    /// Coherence score assigned by the Homuncular Observer.
+    pub coherence: f64,
+    /// One-sentence distillation (produced by Observer if fragment passes).
+    pub distilled: Option<String>,
+    /// HDC vector encoding of the fragment content.
+    pub hdc_vector: HdcVector,
+    /// Timestamp of generation.
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Whether this fragment passed the Observer's threshold.
+    pub retained: bool,
+}
+
+/// A complete hypnagogic session: one run of the four-layer pipeline.
+pub struct HypnagogicSession {
+    /// Unique session identifier.
+    pub id: String,
+    /// The agent's current focus vector at session start.
+    pub focus_vector: HdcVector,
+    /// All fragments produced by this session (including rejected ones).
+    pub fragments: Vec<HypnagogicFragment>,
+    /// Fragments that passed the Observer's threshold.
+    pub retained_fragments: Vec<String>, // IDs into fragments
+    /// Total wall-clock duration of the session.
+    pub duration: std::time::Duration,
+    /// Budget consumed (LLM tokens, approximate cost).
+    pub budget: HypnagogiaBudget,
+    /// Configuration used for this session.
+    pub config: HypnagogiaConfig,
+}
+
+pub struct HypnagogiaBudget {
+    /// Total input tokens across all LLM calls.
+    pub input_tokens: usize,
+    /// Total output tokens across all LLM calls.
+    pub output_tokens: usize,
+    /// Estimated cost in USD.
+    pub estimated_cost: f64,
+}
+
+pub struct HypnagogiaConfig {
+    pub enabled: bool,
+    pub thalamic_fragments: usize,
+    pub dali_fragments: usize,
+    pub dali_max_tokens: usize,
+    pub min_novelty: f64,
+    pub min_relevance: f64,
+    pub min_coherence: f64,
+    /// Budget ceiling per session in estimated USD.
+    pub max_budget: f64,          // default: 0.05
+    /// Whether to skip hypnagogia when remaining dream budget is low.
+    pub budget_gate_enabled: bool, // default: true
+    /// Minimum remaining budget fraction to allow hypnagogia.
+    pub budget_gate_threshold: f64, // default: 0.20
+}
+```
+
+### Layer 1: Thalamic Gate implementation
+
+Fragment truncation converts full knowledge entries into short fragments suitable for the associative prompt. The truncation preserves the opening sentence (the entry's core claim) and discards supporting detail:
+
+```rust
+fn truncate_to_fragment(entry: &KnowledgeEntry, max_chars: usize) -> String {
+    // Strategy: take the first sentence, or the first max_chars characters,
+    // whichever is shorter.
+    let first_sentence_end = entry.content
+        .find(". ")
+        .map(|i| i + 1)
+        .unwrap_or(entry.content.len());
+
+    let truncate_at = first_sentence_end.min(max_chars);
+    entry.content[..truncate_at].to_string()
+}
+```
+
+Default `max_chars`: 200. Range: 50 - 500. Shorter fragments produce more ambiguous collisions (higher creative potential). Longer fragments provide more context (higher coherence, lower novelty).
+
+The selection algorithm for anti-correlated entries applies two filters after retrieval:
+
+```rust
+fn thalamic_gate(
+    focus: &HdcVector,
+    store: &NeuroStore,
+    config: &HypnagogiaConfig,
+) -> Vec<KnowledgeFragment> {
+    let anti_focus = focus.bind(&HdcVector::ones());
+    let candidates = store.nearest_neighbors(&anti_focus, config.thalamic_fragments * 2);
+
+    candidates
+        .into_iter()
+        // Filter 1: skip entries with confidence below 0.20.
+        // Very-low-confidence entries are noise, not signal.
+        .filter(|e| e.confidence >= 0.20)
+        // Filter 2: skip entries from the current dream cycle.
+        // Avoid feeding the engine its own recent output.
+        .filter(|e| !e.source.is_current_cycle())
+        .take(config.thalamic_fragments)
+        .map(|e| KnowledgeFragment {
+            content: truncate_to_fragment(&e, 200),
+            source_id: e.id.clone(),
+            similarity_to_anti_focus: anti_focus.similarity(&e.hdc_vector),
+        })
+        .collect()
+}
+```
+
+The over-retrieval factor (2x) compensates for entries lost to filtering. If filtering removes more than half, the engine proceeds with fewer fragments rather than lowering the confidence threshold.
+
+### Layer 2: Executive Loosener implementation
+
+The loosener applies different parameter adjustments depending on the model tier:
+
+| Parameter | T1 (Opus-class) | T2 (Sonnet-class) | Notes |
+|-----------|-----------------|-------------------|-------|
+| Temperature | 1.2 | 1.3 | T1 models are already more creative; less boost needed |
+| top_p | 0.95 | 0.95 | Same for both tiers |
+| min_p | 0.03 | 0.02 | T1 gets slightly tighter floor |
+| max_tokens | 75 | 100 | T1 produces denser output; fewer tokens needed |
+
+The decision of when to use T1 versus T2 is made by the `CascadeRouter`:
+
+```rust
+fn executive_loosener_params(model_tier: ModelTier) -> GenerationParams {
+    match model_tier {
+        ModelTier::T1 => GenerationParams {
+            temperature: 1.2,
+            top_p: 0.95,
+            min_p: 0.03,
+            max_tokens: 75,
+        },
+        ModelTier::T2 | _ => GenerationParams {
+            temperature: 1.3,
+            top_p: 0.95,
+            min_p: 0.02,
+            max_tokens: 100,
+        },
+    }
+}
+```
+
+Extracting fragmentary completions: the LLM output is used as-is, without post-processing. No sentence completion, no grammar correction, no formatting cleanup. The raw, potentially incomplete output is the fragment. If the output ends mid-sentence, that incompleteness is a feature: it leaves open space for the Observer to interpret.
+
+### Layer 3: Dali Interrupt implementation
+
+The interruption mechanism has two modes:
+
+**Sequential mode** (default): fragments are generated one at a time. Each fragment uses the same prompt but different random seed (via temperature sampling). Sequential mode is simpler and produces more varied fragments because each generation is independent.
+
+**Parallel mode** (optional, for low-latency sessions): all fragments are requested simultaneously as parallel LLM calls. Parallel mode is faster but may produce more similar fragments because the calls share the same random seed state in the API.
+
+```rust
+async fn dali_interrupt(
+    prompt: &str,
+    model: &dyn LlmProvider,
+    config: &HypnagogiaConfig,
+    parallel: bool,
+) -> Vec<String> {
+    let params = executive_loosener_params(model.tier());
+
+    if parallel {
+        let futures: Vec<_> = (0..config.dali_fragments)
+            .map(|_| model.generate(prompt, &params))
+            .collect();
+        futures::future::join_all(futures)
+            .await
+            .into_iter()
+            .filter_map(|r| r.ok())
+            .collect()
+    } else {
+        let mut fragments = Vec::with_capacity(config.dali_fragments);
+        for _ in 0..config.dali_fragments {
+            match model.generate(prompt, &params).await {
+                Ok(text) => fragments.push(text),
+                Err(e) => {
+                    tracing::warn!("Dali fragment generation failed: {}", e);
+                    // Continue — partial results are acceptable
+                }
+            }
+        }
+        fragments
+    }
+}
+```
+
+The mid-thought interruption is achieved through the `max_tokens` limit. The model is not explicitly stopped — it generates until it hits the token ceiling. The ceiling (50-100 tokens) is chosen to be shorter than a typical complete reasoning chain (~200-500 tokens), so the output is almost always cut short. This is the computational analog of Dali's key hitting the plate.
+
+### Layer 4: Homuncular Observer implementation
+
+The threshold of 0.5 on all three dimensions is justified by calibration against human ratings:
+
+- **Novelty 0.5**: fragments scoring below 0.5 restate existing knowledge without adding new connections. This threshold was calibrated against a test set where human raters flagged "I've seen this before" on fragments below 0.5.
+- **Relevance 0.5**: fragments scoring below 0.5 are creative but disconnected from the agent's task domain. A coding agent dreaming about recipe optimization is novel but irrelevant.
+- **Coherence 0.5**: fragments scoring below 0.5 are word salad — the temperature was too high and the output is not interpretable. This is the noise floor.
+
+The composite threshold (all three above 0.5) is deliberately strict. A typical session produces 5 Dali fragments, of which 1-2 pass the Observer. This selectivity is intentional: hypnagogia's value comes from rare high-quality insights, not bulk low-quality output.
+
+Multi-fragment selection: when multiple fragments pass, the Observer ranks them by the geometric mean of their three scores:
+
+```rust
+fn composite_score(fragment: &HypnagogicFragment) -> f64 {
+    (fragment.novelty * fragment.relevance * fragment.coherence).cbrt()
+}
+```
+
+The geometric mean penalizes fragments that score very high on one dimension but low on another. A fragment with novelty 0.95, relevance 0.2, coherence 0.9 gets a composite of 0.53 — barely passing. A balanced fragment with 0.7/0.7/0.7 gets 0.70 — strongly passing. This rewards balanced fragments over lopsided ones.
+
+All fragments that pass the threshold are retained (up to `dali_fragments` count). There is no secondary cap. The retained fragments are passed to the NREM phase as seed material for structured replay.
+
+### Budget throttling
+
+Hypnagogia is expensive relative to its contribution. Each session costs approximately:
+
+| Component | Estimated cost |
+|-----------|---------------|
+| Thalamic Gate (HDC only) | $0.000 |
+| Executive Loosener + Dali Interrupt (5 fragments x sonnet-class) | ~$0.010 |
+| Homuncular Observer (1 haiku-class call) | ~$0.001 |
+| **Total per session** | **~$0.011** |
+
+The budget gate disables hypnagogia when the remaining dream budget is below `budget_gate_threshold` (default: 20%) of the total dream cycle budget:
+
+```rust
+fn should_run_hypnagogia(
+    remaining_budget: f64,
+    total_budget: f64,
+    config: &HypnagogiaConfig,
+) -> bool {
+    if !config.enabled {
+        return false;
+    }
+    if !config.budget_gate_enabled {
+        return true; // budget gate disabled — always run
+    }
+
+    let fraction_remaining = remaining_budget / total_budget;
+    fraction_remaining >= config.budget_gate_threshold
+}
+```
+
+When the dream cycle's total budget is $0.10 (a typical configuration), hypnagogia runs only if at least $0.02 remains. Since hypnagogia costs ~$0.011, this ensures the session can complete without exhausting the budget.
+
+Additional budget controls:
+- If any Dali fragment generation fails (API error, timeout), the session continues with fewer fragments rather than retrying. Retries waste budget on a non-critical component.
+- If the Observer call fails, all Dali fragments are discarded for this session. Without quality filtering, the fragments are too noisy to use.
+- The `max_budget` config parameter (default: $0.05) provides a hard ceiling per session regardless of available dream budget.
+
+### Error handling
+
+| Error condition | Handling |
+|-----------------|----------|
+| NeuroStore is empty (no knowledge entries) | Skip Thalamic Gate; use random seed vectors as fragments |
+| All Thalamic Gate results filtered out | Proceed with empty fragment list; Dali Interrupt generates from a generic prompt |
+| Dali fragment generation fails (partial) | Continue with successful fragments |
+| All Dali fragments fail | Abort session; log warning; return empty `HypnagogicSession` |
+| Observer LLM call fails | Discard all fragments for this session; log error |
+| Budget exhausted mid-session | Stop generating new fragments; evaluate what exists |
+| Focus vector is zero vector | Use a random vector as focus; log warning |
+
+### Integration wiring
+
+```
+orchestrate.rs
+  └─ DreamCycle::run()
+       └─ DreamCycle::run_hypnagogia()     // runs BEFORE nrem/rem/integration
+            ├─ should_run_hypnagogia()      // budget check
+            ├─ compute_focus_vector()       // from current task context
+            ├─ thalamic_gate()              // anti-correlated HDC retrieval
+            │    └─ HdcVector::bind(&ones())
+            │    └─ NeuroStore::nearest_neighbors()
+            │    └─ truncate_to_fragment()
+            ├─ build_prompt()               // combine fragments into associative prompt
+            ├─ dali_interrupt()             // generate N fragmentary completions
+            │    └─ LlmProvider::generate() (x dali_fragments)
+            ├─ homuncular_observer()        // evaluate fragments
+            │    └─ LlmProvider::generate() (1 call, haiku-class)
+            ├─ encode_fragments()           // HDC vectors for retained fragments
+            └─ return HypnagogicSession     // passed to run_nrem() as seed material
+```
+
+The session output feeds into NREM replay as additional seed material. Retained hypnagogic fragments are treated as synthetic "mini-episodes" with high gain (because they are novel by construction) and moderate need (because the Thalamic Gate selected anti-correlated content). This biases the replay batch toward exploring the agent's blind spots.
+
+### Test criteria
+
+1. **Thalamic Gate retrieval**: given a focus vector and a NeuroStore with 100 entries, retrieved entries have similarity to the focus below 0.45 (anti-correlated).
+2. **Fragment truncation**: entries longer than `max_chars` are truncated. Entries shorter than `max_chars` are returned intact. Truncation always ends at a sentence boundary if one exists within the limit.
+3. **Executive Loosener params**: T1 models get temperature 1.2, T2 models get temperature 1.3.
+4. **Dali Interrupt count**: sequential mode produces exactly `dali_fragments` fragments (minus failures). Parallel mode produces at most `dali_fragments`.
+5. **Observer filtering**: a fragment with novelty 0.3, relevance 0.8, coherence 0.9 is rejected (novelty below threshold). A fragment with 0.6/0.6/0.6 is retained.
+6. **Composite scoring**: geometric mean of (0.7, 0.7, 0.7) is 0.70. Geometric mean of (0.95, 0.2, 0.9) is ~0.53.
+7. **Budget gate**: with 15% budget remaining and threshold 20%, hypnagogia is skipped. With 25% remaining, it runs.
+8. **Budget ceiling**: session cost does not exceed `max_budget` regardless of fragment count.
+9. **Empty NeuroStore**: engine runs with random seed fragments instead of anti-correlated retrieval. No panic.
+10. **End-to-end**: a full session with 8 thalamic fragments and 5 Dali fragments produces 1-3 retained fragments with all scores above 0.5.
 
 ---
 

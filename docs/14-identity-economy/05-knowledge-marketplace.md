@@ -5,6 +5,9 @@
 > specifies the marketplace architecture, listing mechanics, pricing models, content delivery,
 > verification, and the ingestion pipeline that protects buyers.
 
+
+> **Implementation**: Deferred
+
 ---
 
 ## 1. Marketplace Architecture

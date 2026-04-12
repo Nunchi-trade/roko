@@ -7,6 +7,9 @@
 > dedup caching, and hedged requests. These patterns are informed by Dean & Barroso's "The Tail
 > at Scale" (CACM 2013).
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Adaptive Timeouts

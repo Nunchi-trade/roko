@@ -2,6 +2,9 @@
 
 > WCAG 2.1 AA compliance targets, keyboard navigation, screen reader support, reduced motion, port allocation, and comprehensive status of all interface components.
 
+
+> **Implementation**: Scaffold
+
 **Topic**: [12-interfaces](./INDEX.md)
 **Prerequisites**: [07-rosedust-design-language.md](./07-rosedust-design-language.md), [08-tui-main-layout.md](./08-tui-main-layout.md), [13-web-portal.md](./13-web-portal.md)
 **Key sources**: `refactoring-prd/06-interfaces.md` §9, `bardo-backup/prd/shared/port-allocation.md`

@@ -2,6 +2,9 @@
 
 > Every domain-specific prediction system in Roko implements a single trait. This document specifies the full Rust signature, supporting types, and integration points.
 
+
+> **Implementation**: Specified
+
 **Topic**: [Technical Analysis](./INDEX.md)
 **Prerequisites**: [00-vision-ta-generalized](./00-vision-ta-generalized.md) for motivation, [00-architecture](../00-architecture/INDEX.md) for Synapse traits and Engram
 **Key sources**: `refactoring-prd/03-cognitive-subsystems.md` §4, `refactoring-prd/01-synapse-architecture.md`

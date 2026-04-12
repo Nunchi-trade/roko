@@ -4,6 +4,9 @@
 > Decide via intervention policy. Act through orchestrator commands.
 > Every evaluation cycle is one iteration of this loop.
 
+
+> **Implementation**: Built
+
 ---
 
 ## The OODA Framework

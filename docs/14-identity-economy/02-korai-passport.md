@@ -5,6 +5,9 @@
 > encoding, the lifecycle from minting to potential revocation, and the security properties
 > that make it a credible identity primitive.
 
+
+> **Implementation**: Deferred
+
 ---
 
 ## 1. Passport Struct Definition

@@ -2,6 +2,9 @@
 
 > The Library of Babel is the cross-collective knowledge exchange layer — how agents in different collectives (and on the public Korai chain) share, discover, and import knowledge with confidence discounting and publishing policies.
 
+
+> **Implementation**: Built
+
 **Topic**: [Neuro — Cognitive Knowledge Layer](./INDEX.md)
 **Prerequisites**: [02-four-validation-tiers.md](./02-four-validation-tiers.md), [06-hdc-knowledge-encoding.md](./06-hdc-knowledge-encoding.md)
 **Key sources**:

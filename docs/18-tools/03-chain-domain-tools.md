@@ -3,6 +3,9 @@
 > The chain domain plugin — 423+ DeFi tools as ONE domain plugin, not the core framework.
 > Two-layer tool model, adapter pattern, high-level architecture, protocol coverage.
 
+
+> **Implementation**: Built
+
 ---
 
 ## Framing

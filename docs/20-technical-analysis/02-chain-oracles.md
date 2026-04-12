@@ -2,6 +2,9 @@
 
 > The chain domain is where TA originated. Chain oracles implement the universal Oracle trait with blockchain-specific state variables, verification mechanisms, and adversarial threat models.
 
+
+> **Implementation**: Specified
+
 **Topic**: [Technical Analysis](./INDEX.md)
 **Prerequisites**: [01-oracle-trait](./01-oracle-trait.md) for the Oracle trait, [00-vision-ta-generalized](./00-vision-ta-generalized.md) for generalization rationale
 **Key sources**: `refactoring-prd/03-cognitive-subsystems.md` §4, `bardo-backup/prd/23-ta/00-witness-as-technical-analyst.md`, `bardo-backup/prd/23-ta/07-defi-native-technical-analysis.md`

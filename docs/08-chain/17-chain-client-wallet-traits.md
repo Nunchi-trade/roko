@@ -2,6 +2,9 @@
 
 > Two async traits define the interface between Roko agents and any EVM-compatible chain: `ChainClient` for reading chain state (blocks, logs, storage, eth_call) and `ChainWallet` for writing (signing, submitting, and waiting for transactions). Implementations exist for live RPC nodes, mirage-rs simulation, and mock testing.
 
+
+> **Implementation**: Built
+
 **Topic**: [08-chain](./INDEX.md)
 **Prerequisites**: [01-korai-chain-spec.md](./01-korai-chain-spec.md)
 **Key sources**: `roko/crates/roko-chain/src/client.rs`, `roko/crates/roko-chain/src/wallet.rs`, `roko/crates/roko-chain/src/types.rs`
@@ -288,7 +291,7 @@ Post-transaction verification. After a transaction is submitted, verify:
 - State changes match the simulation
 - No unexpected side effects
 
-Both gates implement the `Gate` trait from `roko-core` (see topic [04-gates](../04-gates/INDEX.md)), making them composable with other gates in the gate pipeline.
+Both gates implement the `Gate` trait from `roko-core` (see topic [04-gates](../04-verification/INDEX.md)), making them composable with other gates in the gate pipeline.
 
 ---
 
@@ -315,4 +318,4 @@ Both gates implement the `Gate` trait from `roko-core` (see topic [04-gates](../
 - See [18-mirage-rs-evm-simulator.md](./18-mirage-rs-evm-simulator.md) for the mirage-rs implementation of `ChainClient`
 - See [15-chainwitness-event-watching.md](./15-chainwitness-event-watching.md) for how `ChainClient` is used in block ingestion
 - See [19-chain-agent-heartbeat.md](./19-chain-agent-heartbeat.md) for how `ChainWallet` is used in the EXECUTE step
-- See topic [04-gates](../04-gates/INDEX.md) for the gate pipeline that includes `TxSimGate` and `WalletGate`
+- See topic [04-gates](../04-verification/INDEX.md) for the gate pipeline that includes `TxSimGate` and `WalletGate`

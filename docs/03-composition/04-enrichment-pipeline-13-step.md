@@ -4,6 +4,9 @@
 > Status: **Implemented** — `roko-compose::enrichment` (1,187 lines total)
 > Canonical source: `crates/roko-compose/src/enrichment/`
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Abstract

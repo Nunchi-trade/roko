@@ -2,6 +2,9 @@
 
 > How emotional state propagates across the agent mesh with exponential decay, somatic field formation, and anti-cascade safeguards.
 
+
+> **Implementation**: Built
+
 **Topic**: [Daimon](./INDEX.md)
 **Prerequisites**: [01-pad-vector.md](./01-pad-vector.md), [06-somatic-markers-damasio.md](./06-somatic-markers-damasio.md)
 **Key sources**: `bardo-backup/prd/03-daimon/07-runtime-daimon.md` §5, `refactoring-prd/03-cognitive-subsystems.md` §2, `refactoring-prd/09-innovations.md` §III
@@ -253,7 +256,7 @@ The Daimon exports contagion-related metrics:
 
 **Not implemented**: No contagion code exists in `roko-daimon` or `roko-golem`. The agent mesh (Korai) is not yet built. Somatic field aggregation is not implemented. C-Factor measurement is not implemented.
 
-**Dependency**: Requires the agent mesh infrastructure (topic [04-knowledge](../04-knowledge/INDEX.md)) for inter-agent communication. Requires the somatic landscape (see [06-somatic-markers-damasio.md](./06-somatic-markers-damasio.md)) for somatic field formation.
+**Dependency**: Requires the agent mesh infrastructure (topic [04-knowledge](../06-neuro/INDEX.md)) for inter-agent communication. Requires the somatic landscape (see [06-somatic-markers-damasio.md](./06-somatic-markers-damasio.md)) for somatic field formation.
 
 ---
 
@@ -271,4 +274,4 @@ The Daimon exports contagion-related metrics:
 - See [01-pad-vector.md](./01-pad-vector.md) for PAD vector structure
 - See [06-somatic-markers-damasio.md](./06-somatic-markers-damasio.md) for individual somatic landscape
 - See [10-integration-points.md](./10-integration-points.md) for Daimon integration points
-- See topic [04-knowledge](../04-knowledge/INDEX.md) for mesh infrastructure and Engram sharing
+- See topic [04-knowledge](../06-neuro/INDEX.md) for mesh infrastructure and Engram sharing

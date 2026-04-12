@@ -8,6 +8,9 @@
 >
 > **Prerequisites**: [00-defense-in-depth.md](00-defense-in-depth.md), [08-threat-model.md](08-threat-model.md)
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview
@@ -171,6 +174,250 @@ When health score drops below threshold (default 0.3), the conductor's circuit b
 
 ---
 
+## OperationalConfidenceTracker: full implementation
+
+```rust
+use std::collections::HashMap;
+
+/// Tracks operational confidence across multiple competence dimensions
+/// using Beta-Binomial models with asymmetric learning rates.
+pub struct OperationalConfidenceTracker {
+    /// Per-dimension Beta distributions.
+    pub dimensions: HashMap<String, BetaDistribution>,
+    /// Failure multiplier for asymmetric learning.
+    /// Default: 1.5 (failures count 1.5x).
+    pub failure_weight: f64,
+}
+
+/// Beta distribution parameters for a single dimension.
+pub struct BetaDistribution {
+    /// Success pseudo-count (alpha). Starts at 1.0 (weakly pessimistic).
+    pub alpha: f64,
+    /// Failure pseudo-count (beta). Starts at 3.0 (weakly pessimistic).
+    pub beta: f64,
+}
+
+impl BetaDistribution {
+    /// Weakly pessimistic prior: mean = 1/(1+3) = 0.25.
+    pub fn pessimistic_prior() -> Self {
+        Self { alpha: 1.0, beta: 3.0 }
+    }
+
+    /// Mean of the Beta distribution: alpha / (alpha + beta).
+    pub fn mean(&self) -> f64 {
+        self.alpha / (self.alpha + self.beta)
+    }
+
+    /// Variance: alpha*beta / ((alpha+beta)^2 * (alpha+beta+1)).
+    pub fn variance(&self) -> f64 {
+        let sum = self.alpha + self.beta;
+        (self.alpha * self.beta) / (sum * sum * (sum + 1.0))
+    }
+
+    /// Lower bound of 95% credible interval.
+    /// Uses the normal approximation: mean - 1.96 * sqrt(variance).
+    /// For small alpha+beta, this underestimates -- conservative, which is correct.
+    pub fn lower_95(&self) -> f64 {
+        (self.mean() - 1.96 * self.variance().sqrt()).max(0.0)
+    }
+
+    /// Record a success: increment alpha by 1.
+    pub fn record_success(&mut self) {
+        self.alpha += 1.0;
+    }
+
+    /// Record a failure: increment beta by failure_weight.
+    pub fn record_failure(&mut self, weight: f64) {
+        self.beta += weight;
+    }
+}
+
+impl OperationalConfidenceTracker {
+    pub fn new() -> Self {
+        Self {
+            dimensions: HashMap::new(),
+            failure_weight: 1.5,
+        }
+    }
+
+    /// Register a competence dimension with a pessimistic prior.
+    /// Standard dimensions: "gate_pass", "tool_success", "cost_efficiency",
+    /// "context_utilization", "task_completion".
+    pub fn register_dimension(&mut self, name: &str) {
+        self.dimensions
+            .entry(name.to_string())
+            .or_insert_with(BetaDistribution::pessimistic_prior);
+    }
+
+    /// Record a success in a dimension.
+    pub fn record_success(&mut self, dimension: &str) {
+        if let Some(dist) = self.dimensions.get_mut(dimension) {
+            dist.record_success();
+        }
+    }
+
+    /// Record a failure in a dimension.
+    /// Failures are weighted by self.failure_weight (default 1.5x).
+    pub fn record_failure(&mut self, dimension: &str) {
+        let w = self.failure_weight;
+        if let Some(dist) = self.dimensions.get_mut(dimension) {
+            dist.record_failure(w);
+        }
+    }
+
+    /// Composite confidence: geometric mean of lower 95% credible intervals.
+    /// The geometric mean ensures a single poorly-calibrated dimension
+    /// drags everything down.
+    pub fn composite_confidence(&self) -> f64 {
+        if self.dimensions.is_empty() {
+            return 0.0;
+        }
+        let product: f64 = self
+            .dimensions
+            .values()
+            .map(|d| d.lower_95().max(0.001)) // floor to avoid zero-product
+            .product();
+        product.powf(1.0 / self.dimensions.len() as f64)
+    }
+}
+```
+
+### confidence_multiplier() and effective_limit()
+
+```rust
+/// Sigmoid confidence multiplier.
+/// Maps confidence [0, 1] to Kelly fraction multiplier [0.1, 0.5].
+///
+/// At confidence 0.0: returns ~0.1 (10% of growth-optimal).
+/// At confidence 0.5: returns ~0.3 (inflection point).
+/// At confidence 1.0: returns ~0.5 (half-Kelly).
+pub fn confidence_multiplier(confidence: f64) -> f64 {
+    let sigmoid = 1.0 / (1.0 + (-10.0 * (confidence - 0.5)).exp());
+    0.1 + 0.4 * sigmoid
+}
+
+/// Compute effective limit for a given action.
+///
+/// effective_limit = hard_shield_limit * base_multiplier * context_multiplier
+///
+/// base_multiplier = 0.2 + 0.8 * confidence  (range: [0.2, 1.0])
+/// context_multiplier = f(failure_rate, task_complexity, domain_risk)
+pub fn effective_limit(
+    hard_shield_limit: f64,
+    confidence: f64,
+    failure_rate: f64,
+    task_complexity: f64,
+    domain_risk: f64,
+) -> f64 {
+    let base_multiplier = 0.2 + 0.8 * confidence;
+
+    // Context multiplier: penalize recent failures, complex tasks, risky domains.
+    // Each factor in [0, 1]; product gives the combined discount.
+    let failure_factor = 1.0 - (failure_rate * 0.5).min(0.8);   // max 80% reduction
+    let complexity_factor = 1.0 - (task_complexity * 0.3).min(0.6); // max 60% reduction
+    let risk_factor = 1.0 - (domain_risk * 0.4).min(0.7);       // max 70% reduction
+    let context_multiplier = failure_factor * complexity_factor * risk_factor;
+
+    hard_shield_limit * base_multiplier * context_multiplier
+}
+```
+
+### Risk-constrained Kelly optimization (Busseti et al. 2016)
+
+The standard Kelly criterion maximizes log-growth: `f* = edge / variance`. Busseti, Ryu, and Boyd reformulate this as a convex optimization problem with an explicit drawdown constraint:
+
+```
+maximize    E[log(1 + f * X)]
+subject to  P(drawdown > d) <= epsilon
+            0 <= f <= f_max
+```
+
+Where `X` is the random return, `d` is the maximum acceptable drawdown, and `epsilon` is the probability bound on exceeding that drawdown.
+
+Algorithm (pseudocode):
+
+```
+risk_constrained_kelly(edge, variance, max_drawdown, epsilon):
+    # Step 1: Compute unconstrained Kelly fraction.
+    f_kelly = edge / variance
+
+    # Step 2: Compute drawdown-constrained upper bound.
+    # From Busseti et al., the bound on ruin probability
+    # for fractional Kelly is approximately:
+    #   P(drawdown > d) ≈ exp(-2 * d * (1 - f/f_kelly) / (f^2 * variance))
+    # Solving for f given P = epsilon:
+    #   f_dd = solve: exp(-2 * d * (1 - f/f_kelly) / (f^2 * variance)) = epsilon
+
+    # Step 3: Iterative bisection (convex, so bisection converges).
+    f_low = 0.0
+    f_high = f_kelly
+    for _ in 0..50:
+        f_mid = (f_low + f_high) / 2
+        ruin_prob = exp(-2 * max_drawdown * (1 - f_mid / f_kelly) / (f_mid^2 * variance))
+        if ruin_prob > epsilon:
+            f_high = f_mid   # Too aggressive
+        else:
+            f_low = f_mid    # Can afford more
+
+    # Step 4: Apply confidence modulation.
+    f_constrained = f_low
+    return f_constrained * confidence_multiplier(operational_confidence)
+```
+
+**Configuration parameters:**
+
+```toml
+[agent.risk.kelly]
+base_kelly_fraction = 0.5     # Starting Kelly fraction before modulation. Range: 0.1..1.0.
+max_drawdown = 0.13           # Maximum acceptable drawdown. Range: 0.01..0.5.
+drawdown_epsilon = 0.05       # Probability bound on exceeding drawdown. Range: 0.001..0.2.
+confidence_floor = 0.1        # Minimum confidence multiplier. Range: 0.05..0.3.
+confidence_ceiling = 0.5      # Maximum confidence multiplier (half-Kelly). Range: 0.3..1.0.
+```
+
+For code-domain agents, Kelly sizing translates to scope limits:
+
+| Confidence range | Scope allowed | Files per task | Refactor depth |
+|-----------------|---------------|----------------|----------------|
+| 0.0 - 0.3 | Single-file, single-function | 1 | Leaf functions only |
+| 0.3 - 0.6 | Single-file, multi-function | 1-3 | Module-level |
+| 0.6 - 0.8 | Multi-file, single crate | 3-10 | Cross-module |
+| 0.8 - 1.0 | Multi-crate refactoring | 10+ | Architectural |
+
+### Confidence evolution state machine
+
+```
+  +------------+     success    +------------+     success    +-----------+
+  |  Cautious  | ------------> | Developing | ------------> |  Capable  |
+  | conf<0.3   |               | 0.3<=c<0.7 |               | c>=0.7    |
+  +-----+------+               +-----+------+               +-----+-----+
+        ^                            |                             |
+        |     failure streak         |  failure streak             |
+        |     (>=5 consecutive)      |  (>=3 consecutive)         |
+        +----------------------------+-----------------------------+
+                                     |
+                                     v
+                              +------+------+
+                              |  Recovery   |
+                              | temp tighten|
+                              +------+------+
+                                     |
+                                     | 10 turns without failure
+                                     v
+                              (return to previous state)
+```
+
+| From | To | Trigger |
+|------|----|---------|
+| Cautious | Developing | composite_confidence crosses 0.3 upward |
+| Developing | Capable | composite_confidence crosses 0.7 upward |
+| Capable | Recovery | 3+ consecutive failures in any dimension |
+| Developing | Recovery | 5+ consecutive failures in any dimension |
+| Recovery | previous state | 10 consecutive turns without failure |
+| Any | Cautious | composite_confidence drops below 0.3 |
+
+---
+
 ## Integration with Daimon
 
 The Daimon (motivation/affect engine) modulates risk tolerance based on the agent's behavioral state:
@@ -189,6 +436,86 @@ The PAD (Pleasure-Arousal-Dominance) vector from the Daimon modulates the effect
 ```
 effective_confidence = base_confidence × daimon_modifier(pad_vector)
 ```
+
+### Daimon state to risk_tolerance_modifier mapping
+
+```rust
+/// Compute risk tolerance modifier from Daimon behavioral state.
+/// Returns a multiplier applied to effective_confidence.
+pub fn risk_tolerance_modifier(state: &DaimonState) -> f64 {
+    match state {
+        DaimonState::Engaged => 1.0,     // Normal operation.
+        DaimonState::Struggling => 0.6,  // Tighten limits to help recovery.
+        DaimonState::Coasting => 0.8,    // Slight tightening; may be cutting corners.
+        DaimonState::Exploring => 1.2,   // Exploration needs room for failure.
+        DaimonState::Focused => 1.0,     // Concentrated work, standard limits.
+        DaimonState::Resting => 0.3,     // Minimal operations during rest.
+    }
+}
+
+/// Full effective confidence computation including Daimon modulation.
+pub fn daimon_adjusted_confidence(
+    tracker: &OperationalConfidenceTracker,
+    daimon_state: &DaimonState,
+) -> f64 {
+    let base = tracker.composite_confidence();
+    let modifier = risk_tolerance_modifier(daimon_state);
+    (base * modifier).clamp(0.0, 1.0)
+}
+```
+
+### roko.toml kelly_fraction configuration
+
+```toml
+[agent.risk]
+# Base Kelly fraction before confidence modulation.
+# Half-Kelly (0.5) captures ~75% of optimal growth with much lower drawdown.
+# Range: 0.1..1.0. Default: 0.5.
+kelly_fraction = 0.5
+
+# Hard shield limits (immutable per-domain caps).
+max_files_per_task = 20          # Code domain. Range: 1..100.
+max_concurrent_worktrees = 3     # Code domain. Range: 1..10.
+max_transaction_value_eth = 1.0  # Chain domain. Range: 0.001..100.0.
+max_daily_spend_usd = 100.0     # Cost domain. Range: 1.0..10000.0.
+
+# Adaptive guardrail parameters.
+confidence_floor = 0.1           # Minimum multiplier (never below 10% of hard shield).
+failure_weight = 1.5             # Failures count 1.5x in Beta update. Range: 1.0..3.0.
+recovery_window_turns = 10       # Turns without failure to exit Recovery state.
+```
+
+### Integration wiring path
+
+```
+orchestrate.rs: PlanRunner::run_task()
+  |
+  +--> OperationalConfidenceTracker::composite_confidence()
+  |      reads from: .roko/learn/gate-thresholds.json (EMA per rung)
+  |
+  +--> daimon_adjusted_confidence()
+  |      reads from: Daimon PAD vector (roko-daimon)
+  |
+  +--> confidence_multiplier() --> kelly_fraction
+  |
+  +--> effective_limit()
+  |      applies: hard_shield * base_mult * context_mult
+  |
+  +--> SafetyLayer::check_pre_execution()
+         enforces: effective limits per action
+```
+
+### Test criteria
+
+- `BetaDistribution::pessimistic_prior()` starts at mean 0.25 (alpha=1, beta=3)
+- `record_failure()` increments beta by `failure_weight`, not by 1.0
+- `composite_confidence()` uses geometric mean: one dimension at 0.01 drags composite below 0.1
+- `confidence_multiplier(0.0)` returns approximately 0.1; `confidence_multiplier(1.0)` returns approximately 0.5
+- `effective_limit()` at confidence 0.0 returns 20% of hard shield
+- `effective_limit()` at confidence 1.0 with zero failure/complexity/risk returns 100% of hard shield
+- `risk_tolerance_modifier` for Resting state (0.3) combined with low confidence (0.2) produces a heavily constrained limit
+- Kelly fraction stays within `[confidence_floor, confidence_ceiling]` for all inputs
+- Recovery state exits after `recovery_window_turns` consecutive successes
 
 ---
 

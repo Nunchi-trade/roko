@@ -5,6 +5,9 @@
 > **Wiring:** `LearningRuntime::record_completed_run()` → metrics pipeline
 > **Cross-references:** [00-episode-logger](00-episode-logger.md), [07-regression-detection](07-regression-detection.md), [15-collective-calibration-31x](15-collective-calibration-31x.md)
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Purpose

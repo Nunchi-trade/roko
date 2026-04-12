@@ -7,6 +7,9 @@
 > and the error classification system. It traces the design from the
 > implementation plan through to the working code.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## The ProviderAdapter Trait

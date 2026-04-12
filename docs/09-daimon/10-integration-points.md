@@ -2,6 +2,9 @@
 
 > The four ways the Daimon's PAD vector drives other systems: behavioral state selection, tier routing bias, VCG auction bidding, and somatic landscape querying.
 
+
+> **Implementation**: Built
+
 **Topic**: [Daimon](./INDEX.md)
 **Prerequisites**: [04-six-behavioral-states.md](./04-six-behavioral-states.md), [05-behavioral-state-to-tier-routing.md](./05-behavioral-state-to-tier-routing.md), [06-somatic-markers-damasio.md](./06-somatic-markers-damasio.md)
 **Key sources**: `refactoring-prd/03-cognitive-subsystems.md` §2, `refactoring-prd/09-innovations.md` §II–III, `roko-daimon/src/lib.rs`, `roko-golem/src/daimon.rs`

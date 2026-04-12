@@ -5,6 +5,9 @@
 > **Tests**: 20 tests covering empty DAG, linear chain, fan-out/fan-in, cycles,
 > cross-plan deps, file overlap, max wave width, critical path
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Overview

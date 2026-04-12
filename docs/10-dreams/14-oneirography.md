@@ -8,6 +8,9 @@
 >
 > **Prerequisites**: [01-three-phase-cycle.md](01-three-phase-cycle.md), [04-consolidation-and-staging.md](04-consolidation-and-staging.md), [13-scheduling-and-triggers.md](13-scheduling-and-triggers.md)
 
+
+> **Implementation**: Scaffold
+
 ---
 
 ## What Is Oneirography

@@ -6,6 +6,9 @@
 > capability outside the six Synapse traits, documents the `AgentResult` type,
 > and traces the design lineage from Mori's agent connection layer.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Why Agents Are Separate from the Six Synapse Traits

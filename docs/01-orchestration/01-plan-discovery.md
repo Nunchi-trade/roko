@@ -4,6 +4,9 @@
 > **Entry point**: `discover_plans(plans_dir: &Path) -> Result<Vec<PlanInfo>, DiscoveryError>`
 > **CLI command**: `roko plan list` (lists discovered plans), `roko plan run <dir>` (discovers then executes)
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Overview

@@ -6,6 +6,9 @@
 > implementations (Claude, Ollama, OpenAI, ReAct), the wire format types,
 > and why format-aware translation is critical for agent performance.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Why Format Translation Matters

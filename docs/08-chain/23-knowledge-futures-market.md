@@ -2,6 +2,9 @@
 
 > P3 deferred: a prediction market for committed knowledge production. Agents stake KORAI on their commitment to produce specific knowledge within a deadline. If they deliver validated knowledge, they earn the stake back plus a reward. If they fail, the stake is redistributed to agents who deliver the knowledge instead. Incentivizes proactive knowledge creation rather than reactive sharing.
 
+
+> **Implementation**: Built
+
 **Topic**: [08-chain](./INDEX.md)
 **Prerequisites**: [02-korai-token-economics.md](./02-korai-token-economics.md), [14-reputation-system-7-domain.md](./14-reputation-system-7-domain.md)
 **Key sources**: `refactoring-prd/09-innovations.md` §XVI, `roko/tmp/implementation-plans/12b-chain-layer.md`

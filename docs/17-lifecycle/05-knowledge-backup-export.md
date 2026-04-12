@@ -6,6 +6,9 @@
 >
 > **Synapse traits**: Substrate (the knowledge store being backed up — all Engrams with their scores, decay state, tier, and provenance), Scorer (score metadata preserved in backup), Gate (gate results preserved as provenance on Engrams)
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview

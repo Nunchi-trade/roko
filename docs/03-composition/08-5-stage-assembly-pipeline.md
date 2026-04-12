@@ -4,6 +4,9 @@
 > Status: **Partially Implemented** — Stages 1-2 in ContextAssembler, Stage 3 (compress), Stages 4-5 in PromptComposer
 > Canonical sources: `refactoring-prd/02-five-layers.md`, `12a-cognitive-layer.md` §E
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Abstract

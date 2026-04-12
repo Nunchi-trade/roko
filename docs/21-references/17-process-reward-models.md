@@ -3,7 +3,7 @@
 > Academic foundations for step-level verification, generation-verification gaps, and process supervision in Roko's Gate pipeline.
 
 **Topic**: [References](./INDEX.md)
-**Prerequisites**: [Architecture](../00-architecture/INDEX.md), [Harness](../03-harness/INDEX.md)
+**Prerequisites**: [Architecture](../00-architecture/INDEX.md), [Harness](../04-verification/INDEX.md)
 **Key sources**: `bardo-backup/tmp/mori-agents/12-references.md`
 
 ---
@@ -69,4 +69,4 @@ Process Reward Models (PRMs) verify each reasoning step rather than only the fin
 
 - See [06-self-learning-systems.md](./06-self-learning-systems.md) for the full self-improvement context
 - See [14-agent-harnesses-and-tool-use.md](./14-agent-harnesses-and-tool-use.md) for evaluation benchmarks
-- See topic [03-harness](../03-harness/INDEX.md) for full Gate pipeline design
+- See topic [03-harness](../04-verification/INDEX.md) for full Gate pipeline design

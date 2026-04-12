@@ -10,6 +10,9 @@
 >
 > **Domain**: This document applies to chain-domain agents using `roko-chain`. General-purpose agents (code, research) do not face MEV threats.
 
+
+> **Implementation**: Deferred
+
 ---
 
 ## Overview

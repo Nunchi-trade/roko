@@ -8,6 +8,9 @@
 > matters, how the five-layer stack maps to Beer's Viable System Model, and how the Good
 > Regulator Theorem justifies the Daimon self-model.
 
+
+> **Implementation**: Shipping
+
 **Topic**: [00-architecture](./INDEX.md)
 **Prerequisites**: [00-vision-and-thesis](./00-vision-and-thesis.md), [12-five-layer-taxonomy](./12-five-layer-taxonomy.md), [13-cognitive-cross-cuts](./13-cognitive-cross-cuts.md)
 **Key sources**:

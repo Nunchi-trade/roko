@@ -7,6 +7,9 @@
 > It covers the 8-step domain plugin process and the extensibility
 > architecture.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Extensibility Points

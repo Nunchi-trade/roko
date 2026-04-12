@@ -9,6 +9,9 @@
 > **Prerequisites**: `03-digital-pheromones.md` (pheromone fundamentals),
 > `04-pheromone-kinds.md` (pheromone type taxonomy)
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview

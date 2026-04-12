@@ -4,6 +4,9 @@
 > Given raw error text, return a typed diagnosis with category,
 > confidence, and suggested intervention.
 
+
+> **Implementation**: Built
+
 ---
 
 ## Purpose

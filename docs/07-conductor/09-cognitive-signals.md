@@ -4,6 +4,9 @@
 > happened" but "pause execution," "reprioritize this task," "inject
 > this context," "escalate to a more capable model."
 
+
+> **Implementation**: Built
+
 ---
 
 ## Definition

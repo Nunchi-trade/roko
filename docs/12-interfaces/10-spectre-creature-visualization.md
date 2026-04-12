@@ -2,6 +2,9 @@
 
 > The Spectre creature — a procedurally generated, behaviorally animated entity that encodes an agent's cognitive state as a dense visual readout. Generated deterministically from agent identity, animated by Daimon state. Never dies.
 
+
+> **Implementation**: Scaffold
+
 **Topic**: [12-interfaces](./INDEX.md)
 **Prerequisites**: [07-rosedust-design-language.md](./07-rosedust-design-language.md), [08-tui-main-layout.md](./08-tui-main-layout.md)
 **Key sources**: `refactoring-prd/06-interfaces.md` §5, `bardo-backup/prd/18-interfaces/28-creature-system.md`, `bardo-backup/prd/shared/branding.md`

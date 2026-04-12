@@ -2,6 +2,9 @@
 
 > Summary of what is built, what is scaffolded, and what remains for Tier 6. Six planned Solidity contracts: Agent Registry (Identity), Reputation Registry, Marketplace (Spore), Escrow, KORAI Token, and Validation Registry. All are Tier 6 deferred — blocked by Tier 5 completion.
 
+
+> **Implementation**: Built
+
 **Topic**: [08-chain](./INDEX.md)
 **Prerequisites**: All previous sub-docs in this topic
 **Key sources**: `roko/tmp/implementation-plans/12b-chain-layer.md`, `refactoring-prd/07-implementation-priorities.md`

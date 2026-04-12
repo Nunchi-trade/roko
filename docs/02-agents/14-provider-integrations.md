@@ -7,6 +7,9 @@
 > Moonshot (Kimi), and OpenRouter. Each section covers the API surface,
 > Roko-specific extensions, and integration status.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Perplexity (Sonar)

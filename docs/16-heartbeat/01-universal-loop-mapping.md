@@ -2,6 +2,9 @@
 
 > How the CoALA 9-step pipeline maps to the universal Synapse loop — the domain-agnostic version that every Roko agent executes.
 
+
+> **Implementation**: Specified
+
 **Topic**: [16-heartbeat](./INDEX.md)
 **Prerequisites**: [00-coala-9-step-pipeline.md](./00-coala-9-step-pipeline.md), [00-architecture](../00-architecture/INDEX.md)
 **Key sources**: `refactoring-prd/01-synapse-architecture.md` §3, `refactoring-prd/08-translation-guide.md` §7

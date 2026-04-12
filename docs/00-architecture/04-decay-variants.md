@@ -8,6 +8,9 @@
 > the mathematical formulas, shows the implementation, and explains how decay interacts with
 > Score to produce effective weight.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## 1. Why Decay

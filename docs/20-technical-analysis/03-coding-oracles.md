@@ -2,6 +2,9 @@
 
 > Every financial TA primitive has a structural equivalent in software engineering. Build time trends are price trends. Test failure probability is risk assessment. Dependency vulnerability scoring is portfolio risk. The mathematics is identical; the vocabulary changes.
 
+
+> **Implementation**: Specified
+
 **Topic**: [Technical Analysis](./INDEX.md)
 **Prerequisites**: [01-oracle-trait](./01-oracle-trait.md) for Oracle trait, [02-chain-oracles](./02-chain-oracles.md) for chain-domain comparison
 **Key sources**: `refactoring-prd/03-cognitive-subsystems.md` §4, `refactoring-prd/09-innovations.md` §I (coding probes)

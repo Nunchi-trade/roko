@@ -3,6 +3,9 @@
 > The 17 chain domain categories, prefix conventions, chain support matrix, and risk tier
 > scale. Plus how categories interact with profiles for tool filtering.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Overview

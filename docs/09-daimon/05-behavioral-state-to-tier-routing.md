@@ -2,6 +2,9 @@
 
 > How the Daimon's behavioral state modulates the CascadeRouter's prediction error thresholds, creating a closed loop between emotional state and compute allocation.
 
+
+> **Implementation**: Built
+
 **Topic**: [Daimon](./INDEX.md)
 **Prerequisites**: [04-six-behavioral-states.md](./04-six-behavioral-states.md), [01-pad-vector.md](./01-pad-vector.md)
 **Key sources**: `roko-daimon/src/lib.rs`, `refactoring-prd/03-cognitive-subsystems.md` §2, `refactoring-prd/09-innovations.md` §I

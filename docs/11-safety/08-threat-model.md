@@ -8,6 +8,9 @@
 >
 > **Prerequisites**: [00-defense-in-depth.md](00-defense-in-depth.md), [07-prompt-security.md](07-prompt-security.md)
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview

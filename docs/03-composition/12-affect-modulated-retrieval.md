@@ -4,6 +4,9 @@
 > Status: **Scaffold** — PadState struct implemented, modulation hooks in ContextAssembler
 > Canonical sources: `refactoring-prd/09-innovations.md`, Mehrabian (1996)
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Abstract

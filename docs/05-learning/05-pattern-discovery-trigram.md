@@ -4,6 +4,9 @@
 > **Wiring:** `LearningRuntime::record_completed_run()` → `PatternMiner::ingest_episode()`
 > **Cross-references:** [00-episode-logger](00-episode-logger.md), [01-playbook-system](01-playbook-system.md), [15-collective-calibration-31x](15-collective-calibration-31x.md)
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Purpose

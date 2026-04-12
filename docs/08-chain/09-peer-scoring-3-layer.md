@@ -2,6 +2,9 @@
 
 > Three layers of peer scoring protect the gossip network: protocol-level (GossipSub v1.1 mesh scoring), application-level (domain-specific behavior scoring), and economic-level (stake-weighted trust). Combined score determines mesh membership, message priority, and job eligibility.
 
+
+> **Implementation**: Built
+
 **Topic**: [08-chain](./INDEX.md)
 **Prerequisites**: [07-4-tier-gossip-architecture.md](./07-4-tier-gossip-architecture.md), [08-eight-gossip-topics.md](./08-eight-gossip-topics.md)
 **Key sources**: `roko/tmp/implementation-plans/12b-chain-layer.md` §B, `refactoring-prd/04-knowledge-and-mesh.md`

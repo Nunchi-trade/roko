@@ -2,6 +2,9 @@
 
 > Every domain has adversaries who manipulate signals. MEV searchers manipulate prices. Attackers manipulate supply chains. p-hackers manipulate statistics. The adversarial robustness subsystem defends predictions through HDC prototype matching, robust statistics, and red-team dreaming.
 
+
+> **Implementation**: Specified
+
 **Topic**: [Technical Analysis](./INDEX.md)
 **Prerequisites**: [06-hyperdimensional-ta](./06-hyperdimensional-ta.md) for HDC encoding, [09-causal-microstructure-discovery](./09-causal-microstructure-discovery.md) for causal analysis
 **Key sources**: `bardo-backup/prd/23-ta/08-adversarial-signal-robustness.md`
@@ -507,6 +510,329 @@ Adversarial detection feeds directly into the Daimon PAD vector:
 - **Successful defense** → increases Pleasure (positive outcome)
 
 This creates a feedback loop: adversarial pressure raises arousal, which routes more cycles to T2 (deep reasoning), which enables more thorough analysis.
+
+---
+
+## Implementation details
+
+### Attack prototype HDC encoding
+
+Each attack prototype is encoded as an HDC vector that captures the structural signature of the attack pattern. The encoding method varies by domain:
+
+```rust
+/// Encode a chain attack prototype as an HDC vector.
+///
+/// The encoding captures the temporal and structural fingerprint of the attack.
+/// For a sandwich attack:
+///   TEMPORAL_PATTERN(
+///     BIND(swap_role, large_buy),       // step 0: frontrun
+///     BIND(swap_role, victim_trade),     // step 1: victim
+///     BIND(swap_role, large_sell),       // step 2: backrun
+///   )
+/// bundled with:
+///   BIND(timing_role, same_block),       // timing constraint
+///   BIND(profit_role, positive),         // profit indicator
+///
+/// The resulting vector matches any structurally similar sandwich pattern
+/// regardless of specific tokens, amounts, or protocols.
+pub fn encode_attack_prototype(
+    pattern: &AttackPatternDef,
+    codebook: &DeFiCodebook,
+) -> HdcVector {
+    // Encode the temporal sequence of actions
+    let temporal = encode_temporal_pattern(
+        &pattern.steps.iter()
+            .map(|step| encode_ta_state(&step.role_filler_pairs(codebook)))
+            .collect::<Vec<_>>()
+    );
+
+    // Encode structural constraints (timing, profit, etc.)
+    let constraints: Vec<HdcVector> = pattern.constraints.iter()
+        .map(|c| c.encode(codebook))
+        .collect();
+
+    // Bundle temporal pattern with constraints
+    let mut all = vec![temporal];
+    all.extend(constraints);
+    HdcVector::bundle(&all)
+}
+
+/// For coding domain attacks, encode the supply chain signature:
+///   BIND(package_role, name_similarity_vector),
+///   BIND(action_role, install_hook | postinstall_script),
+///   BIND(timing_role, recent_publish),
+pub fn encode_coding_attack_prototype(
+    pattern: &CodingAttackDef,
+    codebook: &CodingCodebook,
+) -> HdcVector {
+    let components: Vec<HdcVector> = pattern.indicators.iter()
+        .map(|indicator| {
+            let role = codebook.role_for(indicator.kind);
+            let filler = codebook.encode_indicator_value(&indicator.value);
+            role.xor(&filler)
+        })
+        .collect();
+    HdcVector::bundle(&components)
+}
+```
+
+### Prototype selection: count and update procedure
+
+| Domain | Initial prototype count | Source | Update cadence |
+|---|---|---|---|
+| Chain | 20-50 | Known MEV patterns from Flashbots data, historical exploits | Delta frequency (daily) |
+| Coding | 15-30 | Known supply chain attacks from OSV/advisories | Weekly or on new advisory |
+| Research | 5-10 | Known p-hacking patterns from replication crisis literature | Monthly |
+
+**Update procedure**:
+
+1. When a new attack is confirmed (by red-team dreaming or external report), encode it as a prototype.
+2. Compute similarity to existing prototypes. If max similarity > 0.8, update the existing prototype via bundle (strengthens shared structure).
+3. If max similarity <= 0.8, add as a new prototype.
+4. Prune prototypes with zero matches in the last 30 days, unless they represent critical attack classes (severity >= 0.9).
+
+```rust
+/// Update prototypes with a newly confirmed attack pattern.
+pub fn update_prototypes(
+    prototypes: &mut Vec<PrototypeEntry>,
+    new_attack: &HdcVector,
+    metadata: PrototypeMetadata,
+    merge_threshold: f64,  // default: 0.8
+) {
+    let best_match = prototypes.iter_mut()
+        .map(|p| (p, new_attack.hamming_similarity(&p.vector)))
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+
+    match best_match {
+        Some((existing, sim)) if sim > merge_threshold => {
+            // Merge: bundle existing with new to strengthen shared structure
+            existing.vector = existing.vector.bundle_with(new_attack);
+            existing.last_matched = now_ms();
+        }
+        _ => {
+            // Add as new prototype
+            prototypes.push(PrototypeEntry {
+                vector: new_attack.clone(),
+                name: metadata.name,
+                domain: metadata.domain,
+                severity: metadata.severity,
+                response: metadata.response,
+            });
+        }
+    }
+}
+```
+
+### Robust statistics: adaptive trim fraction
+
+The trim fraction alpha for the trimmed mean should adapt based on the suspected contamination rate:
+
+```rust
+/// Adaptive trim fraction selection.
+///
+/// If adversarial activity is detected (prototype match or cross-source
+/// disagreement), increase alpha to resist heavier contamination.
+///
+/// Default: alpha = 0.10 (handles up to 10% contamination).
+/// Under adversarial pressure: alpha = min(0.25, 2 * estimated_contamination).
+/// Maximum useful alpha: 0.25 (trimming more than 25% from each tail
+/// discards too much genuine data).
+pub fn adaptive_trim_alpha(
+    adversarial_detected: bool,
+    estimated_contamination: Option<f64>,
+) -> f64 {
+    match (adversarial_detected, estimated_contamination) {
+        (false, _) => 0.10,                                    // baseline
+        (true, Some(rate)) => (2.0 * rate).clamp(0.10, 0.25),  // adaptive
+        (true, None) => 0.20,                                   // conservative default
+    }
+}
+```
+
+### Hodges-Lehmann caching for n > 1000
+
+The Hodges-Lehmann estimator computes the median of all `n*(n+1)/2` pairwise averages. For n = 1000, this is ~500K pairs (fast). For n > 1000, the O(n^2) cost becomes significant:
+
+```rust
+/// Hodges-Lehmann estimator with subsampling for large n.
+///
+/// For n <= 1000: exact computation (500K pairs, ~1ms).
+/// For n > 1000: subsample to 1000 points, compute exactly on the subsample.
+///   Error bound: O(1/sqrt(1000)) = ~3% relative to exact.
+///   The subsample is drawn without replacement using reservoir sampling.
+///
+/// Alternative for very large n: use the Johnson-Ethier approximation
+/// (Hodges-Lehmann ~ median + O(1/n)), but this loses robustness.
+pub fn hodges_lehmann_cached(data: &[f64], max_exact_n: usize) -> f64 {
+    if data.len() <= max_exact_n {
+        return RobustStatistics::hodges_lehmann(data);
+    }
+
+    // Subsample
+    let sample = reservoir_sample(data, max_exact_n);
+    RobustStatistics::hodges_lehmann(&sample)
+}
+```
+
+### MAD scaling constant
+
+The MAD is scaled by 1.4826 to estimate the standard deviation under a Gaussian distribution. This constant equals `1 / Phi_inv(3/4)` where `Phi_inv` is the inverse normal CDF. For non-Gaussian distributions, the constant differs:
+
+| Distribution | Correct scaling constant | When to use |
+|---|---|---|
+| Gaussian | 1.4826 | Default assumption |
+| Laplace (heavy-tailed) | 1.0 | When data has fat tails (common in DeFi) |
+| Uniform | 1.1547 | When data is bounded |
+| Unknown | 1.4826 | Safe default (overestimates for fat tails, conservative) |
+
+### Cross-source verification
+
+```rust
+/// Cross-source verification configuration.
+pub struct CrossSourceConfig {
+    /// Minimum number of independent sources required for verification.
+    /// Default: 3. With fewer sources, mark the signal as unverified.
+    pub min_independent_sources: usize,
+
+    /// Maximum acceptable MAD-normalized disagreement between sources.
+    /// Default: 3.0 (sources within 3 MAD-scaled deviations agree).
+    pub max_disagreement_mad: f64,
+
+    /// Reliability weights per source (higher = more trusted).
+    /// Sources with reliability < 0.3 are excluded from consensus.
+    pub source_weights: HashMap<SourceId, f64>,
+}
+
+impl CrossSourceConfig {
+    /// Compute reliability-weighted consensus.
+    ///
+    /// Each source contributes proportionally to its reliability weight.
+    /// The consensus is the weighted median (robust to a single bad source).
+    pub fn weighted_consensus(&self, predictions: &[(SourceId, f64)]) -> f64 {
+        let filtered: Vec<(f64, f64)> = predictions.iter()
+            .filter_map(|(id, v)| {
+                let w = self.source_weights.get(id).copied().unwrap_or(0.5);
+                if w >= 0.3 { Some((*v, w)) } else { None }
+            })
+            .collect();
+        weighted_median(&filtered)
+    }
+}
+```
+
+### Red-team dreaming: strategy selection and severity
+
+Red-team dreaming selects strategies to attack based on exposure and novelty:
+
+```rust
+/// Select strategies for red-team dreaming.
+///
+/// Priority order:
+/// 1. Strategies with highest current exposure (most capital/attention at risk).
+/// 2. Strategies that have not been red-teamed in the last 7 days.
+/// 3. Strategies that survived all previous red-teams (they may have
+///    undiscovered vulnerabilities).
+pub fn select_red_team_targets(
+    strategies: &[StrategyFragment],
+    red_team_history: &HashMap<StrategyId, DateTime>,
+    max_targets: usize,
+) -> Vec<&StrategyFragment> {
+    let mut scored: Vec<_> = strategies.iter()
+        .map(|s| {
+            let exposure_score = s.exposure_value();
+            let staleness = red_team_history.get(&s.id)
+                .map(|last| (now() - *last).as_secs_f64() / 86400.0)
+                .unwrap_or(30.0); // never tested = 30 days stale
+            let survived_all = s.red_team_failures == 0;
+            let priority = exposure_score * staleness * if survived_all { 2.0 } else { 1.0 };
+            (s, priority)
+        })
+        .collect();
+
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    scored.into_iter().take(max_targets).map(|(s, _)| s).collect()
+}
+```
+
+**Perturbation severity levels**:
+
+| Severity | Description | Example perturbations |
+|---|---|---|
+| 0.0 - 0.3 | Mild | 10% price change, 2x gas, minor slippage |
+| 0.3 - 0.6 | Moderate | 30% price change, 5x gas, correlation weakening |
+| 0.6 - 0.8 | Severe | 50% price change, pool 50% drained, correlation breakdown |
+| 0.8 - 1.0 | Extreme | 90% price crash, pool fully drained, sandwich + frontrun combo |
+
+**Success/failure criteria**: A strategy "survives" a perturbation if its simulated PnL remains above -10% (chain domain) or its test pass rate remains above 80% (coding domain). Failure triggers confidence demotion and a Warning stored in Neuro.
+
+### Somatic marker formation from adversarial events
+
+When adversarial activity triggers an `AdversarialResponse`, the event feeds into the Daimon PAD vector and forms a somatic marker:
+
+```rust
+/// Map AdversarialResponse to Daimon PAD changes.
+pub fn adversarial_response_to_pad(response: &AdversarialResponse) -> PadDelta {
+    match response {
+        AdversarialResponse::WidenIntervals(amount) => PadDelta {
+            pleasure: -0.1,                // mild negative valence
+            arousal: 0.2 * amount,         // proportional urgency
+            dominance: -0.1,               // slight loss of control
+        },
+        AdversarialResponse::SuppressAction(duration) => PadDelta {
+            pleasure: -0.2,
+            arousal: 0.4,                  // significant urgency
+            dominance: -0.3,               // loss of agency (can't act)
+        },
+        AdversarialResponse::EscalateToT2 => PadDelta {
+            pleasure: -0.3,
+            arousal: 0.6,                  // high urgency
+            dominance: -0.5,               // significant loss of control
+        },
+        AdversarialResponse::EmitWarning(_) => PadDelta {
+            pleasure: -0.15,
+            arousal: 0.3,
+            dominance: -0.2,
+        },
+    }
+}
+
+/// Form a somatic marker for an adversarial event.
+///
+/// The marker binds the attack pattern vector with the PAD response,
+/// enabling future fast retrieval: "I've seen something like this before,
+/// and it felt bad."
+pub fn form_adversarial_marker(
+    attack_vector: &HdcVector,
+    response: &AdversarialResponse,
+    codebook: &AffectCodebook,
+) -> SomaticMarker {
+    let pad = adversarial_response_to_pad(response);
+    let affect_hv = encode_pad(pad.pleasure, pad.arousal, pad.dominance, codebook);
+    let marker_hv = attack_vector.xor(&affect_hv);
+
+    SomaticMarker {
+        marker_hv,
+        pattern_hv: attack_vector.clone(),
+        affect_hv,
+        pleasure: pad.pleasure,
+        arousal: pad.arousal,
+        dominance: pad.dominance,
+        strength: 1.5, // adversarial markers start stronger (high-salience events)
+        episode_sources: vec![],
+        created_at_ms: now_ms(),
+    }
+}
+```
+
+### Test criteria
+
+- **Prototype matching recall**: Against a test set of 100 known sandwich attacks, the PrototypeMatcher detects >= 90% with threshold = 0.6.
+- **Prototype matching precision**: Against 1000 random (non-attack) observations, false positive rate < 5%.
+- **Robust statistics breakdown**: The trimmed mean with alpha = 0.25 survives 25% contamination (estimate within 10% of true mean).
+- **Hodges-Lehmann accuracy**: Subsampled estimate (n=1000 from n=10000) is within 5% of exact estimate.
+- **Cross-source consensus**: When 2 of 3 sources agree and 1 is adversarial, the consensus matches the honest majority.
+- **Red-team coverage**: After 10 dream cycles, every strategy with exposure > 0 has been red-teamed at least once.
+- **Somatic marker formation**: After an adversarial event, a somatic marker exists with correct PAD sign (negative pleasure, positive arousal).
 
 ---
 

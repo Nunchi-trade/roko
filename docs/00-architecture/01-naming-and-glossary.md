@@ -6,6 +6,9 @@
 > When any other document disagrees with a definition here, this glossary is authoritative.
 > This serves as a quick-reference companion to the full architecture documentation.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## 1. Project and Framework Names
@@ -25,6 +28,14 @@ parenthetical notes when quoting legacy sources).
 | Korai | **Korai** | Dedicated EVM chain for agent coordination. Mainnet. |
 | Daeji | **Daeji** | Testnet for the Korai chain. |
 | Clade | **Collective** / **Mesh** | Groups of cooperating agents. **Never use "fleet"** — this was an incorrect interim rename. |
+| Signal (code) | **Engram** (docs) | The universal data type. In Rust code it is `Signal` (`roko-core`). In PRD docs it is "Engram." These are **the same concept** — see note below. |
+
+> **Signal ↔ Engram:** The Rust codebase uses `Signal` as the struct name for the
+> universal datum (defined in `crates/roko-core/src/signal.rs`). The PRD documentation
+> calls the same concept an **Engram**, emphasizing its neuroscience roots (Semon 1904).
+> Whenever you see `Signal` in code, read it as "Engram." Whenever you see "Engram" in
+> docs, the corresponding Rust type is `Signal`. The six verb traits (`Substrate`,
+> `Scorer`, `Gate`, `Router`, `Composer`, `Policy`) all operate on `Signal` / Engram.
 
 ---
 

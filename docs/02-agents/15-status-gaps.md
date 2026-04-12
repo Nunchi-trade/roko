@@ -6,6 +6,9 @@
 > system, identifies the remaining gaps, and prioritizes the work needed
 > to reach full integration.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Current Status Summary

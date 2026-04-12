@@ -100,7 +100,7 @@ pub struct EmotionalTag { pad: PadVector, emotion: String, intensity: f32, trigg
 | Dependency | Direction | What Flows |
 |---|---|---|
 | [05-learning](../05-learning/INDEX.md) | Daimon → Learning | Behavioral state modulates CascadeRouter thresholds |
-| [03-dreams](../03-dreams/INDEX.md) | Bidirectional | Emotional load → dream urgency; REM → depotentiation; dream outcomes → appraisal |
-| [04-knowledge](../04-knowledge/INDEX.md) | Daimon → Knowledge | EmotionalTag on Engrams; mood-congruent retrieval; somatic field via mesh |
+| [03-dreams](../10-dreams/INDEX.md) | Bidirectional | Emotional load → dream urgency; REM → depotentiation; dream outcomes → appraisal |
+| [04-knowledge](../06-neuro/INDEX.md) | Daimon → Knowledge | EmotionalTag on Engrams; mood-congruent retrieval; somatic field via mesh |
 | [04-verification](../04-verification/INDEX.md) | Verification → Daimon | Gate pass/fail triggers appraisal; rung level scales emotional impact |
-| [02-runtime](../02-runtime/INDEX.md) | Daimon → Runtime | Conversational tone mapping; event emission; TUI/Spectre visualization |
+| [02-runtime](../01-orchestration/INDEX.md) | Daimon → Runtime | Conversational tone mapping; event emission; TUI/Spectre visualization |

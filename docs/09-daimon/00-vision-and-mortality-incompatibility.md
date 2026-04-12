@@ -2,6 +2,9 @@
 
 > The Daimon is a cognitive performance affect engine — NOT a mortality anxiety system. This document explains what Daimon is, what it is not, and why the new architecture explicitly removes mortality framing.
 
+
+> **Implementation**: Built
+
 **Topic**: [Daimon](./INDEX.md)
 **Prerequisites**: [00-architecture](../00-architecture/INDEX.md) for Engrams, Synapse traits, universal cognitive loop
 **Key sources**: `refactoring-prd/03-cognitive-subsystems.md` §2, `refactoring-prd/08-translation-guide.md` §INCOMPATIBLE: Emotion Mapped to Mortality, `refactoring-prd/07-implementation-priorities.md` §Tier 2D/2E

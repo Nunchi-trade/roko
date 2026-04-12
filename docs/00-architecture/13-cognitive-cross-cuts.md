@@ -6,6 +6,9 @@
 > distinguish Roko from static agent frameworks. This document specifies each subsystem's
 > role, data structures, integration points, and theoretical foundations.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## 1. Why Cross-Cuts

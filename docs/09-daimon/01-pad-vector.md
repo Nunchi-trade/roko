@@ -2,6 +2,9 @@
 
 > Mehrabian's Pleasure-Arousal-Dominance model as the foundation of agent affect state, with 8 octant states and concrete Rust implementation.
 
+
+> **Implementation**: Built
+
 **Topic**: [Daimon](./INDEX.md)
 **Prerequisites**: [00-vision-and-mortality-incompatibility.md](./00-vision-and-mortality-incompatibility.md)
 **Key sources**: `refactoring-prd/03-cognitive-subsystems.md` §2, `bardo-backup/prd/03-daimon/00-overview.md`, `roko-daimon/src/lib.rs`, `roko-golem/src/daimon.rs`

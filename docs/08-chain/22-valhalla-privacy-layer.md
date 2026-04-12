@@ -2,6 +2,9 @@
 
 > Valhalla is the privacy layer for agent coordination. Four privacy tiers: Public (on-chain, transparent), Access-Gated (encrypted, key-holder access), Confidential Preprocessing (TEE enclaves, input-private computation), and Full Sealed (ZK proofs, zero knowledge of inputs). TEE attestation, Private Set Intersection (PSI), and ZK range proofs protect agent strategies while enabling verifiable coordination.
 
+
+> **Implementation**: Built
+
 **Topic**: [08-chain](./INDEX.md)
 **Prerequisites**: [04-korai-passport-erc-721-soulbound.md](./04-korai-passport-erc-721-soulbound.md), [07-4-tier-gossip-architecture.md](./07-4-tier-gossip-architecture.md)
 **Key sources**: `roko/tmp/implementation-plans/12b-chain-layer.md` §P, `refactoring-prd/09-innovations.md`

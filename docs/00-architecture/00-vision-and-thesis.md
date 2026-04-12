@@ -8,6 +8,9 @@
 > empirical evidence for the scaffold thesis, introduces the Synapse Architecture, and
 > explains how Roko's design enables agents that improve themselves across any domain.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## 1. The Problem: LLMs Are Necessary but Not Sufficient

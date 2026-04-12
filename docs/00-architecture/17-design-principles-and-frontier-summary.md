@@ -7,6 +7,9 @@
 > frontier innovation, and shows how the innovations interconnect to form an autocatalytic
 > improvement system.
 
+
+> **Implementation**: Shipping
+
 **Topic**: [00-architecture](./INDEX.md)
 **Prerequisites**: [00-vision-and-thesis](./00-vision-and-thesis.md), [06-synapse-traits](./06-synapse-traits.md), [12-five-layer-taxonomy](./12-five-layer-taxonomy.md)
 **Key sources**:

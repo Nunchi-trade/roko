@@ -4,6 +4,9 @@
 > Not individual task health — system health. Is the infrastructure
 > functioning? Are agents alive? Is coverage trending down?
 
+
+> **Implementation**: Built
+
 ---
 
 ## SystemSnapshot

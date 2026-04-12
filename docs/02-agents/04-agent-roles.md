@@ -6,6 +6,9 @@
 > (backend, model tier, budget, permissions), and how roles compose into
 > agent types for different task categories.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Overview

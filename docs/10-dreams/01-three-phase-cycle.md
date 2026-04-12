@@ -8,6 +8,9 @@
 >
 > **Prerequisites**: [00-vision-and-dream-as-death-reframe.md](00-vision-and-dream-as-death-reframe.md)
 
+
+> **Implementation**: Scaffold
+
 ---
 
 ## Overview

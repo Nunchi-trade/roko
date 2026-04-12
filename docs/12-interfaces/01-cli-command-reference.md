@@ -2,6 +2,9 @@
 
 > Full command list for the `roko` binary with per-command syntax, flags, and descriptions.
 
+
+> **Implementation**: Scaffold
+
 **Topic**: [12-interfaces](./INDEX.md)
 **Prerequisites**: [00-cli-overview.md](./00-cli-overview.md) for mode overview and design principles
 **Key sources**: `refactoring-prd/06-interfaces.md` §1, `roko-cli/src/main.rs`, `bardo-backup/prd/25-mori/mori-interfaces.md`

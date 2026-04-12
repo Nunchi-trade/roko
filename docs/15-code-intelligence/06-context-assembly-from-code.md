@@ -2,6 +2,9 @@
 
 > How indexed code becomes LLM context — combining graph traversal, PageRank scoring, HDC similarity, and budget-aware composition to build the optimal context window for coding tasks.
 
+
+> **Implementation**: Built
+
 **Topic**: [Code Intelligence](./INDEX.md)
 **Prerequisites**: [04-pagerank-symbol-importance.md](./04-pagerank-symbol-importance.md), [05-hdc-fingerprints.md](./05-hdc-fingerprints.md)
 **Key sources**: `bardo-backup/tmp/mori-refactor/10-code-intelligence.md`, `bardo-backup/tmp/mori-agents/18-code-intelligence-and-gateway.md`, `refactoring-prd/05-agent-types.md`, `crates/roko-compose/src/system_prompt_builder.rs`

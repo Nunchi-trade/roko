@@ -6,6 +6,9 @@
 > flow, the self-funding agent loop, Rust implementation patterns, and integration with
 > the Roko agent runtime.
 
+
+> **Implementation**: Deferred
+
 ---
 
 ## 1. Protocol Overview

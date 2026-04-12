@@ -10,6 +10,9 @@
 > trait, the `ToolDispatcher` 7-step pipeline, the `SafetyLayer` composition,
 > and the integration gap.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## The ToolLoop Already Exists

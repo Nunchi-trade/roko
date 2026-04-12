@@ -4,6 +4,9 @@
 > **Crate**: `roko-gate` (`crates/roko-gate/src/artifact_store.rs`)
 > **Status**: Implemented (172 lines)
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## 1. Overview

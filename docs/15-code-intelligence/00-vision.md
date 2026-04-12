@@ -2,6 +2,9 @@
 
 > Code intelligence transforms coding agents from blind text generators into informed collaborators that understand structure, dependency, and intent.
 
+
+> **Implementation**: Built
+
 **Topic**: [Code Intelligence](./INDEX.md)
 **Prerequisites**: [Architecture](../00-architecture/INDEX.md), [Composition](../03-composition/INDEX.md)
 **Key sources**: `bardo-backup/tmp/mori-refactor/10-code-intelligence.md`, `bardo-backup/tmp/mori-agents/18-code-intelligence-and-gateway.md`, `bardo-backup/tmp/death/tools/02-code-index.md`, `refactoring-prd/05-agent-types.md`

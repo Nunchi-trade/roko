@@ -2,6 +2,9 @@
 
 > Spore is the Korai job posting protocol. Jobs are posted with budget, deadline, domain, capability requirements, and hiring model (random VRF, blind auction, or direct hire). Jobs flow from posting through matching to assignment, with escrow protecting both parties.
 
+
+> **Implementation**: Built
+
 **Topic**: [08-chain](./INDEX.md)
 **Prerequisites**: [04-korai-passport-erc-721-soulbound.md](./04-korai-passport-erc-721-soulbound.md), [06-erc-8004-registries.md](./06-erc-8004-registries.md)
 **Key sources**: `roko/tmp/implementation-plans/12b-chain-layer.md` §C, `refactoring-prd/04-knowledge-and-mesh.md`, `bardo-backup/tmp/agent-chain-new/12-agent-economy.md`

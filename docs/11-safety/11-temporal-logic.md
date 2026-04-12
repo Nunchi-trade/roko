@@ -8,6 +8,9 @@
 >
 > **Prerequisites**: [00-defense-in-depth.md](00-defense-in-depth.md), [09-adaptive-risk.md](09-adaptive-risk.md)
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview
@@ -92,6 +95,430 @@ AG(plan_node → AF(gate_check))
     "There is no path that leads to a state from which termination is
      impossible" (ensures the plan always terminates)
 ```
+
+---
+
+## BuchiAutomaton: full implementation
+
+A Buchi automaton accepts or rejects infinite streams of events. Each LTL formula compiles to one automaton.
+
+```rust
+use std::collections::{HashMap, HashSet};
+
+/// A state in the Buchi automaton.
+pub type StateId = u32;
+
+/// An atomic proposition (e.g., "bash_call", "safety_check", "gate_passed").
+pub type Proposition = String;
+
+/// A set of propositions that are true at a given time step.
+pub type EventLabel = HashSet<Proposition>;
+
+/// A compiled Buchi automaton for monitoring a single LTL formula.
+pub struct BuchiAutomaton {
+    /// Human-readable name of the formula being monitored.
+    formula_name: String,
+    /// The original LTL formula string (for diagnostics).
+    formula_source: String,
+    /// Number of states in the automaton.
+    num_states: u32,
+    /// Initial state.
+    initial_state: StateId,
+    /// Accepting states (the automaton must visit these infinitely often).
+    accepting_states: HashSet<StateId>,
+    /// Transition function: (current_state, event_label) -> set of next states.
+    /// Nondeterministic: a single event can lead to multiple states.
+    transitions: HashMap<(StateId, EventLabel), HashSet<StateId>>,
+    /// Propositions this automaton cares about.
+    alphabet: HashSet<Proposition>,
+}
+
+impl BuchiAutomaton {
+    pub fn formula_name(&self) -> &str {
+        &self.formula_name
+    }
+
+    /// Compute the set of next states given a current state and event.
+    /// For nondeterministic automata, returns all reachable states.
+    pub fn transition(
+        &self,
+        current: &AutomatonState,
+        event: &EventLabel,
+    ) -> AutomatonState {
+        let mut next_states = HashSet::new();
+
+        // Filter event to only propositions this automaton uses.
+        let relevant: EventLabel = event
+            .iter()
+            .filter(|p| self.alphabet.contains(*p))
+            .cloned()
+            .collect();
+
+        for &state in &current.active_states {
+            if let Some(targets) = self.transitions.get(&(state, relevant.clone())) {
+                next_states.extend(targets);
+            }
+        }
+
+        // If no transitions matched, the automaton is stuck (rejecting).
+        let in_accepting = next_states
+            .iter()
+            .any(|s| self.accepting_states.contains(s));
+
+        AutomatonState {
+            active_states: next_states,
+            visited_accepting: current.visited_accepting || in_accepting,
+            steps_since_accepting: if in_accepting {
+                0
+            } else {
+                current.steps_since_accepting + 1
+            },
+        }
+    }
+
+    /// Check whether the automaton is in a rejecting configuration.
+    ///
+    /// A state is rejecting when:
+    /// - The active state set is empty (no valid transitions exist), OR
+    /// - The automaton has not visited an accepting state in
+    ///   `liveness_bound` steps (bounded liveness check).
+    pub fn is_rejecting(&self, state: &AutomatonState) -> bool {
+        // Dead: no active states remain.
+        if state.active_states.is_empty() {
+            return true;
+        }
+
+        // Bounded liveness: if we haven't seen an accepting state
+        // in too long, treat as a violation. This converts liveness
+        // properties to safety properties with a finite bound.
+        // Default bound: 1000 steps (~2.5 hours at gamma speed).
+        let liveness_bound = 1000;
+        state.steps_since_accepting > liveness_bound
+    }
+}
+
+/// Runtime state of a monitored automaton.
+#[derive(Debug, Clone)]
+pub struct AutomatonState {
+    /// Current active states (nondeterministic: may be multiple).
+    pub active_states: HashSet<StateId>,
+    /// Whether an accepting state has been visited at least once.
+    pub visited_accepting: bool,
+    /// Number of steps since the last visit to an accepting state.
+    pub steps_since_accepting: u64,
+}
+
+impl AutomatonState {
+    /// Create an initial state from the automaton's initial state.
+    pub fn initial(automaton: &BuchiAutomaton) -> Self {
+        let mut active = HashSet::new();
+        active.insert(automaton.initial_state);
+        Self {
+            active_states: active,
+            visited_accepting: automaton
+                .accepting_states
+                .contains(&automaton.initial_state),
+            steps_since_accepting: 0,
+        }
+    }
+}
+```
+
+### TemporalMonitor: full struct
+
+```rust
+/// Runtime temporal monitor. Runs all compiled LTL automata
+/// against the stream of Engrams at each gamma tick.
+pub struct TemporalMonitor {
+    /// Compiled LTL formulas as Buchi automata.
+    automata: Vec<BuchiAutomaton>,
+    /// Current runtime state for each automaton.
+    states: Vec<AutomatonState>,
+    /// Event classifier: maps Engram kinds to propositions.
+    classifier: EventClassifier,
+    /// Liveness bound: max steps without visiting an accepting state.
+    /// Default: 1000 (~2.5 hours at gamma speed).
+    liveness_bound: u64,
+    /// Total events processed (for diagnostics).
+    events_processed: u64,
+    /// Total violations detected.
+    violations_detected: u64,
+}
+
+impl TemporalMonitor {
+    pub fn new(liveness_bound: u64) -> Self {
+        Self {
+            automata: Vec::new(),
+            states: Vec::new(),
+            classifier: EventClassifier::default(),
+            liveness_bound,
+            events_processed: 0,
+            violations_detected: 0,
+        }
+    }
+
+    /// Add a compiled LTL formula to the monitor.
+    pub fn add_formula(&mut self, automaton: BuchiAutomaton) {
+        let state = AutomatonState::initial(&automaton);
+        self.states.push(state);
+        self.automata.push(automaton);
+    }
+
+    /// Process a batch of Engrams (one gamma tick's worth).
+    /// Returns violation Engrams for any formulas that entered
+    /// a rejecting state.
+    pub fn process(&mut self, engrams: &[Signal]) -> Vec<Signal> {
+        let mut violations = Vec::new();
+
+        for engram in engrams {
+            self.events_processed += 1;
+            let event = self.classifier.classify(engram);
+
+            for (i, automaton) in self.automata.iter().enumerate() {
+                let new_state = automaton.transition(&self.states[i], &event);
+                if automaton.is_rejecting(&new_state) {
+                    self.violations_detected += 1;
+                    violations.push(create_violation_engram(
+                        automaton.formula_name(),
+                        engram,
+                    ));
+                }
+                self.states[i] = new_state;
+            }
+        }
+
+        violations
+    }
+
+    /// Reset all automata to their initial states.
+    /// Used after a Pause/Resume cycle.
+    pub fn reset(&mut self) {
+        for (i, automaton) in self.automata.iter().enumerate() {
+            self.states[i] = AutomatonState::initial(automaton);
+        }
+    }
+}
+
+/// Maps Engram kinds and metadata to atomic propositions.
+struct EventClassifier {
+    /// Mapping from (Engram kind, optional tool name) to proposition set.
+    rules: Vec<ClassificationRule>,
+}
+
+struct ClassificationRule {
+    kind_match: Option<String>,    // Engram kind to match.
+    tool_match: Option<String>,    // Tool name to match (for tool call Engrams).
+    propositions: Vec<Proposition>, // Propositions to emit on match.
+}
+```
+
+### LTL formula parser and compiler
+
+The parser converts LTL formula strings into `BuchiAutomaton` instances using a two-stage pipeline:
+
+```
+"G(bash_call -> previous(safety_check))"
+    |
+    v
+  [Parser] --> LtlAst
+    |
+    v
+  [Compiler] --> BuchiAutomaton (via Gerth et al. 1995 algorithm)
+```
+
+**LTL AST:**
+
+```rust
+/// Abstract syntax tree for LTL formulas.
+pub enum LtlAst {
+    /// Atomic proposition: "bash_call", "gate_passed", etc.
+    Atom(Proposition),
+    /// Negation: not phi.
+    Not(Box<LtlAst>),
+    /// Conjunction: phi and psi.
+    And(Box<LtlAst>, Box<LtlAst>),
+    /// Disjunction: phi or psi.
+    Or(Box<LtlAst>, Box<LtlAst>),
+    /// Implication: phi -> psi (sugar for !phi || psi).
+    Implies(Box<LtlAst>, Box<LtlAst>),
+    /// Globally: G(phi) -- phi holds at every future step.
+    Globally(Box<LtlAst>),
+    /// Eventually: F(phi) -- phi holds at some future step.
+    Eventually(Box<LtlAst>),
+    /// Next: X(phi) -- phi holds at the next step.
+    Next(Box<LtlAst>),
+    /// Until: phi U psi -- phi holds until psi becomes true.
+    Until(Box<LtlAst>, Box<LtlAst>),
+    /// Previous: P(phi) -- phi held at the previous step (past-time LTL).
+    Previous(Box<LtlAst>),
+}
+```
+
+**Compiler algorithm** (Gerth, Peled, Vardi, Wolper 1995):
+
+```
+ltl_to_buchi(formula: LtlAst) -> BuchiAutomaton:
+    # Step 1: Negate the formula (Buchi automaton accepts violations).
+    negated = negate(formula)
+
+    # Step 2: Convert to negation normal form (push negation inward).
+    nnf = to_nnf(negated)
+
+    # Step 3: Build generalized Buchi automaton (GBA) using the
+    #         tableau construction. Each node in the tableau becomes
+    #         a state. Transitions are generated by expanding temporal
+    #         operators.
+    gba = expand_tableau(nnf)
+
+    # Step 4: Degenralize GBA to standard Buchi automaton.
+    #         Uses the standard product construction with acceptance
+    #         counter: k acceptance sets become k copies of the state
+    #         space, cycling through acceptance sets.
+    ba = degeneralize(gba)
+
+    # Step 5: Minimize (optional, improves runtime monitoring speed).
+    #         Remove unreachable states and merge bisimilar states.
+    minimized = minimize(ba)
+
+    return minimized
+```
+
+### CTL pre-execution verification
+
+CTL model checking verifies properties of execution plans (DAGs of tasks) before they run. The plan's task graph is the model; CTL formulas specify required properties.
+
+**Algorithm** (Clarke, Emerson, Sistla 1986):
+
+```
+ctl_check(plan: TaskDAG, formula: CtlFormula) -> bool:
+    # The plan is a Kripke structure where:
+    #   - States = task nodes + a "done" terminal state
+    #   - Transitions = task dependencies (edges in the DAG)
+    #   - Atomic propositions = task properties (has_gate_check, is_safe, etc.)
+
+    match formula:
+        AG(phi):
+            # For all paths, globally phi.
+            # Compute the set of states satisfying phi, then check
+            # that all reachable states from the initial state are in that set.
+            sat_phi = ctl_sat(plan, phi)
+            reachable = bfs_reachable(plan, plan.initial_state)
+            return reachable.is_subset(&sat_phi)
+
+        EF(phi):
+            # There exists a path where eventually phi.
+            # Backward fixed-point: start from states satisfying phi,
+            # iteratively add predecessors until fixed point.
+            sat_phi = ctl_sat(plan, phi)
+            reachable_back = backward_reachable(plan, sat_phi)
+            return plan.initial_state in reachable_back
+
+        AF(phi):
+            # For all paths, eventually phi.
+            # Backward fixed-point with universal quantification.
+            sat_phi = ctl_sat(plan, phi)
+            result = sat_phi.clone()
+            loop:
+                prev = result.clone()
+                for state in plan.states:
+                    if all successors of state are in result:
+                        result.insert(state)
+                if result == prev:
+                    break
+            return plan.initial_state in result
+
+        AG(EF(safe_state)):
+            # From every reachable state, there exists a path to safety.
+            # Combined: check AG and EF composition.
+            sat_safe = ctl_sat(plan, Atom("safe_state"))
+            recoverable = backward_reachable(plan, sat_safe)
+            reachable = bfs_reachable(plan, plan.initial_state)
+            return reachable.is_subset(&recoverable)
+```
+
+**Standard plan verification properties:**
+
+| Property | CTL formula | What it checks |
+|----------|-------------|---------------|
+| No dead ends | `AG(EF(done))` | Every plan state can reach completion |
+| Gate coverage | `AG(task_node -> AF(gate_check))` | Every task is eventually followed by a gate check |
+| Termination | `not EF(AG(not done))` | No infinite non-terminating path exists |
+| Recoverability | `AG(EF(safe_state))` | Every state can reach a safe configuration |
+
+### Integration with Gate pipeline
+
+The `TemporalMonitor` integrates as a Policy within the existing Gate/conductor architecture:
+
+```
+Gate pipeline (per-task):
+  CompileGate -> TestGate -> ClippyGate -> DiffGate
+                                              |
+                                              v
+Conductor (continuous):                   TemporalMonitor
+  circuit breaker <-- health score <-- violation Engrams
+       |
+       v
+  Cooldown / Pause / Shutdown signals
+```
+
+```rust
+/// TemporalMonitor as a Gate implementation.
+/// Wraps the monitor and checks accumulated temporal properties
+/// after each task completes.
+pub struct TemporalGate {
+    monitor: Arc<parking_lot::Mutex<TemporalMonitor>>,
+}
+
+#[async_trait]
+impl Gate for TemporalGate {
+    async fn verify(&self, engram: &Signal) -> Result<Verdict> {
+        let mut monitor = self.monitor.lock();
+        let violations = monitor.process(&[engram.clone()]);
+
+        if violations.is_empty() {
+            Ok(Verdict::Pass {
+                confidence: 1.0,
+                message: "All temporal properties hold".into(),
+            })
+        } else {
+            Ok(Verdict::Fail {
+                confidence: 1.0,
+                message: format!(
+                    "{} temporal violations: {}",
+                    violations.len(),
+                    violations
+                        .iter()
+                        .map(|v| v.body_text().unwrap_or_default())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                violations,
+            })
+        }
+    }
+}
+```
+
+### Configuration parameters
+
+```toml
+[safety.temporal]
+liveness_bound = 1000            # Max steps without accepting state. Range: 100..100000.
+tick_interval_secs = 10          # Gamma tick interval. Range: 1..60.
+max_formulas = 50                # Maximum compiled automata. Range: 1..200.
+violation_priority = "high"      # Priority of violation Engrams: "low", "medium", "high".
+```
+
+### Test criteria
+
+- `BuchiAutomaton::transition()` with an empty event label produces a valid state transition
+- `BuchiAutomaton::is_rejecting()` returns true when active_states is empty
+- `BuchiAutomaton::is_rejecting()` returns true when steps_since_accepting exceeds liveness_bound
+- `TemporalMonitor::process()` returns a violation Engram when a safety property is violated
+- The LTL formula `G(a -> X(b))` compiled to a Buchi automaton rejects the trace `[{a}, {}, {a}, {b}]` (a without b at next step)
+- CTL `AG(EF(done))` returns false for a plan DAG with a dead-end node
+- `TemporalGate` produces `Verdict::Fail` when any monitored formula is violated
+- `TemporalMonitor::reset()` returns all automata to their initial states
 
 ---
 

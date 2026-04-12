@@ -5,6 +5,9 @@
 > covers the minimal feature set, the binary size budget, the no_std considerations, use cases
 > for edge deployment, and the relationship to the WASM deployment target.
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Edge Deployment Philosophy

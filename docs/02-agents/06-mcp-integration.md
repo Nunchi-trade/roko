@@ -6,6 +6,9 @@
 > the JSON-RPC stdio client, tool conversion, multi-server dedup, config
 > discovery, dynamic registry, and passthrough to Claude CLI.
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## What Is MCP

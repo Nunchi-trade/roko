@@ -2,6 +2,9 @@
 
 > The triage pipeline is a 4-stage classification system: rule-based filters → MIDAS-R streaming anomaly detection → contextual enrichment → HDC/Bayesian curiosity scoring. It assigns each transaction a curiosity score that determines whether it is noise (ignore), worth tracking (silent monitor), or worth escalating (LLM analysis). No LLM calls touch this path — speed comes from pure computation.
 
+
+> **Implementation**: Built
+
 **Topic**: [08-chain](./INDEX.md)
 **Prerequisites**: [15-chainwitness-event-watching.md](./15-chainwitness-event-watching.md), [03-hdc-on-chain-precompile.md](./03-hdc-on-chain-precompile.md)
 **Key sources**: `bardo-backup/prd/14-chain/02-triage.md`, `roko/tmp/implementation-plans/12b-chain-layer.md` §H

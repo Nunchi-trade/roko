@@ -5,6 +5,9 @@
 > **Wiring:** `LearningRuntime::record_completed_run()` → `PlaybookStore`, `PlaybookRules`
 > **Cross-references:** [00-episode-logger](00-episode-logger.md), [02-skill-library-voyager](02-skill-library-voyager.md), [05-pattern-discovery-trigram](05-pattern-discovery-trigram.md)
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Purpose

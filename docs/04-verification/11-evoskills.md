@@ -4,6 +4,9 @@
 > **Crates**: `roko-learn` (skill_library, pattern_discovery), `roko-gate`
 > **Status**: Skill library scaffold exists, adversarial verification designed
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## 1. Overview

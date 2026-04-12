@@ -5,6 +5,9 @@
 > **Theoretical basis:** Ashby's Law of Requisite Variety, Beer's Viable System Model, Good Regulator Theorem
 > **Cross-references:** [04-cascade-router](04-cascade-router.md), [09-provider-health-circuit-breaker](09-provider-health-circuit-breaker.md), [14-stability-mechanisms](14-stability-mechanisms.md)
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Purpose

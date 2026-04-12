@@ -5,6 +5,9 @@
 > **Tests**: 12 tests covering append, hash chain, integrity, replay, snapshot,
 > concurrent appends, tamper detection
 
+
+> **Implementation**: Shipping
+
 ---
 
 ## Overview

@@ -6,6 +6,9 @@
 >
 > **Synapse traits**: Policy (operator controls implemented as Policy trait observers), Router (model selection configured via config), Composer (budget constraints configured via config)
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview

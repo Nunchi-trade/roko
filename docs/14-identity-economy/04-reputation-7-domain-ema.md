@@ -6,6 +6,9 @@
 > reputation scoring algorithm, the seven domains, the reputation multiplier formula,
 > dispute mechanics, and the Bayesian Beta model underlying score computation.
 
+
+> **Implementation**: Deferred
+
 ---
 
 ## 1. Why Multi-Domain Reputation

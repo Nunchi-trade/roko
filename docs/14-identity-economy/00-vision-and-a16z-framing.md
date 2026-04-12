@@ -5,6 +5,9 @@
 > identity and economy layer for a Series A conversation — what it is, why it matters, how
 > it creates a moat, and why the timing is right.
 
+
+> **Implementation**: Deferred
+
 ---
 
 ## 1. The Vision: Know Your Agent (KYA)

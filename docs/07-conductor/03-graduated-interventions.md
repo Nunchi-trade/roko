@@ -3,6 +3,9 @@
 > Three actions. No nudges. Continue, Restart, or Fail.
 > The Conductor decides; it does not suggest.
 
+
+> **Implementation**: Built
+
 ---
 
 ## The ConductorDecision Enum

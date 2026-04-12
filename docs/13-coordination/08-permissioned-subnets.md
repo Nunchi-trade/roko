@@ -8,6 +8,9 @@
 > **Prerequisites**: `05-pheromone-scope.md` (scope hierarchy),
 > `06-agent-mesh-sync.md` (Agent Mesh transport)
 
+
+> **Implementation**: Specified
+
 ---
 
 ## Overview

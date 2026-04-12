@@ -5,6 +5,9 @@
 > This document specifies the three commerce tiers (Collective, Ecosystem, Universal), the
 > economic mechanics of each, and the commerce primitives that make knowledge tradeable.
 
+
+> **Implementation**: Deferred
+
 ---
 
 ## 1. Bazaar Philosophy

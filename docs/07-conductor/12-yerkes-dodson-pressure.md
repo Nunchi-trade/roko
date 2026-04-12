@@ -4,6 +4,9 @@
 > cooperative behavior within 5-12 turns. The Conductor's thresholds
 > are not timeouts — they are positions on a cooperation curve.
 
+
+> **Implementation**: Built
+
 ---
 
 ## The Inverted-U Curve
