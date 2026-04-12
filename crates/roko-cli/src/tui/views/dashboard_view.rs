@@ -5,9 +5,7 @@
 //! Errors, Git, Context/MCP, Processes).
 //! Bottom ribbon: wave progress + token sparkline + sys metrics.
 //!
-//! Calls real compiled widgets where available; falls back to inline
-//! rendering when widget modules depend on uncompiled `mori_theme` /
-//! `tui_state` types.
+//! Delegates to compiled widgets for all panels.
 
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -66,10 +64,10 @@ pub fn render(
 fn render_left_panel(
     frame: &mut Frame<'_>,
     area: Rect,
-    data: &DashboardData,
+    _data: &DashboardData,
     tui_state: &TuiState,
-    view_state: &ViewState,
-    theme: &Theme,
+    _view_state: &ViewState,
+    _theme: &Theme,
 ) {
     let sections = Layout::vertical([
         Constraint::Percentage(50),
@@ -87,184 +85,6 @@ fn render_left_panel(
     widgets::phase_compact::render_phase_compact(frame, sections[1], tui_state, false);
     // Use the Mori task_progress widget (semantic checklist)
     widgets::task_progress::render_task_progress(frame, sections[2], tui_state, task_focused);
-}
-
-// ---------------------------------------------------------------------------
-// Plan tree -- delegates to widgets::plan_list
-// ---------------------------------------------------------------------------
-
-fn render_plan_tree(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    data: &DashboardData,
-    view_state: &ViewState,
-    focused: bool,
-    theme: &Theme,
-) {
-    let entries: Vec<widgets::plan_list::PlanEntry> = data
-        .plans
-        .iter()
-        .map(|p| {
-            let done = if p.completed { p.task_count as u32 } else { 0 };
-            widgets::plan_list::PlanEntry {
-                name: p.title.clone(),
-                progress: if p.task_count > 0 { done as f64 / p.task_count as f64 } else { 0.0 },
-                tasks_done: done,
-                tasks_total: p.task_count as u32,
-                failed: false,
-            }
-        })
-        .collect();
-
-    if entries.is_empty() {
-        let border = if focused { theme.accent() } else { theme.muted() };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(" Plans (0) ")
-            .border_style(border);
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        frame.render_widget(
-            Paragraph::new("no plans discovered").style(theme.muted()),
-            inner,
-        );
-        return;
-    }
-
-    widgets::plan_list::render_plan_list(
-        frame,
-        area,
-        &entries,
-        view_state.selected,
-        view_state.scroll as usize,
-        theme,
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Phase compact -- delegates to widgets::phase_timeline
-// ---------------------------------------------------------------------------
-
-fn render_phase_compact(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, theme: &Theme) {
-    let phase_stages = ["preflight", "implement", "verify", "gate", "merge"];
-
-    let (phases, current_idx) = if let Some(exec) = &data.current_plan_execution {
-        let pct = if exec.tasks_total > 0 {
-            exec.tasks_done as f64 / exec.tasks_total as f64
-        } else {
-            0.0
-        };
-        let entries: Vec<_> = phase_stages
-            .iter()
-            .map(|&name| widgets::phase_timeline::PhaseEntry {
-                name: name.to_string(),
-                elapsed_secs: 0.0,
-            })
-            .collect();
-        let idx = ((pct * phase_stages.len() as f64).floor() as usize)
-            .min(phase_stages.len().saturating_sub(1));
-        (entries, idx)
-    } else {
-        let entries = vec![widgets::phase_timeline::PhaseEntry {
-            name: "idle".into(),
-            elapsed_secs: 0.0,
-        }];
-        (entries, 0)
-    };
-
-    widgets::phase_timeline::render_phase_timeline(frame, area, &phases, current_idx, theme);
-}
-
-// ---------------------------------------------------------------------------
-// Task progress -- inline (MoriTheme widget not compiled)
-// ---------------------------------------------------------------------------
-
-fn render_task_progress(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    data: &DashboardData,
-    view_state: &ViewState,
-    focused: bool,
-    theme: &Theme,
-) {
-    let total = data.active_tasks.len();
-    let done = data
-        .active_tasks
-        .iter()
-        .filter(|t| t.status == "done" || t.status == "completed")
-        .count();
-
-    let border = if focused { theme.accent() } else { theme.muted() };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(format!(" Tasks ({done}/{total}) "))
-        .border_style(border);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if data.active_tasks.is_empty() {
-        frame.render_widget(
-            Paragraph::new("no active tasks").style(theme.muted()),
-            inner,
-        );
-        return;
-    }
-
-    let mut lines: Vec<Line<'_>> = Vec::new();
-
-    // Progress bar.
-    if total > 0 && inner.width > 12 {
-        let bar_w = (inner.width as usize).saturating_sub(12);
-        let pct = done as f64 / total.max(1) as f64;
-        let filled = (pct * bar_w as f64).round() as usize;
-        let bar_color = match () {
-            _ if done == total => Color::Green,
-            _ if done > 0 => Color::Yellow,
-            _ => Color::DarkGray,
-        };
-        lines.push(Line::from(vec![
-            Span::raw(" "),
-            Span::styled("\u{2588}".repeat(filled.min(bar_w)), Style::default().fg(bar_color)),
-            Span::styled("\u{2591}".repeat(bar_w.saturating_sub(filled)), Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("  {done}/{total}"), Style::default().fg(Color::Gray)),
-        ]));
-    }
-
-    // Task rows.
-    let visible = (inner.height as usize).saturating_sub(lines.len() + 1);
-    let start = view_state.secondary_selected.min(total.saturating_sub(1));
-    let end = (start + visible).min(total);
-
-    for (i, task) in data.active_tasks[start..end].iter().enumerate() {
-        let idx = start + i;
-        let (icon, icon_s) = task_icon(task.status.as_str());
-        let text_s = if idx == view_state.secondary_selected && focused {
-            theme.selection()
-        } else {
-            task_text_style(task.status.as_str(), theme)
-        };
-
-        let elapsed_ms: u64 = data
-            .efficiency_events
-            .iter()
-            .filter(|e| e.task_id == task.task_id)
-            .map(|e| e.wall_time_ms)
-            .sum();
-
-        let mut spans = vec![
-            Span::styled(format!(" {icon} "), icon_s),
-            Span::styled(truncate(&task.task_id, 18), text_s),
-        ];
-        if elapsed_ms > 0 {
-            spans.push(Span::styled(
-                format!(" {}", fmt_duration_ms(elapsed_ms as f64)),
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
-        lines.push(Line::from(spans));
-    }
-
-    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 // ===========================================================================
@@ -678,9 +498,9 @@ fn render_sub_processes(
 fn render_bottom_ribbon(
     frame: &mut Frame<'_>,
     area: Rect,
-    data: &DashboardData,
+    _data: &DashboardData,
     tui_state: &TuiState,
-    theme: &Theme,
+    _theme: &Theme,
 ) {
     // Use the Mori wave_progress + token_sparkline + sys_metrics widgets
     let sections = Layout::horizontal([
@@ -698,131 +518,9 @@ fn render_bottom_ribbon(
     widgets::sys_metrics::render_sys_metrics(frame, sections[2], tui_state);
 }
 
-// Keep the old implementation as dead code for reference
-#[allow(dead_code)]
-fn render_bottom_ribbon_inline(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    data: &DashboardData,
-    theme: &Theme,
-) {
-    let sections = Layout::horizontal([
-        Constraint::Percentage(40),
-        Constraint::Percentage(40),
-        Constraint::Percentage(20),
-    ])
-    .split(area);
-
-    // Wave progress.
-    {
-        let (done, total) = data
-            .current_plan_execution
-            .as_ref()
-            .map(|e| (e.tasks_done, e.tasks_total))
-            .unwrap_or((0, 0));
-        let ratio = if total > 0 { done as f64 / total as f64 } else { 0.0 };
-
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(" Wave ")
-            .border_style(theme.muted());
-        let inner = block.inner(sections[0]);
-        frame.render_widget(block, sections[0]);
-
-        if inner.width >= 4 && inner.height >= 1 {
-            let w = inner.width as usize;
-            let filled = (ratio.clamp(0.0, 1.0) * w as f64).round() as usize;
-            let mut spans: Vec<Span<'_>> = Vec::new();
-            for i in 0..filled.min(w) {
-                let t = if filled > 1 { i as f64 / (filled - 1) as f64 } else { ratio };
-                spans.push(Span::styled("\u{2588}", Style::default().fg(ocean_gradient(t))));
-            }
-            if filled < w {
-                spans.push(Span::styled(
-                    "\u{2500}".repeat(w.saturating_sub(filled)),
-                    Style::default().fg(Color::DarkGray),
-                ));
-            }
-            frame.render_widget(Paragraph::new(Line::from(spans)), inner);
-        }
-    }
-
-    // Token sparkline.
-    {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(" Tokens ")
-            .border_style(theme.muted());
-        let inner = block.inner(sections[1]);
-        frame.render_widget(block, sections[1]);
-        let eff = &data.efficiency;
-        let total = eff.total_input_tokens + eff.total_output_tokens;
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                format!(" {} total  ${:.3}", fmt_count(total), eff.total_cost_usd),
-                Style::default().fg(theme.foreground),
-            ))),
-            inner,
-        );
-    }
-
-    // Sys badge.
-    {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(" Sys ")
-            .border_style(theme.muted());
-        let inner = block.inner(sections[2]);
-        frame.render_widget(block, sections[2]);
-        let active = data
-            .agents
-            .iter()
-            .filter(|a| a.status == "running" || a.status == "active")
-            .count();
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                format!(" {active}agt"),
-                Style::default().fg(theme.foreground),
-            ))),
-            inner,
-        );
-    }
-}
-
 // ===========================================================================
 // Helpers
 // ===========================================================================
-
-fn task_icon(status: &str) -> (&'static str, Style) {
-    match status {
-        "done" | "completed" => ("\u{2713}", Style::default().fg(Color::Green)),
-        "running" | "in_progress" => (
-            "\u{25ba}",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        ),
-        "failed" => ("\u{2717}", Style::default().fg(Color::Red)),
-        "blocked" => ("\u{2717}", Style::default().fg(Color::Red)),
-        _ => ("\u{00b7}", Style::default().fg(Color::DarkGray)),
-    }
-}
-
-fn task_text_style<'a>(status: &str, theme: &'a Theme) -> Style {
-    match status {
-        "done" | "completed" => theme.success(),
-        "running" | "in_progress" => theme.info(),
-        "failed" => theme.danger(),
-        _ => theme.text(),
-    }
-}
-
-fn ocean_gradient(t: f64) -> Color {
-    let t = t.clamp(0.0, 1.0);
-    Color::Rgb(
-        (40.0 + t * 60.0).min(255.0) as u8,
-        (180.0 - t * 80.0).min(255.0) as u8,
-        (200.0 + t * 55.0).min(255.0) as u8,
-    )
-}
 
 fn shorten_model(slug: &str) -> String {
     slug.replace("claude-", "")
@@ -845,19 +543,6 @@ fn fmt_tokens(n: u64) -> String {
         format!("{}k", n / 1_000)
     } else {
         format!("{:.1}M", n as f64 / 1_000_000.0)
-    }
-}
-
-fn fmt_duration_ms(ms: f64) -> String {
-    let secs = (ms / 1000.0) as u64;
-    if secs >= 3600 {
-        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
-    } else if secs >= 60 {
-        format!("{}m{}s", secs / 60, secs % 60)
-    } else if secs > 0 {
-        format!("{}s", secs)
-    } else {
-        format!("{:.0}ms", ms)
     }
 }
 
