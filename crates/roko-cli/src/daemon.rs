@@ -981,7 +981,7 @@ async fn handle_ipc_command(
 
 async fn reload_daemon_runtime(state: &AppState) -> DaemonReloadResponse {
     let subscriptions_report = {
-        let roko_config = state.roko_config.read().await.clone();
+        let roko_config = state.load_roko_config().as_ref().clone();
         let registry = roko_serve::dispatch::SubscriptionRegistry::load_from_project(
             &state.workdir,
             &roko_config,
@@ -1047,7 +1047,7 @@ async fn run_daemon_http_server(
     port: u16,
     shutdown: CancellationToken,
 ) -> Result<()> {
-    let roko_config = state.roko_config.read().await.clone();
+    let roko_config = state.load_roko_config().as_ref().clone();
     let router = roko_serve::routes::build_router(
         Arc::clone(&state),
         &roko_config.server.cors_origins,

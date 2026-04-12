@@ -47,10 +47,9 @@ pub fn routes() -> Router<Arc<AppState>> {
 
 /// `GET /api/providers` — list configured providers with health and model counts.
 async fn list_providers(State(state): State<Arc<AppState>>) -> Json<ProvidersResponse> {
-    let config = state.roko_config.read().await;
+    let config = state.load_roko_config();
     let providers = config.effective_providers();
     let models = config.effective_models();
-    drop(config);
 
     let health: HashMap<String, ProviderHealthInfo> = state
         .provider_health
@@ -81,7 +80,7 @@ async fn list_providers(State(state): State<Arc<AppState>>) -> Json<ProvidersRes
 
 /// `GET /api/models` — list configured models with capabilities and pricing.
 async fn list_models(State(state): State<Arc<AppState>>) -> Json<ModelsResponse> {
-    let config = state.roko_config.read().await;
+    let config = state.load_roko_config();
     let mut models: Vec<ModelInfo> = config
         .effective_models()
         .into_iter()
@@ -120,7 +119,7 @@ async fn explain_routing(
     let role = parse_agent_role(role)
         .ok_or_else(|| ApiError::bad_request(format!("invalid role: {role}")))?;
 
-    let config = state.roko_config.read().await.clone();
+    let config = state.load_roko_config().as_ref().clone();
     let resolved = resolve_model(&config, model);
     let complexity = params
         .complexity
@@ -279,7 +278,7 @@ async fn test_provider(
     State(state): State<Arc<AppState>>,
     Path(provider_id): Path<String>,
 ) -> Result<Json<ProviderTestResponse>, ApiError> {
-    let config = state.roko_config.read().await.clone();
+    let config = state.load_roko_config().as_ref().clone();
     let providers = config.effective_providers();
     let Some(provider) = providers.get(&provider_id) else {
         return Err(ApiError::not_found(format!(

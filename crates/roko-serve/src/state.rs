@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use arc_swap::ArcSwap;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{OnceCell, RwLock};
@@ -139,8 +140,8 @@ pub struct AppState {
     pub subscriptions: SubscriptionRegistry,
     /// Runtime bridge to CLI operations (run_once, status, dashboard).
     pub runtime: Arc<dyn CliRuntime>,
-    /// Full `roko.toml` schema configuration.
-    pub roko_config: RwLock<RokoConfig>,
+    /// Full `roko.toml` schema configuration with lock-free reads.
+    pub roko_config: ArcSwap<RokoConfig>,
     /// In-memory provider health tracker exposed via serve APIs.
     pub provider_health: ProviderHealthTracker,
     /// In-memory provider latency stats exposed via serve APIs.
@@ -194,7 +195,7 @@ impl AppState {
             state_hub: roko_core::shared_state_hub(),
             subscriptions,
             runtime,
-            roko_config: RwLock::new(roko_config),
+            roko_config: ArcSwap::from_pointee(roko_config),
             provider_health: ProviderHealthTracker::new(),
             latency_registry: LatencyRegistry::new(),
             active_runs: RwLock::new(HashMap::new()),
@@ -206,6 +207,17 @@ impl AppState {
             template_runs: RwLock::new(HashMap::new()),
             scrubber: Arc::new(LogScrubber::new()),
         }
+    }
+
+    /// Load the current config snapshot.
+    #[must_use]
+    pub fn load_roko_config(&self) -> Arc<RokoConfig> {
+        self.roko_config.load_full()
+    }
+
+    /// Atomically swap in a new config snapshot.
+    pub fn store_roko_config(&self, roko_config: RokoConfig) {
+        self.roko_config.store(Arc::new(roko_config));
     }
 
     /// Initiate graceful shutdown: cancel all work and stop supervised processes.
@@ -248,5 +260,53 @@ impl SignalStore {
         let substrate = self.substrate().await?;
         substrate.put(signal).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use tempfile::tempdir;
+    use tokio::task::JoinSet;
+
+    use crate::deploy::manual::ManualBackend;
+    use crate::runtime::NoOpRuntime;
+
+    #[tokio::test]
+    async fn arcswap_config_supports_concurrent_reads_during_swap() {
+        let tempdir = tempdir().expect("tempdir");
+        let mut initial = RokoConfig::default();
+        initial.server.port = 4000;
+
+        let state = Arc::new(AppState::new(
+            tempdir.path().to_path_buf(),
+            Arc::new(NoOpRuntime),
+            initial,
+            Arc::new(ManualBackend::default()),
+        ));
+
+        let mut readers = JoinSet::new();
+        for _ in 0..8 {
+            let state = Arc::clone(&state);
+            readers.spawn(async move {
+                for _ in 0..256 {
+                    let config = state.load_roko_config();
+                    let port = config.server.port;
+                    assert!(port == 4000 || port == 5000);
+                    tokio::task::yield_now().await;
+                }
+            });
+        }
+
+        let mut updated = state.load_roko_config().as_ref().clone();
+        updated.server.port = 5000;
+        state.store_roko_config(updated);
+
+        while let Some(result) = readers.join_next().await {
+            result.expect("reader task");
+        }
+
+        assert_eq!(state.load_roko_config().server.port, 5000);
     }
 }

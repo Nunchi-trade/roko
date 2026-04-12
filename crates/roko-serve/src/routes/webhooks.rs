@@ -41,7 +41,7 @@ async fn github_webhook(
     body: Bytes,
 ) -> Result<StatusCode, ApiError> {
     let secret = {
-        let config = state.roko_config.read().await;
+        let config = state.load_roko_config();
         config.webhooks.github.secret.clone()
     };
 

@@ -18,11 +18,10 @@ pub fn routes() -> Router<Arc<AppState>> {
 
 /// `GET /api/config` — return the current `RokoConfig` as JSON.
 async fn get_config(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    let cfg = state.roko_config.read().await;
-    let mut value = serde_json::to_value(&*cfg)
+    let cfg = state.load_roko_config();
+    let mut value = serde_json::to_value(cfg.as_ref())
         .map_err(|e| ApiError::internal(format!("serialize config: {e}")))?;
     mask_secret_fields(&mut value);
-    drop(cfg);
     Ok(Json(value))
 }
 
@@ -33,10 +32,10 @@ async fn update_config(
     Json(partial): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     // Read current config, merge the partial update, and write back.
-    let mut cfg = state.roko_config.write().await;
+    let cfg = state.load_roko_config();
 
     // Serialize current to Value, deep-merge, then deserialize back.
-    let mut current = serde_json::to_value(&*cfg)
+    let mut current = serde_json::to_value(cfg.as_ref())
         .map_err(|e| ApiError::internal(format!("serialize current config: {e}")))?;
 
     merge_json(&mut current, &partial);
@@ -52,8 +51,7 @@ async fn update_config(
         .await
         .map_err(|e| ApiError::internal(format!("write roko.toml: {e}")))?;
 
-    *cfg = updated;
-    drop(cfg);
+    state.store_roko_config(updated);
 
     mask_secret_fields(&mut current);
     Ok(Json(current))

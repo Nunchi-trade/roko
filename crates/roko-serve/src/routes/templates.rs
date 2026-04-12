@@ -237,14 +237,13 @@ async fn deploy_template_cloud(
         env_vars.insert("ANTHROPIC_API_KEY".to_string(), key);
     }
 
-    let roko_config = state.roko_config.read().await;
+    let roko_config = state.load_roko_config();
     let image = roko_config
         .deploy
         .worker_image
         .clone()
         .unwrap_or_else(|| "roko-worker:latest".to_string());
     let region = roko_config.deploy.default_region.clone();
-    drop(roko_config);
 
     let spec = DeploySpec {
         name: format!("roko-worker-{name}"),

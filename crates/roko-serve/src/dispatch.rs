@@ -417,7 +417,7 @@ async fn run_anomaly_preflight(
         .map(|ctx| ctx.repo_workdir.as_path())
         .unwrap_or_else(|| state.workdir.as_path());
     let repo_layout = repo_ctx.map(|ctx| &ctx.layout);
-    let base_config = state.roko_config.read().await.clone();
+    let base_config = state.load_roko_config().as_ref().clone();
     let effective_config = repo_ctx
         .and_then(|ctx| ctx.repo_config.clone())
         .unwrap_or(base_config);
@@ -507,7 +507,7 @@ impl TemplateAgentDispatcher {
 #[must_use]
 pub fn start_dispatch_loop(state: Arc<AppState>) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let roko_config = state.roko_config.read().await.clone();
+        let roko_config = state.load_roko_config().as_ref().clone();
         let dispatcher = Arc::new(TemplateAgentDispatcher::new(
             state.workdir.clone(),
             None,
@@ -1588,7 +1588,7 @@ async fn dispatch_template(
         let repo_listing = state.runtime.list_repos();
         let roko_config = match ctx.repo_config.clone() {
             Some(config) => config,
-            None => state.roko_config.read().await.clone(),
+            None => state.load_roko_config().as_ref().clone(),
         };
         let mut repo_dispatcher =
             TemplateAgentDispatcher::new(state.workdir.clone(), None, roko_config);
@@ -1655,7 +1655,10 @@ async fn dispatch_template(
     let session_root = repo_ctx
         .map(|ctx| ctx.repo_workdir.as_path())
         .unwrap_or_else(|| state.workdir.as_path());
-    let budget_limit = f64::from(state.roko_config.read().await.budget.max_plan_usd);
+    let budget_limit = {
+        let roko_config = state.load_roko_config();
+        f64::from(roko_config.budget.max_plan_usd)
+    };
     record_post_turn_anomalies(
         session_root,
         &model_used,
