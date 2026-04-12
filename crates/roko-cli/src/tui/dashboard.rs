@@ -2566,6 +2566,7 @@ struct ProviderHealthData {
 #[derive(Debug, Clone, serde::Deserialize)]
 struct ProviderEntryData {
     #[serde(default)]
+    #[allow(dead_code)]
     provider_id: String,
     #[serde(default)]
     state: String,

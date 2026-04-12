@@ -36,7 +36,7 @@ use super::pages::{PageId, PageRegistry};
 use super::state::TuiState;
 use super::tabs::Tab;
 use super::views::{self, ViewState};
-use super::widgets;
+
 
 /// Interactive dashboard shell backed by the existing snapshot renderer.
 ///
@@ -878,6 +878,7 @@ impl App {
         }
     }
 
+    #[allow(dead_code)]
     fn select_page_by_slot(&mut self, slot: usize) {
         let pages = self.pages().ids();
         if let Some(page) = pages.get(slot).copied() {
@@ -908,6 +909,7 @@ impl App {
         PageRegistry::from_dashboard(&self.scaffold)
     }
 
+    #[allow(dead_code)]
     fn scroll_for(&self, page: PageId) -> u16 {
         self.scroll_offset.get(&page).copied().unwrap_or(0)
     }

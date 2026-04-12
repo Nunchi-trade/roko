@@ -190,48 +190,189 @@ fn build_config_sections(data: &DashboardData) -> Vec<ConfigSection> {
     let mut sections = Vec::new();
 
     // Efficiency summary section
-    sections.push(ConfigSection {
-        name: String::from("efficiency"),
-        entries: vec![
-            ConfigEntry {
-                key: String::from("total_cost_usd"),
-                value: format!("${:.4}", data.efficiency.total_cost_usd),
-                source: ConfigSource::Default,
-            },
-            ConfigEntry {
-                key: String::from("event_count"),
-                value: data.efficiency.event_count.to_string(),
-                source: ConfigSource::Default,
-            },
-            ConfigEntry {
-                key: String::from("avg_wall_time_ms"),
-                value: format!("{:.0}", data.efficiency.average_wall_time_ms),
-                source: ConfigSource::Default,
-            },
-        ],
-        expanded: true,
-    });
+    {
+        let eff = &data.efficiency;
+        let pass_rate = if eff.event_count > 0 {
+            format!(
+                "{:.1}%",
+                eff.passed_count as f64 / eff.event_count as f64 * 100.0
+            )
+        } else {
+            "-".to_string()
+        };
+        sections.push(ConfigSection {
+            name: String::from("efficiency"),
+            entries: vec![
+                ConfigEntry {
+                    key: String::from("total_cost_usd"),
+                    value: format!("${:.4}", eff.total_cost_usd),
+                    source: ConfigSource::Default,
+                },
+                ConfigEntry {
+                    key: String::from("event_count"),
+                    value: eff.event_count.to_string(),
+                    source: ConfigSource::Default,
+                },
+                ConfigEntry {
+                    key: String::from("avg_wall_time_ms"),
+                    value: format!("{:.0}", eff.average_wall_time_ms),
+                    source: ConfigSource::Default,
+                },
+                ConfigEntry {
+                    key: String::from("total_input_tokens"),
+                    value: format_count(eff.total_input_tokens),
+                    source: ConfigSource::Default,
+                },
+                ConfigEntry {
+                    key: String::from("total_output_tokens"),
+                    value: format_count(eff.total_output_tokens),
+                    source: ConfigSource::Default,
+                },
+                ConfigEntry {
+                    key: String::from("pass_rate"),
+                    value: pass_rate,
+                    source: ConfigSource::Default,
+                },
+            ],
+            expanded: true,
+        });
+    }
 
-    // Cascade router section
+    // Cascade router section — model routing state
     if !data.cascade_router.model_slugs.is_empty() {
+        let mut entries: Vec<ConfigEntry> = data
+            .cascade_router
+            .model_slugs
+            .iter()
+            .map(|slug| {
+                let stats = data.cascade_router.confidence_stats.get(slug);
+                let trials = stats.map_or(0, |s| s.trials);
+                let successes = stats.map_or(0, |s| s.successes);
+                let rate = if trials > 0 {
+                    format!("{:.0}%", successes as f64 / trials as f64 * 100.0)
+                } else {
+                    "-".to_string()
+                };
+                ConfigEntry {
+                    key: slug.clone(),
+                    value: format!("{successes}/{trials} ({rate})"),
+                    source: ConfigSource::File,
+                }
+            })
+            .collect();
+
+        // Add summary row
+        let total_trials: u64 = data
+            .cascade_router
+            .confidence_stats
+            .values()
+            .map(|s| s.trials)
+            .sum();
+        let total_success: u64 = data
+            .cascade_router
+            .confidence_stats
+            .values()
+            .map(|s| s.successes)
+            .sum();
+        entries.insert(
+            0,
+            ConfigEntry {
+                key: String::from("_total"),
+                value: format!(
+                    "{} models, {total_success}/{total_trials} total",
+                    data.cascade_router.model_slugs.len()
+                ),
+                source: ConfigSource::Default,
+            },
+        );
+
         sections.push(ConfigSection {
             name: String::from("cascade_router"),
-            entries: data
-                .cascade_router
-                .model_slugs
-                .iter()
-                .map(|slug| {
-                    let stats = data.cascade_router.confidence_stats.get(slug);
-                    let trials = stats.map_or(0, |s| s.trials);
-                    let successes = stats.map_or(0, |s| s.successes);
-                    ConfigEntry {
-                        key: slug.clone(),
-                        value: format!("{successes}/{trials} success"),
-                        source: ConfigSource::File,
-                    }
-                })
-                .collect(),
+            entries,
             expanded: true,
+        });
+    }
+
+    // Gate thresholds section — adaptive thresholds per rung
+    if !data.gate_results_page.threshold_rows.is_empty() {
+        let entries: Vec<ConfigEntry> = data
+            .gate_results_page
+            .threshold_rows
+            .iter()
+            .map(|row| {
+                let trend_icon = match row.trend {
+                    crate::tui::dashboard::GateTrend::Up => "\u{2191}",   // arrow up
+                    crate::tui::dashboard::GateTrend::Down => "\u{2193}", // arrow down
+                    crate::tui::dashboard::GateTrend::Flat => "\u{2194}", // arrow left-right
+                };
+                ConfigEntry {
+                    key: format!("rung_{}", row.rung),
+                    value: format!(
+                        "threshold={} pass_rate={:.1}% {}",
+                        row.current_threshold,
+                        row.ema_pass_rate * 100.0,
+                        trend_icon,
+                    ),
+                    source: ConfigSource::File,
+                }
+            })
+            .collect();
+        sections.push(ConfigSection {
+            name: String::from("gate_thresholds"),
+            entries,
+            expanded: true,
+        });
+    }
+
+    // Gate results summary section
+    if !data.gate_results_page.gate_rows.is_empty() {
+        let entries: Vec<ConfigEntry> = data
+            .gate_results_page
+            .gate_rows
+            .iter()
+            .map(|row| ConfigEntry {
+                key: row.gate_name.clone(),
+                value: format!(
+                    "{} runs, {:.0}% pass, avg {:.0}ms",
+                    row.total_runs,
+                    row.pass_rate * 100.0,
+                    row.avg_duration_ms,
+                ),
+                source: ConfigSource::Default,
+            })
+            .collect();
+        sections.push(ConfigSection {
+            name: String::from("gate_results"),
+            entries,
+            expanded: true,
+        });
+    }
+
+    // Experiments section
+    if !data.experiments.is_empty() {
+        let entries: Vec<ConfigEntry> = data
+            .experiments
+            .iter()
+            .map(|exp| ConfigEntry {
+                key: exp.experiment_id.clone(),
+                value: format!(
+                    "{} ({} variants, {} trials, {})",
+                    exp.section_name,
+                    exp.active_variants,
+                    exp.total_trials,
+                    exp.status,
+                ),
+                source: if exp.winner_id.is_some() {
+                    ConfigSource::File
+                } else {
+                    ConfigSource::Default
+                },
+            })
+            .collect();
+        sections.push(ConfigSection {
+            name: String::from("experiments"),
+            entries,
+            expanded: false,
         });
     }
 
@@ -257,6 +398,31 @@ fn build_config_sections(data: &DashboardData) -> Vec<ConfigSection> {
         });
     }
 
+    // Agents section
+    if !data.agents.is_empty() {
+        let entries: Vec<ConfigEntry> = data
+            .agents
+            .iter()
+            .map(|agent| ConfigEntry {
+                key: agent.id.clone(),
+                value: format!(
+                    "{} ({})",
+                    agent.label,
+                    agent.status,
+                ),
+                source: match agent.status.as_str() {
+                    "running" | "active" => ConfigSource::Env,
+                    _ => ConfigSource::Default,
+                },
+            })
+            .collect();
+        sections.push(ConfigSection {
+            name: String::from("agents"),
+            entries,
+            expanded: false,
+        });
+    }
+
     sections
 }
 
@@ -265,5 +431,15 @@ fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         format!("{}...", &s[..max.saturating_sub(3)])
+    }
+}
+
+fn format_count(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
     }
 }

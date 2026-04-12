@@ -3,8 +3,8 @@
 //! Two-panel layout: left 35% agent roster (pool table),
 //! right 65% agent output with scroll pinning (auto-tail + manual pin).
 
-use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::Modifier;
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap};
 use ratatui::Frame;
@@ -29,7 +29,7 @@ pub fn render(
     render_agent_output(frame, panels[1], data, view_state, theme);
 }
 
-/// Left panel: agent roster table.
+/// Left panel: agent roster table with token/cost columns.
 fn render_agent_roster(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -37,57 +37,135 @@ fn render_agent_roster(
     view_state: &ViewState,
     theme: &Theme,
 ) {
+    let active_count = data
+        .agents
+        .iter()
+        .filter(|a| a.status == "running" || a.status == "active")
+        .count();
+    let title = format!(" Agent Roster ({}/{}) ", active_count, data.agents.len());
+
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Agent Roster ")
+        .title(title)
         .border_style(theme.accent());
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // TODO: use agent_pool / parallel_pool widget here when available
     if data.agents.is_empty() {
-        let empty = Paragraph::new("no agents registered")
-            .style(theme.muted())
+        // Centered empty state message
+        let empty_lines = vec![
+            Line::from(""),
+            Line::from(""),
+            Line::from(Span::styled(
+                "no agents registered",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "agents will appear here when",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(Span::styled(
+                "plan execution begins",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ];
+        let empty = Paragraph::new(empty_lines)
+            .alignment(Alignment::Center)
             .wrap(Wrap { trim: false });
         frame.render_widget(empty, inner);
         return;
     }
+
+    // Build activity snapshot for token/cost info
+    let activity =
+        crate::tui::dashboard::build_agent_activity_snapshot(&data.agents, &data.efficiency_events);
 
     let rows: Vec<Row<'_>> = data
         .agents
         .iter()
         .enumerate()
         .map(|(i, agent)| {
-            let style = if i == view_state.selected {
+            let is_selected = i == view_state.selected;
+
+            let (status_icon, status_style) = match agent.status.as_str() {
+                "running" | "active" => (
+                    "\u{25ba}",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                "idle" => ("\u{00b7}", Style::default().fg(Color::DarkGray)),
+                "done" | "completed" => ("\u{2713}", Style::default().fg(Color::Green)),
+                "error" | "failed" => ("\u{2717}", Style::default().fg(Color::Red)),
+                _ => ("?", Style::default().fg(Color::DarkGray)),
+            };
+
+            let row_style = if is_selected {
                 theme.selection()
             } else {
                 match agent.status.as_str() {
-                    "running" => theme.info(),
+                    "running" | "active" => theme.info(),
                     "idle" => theme.muted(),
                     "error" | "failed" => theme.danger(),
                     _ => theme.text(),
                 }
             };
+
+            // Find activity data for this agent
+            let activity_row = activity.as_ref().and_then(|snap| {
+                snap.active_agents
+                    .iter()
+                    .find(|r| r.agent_id == agent.id)
+            });
+
+            let tokens_str = activity_row
+                .map(|r| format_tokens(r.tokens_used))
+                .unwrap_or_else(|| "-".to_string());
+
+            let cost_str = activity_row
+                .map(|r| {
+                    if r.cost_usd > 0.0 {
+                        format!("${:.2}", r.cost_usd)
+                    } else {
+                        "-".to_string()
+                    }
+                })
+                .unwrap_or_else(|| "-".to_string());
+
             Row::new(vec![
-                Cell::from(truncate(&agent.id, 14)),
+                Cell::from(Span::styled(
+                    format!("{status_icon}"),
+                    status_style,
+                )),
+                Cell::from(truncate(&agent.id, 12)),
                 Cell::from(agent.label.as_str()),
-                Cell::from(status_icon(agent.status.as_str())),
+                Cell::from(tokens_str),
+                Cell::from(cost_str),
             ])
-            .style(style)
+            .style(row_style)
         })
         .collect();
 
-    let widths = [Constraint::Min(10), Constraint::Min(12), Constraint::Length(8)];
+    let widths = [
+        Constraint::Length(2),
+        Constraint::Min(8),
+        Constraint::Min(10),
+        Constraint::Length(7),
+        Constraint::Length(7),
+    ];
     let table = Table::new(rows, widths)
         .header(
-            Row::new(["id", "role", "status"])
+            Row::new([" ", "id", "role", "tokens", "cost"])
                 .style(theme.accent().add_modifier(Modifier::BOLD)),
         )
         .column_spacing(1);
     frame.render_widget(table, inner);
 }
 
-/// Right panel: agent output with scroll pinning.
+/// Right panel: agent output with TAIL/PINNED indicator and scroll.
 fn render_agent_output(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -125,15 +203,23 @@ fn render_agent_output(
     let role_bar = Paragraph::new(Line::from(role_spans));
     frame.render_widget(role_bar, sections[0]);
 
-    // Output panel
+    // Output panel with TAIL/PINNED indicator in title
     let tail_indicator = if view_state.auto_tail {
-        " [TAIL] "
+        "TAIL"
     } else {
-        " [PINNED] "
+        &format!("PINNED @{}", view_state.scroll)
     };
+    let title = format!(" Output [{}] ", tail_indicator);
+
+    let title_style = if view_state.auto_tail {
+        theme.accent()
+    } else {
+        theme.warning()
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(format!(" Output{tail_indicator}"))
+        .title(Span::styled(title, title_style))
         .border_style(theme.accent());
     let inner = block.inner(sections[1]);
     frame.render_widget(block, sections[1]);
@@ -145,8 +231,25 @@ fn render_agent_output(
         .unwrap_or_default();
 
     if lines.is_empty() {
-        let empty = Paragraph::new("waiting for agent output...")
-            .style(theme.muted())
+        // Centered empty state
+        let v_pad = inner.height / 2;
+        let mut empty_lines: Vec<Line<'_>> = Vec::new();
+        for _ in 0..v_pad.saturating_sub(1) {
+            empty_lines.push(Line::from(""));
+        }
+        empty_lines.push(Line::from(Span::styled(
+            "waiting for agent output...",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        )));
+        empty_lines.push(Line::from(""));
+        empty_lines.push(Line::from(Span::styled(
+            "output will stream here when agents are active",
+            Style::default().fg(Color::DarkGray),
+        )));
+        let empty = Paragraph::new(empty_lines)
+            .alignment(Alignment::Center)
             .wrap(Wrap { trim: false });
         frame.render_widget(empty, inner);
         return;
@@ -166,13 +269,22 @@ fn render_agent_output(
     frame.render_widget(paragraph, inner);
 }
 
-fn status_icon(status: &str) -> &'static str {
-    match status {
-        "running" => ">>",
-        "idle" => "--",
-        "done" | "completed" => "ok",
-        "error" | "failed" => "!!",
-        _ => "??",
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Format token count compactly.
+fn format_tokens(n: u64) -> String {
+    if n == 0 {
+        "-".to_string()
+    } else if n < 1_000 {
+        format!("{n}")
+    } else if n < 10_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else if n < 1_000_000 {
+        format!("{}k", n / 1_000)
+    } else {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
     }
 }
 

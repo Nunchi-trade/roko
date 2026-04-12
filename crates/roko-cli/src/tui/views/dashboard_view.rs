@@ -6,9 +6,9 @@
 //! Wave progress ribbon at bottom.
 
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::Modifier;
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Gauge, List, ListItem, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, Wrap};
 use ratatui::Frame;
 
 use super::ViewState;
@@ -65,7 +65,11 @@ fn render_left_panel(
     render_task_progress(frame, sections[2], data, view_state, theme);
 }
 
-/// Plan tree: hierarchical plan listing.
+// ---------------------------------------------------------------------------
+// Plan tree — rich rendering with colored counts, progress bars, status icons
+// ---------------------------------------------------------------------------
+
+/// Plan tree: hierarchical plan listing with colored task counts and progress.
 fn render_plan_tree(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -73,9 +77,18 @@ fn render_plan_tree(
     view_state: &ViewState,
     theme: &Theme,
 ) {
+    let total = data.plans.len();
+    let completed = data.plans.iter().filter(|p| p.completed).count();
+    let pending = total.saturating_sub(completed);
+
+    // Build title with colored counts
+    let title = format!(
+        " Plans ({completed}/{total}) ",
+    );
+
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Plans ")
+        .title(title)
         .border_style(theme.accent());
 
     let inner = block.inner(area);
@@ -89,25 +102,79 @@ fn render_plan_tree(
         return;
     }
 
-    // TODO: use plan_tree widget here when available
+    let bar_width = 10usize;
+
     let items: Vec<ListItem<'_>> = data
         .plans
         .iter()
         .enumerate()
         .map(|(i, plan)| {
-            let marker = if plan.completed { "[x]" } else { "[ ]" };
-            let style = if i == view_state.selected {
+            let is_selected = i == view_state.selected;
+
+            // Status icon with semantic color
+            let (icon, icon_style) = if plan.completed {
+                ("\u{2713}", Style::default().fg(Color::Green))      // checkmark green
+            } else {
+                ("\u{25cb}", Style::default().fg(Color::DarkGray))   // circle gray
+            };
+
+            // Task count coloring: green for all done, yellow for in-progress, gray for none
+            let count_style = if plan.completed {
+                Style::default().fg(Color::Green)
+            } else if plan.task_count > 0 {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+
+            // Progress bar: filled blocks for done ratio
+            let done_count = if plan.completed { plan.task_count } else { 0 };
+            let fill_pct = if plan.task_count > 0 {
+                done_count as f64 / plan.task_count as f64
+            } else {
+                0.0
+            };
+            let filled = (fill_pct * bar_width as f64).round() as usize;
+            let empty = bar_width.saturating_sub(filled);
+
+            let bar_color = if plan.completed {
+                Color::Green
+            } else if done_count > 0 {
+                Color::Yellow
+            } else {
+                Color::DarkGray
+            };
+
+            let bar_str = format!(
+                "{}{}",
+                "\u{2588}".repeat(filled.min(bar_width)),
+                "\u{2500}".repeat(empty),
+            );
+
+            // Selection style
+            let text_style = if is_selected {
                 theme.selection()
             } else if plan.completed {
                 theme.success()
             } else {
                 theme.text()
             };
-            ListItem::new(Line::from(format!(
-                "{} {} ({} tasks)",
-                marker, plan.title, plan.task_count
-            )))
-            .style(style)
+
+            // Truncate name
+            let max_name = (inner.width as usize).saturating_sub(bar_width + 18);
+            let name = truncate(&plan.title, max_name);
+
+            ListItem::new(Line::from(vec![
+                Span::styled(format!(" {icon} "), icon_style),
+                Span::styled(name, text_style),
+                Span::raw(" "),
+                Span::styled(
+                    format!("{:>2}/{:<2}", done_count, plan.task_count),
+                    count_style,
+                ),
+                Span::raw(" "),
+                Span::styled(bar_str, Style::default().fg(bar_color)),
+            ]))
         })
         .collect();
 
@@ -115,37 +182,123 @@ fn render_plan_tree(
     frame.render_widget(list, inner);
 }
 
-/// Phase compact: current execution phase indicator.
+// ---------------------------------------------------------------------------
+// Phase compact — segmented phase bar with stage names
+// ---------------------------------------------------------------------------
+
+/// Phase compact: segmented bar showing execution stages.
 fn render_phase_compact(
     frame: &mut Frame<'_>,
     area: Rect,
     data: &DashboardData,
     theme: &Theme,
 ) {
+    // Derive phase info from execution state
+    let (phase_label, phase_pct) = if let Some(exec) = &data.current_plan_execution {
+        let pct = if exec.tasks_total > 0 {
+            exec.tasks_done as f64 / exec.tasks_total as f64
+        } else {
+            0.0
+        };
+        // Derive stage name from task phases
+        let current_phase = exec
+            .tasks
+            .iter()
+            .find(|t| t.is_current)
+            .map(|t| t.phase.as_str())
+            .unwrap_or("idle");
+        (current_phase.to_string(), pct)
+    } else {
+        ("idle".to_string(), 0.0)
+    };
+
+    let title = format!(" Phase \u{00b7} {} ", phase_label);
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Phase ")
+        .title(title)
         .border_style(theme.muted());
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // TODO: use phase_timeline widget here when available
-    let phase_text = if let Some(exec) = &data.current_plan_execution {
-        format!(
-            "{}: {}/{} tasks",
-            exec.plan_title, exec.tasks_done, exec.tasks_total
-        )
-    } else {
-        String::from("idle - no active execution")
-    };
+    if inner.height < 1 || inner.width < 10 {
+        return;
+    }
 
-    let paragraph = Paragraph::new(phase_text)
-        .style(theme.text())
-        .wrap(Wrap { trim: false });
+    let bar_width = inner.width as usize;
+    let mut lines: Vec<Line<'_>> = Vec::new();
+
+    // Line 1: Segmented phase bar
+    // Define canonical phases and determine which are done/active/pending
+    let phase_stages = ["preflight", "implement", "verify", "gate", "merge"];
+    let seg_width = bar_width / phase_stages.len().max(1);
+    let leftover = bar_width.saturating_sub(seg_width * phase_stages.len());
+
+    let mut bar_spans: Vec<Span<'_>> = Vec::new();
+
+    for (i, &stage) in phase_stages.iter().enumerate() {
+        let w = if i == phase_stages.len() - 1 {
+            seg_width + leftover
+        } else {
+            seg_width
+        };
+
+        // Determine if this stage is done, active, or pending based on overall progress
+        let stage_threshold = (i as f64 + 1.0) / phase_stages.len() as f64;
+        let prev_threshold = i as f64 / phase_stages.len() as f64;
+
+        let (fill_char, fill_color) = if phase_pct >= stage_threshold {
+            // Stage complete
+            ("\u{2588}", Color::Green)
+        } else if phase_pct > prev_threshold {
+            // Stage active - partial fill
+            ("\u{2593}", Color::Yellow)
+        } else {
+            // Stage pending
+            ("\u{2500}", Color::DarkGray)
+        };
+
+        bar_spans.push(Span::styled(
+            fill_char.repeat(w),
+            Style::default().fg(fill_color),
+        ));
+    }
+    lines.push(Line::from(bar_spans));
+
+    // Line 2: Stage labels below the bar
+    if inner.height >= 2 {
+        let mut label_spans: Vec<Span<'_>> = Vec::new();
+        for (i, &stage) in phase_stages.iter().enumerate() {
+            let w = if i == phase_stages.len() - 1 {
+                seg_width + leftover
+            } else {
+                seg_width
+            };
+            let stage_threshold = (i as f64 + 1.0) / phase_stages.len() as f64;
+            let prev_threshold = i as f64 / phase_stages.len() as f64;
+
+            let label_color = if phase_pct >= stage_threshold {
+                Color::Green
+            } else if phase_pct > prev_threshold {
+                Color::Yellow
+            } else {
+                Color::DarkGray
+            };
+
+            let padded = format!("{:^width$}", stage, width = w);
+            label_spans.push(Span::styled(padded, Style::default().fg(label_color)));
+        }
+        lines.push(Line::from(label_spans));
+    }
+
+    let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, inner);
 }
 
-/// Task progress: list of active tasks with status.
+// ---------------------------------------------------------------------------
+// Task progress — table with elapsed time and iteration counts
+// ---------------------------------------------------------------------------
+
+/// Task progress: list of active tasks with elapsed time and iteration.
 fn render_task_progress(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -153,14 +306,21 @@ fn render_task_progress(
     view_state: &ViewState,
     theme: &Theme,
 ) {
+    let total = data.active_tasks.len();
+    let done = data
+        .active_tasks
+        .iter()
+        .filter(|t| t.status == "done" || t.status == "completed")
+        .count();
+
+    let title = format!(" Tasks ({done}/{total}) ");
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Tasks ")
+        .title(title)
         .border_style(theme.muted());
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // TODO: use task_progress widget here when available
     if data.active_tasks.is_empty() {
         let empty = Paragraph::new("no active tasks")
             .style(theme.muted())
@@ -169,12 +329,22 @@ fn render_task_progress(
         return;
     }
 
+    // Build enhanced rows with status icon, elapsed time, and iteration
     let rows: Vec<Row<'_>> = data
         .active_tasks
         .iter()
         .enumerate()
         .map(|(i, task)| {
-            let style = if i == view_state.secondary_selected {
+            // Status icon
+            let (icon, status_style) = match task.status.as_str() {
+                "done" | "completed" => ("\u{2713}", Style::default().fg(Color::Green)),
+                "running" | "in_progress" => ("\u{25ba}", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                "failed" => ("\u{2717}", Style::default().fg(Color::Red)),
+                "blocked" => ("\u{2717}", Style::default().fg(Color::Red)),
+                _ => ("\u{00b7}", Style::default().fg(Color::DarkGray)),
+            };
+
+            let row_style = if i == view_state.secondary_selected {
                 theme.selection()
             } else {
                 match task.status.as_str() {
@@ -184,19 +354,48 @@ fn render_task_progress(
                     _ => theme.text(),
                 }
             };
+
+            // Elapsed time from efficiency events (find matching task)
+            let elapsed_ms: u64 = data
+                .efficiency_events
+                .iter()
+                .filter(|e| e.task_id == task.task_id)
+                .map(|e| e.wall_time_ms)
+                .sum();
+            let elapsed_str = if elapsed_ms > 0 {
+                format_duration_ms(elapsed_ms as f64)
+            } else {
+                "-".to_string()
+            };
+
+            // Iteration count
+            let iter_str = if task.iteration > 0 {
+                format!("#{}", task.iteration)
+            } else {
+                "-".to_string()
+            };
+
             Row::new(vec![
-                Cell::from(truncate(&task.task_id, 20)),
+                Cell::from(Span::styled(format!(" {icon}"), status_style)),
+                Cell::from(truncate(&task.task_id, 18)),
                 Cell::from(task.status.as_str()),
-                Cell::from(format!("iter {}", task.iteration)),
+                Cell::from(elapsed_str),
+                Cell::from(iter_str),
             ])
-            .style(style)
+            .style(row_style)
         })
         .collect();
 
-    let widths = [Constraint::Min(14), Constraint::Length(12), Constraint::Length(8)];
+    let widths = [
+        Constraint::Length(3),
+        Constraint::Min(12),
+        Constraint::Length(10),
+        Constraint::Length(8),
+        Constraint::Length(6),
+    ];
     let table = Table::new(rows, widths)
         .header(
-            Row::new(["task", "status", "iter"])
+            Row::new([" ", "task", "status", "elapsed", "iter"])
                 .style(theme.accent().add_modifier(Modifier::BOLD)),
         )
         .column_spacing(1);
@@ -248,21 +447,30 @@ fn render_right_panel(
     }
 }
 
-/// Sub-tab: Agents roster summary.
+// ---------------------------------------------------------------------------
+// Sub-tab: Agents — roster with model name and token counts
+// ---------------------------------------------------------------------------
+
+/// Sub-tab: Agents roster with model and token info.
 fn render_sub_agents(
     frame: &mut Frame<'_>,
     area: Rect,
     data: &DashboardData,
     theme: &Theme,
 ) {
+    let active_count = data
+        .agents
+        .iter()
+        .filter(|a| a.status == "running" || a.status == "active")
+        .count();
+    let title = format!(" Agents ({} active) ", active_count);
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Agents ")
+        .title(title)
         .border_style(theme.accent());
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // TODO: use agent_pool widget here when available
     if data.agents.is_empty() {
         let empty = Paragraph::new("no active agents")
             .style(theme.muted())
@@ -271,28 +479,68 @@ fn render_sub_agents(
         return;
     }
 
+    // Build agent activity snapshot for model/token info
+    let activity =
+        crate::tui::dashboard::build_agent_activity_snapshot(&data.agents, &data.efficiency_events);
+
     let rows: Vec<Row<'_>> = data
         .agents
         .iter()
         .map(|agent| {
             let status_style = match agent.status.as_str() {
-                "running" => theme.info(),
+                "running" | "active" => theme.info(),
                 "idle" => theme.muted(),
                 "error" | "failed" => theme.danger(),
                 _ => theme.text(),
             };
+
+            // Find matching activity row for model/token info
+            let activity_row = activity.as_ref().and_then(|snap| {
+                snap.active_agents
+                    .iter()
+                    .find(|row| row.agent_id == agent.id)
+            });
+
+            let model_str = activity_row
+                .map(|r| shorten_model(&r.model))
+                .unwrap_or_else(|| "-".to_string());
+
+            let tokens_str = activity_row
+                .map(|r| format_tokens(r.tokens_used))
+                .unwrap_or_else(|| "-".to_string());
+
+            let cost_str = activity_row
+                .map(|r| {
+                    if r.cost_usd > 0.0 {
+                        format!("${:.3}", r.cost_usd)
+                    } else {
+                        "-".to_string()
+                    }
+                })
+                .unwrap_or_else(|| "-".to_string());
+
             Row::new(vec![
-                Cell::from(truncate(&agent.id, 16)),
+                Cell::from(truncate(&agent.id, 14)),
                 Cell::from(agent.label.as_str()),
                 Cell::from(Span::styled(agent.status.as_str(), status_style)),
+                Cell::from(model_str),
+                Cell::from(tokens_str),
+                Cell::from(cost_str),
             ])
         })
         .collect();
 
-    let widths = [Constraint::Min(12), Constraint::Min(14), Constraint::Length(10)];
+    let widths = [
+        Constraint::Min(10),
+        Constraint::Min(12),
+        Constraint::Length(8),
+        Constraint::Length(12),
+        Constraint::Length(8),
+        Constraint::Length(8),
+    ];
     let table = Table::new(rows, widths)
         .header(
-            Row::new(["id", "label", "status"])
+            Row::new(["id", "label", "status", "model", "tokens", "cost"])
                 .style(theme.accent().add_modifier(Modifier::BOLD)),
         )
         .column_spacing(1);
@@ -356,7 +604,6 @@ fn render_sub_diff(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // TODO: use diff_panel widget here when available
     let placeholder = Paragraph::new("diff panel: will show per-agent diffs")
         .style(theme.muted())
         .wrap(Wrap { trim: false });
@@ -418,7 +665,6 @@ fn render_sub_git(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Compact git summary for the dashboard sub-tab
     let placeholder = Paragraph::new("git summary: use F4 for full git view")
         .style(theme.muted())
         .wrap(Wrap { trim: false });
@@ -523,7 +769,11 @@ fn render_sub_processes(
     frame.render_widget(table, inner);
 }
 
-/// Wave progress ribbon at bottom of dashboard.
+// ---------------------------------------------------------------------------
+// Wave progress ribbon — fire-gradient gauge at bottom
+// ---------------------------------------------------------------------------
+
+/// Wave progress ribbon with fire-gradient coloring.
 fn render_wave_ribbon(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -537,7 +787,6 @@ fn render_wave_ribbon(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // TODO: use wave_bar widget here when available
     let (done, total) = data
         .current_plan_execution
         .as_ref()
@@ -550,11 +799,98 @@ fn render_wave_ribbon(
         0.0
     };
 
-    let gauge = Gauge::default()
-        .gauge_style(theme.info())
-        .label(format!("{done}/{total} tasks"))
-        .ratio(ratio.clamp(0.0, 1.0));
-    frame.render_widget(gauge, inner);
+    if inner.width < 4 || inner.height < 1 {
+        return;
+    }
+
+    let bar_width = inner.width as usize;
+    let filled = (ratio.clamp(0.0, 1.0) * bar_width as f64).round() as usize;
+    let empty = bar_width.saturating_sub(filled);
+
+    // Fire gradient: dark red -> orange -> yellow -> white at full
+    let mut bar_spans: Vec<Span<'_>> = Vec::new();
+    for i in 0..filled.min(bar_width) {
+        let t = if filled > 1 {
+            i as f64 / (filled - 1) as f64
+        } else {
+            ratio
+        };
+        let color = fire_gradient(t);
+        bar_spans.push(Span::styled(
+            "\u{2588}",
+            Style::default().fg(color),
+        ));
+    }
+    if empty > 0 {
+        bar_spans.push(Span::styled(
+            "\u{2500}".repeat(empty),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
+    // Append label
+    let label = format!("  {done}/{total} tasks");
+    bar_spans.push(Span::styled(label, Style::default().fg(Color::White)));
+
+    let line = Line::from(bar_spans);
+    let paragraph = Paragraph::new(line);
+    frame.render_widget(paragraph, inner);
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Fire gradient: interpolate from deep red through orange to bright yellow.
+fn fire_gradient(t: f64) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    // Red channel: always high
+    let r = (180.0 + t * 75.0).min(255.0) as u8;
+    // Green channel: ramps up from dark to bright
+    let g = (t * 200.0).min(255.0) as u8;
+    // Blue channel: stays very low, slight rise at end
+    let b = (t * t * 60.0).min(255.0) as u8;
+    Color::Rgb(r, g, b)
+}
+
+/// Shorten a model slug for compact display.
+fn shorten_model(slug: &str) -> String {
+    slug.replace("claude-", "")
+        .replace("gpt-", "")
+        .replace("-codex", "c")
+        .replace("-mini", "m")
+        .replace("sonnet-", "s")
+        .replace("opus-", "o")
+        .replace("haiku-", "h")
+}
+
+/// Format token count compactly.
+fn format_tokens(n: u64) -> String {
+    if n == 0 {
+        "-".to_string()
+    } else if n < 1_000 {
+        format!("{n}")
+    } else if n < 10_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else if n < 1_000_000 {
+        format!("{}k", n / 1_000)
+    } else {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    }
+}
+
+/// Format duration from milliseconds to compact string.
+fn format_duration_ms(ms: f64) -> String {
+    let secs = (ms / 1000.0) as u64;
+    if secs >= 3600 {
+        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
+    } else if secs >= 60 {
+        format!("{}m{}s", secs / 60, secs % 60)
+    } else if secs > 0 {
+        format!("{}s", secs)
+    } else {
+        format!("{:.0}ms", ms)
+    }
 }
 
 fn truncate(s: &str, max: usize) -> String {
