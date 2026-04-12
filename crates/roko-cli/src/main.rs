@@ -259,6 +259,11 @@ enum Command {
         #[command(subcommand)]
         cmd: ProviderCmd,
     },
+    /// Inspect configured models and their capabilities.
+    Model {
+        #[command(subcommand)]
+        cmd: ModelCmd,
+    },
     /// Manage model experiments.
     Experiment {
         #[command(subcommand)]
@@ -591,6 +596,16 @@ enum ProviderCmd {
 }
 
 #[derive(Debug, Subcommand)]
+enum ModelCmd {
+    /// List configured models and their capabilities.
+    List {
+        /// Directory containing `roko.toml` (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum DeployCmd {
     /// Deploy the current workspace to Railway via the public GraphQL API.
     Railway {
@@ -885,6 +900,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             result
         }
         Command::Provider { cmd } => cmd_provider(cli, cmd).await,
+        Command::Model { cmd } => cmd_model(cli, cmd).await,
         Command::Experiment { cmd } => dispatch_experiment(cli, cmd),
         Command::Deploy { cmd } => cmd_deploy(cli, cmd).await,
         Command::Daemon { cmd } => cmd_daemon(cli, cmd).await,
@@ -1439,6 +1455,18 @@ struct ProviderListRow {
     status: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelListRow {
+    model: String,
+    provider: String,
+    slug: String,
+    context: String,
+    tools: String,
+    thinking: String,
+    vision: String,
+    cost: String,
+}
+
 const PROVIDER_FAILURE_THRESHOLD: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1522,6 +1550,16 @@ async fn cmd_provider(cli: &Cli, cmd: ProviderCmd) -> Result<i32> {
     }
 }
 
+async fn cmd_model(cli: &Cli, cmd: ModelCmd) -> Result<i32> {
+    match cmd {
+        ModelCmd::List { workdir } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            cmd_model_list(&wd)?;
+            Ok(EXIT_SUCCESS)
+        }
+    }
+}
+
 async fn cmd_provider_list(workdir: &Path) -> Result<()> {
     let config = load_roko_config(workdir)?;
     let providers = configured_providers(&config);
@@ -1548,6 +1586,31 @@ async fn cmd_provider_list(workdir: &Path) -> Result<()> {
     }
 
     print!("{}", format_provider_rows(&rows));
+    Ok(())
+}
+
+fn cmd_model_list(workdir: &Path) -> Result<()> {
+    let config = load_roko_config(workdir)?;
+    let models = configured_models(&config);
+    if models.is_empty() {
+        println!("no models configured");
+        return Ok(());
+    }
+
+    let mut model_names = models.keys().cloned().collect::<Vec<_>>();
+    model_names.sort_unstable();
+
+    let rows = model_names
+        .into_iter()
+        .map(|model_name| {
+            let profile = models
+                .get(&model_name)
+                .expect("model name collected from model registry");
+            build_model_list_row(&model_name, profile)
+        })
+        .collect::<Vec<_>>();
+
+    print!("{}", format_model_rows(&rows));
     Ok(())
 }
 
@@ -1691,7 +1754,9 @@ async fn run_openai_compat_provider_test(
 
     let client = reqwest::Client::builder()
         .user_agent("roko-cli/0.1")
-        .timeout(Duration::from_millis(provider.timeout_ms.unwrap_or(120_000)))
+        .timeout(Duration::from_millis(
+            provider.timeout_ms.unwrap_or(120_000),
+        ))
         .build()
         .context("build provider test client")?;
 
@@ -1980,6 +2045,119 @@ fn format_provider_rows(rows: &[ProviderListRow]) -> String {
     }
 
     out
+}
+
+fn build_model_list_row(model_name: &str, profile: &ModelProfile) -> ModelListRow {
+    ModelListRow {
+        model: model_name.to_string(),
+        provider: profile.provider.clone(),
+        slug: profile.slug.clone(),
+        context: format_context_window(profile.context_window),
+        tools: format_bool_capability(profile.supports_tools).to_string(),
+        thinking: format_bool_capability(profile.supports_thinking).to_string(),
+        vision: format_bool_capability(profile.supports_vision).to_string(),
+        cost: format_model_cost(profile),
+    }
+}
+
+fn format_model_rows(rows: &[ModelListRow]) -> String {
+    let mut widths = [
+        "Model".len(),
+        "Provider".len(),
+        "Slug".len(),
+        "Context".len(),
+        "Tools".len(),
+        "Thinking".len(),
+        "Vision".len(),
+        "Cost (in/out)".len(),
+    ];
+
+    for row in rows {
+        widths[0] = widths[0].max(row.model.len());
+        widths[1] = widths[1].max(row.provider.len());
+        widths[2] = widths[2].max(row.slug.len());
+        widths[3] = widths[3].max(row.context.len());
+        widths[4] = widths[4].max(row.tools.len());
+        widths[5] = widths[5].max(row.thinking.len());
+        widths[6] = widths[6].max(row.vision.len());
+        widths[7] = widths[7].max(row.cost.len());
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "{:<model_w$}  {:<provider_w$}  {:<slug_w$}  {:<context_w$}  {:<tools_w$}  {:<thinking_w$}  {:<vision_w$}  {:<cost_w$}",
+        "Model",
+        "Provider",
+        "Slug",
+        "Context",
+        "Tools",
+        "Thinking",
+        "Vision",
+        "Cost (in/out)",
+        model_w = widths[0],
+        provider_w = widths[1],
+        slug_w = widths[2],
+        context_w = widths[3],
+        tools_w = widths[4],
+        thinking_w = widths[5],
+        vision_w = widths[6],
+        cost_w = widths[7],
+    );
+
+    for row in rows {
+        let _ = writeln!(
+            out,
+            "{:<model_w$}  {:<provider_w$}  {:<slug_w$}  {:<context_w$}  {:<tools_w$}  {:<thinking_w$}  {:<vision_w$}  {:<cost_w$}",
+            row.model,
+            row.provider,
+            row.slug,
+            row.context,
+            row.tools,
+            row.thinking,
+            row.vision,
+            row.cost,
+            model_w = widths[0],
+            provider_w = widths[1],
+            slug_w = widths[2],
+            context_w = widths[3],
+            tools_w = widths[4],
+            thinking_w = widths[5],
+            vision_w = widths[6],
+            cost_w = widths[7],
+        );
+    }
+
+    out
+}
+
+fn format_context_window(tokens: u64) -> String {
+    if tokens >= 1_000_000 && tokens % 1_000_000 == 0 {
+        format!("{}M", tokens / 1_000_000)
+    } else if tokens >= 1_000 {
+        let whole_thousands = tokens / 1_000;
+        if tokens % 1_000 == 0 {
+            format!("{whole_thousands}K")
+        } else {
+            let value = tokens as f64 / 1_000.0;
+            format!("{value:.1}K")
+        }
+    } else {
+        tokens.to_string()
+    }
+}
+
+fn format_bool_capability(value: bool) -> &'static str {
+    if value { "✓" } else { "✗" }
+}
+
+fn format_model_cost(profile: &ModelProfile) -> String {
+    match (profile.cost_input_per_m, profile.cost_output_per_m) {
+        (Some(input), Some(output)) => format!("${input:.2}/${output:.2}"),
+        (Some(input), None) => format!("${input:.2}/—"),
+        (None, Some(output)) => format!("—/${output:.2}"),
+        (None, None) => "—".to_string(),
+    }
 }
 
 fn provider_health_path(workdir: &Path) -> PathBuf {
@@ -4839,6 +5017,17 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_model_list_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "model", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Model {
+                cmd: ModelCmd::List { .. }
+            })
+        ));
+    }
+
+    #[test]
     fn select_provider_test_model_prefers_default_model() {
         let mut config = RokoConfig::default();
         config.agent.default_model = "glm-5-1".to_string();
@@ -4907,6 +5096,61 @@ mod tests {
         assert!(output.contains("Base URL"));
         assert!(output.contains("anthropic"));
         assert!(output.contains("ok (cli found)"));
+    }
+
+    #[test]
+    fn format_model_rows_renders_headers_and_rows() {
+        let output = format_model_rows(&[ModelListRow {
+            model: "glm-5-1".to_string(),
+            provider: "zai".to_string(),
+            slug: "glm-5.1".to_string(),
+            context: "200K".to_string(),
+            tools: "✓".to_string(),
+            thinking: "✓".to_string(),
+            vision: "✗".to_string(),
+            cost: "$1.40/$4.40".to_string(),
+        }]);
+
+        assert!(output.contains("Model"));
+        assert!(output.contains("Cost (in/out)"));
+        assert!(output.contains("glm-5-1"));
+        assert!(output.contains("$1.40/$4.40"));
+    }
+
+    #[test]
+    fn build_model_list_row_formats_capabilities_and_costs() {
+        let row = build_model_list_row(
+            "kimi-k2-5",
+            &ModelProfile {
+                provider: "moonshot".to_string(),
+                slug: "kimi-k2.5".to_string(),
+                context_window: 256_000,
+                max_output: Some(128_000),
+                supports_tools: true,
+                supports_thinking: true,
+                supports_vision: true,
+                supports_web_search: false,
+                supports_mcp_tools: false,
+                supports_partial: false,
+                provider_routing: None,
+                tool_format: "openai_json".to_string(),
+                cost_input_per_m: Some(0.60),
+                cost_output_per_m: Some(3.00),
+                cost_cache_read_per_m: None,
+                cost_cache_write_per_m: None,
+                max_tools: None,
+                tokenizer_ratio: None,
+            },
+        );
+
+        assert_eq!(row.model, "kimi-k2-5");
+        assert_eq!(row.provider, "moonshot");
+        assert_eq!(row.slug, "kimi-k2.5");
+        assert_eq!(row.context, "256K");
+        assert_eq!(row.tools, "✓");
+        assert_eq!(row.thinking, "✓");
+        assert_eq!(row.vision, "✓");
+        assert_eq!(row.cost, "$0.60/$3.00");
     }
 
     #[test]
