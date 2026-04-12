@@ -24,9 +24,11 @@ use roko_core::metric::{Headlines, TaskMetric, compute_headlines};
 use roko_core::task::{TaskCategory, TaskComplexityBand};
 use roko_gate::adaptive_threshold::AdaptiveThresholds;
 pub use roko_learn::cfactor::{CFactor, CFactorComponents};
+use roko_learn::cost_table::CostTable as ModelCostTable;
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
 use roko_learn::latency::LatencyStats;
+use roko_learn::pareto::{ModelObservation, compute_pareto_frontier};
 use roko_learn::prompt_experiment::{
     ExperimentStatus, ExperimentStore, PromptExperiment, PromptVariant, VariantStats,
 };
@@ -342,6 +344,7 @@ impl DashboardScaffold {
             PageId::Experiments => self.snapshot.render_experiments_page(scaffold),
             PageId::Optimizer => self.snapshot.render_optimizer_page(scaffold),
             PageId::ProviderHealth => self.snapshot.render_provider_health_page(scaffold),
+            PageId::ModelComparison => self.snapshot.render_model_comparison_page(scaffold),
             PageId::AgentStatus => self.snapshot.render_agent_status_page(scaffold),
             PageId::PlanView => self.snapshot.render_plan_view_page(scaffold),
             PageId::LogView => self.snapshot.render_log_view_page(scaffold),
@@ -2778,8 +2781,7 @@ impl DashboardSnapshot {
         let recent_signals = load_recent_signals(&signals_path, 100);
         let cascade_snapshot =
             load_json_opt::<CascadeSnapshotData>(&learn_dir.join(CASCADE_ROUTER_FILE));
-        let provider_health =
-            load_provider_health_snapshot(&learn_dir.join(PROVIDER_HEALTH_FILE));
+        let provider_health = load_provider_health_snapshot(&learn_dir.join(PROVIDER_HEALTH_FILE));
         let provider_latency = load_latency_stats_by_provider(&learn_dir.join(LATENCY_STATS_FILE));
 
         Ok(Self::from_records(
@@ -3568,6 +3570,62 @@ impl DashboardSnapshot {
         Some(out)
     }
 
+    fn render_model_comparison_page(&self, page: &PageScaffold) -> Option<String> {
+        let mut out = page_header(page);
+        let _ = writeln!(
+            out,
+            "source: {}/{}",
+            self.root.join(LEARN_DIR).display(),
+            CASCADE_ROUTER_FILE
+        );
+
+        let Some(snapshot) = self.cascade_snapshot.as_ref() else {
+            let _ = writeln!(out, "  no cascade-router snapshot found");
+            return Some(out);
+        };
+        let rows = model_comparison_rows_snapshot(snapshot);
+        if rows.is_empty() {
+            let _ = writeln!(out, "  no observed models in cascade-router stats");
+            return Some(out);
+        }
+
+        let _ = writeln!(out, "window: last 7 days");
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "  {:<20}  {:>7}  {:>9}  {:>11}  {:>12}",
+            "Model", "Pass %", "Avg Cost", "$/Success", "Observations"
+        );
+        for row in &rows {
+            let _ = writeln!(
+                out,
+                "  {:<20}  {:>7}  {:>9}  {:>11}  {:>12}",
+                truncate_str(&row.model, 20),
+                format!("{:.0}%", row.pass_rate * 100.0),
+                format_usd_2(row.avg_cost_usd),
+                format_cost_per_success(row.cost_per_success_usd),
+                row.observations
+            );
+        }
+
+        let frontier = model_comparison_pareto_frontier_snapshot(&rows);
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "Pareto frontier: {}",
+            if frontier.is_empty() {
+                String::from("n/a")
+            } else {
+                frontier.join(", ")
+            }
+        );
+        if let Some(summary) = model_comparison_dominance_summary_snapshot(&rows, &frontier) {
+            let _ = writeln!(out, "{summary}");
+        }
+
+        Some(out)
+    }
+
     // ── Operations pages ────────────────────────────────────────────
 
     fn render_agent_status_page(&self, page: &PageScaffold) -> Option<String> {
@@ -3888,6 +3946,12 @@ struct LearningModelCostComparisonAggregateSnapshot {
     observations: u64,
     successes: u64,
     cost_usd: f64,
+}
+
+#[derive(Debug, Clone)]
+struct ModelComparisonDominanceSnapshot {
+    dominated: String,
+    dominator: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -4293,6 +4357,185 @@ fn model_cost_comparison_section_snapshot(events: &[AgentEfficiencyEvent]) -> Op
     }
 
     Some(out)
+}
+
+fn model_comparison_rows_snapshot(
+    snapshot: &CascadeSnapshotData,
+) -> Vec<LearningModelCostComparisonRowSnapshot> {
+    let pricing = ModelCostTable {
+        models: HashMap::new(),
+    }
+    .with_defaults();
+    let mut rows = snapshot
+        .model_slugs
+        .iter()
+        .chain(snapshot.confidence_stats.keys())
+        .fold(Vec::<String>::new(), |mut acc, slug| {
+            if !acc.iter().any(|seen| seen == slug) {
+                acc.push(slug.clone());
+            }
+            acc
+        })
+        .into_iter()
+        .filter_map(|model| {
+            let stats = snapshot.confidence_stats.get(&model)?;
+            if stats.trials == 0 {
+                return None;
+            }
+
+            let pass_rate = stats.successes as f64 / stats.trials as f64;
+            let avg_cost_usd = estimated_model_avg_cost_snapshot(&pricing, &model);
+            let cost_per_success_usd = if stats.successes == 0 {
+                None
+            } else {
+                Some(avg_cost_usd * stats.trials as f64 / stats.successes as f64)
+            };
+
+            Some(LearningModelCostComparisonRowSnapshot {
+                model,
+                pass_rate,
+                avg_cost_usd,
+                cost_per_success_usd,
+                observations: stats.trials,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    rows.sort_by(|a, b| {
+        a.cost_per_success_usd
+            .unwrap_or(f64::INFINITY)
+            .partial_cmp(&b.cost_per_success_usd.unwrap_or(f64::INFINITY))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                b.pass_rate
+                    .partial_cmp(&a.pass_rate)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.model.cmp(&b.model))
+    });
+
+    rows
+}
+
+fn estimated_model_avg_cost_snapshot(pricing: &ModelCostTable, model: &str) -> f64 {
+    for candidate in model_cost_lookup_candidates_snapshot(model) {
+        let blended = pricing.blended_cost_per_m(candidate);
+        if blended > 0.0 {
+            return blended / 20.0;
+        }
+    }
+
+    0.0
+}
+
+fn model_cost_lookup_candidates_snapshot(model: &str) -> Vec<&str> {
+    let mut candidates = vec![model];
+    if model.starts_with("kimi-k2") && !candidates.contains(&"kimi-k2.5") {
+        candidates.push("kimi-k2.5");
+    }
+    if model.contains("glm-5.1") && !candidates.contains(&"glm-5.1") {
+        candidates.push("glm-5.1");
+    }
+    if model.contains("glm-5") && !candidates.contains(&"glm-5") {
+        candidates.push("glm-5");
+    }
+    if model.contains("haiku") && !candidates.contains(&"claude-haiku-4-5") {
+        candidates.push("claude-haiku-4-5");
+    }
+    if model.contains("sonnet") && !candidates.contains(&"claude-sonnet-4-6") {
+        candidates.push("claude-sonnet-4-6");
+    }
+    if model.contains("opus") && !candidates.contains(&"claude-opus-4-6") {
+        candidates.push("claude-opus-4-6");
+    }
+    candidates
+}
+
+fn model_comparison_pareto_frontier_snapshot(
+    rows: &[LearningModelCostComparisonRowSnapshot],
+) -> Vec<String> {
+    let stats = rows
+        .iter()
+        .filter_map(|row| {
+            row.cost_per_success_usd.map(|cost_per_success| {
+                (
+                    row.model.clone(),
+                    ModelObservation {
+                        pass_rate: row.pass_rate,
+                        cost_per_success,
+                        avg_latency_ms: 0.0,
+                        observations: row.observations,
+                    },
+                )
+            })
+        })
+        .collect::<HashMap<_, _>>();
+
+    compute_pareto_frontier(&stats)
+}
+
+fn model_comparison_dominance_summary_snapshot(
+    rows: &[LearningModelCostComparisonRowSnapshot],
+    frontier: &[String],
+) -> Option<String> {
+    let frontier = frontier.iter().cloned().collect::<HashSet<_>>();
+    let mut dominated = rows
+        .iter()
+        .filter(|row| !frontier.contains(&row.model))
+        .filter_map(|row| {
+            dominant_model_snapshot(rows, row).map(|dominator| ModelComparisonDominanceSnapshot {
+                dominated: row.model.clone(),
+                dominator,
+            })
+        })
+        .collect::<Vec<_>>();
+    dominated.sort_by(|a, b| a.dominated.cmp(&b.dominated));
+
+    if dominated.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "({})",
+            dominated
+                .iter()
+                .map(|entry| format!("{} dominated by {}", entry.dominated, entry.dominator))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ))
+    }
+}
+
+fn dominant_model_snapshot(
+    rows: &[LearningModelCostComparisonRowSnapshot],
+    target: &LearningModelCostComparisonRowSnapshot,
+) -> Option<String> {
+    let target_cost = target.cost_per_success_usd?;
+
+    rows.iter()
+        .filter(|candidate| candidate.model != target.model)
+        .filter_map(|candidate| {
+            let candidate_cost = candidate.cost_per_success_usd?;
+            let dominates = candidate.pass_rate >= target.pass_rate
+                && candidate_cost <= target_cost
+                && (candidate.pass_rate > target.pass_rate || candidate_cost < target_cost);
+            dominates.then_some((
+                candidate.model.as_str(),
+                candidate.pass_rate,
+                candidate_cost,
+            ))
+        })
+        .min_by(|lhs, rhs| {
+            lhs.2
+                .partial_cmp(&rhs.2)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    rhs.1
+                        .partial_cmp(&lhs.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| lhs.0.cmp(rhs.0))
+        })
+        .map(|(model, _, _)| model.to_string())
 }
 
 impl LearningTaskAggregateSnapshot {
@@ -4795,7 +5038,7 @@ mod tests {
     fn scaffold_has_expected_page_count() {
         let dashboard = DashboardScaffold::new();
         let summary = dashboard.summary();
-        assert_eq!(summary.page_count, 14);
+        assert_eq!(summary.page_count, 15);
         assert!(summary.widget_count >= 20);
         assert_eq!(summary.active_page, PageId::Health);
     }
@@ -4831,7 +5074,7 @@ mod tests {
     fn overview_render_contains_active_page_and_counts() {
         let dashboard = DashboardScaffold::new();
         let rendered = dashboard.render_overview_text();
-        assert!(rendered.contains("dashboard scaffold: 14 pages"));
+        assert!(rendered.contains("dashboard scaffold: 15 pages"));
         assert!(rendered.contains("active=health"));
         assert!(rendered.contains("active page:"));
         assert!(rendered.contains("* Health [health] efficiency"));
@@ -5341,6 +5584,39 @@ mod tests {
         assert!(rendered.contains("✗ OPEN"));
         assert!(rendered.contains("openrouter"));
         assert!(rendered.contains("summary: 423 requests, 4 failures, 1 open, 0 half-open"));
+    }
+
+    #[test]
+    fn model_comparison_page_renders_rows_and_pareto_frontier() {
+        let tmpdir = tempdir().expect("tempdir");
+        let learn_dir = tmpdir.path().join(".roko/learn");
+        let memory_dir = tmpdir.path().join(MEMORY_DIR);
+        fs::create_dir_all(&memory_dir).expect("memory dir");
+        fs::write(memory_dir.join(EPISODES_FILE), "").expect("empty episodes");
+
+        let cascade = serde_json::json!({
+            "model_slugs": ["kimi-k2.5", "glm-5.1", "claude-sonnet-4-6", "claude-opus-4-6"],
+            "confidence_stats": {
+                "kimi-k2.5": { "trials": 145, "successes": 113 },
+                "glm-5.1": { "trials": 203, "successes": 166 },
+                "claude-sonnet-4-6": { "trials": 312, "successes": 250 },
+                "claude-opus-4-6": { "trials": 47, "successes": 44 }
+            }
+        });
+        write_json(&learn_dir.join(CASCADE_ROUTER_FILE), &cascade);
+
+        let dashboard = DashboardScaffold::new_in(tmpdir.path());
+        let rendered = dashboard
+            .render_page_text(PageId::ModelComparison)
+            .expect("model comparison page should render");
+
+        assert!(rendered.contains("Model Comparison (model-comparison)"));
+        assert!(rendered.contains("kimi-k2.5"));
+        assert!(rendered.contains("glm-5.1"));
+        assert!(rendered.contains("claude-sonnet-4-6"));
+        assert!(rendered.contains("claude-opus-4-6"));
+        assert!(rendered.contains("Pareto frontier:"));
+        assert!(rendered.contains("claude-sonnet-4-6 dominated by glm-5.1"));
     }
 
     #[test]

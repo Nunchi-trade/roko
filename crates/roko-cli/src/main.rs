@@ -5051,6 +5051,7 @@ fn parse_dashboard_page(input: &str) -> Option<PageId> {
         "experiments" => PageId::Experiments,
         "optimizer" => PageId::Optimizer,
         "provider-health" | "providerhealth" => PageId::ProviderHealth,
+        "model-comparison" | "modelcomparison" => PageId::ModelComparison,
         "agent-status" | "agentstatus" | "agent-activity" | "agentactivity" => PageId::AgentStatus,
         "plan-view" | "planview" => PageId::PlanView,
         "log-view" | "logview" => PageId::LogView,
@@ -5070,6 +5071,7 @@ fn dashboard_page_slugs() -> Vec<&'static str> {
         PageId::Experiments,
         PageId::Optimizer,
         PageId::ProviderHealth,
+        PageId::ModelComparison,
         PageId::AgentStatus,
         PageId::PlanView,
         PageId::LogView,
@@ -5760,6 +5762,10 @@ mod tests {
             parse_dashboard_page("provider health"),
             Some(PageId::ProviderHealth)
         );
+        assert_eq!(
+            parse_dashboard_page("model comparison"),
+            Some(PageId::ModelComparison)
+        );
     }
 
     #[test]
@@ -5906,6 +5912,23 @@ mod tests {
         )
         .await
         .unwrap();
+
+        let cascade_router_path = learn_dir.join("cascade-router.json");
+        let cascade_router = serde_json::json!({
+            "model_slugs": ["kimi-k2.5", "glm-5.1", "claude-sonnet-4-6", "claude-opus-4-6"],
+            "confidence_stats": {
+                "kimi-k2.5": { "trials": 145, "successes": 113 },
+                "glm-5.1": { "trials": 203, "successes": 166 },
+                "claude-sonnet-4-6": { "trials": 312, "successes": 250 },
+                "claude-opus-4-6": { "trials": 47, "successes": 44 }
+            }
+        });
+        fs::write(
+            &cascade_router_path,
+            serde_json::to_string_pretty(&cascade_router).unwrap(),
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -5959,6 +5982,18 @@ mod tests {
         assert!(provider_health.contains("● CLOSED"));
         assert!(provider_health.contains("p50: 0.8s"));
         assert!(provider_health.contains("summary: 20 requests, 3 failures"));
+
+        let model_comparison = dashboard_output(
+            &cli,
+            Some(dir.path().to_path_buf()),
+            Some("model-comparison".to_string()),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(model_comparison.contains("Model Comparison (model-comparison)"));
+        assert!(model_comparison.contains("Pareto frontier:"));
+        assert!(model_comparison.contains("claude-sonnet-4-6 dominated by glm-5.1"));
 
         let fallback = dashboard_output(
             &cli,

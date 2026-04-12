@@ -24,6 +24,23 @@ pub fn scaffold_pages() -> Vec<PageScaffold> {
             ],
         ),
         PageScaffold::new(
+            PageId::ModelComparison,
+            "Model Comparison",
+            "Cross-model pass rate, estimated cost, and Pareto frontier from cascade-router observations.",
+            vec![
+                WidgetScaffold::new(
+                    "comparison_table",
+                    "Model Comparison Table",
+                    "Per-model pass rate, estimated average cost, cost per success, and observation counts.",
+                ),
+                WidgetScaffold::new(
+                    "pareto_frontier",
+                    "Pareto Frontier",
+                    "Non-dominated models and dominated-model notes from the cascade snapshot.",
+                ),
+            ],
+        ),
+        PageScaffold::new(
             PageId::AgentStatus,
             "Agent Activity",
             "Live active-agent roster, model mix, and session cost breakdown.",
