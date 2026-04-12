@@ -19,6 +19,8 @@ pub mod scheduler;
 pub mod state;
 pub mod templates;
 
+pub use crate::routes::reload_config_from_disk;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 

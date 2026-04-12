@@ -74,10 +74,7 @@ async fn update_config(
 pub async fn reload_config(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ReloadResponse>, ApiError> {
-    let new_config = load_config(&state.workdir).map_err(map_load_config_error)?;
-    let warnings = validate_references(&new_config);
-
-    state.store_roko_config(new_config);
+    let warnings = reload_config_from_disk(&state).map_err(map_load_config_error)?;
 
     Ok(Json(ReloadResponse {
         success: true,
@@ -91,6 +88,14 @@ fn map_load_config_error(err: LoadConfigError) -> ApiError {
         LoadConfigError::Read { .. } => ApiError::internal(err.to_string()),
         LoadConfigError::Parse { .. } => ApiError::bad_request(err.to_string()),
     }
+}
+
+/// Reload `roko.toml` from disk into the live state and return validation warnings.
+pub fn reload_config_from_disk(state: &AppState) -> Result<Vec<String>, LoadConfigError> {
+    let new_config = load_config(&state.workdir)?;
+    let warnings = validate_references(&new_config);
+    state.store_roko_config(new_config);
+    Ok(warnings)
 }
 
 fn validate_references(config: &RokoConfig) -> Vec<String> {

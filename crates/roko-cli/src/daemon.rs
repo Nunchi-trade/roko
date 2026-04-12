@@ -26,7 +26,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 /// macOS LaunchAgents plist helpers for daemon installation.
 pub mod launchd;
@@ -546,10 +546,18 @@ pub async fn daemon_reload() -> Result<()> {
         response.command, response.subscriptions, response.templates, response.loaded
     );
 
+    if !response.warnings.is_empty() {
+        println!("warnings: {}", response.warnings.join("; "));
+    }
+
     if response.ok {
         Ok(())
     } else {
-        Err(anyhow!("daemon reload failed"))
+        Err(anyhow!(
+            response
+                .error
+                .unwrap_or_else(|| "daemon reload failed".to_string())
+        ))
     }
 }
 
@@ -783,6 +791,10 @@ struct DaemonReloadResponse {
     subscriptions: usize,
     templates: usize,
     loaded: usize,
+    #[serde(default)]
+    warnings: Vec<String>,
+    #[serde(default)]
+    error: Option<String>,
 }
 
 fn print_daemon_status_table(
@@ -947,6 +959,24 @@ async fn handle_ipc_command(
 
     if request == "reload" {
         let response = reload_daemon_runtime(&state).await;
+        if response.ok {
+            if response.warnings.is_empty() {
+                info!(
+                    subscriptions = response.subscriptions,
+                    templates = response.templates,
+                    loaded = response.loaded,
+                    "daemon config reloaded after IPC request"
+                );
+            } else {
+                warn!(
+                    subscriptions = response.subscriptions,
+                    templates = response.templates,
+                    loaded = response.loaded,
+                    warnings = ?response.warnings,
+                    "daemon config reloaded after IPC request with warnings"
+                );
+            }
+        }
         let response =
             serde_json::to_string(&response).context("serialize daemon reload response")?;
         stream.write_all(response.as_bytes()).await?;
@@ -980,6 +1010,22 @@ async fn handle_ipc_command(
 }
 
 async fn reload_daemon_runtime(state: &AppState) -> DaemonReloadResponse {
+    let warnings = match roko_serve::reload_config_from_disk(state) {
+        Ok(warnings) => warnings,
+        Err(err) => {
+            error!(error = %err, "daemon config reload failed; keeping previous config");
+            return DaemonReloadResponse {
+                ok: false,
+                command: "reload".to_string(),
+                subscriptions: 0,
+                templates: 0,
+                loaded: 0,
+                warnings: Vec::new(),
+                error: Some(err.to_string()),
+            };
+        }
+    };
+
     let subscriptions_report = {
         let roko_config = state.load_roko_config().as_ref().clone();
         let registry = roko_serve::dispatch::SubscriptionRegistry::load_from_project(
@@ -1000,6 +1046,8 @@ async fn reload_daemon_runtime(state: &AppState) -> DaemonReloadResponse {
         subscriptions: subscriptions_report,
         templates: templates_report.loaded,
         loaded: subscriptions_report + templates_report.loaded,
+        warnings,
+        error: None,
     }
 }
 
@@ -1008,13 +1056,26 @@ async fn wait_for_reload_signal(state: Arc<AppState>) {
     {
         let mut sighup = signal(SignalKind::hangup()).expect("install SIGHUP handler");
         while sighup.recv().await.is_some() {
+            info!("SIGHUP received, reloading config");
             let response = reload_daemon_runtime(&state).await;
-            info!(
-                subscriptions = response.subscriptions,
-                templates = response.templates,
-                loaded = response.loaded,
-                "daemon reloaded after SIGHUP"
-            );
+            if response.ok {
+                if response.warnings.is_empty() {
+                    info!(
+                        subscriptions = response.subscriptions,
+                        templates = response.templates,
+                        loaded = response.loaded,
+                        "daemon config reloaded after SIGHUP"
+                    );
+                } else {
+                    warn!(
+                        subscriptions = response.subscriptions,
+                        templates = response.templates,
+                        loaded = response.loaded,
+                        warnings = ?response.warnings,
+                        "daemon config reloaded after SIGHUP with warnings"
+                    );
+                }
+            }
         }
         return;
     }

@@ -28,6 +28,8 @@ use axum::Router;
 use roko_core::config::ServeAuthConfig;
 use tower_http::trace::TraceLayer;
 
+pub use self::config::reload_config_from_disk;
+
 /// Build the complete API router with all route groups and middleware.
 pub fn build_router(
     state: Arc<AppState>,
