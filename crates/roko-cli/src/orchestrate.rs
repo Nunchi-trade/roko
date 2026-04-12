@@ -68,6 +68,7 @@ use roko_learn::events::{AgentEvent, EventBus as LearningEventBus};
 use roko_learn::latency::LatencyRegistry;
 use roko_learn::model_experiment::ModelExperimentStore;
 use roko_learn::playbook::{Playbook, PlaybookStore};
+use roko_learn::routing_log::{CandidateEntry, RoutingDecisionLog, RoutingDecisionLogStore};
 use roko_learn::runtime_feedback::{
     CompletedRunInput, LearningRuntime, LearningUpdate, read_efficiency_events,
     refresh_cfactor_snapshot,
@@ -116,6 +117,12 @@ fn latency_registry_path(workdir: &Path) -> PathBuf {
         .join(".roko")
         .join("learn")
         .join("latency-stats.json")
+}
+
+fn routing_log_path(workdir: &Path) -> PathBuf {
+    RokoLayout::for_project(workdir)
+        .learn_dir()
+        .join("routing.jsonl")
 }
 
 fn conductor_policy_path(workdir: &Path) -> PathBuf {
@@ -7570,12 +7577,32 @@ impl PlanRunner {
             (text, model)
         };
 
+        let requested_model = selected_model.clone();
+        let mut routing_stage = "static".to_string();
+        let mut routing_reason = "configured_default".to_string();
+        let mut routing_explanation: Option<roko_learn::cascade_router::CascadeRouteExplanation> =
+            None;
+        let mut routing_log_store: Option<RoutingDecisionLogStore> = None;
+        let mut routing_log_record: Option<RoutingDecisionLog> = None;
+
         // ── Adaptive model selection via CascadeRouter ───────────────
         let mut selected_model_experiment = None;
         if let Some(td) = task_def.as_ref() {
             let cascade_router = self.learning.cascade_router();
             let routing_ctx = cascade_routing_context(self, plan_id, task, role, Some(td));
             let agent_id = format!("{role:?}");
+            routing_explanation = Some(cascade_router.explain_route(&routing_ctx, None));
+            if let Some(explanation) = routing_explanation.as_ref() {
+                routing_stage = explanation.stage.label().to_string();
+                routing_reason = match explanation.stage {
+                    roko_learn::cascade_router::CascadeStage::Static => "role_default",
+                    roko_learn::cascade_router::CascadeStage::Confidence => {
+                        "highest_confidence_score"
+                    }
+                    roko_learn::cascade_router::CascadeStage::Ucb => "highest_ucb_score",
+                }
+                .to_string();
+            }
             let cfactor_snapshot = match self.learning.latest_cfactor().await {
                 Ok(snapshot) => snapshot,
                 Err(err) => {
@@ -7602,6 +7629,7 @@ impl PlanRunner {
                     model_slug: variant.slug.clone(),
                 });
                 selected_model = variant.slug;
+                routing_reason = "experiment_override".to_string();
             } else {
                 match cascade_router.select_for_frequency(
                     frequency,
@@ -7622,6 +7650,7 @@ impl PlanRunner {
                             "[orchestrate] frequency={} (reactive; bypassing model selection)",
                             frequency_label(frequency)
                         );
+                        routing_reason = "reactive_bypass".to_string();
                     }
                 }
             }
@@ -7644,6 +7673,7 @@ impl PlanRunner {
             }
             BudgetAction::RouteToCheaper => {
                 selected_model = mechanical_tier_model(&self.config.agent.tier_models);
+                routing_reason = "budget_guardrail".to_string();
             }
             BudgetAction::Warn { percent_used, .. } => {
                 tracing::warn!(pct = percent_used, "budget warning");
@@ -7720,11 +7750,13 @@ impl PlanRunner {
                 fallback_model = %fallback,
                 "model marked unhealthy by ProviderHealthTracker, falling back"
             );
+            routing_reason = "provider_unhealthy".to_string();
             fallback
         } else {
             selected_model
         };
 
+        let pre_daimon_model = selected_model.clone();
         let mut dispatch_params =
             DispatchParams::new(selected_model.clone(), frequency.turn_limit());
         dispatch_params.effort = self.config.agent.effort.clone();
@@ -7732,6 +7764,9 @@ impl PlanRunner {
         let selected_model = dispatch_params.model;
         let dispatch_turn_limit = dispatch_params.turn_limit;
         let dispatch_effort = dispatch_params.effort.clone();
+        if selected_model != pre_daimon_model {
+            routing_reason = "fallback".to_string();
+        }
         if selected_model_experiment
             .as_ref()
             .is_some_and(|selection| selection.model_slug != selected_model)
@@ -7741,6 +7776,82 @@ impl PlanRunner {
                 "[orchestrate] clearing model experiment assignment after downstream model override"
             );
             selected_model_experiment = None;
+        }
+
+        let mut routing_candidates = routing_explanation
+            .as_ref()
+            .map(|explanation| {
+                explanation
+                    .candidates
+                    .iter()
+                    .map(|candidate| {
+                        let provider = self.provider_id_for_model(&candidate.slug);
+                        let disqualified = (!self.learning.provider_health().is_healthy(&provider))
+                            .then_some("provider_unhealthy".to_string());
+                        CandidateEntry {
+                            model: candidate.slug.clone(),
+                            provider,
+                            score: candidate.score,
+                            disqualified,
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if !routing_candidates
+            .iter()
+            .any(|candidate| candidate.model == selected_model)
+        {
+            routing_candidates.insert(
+                0,
+                CandidateEntry {
+                    model: selected_model.clone(),
+                    provider: self.provider_id_for_model(&selected_model),
+                    score: 1.0,
+                    disqualified: None,
+                },
+            );
+        }
+        if routing_candidates.is_empty() {
+            routing_candidates.push(CandidateEntry {
+                model: selected_model.clone(),
+                provider: self.provider_id_for_model(&selected_model),
+                score: 1.0,
+                disqualified: None,
+            });
+        }
+
+        let routing_log = RoutingDecisionLog {
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            trace_id: Self::trace_id_for(plan_id, task).to_hex(),
+            task_id: task.to_string(),
+            requested_model: requested_model.clone(),
+            role: role.label().to_string(),
+            task_complexity: task_def
+                .as_ref()
+                .map(|td| td.tier.clone())
+                .unwrap_or_else(|| "unknown".to_string()),
+            selected_provider: self.provider_id_for_model(&selected_model),
+            selected_model: selected_model.clone(),
+            routing_stage: routing_stage.clone(),
+            routing_reason: routing_reason.clone(),
+            candidates: routing_candidates,
+            outcome_success: None,
+            outcome_cost_usd: None,
+            outcome_latency_ms: None,
+        };
+        match RoutingDecisionLogStore::open_creating(routing_log_path(&self.workdir)).await {
+            Ok(store) => {
+                if let Err(err) = store.append(&routing_log).await {
+                    tracing::warn!(error = %err, "failed to append routing decision log");
+                } else {
+                    routing_log_record = Some(routing_log);
+                    routing_log_store = Some(store);
+                }
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to open routing decision log");
+            }
         }
 
         // ── Build context via tiered ContextProvider ───────────────
@@ -8149,6 +8260,16 @@ impl PlanRunner {
         };
 
         self.record_turn_learning_feedback(&prompt, &selected_model, &result);
+        if let (Some(store), Some(record)) = (&routing_log_store, routing_log_record.as_ref()) {
+            let completed = record.clone().with_outcome(
+                result.success,
+                f64::from(result.usage.cost_usd),
+                result.usage.wall_ms,
+            );
+            if let Err(err) = store.append(&completed).await {
+                tracing::warn!(error = %err, "failed to append completed routing decision log");
+            }
+        }
 
         let task_cost = f64::from(result.usage.cost_usd);
         self.add_task_spend(plan_id, task, task_cost);

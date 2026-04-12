@@ -56,6 +56,8 @@ pub mod prompt_experiment;
 pub mod provider_health;
 pub mod quality_judge;
 pub mod regression;
+/// Append-only routing-decision audit log for explainability and dashboards.
+pub mod routing_log;
 pub mod runtime_feedback;
 pub mod section_effect;
 pub mod skill_library;
