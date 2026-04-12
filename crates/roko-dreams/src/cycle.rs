@@ -866,7 +866,12 @@ async fn process_cluster(
             .save(&playbook)
             .await
             .context("save dream playbook")?;
-        let playbook_entry = playbook_knowledge_entry(&playbook, &cluster.episode_ids, started_at);
+        let playbook_entry = playbook_knowledge_entry(
+            &playbook,
+            &cluster.episode_ids,
+            Some(cluster.key.model.as_str()),
+            started_at,
+        );
         knowledge_store.add(playbook_entry.clone())?;
         outcome.knowledge_entries_written += 1;
         outcome.playbook_created = true;
@@ -1316,6 +1321,8 @@ impl DreamDistillationCandidate {
             refutation_evidence: None,
             source_episodes: self.source_episodes,
             tags: self.tags,
+            source_model: None,
+            model_generality: 1.0,
             created_at: Utc::now(),
             half_life_days,
             hdc_vector: None,
@@ -1424,9 +1431,14 @@ fn build_playbook(cluster: &DreamCluster, started_at: DateTime<Utc>) -> Playbook
 fn playbook_knowledge_entry(
     playbook: &Playbook,
     source_episodes: &[String],
+    source_model: Option<&str>,
     created_at: DateTime<Utc>,
 ) -> KnowledgeEntry {
     let content = render_playbook_content(playbook);
+    let source_model = source_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(ToOwned::to_owned);
     KnowledgeEntry {
         id: derive_knowledge_id(
             KnowledgeKind::Playbook,
@@ -1447,6 +1459,8 @@ fn playbook_knowledge_entry(
             "playbook".to_string(),
             "task-reusable".to_string(),
         ],
+        source_model,
+        model_generality: 0.0,
         created_at,
         half_life_days: KnowledgeKind::Playbook.default_half_life_days(),
         hdc_vector: None,
@@ -1507,6 +1521,8 @@ fn build_regression_entry(cluster: &DreamCluster, created_at: DateTime<Utc>) -> 
             format!("task_type:{}", cluster.key.task_type),
             format!("model:{}", cluster.key.model),
         ],
+        source_model: None,
+        model_generality: 1.0,
         created_at,
         half_life_days: kind.default_half_life_days(),
         hdc_vector: None,
@@ -1638,6 +1654,8 @@ fn generate_cross_domain_strategy_hypotheses(
             refutation_evidence: None,
             source_episodes,
             tags,
+            source_model: Some(target.key.model.clone()),
+            model_generality: 0.0,
             created_at,
             half_life_days: KnowledgeKind::Heuristic.default_half_life_days(),
             hdc_vector: None,
@@ -1919,6 +1937,8 @@ fn build_mistake_insight_entry(
             format!("task_type:{}", cluster.key.task_type),
             format!("model:{}", cluster.key.model),
         ],
+        source_model: None,
+        model_generality: 1.0,
         created_at,
         half_life_days: KnowledgeKind::Insight.default_half_life_days(),
         hdc_vector: None,
@@ -1963,6 +1983,8 @@ fn review_insights_from_heuristics(
             refutation_evidence: None,
             source_episodes,
             tags,
+            source_model: None,
+            model_generality: 1.0,
             created_at,
             half_life_days: KnowledgeKind::Insight.default_half_life_days(),
             hdc_vector: None,
@@ -2760,6 +2782,8 @@ mod tests {
                     first_seen_ms: 10,
                     last_seen_ms: 20,
                     source_episodes: vec!["ep-1".to_string(), "ep-2".to_string()],
+                    source_model: None,
+                    model_generality: 1.0,
                 },
                 roko_neuro::tier_progression::HeuristicRule {
                     id: "heuristic-2".to_string(),
@@ -2772,6 +2796,8 @@ mod tests {
                     first_seen_ms: 30,
                     last_seen_ms: 40,
                     source_episodes: vec!["ep-3".to_string(), "ep-4".to_string()],
+                    source_model: None,
+                    model_generality: 1.0,
                 },
             ],
             playbook: roko_neuro::tier_progression::PlaybookCompilation {

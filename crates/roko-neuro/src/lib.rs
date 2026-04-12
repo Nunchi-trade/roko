@@ -16,6 +16,10 @@ fn default_confidence_weight() -> f64 {
     1.0
 }
 
+fn default_model_generality() -> f64 {
+    1.0
+}
+
 const fn default_half_life_days() -> f64 {
     30.0
 }
@@ -101,6 +105,14 @@ pub struct KnowledgeEntry {
     /// Topic tags used for retrieval and filtering.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Which model originally produced the supporting episode(s), when
+    /// this entry is model-specific.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_model: Option<String>,
+    /// How broadly this entry applies across models (`1.0` = fully
+    /// general, `0.0` = only valid for one model family).
+    #[serde(default = "default_model_generality")]
+    pub model_generality: f64,
     /// Creation timestamp for the knowledge entry.
     #[serde(default = "Utc::now")]
     pub created_at: DateTime<Utc>,
@@ -138,6 +150,12 @@ impl KnowledgeEntry {
         Some(format!(
             "Previous insight {refuted_id} was wrong because {evidence}."
         ))
+    }
+
+    /// Return whether the entry should be injected for `current_model`.
+    #[must_use]
+    pub fn applies_to_model(&self, current_model: &str) -> bool {
+        self.model_generality > 0.7 || self.source_model.as_deref() == Some(current_model)
     }
 }
 

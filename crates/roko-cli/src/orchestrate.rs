@@ -1089,14 +1089,17 @@ fn select_playbook_heuristics(
     role: AgentRole,
     task_def: Option<&crate::task_parser::TaskDef>,
     task_text: &str,
+    current_model: &str,
     limit: usize,
 ) -> Vec<KnowledgeEntry> {
     let query = playbook_heuristic_query(role, task_def, task_text);
     knowledge_store
-        .query_kind(&query, KnowledgeKind::Playbook, limit)
+        .query_kind(&query, KnowledgeKind::Playbook, limit.saturating_mul(3).max(limit))
         .unwrap_or_default()
         .into_iter()
         .filter(|entry| entry.confidence > 0.0)
+        .filter(|entry| entry.applies_to_model(current_model))
+        .take(limit)
         .collect()
 }
 
@@ -1130,8 +1133,10 @@ fn build_playbook_heuristics_context(
     role: AgentRole,
     task_def: Option<&crate::task_parser::TaskDef>,
     task_text: &str,
+    current_model: &str,
 ) -> Option<String> {
-    let heuristics = select_playbook_heuristics(knowledge_store, role, task_def, task_text, 3);
+    let heuristics =
+        select_playbook_heuristics(knowledge_store, role, task_def, task_text, current_model, 3);
     if heuristics.is_empty() {
         None
     } else {
@@ -4038,6 +4043,8 @@ impl PlanRunner {
                                     "gate-failure".to_string(),
                                     phase.to_string(),
                                 ],
+                                source_model: None,
+                                model_generality: 1.0,
                                 created_at: chrono::Utc::now(),
                                 half_life_days: KnowledgeKind::AntiKnowledge
                                     .default_half_life_days(),
@@ -5125,6 +5132,7 @@ impl PlanRunner {
         task_def: Option<&crate::task_parser::TaskDef>,
         task_text: &str,
         task_tier: Option<&str>,
+        current_model: &str,
     ) -> LearnedContext {
         use roko_learn::playbook_rules::MatchContext;
 
@@ -5184,8 +5192,13 @@ impl PlanRunner {
         }
 
         // 4. Playbook-tier heuristics distilled by roko-neuro.
-        if let Some(playbook_heuristics) =
-            build_playbook_heuristics_context(&self.knowledge_store, role, task_def, task_text)
+        if let Some(playbook_heuristics) = build_playbook_heuristics_context(
+            &self.knowledge_store,
+            role,
+            task_def,
+            task_text,
+            current_model,
+        )
         {
             parts.push(playbook_heuristics);
         }
@@ -7995,6 +8008,7 @@ impl PlanRunner {
             task_def.as_ref(),
             &task_text,
             task_def.as_ref().map(|td| td.tier.as_str()),
+            &selected_model,
         );
         if !learned.text.is_empty() {
             let learned_section = PromptSection::new("learned-context", &learned.text)
@@ -10859,6 +10873,8 @@ files = ["crates/roko-cli/src/orchestrate.rs"]
                     "implementation".to_string(),
                     "roko-cli".to_string(),
                 ],
+                source_model: None,
+                model_generality: 1.0,
                 created_at: chrono::Utc::now(),
                 half_life_days: 30.0,
                 hdc_vector: None,
@@ -10881,6 +10897,8 @@ files = ["crates/roko-cli/src/orchestrate.rs"]
                     "implementation".to_string(),
                     "roko-cli".to_string(),
                 ],
+                source_model: None,
+                model_generality: 1.0,
                 created_at: chrono::Utc::now(),
                 half_life_days: 90.0,
                 hdc_vector: None,
@@ -10901,12 +10919,67 @@ files = ["crates/roko-cli/src/orchestrate.rs"]
             AgentRole::Implementer,
             Some(&task),
             "Wire prompt assembly to inject neuro playbook heuristics in roko-cli orchestrate",
+            "claude-sonnet-4-5",
         )
         .expect("playbook context");
 
         assert!(context.contains("## Playbook Heuristics"));
         assert!(context.contains("Prefer injecting playbook heuristics before the task body"));
         assert!(!context.contains("lower-tier heuristic"));
+    }
+
+    #[test]
+    fn model_specific_playbook_heuristics_require_matching_model() {
+        let tmp = TempDir::new().unwrap();
+        let store = KnowledgeStore::new(tmp.path().join("knowledge.jsonl"));
+
+        store
+            .add(KnowledgeEntry {
+                id: "playbook-model-specific".to_string(),
+                kind: KnowledgeKind::Playbook,
+                source: Some("roko-neuro".to_string()),
+                content: "# PLAYBOOK\n\nUse XML tool-call tags for this model.\n".to_string(),
+                confidence: 0.92,
+                confidence_weight: 0.92,
+                refuted_insight_id: None,
+                refutation_evidence: None,
+                source_episodes: vec!["ep-1".to_string()],
+                tags: vec!["tier:playbook".to_string(), "implementation".to_string()],
+                source_model: Some("claude-sonnet-4-5".to_string()),
+                model_generality: 0.1,
+                created_at: chrono::Utc::now(),
+                half_life_days: 30.0,
+                hdc_vector: None,
+            })
+            .unwrap();
+
+        let task: crate::task_parser::TaskDef = toml::from_str(
+            r#"
+id = "T1"
+title = "Inject only matching model-specific playbook heuristics"
+files = ["crates/roko-cli/src/orchestrate.rs"]
+"#,
+        )
+        .unwrap();
+
+        let mismatch = build_playbook_heuristics_context(
+            &store,
+            AgentRole::Implementer,
+            Some(&task),
+            "Inject only matching model-specific playbook heuristics",
+            "gpt-5.4",
+        );
+        assert!(mismatch.is_none());
+
+        let matched = build_playbook_heuristics_context(
+            &store,
+            AgentRole::Implementer,
+            Some(&task),
+            "Inject only matching model-specific playbook heuristics",
+            "claude-sonnet-4-5",
+        )
+        .expect("matched playbook context");
+        assert!(matched.contains("XML tool-call tags"));
     }
 
     #[test]
