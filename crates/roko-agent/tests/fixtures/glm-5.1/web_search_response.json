@@ -1,0 +1,33 @@
+{
+  "id": "chatcmpl-glm-web-1",
+  "object": "chat.completion",
+  "created": 1760000004,
+  "model": "glm-5.1",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Here are the search results."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "web_search": [
+    {
+      "title": "Result 1",
+      "link": "https://example.com/result-1",
+      "content": "First result snippet"
+    },
+    {
+      "title": "Result 2",
+      "link": "https://example.com/result-2",
+      "content": "Second result snippet"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 54,
+    "completion_tokens": 20,
+    "total_tokens": 74
+  }
+}

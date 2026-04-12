@@ -27,6 +27,8 @@ pub enum PageId {
     Experiments,
     /// Efficiency optimizer loop.
     Optimizer,
+    /// Provider circuit breaker and latency status.
+    ProviderHealth,
     /// Live per-agent status.
     AgentStatus,
     /// Plan DAG/progress view.
@@ -52,6 +54,7 @@ impl PageId {
             Self::Parameters => "Parameters",
             Self::Experiments => "Experiments",
             Self::Optimizer => "Optimizer",
+            Self::ProviderHealth => "Provider Health",
             Self::AgentStatus => "Agent Activity",
             Self::PlanView => "Plan View",
             Self::LogView => "Log View",
@@ -72,6 +75,7 @@ impl PageId {
             Self::Parameters => "parameters",
             Self::Experiments => "experiments",
             Self::Optimizer => "optimizer",
+            Self::ProviderHealth => "provider-health",
             Self::AgentStatus => "agent-status",
             Self::PlanView => "plan-view",
             Self::LogView => "log-view",
@@ -92,7 +96,8 @@ impl PageId {
             | Self::Parameters
             | Self::Experiments
             | Self::Optimizer => "efficiency",
-            Self::AgentStatus
+            Self::ProviderHealth
+            | Self::AgentStatus
             | Self::PlanView
             | Self::LogView
             | Self::Signals
@@ -383,6 +388,7 @@ mod tests {
         assert_eq!(PageId::Health.group(), "efficiency");
         assert_eq!(PageId::PlanView.group(), "operations");
         assert_eq!(PageId::Learning.group(), "efficiency");
+        assert_eq!(PageId::ProviderHealth.group(), "operations");
     }
 
     #[test]

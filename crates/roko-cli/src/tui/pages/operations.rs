@@ -7,6 +7,23 @@ use super::{PageId, PageScaffold, WidgetScaffold};
 pub fn scaffold_pages() -> Vec<PageScaffold> {
     vec![
         PageScaffold::new(
+            PageId::ProviderHealth,
+            "Provider Health",
+            "Provider circuit state, latency, error rate, and recorded request totals.",
+            vec![
+                WidgetScaffold::new(
+                    "provider_status",
+                    "Provider Status",
+                    "Per-provider circuit state, latency p50, error rate, and recorded cost placeholder.",
+                ),
+                WidgetScaffold::new(
+                    "provider_summary",
+                    "Provider Summary",
+                    "Aggregate request and failure totals across recorded providers.",
+                ),
+            ],
+        ),
+        PageScaffold::new(
             PageId::AgentStatus,
             "Agent Activity",
             "Live active-agent roster, model mix, and session cost breakdown.",

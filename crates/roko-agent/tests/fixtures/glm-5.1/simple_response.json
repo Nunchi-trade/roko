@@ -1,0 +1,24 @@
+{
+  "id": "chatcmpl-glm-simple-1",
+  "object": "chat.completion",
+  "created": 1760000001,
+  "model": "glm-5.1",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Mock GLM response."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 11,
+    "completion_tokens": 7,
+    "total_tokens": 18,
+    "prompt_tokens_details": {
+      "cached_tokens": 3
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "id": "chatcmpl-kimi-partial-1",
+  "object": "chat.completion",
+  "created": 1760000104,
+  "model": "kimi-k2.5",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "This is the first half of the answer "
+      },
+      "finish_reason": "length"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 32,
+    "completion_tokens": 16,
+    "total_tokens": 48,
+    "cached_tokens": 0
+  }
+}

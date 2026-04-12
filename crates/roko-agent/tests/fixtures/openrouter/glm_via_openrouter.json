@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-openrouter-glm-1",
+  "object": "chat.completion",
+  "created": 1760000201,
+  "model": "z-ai/glm-5.1",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "OpenRouter routed to GLM."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 15,
+    "completion_tokens": 8,
+    "total_tokens": 23
+  }
+}

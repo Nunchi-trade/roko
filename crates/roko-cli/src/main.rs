@@ -5050,6 +5050,7 @@ fn parse_dashboard_page(input: &str) -> Option<PageId> {
         "parameters" => PageId::Parameters,
         "experiments" => PageId::Experiments,
         "optimizer" => PageId::Optimizer,
+        "provider-health" | "providerhealth" => PageId::ProviderHealth,
         "agent-status" | "agentstatus" | "agent-activity" | "agentactivity" => PageId::AgentStatus,
         "plan-view" | "planview" => PageId::PlanView,
         "log-view" | "logview" => PageId::LogView,
@@ -5068,6 +5069,7 @@ fn dashboard_page_slugs() -> Vec<&'static str> {
         PageId::Parameters,
         PageId::Experiments,
         PageId::Optimizer,
+        PageId::ProviderHealth,
         PageId::AgentStatus,
         PageId::PlanView,
         PageId::LogView,
@@ -5754,6 +5756,10 @@ mod tests {
         );
         assert_eq!(parse_dashboard_page("plan_view"), Some(PageId::PlanView));
         assert_eq!(parse_dashboard_page("learning"), Some(PageId::Learning));
+        assert_eq!(
+            parse_dashboard_page("provider health"),
+            Some(PageId::ProviderHealth)
+        );
     }
 
     #[test]
@@ -5844,6 +5850,62 @@ mod tests {
         .join("\n")
             + "\n";
         fs::write(&cfactor_path, cfactor_history).await.unwrap();
+
+        let provider_health_path = learn_dir.join("provider-health.json");
+        let provider_health = serde_json::json!({
+            "providers": {
+                "anthropic": {
+                    "provider_id": "anthropic",
+                    "state": "Closed",
+                    "consecutive_failures": 0,
+                    "total_requests": 12,
+                    "total_failures": 1,
+                    "last_failure_at": null,
+                    "cooldown_until": null,
+                    "failure_window": []
+                },
+                "zai": {
+                    "provider_id": "zai",
+                    "state": "HalfOpen",
+                    "consecutive_failures": 3,
+                    "total_requests": 8,
+                    "total_failures": 2,
+                    "last_failure_at": 1710000000000i64,
+                    "cooldown_until": 1710000005000i64,
+                    "failure_window": []
+                }
+            }
+        });
+        fs::write(
+            &provider_health_path,
+            serde_json::to_string_pretty(&provider_health).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let latency_stats_path = learn_dir.join("latency-stats.json");
+        let latency_stats = serde_json::json!({
+            "entries": [
+                {
+                    "provider": "anthropic",
+                    "stats": {
+                        "model_slug": "claude-opus-4-6",
+                        "provider_id": "anthropic",
+                        "ttft_ema_ms": 0.0,
+                        "total_latency_ema_ms": 0.0,
+                        "tokens_per_second_ema": 0.0,
+                        "observations": 3,
+                        "recent_latencies": [800.0, 1200.0, 600.0]
+                    }
+                }
+            ]
+        });
+        fs::write(
+            &latency_stats_path,
+            serde_json::to_string_pretty(&latency_stats).unwrap(),
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -5883,6 +5945,20 @@ mod tests {
         assert!(trends.contains("avg iterations per plan: 1.00"));
         assert!(trends.contains("avg cost per plan: $2.0000"));
         assert!(trends.contains("haiku share: 50.0%"));
+
+        let provider_health = dashboard_output(
+            &cli,
+            Some(dir.path().to_path_buf()),
+            Some("provider-health".to_string()),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(provider_health.contains("Provider Health (provider-health)"));
+        assert!(provider_health.contains("anthropic"));
+        assert!(provider_health.contains("● CLOSED"));
+        assert!(provider_health.contains("p50: 0.8s"));
+        assert!(provider_health.contains("summary: 20 requests, 3 failures"));
 
         let fallback = dashboard_output(
             &cli,

@@ -1,0 +1,25 @@
+{
+  "id": "chatcmpl-glm-thinking-1",
+  "object": "chat.completion",
+  "created": 1760000003,
+  "model": "glm-5.1",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "reasoning_content": "Need to compare both options before answering.",
+        "content": "Choose the cheaper healthy route."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 41,
+    "completion_tokens": 18,
+    "total_tokens": 59,
+    "prompt_tokens_details": {
+      "cached_tokens": 21
+    }
+  }
+}

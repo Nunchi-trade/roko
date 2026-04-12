@@ -4,7 +4,7 @@
 //! best-effort learning snapshot on top so the health and trends pages
 //! can render real stats when the memory JSONL files are present.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::{self, Write as _};
 use std::fs::File;
 use std::io::{BufRead as _, BufReader, Seek, SeekFrom};
@@ -26,9 +26,11 @@ use roko_gate::adaptive_threshold::AdaptiveThresholds;
 pub use roko_learn::cfactor::{CFactor, CFactorComponents};
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
+use roko_learn::latency::LatencyStats;
 use roko_learn::prompt_experiment::{
     ExperimentStatus, ExperimentStore, PromptExperiment, PromptVariant, VariantStats,
 };
+use roko_learn::provider_health::{CircuitState, ProviderHealth};
 
 use super::pages::{PageId, PageScaffold, efficiency, operations};
 
@@ -41,6 +43,8 @@ const EFFICIENCY_FILE: &str = "efficiency.jsonl";
 const EXPERIMENTS_FILE: &str = "experiments.json";
 const GATE_THRESHOLDS_FILE: &str = "gate-thresholds.json";
 const CASCADE_ROUTER_FILE: &str = "cascade-router.json";
+const PROVIDER_HEALTH_FILE: &str = "provider-health.json";
+const LATENCY_STATS_FILE: &str = "latency-stats.json";
 const DAIMON_DIR: &str = "daimon";
 const AFFECT_FILE: &str = "affect.json";
 
@@ -337,6 +341,7 @@ impl DashboardScaffold {
             PageId::Parameters => self.snapshot.render_parameters_page(scaffold),
             PageId::Experiments => self.snapshot.render_experiments_page(scaffold),
             PageId::Optimizer => self.snapshot.render_optimizer_page(scaffold),
+            PageId::ProviderHealth => self.snapshot.render_provider_health_page(scaffold),
             PageId::AgentStatus => self.snapshot.render_agent_status_page(scaffold),
             PageId::PlanView => self.snapshot.render_plan_view_page(scaffold),
             PageId::LogView => self.snapshot.render_log_view_page(scaffold),
@@ -2672,6 +2677,10 @@ pub struct DashboardSnapshot {
     recent_signals: Vec<SignalSummary>,
     /// Cascade router snapshot from `.roko/learn/cascade-router.json` (raw JSON).
     cascade_snapshot: Option<CascadeSnapshotData>,
+    /// Provider health snapshot from `.roko/learn/provider-health.json`.
+    provider_health: HashMap<String, ProviderHealth>,
+    /// Provider latency summaries aggregated from `.roko/learn/latency-stats.json`.
+    provider_latency: HashMap<String, ProviderLatencySummary>,
     /// Raw episodes kept for per-agent analysis.
     episodes: Vec<Episode>,
 }
@@ -2690,6 +2699,56 @@ struct CascadeSnapshotData {
 struct PersistedModelStatsData {
     trials: u64,
     successes: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct ProviderHealthSnapshotData {
+    #[serde(default)]
+    providers: HashMap<String, ProviderHealth>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct LatencyStatsSnapshotData {
+    #[serde(default)]
+    entries: Vec<LatencyStatsEntryData>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LatencyStatsEntryData {
+    provider: String,
+    stats: LatencyStats,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ProviderLatencySummary {
+    recent_latencies: Vec<f64>,
+    weighted_latency_ms: f64,
+    observations: u64,
+}
+
+impl ProviderLatencySummary {
+    fn record(&mut self, stats: &LatencyStats) {
+        self.recent_latencies
+            .extend(stats.recent_latencies.iter().copied());
+        self.weighted_latency_ms += stats.total_latency_ema_ms * stats.observations as f64;
+        self.observations = self.observations.saturating_add(stats.observations);
+    }
+
+    fn p50_ms(&self) -> Option<f64> {
+        if !self.recent_latencies.is_empty() {
+            let mut latencies = self.recent_latencies.clone();
+            latencies.sort_by(|a, b| a.total_cmp(b));
+            let idx = ((latencies.len() as f64) * 0.50).floor() as usize;
+            let idx = idx.min(latencies.len().saturating_sub(1));
+            return latencies.get(idx).copied();
+        }
+
+        if self.observations > 0 {
+            return Some(self.weighted_latency_ms / self.observations as f64);
+        }
+
+        None
+    }
 }
 
 impl DashboardSnapshot {
@@ -2719,6 +2778,9 @@ impl DashboardSnapshot {
         let recent_signals = load_recent_signals(&signals_path, 100);
         let cascade_snapshot =
             load_json_opt::<CascadeSnapshotData>(&learn_dir.join(CASCADE_ROUTER_FILE));
+        let provider_health =
+            load_provider_health_snapshot(&learn_dir.join(PROVIDER_HEALTH_FILE));
+        let provider_latency = load_latency_stats_by_provider(&learn_dir.join(LATENCY_STATS_FILE));
 
         Ok(Self::from_records(
             root,
@@ -2730,6 +2792,8 @@ impl DashboardSnapshot {
             gate_results_page,
             recent_signals,
             cascade_snapshot,
+            provider_health,
+            provider_latency,
         ))
     }
 
@@ -2744,6 +2808,8 @@ impl DashboardSnapshot {
             GateResultsPageData::default(),
             Vec::new(),
             None,
+            HashMap::new(),
+            HashMap::new(),
         )
     }
 
@@ -2758,6 +2824,8 @@ impl DashboardSnapshot {
         gate_results_page: GateResultsPageData,
         recent_signals: Vec<SignalSummary>,
         cascade_snapshot: Option<CascadeSnapshotData>,
+        provider_health: HashMap<String, ProviderHealth>,
+        provider_latency: HashMap<String, ProviderLatencySummary>,
     ) -> Self {
         let episode_count = episodes.len();
         let success_rate = if episode_count == 0 {
@@ -2828,6 +2896,8 @@ impl DashboardSnapshot {
             gate_results_page,
             recent_signals,
             cascade_snapshot,
+            provider_health,
+            provider_latency,
             episodes: episodes.to_vec(),
         }
     }
@@ -3385,6 +3455,114 @@ impl DashboardSnapshot {
         if let Some(store) = &self.experiments {
             let _ = writeln!(out, "  active experiments: {}", store.running_count());
             let _ = writeln!(out, "  concluded experiments: {}", store.concluded_count());
+        }
+
+        Some(out)
+    }
+
+    fn render_provider_health_page(&self, page: &PageScaffold) -> Option<String> {
+        let mut provider_names = BTreeSet::new();
+        provider_names.extend(self.provider_health.keys().cloned());
+        provider_names.extend(self.provider_latency.keys().cloned());
+        if provider_names.is_empty() {
+            return None;
+        }
+
+        let mut out = page_header(page);
+        let _ = writeln!(
+            out,
+            "source: {}/{}",
+            self.root.join(LEARN_DIR).display(),
+            PROVIDER_HEALTH_FILE
+        );
+        let _ = writeln!(
+            out,
+            "source: {}/{}",
+            self.root.join(LEARN_DIR).display(),
+            LATENCY_STATS_FILE
+        );
+        let _ = writeln!(out, "providers: {}", provider_names.len());
+        let _ = writeln!(out);
+
+        let now_ms = now_ms_i64();
+        let provider_width = provider_names
+            .iter()
+            .map(String::len)
+            .max()
+            .unwrap_or("provider".len())
+            .max("provider".len());
+        let state_width = provider_names
+            .iter()
+            .map(|provider| {
+                self.provider_health
+                    .get(provider)
+                    .map(|health| {
+                        provider_health_state_label(effective_provider_circuit_state(
+                            health, now_ms,
+                        ))
+                    })
+                    .unwrap_or("CLOSED")
+                    .len()
+            })
+            .max()
+            .unwrap_or("CLOSED".len())
+            .max("state".len());
+
+        for provider in provider_names {
+            let health = self.provider_health.get(&provider);
+            let latency = self.provider_latency.get(&provider);
+            let state = health
+                .map(|snapshot| effective_provider_circuit_state(snapshot, now_ms))
+                .unwrap_or(CircuitState::Closed);
+            let _ = writeln!(
+                out,
+                "  {:<provider_width$}  {} {:<state_width$}  p50: {:<6}  err: {:<6}  cost: —",
+                provider,
+                provider_health_state_icon(state),
+                provider_health_state_label(state),
+                latency
+                    .and_then(ProviderLatencySummary::p50_ms)
+                    .map(format_provider_latency_ms)
+                    .unwrap_or_else(|| "—".to_string()),
+                health
+                    .and_then(provider_health_error_rate)
+                    .unwrap_or_else(|| "—".to_string()),
+                provider_width = provider_width,
+                state_width = state_width,
+            );
+        }
+
+        let total_requests: u64 = self
+            .provider_health
+            .values()
+            .map(|health| health.total_requests)
+            .sum();
+        let total_failures: u64 = self
+            .provider_health
+            .values()
+            .map(|health| health.total_failures)
+            .sum();
+        let open_count = self
+            .provider_health
+            .values()
+            .filter(|health| effective_provider_circuit_state(health, now_ms) == CircuitState::Open)
+            .count();
+        let half_open_count = self
+            .provider_health
+            .values()
+            .filter(|health| {
+                effective_provider_circuit_state(health, now_ms) == CircuitState::HalfOpen
+            })
+            .count();
+
+        let _ = writeln!(out);
+        if self.provider_health.is_empty() {
+            let _ = writeln!(out, "summary: no request/failure counters recorded");
+        } else {
+            let _ = writeln!(
+                out,
+                "summary: {total_requests} requests, {total_failures} failures, {open_count} open, {half_open_count} half-open"
+            );
         }
 
         Some(out)
@@ -4412,6 +4590,73 @@ fn format_ms(value: f64) -> String {
     format!("{value:.0} ms")
 }
 
+fn format_provider_latency_ms(value: f64) -> String {
+    if value >= 500.0 {
+        format!("{:.1}s", value / 1000.0)
+    } else {
+        format!("{value:.0}ms")
+    }
+}
+
+fn provider_health_error_rate(health: &ProviderHealth) -> Option<String> {
+    (health.total_requests > 0).then(|| {
+        format!(
+            "{:.1}%",
+            (health.total_failures as f64 * 100.0) / health.total_requests as f64
+        )
+    })
+}
+
+fn provider_health_state_label(state: CircuitState) -> &'static str {
+    match state {
+        CircuitState::Closed => "CLOSED",
+        CircuitState::Open => "OPEN",
+        CircuitState::HalfOpen => "HALF-OPEN",
+    }
+}
+
+fn provider_health_state_icon(state: CircuitState) -> &'static str {
+    match state {
+        CircuitState::Closed => "●",
+        CircuitState::HalfOpen => "○",
+        CircuitState::Open => "✗",
+    }
+}
+
+fn effective_provider_circuit_state(health: &ProviderHealth, now_ms: i64) -> CircuitState {
+    match health.state {
+        CircuitState::Open if health.cooldown_until.is_some_and(|until| now_ms >= until) => {
+            CircuitState::HalfOpen
+        }
+        state => state,
+    }
+}
+
+fn load_provider_health_snapshot(path: &Path) -> HashMap<String, ProviderHealth> {
+    load_json_opt::<ProviderHealthSnapshotData>(path)
+        .map(|snapshot| snapshot.providers)
+        .unwrap_or_default()
+}
+
+fn load_latency_stats_by_provider(path: &Path) -> HashMap<String, ProviderLatencySummary> {
+    let Some(snapshot) = load_json_opt::<LatencyStatsSnapshotData>(path) else {
+        return HashMap::new();
+    };
+
+    let mut providers = HashMap::new();
+    for entry in snapshot.entries {
+        providers
+            .entry(entry.provider)
+            .or_insert_with(ProviderLatencySummary::default)
+            .record(&entry.stats);
+    }
+    providers
+}
+
+fn now_ms_i64() -> i64 {
+    i64::try_from(now_ms()).unwrap_or(i64::MAX)
+}
+
 fn valence_indicator(pleasure: f64) -> &'static str {
     if pleasure >= 0.25 {
         "😊"
@@ -4550,7 +4795,7 @@ mod tests {
     fn scaffold_has_expected_page_count() {
         let dashboard = DashboardScaffold::new();
         let summary = dashboard.summary();
-        assert_eq!(summary.page_count, 13);
+        assert_eq!(summary.page_count, 14);
         assert!(summary.widget_count >= 20);
         assert_eq!(summary.active_page, PageId::Health);
     }
@@ -4586,7 +4831,7 @@ mod tests {
     fn overview_render_contains_active_page_and_counts() {
         let dashboard = DashboardScaffold::new();
         let rendered = dashboard.render_overview_text();
-        assert!(rendered.contains("dashboard scaffold: 13 pages"));
+        assert!(rendered.contains("dashboard scaffold: 14 pages"));
         assert!(rendered.contains("active=health"));
         assert!(rendered.contains("active page:"));
         assert!(rendered.contains("* Health [health] efficiency"));
@@ -5010,6 +5255,92 @@ mod tests {
         assert!(rendered.contains("Experiments"));
         assert!(rendered.contains("system_prompt"));
         assert!(rendered.contains("1 running"));
+    }
+
+    #[test]
+    fn provider_health_page_renders_with_health_and_latency() {
+        let tmpdir = tempdir().expect("tempdir");
+        let learn_dir = tmpdir.path().join(".roko/learn");
+        let memory_dir = tmpdir.path().join(MEMORY_DIR);
+        fs::create_dir_all(&memory_dir).expect("memory dir");
+        fs::write(memory_dir.join(EPISODES_FILE), "").expect("empty episodes");
+
+        let provider_health = ProviderHealthSnapshotData {
+            providers: HashMap::from([
+                (
+                    "anthropic".to_string(),
+                    ProviderHealth {
+                        provider_id: "anthropic".to_string(),
+                        state: CircuitState::Closed,
+                        consecutive_failures: 0,
+                        total_requests: 420,
+                        total_failures: 1,
+                        last_failure_at: None,
+                        cooldown_until: None,
+                        failure_window: Vec::new(),
+                    },
+                ),
+                (
+                    "ollama".to_string(),
+                    ProviderHealth {
+                        provider_id: "ollama".to_string(),
+                        state: CircuitState::Open,
+                        consecutive_failures: 5,
+                        total_requests: 3,
+                        total_failures: 3,
+                        last_failure_at: Some(now_ms_i64()),
+                        cooldown_until: Some(now_ms_i64() + 30_000),
+                        failure_window: Vec::new(),
+                    },
+                ),
+            ]),
+        };
+        write_json(&learn_dir.join(PROVIDER_HEALTH_FILE), &provider_health);
+
+        let latency = LatencyStatsSnapshotData {
+            entries: vec![
+                LatencyStatsEntryData {
+                    provider: "anthropic".to_string(),
+                    stats: LatencyStats {
+                        model_slug: "claude-opus-4-6".to_string(),
+                        provider_id: "anthropic".to_string(),
+                        ttft_ema_ms: 0.0,
+                        total_latency_ema_ms: 0.0,
+                        tokens_per_second_ema: 0.0,
+                        observations: 3,
+                        recent_latencies: vec![800.0, 1_200.0, 600.0],
+                    },
+                },
+                LatencyStatsEntryData {
+                    provider: "openrouter".to_string(),
+                    stats: LatencyStats {
+                        model_slug: "glm-5.1".to_string(),
+                        provider_id: "openrouter".to_string(),
+                        ttft_ema_ms: 0.0,
+                        total_latency_ema_ms: 0.0,
+                        tokens_per_second_ema: 0.0,
+                        observations: 2,
+                        recent_latencies: vec![700.0, 900.0],
+                    },
+                },
+            ],
+        };
+        write_json(&learn_dir.join(LATENCY_STATS_FILE), &latency);
+
+        let dashboard = DashboardScaffold::new_in(tmpdir.path());
+        let rendered = dashboard
+            .render_page_text(PageId::ProviderHealth)
+            .expect("provider health page should render");
+
+        assert!(rendered.contains("Provider Health"));
+        assert!(rendered.contains("anthropic"));
+        assert!(rendered.contains("● CLOSED"));
+        assert!(rendered.contains("p50: 0.8s"));
+        assert!(rendered.contains("err: 0.2%"));
+        assert!(rendered.contains("ollama"));
+        assert!(rendered.contains("✗ OPEN"));
+        assert!(rendered.contains("openrouter"));
+        assert!(rendered.contains("summary: 423 requests, 4 failures, 1 open, 0 half-open"));
     }
 
     #[test]
