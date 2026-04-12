@@ -43,6 +43,7 @@ pub fn create_backend(
     match provider.kind {
         ProviderKind::OpenAiCompat => Ok(Arc::new(
             OpenAiCompatBackend::new(resolve_api_key(provider)?, model.slug.clone())
+                .with_provider_id(model.provider.clone())
                 .with_base_url(base_url_for_tool_loop(provider))
                 .with_timeout_ms(provider.timeout_ms.unwrap_or(120_000))
                 .with_max_tokens(max_tokens_for_model(model))

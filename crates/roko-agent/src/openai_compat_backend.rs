@@ -2,6 +2,7 @@
 //! for OpenAI-compatible chat-completions endpoints.
 
 use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -9,6 +10,7 @@ use serde_json::{Map, Value};
 use tokio::sync::mpsc;
 
 use crate::http::{HttpPoster, ReqwestPoster};
+use crate::rate_limit::ProviderRateLimiter;
 use crate::streaming::{StreamAccumulator, StreamChunk, parse_sse_line};
 use crate::tool_loop::{LlmBackend, LlmError};
 use crate::translate::FinishReason;
@@ -17,16 +19,27 @@ use crate::usage::Usage;
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
+const DEFAULT_PROVIDER_RPM: u32 = 60;
+
+fn shared_rate_limiter() -> Arc<ProviderRateLimiter> {
+    static SHARED_RATE_LIMITER: OnceLock<Arc<ProviderRateLimiter>> = OnceLock::new();
+    Arc::clone(
+        SHARED_RATE_LIMITER
+            .get_or_init(|| Arc::new(ProviderRateLimiter::new(DEFAULT_PROVIDER_RPM))),
+    )
+}
 
 /// HTTP adapter for OpenAI-compatible `/chat/completions` endpoints.
 pub struct OpenAiCompatLlmBackend {
     api_key: String,
     model: String,
+    provider_id: String,
     base_url: String,
     timeout_ms: u64,
     max_tokens: Option<u32>,
     extra_headers: Vec<(String, String)>,
     extra_body_params: Map<String, Value>,
+    rate_limiter: Arc<ProviderRateLimiter>,
     poster: Box<dyn HttpPoster>,
 }
 
@@ -34,16 +47,26 @@ impl OpenAiCompatLlmBackend {
     /// Construct a backend for `model` with default URL and timeout.
     #[must_use]
     pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
+        let model = model.into();
         Self {
             api_key: api_key.into(),
-            model: model.into(),
+            provider_id: model.clone(),
+            model,
             base_url: DEFAULT_BASE_URL.to_string(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             max_tokens: None,
             extra_headers: Vec::new(),
             extra_body_params: Map::new(),
+            rate_limiter: shared_rate_limiter(),
             poster: Box::new(ReqwestPoster::new()),
         }
+    }
+
+    /// Override the provider identifier used for request throttling.
+    #[must_use]
+    pub fn with_provider_id(mut self, provider_id: impl Into<String>) -> Self {
+        self.provider_id = provider_id.into();
+        self
     }
 
     /// Override the provider base URL.
@@ -80,6 +103,13 @@ impl OpenAiCompatLlmBackend {
     #[must_use]
     pub fn with_extra_body_params(mut self, extra_body_params: Map<String, Value>) -> Self {
         self.extra_body_params = extra_body_params;
+        self
+    }
+
+    /// Override the shared provider rate limiter.
+    #[must_use]
+    pub fn with_rate_limiter(mut self, rate_limiter: Arc<ProviderRateLimiter>) -> Self {
+        self.rate_limiter = rate_limiter;
         self
     }
 
@@ -197,6 +227,7 @@ impl LlmBackend for OpenAiCompatLlmBackend {
         _session: &SessionState,
     ) -> Result<BackendResponse, LlmError> {
         let body_bytes = self.build_body(messages, tools, false)?;
+        self.rate_limiter.acquire(&self.provider_id).await;
 
         let raw = self
             .poster
@@ -223,6 +254,7 @@ impl LlmBackend for OpenAiCompatLlmBackend {
         event_tx: mpsc::UnboundedSender<StreamChunk>,
     ) -> Result<BackendResponse, LlmError> {
         let body_bytes = self.build_body(messages, tools, true)?;
+        self.rate_limiter.acquire(&self.provider_id).await;
 
         let mut req = reqwest::Client::new()
             .post(self.endpoint())
@@ -311,6 +343,7 @@ impl std::fmt::Debug for OpenAiCompatLlmBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OpenAiCompatLlmBackend")
             .field("model", &self.model)
+            .field("provider_id", &self.provider_id)
             .field("base_url", &self.base_url)
             .field("timeout_ms", &self.timeout_ms)
             .field("max_tokens", &self.max_tokens)
@@ -327,6 +360,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration as StdDuration;
+    use std::time::Instant;
 
     use crate::dispatcher::{HandlerResolver, ToolDispatcher};
     use crate::tool_loop::{StopReason, ToolLoop};
@@ -545,6 +579,61 @@ mod tests {
         assert_eq!(requests[0].body["model"], "glm-5.1");
         assert_eq!(requests[0].body["thinking"]["type"], "enabled");
         assert_eq!(requests[0].body["tools"][0]["function"]["name"], "echo");
+    }
+
+    #[tokio::test]
+    async fn rate_limited_backend_spreads_same_provider_requests() {
+        let limiter = Arc::new(ProviderRateLimiter::new_per_second(1));
+        let (poster_a, requests_a) = MockPoster::new(vec![Ok(serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "done"
+                }
+            }]
+        })
+        .to_string())]);
+        let (poster_b, requests_b) = MockPoster::new(vec![Ok(serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "done"
+                }
+            }]
+        })
+        .to_string())]);
+
+        let backend_a = OpenAiCompatLlmBackend::new("test-key", "glm-5.1")
+            .with_provider_id("zai")
+            .with_rate_limiter(limiter.clone())
+            .with_poster(Box::new(poster_a));
+        let backend_b = OpenAiCompatLlmBackend::new("test-key", "glm-5.1")
+            .with_provider_id("zai")
+            .with_rate_limiter(limiter)
+            .with_poster(Box::new(poster_b));
+        let messages = [serde_json::json!({ "role": "user", "content": "hi" })];
+        let tools = RenderedTools::JsonArray(serde_json::json!([]));
+        let session = SessionState::default();
+
+        let start = Instant::now();
+        let (response_a, response_b) = tokio::join!(
+            backend_a.send_turn(&messages, &tools, &session),
+            backend_b.send_turn(&messages, &tools, &session),
+        );
+        let elapsed = start.elapsed();
+
+        assert!(matches!(response_a, Ok(BackendResponse::Json(_))));
+        assert!(matches!(response_b, Ok(BackendResponse::Json(_))));
+        assert!(
+            elapsed >= StdDuration::from_millis(900),
+            "same-provider requests should be throttled, got {elapsed:?}"
+        );
+        assert!(
+            elapsed < StdDuration::from_secs(3),
+            "test limiter should finish promptly, got {elapsed:?}"
+        );
+        assert_eq!(requests_a.lock().expect("requests lock").len(), 1);
+        assert_eq!(requests_b.lock().expect("requests lock").len(), 1);
     }
 
     #[test]
