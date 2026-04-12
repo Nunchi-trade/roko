@@ -12,7 +12,8 @@
 //! # [`CascadeModel`]
 //!
 //! The router returns a [`CascadeModel`] containing a primary model,
-//! an optional fallback model, and a latency SLA in milliseconds.
+//! an ordered fallback chain, an optional context-overflow fallback,
+//! and a latency SLA in milliseconds.
 //!
 //! # Thread safety
 //!
@@ -71,12 +72,28 @@ impl std::fmt::Display for CascadeStage {
 pub struct CascadeModel {
     /// Primary model to use.
     pub primary: ModelSpec,
-    /// Fallback model if the primary fails or times out.
-    pub fallback: Option<ModelSpec>,
+    /// Ordered fallback models to try after general failures.
+    pub fallback_chain: Vec<ModelSpec>,
+    /// Larger-context model to try when the primary overflows context.
+    pub context_overflow_fallback: Option<ModelSpec>,
     /// Latency SLA in milliseconds.
     pub latency_sla_ms: u64,
     /// Which cascade stage produced this recommendation.
     pub stage: CascadeStage,
+}
+
+impl CascadeModel {
+    /// Return the model to use for the given attempt number.
+    ///
+    /// Attempt 0 is the primary model. Subsequent attempts walk the fallback
+    /// chain in order until it is exhausted.
+    #[must_use]
+    pub fn model_for_attempt(&self, attempt: usize) -> Option<&ModelSpec> {
+        match attempt {
+            0 => Some(&self.primary),
+            _ => self.fallback_chain.get(attempt - 1),
+        }
+    }
 }
 
 /// Selection result for raw-context routing.
@@ -227,14 +244,54 @@ fn slug_to_tier(slug: &str) -> ModelTier {
     }
 }
 
-/// Determine the fallback model slug for a given primary tier.
-fn fallback_for_tier(tier: ModelTier) -> Option<String> {
-    match tier {
-        ModelTier::Fast => None, // no fallback below fast
-        ModelTier::Standard => Some("claude-haiku-3-5".to_string()),
-        // Premium and forward-compat: fall back to sonnet
-        _ => Some("claude-sonnet-4-5".to_string()),
+/// Build the ordered fallback chain for a routed primary model.
+fn fallback_chain_for_model(model_slugs: &[String], primary_slug: &str) -> Vec<ModelSpec> {
+    let primary_tier = slug_to_tier(primary_slug);
+
+    if matches!(primary_tier, ModelTier::Fast) {
+        return Vec::new();
     }
+
+    let mut grouped = [Vec::new(), Vec::new(), Vec::new()];
+
+    for slug in model_slugs {
+        if slugs_match(slug, primary_slug) {
+            continue;
+        }
+
+        let bucket = match primary_tier {
+            ModelTier::Standard => match slug_to_tier(slug) {
+                ModelTier::Fast => 0,
+                ModelTier::Standard => 1,
+                ModelTier::Premium => 2,
+                _ => 1,
+            },
+            ModelTier::Premium => match slug_to_tier(slug) {
+                ModelTier::Standard => 0,
+                ModelTier::Fast => 1,
+                ModelTier::Premium => 2,
+                _ => 0,
+            },
+            _ => 0,
+        };
+
+        grouped[bucket].push(ModelSpec::from_slug(slug));
+    }
+
+    grouped.into_iter().flatten().collect()
+}
+
+/// Find a stronger model to use when the selected model overflows context.
+fn context_overflow_fallback_for_model(
+    model_slugs: &[String],
+    primary_slug: &str,
+) -> Option<ModelSpec> {
+    let primary_rank = model_tier_rank(slug_to_tier(primary_slug));
+
+    model_slugs
+        .iter()
+        .find(|slug| model_tier_rank(slug_to_tier(slug)) > primary_rank)
+        .map(ModelSpec::from_slug)
 }
 
 fn low_confidence_tier_bonus(tier: ModelTier) -> f64 {
@@ -467,7 +524,8 @@ impl CascadeRouter {
         {
             return CascadeModel {
                 primary: ModelSpec::from_slug(&variant.slug),
-                fallback: None,
+                fallback_chain: Vec::new(),
+                context_overflow_fallback: None,
                 latency_sla_ms: 30_000,
                 stage: CascadeStage::Static,
             };
@@ -744,11 +802,14 @@ impl CascadeRouter {
 
         let selected = self.bias_model_for_cfactor(ModelSpec::from_slug(&slug), cfactor, agent_id);
         let tier = slug_to_tier(&selected.slug);
-        let fallback = fallback_for_tier(tier).map(ModelSpec::from_slug);
+        let fallback_chain = fallback_chain_for_model(&self.model_slugs, &selected.slug);
+        let context_overflow_fallback =
+            context_overflow_fallback_for_model(&self.model_slugs, &selected.slug);
 
         CascadeModel {
             primary: selected,
-            fallback,
+            fallback_chain,
+            context_overflow_fallback,
             latency_sla_ms: default_latency_sla(tier),
             stage: CascadeStage::Static,
         }
@@ -781,11 +842,14 @@ impl CascadeRouter {
         };
         let selected = ModelSpec::from_slug(selected_slug);
         let tier = slug_to_tier(&selected.slug);
-        let fallback = fallback_for_tier(tier).map(ModelSpec::from_slug);
+        let fallback_chain = fallback_chain_for_model(candidates, &selected.slug);
+        let context_overflow_fallback =
+            context_overflow_fallback_for_model(candidates, &selected.slug);
 
         CascadeModel {
             primary: selected,
-            fallback,
+            fallback_chain,
+            context_overflow_fallback,
             latency_sla_ms: default_latency_sla(tier),
             stage: CascadeStage::Static,
         }
@@ -803,11 +867,14 @@ impl CascadeRouter {
         let selected =
             self.bias_model_for_cfactor(ModelSpec::from_slug(&best_slug), cfactor, agent_id);
         let tier = slug_to_tier(&selected.slug);
-        let fallback = fallback_for_tier(tier).map(ModelSpec::from_slug);
+        let fallback_chain = fallback_chain_for_model(&self.model_slugs, &selected.slug);
+        let context_overflow_fallback =
+            context_overflow_fallback_for_model(&self.model_slugs, &selected.slug);
 
         CascadeModel {
             primary: selected,
-            fallback,
+            fallback_chain,
+            context_overflow_fallback,
             latency_sla_ms: default_latency_sla(tier),
             stage: CascadeStage::Confidence,
         }
@@ -823,11 +890,14 @@ impl CascadeRouter {
 
         let selected = ModelSpec::from_slug(best_slug);
         let tier = slug_to_tier(&selected.slug);
-        let fallback = fallback_for_tier(tier).map(ModelSpec::from_slug);
+        let fallback_chain = fallback_chain_for_model(candidates, &selected.slug);
+        let context_overflow_fallback =
+            context_overflow_fallback_for_model(candidates, &selected.slug);
 
         CascadeModel {
             primary: selected,
-            fallback,
+            fallback_chain,
+            context_overflow_fallback,
             latency_sla_ms: default_latency_sla(tier),
             stage: CascadeStage::Confidence,
         }
@@ -842,11 +912,14 @@ impl CascadeRouter {
         let model = self.select_ucb_model(ctx, &self.model_slugs);
         let selected = self.bias_model_for_cfactor(model, cfactor, agent_id);
         let tier = slug_to_tier(&selected.slug);
-        let fallback = fallback_for_tier(tier).map(ModelSpec::from_slug);
+        let fallback_chain = fallback_chain_for_model(&self.model_slugs, &selected.slug);
+        let context_overflow_fallback =
+            context_overflow_fallback_for_model(&self.model_slugs, &selected.slug);
 
         CascadeModel {
             primary: selected,
-            fallback,
+            fallback_chain,
+            context_overflow_fallback,
             latency_sla_ms: default_latency_sla(tier),
             stage: CascadeStage::Ucb,
         }
@@ -856,11 +929,14 @@ impl CascadeRouter {
         let model = self.select_ucb_model(ctx, candidates);
         let selected = model;
         let tier = slug_to_tier(&selected.slug);
-        let fallback = fallback_for_tier(tier).map(ModelSpec::from_slug);
+        let fallback_chain = fallback_chain_for_model(candidates, &selected.slug);
+        let context_overflow_fallback =
+            context_overflow_fallback_for_model(candidates, &selected.slug);
 
         CascadeModel {
             primary: selected,
-            fallback,
+            fallback_chain,
+            context_overflow_fallback,
             latency_sla_ms: default_latency_sla(tier),
             stage: CascadeStage::Ucb,
         }
@@ -1136,13 +1212,18 @@ mod tests {
     // ── Test 3: static stage gives correct fallback ─────────────────────
 
     #[test]
-    fn static_stage_fallback_for_standard() {
+    fn static_stage_fallback_chain_for_standard() {
         let cascade = CascadeRouter::new(test_slugs());
         let ctx = default_ctx();
         let result = cascade.route(&ctx);
 
-        assert!(result.fallback.is_some());
-        assert_eq!(result.fallback.as_ref().unwrap().slug, "claude-haiku-3-5");
+        assert_eq!(result.fallback_chain.len(), 2);
+        assert_eq!(result.fallback_chain[0].slug, "claude-haiku-3-5");
+        assert_eq!(result.fallback_chain[1].slug, "claude-opus-4");
+        assert_eq!(
+            result.context_overflow_fallback.as_ref().unwrap().slug,
+            "claude-opus-4"
+        );
     }
 
     #[test]
@@ -1173,7 +1254,8 @@ mod tests {
         let routed = cascade.route_with_experiments(&ctx, &store);
 
         assert_eq!(routed.primary.slug, "override-model-slug");
-        assert_eq!(routed.fallback, None);
+        assert!(routed.fallback_chain.is_empty());
+        assert_eq!(routed.context_overflow_fallback, None);
         assert_eq!(routed.latency_sla_ms, 30_000);
         assert_eq!(routed.stage, CascadeStage::Static);
     }
@@ -1187,7 +1269,7 @@ mod tests {
         ctx.role = AgentRole::Conductor; // Fast tier
 
         let result = cascade.route(&ctx);
-        assert!(result.fallback.is_none());
+        assert!(result.fallback_chain.is_empty());
     }
 
     // ── Test 5: transitions to Confidence at 50 observations ────────────
@@ -1550,8 +1632,30 @@ mod tests {
 
         let result = cascade.route(&ctx);
         assert_eq!(result.primary.slug, "claude-opus-4");
-        // Premium fallback is sonnet
-        assert_eq!(result.fallback.as_ref().unwrap().slug, "claude-sonnet-4-5");
+        assert_eq!(result.fallback_chain[0].slug, "claude-sonnet-4-5");
+        assert_eq!(result.fallback_chain[1].slug, "claude-haiku-3-5");
+        assert_eq!(result.context_overflow_fallback, None);
+    }
+
+    #[test]
+    fn fallback_chain_tries_each_model_in_order() {
+        let cascade = CascadeModel {
+            primary: ModelSpec::from_slug("primary-model"),
+            fallback_chain: vec![
+                ModelSpec::from_slug("fallback-1"),
+                ModelSpec::from_slug("fallback-2"),
+                ModelSpec::from_slug("fallback-3"),
+            ],
+            context_overflow_fallback: Some(ModelSpec::from_slug("larger-context")),
+            latency_sla_ms: 30_000,
+            stage: CascadeStage::Static,
+        };
+
+        assert_eq!(cascade.model_for_attempt(0).unwrap().slug, "primary-model");
+        assert_eq!(cascade.model_for_attempt(1).unwrap().slug, "fallback-1");
+        assert_eq!(cascade.model_for_attempt(2).unwrap().slug, "fallback-2");
+        assert_eq!(cascade.model_for_attempt(3).unwrap().slug, "fallback-3");
+        assert!(cascade.model_for_attempt(4).is_none());
     }
 
     // ── Test 16: display impl for CascadeStage ──────────────────────────
