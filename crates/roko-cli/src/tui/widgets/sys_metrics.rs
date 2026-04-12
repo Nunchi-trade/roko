@@ -8,8 +8,8 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use super::super::mori_theme::MoriTheme;
-use super::super::tui_state::TuiState;
+use super::rosedust::MoriTheme;
+use super::super::state::TuiState;
 use super::braille;
 
 // ---------------------------------------------------------------------------

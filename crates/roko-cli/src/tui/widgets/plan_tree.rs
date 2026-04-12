@@ -10,8 +10,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use super::super::mori_theme::{MoriTheme, gradient_ocean};
-use super::super::tui_state::{PlanEntry, TuiState};
+use super::rosedust::{MoriTheme, gradient_ocean};
+use super::super::state::{PlanEntry, TuiState};
 
 // ---------------------------------------------------------------------------
 // Fixed column widths (chars)
@@ -638,7 +638,7 @@ fn render_gradient_bar(width: usize, fill_pct: f64, heartbeat: Option<f64>) -> V
         };
         let mut color = grad.sample(t);
         if let Some(hb) = heartbeat {
-            color = super::super::mori_theme::brighten(color, hb);
+            color = super::rosedust::brighten(color, hb);
         }
         spans.push(Span::styled(
             "\u{2588}".to_string(),
@@ -675,7 +675,7 @@ fn render_data_rain(frame: &mut Frame<'_>, area: Rect, elapsed: f64, progress: f
                     _ => '\u{00b0}', // °
                 };
                 let brightness = 0.3 + (seed.abs() * 0.7);
-                let color = super::super::mori_theme::brighten(MoriTheme::TEXT_PHANTOM, brightness);
+                let color = super::rosedust::brighten(MoriTheme::TEXT_PHANTOM, brightness);
                 if let Some(cell) = buf.cell_mut((x, y)) {
                     cell.set_char(ch);
                     cell.set_fg(color);
@@ -824,11 +824,11 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    use crate::tui::tui_state::Wave;
+    use crate::tui::state::Wave;
 
     fn sample_state() -> TuiState {
         use crate::tui::dashboard::DashboardData;
-        use crate::tui::tui_state::TuiState;
+        use crate::tui::state::TuiState;
 
         let data = DashboardData::default();
         let mut state = TuiState::from_dashboard_data(&data);
@@ -843,6 +843,7 @@ mod tests {
                 active: true,
                 phase: "implementing".into(),
                 elapsed_secs: 120.0,
+                ..Default::default()
             },
             PlanEntry {
                 id: "plan-beta".into(),
@@ -854,6 +855,7 @@ mod tests {
                 active: false,
                 phase: "done".into(),
                 elapsed_secs: 300.0,
+                ..Default::default()
             },
             PlanEntry {
                 id: "plan-gamma".into(),
@@ -865,6 +867,7 @@ mod tests {
                 active: false,
                 phase: "failed".into(),
                 elapsed_secs: 60.0,
+                ..Default::default()
             },
         ];
         state.execution_waves = vec![

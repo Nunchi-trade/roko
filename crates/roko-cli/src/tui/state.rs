@@ -268,6 +268,19 @@ pub struct TaskRow {
 // System metrics (for sys_metrics, header_bar widgets)
 // ---------------------------------------------------------------------------
 
+/// A single gate result for the command_output widget.
+#[derive(Debug, Clone, Default)]
+pub struct GateResultEntry {
+    /// Gate name (e.g. "compile", "clippy", "test").
+    pub gate: String,
+    /// Plan ID this gate ran against.
+    pub plan_id: String,
+    /// Whether the gate passed.
+    pub passed: bool,
+    /// Gate output text (stdout + stderr).
+    pub output: String,
+}
+
 /// System resource metrics snapshot.
 #[derive(Debug, Clone, Default)]
 pub struct SysMetrics {
@@ -317,6 +330,10 @@ pub struct TuiState {
     // -- task checklist --
     /// Task rows for the task_progress widget.
     pub current_task_checklist: Vec<TaskRow>,
+
+    // -- gate results --
+    /// Gate pipeline results for the command_output widget.
+    pub gate_results: Vec<GateResultEntry>,
 
     // -- agents (Vec-based roster for widgets) --
     /// Ordered agent roster for widgets (agent_pool, agent_output, header_bar).
@@ -497,6 +514,7 @@ impl Default for TuiState {
             phase_pipeline: Vec::new(),
             execution_waves: Vec::new(),
             current_task_checklist: Vec::new(),
+            gate_results: Vec::new(),
 
             agents: Vec::new(),
             agents_by_id: HashMap::new(),

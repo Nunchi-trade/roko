@@ -9,8 +9,8 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use super::super::mori_theme::{MoriTheme, gradient_ocean};
-use super::super::tui_state::TuiState;
+use super::rosedust::{MoriTheme, gradient_ocean};
+use super::super::state::TuiState;
 
 // ---------------------------------------------------------------------------
 // Public render

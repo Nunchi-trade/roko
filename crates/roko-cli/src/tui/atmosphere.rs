@@ -64,6 +64,42 @@ impl Atmosphere {
         }
     }
 
+    /// Current frame count.
+    #[must_use]
+    pub const fn frame(&self) -> u64 {
+        self.frame_count
+    }
+
+    /// Elapsed seconds since start.
+    #[must_use]
+    pub fn elapsed(&self) -> f64 {
+        self.elapsed
+    }
+
+    /// Approximate FPS based on elapsed time and frame count.
+    #[must_use]
+    pub fn fps(&self) -> f64 {
+        if self.elapsed > 0.0 {
+            self.frame_count as f64 / self.elapsed
+        } else {
+            60.0
+        }
+    }
+
+    /// Spinner character cycling through animation frames.
+    #[must_use]
+    pub fn spinner(&self) -> char {
+        const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        SPINNER[(self.frame_count as usize / 4) % SPINNER.len()]
+    }
+
+    /// Ethereal spinner (slower, for subtle animations).
+    #[must_use]
+    pub fn spinner_ethereal(&self) -> char {
+        const SPINNER: &[char] = &['◜', '◝', '◞', '◟'];
+        SPINNER[(self.frame_count as usize / 8) % SPINNER.len()]
+    }
+
     /// Apply a full-frame bloom post-processing pass.
     /// Brightens cells whose luminance exceeds `threshold` by `intensity`.
     pub fn apply(&self, area: Rect, buf: &mut Buffer) {

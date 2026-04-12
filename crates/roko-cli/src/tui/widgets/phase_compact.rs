@@ -10,9 +10,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use super::super::mori_atmosphere::Atmosphere;
-use super::super::mori_theme::MoriTheme;
-use super::super::tui_state::{PhaseStatus, TuiState};
+use super::super::atmosphere::Atmosphere;
+use super::rosedust::MoriTheme;
+use super::super::state::{PhaseStatus, TuiState};
 
 // ---------------------------------------------------------------------------
 // Phase labels
@@ -182,7 +182,7 @@ pub fn render_phase_compact(frame: &mut Frame<'_>, area: Rect, state: &TuiState,
 
 /// Build the active-phase detail line: icon + name + pct + elapsed + ETA.
 fn build_active_detail(
-    step: &super::super::tui_state::PhaseStep,
+    step: &super::super::state::PhaseStep,
     atm: &Atmosphere,
 ) -> Line<'static> {
     let pulse_color = pulse_active(atm.heartbeat());
@@ -246,8 +246,8 @@ fn pulse_active(heartbeat: f64) -> Color {
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::mori_atmosphere::Atmosphere;
-    use super::super::super::tui_state::{PhaseStatus, PhaseStep, TuiState};
+    use super::super::super::atmosphere::Atmosphere;
+    use super::super::super::state::{PhaseStatus, PhaseStep, TuiState};
     use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;

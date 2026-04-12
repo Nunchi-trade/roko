@@ -7,8 +7,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use super::super::mori_theme::{Gradient, MoriTheme, brighten, gradient_context};
-use super::super::tui_state::TuiState;
+use super::rosedust::{Gradient, MoriTheme, brighten, gradient_context};
+use super::super::state::TuiState;
 
 // ---------------------------------------------------------------------------
 // Helpers

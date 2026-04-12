@@ -24,8 +24,8 @@ use ratatui::widgets::{
     Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
 
-use super::super::mori_theme::MoriTheme;
-use super::super::tui_state::{TaskRowStatus, TuiState};
+use super::rosedust::MoriTheme;
+use super::super::state::{TaskRowStatus, TuiState};
 
 // ---------------------------------------------------------------------------
 // Public render entry-point
@@ -385,7 +385,7 @@ fn pulse_rose(heartbeat: f64) -> Color {
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::tui_state::{TaskRow, TaskRowStatus, TuiState};
+    use super::super::super::state::{TaskRow, TaskRowStatus, TuiState};
     use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;

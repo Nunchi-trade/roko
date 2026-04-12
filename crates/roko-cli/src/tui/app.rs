@@ -733,63 +733,14 @@ impl App {
     // Rendering helpers
     // -----------------------------------------------------------------------
 
-    fn render_tab_header(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-        let tab_titles: Vec<Line<'_>> = Tab::ALL
-            .iter()
-            .map(|t| {
-                let label = format!("F{} {}", t.index() + 1, t.label());
-                if *t == self.tui_state.active_tab {
-                    Line::from(Span::styled(label, theme.accent_bold()))
-                } else {
-                    Line::from(Span::styled(label, theme.muted()))
-                }
-            })
-            .collect();
-
-        let tabs = ratatui::widgets::Tabs::new(tab_titles)
-            .block(
-                Block::default()
-                    .borders(Borders::BOTTOM)
-                    .title(Span::styled("roko", theme.accent_bold())),
-            )
-            .style(theme.text())
-            .highlight_style(theme.accent_bold())
-            .select(self.tui_state.active_tab.index());
-        frame.render_widget(tabs, area);
+    fn render_tab_header(&self, frame: &mut Frame<'_>, area: Rect, _theme: &Theme) {
+        // Use the Mori-ported header_bar widget with full progress/ETA/tokens
+        super::widgets::header_bar::render_header_bar(frame, area, &self.tui_state);
     }
 
-    fn render_status_footer(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-        let mode_label = match self.tui_state.input_mode {
-            InputMode::Normal => "NORMAL",
-            InputMode::Inject => "INJECT",
-            InputMode::Filter => "FILTER",
-            InputMode::Confirm => "CONFIRM",
-        };
-        let focus_label = format!("{:?}", self.tui_state.focus);
-        let cost_label = if self.tui_state.cumulative_cost_usd > 0.0 {
-            format!("${:.4}", self.tui_state.cumulative_cost_usd)
-        } else {
-            String::new()
-        };
-
-        let status = Line::from(vec![
-            Span::styled(format!(" {mode_label} "), theme.accent_bold()),
-            Span::raw(" "),
-            Span::styled(focus_label, theme.muted()),
-            Span::raw("  "),
-            Span::styled(
-                format!("{} plans", self.tui_state.plans.len()),
-                theme.text(),
-            ),
-            Span::raw("  "),
-            Span::styled(cost_label, theme.success()),
-            Span::raw("  "),
-            Span::styled(
-                "? help  q quit",
-                theme.muted(),
-            ),
-        ]);
-        frame.render_widget(Paragraph::new(status), area);
+    fn render_status_footer(&self, frame: &mut Frame<'_>, area: Rect, _theme: &Theme) {
+        // Use the Mori-ported status_bar widget with context-sensitive hints
+        super::widgets::status_bar::render_status_bar(frame, area, &self.tui_state);
     }
 
     fn render_help_overlay(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {

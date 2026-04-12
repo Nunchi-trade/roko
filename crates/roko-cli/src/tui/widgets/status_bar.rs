@@ -9,8 +9,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use super::super::mori_theme::MoriTheme;
-use super::super::tui_state::{Tab, TuiState};
+use super::rosedust::MoriTheme;
+use super::super::state::TuiState;
+use super::super::tabs::Tab;
 
 const HEARTBEAT_FRAMES: [&str; 4] = ["\u{00b7}", "\u{00b0}", ".", "\u{25cf}"];
 
@@ -168,7 +169,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::super::super::dashboard::DashboardData;
-    use super::super::super::tui_state::TuiState;
+    use super::super::super::state::TuiState;
 
     #[test]
     fn status_bar_renders_without_panic() {

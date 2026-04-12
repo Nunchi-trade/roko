@@ -10,8 +10,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use super::super::mori_theme::{MoriTheme, gradient_fire};
-use super::super::tui_state::TuiState;
+use super::rosedust::{MoriTheme, gradient_fire};
+use super::super::state::TuiState;
 
 const HEARTBEAT_FRAMES: [&str; 4] = ["\u{00b7}", "\u{00b0}", "\u{2219}", "\u{25cf}"];
 
@@ -296,14 +296,14 @@ pub fn render_header_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
     }
 
     // ── 8. F-key strip (right-aligned) ────────────────────────────────
-    use super::super::tui_state::Tab;
+    use super::super::tabs::Tab;
 
     let fkey_items: Vec<(&str, Color, &str, Tab)> = vec![
         (" F1", MoriTheme::ROSE, "dash", Tab::Dashboard),
         (" F2", MoriTheme::BONE_DIM, "plans", Tab::Plans),
         (" F3", MoriTheme::SAGE, "agents", Tab::Agents),
-        (" F4", MoriTheme::DREAM, "logs", Tab::Logs),
-        (" F5", MoriTheme::DREAM, "sigs", Tab::Signals),
+        (" F4", MoriTheme::DREAM, "git", Tab::Git),
+        (" F5", MoriTheme::DREAM, "logs", Tab::Logs),
         (" F6", MoriTheme::BONE_DIM, "cfg", Tab::Config),
     ];
 
@@ -368,7 +368,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::super::super::dashboard::DashboardData;
-    use super::super::super::tui_state::TuiState;
+    use super::super::super::state::TuiState;
 
     #[test]
     fn header_bar_renders_without_panic() {
