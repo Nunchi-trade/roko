@@ -21,6 +21,7 @@
 //! [`parking_lot::Mutex`] for confidence-stage statistics.
 
 use parking_lot::Mutex;
+use roko_agent::provider::ProviderError;
 use roko_core::OperatingFrequency;
 use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
 use roko_core::config::schema::RewardWeights;
@@ -92,6 +93,20 @@ impl CascadeModel {
         match attempt {
             0 => Some(&self.primary),
             _ => self.fallback_chain.get(attempt - 1),
+        }
+    }
+
+    /// Return the best fallback to use for a provider-specific failure.
+    #[must_use]
+    pub fn fallback_for_error(&self, error: &ProviderError) -> Option<&ModelSpec> {
+        match error {
+            ProviderError::ContextOverflow => self.context_overflow_fallback.as_ref(),
+            ProviderError::RateLimit { .. } => self
+                .fallback_chain
+                .iter()
+                .find(|model| model.backend != self.primary.backend)
+                .or_else(|| self.fallback_chain.first()),
+            _ => self.fallback_chain.first(),
         }
     }
 }
@@ -1656,6 +1671,45 @@ mod tests {
         assert_eq!(cascade.model_for_attempt(2).unwrap().slug, "fallback-2");
         assert_eq!(cascade.model_for_attempt(3).unwrap().slug, "fallback-3");
         assert!(cascade.model_for_attempt(4).is_none());
+    }
+
+    #[test]
+    fn error_specific_fallback_routes_by_error_type() {
+        let cascade = CascadeModel {
+            primary: ModelSpec::from_slug("gpt-5"),
+            fallback_chain: vec![
+                ModelSpec::from_slug("glm-5.1"),
+                ModelSpec::from_slug("claude-sonnet-4-5"),
+                ModelSpec::from_slug("ollama/llama3"),
+            ],
+            context_overflow_fallback: Some(ModelSpec::from_slug("claude-opus-4")),
+            latency_sla_ms: 30_000,
+            stage: CascadeStage::Static,
+        };
+
+        assert_eq!(
+            cascade
+                .fallback_for_error(&ProviderError::ContextOverflow)
+                .unwrap()
+                .slug,
+            "claude-opus-4"
+        );
+        assert_eq!(
+            cascade
+                .fallback_for_error(&ProviderError::RateLimit {
+                    retry_after_ms: Some(1_000),
+                })
+                .unwrap()
+                .slug,
+            "claude-sonnet-4-5"
+        );
+        assert_eq!(
+            cascade
+                .fallback_for_error(&ProviderError::ServerError(503))
+                .unwrap()
+                .slug,
+            "glm-5.1"
+        );
     }
 
     // ── Test 16: display impl for CascadeStage ──────────────────────────
