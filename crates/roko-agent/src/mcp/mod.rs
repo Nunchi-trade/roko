@@ -10,6 +10,7 @@ pub mod client;
 pub mod config;
 pub mod dedup;
 pub mod dynamic_registry;
+pub mod handler;
 pub mod to_tool_def;
 
 pub use bridge::{McpBridgeError, discover_mcp_tools};
@@ -19,4 +20,5 @@ pub use client::{
 pub use config::{McpConfig, McpServerConfig, find_mcp_config};
 pub use dedup::dedup_tools;
 pub use dynamic_registry::DynamicToolRegistry;
+pub use handler::{McpHandlerResolver, McpToolHandler};
 pub use to_tool_def::mcp_to_tool_def;
