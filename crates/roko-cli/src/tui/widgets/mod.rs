@@ -3,6 +3,7 @@
 pub mod branch_tree;
 pub mod context_gauge;
 pub mod diff_panel;
+pub mod error_digest;
 pub mod parallel_pool;
 pub mod phase_timeline;
 pub mod plan_list;

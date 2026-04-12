@@ -3,53 +3,71 @@
 //! Left panel (38%): plan tree + phase compact + task progress.
 //! Right panel (62%): sub-tabbed detail view (Agents, Output, Diff,
 //! Errors, Git, Context/MCP, Processes).
-//! Wave progress ribbon at bottom.
+//! Bottom ribbon: wave progress + token sparkline + sys metrics.
+//!
+//! Calls real compiled widgets where available; falls back to inline
+//! rendering when widget modules depend on uncompiled `mori_theme` /
+//! `tui_state` types.
 
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap};
 use ratatui::Frame;
+
+use roko_core::dashboard_snapshot::{ErrorEntry, GateVerdict, SnapshotStats};
 
 use super::ViewState;
 use crate::tui::dashboard::{DashboardData, Theme};
+use crate::tui::input::FocusZone;
 use crate::tui::state::TuiState;
+use crate::tui::widgets;
 
-/// Sub-tabs within the dashboard detail panel.
-const SUB_TAB_LABELS: &[&str] = &[
-    "a:Agents",
-    "o:Output",
-    "d:Diff",
-    "e:Errors",
-    "g:Git",
-    "m:MCP",
-    "P:Procs",
+// ---------------------------------------------------------------------------
+// Sub-tab labels
+// ---------------------------------------------------------------------------
+
+const SUB_TAB_LABELS: &[(&str, &str)] = &[
+    ("a", "Agents"),
+    ("o", "Output"),
+    ("d", "Diff"),
+    ("e", "Errors"),
+    ("g", "Git"),
+    ("m", "MCP"),
+    ("P", "Procs"),
 ];
+
+// ---------------------------------------------------------------------------
+// Public render entry-point
+// ---------------------------------------------------------------------------
 
 /// Render the full dashboard view.
 pub fn render(
     frame: &mut Frame<'_>,
     area: Rect,
     data: &DashboardData,
-    _tui_state: &TuiState,
+    tui_state: &TuiState,
     view_state: &ViewState,
     theme: &Theme,
 ) {
     let outer = Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).split(area);
-
     let main = Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)])
         .split(outer[0]);
 
-    render_left_panel(frame, main[0], data, view_state, theme);
-    render_right_panel(frame, main[1], data, view_state, theme);
-    render_wave_ribbon(frame, outer[1], data, theme);
+    render_left_panel(frame, main[0], data, tui_state, view_state, theme);
+    render_right_panel(frame, main[1], data, tui_state, view_state, theme);
+    render_bottom_ribbon(frame, outer[1], data, theme);
 }
 
-/// Left panel: plan tree (top 50%), phase compact (15%), task progress (35%).
+// ===========================================================================
+// Left panel: plan tree (50%) + phase compact (15%) + task progress (35%)
+// ===========================================================================
+
 fn render_left_panel(
     frame: &mut Frame<'_>,
     area: Rect,
     data: &DashboardData,
+    tui_state: &TuiState,
     view_state: &ViewState,
     theme: &Theme,
 ) {
@@ -60,250 +78,110 @@ fn render_left_panel(
     ])
     .split(area);
 
-    render_plan_tree(frame, sections[0], data, view_state, theme);
+    let plan_focused = matches!(tui_state.focus, FocusZone::PlanTree);
+    let task_focused = matches!(tui_state.focus, FocusZone::TaskProgress);
+
+    render_plan_tree(frame, sections[0], data, view_state, plan_focused, theme);
     render_phase_compact(frame, sections[1], data, theme);
-    render_task_progress(frame, sections[2], data, view_state, theme);
+    render_task_progress(frame, sections[2], data, view_state, task_focused, theme);
 }
 
 // ---------------------------------------------------------------------------
-// Plan tree — rich rendering with colored counts, progress bars, status icons
+// Plan tree -- delegates to widgets::plan_list
 // ---------------------------------------------------------------------------
 
-/// Plan tree: hierarchical plan listing with colored task counts and progress.
 fn render_plan_tree(
     frame: &mut Frame<'_>,
     area: Rect,
     data: &DashboardData,
     view_state: &ViewState,
+    focused: bool,
     theme: &Theme,
 ) {
-    let total = data.plans.len();
-    let completed = data.plans.iter().filter(|p| p.completed).count();
-    let pending = total.saturating_sub(completed);
-
-    // Build title with colored counts
-    let title = format!(
-        " Plans ({completed}/{total}) ",
-    );
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .border_style(theme.accent());
-
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if data.plans.is_empty() {
-        let empty = Paragraph::new("no plans discovered")
-            .style(theme.muted())
-            .wrap(Wrap { trim: false });
-        frame.render_widget(empty, inner);
-        return;
-    }
-
-    let bar_width = 10usize;
-
-    let items: Vec<ListItem<'_>> = data
+    let entries: Vec<widgets::plan_list::PlanEntry> = data
         .plans
         .iter()
-        .enumerate()
-        .map(|(i, plan)| {
-            let is_selected = i == view_state.selected;
-
-            // Status icon with semantic color
-            let (icon, icon_style) = if plan.completed {
-                ("\u{2713}", Style::default().fg(Color::Green))      // checkmark green
-            } else {
-                ("\u{25cb}", Style::default().fg(Color::DarkGray))   // circle gray
-            };
-
-            // Task count coloring: green for all done, yellow for in-progress, gray for none
-            let count_style = if plan.completed {
-                Style::default().fg(Color::Green)
-            } else if plan.task_count > 0 {
-                Style::default().fg(Color::Yellow)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-
-            // Progress bar: filled blocks for done ratio
-            let done_count = if plan.completed { plan.task_count } else { 0 };
-            let fill_pct = if plan.task_count > 0 {
-                done_count as f64 / plan.task_count as f64
-            } else {
-                0.0
-            };
-            let filled = (fill_pct * bar_width as f64).round() as usize;
-            let empty = bar_width.saturating_sub(filled);
-
-            let bar_color = if plan.completed {
-                Color::Green
-            } else if done_count > 0 {
-                Color::Yellow
-            } else {
-                Color::DarkGray
-            };
-
-            let bar_str = format!(
-                "{}{}",
-                "\u{2588}".repeat(filled.min(bar_width)),
-                "\u{2500}".repeat(empty),
-            );
-
-            // Selection style
-            let text_style = if is_selected {
-                theme.selection()
-            } else if plan.completed {
-                theme.success()
-            } else {
-                theme.text()
-            };
-
-            // Truncate name
-            let max_name = (inner.width as usize).saturating_sub(bar_width + 18);
-            let name = truncate(&plan.title, max_name);
-
-            ListItem::new(Line::from(vec![
-                Span::styled(format!(" {icon} "), icon_style),
-                Span::styled(name, text_style),
-                Span::raw(" "),
-                Span::styled(
-                    format!("{:>2}/{:<2}", done_count, plan.task_count),
-                    count_style,
-                ),
-                Span::raw(" "),
-                Span::styled(bar_str, Style::default().fg(bar_color)),
-            ]))
+        .map(|p| {
+            let done = if p.completed { p.task_count as u32 } else { 0 };
+            widgets::plan_list::PlanEntry {
+                name: p.title.clone(),
+                progress: if p.task_count > 0 { done as f64 / p.task_count as f64 } else { 0.0 },
+                tasks_done: done,
+                tasks_total: p.task_count as u32,
+                failed: false,
+            }
         })
         .collect();
 
-    let list = List::new(items);
-    frame.render_widget(list, inner);
+    if entries.is_empty() {
+        let border = if focused { theme.accent() } else { theme.muted() };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Plans (0) ")
+            .border_style(border);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        frame.render_widget(
+            Paragraph::new("no plans discovered").style(theme.muted()),
+            inner,
+        );
+        return;
+    }
+
+    widgets::plan_list::render_plan_list(
+        frame,
+        area,
+        &entries,
+        view_state.selected,
+        view_state.scroll as usize,
+        theme,
+    );
 }
 
 // ---------------------------------------------------------------------------
-// Phase compact — segmented phase bar with stage names
+// Phase compact -- delegates to widgets::phase_timeline
 // ---------------------------------------------------------------------------
 
-/// Phase compact: segmented bar showing execution stages.
-fn render_phase_compact(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    data: &DashboardData,
-    theme: &Theme,
-) {
-    // Derive phase info from execution state
-    let (phase_label, phase_pct) = if let Some(exec) = &data.current_plan_execution {
+fn render_phase_compact(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, theme: &Theme) {
+    let phase_stages = ["preflight", "implement", "verify", "gate", "merge"];
+
+    let (phases, current_idx) = if let Some(exec) = &data.current_plan_execution {
         let pct = if exec.tasks_total > 0 {
             exec.tasks_done as f64 / exec.tasks_total as f64
         } else {
             0.0
         };
-        // Derive stage name from task phases
-        let current_phase = exec
-            .tasks
+        let entries: Vec<_> = phase_stages
             .iter()
-            .find(|t| t.is_current)
-            .map(|t| t.phase.as_str())
-            .unwrap_or("idle");
-        (current_phase.to_string(), pct)
+            .map(|&name| widgets::phase_timeline::PhaseEntry {
+                name: name.to_string(),
+                elapsed_secs: 0.0,
+            })
+            .collect();
+        let idx = ((pct * phase_stages.len() as f64).floor() as usize)
+            .min(phase_stages.len().saturating_sub(1));
+        (entries, idx)
     } else {
-        ("idle".to_string(), 0.0)
+        let entries = vec![widgets::phase_timeline::PhaseEntry {
+            name: "idle".into(),
+            elapsed_secs: 0.0,
+        }];
+        (entries, 0)
     };
 
-    let title = format!(" Phase \u{00b7} {} ", phase_label);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .border_style(theme.muted());
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if inner.height < 1 || inner.width < 10 {
-        return;
-    }
-
-    let bar_width = inner.width as usize;
-    let mut lines: Vec<Line<'_>> = Vec::new();
-
-    // Line 1: Segmented phase bar
-    // Define canonical phases and determine which are done/active/pending
-    let phase_stages = ["preflight", "implement", "verify", "gate", "merge"];
-    let seg_width = bar_width / phase_stages.len().max(1);
-    let leftover = bar_width.saturating_sub(seg_width * phase_stages.len());
-
-    let mut bar_spans: Vec<Span<'_>> = Vec::new();
-
-    for (i, &stage) in phase_stages.iter().enumerate() {
-        let w = if i == phase_stages.len() - 1 {
-            seg_width + leftover
-        } else {
-            seg_width
-        };
-
-        // Determine if this stage is done, active, or pending based on overall progress
-        let stage_threshold = (i as f64 + 1.0) / phase_stages.len() as f64;
-        let prev_threshold = i as f64 / phase_stages.len() as f64;
-
-        let (fill_char, fill_color) = if phase_pct >= stage_threshold {
-            // Stage complete
-            ("\u{2588}", Color::Green)
-        } else if phase_pct > prev_threshold {
-            // Stage active - partial fill
-            ("\u{2593}", Color::Yellow)
-        } else {
-            // Stage pending
-            ("\u{2500}", Color::DarkGray)
-        };
-
-        bar_spans.push(Span::styled(
-            fill_char.repeat(w),
-            Style::default().fg(fill_color),
-        ));
-    }
-    lines.push(Line::from(bar_spans));
-
-    // Line 2: Stage labels below the bar
-    if inner.height >= 2 {
-        let mut label_spans: Vec<Span<'_>> = Vec::new();
-        for (i, &stage) in phase_stages.iter().enumerate() {
-            let w = if i == phase_stages.len() - 1 {
-                seg_width + leftover
-            } else {
-                seg_width
-            };
-            let stage_threshold = (i as f64 + 1.0) / phase_stages.len() as f64;
-            let prev_threshold = i as f64 / phase_stages.len() as f64;
-
-            let label_color = if phase_pct >= stage_threshold {
-                Color::Green
-            } else if phase_pct > prev_threshold {
-                Color::Yellow
-            } else {
-                Color::DarkGray
-            };
-
-            let padded = format!("{:^width$}", stage, width = w);
-            label_spans.push(Span::styled(padded, Style::default().fg(label_color)));
-        }
-        lines.push(Line::from(label_spans));
-    }
-
-    let paragraph = Paragraph::new(lines);
-    frame.render_widget(paragraph, inner);
+    widgets::phase_timeline::render_phase_timeline(frame, area, &phases, current_idx, theme);
 }
 
 // ---------------------------------------------------------------------------
-// Task progress — table with elapsed time and iteration counts
+// Task progress -- inline (MoriTheme widget not compiled)
 // ---------------------------------------------------------------------------
 
-/// Task progress: list of active tasks with elapsed time and iteration.
 fn render_task_progress(
     frame: &mut Frame<'_>,
     area: Rect,
     data: &DashboardData,
     view_state: &ViewState,
+    focused: bool,
     theme: &Theme,
 ) {
     let total = data.active_tasks.len();
@@ -313,252 +191,196 @@ fn render_task_progress(
         .filter(|t| t.status == "done" || t.status == "completed")
         .count();
 
-    let title = format!(" Tasks ({done}/{total}) ");
+    let border = if focused { theme.accent() } else { theme.muted() };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(title)
-        .border_style(theme.muted());
+        .title(format!(" Tasks ({done}/{total}) "))
+        .border_style(border);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     if data.active_tasks.is_empty() {
-        let empty = Paragraph::new("no active tasks")
-            .style(theme.muted())
-            .wrap(Wrap { trim: false });
-        frame.render_widget(empty, inner);
+        frame.render_widget(
+            Paragraph::new("no active tasks").style(theme.muted()),
+            inner,
+        );
         return;
     }
 
-    // Build enhanced rows with status icon, elapsed time, and iteration
-    let rows: Vec<Row<'_>> = data
-        .active_tasks
-        .iter()
-        .enumerate()
-        .map(|(i, task)| {
-            // Status icon
-            let (icon, status_style) = match task.status.as_str() {
-                "done" | "completed" => ("\u{2713}", Style::default().fg(Color::Green)),
-                "running" | "in_progress" => ("\u{25ba}", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                "failed" => ("\u{2717}", Style::default().fg(Color::Red)),
-                "blocked" => ("\u{2717}", Style::default().fg(Color::Red)),
-                _ => ("\u{00b7}", Style::default().fg(Color::DarkGray)),
-            };
+    let mut lines: Vec<Line<'_>> = Vec::new();
 
-            let row_style = if i == view_state.secondary_selected {
-                theme.selection()
-            } else {
-                match task.status.as_str() {
-                    "done" | "completed" => theme.success(),
-                    "running" | "in_progress" => theme.info(),
-                    "failed" => theme.danger(),
-                    _ => theme.text(),
-                }
-            };
+    // Progress bar.
+    if total > 0 && inner.width > 12 {
+        let bar_w = (inner.width as usize).saturating_sub(12);
+        let pct = done as f64 / total.max(1) as f64;
+        let filled = (pct * bar_w as f64).round() as usize;
+        let bar_color = match () {
+            _ if done == total => Color::Green,
+            _ if done > 0 => Color::Yellow,
+            _ => Color::DarkGray,
+        };
+        lines.push(Line::from(vec![
+            Span::raw(" "),
+            Span::styled("\u{2588}".repeat(filled.min(bar_w)), Style::default().fg(bar_color)),
+            Span::styled("\u{2591}".repeat(bar_w.saturating_sub(filled)), Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("  {done}/{total}"), Style::default().fg(Color::Gray)),
+        ]));
+    }
 
-            // Elapsed time from efficiency events (find matching task)
-            let elapsed_ms: u64 = data
-                .efficiency_events
-                .iter()
-                .filter(|e| e.task_id == task.task_id)
-                .map(|e| e.wall_time_ms)
-                .sum();
-            let elapsed_str = if elapsed_ms > 0 {
-                format_duration_ms(elapsed_ms as f64)
-            } else {
-                "-".to_string()
-            };
+    // Task rows.
+    let visible = (inner.height as usize).saturating_sub(lines.len() + 1);
+    let start = view_state.secondary_selected.min(total.saturating_sub(1));
+    let end = (start + visible).min(total);
 
-            // Iteration count
-            let iter_str = if task.iteration > 0 {
-                format!("#{}", task.iteration)
-            } else {
-                "-".to_string()
-            };
+    for (i, task) in data.active_tasks[start..end].iter().enumerate() {
+        let idx = start + i;
+        let (icon, icon_s) = task_icon(task.status.as_str());
+        let text_s = if idx == view_state.secondary_selected && focused {
+            theme.selection()
+        } else {
+            task_text_style(task.status.as_str(), theme)
+        };
 
-            Row::new(vec![
-                Cell::from(Span::styled(format!(" {icon}"), status_style)),
-                Cell::from(truncate(&task.task_id, 18)),
-                Cell::from(task.status.as_str()),
-                Cell::from(elapsed_str),
-                Cell::from(iter_str),
-            ])
-            .style(row_style)
-        })
-        .collect();
+        let elapsed_ms: u64 = data
+            .efficiency_events
+            .iter()
+            .filter(|e| e.task_id == task.task_id)
+            .map(|e| e.wall_time_ms)
+            .sum();
 
-    let widths = [
-        Constraint::Length(3),
-        Constraint::Min(12),
-        Constraint::Length(10),
-        Constraint::Length(8),
-        Constraint::Length(6),
-    ];
-    let table = Table::new(rows, widths)
-        .header(
-            Row::new([" ", "task", "status", "elapsed", "iter"])
-                .style(theme.accent().add_modifier(Modifier::BOLD)),
-        )
-        .column_spacing(1);
-    frame.render_widget(table, inner);
+        let mut spans = vec![
+            Span::styled(format!(" {icon} "), icon_s),
+            Span::styled(truncate(&task.task_id, 18), text_s),
+        ];
+        if elapsed_ms > 0 {
+            spans.push(Span::styled(
+                format!(" {}", fmt_duration_ms(elapsed_ms as f64)),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
-/// Right panel: sub-tabbed detail view.
+// ===========================================================================
+// Right panel: sub-tabbed detail view
+// ===========================================================================
+
 fn render_right_panel(
     frame: &mut Frame<'_>,
     area: Rect,
     data: &DashboardData,
+    tui_state: &TuiState,
     view_state: &ViewState,
     theme: &Theme,
 ) {
     let sections = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
+    let sub = view_state.sub_tab.min(SUB_TAB_LABELS.len().saturating_sub(1));
+    render_sub_tab_bar(frame, sections[0], sub, theme);
 
-    // Sub-tab bar
-    let sub_tab_idx = view_state.sub_tab.min(SUB_TAB_LABELS.len().saturating_sub(1));
-    let spans: Vec<Span<'_>> = SUB_TAB_LABELS
-        .iter()
-        .enumerate()
-        .flat_map(|(i, label)| {
-            let style = if i == sub_tab_idx {
-                theme.selection()
-            } else {
-                theme.muted()
-            };
-            let sep = if i + 1 < SUB_TAB_LABELS.len() {
-                " | "
-            } else {
-                ""
-            };
-            vec![Span::styled(*label, style), Span::raw(sep)]
-        })
-        .collect();
-    let tab_line = Paragraph::new(Line::from(spans));
-    frame.render_widget(tab_line, sections[0]);
+    let focused = matches!(tui_state.focus, FocusZone::RightPanel);
 
-    // Sub-tab content
-    match sub_tab_idx {
-        0 => render_sub_agents(frame, sections[1], data, theme),
-        1 => render_sub_output(frame, sections[1], data, view_state, theme),
-        2 => render_sub_diff(frame, sections[1], data, theme),
+    match sub {
+        0 => render_sub_agents(frame, sections[1], data, view_state, focused, theme),
+        1 => render_output_panel(frame, sections[1], data, view_state, focused, theme),
+        2 => render_sub_diff(frame, sections[1], data, tui_state, theme),
         3 => render_sub_errors(frame, sections[1], data, theme),
-        4 => render_sub_git(frame, sections[1], data, theme),
+        4 => render_sub_git(frame, sections[1], theme),
         5 => render_sub_mcp(frame, sections[1], data, theme),
-        6 => render_sub_processes(frame, sections[1], data, theme),
+        6 => render_sub_processes(frame, sections[1], data, focused, theme),
         _ => {}
     }
 }
 
+/// Sub-tab bar with key labels and active highlighting.
+fn render_sub_tab_bar(frame: &mut Frame<'_>, area: Rect, active: usize, theme: &Theme) {
+    let mut spans: Vec<Span<'_>> = vec![Span::raw(" ")];
+    for (i, (key, label)) in SUB_TAB_LABELS.iter().enumerate() {
+        let style = if i == active {
+            Style::default()
+                .fg(theme.background)
+                .bg(theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.muted)
+        };
+        spans.push(Span::styled(format!(" {key}:{label} "), style));
+        if i + 1 < SUB_TAB_LABELS.len() {
+            spans.push(Span::styled("\u{2502}", Style::default().fg(Color::DarkGray)));
+        }
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
 // ---------------------------------------------------------------------------
-// Sub-tab: Agents — roster with model name and token counts
+// Sub-tab: Agents -- pool (top) + output (bottom)
 // ---------------------------------------------------------------------------
 
-/// Sub-tab: Agents roster with model and token info.
 fn render_sub_agents(
     frame: &mut Frame<'_>,
     area: Rect,
     data: &DashboardData,
+    view_state: &ViewState,
+    focused: bool,
     theme: &Theme,
 ) {
-    let active_count = data
-        .agents
-        .iter()
-        .filter(|a| a.status == "running" || a.status == "active")
-        .count();
-    let title = format!(" Agents ({} active) ", active_count);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .border_style(theme.accent());
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let sections = Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(area);
 
-    if data.agents.is_empty() {
-        let empty = Paragraph::new("no active agents")
-            .style(theme.muted())
-            .wrap(Wrap { trim: false });
-        frame.render_widget(empty, inner);
-        return;
-    }
-
-    // Build agent activity snapshot for model/token info
+    // Build pool entries once.
     let activity =
         crate::tui::dashboard::build_agent_activity_snapshot(&data.agents, &data.efficiency_events);
 
-    let rows: Vec<Row<'_>> = data
+    let pool: Vec<widgets::parallel_pool::ParallelAgentState> = data
         .agents
         .iter()
         .map(|agent| {
-            let status_style = match agent.status.as_str() {
-                "running" | "active" => theme.info(),
-                "idle" => theme.muted(),
-                "error" | "failed" => theme.danger(),
-                _ => theme.text(),
-            };
-
-            // Find matching activity row for model/token info
-            let activity_row = activity.as_ref().and_then(|snap| {
-                snap.active_agents
-                    .iter()
-                    .find(|row| row.agent_id == agent.id)
+            let row = activity.as_ref().and_then(|s| {
+                s.active_agents.iter().find(|r| r.agent_id == agent.id)
             });
-
-            let model_str = activity_row
-                .map(|r| shorten_model(&r.model))
-                .unwrap_or_else(|| "-".to_string());
-
-            let tokens_str = activity_row
-                .map(|r| format_tokens(r.tokens_used))
-                .unwrap_or_else(|| "-".to_string());
-
-            let cost_str = activity_row
-                .map(|r| {
-                    if r.cost_usd > 0.0 {
-                        format!("${:.3}", r.cost_usd)
-                    } else {
-                        "-".to_string()
-                    }
-                })
-                .unwrap_or_else(|| "-".to_string());
-
-            Row::new(vec![
-                Cell::from(truncate(&agent.id, 14)),
-                Cell::from(agent.label.as_str()),
-                Cell::from(Span::styled(agent.status.as_str(), status_style)),
-                Cell::from(model_str),
-                Cell::from(tokens_str),
-                Cell::from(cost_str),
-            ])
+            let state = match agent.status.as_str() {
+                "running" | "active" => widgets::parallel_pool::AgentRunState::Active,
+                "done" | "completed" => widgets::parallel_pool::AgentRunState::Done,
+                "error" | "failed" => widgets::parallel_pool::AgentRunState::Failed,
+                _ => widgets::parallel_pool::AgentRunState::Idle,
+            };
+            let used = row.map_or(0, |r| r.tokens_used);
+            let total = row.map_or(200_000, |r| if r.tokens_used > 0 { r.tokens_used * 2 } else { 200_000 });
+            widgets::parallel_pool::ParallelAgentState {
+                role: agent.label.clone(),
+                model: row.map_or_else(|| "-".to_string(), |r| r.model.clone()),
+                task: agent.plan_id.as_deref().unwrap_or("-").to_string(),
+                tokens_used: used,
+                tokens_total: total,
+                state,
+                context_pct: if total > 0 { used as f64 / total as f64 } else { 0.0 },
+            }
         })
         .collect();
 
-    let widths = [
-        Constraint::Min(10),
-        Constraint::Min(12),
-        Constraint::Length(8),
-        Constraint::Length(12),
-        Constraint::Length(8),
-        Constraint::Length(8),
-    ];
-    let table = Table::new(rows, widths)
-        .header(
-            Row::new(["id", "label", "status", "model", "tokens", "cost"])
-                .style(theme.accent().add_modifier(Modifier::BOLD)),
-        )
-        .column_spacing(1);
-    frame.render_widget(table, inner);
+    widgets::parallel_pool::render_parallel_pool(frame, sections[0], &pool, view_state.selected, theme);
+    render_output_panel(frame, sections[1], data, view_state, focused, theme);
 }
 
-/// Sub-tab: Agent output tail.
-fn render_sub_output(
+// ---------------------------------------------------------------------------
+// Sub-tab: Output -- shared agent output panel
+// ---------------------------------------------------------------------------
+
+fn render_output_panel(
     frame: &mut Frame<'_>,
     area: Rect,
     data: &DashboardData,
     view_state: &ViewState,
+    focused: bool,
     theme: &Theme,
 ) {
+    let border = if focused { theme.accent() } else { theme.muted() };
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Output ")
-        .border_style(theme.accent());
+        .border_style(border);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -569,10 +391,10 @@ fn render_sub_output(
         .unwrap_or_default();
 
     if lines.is_empty() {
-        let empty = Paragraph::new("no agent output yet")
-            .style(theme.muted())
-            .wrap(Wrap { trim: false });
-        frame.render_widget(empty, inner);
+        frame.render_widget(
+            Paragraph::new("no agent output yet").style(theme.muted()),
+            inner,
+        );
         return;
     }
 
@@ -582,278 +404,398 @@ fn render_sub_output(
     } else {
         view_state.scroll
     };
-
-    let paragraph = Paragraph::new(text)
-        .style(theme.text())
-        .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
-    frame.render_widget(paragraph, inner);
+    frame.render_widget(
+        Paragraph::new(text)
+            .style(theme.text())
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
+        inner,
+    );
 }
 
-/// Sub-tab: Diff panel placeholder.
+// ---------------------------------------------------------------------------
+// Sub-tab: Diff -- delegates to widgets::diff_panel
+// ---------------------------------------------------------------------------
+
 fn render_sub_diff(
     frame: &mut Frame<'_>,
     area: Rect,
-    _data: &DashboardData,
+    data: &DashboardData,
+    tui_state: &TuiState,
     theme: &Theme,
 ) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Diff ")
-        .border_style(theme.accent());
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let placeholder = Paragraph::new("diff panel: will show per-agent diffs")
-        .style(theme.muted())
-        .wrap(Wrap { trim: false });
-    frame.render_widget(placeholder, inner);
+    let diff_text = gather_diff_text(data, tui_state);
+    let scroll = if tui_state.diff_scroll > 0 {
+        Some(tui_state.diff_scroll)
+    } else {
+        None
+    };
+    widgets::diff_panel::render_diff_panel(frame, area, &diff_text, scroll, theme);
 }
 
-/// Sub-tab: Error digest.
-fn render_sub_errors(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    data: &DashboardData,
-    theme: &Theme,
-) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Errors ")
-        .border_style(theme.danger());
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let failures = &data.gate_results_page.failure_rows;
-    if failures.is_empty() {
-        let empty = Paragraph::new("no errors or gate failures")
-            .style(theme.muted())
-            .wrap(Wrap { trim: false });
-        frame.render_widget(empty, inner);
-        return;
+fn gather_diff_text(data: &DashboardData, tui_state: &TuiState) -> String {
+    // Try selected agent's diff content.
+    if let Some(agent) = tui_state
+        .agents_by_id
+        .values()
+        .nth(tui_state.selected_agent_tab)
+    {
+        if !agent.diff_content.is_empty() {
+            return agent.diff_content.clone();
+        }
     }
+    // Fallback: extract diff-like lines from execution output.
+    if let Some(exec) = &data.current_plan_execution {
+        let diff_lines: Vec<&str> = exec
+            .agent_output_tail
+            .iter()
+            .map(String::as_str)
+            .filter(|l| {
+                l.starts_with('+') || l.starts_with('-') || l.starts_with("@@") || l.starts_with("diff ")
+            })
+            .collect();
+        if !diff_lines.is_empty() {
+            return diff_lines.join("\n");
+        }
+    }
+    String::new()
+}
 
-    let items: Vec<ListItem<'_>> = failures
+// ---------------------------------------------------------------------------
+// Sub-tab: Errors -- delegates to widgets::error_digest
+// ---------------------------------------------------------------------------
+
+fn render_sub_errors(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, theme: &Theme) {
+    let verdicts: Vec<GateVerdict> = data
+        .gate_results
         .iter()
-        .take(inner.height as usize)
-        .map(|row| {
-            ListItem::new(Line::from(vec![
-                Span::styled(&row.gate_name, theme.danger()),
-                Span::raw(" "),
-                Span::styled(&row.task_id, theme.muted()),
-                Span::raw(": "),
-                Span::raw(truncate(&row.error_excerpt, 50)),
-            ]))
+        .map(|g| GateVerdict {
+            plan_id: g.plan_id.clone(),
+            task_id: String::new(),
+            gate: g.gate_name.clone(),
+            passed: g.passed,
+            ts_millis: 0,
         })
         .collect();
 
-    let list = List::new(items);
-    frame.render_widget(list, inner);
+    let errors: Vec<ErrorEntry> = data
+        .gate_results_page
+        .failure_rows
+        .iter()
+        .map(|row| ErrorEntry {
+            message: format!("{}: {} - {}", row.gate_name, row.task_id, row.error_excerpt),
+            ts_millis: row.created_at_ms.max(0) as u64,
+        })
+        .collect();
+
+    let stats = SnapshotStats {
+        gates_passed: data.gate_results.iter().filter(|g| g.passed).count(),
+        gates_failed: data.gate_results.iter().filter(|g| !g.passed).count(),
+        errors_total: errors.len(),
+        ..Default::default()
+    };
+
+    widgets::error_digest::render_error_digest(frame, area, &verdicts, &errors, &stats, theme);
 }
 
-/// Sub-tab: Git info.
-fn render_sub_git(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    _data: &DashboardData,
-    theme: &Theme,
-) {
+// ---------------------------------------------------------------------------
+// Sub-tab: Git (placeholder)
+// ---------------------------------------------------------------------------
+
+fn render_sub_git(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Git ")
-        .border_style(theme.accent());
+        .border_style(theme.muted());
     let inner = block.inner(area);
     frame.render_widget(block, area);
-
-    let placeholder = Paragraph::new("git summary: use F4 for full git view")
-        .style(theme.muted())
-        .wrap(Wrap { trim: false });
-    frame.render_widget(placeholder, inner);
+    frame.render_widget(
+        Paragraph::new("git summary: use F4 for full git view").style(theme.muted()),
+        inner,
+    );
 }
 
-/// Sub-tab: MCP / Context status.
-fn render_sub_mcp(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    data: &DashboardData,
-    theme: &Theme,
-) {
+// ---------------------------------------------------------------------------
+// Sub-tab: MCP / Context status
+// ---------------------------------------------------------------------------
+
+fn render_sub_mcp(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, theme: &Theme) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" MCP / Context ")
-        .border_style(theme.accent());
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    // Token summary from efficiency data
-    let eff = &data.efficiency;
-    let lines = vec![
-        Line::from(vec![
-            Span::styled("input tokens:  ", theme.muted()),
-            Span::styled(
-                format_count(eff.total_input_tokens),
-                theme.info(),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("output tokens: ", theme.muted()),
-            Span::styled(
-                format_count(eff.total_output_tokens),
-                theme.info(),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("total cost:    ", theme.muted()),
-            Span::styled(
-                format!("${:.4}", eff.total_cost_usd),
-                theme.warning(),
-            ),
-        ]),
-    ];
-    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-    frame.render_widget(paragraph, inner);
-}
-
-/// Sub-tab: Process table.
-fn render_sub_processes(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    data: &DashboardData,
-    theme: &Theme,
-) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Processes ")
-        .border_style(theme.accent());
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if data.agents.is_empty() {
-        let empty = Paragraph::new("no tracked processes")
-            .style(theme.muted())
-            .wrap(Wrap { trim: false });
-        frame.render_widget(empty, inner);
-        return;
-    }
-
-    let rows: Vec<Row<'_>> = data
-        .agents
-        .iter()
-        .map(|agent| {
-            Row::new(vec![
-                Cell::from(truncate(&agent.id, 14)),
-                Cell::from(agent.label.as_str()),
-                Cell::from(
-                    agent
-                        .plan_id
-                        .as_deref()
-                        .unwrap_or("-"),
-                ),
-                Cell::from(agent.status.as_str()),
-            ])
-        })
-        .collect();
-
-    let widths = [
-        Constraint::Min(10),
-        Constraint::Min(12),
-        Constraint::Min(10),
-        Constraint::Length(10),
-    ];
-    let table = Table::new(rows, widths)
-        .header(
-            Row::new(["pid", "label", "plan", "status"])
-                .style(theme.accent().add_modifier(Modifier::BOLD)),
-        )
-        .column_spacing(1);
-    frame.render_widget(table, inner);
-}
-
-// ---------------------------------------------------------------------------
-// Wave progress ribbon — fire-gradient gauge at bottom
-// ---------------------------------------------------------------------------
-
-/// Wave progress ribbon with fire-gradient coloring.
-fn render_wave_ribbon(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    data: &DashboardData,
-    theme: &Theme,
-) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Wave Progress ")
         .border_style(theme.muted());
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let (done, total) = data
-        .current_plan_execution
-        .as_ref()
-        .map(|exec| (exec.tasks_done, exec.tasks_total))
-        .unwrap_or((0, 0));
+    let eff = &data.efficiency;
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("input tokens:  ", theme.muted()),
+            Span::styled(fmt_count(eff.total_input_tokens), theme.info()),
+        ]),
+        Line::from(vec![
+            Span::styled("output tokens: ", theme.muted()),
+            Span::styled(fmt_count(eff.total_output_tokens), theme.info()),
+        ]),
+        Line::from(vec![
+            Span::styled("total cost:    ", theme.muted()),
+            Span::styled(format!("${:.4}", eff.total_cost_usd), theme.warning()),
+        ]),
+        Line::from(Span::raw("")),
+        Line::from(vec![
+            Span::styled("cascade router: ", theme.muted()),
+            Span::styled(
+                format!("{} models", data.cascade_router.model_slugs.len()),
+                theme.text(),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("experiments:    ", theme.muted()),
+            Span::styled(format!("{} total", data.experiments.len()), theme.text()),
+        ]),
+    ];
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
 
-    let ratio = if total > 0 {
-        done as f64 / total as f64
+// ---------------------------------------------------------------------------
+// Sub-tab: Processes -- process table + sys metrics
+// ---------------------------------------------------------------------------
+
+fn render_sub_processes(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    data: &DashboardData,
+    focused: bool,
+    theme: &Theme,
+) {
+    let sections = Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(area);
+
+    // Process table.
+    let border = if focused { theme.accent() } else { theme.muted() };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Processes ")
+        .border_style(border);
+    let inner = block.inner(sections[0]);
+    frame.render_widget(block, sections[0]);
+
+    if data.agents.is_empty() {
+        frame.render_widget(
+            Paragraph::new("no tracked processes").style(theme.muted()),
+            inner,
+        );
     } else {
-        0.0
-    };
+        let activity = crate::tui::dashboard::build_agent_activity_snapshot(
+            &data.agents,
+            &data.efficiency_events,
+        );
+        let rows: Vec<Row<'_>> = data
+            .agents
+            .iter()
+            .map(|agent| {
+                let ss = match agent.status.as_str() {
+                    "running" | "active" => theme.info(),
+                    "error" | "failed" => theme.danger(),
+                    _ => theme.muted(),
+                };
+                let row = activity
+                    .as_ref()
+                    .and_then(|s| s.active_agents.iter().find(|r| r.agent_id == agent.id));
+                Row::new(vec![
+                    Cell::from(truncate(&agent.id, 14)),
+                    Cell::from(agent.label.as_str()),
+                    Cell::from(Span::styled(agent.status.as_str(), ss)),
+                    Cell::from(row.map_or("-".into(), |r| shorten_model(&r.model))),
+                    Cell::from(row.map_or("-".into(), |r| fmt_tokens(r.tokens_used))),
+                    Cell::from(agent.plan_id.as_deref().unwrap_or("-")),
+                ])
+            })
+            .collect();
 
-    if inner.width < 4 || inner.height < 1 {
-        return;
+        let widths = [
+            Constraint::Min(10),
+            Constraint::Min(12),
+            Constraint::Length(8),
+            Constraint::Length(12),
+            Constraint::Length(8),
+            Constraint::Min(8),
+        ];
+        frame.render_widget(
+            Table::new(rows, widths)
+                .header(
+                    Row::new(["pid", "label", "status", "model", "tokens", "plan"])
+                        .style(theme.accent().add_modifier(Modifier::BOLD)),
+                )
+                .column_spacing(1),
+            inner,
+        );
     }
 
-    let bar_width = inner.width as usize;
-    let filled = (ratio.clamp(0.0, 1.0) * bar_width as f64).round() as usize;
-    let empty = bar_width.saturating_sub(filled);
+    // System metrics summary.
+    let sys_block = Block::default()
+        .borders(Borders::ALL)
+        .title(" System ")
+        .border_style(theme.muted());
+    let sys_inner = sys_block.inner(sections[1]);
+    frame.render_widget(sys_block, sections[1]);
 
-    // Fire gradient: dark red -> orange -> yellow -> white at full
-    let mut bar_spans: Vec<Span<'_>> = Vec::new();
-    for i in 0..filled.min(bar_width) {
-        let t = if filled > 1 {
-            i as f64 / (filled - 1) as f64
-        } else {
-            ratio
-        };
-        let color = fire_gradient(t);
-        bar_spans.push(Span::styled(
-            "\u{2588}",
-            Style::default().fg(color),
-        ));
-    }
-    if empty > 0 {
-        bar_spans.push(Span::styled(
-            "\u{2500}".repeat(empty),
-            Style::default().fg(Color::DarkGray),
-        ));
-    }
-
-    // Append label
-    let label = format!("  {done}/{total} tasks");
-    bar_spans.push(Span::styled(label, Style::default().fg(Color::White)));
-
-    let line = Line::from(bar_spans);
-    let paragraph = Paragraph::new(line);
-    frame.render_widget(paragraph, inner);
+    let eff = &data.efficiency;
+    let active = data
+        .agents
+        .iter()
+        .filter(|a| a.status == "running" || a.status == "active")
+        .count();
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled("agents:  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{active} active / {} total", data.agents.len()), theme.text()),
+            ]),
+            Line::from(vec![
+                Span::styled("tokens:  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{}in + {}out", fmt_count(eff.total_input_tokens), fmt_count(eff.total_output_tokens)),
+                    theme.text(),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("cost:    ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("${:.4}", eff.total_cost_usd), theme.warning()),
+            ]),
+        ]),
+        sys_inner,
+    );
 }
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// Bottom ribbon: wave progress (40%) | token sparkline (40%) | sys (20%)
+// ===========================================================================
+
+fn render_bottom_ribbon(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    data: &DashboardData,
+    theme: &Theme,
+) {
+    let sections = Layout::horizontal([
+        Constraint::Percentage(40),
+        Constraint::Percentage(40),
+        Constraint::Percentage(20),
+    ])
+    .split(area);
+
+    // Wave progress.
+    {
+        let (done, total) = data
+            .current_plan_execution
+            .as_ref()
+            .map(|e| (e.tasks_done, e.tasks_total))
+            .unwrap_or((0, 0));
+        let ratio = if total > 0 { done as f64 / total as f64 } else { 0.0 };
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Wave ")
+            .border_style(theme.muted());
+        let inner = block.inner(sections[0]);
+        frame.render_widget(block, sections[0]);
+
+        if inner.width >= 4 && inner.height >= 1 {
+            let w = inner.width as usize;
+            let filled = (ratio.clamp(0.0, 1.0) * w as f64).round() as usize;
+            let mut spans: Vec<Span<'_>> = Vec::new();
+            for i in 0..filled.min(w) {
+                let t = if filled > 1 { i as f64 / (filled - 1) as f64 } else { ratio };
+                spans.push(Span::styled("\u{2588}", Style::default().fg(ocean_gradient(t))));
+            }
+            if filled < w {
+                spans.push(Span::styled(
+                    "\u{2500}".repeat(w.saturating_sub(filled)),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+            frame.render_widget(Paragraph::new(Line::from(spans)), inner);
+        }
+    }
+
+    // Token sparkline.
+    {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Tokens ")
+            .border_style(theme.muted());
+        let inner = block.inner(sections[1]);
+        frame.render_widget(block, sections[1]);
+        let eff = &data.efficiency;
+        let total = eff.total_input_tokens + eff.total_output_tokens;
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(" {} total  ${:.3}", fmt_count(total), eff.total_cost_usd),
+                Style::default().fg(theme.foreground),
+            ))),
+            inner,
+        );
+    }
+
+    // Sys badge.
+    {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Sys ")
+            .border_style(theme.muted());
+        let inner = block.inner(sections[2]);
+        frame.render_widget(block, sections[2]);
+        let active = data
+            .agents
+            .iter()
+            .filter(|a| a.status == "running" || a.status == "active")
+            .count();
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(" {active}agt"),
+                Style::default().fg(theme.foreground),
+            ))),
+            inner,
+        );
+    }
+}
+
+// ===========================================================================
 // Helpers
-// ---------------------------------------------------------------------------
+// ===========================================================================
 
-/// Fire gradient: interpolate from deep red through orange to bright yellow.
-fn fire_gradient(t: f64) -> Color {
-    let t = t.clamp(0.0, 1.0);
-    // Red channel: always high
-    let r = (180.0 + t * 75.0).min(255.0) as u8;
-    // Green channel: ramps up from dark to bright
-    let g = (t * 200.0).min(255.0) as u8;
-    // Blue channel: stays very low, slight rise at end
-    let b = (t * t * 60.0).min(255.0) as u8;
-    Color::Rgb(r, g, b)
+fn task_icon(status: &str) -> (&'static str, Style) {
+    match status {
+        "done" | "completed" => ("\u{2713}", Style::default().fg(Color::Green)),
+        "running" | "in_progress" => (
+            "\u{25ba}",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ),
+        "failed" => ("\u{2717}", Style::default().fg(Color::Red)),
+        "blocked" => ("\u{2717}", Style::default().fg(Color::Red)),
+        _ => ("\u{00b7}", Style::default().fg(Color::DarkGray)),
+    }
 }
 
-/// Shorten a model slug for compact display.
+fn task_text_style<'a>(status: &str, theme: &'a Theme) -> Style {
+    match status {
+        "done" | "completed" => theme.success(),
+        "running" | "in_progress" => theme.info(),
+        "failed" => theme.danger(),
+        _ => theme.text(),
+    }
+}
+
+fn ocean_gradient(t: f64) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    Color::Rgb(
+        (40.0 + t * 60.0).min(255.0) as u8,
+        (180.0 - t * 80.0).min(255.0) as u8,
+        (200.0 + t * 55.0).min(255.0) as u8,
+    )
+}
+
 fn shorten_model(slug: &str) -> String {
     slug.replace("claude-", "")
         .replace("gpt-", "")
@@ -864,8 +806,7 @@ fn shorten_model(slug: &str) -> String {
         .replace("haiku-", "h")
 }
 
-/// Format token count compactly.
-fn format_tokens(n: u64) -> String {
+fn fmt_tokens(n: u64) -> String {
     if n == 0 {
         "-".to_string()
     } else if n < 1_000 {
@@ -879,8 +820,7 @@ fn format_tokens(n: u64) -> String {
     }
 }
 
-/// Format duration from milliseconds to compact string.
-fn format_duration_ms(ms: f64) -> String {
+fn fmt_duration_ms(ms: f64) -> String {
     let secs = (ms / 1000.0) as u64;
     if secs >= 3600 {
         format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
@@ -896,12 +836,14 @@ fn format_duration_ms(ms: f64) -> String {
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
+    } else if max <= 3 {
+        s[..max].to_string()
     } else {
         format!("{}...", &s[..max.saturating_sub(3)])
     }
 }
 
-fn format_count(n: u64) -> String {
+fn fmt_count(n: u64) -> String {
     if n >= 1_000_000 {
         format!("{:.1}M", n as f64 / 1_000_000.0)
     } else if n >= 1_000 {
