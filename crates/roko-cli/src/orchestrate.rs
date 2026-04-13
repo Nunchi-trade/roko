@@ -8424,6 +8424,18 @@ impl PlanRunner {
                     .healthy_model_slugs(&all_model_slugs, |model_slug| {
                         provider_id_for_routing_model(&roko_config, &model_providers, model_slug)
                     });
+            // Re-rank healthy models by local reward score so models that
+            // historically correlate with global task success float to the top.
+            let healthy_models = {
+                let mut ranked = healthy_models;
+                ranked.sort_by(|a, b| {
+                    let sa = self.learning.local_reward_score("router", a);
+                    let sb = self.learning.local_reward_score("router", b);
+                    sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                ranked
+            };
+
             routing_explanation = Some(cascade_router.explain_route(&routing_ctx, None));
             if let Some(explanation) = routing_explanation.as_ref() {
                 routing_stage = explanation.stage.label().to_string();

@@ -22,6 +22,7 @@ use crate::cfactor::{CFactor, compute_cfactor};
 use roko_core::metric::TaskMetric;
 
 use crate::cascade_router::CascadeRouter;
+use crate::local_reward::LocalRewardFunction;
 use crate::context_pack_cache::ContextPackCache;
 use crate::costs_db::{CostRecord, CostsDb};
 use crate::costs_log::CostsLog;
@@ -105,6 +106,8 @@ pub struct LearningPaths {
     pub experiments_json: PathBuf,
     /// Adaptive gate thresholds JSON.
     pub gate_thresholds_json: PathBuf,
+    /// Per-subsystem local reward functions JSON.
+    pub local_rewards_json: PathBuf,
 }
 
 impl LearningPaths {
@@ -125,6 +128,7 @@ impl LearningPaths {
             cascade_router_json: root.join("cascade-router.json"),
             experiments_json: root.join("experiments.json"),
             gate_thresholds_json: root.join("gate-thresholds.json"),
+            local_rewards_json: root.join("local-rewards.json"),
             root,
         }
     }
@@ -330,6 +334,7 @@ pub struct LearningRuntime {
     cascade_router: CascadeRouter,
     context_pack_cache: ContextPackCache,
     experiment_store: parking_lot::Mutex<ExperimentStore>,
+    local_rewards: parking_lot::Mutex<HashMap<String, LocalRewardFunction>>,
     episode_completion_hook: Option<EpisodeCompletionHook>,
 }
 
@@ -366,13 +371,11 @@ impl LearningRuntime {
         let latency_registry = LatencyRegistry::load_or_new(&paths.latency_stats_json);
         let cascade_router = CascadeRouter::load_or_new(
             &paths.cascade_router_json,
-            vec![
-                "claude-sonnet-4-5".into(),
-                "claude-haiku-4-5".into(),
-            ],
+            vec!["claude-sonnet-4-5".into(), "claude-haiku-4-5".into()],
         );
         let context_pack_cache = ContextPackCache::new(256, paths.root.join("context-cache.json"));
         let experiment_store = ExperimentStore::load_or_new(&paths.experiments_json);
+        let local_rewards = load_local_rewards(&paths.local_rewards_json);
 
         Ok(Self {
             paths,
@@ -393,6 +396,7 @@ impl LearningRuntime {
             cascade_router,
             context_pack_cache,
             experiment_store: parking_lot::Mutex::new(experiment_store),
+            local_rewards: parking_lot::Mutex::new(local_rewards),
             episode_completion_hook: None,
         })
     }
@@ -431,6 +435,7 @@ impl LearningRuntime {
         let cascade_router = CascadeRouter::load_or_new(&paths.cascade_router_json, models);
         let context_pack_cache = ContextPackCache::new(256, paths.root.join("context-cache.json"));
         let experiment_store = ExperimentStore::load_or_new(&paths.experiments_json);
+        let local_rewards = load_local_rewards(&paths.local_rewards_json);
 
         Ok(Self {
             paths,
@@ -451,6 +456,7 @@ impl LearningRuntime {
             cascade_router,
             context_pack_cache,
             experiment_store: parking_lot::Mutex::new(experiment_store),
+            local_rewards: parking_lot::Mutex::new(local_rewards),
             episode_completion_hook: None,
         })
     }
@@ -572,6 +578,36 @@ impl LearningRuntime {
     #[must_use]
     pub const fn experiment_store(&self) -> &parking_lot::Mutex<ExperimentStore> {
         &self.experiment_store
+    }
+
+    /// Query the local reward score for a subsystem decision.
+    ///
+    /// Returns a value in `[0.0, 1.0]` estimating how strongly the given
+    /// local decision correlates with global task success.  Unknown
+    /// decisions return a neutral `0.5`.
+    pub fn local_reward_score(&self, subsystem: &str, decision_key: &str) -> f64 {
+        self.local_rewards
+            .lock()
+            .get(subsystem)
+            .map_or(0.5, |reward| reward.score(decision_key))
+    }
+
+    /// Record a local decision outcome against global task success for the
+    /// named subsystem.
+    fn observe_local_reward(&self, subsystem: &str, decision_key: &str, global_success: bool) {
+        self.local_rewards
+            .lock()
+            .entry(subsystem.to_owned())
+            .or_default()
+            .observe(decision_key, global_success);
+    }
+
+    /// Persist local reward functions to disk.
+    fn save_local_rewards(&self) {
+        let rewards = self.local_rewards.lock();
+        if let Ok(json) = serde_json::to_string_pretty(&*rewards) {
+            let _ = std::fs::write(&self.paths.local_rewards_json, json);
+        }
     }
 
     /// Install a callback that runs after a completed episode is
@@ -766,6 +802,10 @@ impl LearningRuntime {
             }
         }
 
+        // Stash decision keys before they're consumed for local reward tracking.
+        let local_reward_rule_id = input.playbook_rule_id.clone();
+        let local_reward_skill_id = input.matched_skill_id.clone();
+
         if let Some(rule_id) = input.playbook_rule_id {
             self.playbook_rules
                 .record_outcome(&rule_id, input.episode.success);
@@ -848,6 +888,22 @@ impl LearningRuntime {
                 eprintln!("[learn] cascade router save failed after experiment conclusion: {e}");
             }
         }
+
+        // ── Local reward observations ─────────────────────────────────────
+        // Record (local_decision, global_outcome) for each subsystem that
+        // participated in this run so the Optimas-style reward functions
+        // learn which local choices correlate with global task success.
+        let success = input.episode.success;
+        if let Some(model) = extra_string(&input.episode, "model") {
+            self.observe_local_reward("router", &model, success);
+        }
+        if let Some(ref skill_id) = local_reward_skill_id {
+            self.observe_local_reward("skill", skill_id, success);
+        }
+        if let Some(ref rule_id) = local_reward_rule_id {
+            self.observe_local_reward("playbook_rule", rule_id, success);
+        }
+        self.save_local_rewards();
 
         Ok(update)
     }
@@ -1074,6 +1130,14 @@ impl LearningRuntime {
         self.latency_registry.save(&self.paths.latency_stats_json)?;
         Ok(())
     }
+}
+
+/// Load persisted local reward functions, or return an empty map.
+fn load_local_rewards(path: &Path) -> HashMap<String, LocalRewardFunction> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default()
 }
 
 /// Read optional string value from `episode.extra`.
@@ -2027,10 +2091,8 @@ mod tests {
         );
 
         let mut ep = sample_episode(true);
-        ep.extra.insert(
-            "model".to_string(),
-            serde_json::json!("claude-sonnet-4-5"),
-        );
+        ep.extra
+            .insert("model".to_string(), serde_json::json!("claude-sonnet-4-5"));
 
         let update = runtime
             .record_completed_run(CompletedRunInput::from_episode(ep))
@@ -2460,5 +2522,62 @@ mod tests {
         );
         let expected = compute_routing_reward_v2(1.0, 0.25_f64 / 5.0, 20_000.0, 120_000.0);
         assert!((reward - expected).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn local_reward_functions_observe_and_persist_across_runs() {
+        let tmp = TempDir::new().unwrap();
+        let runtime = LearningRuntime::open_with_models(
+            LearningPaths::under(tmp.path()),
+            RegressionConfig::default(),
+            vec!["claude-opus-4-6".to_string()],
+        )
+        .await
+        .unwrap();
+
+        // Before any observations, unknown decisions return the 0.5 prior.
+        assert_eq!(runtime.local_reward_score("router", "claude-opus-4-6"), 0.5);
+
+        // Record a successful run with model + skill metadata.
+        let mut ep = sample_pattern_episode(true, "local-reward-test");
+        ep.extra
+            .insert("model".to_string(), serde_json::json!("claude-opus-4-6"));
+        let mut input = CompletedRunInput::from_episode(ep);
+        input.matched_skill_id = Some("rust-impl".to_string());
+        input.playbook_rule_id = Some("rule-001".to_string());
+        runtime.record_completed_run(input).await.unwrap();
+
+        // Router subsystem should have observed the model decision.
+        assert_eq!(
+            runtime.local_reward_score("router", "claude-opus-4-6"),
+            1.0,
+            "single success should give 1.0"
+        );
+        // Skill subsystem should track the matched skill.
+        assert_eq!(runtime.local_reward_score("skill", "rust-impl"), 1.0);
+        // Playbook rule subsystem.
+        assert_eq!(runtime.local_reward_score("playbook_rule", "rule-001"), 1.0);
+
+        // Record a failed run for the same model.
+        let mut ep2 = sample_pattern_episode(false, "local-reward-fail");
+        ep2.extra
+            .insert("model".to_string(), serde_json::json!("claude-opus-4-6"));
+        ep2.success = false;
+        runtime
+            .record_completed_run(CompletedRunInput::from_episode(ep2))
+            .await
+            .unwrap();
+        assert!(
+            (runtime.local_reward_score("router", "claude-opus-4-6") - 0.5).abs() < 1e-9,
+            "1 success + 1 failure = 0.5"
+        );
+
+        // Verify persistence: reload from disk and check scores survive.
+        let reloaded = LearningRuntime::open_under(tmp.path()).await.unwrap();
+        assert!(
+            (reloaded.local_reward_score("router", "claude-opus-4-6") - 0.5).abs() < 1e-9,
+            "persisted score should survive reload"
+        );
+        assert_eq!(reloaded.local_reward_score("skill", "rust-impl"), 1.0);
     }
 }
