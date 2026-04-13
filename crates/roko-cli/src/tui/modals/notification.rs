@@ -75,7 +75,13 @@ pub fn render_notifications(
         return;
     }
 
-    let toast_width: u16 = 40;
+    // Size toast to fit longest message, clamped to 80% of screen width
+    let max_msg_len = active
+        .iter()
+        .map(|n| n.message.len() + 8) // "[TAG] " prefix + padding
+        .max()
+        .unwrap_or(40) as u16;
+    let toast_width: u16 = max_msg_len.clamp(30, (area.width * 4 / 5).max(30));
     let toast_height: u16 = 3; // border top + message + border bottom
 
     let max_visible = (area.height / toast_height).min(5) as usize;

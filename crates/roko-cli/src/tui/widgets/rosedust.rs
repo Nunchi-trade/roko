@@ -51,9 +51,10 @@ impl MoriTheme {
 
     // -- Block styling helpers -----------------------------------------------
 
-    /// Default block background style.
+    /// Default block background style — uses terminal default background
+    /// for consistency across all panels.
     pub fn block_style() -> Style {
-        Style::default().bg(Self::BG)
+        Style::default()
     }
 
     /// Focused-panel border style.
@@ -61,9 +62,9 @@ impl MoriTheme {
         Style::default().fg(Self::ROSE)
     }
 
-    /// Unfocused-panel border style.
+    /// Unfocused-panel border style — uses TEXT_DIM for visible borders.
     pub fn unfocused_border_style() -> Style {
-        Style::default().fg(Self::TEXT_GHOST)
+        Style::default().fg(Self::TEXT_DIM)
     }
 
     /// Focused-panel title style.

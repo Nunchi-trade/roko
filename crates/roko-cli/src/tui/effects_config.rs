@@ -20,12 +20,12 @@ pub struct EffectsConfig {
 impl Default for EffectsConfig {
     fn default() -> Self {
         Self {
-            screen_postfx: true,
+            screen_postfx: false,
             bloom_enabled: false,
-            shadows_enabled: true,
-            vfx_enabled: true,
-            bloom_intensity: 0.12,
-            vignette_intensity: 0.3,
+            shadows_enabled: false,
+            vfx_enabled: false,
+            bloom_intensity: 0.0,
+            vignette_intensity: 0.0,
         }
     }
 }

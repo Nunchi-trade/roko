@@ -156,28 +156,7 @@ pub fn render_plan_tree(frame: &mut Frame<'_>, area: Rect, state: &TuiState, foc
     let paragraph = Paragraph::new(visible).block(block);
     frame.render_widget(paragraph, area);
 
-    // Fill empty space with subtle data-rain visualization
-    let visible_count = total_lines
-        .saturating_sub(scroll_offset)
-        .min(visible_height);
-    if visible_count + 4 < visible_height {
-        let empty_start = area.y + 1 + visible_count as u16;
-        let empty_end = area.y + area.height.saturating_sub(1);
-        if empty_end > empty_start + 2 {
-            let empty_area = Rect::new(
-                area.x + 1,
-                empty_start,
-                area.width.saturating_sub(2),
-                empty_end - empty_start,
-            );
-            let plan_progress = if total > 0 {
-                completed as f64 / total as f64
-            } else {
-                0.0
-            };
-            render_data_rain(frame, empty_area, state.atmosphere.elapsed(), plan_progress);
-        }
-    }
+    // (data-rain visualization removed — kept empty space clean)
 
     // Scrollbar
     if total_lines > visible_height {
