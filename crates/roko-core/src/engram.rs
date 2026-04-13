@@ -1,75 +1,78 @@
-//! The universal `Signal` type.
+//! The universal `Engram` type.
 //!
-//! A [`Signal`] is every event, every piece of data, every agent output, every
-//! gate verdict in the Roko system. Signals are:
+//! An [`Engram`] is every event, every piece of data, every agent output, every
+//! gate verdict in the Roko system. Engrams are:
 //!
 //! - **Addressable** — content-hashed via BLAKE3
-//! - **Decaying** — every signal has a decay function; weight fades over time
+//! - **Decaying** — every engram has a decay function; weight fades over time
 //! - **Scored** — multi-dimensional confidence/novelty/utility/reputation
-//! - **Traced** — lineage tracks which signals this derived from
-//! - **Composable** — signals combine into new signals via [`Composer`]s
+//! - **Traced** — lineage tracks which engrams this derived from
+//! - **Composable** — engrams combine into new engrams via [`Composer`]s
 
-use crate::{Body, ContentHash, Decay, Kind, Provenance, Score};
+use crate::{Attestation, Body, ContentHash, Decay, Kind, Provenance, Score};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// The universal datum of the Roko system.
 ///
-/// See [crate-level docs](crate) for the architectural role of Signal.
+/// See [crate-level docs](crate) for the architectural role of Engram.
 ///
 /// # Identity
 ///
-/// A signal's identity is its [`ContentHash`], computed from its kind, body,
-/// author, and tags (see [`Signal::content_hash`]). Score and decay are
+/// An engram's identity is its [`ContentHash`], computed from its kind, body,
+/// author, and tags (see [`Engram::content_hash`]). Score and decay are
 /// **excluded** from the hash — they can change without changing identity.
 ///
 /// # Construction
 ///
-/// Use [`Signal::builder`] for ergonomic construction:
+/// Use [`Engram::builder`] for ergonomic construction:
 ///
 /// ```
-/// use roko_core::{Signal, Kind, Body};
+/// use roko_core::{Body, Engram, Kind};
 ///
-/// let s = Signal::builder(Kind::Task)
+/// let s = Engram::builder(Kind::Task)
 ///     .body(Body::text("implement login"))
 ///     .tag("priority", "high")
 ///     .build();
 /// ```
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Signal {
+pub struct Engram {
     /// Content-addressed identity (computed from kind + body + author + tags).
     pub id: ContentHash,
-    /// What kind of signal this is.
+    /// What kind of engram this is.
     pub kind: Kind,
-    /// The signal's payload.
+    /// The engram's payload.
     pub body: Body,
-    /// Unix milliseconds when this signal was first emitted.
+    /// Unix milliseconds when this engram was first emitted.
     pub created_at_ms: i64,
-    /// How this signal's weight decays over time.
+    /// How this engram's weight decays over time.
     pub decay: Decay,
     /// Producer attribution and trust.
     pub provenance: Provenance,
     /// Quality score at emission time (may be recomputed by scorers).
     pub score: Score,
-    /// `ContentHash`es of signals this derived from (forms a DAG for auditing
+    /// `ContentHash`es of engrams this derived from (forms a DAG for auditing
     /// and autocatalytic metrics).
     pub lineage: Vec<ContentHash>,
     /// Arbitrary string metadata (ordered for stable hashing).
     pub tags: BTreeMap<String, String>,
+    /// Optional cryptographic proof of origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation: Option<Attestation>,
 }
 
-impl Signal {
-    /// Begin building a signal.
+impl Engram {
+    /// Begin building an engram.
     #[must_use]
-    pub fn builder(kind: Kind) -> SignalBuilder {
-        SignalBuilder::new(kind)
+    pub fn builder(kind: Kind) -> EngramBuilder {
+        EngramBuilder::new(kind)
     }
 
-    /// Compute the content hash of this signal's identity fields.
+    /// Compute the content hash of this engram's identity fields.
     ///
     /// The hash covers: kind, body, author, taint, lineage, and tags.
-    /// It does NOT cover: score, decay, timestamp — these can change over
-    /// time without changing what the signal fundamentally is.
+    /// It does NOT cover: score, decay, timestamp, or attestation — these can
+    /// change without changing what the engram fundamentally is.
     #[must_use]
     pub fn content_hash(&self) -> ContentHash {
         let mut hasher = blake3::Hasher::new();
@@ -94,7 +97,7 @@ impl Signal {
         ContentHash(*hasher.finalize().as_bytes())
     }
 
-    /// The effective weight of this signal at the given current time.
+    /// The effective weight of this engram at the given current time.
     /// Combines score × decay.
     #[must_use]
     pub fn weight_at(&self, now_ms: i64) -> f32 {
@@ -102,7 +105,7 @@ impl Signal {
         self.score.effective() * self.decay.apply(age)
     }
 
-    /// Age of this signal in milliseconds relative to a reference time.
+    /// Age of this engram in milliseconds relative to a reference time.
     #[must_use]
     pub fn age_ms(&self, now_ms: i64) -> i64 {
         (now_ms - self.created_at_ms).max(0)
@@ -114,16 +117,16 @@ impl Signal {
         self.tags.get(key).map(String::as_str)
     }
 
-    /// Check if this signal's kind matches the given kind.
+    /// Check if this engram's kind matches the given kind.
     #[must_use]
     pub fn is(&self, kind: &Kind) -> bool {
         &self.kind == kind
     }
 
-    /// Emit a derived signal — new kind/body, but tracks this signal as lineage.
-    /// Useful when a gate/composer/policy produces a new signal from an input.
-    pub fn derive(&self, kind: Kind, body: Body) -> SignalBuilder {
-        SignalBuilder::new(kind)
+    /// Emit a derived engram — new kind/body, but tracks this engram as lineage.
+    /// Useful when a gate/composer/policy produces a new engram from an input.
+    pub fn derive(&self, kind: Kind, body: Body) -> EngramBuilder {
+        EngramBuilder::new(kind)
             .body(body)
             .lineage([self.id])
             .provenance(Provenance::agent("derived"))
@@ -132,11 +135,11 @@ impl Signal {
 
 // ─── Builder ───────────────────────────────────────────────────────────────
 
-/// Ergonomic builder for [`Signal`]s.
+/// Ergonomic builder for [`Engram`]s.
 ///
 /// Fills in sensible defaults: current time, neutral score, no decay, trusted
 /// roko provenance, empty lineage and tags.
-pub struct SignalBuilder {
+pub struct EngramBuilder {
     kind: Kind,
     body: Body,
     created_at_ms: Option<i64>,
@@ -145,10 +148,11 @@ pub struct SignalBuilder {
     score: Score,
     lineage: Vec<ContentHash>,
     tags: BTreeMap<String, String>,
+    attestation: Option<Attestation>,
 }
 
-impl SignalBuilder {
-    /// Start building a signal of the given kind.
+impl EngramBuilder {
+    /// Start building an engram of the given kind.
     #[must_use]
     pub fn new(kind: Kind) -> Self {
         Self {
@@ -160,45 +164,46 @@ impl SignalBuilder {
             score: Score::NEUTRAL,
             lineage: Vec::new(),
             tags: BTreeMap::new(),
+            attestation: None,
         }
     }
 
-    /// Set the signal's body (payload).
+    /// Set the engram's body (payload).
     #[must_use]
     pub fn body(mut self, body: Body) -> Self {
         self.body = body;
         self
     }
 
-    /// Set the signal's decay function.
+    /// Set the engram's decay function.
     #[must_use]
     pub const fn decay(mut self, decay: Decay) -> Self {
         self.decay = decay;
         self
     }
 
-    /// Set the signal's provenance (author + trust).
+    /// Set the engram's provenance (author + trust).
     #[must_use]
     pub fn provenance(mut self, provenance: Provenance) -> Self {
         self.provenance = provenance;
         self
     }
 
-    /// Set the signal's score.
+    /// Set the engram's score.
     #[must_use]
     pub const fn score(mut self, score: Score) -> Self {
         self.score = score;
         self
     }
 
-    /// Pin the signal's creation time (mostly useful for tests).
+    /// Pin the engram's creation time (mostly useful for tests).
     #[must_use]
     pub const fn created_at_ms(mut self, t: i64) -> Self {
         self.created_at_ms = Some(t);
         self
     }
 
-    /// Add content-hashes of parent signals to the lineage chain.
+    /// Add content-hashes of parent engrams to the lineage chain.
     #[must_use]
     pub fn lineage(mut self, hashes: impl IntoIterator<Item = ContentHash>) -> Self {
         self.lineage.extend(hashes);
@@ -212,11 +217,18 @@ impl SignalBuilder {
         self
     }
 
-    /// Finalize the signal, computing its content hash.
+    /// Attach a cryptographic proof of origin.
     #[must_use]
-    pub fn build(self) -> Signal {
+    pub fn attestation(mut self, attestation: Attestation) -> Self {
+        self.attestation = Some(attestation);
+        self
+    }
+
+    /// Finalize the engram, computing its content hash.
+    #[must_use]
+    pub fn build(self) -> Engram {
         let created_at_ms = self.created_at_ms.unwrap_or_else(current_time_ms);
-        let mut signal = Signal {
+        let mut engram = Engram {
             id: ContentHash([0; 32]), // placeholder
             kind: self.kind,
             body: self.body,
@@ -226,9 +238,10 @@ impl SignalBuilder {
             score: self.score,
             lineage: self.lineage,
             tags: self.tags,
+            attestation: self.attestation,
         };
-        signal.id = signal.content_hash();
-        signal
+        engram.id = engram.content_hash();
+        engram
     }
 }
 
@@ -243,21 +256,22 @@ mod tests {
 
     #[test]
     fn builder_defaults() {
-        let s = Signal::builder(Kind::Task).build();
+        let s = Engram::builder(Kind::Task).build();
         assert_eq!(s.kind, Kind::Task);
         assert_eq!(s.body, Body::Empty);
         assert_eq!(s.decay, Decay::None);
         assert!(s.lineage.is_empty());
         assert!(s.tags.is_empty());
+        assert!(s.attestation.is_none());
     }
 
     #[test]
     fn content_hash_is_deterministic() {
-        let a = Signal::builder(Kind::Task)
+        let a = Engram::builder(Kind::Task)
             .body(Body::text("same"))
             .created_at_ms(0)
             .build();
-        let b = Signal::builder(Kind::Task)
+        let b = Engram::builder(Kind::Task)
             .body(Body::text("same"))
             .created_at_ms(0)
             .build();
@@ -266,15 +280,15 @@ mod tests {
 
     #[test]
     fn content_hash_ignores_score_and_decay() {
-        // Two signals with same identity fields but different score/decay
+        // Two engrams with same identity fields but different score/decay
         // should have the SAME id (score/decay don't affect identity).
-        let a = Signal::builder(Kind::Task)
+        let a = Engram::builder(Kind::Task)
             .body(Body::text("same"))
             .created_at_ms(0)
             .score(Score::new(0.1, 0.0, 0.0, 1.0))
             .decay(Decay::None)
             .build();
-        let b = Signal::builder(Kind::Task)
+        let b = Engram::builder(Kind::Task)
             .body(Body::text("same"))
             .created_at_ms(0)
             .score(Score::new(0.9, 1.0, 5.0, 2.0))
@@ -285,11 +299,11 @@ mod tests {
 
     #[test]
     fn content_hash_includes_body() {
-        let a = Signal::builder(Kind::Task)
+        let a = Engram::builder(Kind::Task)
             .body(Body::text("a"))
             .created_at_ms(0)
             .build();
-        let b = Signal::builder(Kind::Task)
+        let b = Engram::builder(Kind::Task)
             .body(Body::text("b"))
             .created_at_ms(0)
             .build();
@@ -298,12 +312,12 @@ mod tests {
 
     #[test]
     fn content_hash_includes_tags() {
-        let a = Signal::builder(Kind::Task)
+        let a = Engram::builder(Kind::Task)
             .body(Body::text("x"))
             .created_at_ms(0)
             .tag("priority", "high")
             .build();
-        let b = Signal::builder(Kind::Task)
+        let b = Engram::builder(Kind::Task)
             .body(Body::text("x"))
             .created_at_ms(0)
             .tag("priority", "low")
@@ -314,13 +328,13 @@ mod tests {
     #[test]
     fn tag_order_does_not_affect_hash() {
         // BTreeMap stores keys in sorted order, so insertion order is irrelevant.
-        let a = Signal::builder(Kind::Task)
+        let a = Engram::builder(Kind::Task)
             .body(Body::text("x"))
             .created_at_ms(0)
             .tag("a", "1")
             .tag("b", "2")
             .build();
-        let b = Signal::builder(Kind::Task)
+        let b = Engram::builder(Kind::Task)
             .body(Body::text("x"))
             .created_at_ms(0)
             .tag("b", "2")
@@ -331,7 +345,7 @@ mod tests {
 
     #[test]
     fn weight_at_combines_score_and_decay() {
-        let s = Signal::builder(Kind::Pheromone)
+        let s = Engram::builder(Kind::Pheromone)
             .decay(Decay::HalfLife { half_life_ms: 1000 })
             .score(Score::new(1.0, 0.0, 0.0, 1.0)) // effective = 1.0
             .created_at_ms(0)
@@ -342,7 +356,7 @@ mod tests {
 
     #[test]
     fn derive_tracks_lineage() {
-        let parent = Signal::builder(Kind::Task)
+        let parent = Engram::builder(Kind::Task)
             .body(Body::text("parent"))
             .created_at_ms(0)
             .build();
@@ -352,8 +366,30 @@ mod tests {
     }
 
     #[test]
+    fn content_hash_ignores_attestation() {
+        let base = Engram::builder(Kind::Task)
+            .body(Body::text("same"))
+            .created_at_ms(0)
+            .build();
+        let attested = Engram::builder(Kind::Task)
+            .body(Body::text("same"))
+            .created_at_ms(0)
+            .attestation(Attestation {
+                signature: crate::attestation::Ed25519Signature([7; 64]),
+                public_key: crate::attestation::PublicKey([3; 32]),
+                chain_attestation: Some(crate::attestation::ChainAttestation {
+                    chain_id: 42,
+                    tx_hash: [9; 32],
+                    block_number: 99,
+                }),
+            })
+            .build();
+        assert_eq!(base.id, attested.id);
+    }
+
+    #[test]
     fn serde_roundtrip() {
-        let s = Signal::builder(Kind::Episode)
+        let s = Engram::builder(Kind::Episode)
             .body(Body::text("an episode happened"))
             .decay(Decay::HalfLife {
                 half_life_ms: 60_000,
@@ -361,20 +397,20 @@ mod tests {
             .tag("run", "42")
             .build();
         let json = serde_json::to_string(&s).unwrap();
-        let parsed: Signal = serde_json::from_str(&json).unwrap();
+        let parsed: Engram = serde_json::from_str(&json).unwrap();
         assert_eq!(s, parsed);
     }
 
     #[test]
     fn tag_accessor() {
-        let s = Signal::builder(Kind::Task).tag("foo", "bar").build();
+        let s = Engram::builder(Kind::Task).tag("foo", "bar").build();
         assert_eq!(s.tag("foo"), Some("bar"));
         assert_eq!(s.tag("missing"), None);
     }
 
     #[test]
     fn is_matches_kind() {
-        let s = Signal::builder(Kind::GateVerdict).build();
+        let s = Engram::builder(Kind::GateVerdict).build();
         assert!(s.is(&Kind::GateVerdict));
         assert!(!s.is(&Kind::Task));
     }

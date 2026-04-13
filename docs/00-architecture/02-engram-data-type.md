@@ -89,7 +89,7 @@ pub struct Signal { // will be renamed to Engram in Tier 0D
 }
 ```
 
-The extended Engram adds an attestation field (specified but not yet in the current code):
+The extended Engram includes an attestation field in the current code:
 
 ```rust
 pub struct Engram {

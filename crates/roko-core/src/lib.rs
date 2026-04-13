@@ -1,22 +1,22 @@
-//! Roko kernel — the universal Signal type and six traits that compose to express
+//! Roko kernel — the universal Engram type and six traits that compose to express
 //! every capability in the Roko orchestration system.
 //!
 //! # Architecture
 //!
-//! The entire Roko system is built from **one noun** ([`Signal`]) and **six verbs**:
+//! The entire Roko system is built from **one noun** ([`Engram`]) and **six verbs**:
 //!
 //! | Trait | Purpose |
 //! |---|---|
-//! | [`Substrate`] | Store and query signals |
-//! | [`Scorer`] | Rate signals along multi-dimensional axes |
-//! | [`Gate`] | Verify signals against ground truth |
-//! | [`Router`] | Select one signal from many candidates |
-//! | [`Composer`] | Combine signals into a new signal under a budget |
-//! | [`Policy`] | Watch signal streams and emit new signals (interventions) |
+//! | [`Substrate`] | Store and query engrams |
+//! | [`Scorer`] | Rate engrams along multi-dimensional axes |
+//! | [`Gate`] | Verify engrams against ground truth |
+//! | [`Router`] | Select one engram from many candidates |
+//! | [`Composer`] | Combine engrams into a new engram under a budget |
+//! | [`Policy`] | Watch engram streams and emit new engrams (interventions) |
 //!
 //! Every capability — coding-agent spawning, verification gates, context assembly,
 //! model routing, memory retrieval, chain participation, bounty markets, HDC search
-//! — is one of these six verbs operating on Signals.
+//! — is one of these six verbs operating on Engrams.
 //!
 //! # The Universal Loop
 //!
@@ -37,6 +37,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod agent;
+pub mod attestation;
 pub mod body;
 pub mod build;
 /// Canonical provider-agnostic chat message types.
@@ -46,6 +47,7 @@ pub mod config;
 pub mod context;
 pub mod dashboard_snapshot;
 pub mod decay;
+pub mod engram;
 pub mod error;
 pub mod hash;
 pub mod kind;
@@ -62,7 +64,6 @@ pub mod query;
 pub mod score;
 pub mod secrets;
 pub mod shutdown;
-pub mod signal;
 pub mod signal_kinds;
 pub mod state_hub;
 pub mod task;
@@ -74,6 +75,7 @@ pub use agent::{
     AgentBackend, AgentRole, ModelSpec, ModelTier, ProviderKind, ReasoningEffort, ToolPermissions,
     TurnBudget,
 };
+pub use attestation::{Attestation, ChainAttestation, Ed25519Signature, PublicKey};
 pub use body::Body;
 pub use build::{BuildCommand, BuildSystem};
 pub use chat_types::{
@@ -82,6 +84,7 @@ pub use chat_types::{
 pub use conductor::ConductorDecision;
 pub use context::Context;
 pub use decay::Decay;
+pub use engram::{Engram, EngramBuilder};
 pub use error::{Result, RokoError};
 pub use hash::ContentHash;
 pub use kind::Kind;
@@ -101,7 +104,6 @@ pub use project::{
 pub use provenance::Provenance;
 pub use query::{Budget, Query};
 pub use score::Score;
-pub use signal::Signal;
 pub use signal_kinds::*;
 pub use task::{
     GlobalTaskId, PlanStatus, Task, TaskCategory, TaskComplexityBand, TaskContextWeight, TaskMeta,

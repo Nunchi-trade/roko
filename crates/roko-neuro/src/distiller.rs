@@ -1,7 +1,8 @@
 //! Episode distillation into durable knowledge candidates.
 //!
 //! The distiller batches stored episodes, asks a small model to extract
-//! reusable facts, procedures, heuristics, and constraints, then
+//! reusable insights, heuristics, warnings, causal links, and strategy
+//! fragments, then
 //! normalizes the structured response into [`KnowledgeEntry`] values.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -14,7 +15,7 @@ use chrono::Utc;
 use roko_agent::Agent;
 use roko_agent::claude_agent::ClaudeAgent;
 use roko_agent::nl_to_format::NlToFormatConverter;
-use roko_core::{Body, Context as RokoContext, Kind, Provenance, Signal};
+use roko_core::{Body, Context as RokoContext, Engram, Kind, Provenance};
 use roko_learn::episode_logger::Episode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -113,7 +114,7 @@ impl ClaudeDistillationBackend {
 #[async_trait]
 impl DistillationBackend for ClaudeDistillationBackend {
     async fn complete(&self, prompt: &str) -> Result<String> {
-        let signal = Signal::builder(Kind::Prompt)
+        let signal = Engram::builder(Kind::Prompt)
             .body(Body::text(prompt))
             .provenance(Provenance::agent("roko-neuro:distiller"))
             .build();
@@ -237,6 +238,7 @@ impl DistillationCandidate {
             model_generality,
             created_at: Utc::now(),
             half_life_days,
+            tier: Default::default(),
             hdc_vector: None,
         })
     }
@@ -312,10 +314,11 @@ fn build_prompt(episodes: &[Episode]) -> Result<String> {
          Return only structured JSON that matches the schema in the system prompt.\n\
          Be conservative: emit entries only when the episodes support them.\n\
          Target categories:\n\
-         - fact: declarative observations such as file structure, function arity, or stable project facts\n\
-         - procedure: repeatable steps that fixed a problem or completed a task\n\
+         - insight: declarative observations such as file structure, function arity, or stable project facts\n\
          - heuristic: an empirical rule inferred from repeated episode patterns\n\
-         - constraint: a hard rule inferred from repeated failures or explicit guardrails\n\
+         - warning: a recurring failure mode, guardrail, or risk to avoid\n\
+         - causal_link: a cause-and-effect observation grounded in the episodes\n\
+         - strategy_fragment: a reusable approach or recipe that solved a task\n\
          Prefer concise content strings with concrete wording.\n"
     ))
 }
@@ -327,12 +330,14 @@ fn distillation_system_prompt() -> String {
         "You are Roko's knowledge distiller.\n\
          Read the episode corpus and synthesize durable knowledge.\n\
          Merge duplicate ideas across episodes.\n\
-         Facts should be direct observations.\n\
-         Procedures should describe a fix or recipe.\n\
+         Insights should be direct observations.\n\
          Heuristics should only appear when the episodes show a recurring pattern.\n\
-         For heuristics, set source_model plus a low model_generality only when the guidance depends on one model's behavior, formatting, or tool syntax.\n\
+         Warnings should capture recurring failures, guardrails, or things to avoid.\n\
+         Causal links should state what caused what when the evidence is strong enough.\n\
+         Strategy fragments should describe a reusable fix, recipe, or approach.\n\
+         For heuristics and strategy fragments, set source_model plus a low model_generality only when the guidance depends on one model's behavior, formatting, or tool syntax.\n\
          Use model_generality near 1.0 for heuristics that work across models and omit source_model for those general rules.\n\
-         Constraints should only appear when the episodes show repeated failures or guardrails.\n\n\
+         Avoid legacy category names like fact, procedure, playbook, or constraint in the output.\n\n\
          {}\n",
         extractor.extraction_prompt(&schema)
     )
@@ -396,15 +401,7 @@ fn derive_knowledge_id(
 }
 
 fn knowledge_kind_tag(kind: KnowledgeKind) -> &'static str {
-    match kind {
-        KnowledgeKind::Fact => "fact",
-        KnowledgeKind::Insight => "insight",
-        KnowledgeKind::Procedure => "procedure",
-        KnowledgeKind::Heuristic => "heuristic",
-        KnowledgeKind::Playbook => "playbook",
-        KnowledgeKind::Constraint => "constraint",
-        KnowledgeKind::AntiKnowledge => "anti_knowledge",
-    }
+    kind.as_str()
 }
 
 fn episode_source_id(episode: &Episode) -> &str {
@@ -452,7 +449,7 @@ fn inferred_model_scope(
     tags: &[String],
     episode_models: &BTreeMap<String, String>,
 ) -> (Option<String>, f64) {
-    if kind != KnowledgeKind::Heuristic && kind != KnowledgeKind::Playbook {
+    if kind != KnowledgeKind::Heuristic && kind != KnowledgeKind::StrategyFragment {
         return (None, 1.0);
     }
 
@@ -561,7 +558,7 @@ mod tests {
     #[tokio::test]
     async fn distiller_maps_structured_response_into_entries() {
         let backend = MockBackend::new(
-            r#"<|json|>{"entries":[{"kind":"fact","content":"file src/lib.rs contains struct Widget","confidence":0.9,"source_episodes":["ep-a"],"tags":["rust","struct"],"half_life_days":45},{"kind":"constraint","content":"never modify file X without also updating Y","confidence":0.8,"source_episodes":["ep-b"],"tags":["guardrail"],"half_life_days":60}]}<|/json|>"#,
+            r#"<|json|>{"entries":[{"kind":"insight","content":"file src/lib.rs contains struct Widget","confidence":0.9,"source_episodes":["ep-a"],"tags":["rust","struct"],"half_life_days":45},{"kind":"warning","content":"never modify file X without also updating Y","confidence":0.8,"source_episodes":["ep-b"],"tags":["guardrail"],"half_life_days":60}]}<|/json|>"#,
         );
         let distiller = Distiller::with_backend(backend.clone());
         let episodes = vec![
@@ -571,10 +568,10 @@ mod tests {
 
         let entries = distiller.distill(&episodes).await.expect("distill");
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].kind, KnowledgeKind::Fact);
+        assert_eq!(entries[0].kind, KnowledgeKind::Insight);
         assert_eq!(entries[0].source_episodes, vec!["ep-a"]);
-        assert!(entries[0].tags.iter().any(|tag| tag == "fact"));
-        assert_eq!(entries[1].kind, KnowledgeKind::Constraint);
+        assert!(entries[0].tags.iter().any(|tag| tag == "insight"));
+        assert_eq!(entries[1].kind, KnowledgeKind::Warning);
         assert_eq!(entries[1].source_episodes, vec!["ep-b"]);
         assert!(entries[1].id.starts_with("kn_"));
 

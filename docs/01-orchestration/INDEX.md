@@ -208,10 +208,10 @@ optimal performance.
 | Grimoire | Neuro | Knowledge store |
 | Styx | Agent Mesh | P2P communication |
 | Clade | Collective / Mesh | Agent group |
-| Signal | Engram (in architecture docs) | Content-addressed cognition unit |
+| Signal | Engram | Content-addressed cognition unit |
 | GNOS | KORAI / DAEJI | Token names |
 | Fleet | Collective | Agent group (corrected from earlier error) |
 
-> Note: In the active codebase, `Signal` is still the Rust type name. `Engram`
-> is the architectural concept name used in design documents. The rename will
-> occur in a future crate-wide refactoring pass.
+> Note: The active Rust codebase now uses `Engram` as the type name too. Older
+> docs or historical code samples that mention `Signal` refer to the same
+> content-addressed cognition unit and should be read as `Engram`.

@@ -233,16 +233,16 @@ pub async fn anchor_onchain(
 
 ---
 
-## Current Implementation: Signal-Based Audit Trail
+## Current Implementation: Engram-Based Audit Trail
 
-The current Roko codebase implements audit trailing via the `Signal` type (to be renamed to `Engram` in Tier 0D) and the `AuditSink` trait:
+The current Roko codebase implements audit trailing via the `Engram` type and the `AuditSink` trait:
 
 ### AuditSink Trait
 
 ```rust
 /// A sink for audit signals emitted by the ToolDispatcher.
 pub trait AuditSink: Send + Sync {
-    fn emit(&self, signal: Signal);
+    fn emit(&self, signal: Engram);
 }
 ```
 
@@ -257,7 +257,7 @@ The `ToolDispatcher` emits audit signals at every phase of tool dispatch:
 | `handler` | `started` or `missing` | `call_id`, `tool`, `phase=handler` |
 | `completion` | `succeeded` or `failed` | `call_id`, `tool`, `phase=completion` |
 
-Each signal is a `Signal` (future `Engram`) with:
+Each emitted record is an `Engram` with:
 - `Kind::ToolInvocation`
 - `Provenance::trusted("tool_dispatcher")`
 - Tags for `call_id`, `tool`, `phase`, and `status`
@@ -305,13 +305,13 @@ The linear hash-chain described above is extended by the Witness DAG (see [12-wi
 
 | Component | Status | Location |
 |-----------|--------|----------|
-| `Signal` (Engram) with `lineage` field | Built | `roko-core/src/signal.rs` |
-| `Provenance` struct | Built | `roko-core/src/signal.rs` |
+| `Engram` with `lineage` field | Built | `roko-core/src/engram.rs` |
+| `Provenance` struct | Built | `roko-core/src/provenance.rs` |
 | `AuditSink` trait | Built | `roko-core/src/tool/mod.rs` |
 | ToolDispatcher audit signal emission | Built | `roko-agent/src/dispatcher/mod.rs` |
 | FileSubstrate JSONL persistence | Built | `roko-fs/src/lib.rs` |
 | EpisodeLogger | Built | `roko-learn/src/episode_logger.rs` |
-| `Attestation` on Engrams | Design only | Target: Tier 2 |
+| `Attestation` on Engrams | Core schema built; signing/verification not wired | `roko-core/src/attestation.rs` |
 | SHA-256 linear hash-chain | Design only | Target: Tier 2 |
 | On-chain anchoring | Design only | Target: Tier 3 (chain domain) |
 | Witness DAG | Design only | Target: Tier 3 |

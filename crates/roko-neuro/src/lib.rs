@@ -24,36 +24,42 @@ const fn default_half_life_days() -> f64 {
     30.0
 }
 
-/// Default half-life for facts, in days.
-pub const FACT_HALF_LIFE_DAYS: f64 = 365.0;
 /// Default half-life for insights, in days.
 pub const INSIGHT_HALF_LIFE_DAYS: f64 = 30.0;
 /// Default half-life for heuristics, in days.
 pub const HEURISTIC_HALF_LIFE_DAYS: f64 = 90.0;
+/// Default half-life for warnings, in days.
+pub const WARNING_HALF_LIFE_DAYS: f64 = 7.0;
+/// Default half-life for causal links, in days.
+pub const CAUSAL_LINK_HALF_LIFE_DAYS: f64 = 30.0;
+/// Default half-life for strategy fragments, in days.
+pub const STRATEGY_FRAGMENT_HALF_LIFE_DAYS: f64 = 60.0;
 
 /// Semantic category for a knowledge item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KnowledgeKind {
-    /// A declarative statement that is treated as true until contradicted.
-    Fact,
     /// A compact causal observation distilled from multiple raw episodes.
+    #[serde(alias = "fact", alias = "Fact")]
     Insight,
-    /// A step-by-step action pattern or recipe.
-    Procedure,
     /// A lightweight rule of thumb or learned tendency.
+    #[serde(alias = "procedure", alias = "Procedure")]
     Heuristic,
-    /// A compiled human-readable playbook of validated heuristics.
-    Playbook,
-    /// A hard restriction that should not be violated.
-    Constraint,
     /// Negative knowledge describing what to avoid or what has failed.
     AntiKnowledge,
+    /// A cautionary warning about a recurring failure mode or risk.
+    #[serde(alias = "constraint", alias = "Constraint")]
+    Warning,
+    /// A causal relationship between two observations.
+    CausalLink,
+    /// A reusable approach fragment that can be composed into a larger plan.
+    #[serde(alias = "playbook", alias = "Playbook")]
+    StrategyFragment,
 }
 
 impl Default for KnowledgeKind {
     fn default() -> Self {
-        Self::Fact
+        Self::Insight
     }
 }
 
@@ -62,12 +68,53 @@ impl KnowledgeKind {
     #[must_use]
     pub const fn default_half_life_days(self) -> f64 {
         match self {
-            Self::Fact => FACT_HALF_LIFE_DAYS,
             Self::Insight => INSIGHT_HALF_LIFE_DAYS,
             Self::Heuristic => HEURISTIC_HALF_LIFE_DAYS,
-            Self::Procedure | Self::Playbook | Self::Constraint | Self::AntiKnowledge => {
-                default_half_life_days()
-            }
+            Self::AntiKnowledge => default_half_life_days(),
+            Self::Warning => WARNING_HALF_LIFE_DAYS,
+            Self::CausalLink => CAUSAL_LINK_HALF_LIFE_DAYS,
+            Self::StrategyFragment => STRATEGY_FRAGMENT_HALF_LIFE_DAYS,
+        }
+    }
+
+    /// Stable string label for this knowledge kind.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Insight => "insight",
+            Self::Heuristic => "heuristic",
+            Self::AntiKnowledge => "anti_knowledge",
+            Self::Warning => "warning",
+            Self::CausalLink => "causal_link",
+            Self::StrategyFragment => "strategy_fragment",
+        }
+    }
+}
+
+/// Retention tier for a knowledge entry.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeTier {
+    /// Short-lived entry that should decay aggressively.
+    #[default]
+    Transient,
+    /// Active working memory worth keeping somewhat longer.
+    Working,
+    /// Validated knowledge that should decay at the base rate.
+    Consolidated,
+    /// Highly durable knowledge that should decay much more slowly.
+    Persistent,
+}
+
+impl KnowledgeTier {
+    /// Lifetime multiplier for the tier.
+    #[must_use]
+    pub const fn multiplier(&self) -> f32 {
+        match self {
+            Self::Transient => 0.1,
+            Self::Working => 0.5,
+            Self::Consolidated => 1.0,
+            Self::Persistent => 5.0,
         }
     }
 }
@@ -119,6 +166,9 @@ pub struct KnowledgeEntry {
     /// Exponential decay half-life in days.
     #[serde(default = "default_half_life_days")]
     pub half_life_days: f64,
+    /// Retention tier applied on top of the base half-life.
+    #[serde(default)]
+    pub tier: KnowledgeTier,
     /// Optional HDC fingerprint for similarity search.
     #[serde(default)]
     pub hdc_vector: Option<Vec<u8>>,
@@ -157,6 +207,17 @@ impl KnowledgeEntry {
     pub fn applies_to_model(&self, current_model: &str) -> bool {
         self.model_generality > 0.7 || self.source_model.as_deref() == Some(current_model)
     }
+
+    /// Effective half-life after applying the retention tier multiplier.
+    #[must_use]
+    pub fn effective_half_life_days(&self) -> f64 {
+        let base_half_life = if self.half_life_days.is_finite() && self.half_life_days > 0.0 {
+            self.half_life_days
+        } else {
+            self.kind.default_half_life_days()
+        };
+        base_half_life * self.tier.multiplier() as f64
+    }
 }
 
 /// Single entry point for durable knowledge storage backends.
@@ -194,3 +255,80 @@ pub use knowledge_store::{
 };
 #[cfg(feature = "hdc")]
 pub use knowledge_store::{MemoryHit, MemoryIndex};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn knowledge_tier_multiplier_matches_spec() {
+        assert_eq!(KnowledgeTier::Transient.multiplier(), 0.1);
+        assert_eq!(KnowledgeTier::Working.multiplier(), 0.5);
+        assert_eq!(KnowledgeTier::Consolidated.multiplier(), 1.0);
+        assert_eq!(KnowledgeTier::Persistent.multiplier(), 5.0);
+    }
+
+    #[test]
+    fn effective_half_life_applies_tier_multiplier() {
+        let entry = KnowledgeEntry {
+            id: "kn-1".to_string(),
+            kind: KnowledgeKind::Insight,
+            source: None,
+            content: "Prefer smaller retries after gate failures.".to_string(),
+            confidence: 0.9,
+            confidence_weight: 0.9,
+            refuted_insight_id: None,
+            refutation_evidence: None,
+            source_episodes: vec!["ep-1".to_string()],
+            tags: vec!["insight".to_string()],
+            source_model: None,
+            model_generality: 1.0,
+            created_at: Utc::now(),
+            half_life_days: 20.0,
+            tier: KnowledgeTier::Persistent,
+            hdc_vector: None,
+        };
+
+        assert_eq!(entry.effective_half_life_days(), 100.0);
+    }
+
+    #[test]
+    fn new_knowledge_kinds_have_expected_defaults() {
+        assert_eq!(KnowledgeKind::Warning.default_half_life_days(), 7.0);
+        assert_eq!(KnowledgeKind::CausalLink.default_half_life_days(), 30.0);
+        assert_eq!(
+            KnowledgeKind::StrategyFragment.default_half_life_days(),
+            60.0
+        );
+        assert_eq!(KnowledgeKind::Warning.as_str(), "warning");
+        assert_eq!(KnowledgeKind::CausalLink.as_str(), "causal_link");
+        assert_eq!(
+            KnowledgeKind::StrategyFragment.as_str(),
+            "strategy_fragment"
+        );
+    }
+
+    #[test]
+    fn legacy_knowledge_kind_names_deserialize_to_prd_variants() {
+        #[derive(Deserialize)]
+        struct Wrapper {
+            kind: KnowledgeKind,
+        }
+
+        let cases = [
+            (r#"{"kind":"Fact"}"#, KnowledgeKind::Insight),
+            (r#"{"kind":"fact"}"#, KnowledgeKind::Insight),
+            (r#"{"kind":"Procedure"}"#, KnowledgeKind::Heuristic),
+            (r#"{"kind":"procedure"}"#, KnowledgeKind::Heuristic),
+            (r#"{"kind":"Playbook"}"#, KnowledgeKind::StrategyFragment),
+            (r#"{"kind":"playbook"}"#, KnowledgeKind::StrategyFragment),
+            (r#"{"kind":"Constraint"}"#, KnowledgeKind::Warning),
+            (r#"{"kind":"constraint"}"#, KnowledgeKind::Warning),
+        ];
+
+        for (json, expected) in cases {
+            let decoded: Wrapper = serde_json::from_str(json).expect("deserialize legacy kind");
+            assert_eq!(decoded.kind, expected);
+        }
+    }
+}

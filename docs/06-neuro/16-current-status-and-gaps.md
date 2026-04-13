@@ -9,11 +9,9 @@
 **Prerequisites**: [00-vision-and-grimoire-rename.md](./00-vision-and-grimoire-rename.md)
 **Key sources**:
 - `crates/roko-neuro/src/` (all source files)
-- `crates/bardo-primitives/src/hdc.rs` (HDC implementation)
-- `crates/roko-index/src/hdc.rs` (code symbol fingerprinting)
+- `crates/roko-primitives/src/hdc.rs` (HDC implementation)
 - `crates/roko-learn/src/hdc_clustering.rs` (K-medoids)
-- `crates/roko-golem/src/grimoire.rs` (dissolved placeholder)
-- `tmp/implementation-plans/12a-cognitive-layer.md` (72 implementation items)
+- `tmp/integrate-prds/` (current integration tracker)
 
 ---
 
@@ -21,7 +19,7 @@
 
 Neuro's codebase has a solid foundation: the core data types (`KnowledgeEntry`, `KnowledgeKind`, `NeuroStore` trait), the JSONL storage backend (`KnowledgeStore`), the episode distillation pipeline (`Distiller`, `DistillationBackend`), and the tier progression system (`TierProgression` with D1/D2/D3 stages) are all implemented. The HDC vector library (`HdcVector` in `bardo-primitives`) is fully functional with bind, bundle, permute, similarity, and deterministic seeding.
 
-However, significant gaps remain between the current implementation and the refactoring-prd design. The tier multiplier system (Transient/Working/Consolidated/Persistent) is designed but not implemented as a field on `KnowledgeEntry`. Several knowledge types from the design (Warning, CausalLink, StrategyFragment) are not yet in the `KnowledgeKind` enum. The ContextAssembler is a skeleton with no methods. And none of the frontier innovations (VCG attention auction, somatic landscape, active inference context selection) are implemented.
+However, significant gaps remain between the current implementation and the refactoring-prd design. The tier multiplier system is now implemented on `KnowledgeEntry`, and the canonical knowledge types now match the PRD (`Insight`, `Heuristic`, `Warning`, `CausalLink`, `StrategyFragment`, `AntiKnowledge`) with legacy names preserved only as serde aliases. The main remaining structural gap is that `roko-neuro::context::ContextAssembler` is still a skeleton while `roko-compose::ContextAssembler` carries the real retrieval/ranking logic. Frontier innovations such as the VCG attention auction, somatic landscape, and active-inference retrieval are still not implemented.
 
 ---
 
@@ -31,10 +29,10 @@ However, significant gaps remain between the current implementation and the refa
 
 | Component | File | Status | Lines |
 |---|---|---|---|
-| `KnowledgeKind` enum | `lib.rs` | **Implemented** — 7 variants: Fact, Insight, Procedure, Heuristic, Playbook, Constraint, AntiKnowledge | ~50 |
-| `KnowledgeEntry` struct | `lib.rs` | **Implemented** — all fields including refuted_insight_id, refutation_evidence, hdc_vector | ~60 |
+| `KnowledgeKind` enum | `lib.rs` | **Implemented** — canonical variants are Insight, Heuristic, Warning, CausalLink, StrategyFragment, AntiKnowledge; legacy names deserialize via aliases | ~50 |
+| `KnowledgeEntry` struct | `lib.rs` | **Implemented** — includes tier, refuted_insight_id, refutation_evidence, hdc_vector | ~60 |
 | `NeuroStore` trait | `lib.rs` | **Implemented** — init, query, ingest, decay, gc | ~20 |
-| Half-life constants | `lib.rs` | **Implemented** — FACT=365d, INSIGHT=30d, HEURISTIC=90d; default 30d for others | ~30 |
+| Half-life constants | `lib.rs` | **Implemented** — INSIGHT=30d, HEURISTIC=90d, WARNING=7d, CAUSAL_LINK=30d, STRATEGY_FRAGMENT=60d | ~30 |
 | `refutation_warning()` | `lib.rs` | **Implemented** — generates warning text for AntiKnowledge entries | ~25 |
 | `KnowledgeStore` (JSONL) | `knowledge_store.rs` | **Implemented** — append-only, with stats, optional HDC MemoryIndex | Large |
 | `KnowledgeConfirmationRecord` | `knowledge_store.rs` | **Implemented** — tracks positive/negative confirmations | ~10 |
@@ -49,7 +47,7 @@ However, significant gaps remain between the current implementation and the refa
 | `PlaybookCompilation` | `tier_progression.rs` | **Implemented** — title, rules, markdown | ~10 |
 | `ContextAssembler` struct | `context.rs` | **Skeleton** — struct defined (KnowledgeStore + EpisodeStore + budget), no methods | ~10 |
 
-### bardo-primitives (HDC Vectors)
+### roko-primitives (HDC Vectors)
 
 | Component | File | Status |
 |---|---|---|
@@ -91,11 +89,6 @@ However, significant gaps remain between the current implementation and the refa
 
 | Gap | Where It Belongs | Blocking? | Implementation Plan Reference |
 |---|---|---|---|
-| **Tier field on KnowledgeEntry** | `roko-neuro/src/lib.rs` | Yes — tiers are the core validation mechanism | `12a-cognitive-layer.md` D1-D4 |
-| **Tier multiplier computation** | `roko-neuro/src/knowledge_store.rs` | Yes — effective_half_life = tier × base | D5-D6 |
-| **Warning type (7-day half-life)** | `roko-neuro/src/lib.rs` | Moderate — currently approximated by Constraint | D1 |
-| **CausalLink type (60-day half-life)** | `roko-neuro/src/lib.rs` | Moderate — no current equivalent | D2 |
-| **StrategyFragment type (14-day half-life)** | `roko-neuro/src/lib.rs` | Low — approximated by Procedure | D3 |
 | **AntiKnowledge confidence floor (0.3)** | `roko-neuro/src/knowledge_store.rs` | Moderate — currently decays to 0 | D4 |
 | **ContextAssembler methods** | `roko-neuro/src/context.rs` | Yes — context assembly is not functional | E1-E6 |
 | **Combined retrieval scoring** | `roko-neuro/src/knowledge_store.rs` | Moderate — query uses simple matching, not confidence × decay × similarity | D7-D8 |

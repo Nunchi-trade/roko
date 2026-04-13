@@ -16,19 +16,19 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use bardo_primitives::hdc::{HdcVector, text_fingerprint};
 use chrono::{DateTime, Utc};
 use roko_agent::{Agent, AgentResult, nl_to_format::NlToFormatConverter};
-use roko_core::{Body, Context as RokoContext, Kind, Signal};
+use roko_core::{Body, Context as RokoContext, Engram, Kind};
 use roko_learn::{
     cfactor::{CFactor, CFactorRegression, detect_cfactor_regression},
     episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage},
     playbook::{Playbook, PlaybookStep, PlaybookStore},
 };
 use roko_neuro::{
-    KnowledgeEntry, KnowledgeKind, KnowledgeStore,
+    KnowledgeEntry, KnowledgeKind, KnowledgeStore, KnowledgeTier,
     tier_progression::{TierProgression, TierProgressionReport},
 };
+use roko_primitives::hdc::{HdcVector, text_fingerprint};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -44,7 +44,7 @@ const SIGNALS_LOG_FILE: &str = "signals.jsonl";
 #[async_trait]
 pub trait AgentDispatcher: Send + Sync {
     /// Dispatch a dream-review prompt through the configured agent.
-    async fn dispatch(&self, input: &Signal, ctx: &RokoContext) -> AgentResult;
+    async fn dispatch(&self, input: &Engram, ctx: &RokoContext) -> AgentResult;
 }
 
 #[async_trait]
@@ -52,7 +52,7 @@ impl<T> AgentDispatcher for T
 where
     T: Agent + Send + Sync,
 {
-    async fn dispatch(&self, input: &Signal, ctx: &RokoContext) -> AgentResult {
+    async fn dispatch(&self, input: &Engram, ctx: &RokoContext) -> AgentResult {
         self.run(input, ctx).await
     }
 }
@@ -526,7 +526,7 @@ impl DreamCycle {
                 .with_context(|| format!("create dream signal directory {}", parent.display()))?;
         }
 
-        let signal = Signal::builder(Kind::Custom("dreams:regression".to_string()))
+        let signal = Engram::builder(Kind::Custom("dreams:regression".to_string()))
             .body(Body::from_json(&payload).context("serialize dreams regression payload")?)
             .provenance(roko_core::Provenance::trusted("dreams"))
             .tag("historical_records", historical_records.to_string())
@@ -577,7 +577,7 @@ impl DreamCycle {
                 .with_context(|| format!("create dream signal directory {}", parent.display()))?;
         }
 
-        let signal = Signal::builder(Kind::Custom("cfactor:regression".to_string()))
+        let signal = Engram::builder(Kind::Custom("cfactor:regression".to_string()))
             .body(Body::from_json(&regression).context("serialize cfactor regression payload")?)
             .provenance(roko_core::Provenance::trusted("dreams"))
             .tag("current", format!("{:.4}", regression.current))
@@ -828,7 +828,7 @@ async fn process_cluster(
     };
 
     let prompt = build_cluster_prompt(cluster, started_at)?;
-    let signal = Signal::builder(Kind::Prompt)
+    let signal = Engram::builder(Kind::Prompt)
         .body(Body::text(prompt))
         .build();
     let response = dispatcher.dispatch(&signal, &RokoContext::now()).await;
@@ -1325,6 +1325,7 @@ impl DreamDistillationCandidate {
             model_generality: 1.0,
             created_at: Utc::now(),
             half_life_days,
+            tier: KnowledgeTier::Working,
             hdc_vector: None,
         })
     }
@@ -1441,12 +1442,16 @@ fn playbook_knowledge_entry(
         .map(ToOwned::to_owned);
     KnowledgeEntry {
         id: derive_knowledge_id(
-            KnowledgeKind::Playbook,
+            KnowledgeKind::StrategyFragment,
             &content,
             source_episodes,
-            &["playbook".to_string(), "dream".to_string()],
+            &[
+                "strategy_fragment".to_string(),
+                "playbook".to_string(),
+                "dream".to_string(),
+            ],
         ),
-        kind: KnowledgeKind::Playbook,
+        kind: KnowledgeKind::StrategyFragment,
         source: Some("dream".to_string()),
         content,
         confidence: if playbook.steps.is_empty() { 0.0 } else { 1.0 },
@@ -1456,13 +1461,15 @@ fn playbook_knowledge_entry(
         source_episodes: source_episodes.to_vec(),
         tags: vec![
             "dream".to_string(),
+            "strategy_fragment".to_string(),
             "playbook".to_string(),
             "task-reusable".to_string(),
         ],
         source_model,
         model_generality: 0.0,
         created_at,
-        half_life_days: KnowledgeKind::Playbook.default_half_life_days(),
+        half_life_days: KnowledgeKind::StrategyFragment.default_half_life_days(),
+        tier: KnowledgeTier::Persistent,
         hdc_vector: None,
     }
 }
@@ -1470,7 +1477,7 @@ fn playbook_knowledge_entry(
 fn build_regression_entry(cluster: &DreamCluster, created_at: DateTime<Utc>) -> KnowledgeEntry {
     let reason = summarize_failure_reason(cluster);
     let kind = if cluster.success_count == 0 {
-        KnowledgeKind::Constraint
+        KnowledgeKind::Warning
     } else {
         KnowledgeKind::AntiKnowledge
     };
@@ -1525,6 +1532,7 @@ fn build_regression_entry(cluster: &DreamCluster, created_at: DateTime<Utc>) -> 
         model_generality: 1.0,
         created_at,
         half_life_days: kind.default_half_life_days(),
+        tier: KnowledgeTier::Working,
         hdc_vector: None,
     }
 }
@@ -1658,6 +1666,7 @@ fn generate_cross_domain_strategy_hypotheses(
             model_generality: 0.0,
             created_at,
             half_life_days: KnowledgeKind::Heuristic.default_half_life_days(),
+            tier: KnowledgeTier::Working,
             hdc_vector: None,
         });
     }
@@ -1941,6 +1950,7 @@ fn build_mistake_insight_entry(
         model_generality: 1.0,
         created_at,
         half_life_days: KnowledgeKind::Insight.default_half_life_days(),
+        tier: KnowledgeTier::Working,
         hdc_vector: None,
     }
 }
@@ -1987,6 +1997,7 @@ fn review_insights_from_heuristics(
             model_generality: 1.0,
             created_at,
             half_life_days: KnowledgeKind::Insight.default_half_life_days(),
+            tier: KnowledgeTier::Working,
             hdc_vector: None,
             }
         })
@@ -2201,15 +2212,7 @@ fn default_candidate_confidence() -> f64 {
 }
 
 fn knowledge_kind_tag(kind: KnowledgeKind) -> &'static str {
-    match kind {
-        KnowledgeKind::Fact => "fact",
-        KnowledgeKind::Insight => "insight",
-        KnowledgeKind::Procedure => "procedure",
-        KnowledgeKind::Heuristic => "heuristic",
-        KnowledgeKind::Playbook => "playbook",
-        KnowledgeKind::Constraint => "constraint",
-        KnowledgeKind::AntiKnowledge => "anti_knowledge",
-    }
+    kind.as_str()
 }
 
 fn derive_knowledge_id(
@@ -2251,9 +2254,9 @@ mod tests {
 
     #[async_trait]
     impl AgentDispatcher for MockDispatcher {
-        async fn dispatch(&self, _input: &Signal, _ctx: &RokoContext) -> AgentResult {
+        async fn dispatch(&self, _input: &Engram, _ctx: &RokoContext) -> AgentResult {
             AgentResult::ok(
-                Signal::builder(Kind::Prompt)
+                Engram::builder(Kind::Prompt)
                     .body(Body::text(self.response.clone()))
                     .build(),
             )
@@ -2307,7 +2310,7 @@ mod tests {
         episode
     }
 
-    fn read_signals(path: &Path) -> Vec<Signal> {
+    fn read_signals(path: &Path) -> Vec<Engram> {
         let Ok(text) = std::fs::read_to_string(path) else {
             return Vec::new();
         };

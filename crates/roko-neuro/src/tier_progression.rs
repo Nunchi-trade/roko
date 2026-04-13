@@ -18,7 +18,7 @@ use roko_learn::episode_logger::Episode;
 use roko_learn::pattern_discovery::{EpisodeView, PatternMiner};
 use serde::{Deserialize, Serialize};
 
-use crate::{KnowledgeEntry, KnowledgeKind};
+use crate::{KnowledgeEntry, KnowledgeKind, KnowledgeTier};
 
 const DEFAULT_MIN_SUPPORT: usize = 3;
 const DEFAULT_MIN_HEURISTIC_SUPPORT: usize = 5;
@@ -401,6 +401,7 @@ impl From<&InsightRecord> for KnowledgeEntry {
             model_generality: default_model_generality(),
             created_at: Utc::now(),
             half_life_days: KnowledgeKind::Insight.default_half_life_days(),
+            tier: KnowledgeTier::Consolidated,
             hdc_vector: None,
         }
     }
@@ -427,6 +428,7 @@ impl From<&HeuristicRule> for KnowledgeEntry {
             model_generality: value.model_generality,
             created_at: Utc::now(),
             half_life_days: KnowledgeKind::Heuristic.default_half_life_days(),
+            tier: KnowledgeTier::Consolidated,
             hdc_vector: None,
         }
     }
@@ -436,7 +438,7 @@ impl From<&PlaybookCompilation> for KnowledgeEntry {
     fn from(value: &PlaybookCompilation) -> Self {
         Self {
             id: format!("playbook:{:016x}", stable_hash(value.markdown.as_bytes())),
-            kind: KnowledgeKind::Playbook,
+            kind: KnowledgeKind::StrategyFragment,
             source: None,
             content: value.markdown.clone(),
             confidence: if value.rules.is_empty() { 0.0 } else { 1.0 },
@@ -450,11 +452,16 @@ impl From<&PlaybookCompilation> for KnowledgeEntry {
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect(),
-            tags: vec!["tier:playbook".to_string(), "machine-parseable".to_string()],
+            tags: vec![
+                "tier:strategy_fragment".to_string(),
+                "machine-parseable".to_string(),
+                "playbook".to_string(),
+            ],
             source_model: playbook_source_model(&value.rules),
             model_generality: playbook_model_generality(&value.rules),
             created_at: Utc::now(),
             half_life_days: DEFAULT_HALF_LIFE_DAYS,
+            tier: KnowledgeTier::Persistent,
             hdc_vector: None,
         }
     }

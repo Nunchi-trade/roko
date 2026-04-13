@@ -232,31 +232,31 @@ const fn default_half_life_days() -> f64 {
     30.0  // fallback for types without specific constants
 }
 
-pub const FACT_HALF_LIFE_DAYS: f64 = 365.0;
 pub const INSIGHT_HALF_LIFE_DAYS: f64 = 30.0;
 pub const HEURISTIC_HALF_LIFE_DAYS: f64 = 90.0;
+pub const WARNING_HALF_LIFE_DAYS: f64 = 7.0;
+pub const CAUSAL_LINK_HALF_LIFE_DAYS: f64 = 30.0;
+pub const STRATEGY_FRAGMENT_HALF_LIFE_DAYS: f64 = 60.0;
 
 impl KnowledgeKind {
     pub const fn default_half_life_days(self) -> f64 {
         match self {
-            Self::Fact => FACT_HALF_LIFE_DAYS,
             Self::Insight => INSIGHT_HALF_LIFE_DAYS,
             Self::Heuristic => HEURISTIC_HALF_LIFE_DAYS,
-            Self::Procedure | Self::Playbook | Self::Constraint | Self::AntiKnowledge => {
-                default_half_life_days()
-            }
+            Self::AntiKnowledge => default_half_life_days(),
+            Self::Warning => WARNING_HALF_LIFE_DAYS,
+            Self::CausalLink => CAUSAL_LINK_HALF_LIFE_DAYS,
+            Self::StrategyFragment => STRATEGY_FRAGMENT_HALF_LIFE_DAYS,
         }
     }
 }
 ```
 
-**Gap**: The current code assigns 30 days (the default) to Procedure, Playbook, Constraint, and AntiKnowledge. The refactoring-prd design specifies:
-- Warning: 7 days (not yet a variant)
-- CausalLink: 60 days (not yet a variant)
-- StrategyFragment: 14 days (mapped to Procedure, currently at 30 days)
-- AntiKnowledge: never-decay with floor 0.3 (currently at 30 days, which is incorrect)
-
-Reconciliation requires adding the new variants and updating the `default_half_life_days()` method to return the correct constants for each type.
+This section is now partly historical. Current code has PRD-native variants for
+`Warning`, `CausalLink`, and `StrategyFragment`, plus tier-scaled effective
+half-life computation. The remaining notable mismatch is `AntiKnowledge`, which
+still uses the generic default decay path rather than a true never-decay / floor
+model.
 
 ---
 
@@ -272,18 +272,16 @@ Reconciliation requires adding the new variants and updating the `default_half_l
 ## Current Status and Gaps
 
 **Implemented**:
-- `FACT_HALF_LIFE_DAYS = 365.0`
 - `INSIGHT_HALF_LIFE_DAYS = 30.0`
 - `HEURISTIC_HALF_LIFE_DAYS = 90.0`
-- `default_half_life_days()` fallback of 30.0 days
-- `KnowledgeKind::default_half_life_days()` method
+- `WARNING_HALF_LIFE_DAYS = 7.0`
+- `CAUSAL_LINK_HALF_LIFE_DAYS = 30.0`
+- `STRATEGY_FRAGMENT_HALF_LIFE_DAYS = 60.0`
+- `KnowledgeKind::default_half_life_days()` for the PRD-native enum
+- Tier multiplier application via `KnowledgeEntry::effective_half_life_days()`
 
 **Missing**:
-- Warning half-life constant (7 days) — type not yet in enum
-- CausalLink half-life constant (60 days) — type not yet in enum
-- StrategyFragment half-life constant (14 days) — Procedure currently uses 30-day default
-- AntiKnowledge special decay (never, floor 0.3) — currently uses 30-day default
-- Tier multiplier application to half-lives
+- AntiKnowledge special decay (never, floor 0.3) — still uses the generic default path
 - Configurable half-lives in `roko.toml` (for domain-specific tuning)
 
 ---

@@ -66,7 +66,7 @@ process supervisor, the conductor, and the MCP server state.
 | Field | Type | Purpose |
 |-------|------|---------|
 | `conductor` | `Arc<Conductor>` | Anomaly detection, watchers |
-| `conductor_signals` | `Vec<Signal>` | Signals for conductor evaluation |
+| `conductor_signals` | `Vec<Engram>` | Engrams for conductor evaluation |
 | `metrics` | `Arc<MetricRegistry>` | Prometheus-style counters/histograms |
 | `health_probes` | `ProbeRegistry` | Readiness/liveness probes |
 | `obs_sinks` | `FsObservabilitySinks` | File-backed traces and metrics |

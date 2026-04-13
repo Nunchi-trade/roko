@@ -51,7 +51,7 @@ pub struct KnowledgeConfirmationRecord {
 const HDC_VECTOR_BYTES: usize = 1280;
 
 #[cfg(feature = "hdc")]
-use bardo_primitives::hdc::HdcVector;
+use roko_primitives::hdc::HdcVector;
 
 /// Persistent knowledge store backed by an append-only JSONL file.
 ///
@@ -165,6 +165,8 @@ impl KnowledgeStore {
             return Ok(());
         }
 
+        let entries = prepare_entries_for_ingest(entries);
+
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).context("create knowledge directory")?;
         }
@@ -255,7 +257,7 @@ impl KnowledgeStore {
     ///
     /// This is a thin extension over [`KnowledgeStore::query`] used by prompt
     /// assembly to recall only the highest-tier distilled guidance (for
-    /// example, Playbook entries) without pulling lower-tier noise into the
+    /// example, StrategyFragment entries) without pulling lower-tier noise into the
     /// prompt.
     ///
     /// # Errors
@@ -573,7 +575,7 @@ impl NeuroStore for KnowledgeStore {
 /// A precomputed HDC index over durable knowledge entries.
 ///
 /// The index fingerprints each entry's content with
-/// [`bardo_primitives::hdc::HdcVector::from_seed`] and stores the
+/// [`roko_primitives::hdc::HdcVector::from_seed`] and stores the
 /// resulting vectors alongside the source entries. Searches fingerprint
 /// the query string once and rank entries by HDC similarity, which keeps
 /// semantic lookup fast when the corpus is already indexed.
@@ -670,7 +672,34 @@ impl MemoryIndex {
 
 #[cfg(feature = "hdc")]
 fn fingerprint_entry(entry: &KnowledgeEntry) -> HdcVector {
+    if let Some(vector) = entry.hdc_vector.as_deref()
+        && let Ok(bytes) = <[u8; HDC_VECTOR_BYTES]>::try_from(vector)
+    {
+        return HdcVector::from_bytes(&bytes);
+    }
     HdcVector::from_seed(entry.content.as_bytes())
+}
+
+#[cfg(feature = "hdc")]
+fn prepare_entries_for_ingest(entries: Vec<KnowledgeEntry>) -> Vec<KnowledgeEntry> {
+    entries.into_iter().map(ensure_hdc_vector).collect()
+}
+
+#[cfg(not(feature = "hdc"))]
+fn prepare_entries_for_ingest(entries: Vec<KnowledgeEntry>) -> Vec<KnowledgeEntry> {
+    entries
+}
+
+#[cfg(feature = "hdc")]
+fn ensure_hdc_vector(mut entry: KnowledgeEntry) -> KnowledgeEntry {
+    let has_valid_vector = entry
+        .hdc_vector
+        .as_ref()
+        .is_some_and(|vector| vector.len() == HDC_VECTOR_BYTES);
+    if !has_valid_vector {
+        entry.hdc_vector = Some(fingerprint_entry(&entry).to_bytes().to_vec());
+    }
+    entry
 }
 
 #[cfg(feature = "hdc")]
@@ -749,11 +778,7 @@ fn recency_factor(entry: &KnowledgeEntry, now: DateTime<Utc>) -> f64 {
 }
 
 fn effective_half_life_days(entry: &KnowledgeEntry) -> f64 {
-    if entry.half_life_days.is_finite() && entry.half_life_days > 0.0 {
-        entry.half_life_days
-    } else {
-        entry.kind.default_half_life_days()
-    }
+    entry.effective_half_life_days()
 }
 
 fn effective_confidence(entry: &KnowledgeEntry) -> f64 {
@@ -785,15 +810,7 @@ fn compare_scores(
 }
 
 fn knowledge_kind_label(kind: KnowledgeKind) -> &'static str {
-    match kind {
-        KnowledgeKind::Fact => "fact",
-        KnowledgeKind::Insight => "insight",
-        KnowledgeKind::Procedure => "procedure",
-        KnowledgeKind::Heuristic => "heuristic",
-        KnowledgeKind::Playbook => "playbook",
-        KnowledgeKind::Constraint => "constraint",
-        KnowledgeKind::AntiKnowledge => "anti_knowledge",
-    }
+    kind.as_str()
 }
 
 #[cfg(feature = "hdc")]
@@ -883,7 +900,7 @@ fn detect_confirmations(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::KnowledgeKind;
+    use crate::{KnowledgeKind, KnowledgeTier};
     use chrono::Duration;
     use tempfile::TempDir;
 
@@ -914,6 +931,7 @@ mod tests {
             model_generality: 1.0,
             created_at,
             half_life_days: kind.default_half_life_days(),
+            tier: KnowledgeTier::Consolidated,
             hdc_vector: None,
         }
     }
@@ -926,7 +944,7 @@ mod tests {
 
         store
             .add(entry(
-                KnowledgeKind::Fact,
+                KnowledgeKind::Insight,
                 "k1",
                 "Rust async actors and memory stores",
                 &["rust", "async"],
@@ -937,7 +955,7 @@ mod tests {
             .expect("add first");
         store
             .add(entry(
-                KnowledgeKind::Fact,
+                KnowledgeKind::Insight,
                 "k2",
                 "Rust data pipelines",
                 &["rust"],
@@ -948,7 +966,7 @@ mod tests {
             .expect("add second");
         store
             .add(entry(
-                KnowledgeKind::Fact,
+                KnowledgeKind::Insight,
                 "k3",
                 "Completely unrelated note",
                 &["misc"],
@@ -1001,15 +1019,15 @@ mod tests {
 
         store
             .add(entry(
-                KnowledgeKind::Fact,
-                "fact",
-                "Long-lived factual memory",
-                &["fact"],
+                KnowledgeKind::StrategyFragment,
+                "strategy",
+                "Reusable long-lived strategy fragment",
+                &["strategy_fragment"],
                 1.0,
                 &[],
                 created_at,
             ))
-            .expect("add fact");
+            .expect("add strategy fragment");
         store
             .add(entry(
                 KnowledgeKind::Insight,
@@ -1035,7 +1053,10 @@ mod tests {
 
         store.decay().expect("decay");
         let all = store.read_all().expect("read");
-        let fact = all.iter().find(|entry| entry.id == "fact").expect("fact");
+        let strategy = all
+            .iter()
+            .find(|entry| entry.id == "strategy")
+            .expect("strategy");
         let insight = all
             .iter()
             .find(|entry| entry.id == "insight")
@@ -1045,10 +1066,10 @@ mod tests {
             .find(|entry| entry.id == "heuristic")
             .expect("heuristic");
 
-        assert!(fact.confidence > heuristic.confidence);
-        assert!(heuristic.confidence > insight.confidence);
+        assert!(heuristic.confidence > strategy.confidence);
+        assert!(strategy.confidence > insight.confidence);
         assert!((insight.confidence - 0.5).abs() < 0.05);
-        assert!(fact.confidence > 0.9);
+        assert!((strategy.confidence - 0.71).abs() < 0.05);
         assert!((heuristic.confidence - 0.79).abs() < 0.05);
     }
 
@@ -1150,6 +1171,7 @@ mod tests {
                 model_generality: 1.0,
                 created_at: now,
                 half_life_days: KnowledgeKind::AntiKnowledge.default_half_life_days(),
+                tier: KnowledgeTier::Working,
                 hdc_vector: None,
             })
             .expect("add anti knowledge");
@@ -1174,7 +1196,7 @@ mod tests {
         store
             .add(KnowledgeEntry {
                 id: "oldest".to_owned(),
-                kind: KnowledgeKind::Fact,
+                kind: KnowledgeKind::Insight,
                 source: None,
                 content: "first".to_owned(),
                 confidence: 0.8,
@@ -1186,14 +1208,15 @@ mod tests {
                 source_model: None,
                 model_generality: 1.0,
                 created_at: now - Duration::days(3),
-                half_life_days: KnowledgeKind::Fact.default_half_life_days(),
+                half_life_days: KnowledgeKind::Insight.default_half_life_days(),
+                tier: KnowledgeTier::Consolidated,
                 hdc_vector: None,
             })
             .expect("add oldest");
         store
             .add(KnowledgeEntry {
                 id: "middle".to_owned(),
-                kind: KnowledgeKind::Procedure,
+                kind: KnowledgeKind::StrategyFragment,
                 source: None,
                 content: "second".to_owned(),
                 confidence: 0.6,
@@ -1205,14 +1228,15 @@ mod tests {
                 source_model: None,
                 model_generality: 1.0,
                 created_at: now - Duration::days(1),
-                half_life_days: KnowledgeKind::Procedure.default_half_life_days(),
+                half_life_days: KnowledgeKind::StrategyFragment.default_half_life_days(),
+                tier: KnowledgeTier::Consolidated,
                 hdc_vector: None,
             })
             .expect("add middle");
         store
             .add(KnowledgeEntry {
                 id: "newest".to_owned(),
-                kind: KnowledgeKind::Fact,
+                kind: KnowledgeKind::Insight,
                 source: None,
                 content: "third".to_owned(),
                 confidence: 1.0,
@@ -1224,15 +1248,16 @@ mod tests {
                 source_model: None,
                 model_generality: 1.0,
                 created_at: now,
-                half_life_days: KnowledgeKind::Fact.default_half_life_days(),
+                half_life_days: KnowledgeKind::Insight.default_half_life_days(),
+                tier: KnowledgeTier::Consolidated,
                 hdc_vector: None,
             })
             .expect("add newest");
 
         let stats = store.stats().expect("stats");
         assert_eq!(stats.total_entries, 3);
-        assert_eq!(stats.kind_counts.get("fact"), Some(&2));
-        assert_eq!(stats.kind_counts.get("procedure"), Some(&1));
+        assert_eq!(stats.kind_counts.get("insight"), Some(&2));
+        assert_eq!(stats.kind_counts.get("strategy_fragment"), Some(&1));
         assert!((stats.average_confidence.expect("average") - 0.8).abs() < f64::EPSILON);
         assert_eq!(
             stats.oldest_entry.as_ref().map(|entry| entry.id.as_str()),
@@ -1250,7 +1275,7 @@ mod tests {
         let now = Utc::now();
         let index = MemoryIndex::from_entries(vec![
             entry(
-                KnowledgeKind::Fact,
+                KnowledgeKind::Insight,
                 "k1",
                 "rust async memory retrieval",
                 &["rust", "memory"],
@@ -1259,7 +1284,7 @@ mod tests {
                 now,
             ),
             entry(
-                KnowledgeKind::Fact,
+                KnowledgeKind::Insight,
                 "k2",
                 "postgres maintenance routine",
                 &["db"],
@@ -1287,7 +1312,7 @@ mod tests {
 
         store
             .add(entry(
-                KnowledgeKind::Fact,
+                KnowledgeKind::Insight,
                 "k1",
                 "semantic retrieval over durable knowledge",
                 &["memory"],
@@ -1298,7 +1323,7 @@ mod tests {
             .expect("add first");
         store
             .add(entry(
-                KnowledgeKind::Fact,
+                KnowledgeKind::Insight,
                 "k2",
                 "completely unrelated topic",
                 &["misc"],
@@ -1315,13 +1340,37 @@ mod tests {
         assert_eq!(hits[0].entry.id, "k1");
     }
 
+    #[cfg(feature = "hdc")]
+    #[test]
+    fn ingest_populates_hdc_vector_when_feature_is_enabled() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let now = Utc::now();
+
+        store
+            .add(entry(
+                KnowledgeKind::Insight,
+                "k1",
+                "semantic retrieval over durable knowledge",
+                &["memory"],
+                1.0,
+                &["ep-a"],
+                now,
+            ))
+            .expect("add entry");
+
+        let all = store.read_all().expect("read");
+        let vector = all[0].hdc_vector.as_ref().expect("persisted hdc vector");
+        assert_eq!(vector.len(), HDC_VECTOR_BYTES);
+    }
+
     // ── Confirmation detection tests ─────────────────────────────────
 
     #[test]
     fn entries_are_similar_detects_tag_and_keyword_overlap() {
         let now = Utc::now();
         let existing = entry(
-            KnowledgeKind::Fact,
+            KnowledgeKind::Insight,
             "k1",
             "Rust async actors are useful for concurrent pipelines",
             &["rust", "async", "concurrency"],
@@ -1330,7 +1379,7 @@ mod tests {
             now,
         );
         let similar = entry(
-            KnowledgeKind::Fact,
+            KnowledgeKind::Insight,
             "k2",
             "Rust async runtime handles concurrent execution well",
             &["rust", "async"],
@@ -1339,7 +1388,7 @@ mod tests {
             now,
         );
         let unrelated = entry(
-            KnowledgeKind::Fact,
+            KnowledgeKind::Insight,
             "k3",
             "PostgreSQL requires VACUUM for dead tuple cleanup",
             &["postgres", "maintenance"],
@@ -1356,7 +1405,7 @@ mod tests {
     fn entries_are_similar_requires_minimum_keyword_overlap() {
         let now = Utc::now();
         let existing = entry(
-            KnowledgeKind::Fact,
+            KnowledgeKind::Insight,
             "k1",
             "Rust async actors are useful",
             &["rust"],
@@ -1366,7 +1415,7 @@ mod tests {
         );
         // Shares the tag "rust" but only one keyword overlap ("rust").
         let one_keyword = entry(
-            KnowledgeKind::Fact,
+            KnowledgeKind::Insight,
             "k2",
             "Rust borrow checker prevents data races",
             &["rust"],
@@ -1383,7 +1432,7 @@ mod tests {
     fn entries_are_similar_skips_antiknowledge() {
         let now = Utc::now();
         let existing = entry(
-            KnowledgeKind::Fact,
+            KnowledgeKind::Insight,
             "k1",
             "Rust async actors are useful for concurrent pipelines",
             &["rust", "async"],
@@ -1406,6 +1455,7 @@ mod tests {
             model_generality: 1.0,
             created_at: now,
             half_life_days: KnowledgeKind::AntiKnowledge.default_half_life_days(),
+            tier: KnowledgeTier::Working,
             hdc_vector: None,
         };
 
@@ -1416,7 +1466,7 @@ mod tests {
     fn detect_confirmations_finds_similar_entries() {
         let now = Utc::now();
         let existing = vec![entry(
-            KnowledgeKind::Fact,
+            KnowledgeKind::Insight,
             "k1",
             "Rust async actors are useful for concurrent pipelines",
             &["rust", "async"],
@@ -1425,7 +1475,7 @@ mod tests {
             now,
         )];
         let new_entries = vec![entry(
-            KnowledgeKind::Fact,
+            KnowledgeKind::Insight,
             "k2",
             "Rust async runtime handles concurrent execution well",
             &["rust", "async"],
@@ -1454,7 +1504,7 @@ mod tests {
     fn detect_confirmations_skips_unrelated_entries() {
         let now = Utc::now();
         let existing = vec![entry(
-            KnowledgeKind::Fact,
+            KnowledgeKind::Insight,
             "k1",
             "Rust async actors are useful for concurrent pipelines",
             &["rust", "async"],
@@ -1463,7 +1513,7 @@ mod tests {
             now,
         )];
         let new_entries = vec![entry(
-            KnowledgeKind::Fact,
+            KnowledgeKind::Insight,
             "k3",
             "PostgreSQL requires VACUUM for dead tuple cleanup",
             &["postgres", "maintenance"],
@@ -1485,7 +1535,7 @@ mod tests {
         // Add first entry.
         store
             .add(entry(
-                KnowledgeKind::Fact,
+                KnowledgeKind::Insight,
                 "k1",
                 "Rust async actors are useful for concurrent pipelines",
                 &["rust", "async"],
@@ -1502,7 +1552,7 @@ mod tests {
         // Add a similar entry.
         store
             .add(entry(
-                KnowledgeKind::Fact,
+                KnowledgeKind::Insight,
                 "k2",
                 "Rust async runtime handles concurrent execution well",
                 &["rust", "async"],
@@ -1529,7 +1579,7 @@ mod tests {
 
         store
             .add(entry(
-                KnowledgeKind::Fact,
+                KnowledgeKind::Insight,
                 "k1",
                 "Rust async actors are useful for concurrent pipelines",
                 &["rust", "async"],
@@ -1541,7 +1591,7 @@ mod tests {
 
         store
             .add(entry(
-                KnowledgeKind::Fact,
+                KnowledgeKind::Insight,
                 "k3",
                 "PostgreSQL requires VACUUM for dead tuple cleanup",
                 &["postgres", "maintenance"],

@@ -12,7 +12,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use chrono::Utc;
-use roko_core::{Body, Signal};
+use roko_core::{Body, Engram};
 use roko_learn::episode_logger::Episode;
 use roko_neuro::{EpisodeStore, KnowledgeEntry, KnowledgeStore};
 use serde::de::DeserializeOwned;
@@ -20,7 +20,7 @@ use serde::de::DeserializeOwned;
 use crate::{ContextSource, TaskInput};
 
 #[cfg(feature = "hdc")]
-use bardo_primitives::hdc::text_fingerprint;
+use roko_primitives::hdc::text_fingerprint;
 
 /// Normalized PAD state used to bias retrieval when Daimon is available.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -270,9 +270,9 @@ impl ContextAssembler {
     }
 
     fn gather_recent_signals(&self, plan_id: &str, signals_path: &Path) -> Vec<ContextChunk> {
-        let signals = read_jsonl_lossy::<Signal>(signals_path);
+        let signals = read_jsonl_lossy::<Engram>(signals_path);
 
-        let mut recent: Vec<Signal> = signals
+        let mut recent: Vec<Engram> = signals
             .into_iter()
             .filter(|signal| signal.tag("plan_id") == Some(plan_id))
             .rev()
@@ -384,7 +384,7 @@ fn episode_chunk(episode: Episode, relevance: f64, plan_id: &str) -> ContextChun
     }
 }
 
-fn render_signal_chunk(signal: &Signal) -> String {
+fn render_signal_chunk(signal: &Engram) -> String {
     let tags = if signal.tags.is_empty() {
         String::from("-")
     } else {
@@ -405,7 +405,7 @@ fn render_signal_chunk(signal: &Signal) -> String {
     };
 
     format!(
-        "### Signal {}\nKind: {}\nTags: {}\nCreated: {}\n```\n{}\n```",
+        "### Engram {}\nKind: {}\nTags: {}\nCreated: {}\n```\n{}\n```",
         signal.id,
         signal.kind.as_str(),
         tags,
@@ -663,10 +663,13 @@ fn action_orientation(chunk: &ContextChunk) -> f64 {
             let kind_score = match kind.as_str() {
                 "procedure" => 1.0,
                 "playbook" => 0.9,
+                "strategy_fragment" => 0.85,
                 "heuristic" => 0.7,
+                "causal_link" => 0.6,
                 "insight" => 0.5,
                 "fact" => 0.35,
                 "constraint" => 0.25,
+                "warning" => 0.2,
                 "antiknowledge" | "anti_knowledge" => 0.1,
                 _ => 0.25,
             };
@@ -693,8 +696,11 @@ fn caution_orientation(chunk: &ContextChunk) -> f64 {
             let kind = kind.to_ascii_lowercase();
             let kind_score = match kind.as_str() {
                 "antiknowledge" | "anti_knowledge" => 1.0,
+                "warning" => 0.95,
                 "constraint" => 0.9,
+                "causal_link" => 0.55,
                 "heuristic" => 0.5,
+                "strategy_fragment" => 0.4,
                 "fact" | "insight" => 0.25,
                 _ => 0.15,
             };
@@ -783,8 +789,8 @@ fn estimate_chunk_tokens(content: &str) -> usize {
 mod tests {
     use super::*;
     use chrono::Utc;
-    use roko_core::{Body, Kind, Provenance, Signal};
-    use roko_neuro::KnowledgeKind;
+    use roko_core::{Body, Engram, Kind, Provenance};
+    use roko_neuro::{KnowledgeKind, KnowledgeTier};
     use tempfile::TempDir;
 
     fn task_input() -> TaskInput {
@@ -827,8 +833,8 @@ mod tests {
         ep
     }
 
-    fn signal(plan_id: &str, kind: &str, body: &str, created_at_ms: i64) -> Signal {
-        Signal::builder(Kind::Custom(kind.into()))
+    fn signal(plan_id: &str, kind: &str, body: &str, created_at_ms: i64) -> Engram {
+        Engram::builder(Kind::Custom(kind.into()))
             .body(Body::text(body))
             .provenance(Provenance::trusted("test"))
             .tag("plan_id", plan_id)
@@ -958,11 +964,11 @@ mod tests {
     fn affect_bias_prefers_recent_action_oriented_knowledge() {
         let task_text = "deploy migration rollback";
         let recent_action = ContextChunk {
-            content: "### Knowledge Procedure\nConfidence: 0.95\nTags: deploy, rollback\n```\nUse the migration rollback command immediately after validation.\n```"
+            content: "### Knowledge StrategyFragment\nConfidence: 0.95\nTags: deploy, rollback\n```\nUse the migration rollback command immediately after validation.\n```"
                 .into(),
             source: ContextSource::KnowledgeEntry {
                 entry_id: "proc".into(),
-                kind: "Procedure".into(),
+                kind: "StrategyFragment".into(),
                 source: None,
             },
             relevance: 0.3,
@@ -984,11 +990,11 @@ mod tests {
             recency: Some(0.2),
         };
         let neutral = ContextChunk {
-            content: "### Knowledge Fact\nConfidence: 0.80\nTags: deploy\n```\nDeployments are scheduled on weekdays.\n```"
+            content: "### Knowledge Insight\nConfidence: 0.80\nTags: deploy\n```\nDeployments are scheduled on weekdays.\n```"
                 .into(),
             source: ContextSource::KnowledgeEntry {
                 entry_id: "fact".into(),
-                kind: "Fact".into(),
+                kind: "Insight".into(),
                 source: None,
             },
             relevance: 0.7,
@@ -1037,6 +1043,7 @@ mod tests {
                 model_generality: 1.0,
                 created_at: Utc::now(),
                 half_life_days: 30.0,
+                tier: KnowledgeTier::Consolidated,
                 hdc_vector: None,
             })
             .expect("add knowledge");
@@ -1117,7 +1124,7 @@ mod tests {
         knowledge_store
             .add(KnowledgeEntry {
                 id: "recent-proc".into(),
-                kind: KnowledgeKind::Procedure,
+                kind: KnowledgeKind::StrategyFragment,
                 source: None,
                 content: "Use the rollback command after each migration".into(),
                 confidence: 0.9,
@@ -1130,9 +1137,10 @@ mod tests {
                 model_generality: 1.0,
                 created_at: now,
                 half_life_days: 30.0,
+                tier: KnowledgeTier::Consolidated,
                 hdc_vector: None,
             })
-            .expect("add procedure");
+            .expect("add strategy fragment");
         knowledge_store
             .add(KnowledgeEntry {
                 id: "older-anti".into(),
@@ -1149,13 +1157,14 @@ mod tests {
                 model_generality: 1.0,
                 created_at: now - chrono::Duration::days(10),
                 half_life_days: 30.0,
+                tier: KnowledgeTier::Working,
                 hdc_vector: None,
             })
             .expect("add anti-knowledge");
         knowledge_store
             .add(KnowledgeEntry {
                 id: "neutral-fact".into(),
-                kind: KnowledgeKind::Fact,
+                kind: KnowledgeKind::Insight,
                 source: None,
                 content: "Deployments happen on weekdays".into(),
                 confidence: 0.9,
@@ -1168,9 +1177,10 @@ mod tests {
                 model_generality: 1.0,
                 created_at: now - chrono::Duration::days(3),
                 half_life_days: 30.0,
+                tier: KnowledgeTier::Consolidated,
                 hdc_vector: None,
             })
-            .expect("add fact");
+            .expect("add insight");
 
         let episode_store = Arc::new(EpisodeStore::new(workdir.join(".roko/episodes.jsonl")));
         std::fs::write(episode_store.path(), "").expect("write empty episodes");
@@ -1218,13 +1228,13 @@ mod tests {
             })
             .expect("knowledge chunk");
 
-        // High arousal boosts action-oriented entries — Procedure scores highest.
-        assert_eq!(high_first, "Procedure");
+        // High arousal boosts action-oriented entries — StrategyFragment scores highest.
+        assert_eq!(high_first, "StrategyFragment");
         // Low pleasure boosts caution-oriented entries via affect_bias, but the
         // track_record shortcut in score_chunk (track_record * similarity /
         // uncertainty ≈ 9×similarity) dominates, keeping the more-recent and
-        // higher-similarity Procedure entry on top in both affect states.
-        assert_eq!(low_first, "Procedure");
+        // higher-similarity StrategyFragment entry on top in both affect states.
+        assert_eq!(low_first, "StrategyFragment");
     }
 
     #[test]
