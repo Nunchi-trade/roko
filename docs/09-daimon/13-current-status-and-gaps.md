@@ -13,7 +13,7 @@
 
 ## Abstract
 
-The Daimon affect engine exists in two parallel implementations (`roko-daimon` and `roko-golem/daimon.rs`) with significant overlap and some divergence. The core PAD vector, appraisal pipeline, and behavioral modulation are functional. The somatic landscape, collective contagion, VCG bidding integration, and several appraisal triggers are specified but not built. This document catalogs the exact state of each component, references the implementation priority tiers, and lists the legacy source files that were deliberately skipped during migration.
+The Daimon affect engine still has two conceptual lineages in the docs, but the active codebase has already moved much of the shared affect vocabulary into `roko-core`. The core PAD vector, appraisal pipeline, explicit behavioral-state classification, and baseline behavioral modulation are functional. The somatic landscape, collective contagion, VCG bidding integration, and several appraisal triggers are still specified but not built. This document catalogs the exact state of each component, references the implementation priority tiers, and lists the legacy source files that were deliberately skipped during migration.
 
 ---
 
@@ -21,24 +21,26 @@ The Daimon affect engine exists in two parallel implementations (`roko-daimon` a
 
 ### roko-daimon (standalone crate)
 
-**File**: `crates/roko-daimon/src/lib.rs` (569 lines)
+**File**: `crates/roko-daimon/src/lib.rs`
 
 | Component | Status | Description |
 |---|---|---|
-| `PadVector` struct | **Complete** | Three f64 fields (pleasure, arousal, dominance), clamped to [-1, 1] |
-| `AffectState` struct | **Complete** | PAD + confidence + updated_at timestamp |
+| Shared `PadVector` struct | **Complete** | Canonical type lives in `roko-core`, with clamp/delta/decay/similarity helpers |
+| `AffectState` struct | **Complete** | PAD + confidence + explicit behavioral_state + updated_at timestamp |
 | `AffectEvent` enum | **Complete** | 6 variants: GateResult, TaskOutcome, Blocked, TimePressure, QueueWait, DreamFailure |
 | `DaimonState` struct | **Complete** | Wraps AffectState + half_life_hours + persistence_path |
 | `AffectEngine` trait | **Complete** | 4 methods: appraise(), query(), modulate(), persist() |
 | Appraisal rules | **Complete** | All 6 event types with correct PAD deltas, rung scaling, asymmetric valence |
 | Temporal decay | **Complete** | Exponential decay: `factor = 0.5 ^ (elapsed_hours / half_life_hours)` |
-| Behavioral modulation | **Complete** | Model promotion/demotion (haiku↔sonnet↔opus), turn limit adjustment, strategy selection |
+| Behavioral state classification | **Complete** | Explicit `BehavioralState::classify(pad, confidence)` stored on affect state |
+| Behavioral modulation | **Complete** | Model promotion/demotion (haiku↔sonnet↔opus), turn limit adjustment, strategy selection keyed off behavioral state |
 | Persistence | **Complete** | Atomic file write (write to .tmp, rename) with auto-save on appraise |
 | Load/restore | **Complete** | `load_or_new()` loads from disk or creates fresh neutral state |
 | `DispatchStrategy` enum | **Complete** | 5 variants with effort labels: Conservative, Balanced, Exploratory, Escalating, Proactive |
 | `DispatchParams` struct | **Complete** | model + turn_limit + strategy + effort |
 | `queue_wait_arousal()` | **Complete** | Public function for queue-wait arousal computation |
-| Tests | **Complete** | 3 tests: appraise/persist, escalation, demotion |
+| `EmotionalTag` generation | **Partial** | Daimon can derive emotional tags and the orchestrator stamps conductor engrams with them |
+| Tests | **Complete** | Appraisal, persistence, modulation, behavioral-state, and emotional-tag coverage |
 
 ### roko-golem/daimon.rs (per-task affect engine)
 
@@ -60,7 +62,7 @@ The Daimon affect engine exists in two parallel implementations (`roko-daimon` a
 
 | Feature | roko-daimon | roko-golem/daimon.rs | Notes |
 |---|---|---|---|
-| PAD vector | `PadVector` (3 fields) | 4 inline f64 fields | Same math, different struct |
+| PAD vector | Shared `roko_core::PadVector` | 4 inline f64 fields | Canonical shared type now exists; older docs still mention the legacy split |
 | Appraisal rules | Via `AffectEvent` enum match | Via named methods (on_gate_pass, etc.) | Same deltas, different API surface |
 | Behavioral modulation | `modulate()` on DispatchParams | `behavior_modulation()` on AffectOctant | Different output types |
 | Octant classification | Not present | `AffectOctant::from_pad()` | roko-golem only |
@@ -107,7 +109,7 @@ These are fully specified in the legacy PRDs and/or `refactoring-prd` but have n
 | F3 | `AffectEvent` enum and `AffectEngine::appraise()` | **Done** |
 | F4 | Temporal decay (exponential, 4h half-life) | **Done** |
 | F5 | Behavior modulation table | **Done** (both crates) |
-| F6 | Affect signatures on episodes | **Not done** — episodes don't carry EmotionalTag |
+| F6 | Affect signatures on episodes | **Partial** — Engrams support `EmotionalTag`, and conductor outputs are tagged, but episode-wide propagation is not complete |
 | F7 | Affect → SystemPromptBuilder | **Not done** — Daimon doesn't write to prompt context |
 | F8 | Affect → CascadeRouter | **Not done** — router doesn't read Daimon thresholds |
 | F9 | Persistence (autosave + load) | **Done** |
@@ -127,7 +129,7 @@ These are fully specified in the legacy PRDs and/or `refactoring-prd` but have n
 - `kiddo` crate dependency
 
 **Emotional Memory Integration**:
-- `EmotionalTag` on Engrams
+- Broad `EmotionalTag` propagation across episodes and Neuro outputs
 - Four-factor retrieval scoring (recency × importance × relevance × emotional congruence)
 - PAD cosine similarity for retrieval scoring
 - Emotional provenance tracking on consolidated knowledge
@@ -193,7 +195,7 @@ Based on `refactoring-prd/07-implementation-priorities.md`:
 | **0C** | Dissolve roko-golem, consolidate affect logic into roko-daimon | Not started |
 | **2D** | Daimon PAD tracking (F1-F5, F9) — core appraisal and modulation | **Complete** |
 | **2E** | Behavioral modulation (F5) — behavioral states and dispatch strategy | **Complete** |
-| **2D+** | Affect on episodes (F6), affect→SystemPromptBuilder (F7), affect→CascadeRouter (F8) | Not started |
+| **2D+** | Affect on episodes (F6), affect→SystemPromptBuilder (F7), affect→CascadeRouter (F8) | Partial |
 | **2G** | Somatic landscape, 8D strategy space, k-d tree | Not started |
 | **2H** | Emotional memory integration (EmotionalTag, four-factor retrieval) | Not started |
 | **2I** | Dream-daimon bridge (emotional load, depotentiation) | Not started |
@@ -207,7 +209,7 @@ Based on `refactoring-prd/07-implementation-priorities.md`:
 
 3. **Wire affect→CascadeRouter** (F8): Pass adjusted tier thresholds to the CascadeRouter. This creates the compute allocation feedback loop.
 
-4. **Add EmotionalTag to episodes** (F6): Tag episodes with PAD state at creation time. This enables mood-congruent retrieval and emotional consolidation bias when those systems are built.
+4. **Broaden EmotionalTag propagation** (F6): the type exists and conductor outputs are tagged; the remaining work is to stamp episode creation, Neuro extraction, and retrieval weighting consistently.
 
 ---
 

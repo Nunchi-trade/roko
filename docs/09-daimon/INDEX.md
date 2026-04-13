@@ -74,9 +74,13 @@ The behavioral states are **cyclical** — Engaged, Struggling, Coasting, Explor
 ## Key Rust Types
 
 ```rust
-// roko-daimon/src/lib.rs
+// roko-core/src/affect.rs
 pub struct PadVector { pleasure: f64, arousal: f64, dominance: f64 }
-pub struct AffectState { pad: PadVector, confidence: f64, updated_at: DateTime<Utc> }
+pub enum BehavioralState { Engaged, Struggling, Coasting, Exploring, Focused, Resting }
+pub struct EmotionalTag { pad: PadVector, intensity: f32, trigger: String, mood_snapshot: PadVector }
+
+// roko-daimon/src/lib.rs
+pub struct AffectState { pad: PadVector, confidence: f64, behavioral_state: BehavioralState, updated_at: DateTime<Utc> }
 pub enum AffectEvent { GateResult{..}, TaskOutcome{..}, Blocked{..}, TimePressure{..}, QueueWait{..}, DreamFailure{..} }
 pub struct DaimonState { state: AffectState, half_life_hours: f64, persistence_path: Option<PathBuf> }
 pub trait AffectEngine { fn appraise(&mut self, event: AffectEvent) -> PadVector; fn query(&self) -> AffectState; fn modulate(&self, params: &mut DispatchParams); fn persist(&self, path: &Path) -> Result<()>; }
@@ -90,7 +94,6 @@ pub struct AffectBehaviorModulation { strategy: AffectBehaviorStrategy, explorat
 // Specified but not yet implemented
 pub struct SomaticLandscape { tree: KdTree<f64, SomaticMarker, 8> }
 pub struct SomaticMarker { strategy_coords: [f64; 8], valence: f64, intensity: f64, episodes: Vec<ContentHash> }
-pub struct EmotionalTag { pad: PadVector, emotion: String, intensity: f32, trigger: String, mood_snapshot: PadVector }
 ```
 
 ---

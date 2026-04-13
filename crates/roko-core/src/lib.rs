@@ -37,6 +37,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod agent;
+pub mod affect;
 pub mod attestation;
 pub mod body;
 pub mod build;
@@ -75,6 +76,7 @@ pub use agent::{
     AgentBackend, AgentRole, ModelSpec, ModelTier, ProviderKind, ReasoningEffort, ToolPermissions,
     TurnBudget,
 };
+pub use affect::{BehavioralState, EmotionalTag, PadVector};
 pub use attestation::{Attestation, ChainAttestation, Ed25519Signature, PublicKey};
 pub use body::Body;
 pub use build::{BuildCommand, BuildSystem};

@@ -3146,7 +3146,10 @@ impl PlanRunner {
 
     /// Push a conductor signal so watchers can detect anomalies (§7).
     fn emit_conductor_signal(&mut self, kind: Kind, body: serde_json::Value) {
-        let sig = Engram::builder(kind).body(Body::Json(body)).build();
+        let sig = Engram::builder(kind)
+            .body(Body::Json(body))
+            .emotional_tag(self.daimon.emotional_tag("conductor"))
+            .build();
         self.conductor_signals.push(sig);
     }
 
@@ -11431,6 +11434,9 @@ fn conductor_signal_from_output(output: &Engram) -> Option<Engram> {
     }
     if let Some(attestation) = output.attestation.clone() {
         builder = builder.attestation(attestation);
+    }
+    if let Some(emotional_tag) = output.emotional_tag.clone() {
+        builder = builder.emotional_tag(emotional_tag);
     }
     Some(builder.build())
 }

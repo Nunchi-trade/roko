@@ -9,42 +9,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use roko_core::OperatingFrequencyAffect;
+use roko_core::{
+    BehavioralState, EmotionalTag, OperatingFrequencyAffect, PadVector,
+};
 use serde::{Deserialize, Serialize};
-
-/// Normalized Pleasure-Arousal-Dominance vector.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct PadVector {
-    /// Pleasure in `[-1.0, 1.0]`.
-    pub pleasure: f64,
-    /// Arousal in `[-1.0, 1.0]`.
-    pub arousal: f64,
-    /// Dominance in `[-1.0, 1.0]`.
-    pub dominance: f64,
-}
-
-impl PadVector {
-    /// Neutral PAD vector.
-    pub const fn neutral() -> Self {
-        Self {
-            pleasure: 0.0,
-            arousal: 0.0,
-            dominance: 0.0,
-        }
-    }
-
-    fn apply_delta(&mut self, pleasure: f64, arousal: f64, dominance: f64) {
-        self.pleasure = (self.pleasure + pleasure).clamp(-1.0, 1.0);
-        self.arousal = (self.arousal + arousal).clamp(-1.0, 1.0);
-        self.dominance = (self.dominance + dominance).clamp(-1.0, 1.0);
-    }
-
-    fn decay_by_factor(&mut self, factor: f64) {
-        self.pleasure = (self.pleasure * factor).clamp(-1.0, 1.0);
-        self.arousal = (self.arousal * factor).clamp(-1.0, 1.0);
-        self.dominance = (self.dominance * factor).clamp(-1.0, 1.0);
-    }
-}
 
 /// Current affect snapshot.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -53,6 +21,9 @@ pub struct AffectState {
     pub pad: PadVector,
     /// Motivational confidence in `[0.0, 1.0]`.
     pub confidence: f64,
+    /// Explicit behavioral state derived from PAD plus confidence.
+    #[serde(default)]
+    pub behavioral_state: BehavioralState,
     /// Last update timestamp.
     pub updated_at: DateTime<Utc>,
 }
@@ -62,6 +33,7 @@ impl Default for AffectState {
         Self {
             pad: PadVector::neutral(),
             confidence: 0.5,
+            behavioral_state: BehavioralState::Engaged,
             updated_at: Utc::now(),
         }
     }
@@ -89,6 +61,7 @@ impl AffectState {
             self.pad.decay_by_factor(factor);
             self.confidence = (0.5 + (self.confidence - 0.5) * factor).clamp(0.0, 1.0);
         }
+        self.refresh_behavioral_state();
         self.updated_at = now;
     }
 
@@ -102,7 +75,19 @@ impl AffectState {
     ) {
         self.pad.apply_delta(pleasure, arousal, dominance);
         self.confidence = (self.confidence + confidence).clamp(0.0, 1.0);
+        self.refresh_behavioral_state();
         self.updated_at = now;
+    }
+
+    fn refresh_behavioral_state(&mut self) {
+        self.behavioral_state = BehavioralState::classify(self.pad, self.confidence);
+    }
+
+    /// Build an emotional annotation from the current affect state.
+    #[must_use]
+    pub fn emotional_tag(&self, trigger: impl Into<String>) -> EmotionalTag {
+        let normalized_intensity = (self.pad.magnitude() / 3.0_f64.sqrt()).clamp(0.0, 1.0) as f32;
+        EmotionalTag::new(self.pad, normalized_intensity, trigger, self.pad)
     }
 }
 
@@ -292,6 +277,12 @@ impl DaimonState {
         &self.state
     }
 
+    /// Build an emotional annotation from the current Daimon state.
+    #[must_use]
+    pub fn emotional_tag(&self, trigger: impl Into<String>) -> EmotionalTag {
+        self.state.emotional_tag(trigger)
+    }
+
     fn autosave(&self) {
         if let Some(path) = self.persistence_path.as_ref() {
             let _ = self.persist(path);
@@ -394,29 +385,41 @@ impl AffectEngine for DaimonState {
     }
 
     fn query(&self) -> AffectState {
-        self.state.clone()
+        let mut state = self.state.clone();
+        state.refresh_behavioral_state();
+        state
     }
 
     fn modulate(&self, params: &mut DispatchParams) {
         let state = self.query();
-
-        if state.confidence < 0.30 || state.pad.dominance < -0.25 {
-            params.strategy = DispatchStrategy::Escalating;
-            params.turn_limit = params.turn_limit.saturating_add(10);
-            params.model = promote_model(&params.model);
-        } else if state.pad.pleasure > 0.35 && state.confidence > 0.65 {
-            params.strategy = DispatchStrategy::Exploratory;
-            params.turn_limit = params.turn_limit.saturating_sub(5);
-            params.model = demote_model(&params.model);
-        } else if state.pad.pleasure < -0.30 && state.pad.arousal > 0.30 {
-            params.strategy = DispatchStrategy::Conservative;
-            params.turn_limit = params.turn_limit.saturating_sub(3);
-            params.model = demote_model(&params.model);
-        } else if state.pad.arousal < -0.20 {
-            params.strategy = DispatchStrategy::Proactive;
-            params.turn_limit = params.turn_limit.saturating_add(5);
-        } else {
-            params.strategy = DispatchStrategy::Balanced;
+        match state.behavioral_state {
+            BehavioralState::Struggling => {
+                if state.pad.pleasure < -0.30 && state.pad.arousal > 0.30 {
+                    params.strategy = DispatchStrategy::Conservative;
+                    params.turn_limit = params.turn_limit.saturating_sub(3);
+                    params.model = demote_model(&params.model);
+                } else {
+                    params.strategy = DispatchStrategy::Escalating;
+                    params.turn_limit = params.turn_limit.saturating_add(10);
+                    params.model = promote_model(&params.model);
+                }
+            }
+            BehavioralState::Coasting => {
+                params.strategy = DispatchStrategy::Exploratory;
+                params.turn_limit = params.turn_limit.saturating_sub(5);
+                params.model = demote_model(&params.model);
+            }
+            BehavioralState::Focused => {
+                params.strategy = DispatchStrategy::Balanced;
+                params.turn_limit = params.turn_limit.saturating_sub(2);
+            }
+            BehavioralState::Resting => {
+                params.strategy = DispatchStrategy::Proactive;
+                params.turn_limit = params.turn_limit.saturating_add(5);
+            }
+            BehavioralState::Exploring | BehavioralState::Engaged => {
+                params.strategy = DispatchStrategy::Balanced;
+            }
         }
 
         params.effort = params.strategy.effort_label().to_string();
@@ -510,6 +513,10 @@ mod tests {
         assert!(pad.pleasure < 0.0);
         assert!(pad.arousal > 0.0);
         assert!(pad.dominance < 0.0);
+        assert!(matches!(
+            state.query().behavioral_state,
+            BehavioralState::Exploring | BehavioralState::Struggling
+        ));
         assert!(path.exists());
 
         let reloaded = DaimonState::load_or_new(&path);
@@ -564,5 +571,26 @@ mod tests {
             params.strategy,
             DispatchStrategy::Exploratory | DispatchStrategy::Balanced
         ));
+    }
+
+    #[test]
+    fn neutral_state_exposes_engaged_behavior() {
+        let state = DaimonState::new();
+        assert_eq!(state.query().behavioral_state, BehavioralState::Engaged);
+    }
+
+    #[test]
+    fn affect_state_builds_emotional_tag() {
+        let mut state = DaimonState::new();
+        let _ = state.appraise(AffectEvent::TaskOutcome {
+            task_id: "task-a".to_string(),
+            succeeded: false,
+        });
+
+        let tag = state.emotional_tag("task_outcome");
+
+        assert_eq!(tag.trigger, "task_outcome");
+        assert!(tag.intensity > 0.0);
+        assert_eq!(tag.pad, state.query().pad);
     }
 }

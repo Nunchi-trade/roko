@@ -9,7 +9,7 @@
 //! - **Traced** — lineage tracks which engrams this derived from
 //! - **Composable** — engrams combine into new engrams via [`Composer`]s
 
-use crate::{Attestation, Body, ContentHash, Decay, Kind, Provenance, Score};
+use crate::{Attestation, Body, ContentHash, Decay, EmotionalTag, Kind, Provenance, Score};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -59,6 +59,9 @@ pub struct Engram {
     /// Optional cryptographic proof of origin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attestation: Option<Attestation>,
+    /// Optional emotional metadata associated with this engram.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emotional_tag: Option<EmotionalTag>,
 }
 
 impl Engram {
@@ -71,8 +74,8 @@ impl Engram {
     /// Compute the content hash of this engram's identity fields.
     ///
     /// The hash covers: kind, body, author, taint, lineage, and tags.
-    /// It does NOT cover: score, decay, timestamp, or attestation — these can
-    /// change without changing what the engram fundamentally is.
+    /// It does NOT cover: score, decay, timestamp, attestation, or emotional
+    /// metadata — these can change without changing what the engram fundamentally is.
     #[must_use]
     pub fn content_hash(&self) -> ContentHash {
         let mut hasher = blake3::Hasher::new();
@@ -149,6 +152,7 @@ pub struct EngramBuilder {
     lineage: Vec<ContentHash>,
     tags: BTreeMap<String, String>,
     attestation: Option<Attestation>,
+    emotional_tag: Option<EmotionalTag>,
 }
 
 impl EngramBuilder {
@@ -165,6 +169,7 @@ impl EngramBuilder {
             lineage: Vec::new(),
             tags: BTreeMap::new(),
             attestation: None,
+            emotional_tag: None,
         }
     }
 
@@ -224,6 +229,13 @@ impl EngramBuilder {
         self
     }
 
+    /// Attach optional emotional metadata.
+    #[must_use]
+    pub fn emotional_tag(mut self, emotional_tag: EmotionalTag) -> Self {
+        self.emotional_tag = Some(emotional_tag);
+        self
+    }
+
     /// Finalize the engram, computing its content hash.
     #[must_use]
     pub fn build(self) -> Engram {
@@ -239,6 +251,7 @@ impl EngramBuilder {
             lineage: self.lineage,
             tags: self.tags,
             attestation: self.attestation,
+            emotional_tag: self.emotional_tag,
         };
         engram.id = engram.content_hash();
         engram
@@ -263,6 +276,7 @@ mod tests {
         assert!(s.lineage.is_empty());
         assert!(s.tags.is_empty());
         assert!(s.attestation.is_none());
+        assert!(s.emotional_tag.is_none());
     }
 
     #[test]
@@ -385,6 +399,25 @@ mod tests {
             })
             .build();
         assert_eq!(base.id, attested.id);
+    }
+
+    #[test]
+    fn content_hash_ignores_emotional_tag() {
+        let base = Engram::builder(Kind::Task)
+            .body(Body::text("same"))
+            .created_at_ms(0)
+            .build();
+        let tagged = Engram::builder(Kind::Task)
+            .body(Body::text("same"))
+            .created_at_ms(0)
+            .emotional_tag(EmotionalTag::new(
+                crate::PadVector::new(-0.2, 0.4, -0.1),
+                0.6,
+                "gate_failure",
+                crate::PadVector::new(-0.2, 0.4, -0.1),
+            ))
+            .build();
+        assert_eq!(base.id, tagged.id);
     }
 
     #[test]

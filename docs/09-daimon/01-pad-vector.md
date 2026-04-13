@@ -122,9 +122,9 @@ The mapping is not exact — Plutchik's model and Mehrabian's model were develop
 
 ## Rust Implementation
 
-### PadVector Struct (roko-daimon)
+### PadVector Struct (`roko-core`)
 
-The canonical `PadVector` struct lives in `roko-daimon/src/lib.rs`:
+The shared canonical `PadVector` struct now lives in `crates/roko-core/src/affect.rs` and is re-used by `roko-daimon`:
 
 ```rust
 /// Normalized Pleasure-Arousal-Dominance vector.
@@ -139,26 +139,11 @@ pub struct PadVector {
 }
 
 impl PadVector {
-    /// Neutral PAD vector.
-    pub const fn neutral() -> Self {
-        Self {
-            pleasure: 0.0,
-            arousal: 0.0,
-            dominance: 0.0,
-        }
-    }
-
-    fn apply_delta(&mut self, pleasure: f64, arousal: f64, dominance: f64) {
-        self.pleasure = (self.pleasure + pleasure).clamp(-1.0, 1.0);
-        self.arousal = (self.arousal + arousal).clamp(-1.0, 1.0);
-        self.dominance = (self.dominance + dominance).clamp(-1.0, 1.0);
-    }
-
-    fn decay_by_factor(&mut self, factor: f64) {
-        self.pleasure = (self.pleasure * factor).clamp(-1.0, 1.0);
-        self.arousal = (self.arousal * factor).clamp(-1.0, 1.0);
-        self.dominance = (self.dominance * factor).clamp(-1.0, 1.0);
-    }
+    pub const fn new(pleasure: f64, arousal: f64, dominance: f64) -> Self { ... }
+    pub const fn neutral() -> Self { ... }
+    pub fn clamped(self) -> Self { ... }
+    pub fn apply_delta(&mut self, pleasure: f64, arousal: f64, dominance: f64) { ... }
+    pub fn decay_by_factor(&mut self, factor: f64) { ... }
 }
 ```
 
@@ -174,6 +159,8 @@ pub struct AffectState {
     pub pad: PadVector,
     /// Motivational confidence in `[0.0, 1.0]`.
     pub confidence: f64,
+    /// Explicit discrete behavioral state derived from PAD + confidence.
+    pub behavioral_state: BehavioralState,
     /// Last update timestamp.
     pub updated_at: DateTime<Utc>,
 }
@@ -195,7 +182,7 @@ impl AffectState {
 }
 ```
 
-The confidence dimension is separate from dominance because confidence is a meta-cognitive signal ("how well am I performing overall?") while dominance is a per-situation signal ("am I in control of this specific task?"). Confidence decays toward 0.5 (neutral), while dominance decays toward 0.0 (no strong signal).
+The confidence dimension is separate from dominance because confidence is a meta-cognitive signal ("how well am I performing overall?") while dominance is a per-situation signal ("am I in control of this specific task?"). Confidence decays toward 0.5 (neutral), while dominance decays toward 0.0 (no strong signal). The persisted `behavioral_state` makes the PAD-to-policy bridge explicit instead of re-deriving it ad hoc inside routing code.
 
 ### AffectOctant Enum (roko-golem, to be moved to roko-daimon)
 
@@ -301,7 +288,7 @@ This ensures that an agent with no recent events settles at "uncertain" rather t
 
 ## Current Status and Gaps
 
-**Implemented**: `PadVector`, `AffectState`, decay mechanics, appraisal rules, persistence, octant classification — all in `roko-daimon/src/lib.rs` (569 lines) and `roko-golem/src/daimon.rs` (972 lines).
+**Implemented**: shared `PadVector` in `roko-core`, `AffectState` and explicit `BehavioralState` in `roko-daimon`, decay mechanics, appraisal rules, persistence, and emotion-tag generation on live Daimon output paths.
 
 **Gaps**: The golem implementation needs to be absorbed into the standalone crate per the dissolution plan. The six behavioral states (Engaged/Struggling/Coasting/Exploring/Focused/Resting) from refactoring-prd §2 need to be layered on top of the octant classification. PAD cosine similarity for retrieval scoring is specified but not yet wired into context assembly.
 

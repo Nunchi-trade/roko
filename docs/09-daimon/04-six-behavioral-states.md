@@ -36,17 +36,21 @@ This is a deliberate departure from the legacy specification, which defined five
 
 ### PAD Thresholds for State Classification
 
-The behavioral state is computed from the PAD vector and confidence score. The thresholds are derived from the `AffectEngine::modulate()` implementation in `roko-daimon/src/lib.rs`:
+The behavioral state is now computed explicitly in `roko_core::BehavioralState::classify(pad, confidence)` and then stored on `roko_daimon::AffectState`:
 
 ```rust
-fn classify_behavioral_state(state: &AffectState) -> BehavioralState {
-    let p = state.pad.pleasure;
-    let a = state.pad.arousal;
-    let d = state.pad.dominance;
-    let c = state.confidence;
+pub fn classify(pad: PadVector, confidence: f64) -> BehavioralState {
+    let p = pad.pleasure;
+    let a = pad.arousal;
+    let d = pad.dominance;
+    let c = confidence.clamp(0.0, 1.0);
+
+    if pad == PadVector::neutral() {
+        return BehavioralState::Engaged;
+    }
 
     // Struggling: clearly failing under pressure
-    if c < 0.30 || d < -0.25 {
+    if c < 0.30 || d < -0.25 || (p < -0.30 && a > 0.30) {
         return BehavioralState::Struggling;
     }
 
@@ -75,7 +79,7 @@ fn classify_behavioral_state(state: &AffectState) -> BehavioralState {
 }
 ```
 
-These thresholds are not arbitrary — they emerge from the appraisal rule magnitudes. A single task failure produces `P: -0.20, D: -0.15, C: -0.15`. Two consecutive failures push confidence to `0.70 → 0.40`, which is still above the Struggling threshold (0.30). Three consecutive failures push confidence below 0.30, triggering Struggling. This means the agent tolerates occasional setbacks (Engaged) but escalates after sustained failure (Struggling).
+`modulate()` now switches on the explicit `BehavioralState` enum rather than embedding its own shadow classification logic. The thresholds are still derived from the appraisal rule magnitudes. A single task failure produces `P: -0.20, D: -0.15, C: -0.15`. Two consecutive failures push confidence to `0.70 → 0.40`, which is still above the Struggling threshold (0.30). Three consecutive failures push confidence below 0.30, triggering Struggling. This means the agent tolerates occasional setbacks (Engaged) but escalates after sustained failure (Struggling).
 
 ---
 
@@ -191,7 +195,7 @@ Exploring is not a single octant mapping — it's triggered by low dominance (D 
 
 ### Focused
 
-Focused maps to high dominance with high pleasure — the agent is succeeding at something it understands well. In the current implementation, this falls through to the Coasting branch (high pleasure triggers Exploratory strategy). The intended behavior from the legacy spec:
+Focused maps to high dominance with high pleasure — the agent is succeeding at something it understands well. In the current implementation, this is its own discrete state and maps to a balanced strategy with slightly reduced turn budget. The fuller exploitation-oriented routing policy from the broader spec is still pending:
 
 - T0/T1 routing — exploit known patterns with cheap models
 - Maximum speed — reduce overhead, skip optional checks
@@ -563,7 +567,7 @@ Every transition requires both a PAD condition (the target state's entry criteri
 
 **Priority order**: When multiple states' entry criteria are met simultaneously, the classification function checks in this order: Struggling, Coasting, Focused, Resting, Exploring, Engaged (fallback). Struggling takes priority because it triggers protective measures that should not be delayed.
 
-**Error handling**: If the PAD vector contains NaN or infinite values (from a buggy appraisal rule), `classify_behavioral_state` returns `BehavioralState::Engaged` as the safe default. The Engaged state applies no escalation and no demotion, so a corrupt PAD vector produces baseline behavior rather than runaway escalation.
+**Error handling**: The current shared classifier clamps confidence and assumes valid finite PAD inputs from appraisal. If invalid PAD values ever enter the system, `Engaged` remains the intended safe fallback behavior because it applies no escalation and no demotion.
 
 ```rust
 fn classify_behavioral_state(state: &AffectState) -> BehavioralState {
