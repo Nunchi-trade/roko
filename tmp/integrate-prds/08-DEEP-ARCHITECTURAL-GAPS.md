@@ -153,7 +153,8 @@ KnowledgeEntry now has a `tier` field:
 ### Behavioral State Classification — IMPLEMENTED
 - Shared `BehavioralState` now lives in `roko-core` with explicit `classify(pad, confidence)` logic
 - `roko-daimon::AffectState` persists the discrete state directly and refreshes it on decay/appraisal/query
-- Routing modulation still remains simple, but the state model itself is no longer implicit
+- `roko-cli` now threads live Daimon PAD into `SystemPromptBuilder` and passes live `behavioral_state` into `CascadeRouter` routing contexts
+- The remaining gap is not the wiring path but the richer PRD control surfaces: somatic landscape and VCG-style affect bidding
 
 ### Mood-Congruent Retrieval — PARTIAL
 - `ContextAssembler` now biases retrieval with `PadState` and reserves a contrarian slice of knowledge entries so negative mood does not collapse into pure caution and positive mood does not collapse into pure optimism

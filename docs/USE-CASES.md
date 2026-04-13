@@ -516,8 +516,10 @@ escalates.
 **Who needs it.** Researchers studying agent decision-making. Cost-conscious teams who want
 resource allocation that adapts to task difficulty.
 
-**Current status.** The `roko-daimon` crate is Built — structs exist, PAD vectors work,
-6 behavioral states are defined. Not yet wired to tier routing or prompt assembly.
+**Current status.** The `roko-daimon` crate is wired into live prompt assembly and
+model routing. PAD vectors and 6 behavioral states now influence both affect guidance in
+the system prompt and tier-biased model selection; the remaining gaps are somatic landscape
+and VCG-style context bidding.
 
 ---
 

@@ -248,14 +248,14 @@ The 0.15 threshold prevents event flooding. A shift from Relaxed to Anxious (PAD
 ## Current Status and Gaps
 
 **Implemented**:
-- Integration Point 1 (behavioral state): Fully implemented in `roko-daimon/src/lib.rs` `modulate()` and `roko-golem/src/daimon.rs` `behavior_modulation()`.
-- Integration Point 2 (tier routing): Model promotion/demotion is implemented. Threshold modulation is not wired to CascadeRouter.
+- Integration Point 1 (behavioral state): Fully implemented in `roko-daimon`, with shared `BehavioralState` in `roko-core` and live state persisted on `AffectState`.
+- Integration Point 2 (tier routing): Live Daimon PAD / behavioral state now feeds both `CascadeRouter` selection bias and `SystemPromptBuilder` affect guidance in the orchestration path.
 - Signal emission: MoodUpdate events are emitted when PAD change exceeds threshold (roko-golem). Affect signals emitted to JSONL (roko-golem).
 
 **Not implemented**:
 - Integration Point 3 (VCG auction): The VCG auction is specified but no code exists.
 - Integration Point 4 (somatic landscape): The k-d tree and query protocol are specified but no code exists.
-- Integration Point 2 wiring: The CascadeRouter does not read Daimon thresholds.
+- Full emotional-memory propagation: `EmotionalTag` exists and live conductor engrams carry it, but Neuro distillation and retrieval weighting are still incomplete.
 
 ---
 

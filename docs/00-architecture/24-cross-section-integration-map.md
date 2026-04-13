@@ -166,14 +166,14 @@ graph TB
 
     NEURO -.->|knowledge entries<br/>PARTIAL| COMP
     NEURO -.->|tier data<br/>MISSING| GATE
-    DAIMON -.->|PAD vector<br/>MISSING| ROUTER
-    DAIMON -.->|behavioral state<br/>MISSING| ORCH
+    DAIMON -.->|PAD vector<br/>WIRED| ROUTER
+    DAIMON -.->|behavioral state<br/>WIRED| ORCH
     DREAMS -.->|consolidated knowledge<br/>MISSING| NEURO
     DREAMS -.->|depotentiation<br/>MISSING| DAIMON
 
     GATE -->|verdicts<br/>WIRED| NEURO
     LEARN[05-Learning] -->|episodes<br/>PARTIAL| DREAMS
-    DAIMON -.->|affect bias<br/>MISSING| COMP
+    DAIMON -.->|affect bias<br/>WIRED| COMP
 
     style NEURO fill:#4a9,stroke:#333
     style DAIMON fill:#a94,stroke:#333

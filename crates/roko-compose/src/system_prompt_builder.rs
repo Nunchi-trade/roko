@@ -434,14 +434,32 @@ impl SystemPromptBuilder {
         count
     }
 
-    fn affect_guidance(&self) -> Option<&'static str> {
+    fn affect_guidance(&self) -> Option<String> {
         let affect = self.affect_state?;
+        let mut guidance = Vec::new();
+
         if affect.arousal >= 0.35 {
-            Some("You are under time pressure, focus on the most critical path.")
+            guidance.push("You are under time pressure, focus on the most critical path.");
         } else if affect.arousal <= -0.35 {
-            Some("You have time to explore thoroughly.")
-        } else {
+            guidance.push("You have time to explore thoroughly.");
+        }
+
+        if affect.pleasure <= -0.25 {
+            guidance.push("Prefer proven approaches, verify early, and surface uncertainty explicitly.");
+        } else if affect.pleasure >= 0.35 {
+            guidance.push("Keep the solution lean and avoid over-engineering.");
+        }
+
+        if affect.dominance <= -0.20 {
+            guidance.push("Reduce scope until the next concrete checkpoint is clear.");
+        } else if affect.dominance >= 0.30 {
+            guidance.push("Execute decisively, but keep claims grounded in evidence.");
+        }
+
+        if guidance.is_empty() {
             None
+        } else {
+            Some(guidance.join(" "))
         }
     }
 

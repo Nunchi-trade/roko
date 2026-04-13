@@ -250,7 +250,7 @@ shows a self-editing coding agent achieving 17% → 53% gains.
 | 4 | **Wire SafetyLayer** — Connect ToolDispatcher into production code path (orchestrate.rs) | Small | Critical — safety architecture is built but dormant | Built, not wired |
 | 5 | **Wire Conductor** — Connect 10 watchers + circuit breaker into orchestrate.rs | Small | High — anomaly detection exists but is unused | Built, not wired |
 | 6 | **Wire Neuro** — Connect knowledge store into orchestrator context injection | Medium | High — knowledge management is the foundation for learning | Built, not wired |
-| 7 | **Wire Daimon** — Connect affect engine into tier routing and prompt assembly | Medium | Medium — cost optimization through affect-modulated routing | Built, not wired |
+| 7 | **Wire Daimon** — Connect affect engine into tier routing and prompt assembly | Medium | Medium — cost optimization through affect-modulated routing | Wired |
 | 8 | **Code Intelligence MCP** — Expose roko-index via MCP server for agent consumption | Medium | High — agents need structural code understanding | Built, no server |
 | 9 | **Implement Dream Runner** — Wire NREM replay + REM imagination into Delta loop | Large | Medium — offline consolidation for long-running agents | Scaffold |
 | 10 | **Heartbeat Gamma/Theta/Delta** — Formal three-speed cognitive loop with adaptive clock | Large | High — autonomous agent operation without human triggers | Specified |
@@ -329,7 +329,7 @@ provides a complete, integrated, shipping system.
 
 - [ ] **Wire Conductor** — 10 watchers + circuit breaker in production
 - [ ] **Wire Neuro** — knowledge injection into agent prompts
-- [ ] **Wire Daimon** — affect-modulated tier routing and context
+- [x] **Wire Daimon** — affect-modulated tier routing and context
 - [ ] **Code Intelligence MCP** — expose roko-index to agents via MCP server
 - [ ] **Implement basic Dream Runner** — NREM replay during agent idle time
 

@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use chrono::Utc;
-use roko_core::{Body, Engram};
+use roko_core::{Body, Engram, PadVector};
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
 use serde::de::DeserializeOwned;
 
@@ -162,6 +162,12 @@ impl PadState {
             arousal,
             dominance,
         }
+    }
+}
+
+impl From<PadVector> for PadState {
+    fn from(value: PadVector) -> Self {
+        Self::new(value.pleasure, value.arousal, value.dominance)
     }
 }
 

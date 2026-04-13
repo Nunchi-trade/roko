@@ -30,8 +30,8 @@ use roko_agent::task_runner::{
 use roko_agent::translate::{ClaudeTranslator, RenderedTools, Translator};
 use roko_agent::{Agent, AgentResult, ClaudeCliAgent, ExecAgent, SafetyLayer};
 use roko_compose::{
-    ContextProvider, Placement, PlanArtifacts, PromptComposer, PromptSection, RoleSystemPromptSpec,
-    SectionPriority, TaskContext, budget_for,
+    ContextProvider, PadState, Placement, PlanArtifacts, PromptComposer, PromptSection,
+    RoleSystemPromptSpec, SectionPriority, TaskContext, budget_for,
 };
 use roko_conductor::diagnosis::{DiagnosisEngine, ErrorCategory};
 use roko_conductor::{Conductor, ConductorDecision};
@@ -1632,7 +1632,7 @@ fn role_hash_features(role: &str) -> [f64; 4] {
 fn cascade_routing_context(
     runner: &PlanRunner,
     plan_id: &str,
-    task_id: &str,
+    _task_id: &str,
     role: AgentRole,
     task_def: Option<&crate::task_parser::TaskDef>,
 ) -> roko_learn::model_router::RoutingContext {
@@ -1656,7 +1656,7 @@ fn cascade_routing_context(
         .is_some_and(|tracker| tracker.last_gate_failure.is_some());
 
     let crate_familiarity = runner.crate_familiarity_tracker.score_for_task(task_def);
-    let affect_confidence = runner.learning.task_confidence(task_id);
+    let affect = runner.daimon.query();
 
     RoutingContext {
         task_category: TaskCategory::Implementation,
@@ -1665,7 +1665,8 @@ fn cascade_routing_context(
         role,
         crate_familiarity,
         has_prior_failure,
-        affect_confidence,
+        affect_confidence: affect.confidence,
+        behavioral_state: affect.behavioral_state,
         thinking_level: Some(runner.config.agent.effort.clone()),
         previous_model: None,
         plan_context_tokens: None,
@@ -8806,6 +8807,7 @@ impl PlanRunner {
                 task,
                 &task_allowed_tools_csv,
                 relevant_context.as_deref(),
+                Some(self.current_pad_state()),
                 context_window_tokens,
             )?
         };
@@ -10770,7 +10772,7 @@ fn detect_cost_anomaly_override(
 }
 
 fn build_system_prompt(role: AgentRole, plan_id: &str, task: &str, tools_csv: &str) -> String {
-    build_system_prompt_with_context(role, plan_id, task, tools_csv, None)
+    build_system_prompt_with_context(role, plan_id, task, tools_csv, None, None)
 }
 
 fn build_system_prompt_with_context(
@@ -10779,6 +10781,7 @@ fn build_system_prompt_with_context(
     task: &str,
     tools_csv: &str,
     context_layer: Option<&str>,
+    affect_state: Option<PadState>,
 ) -> String {
     let mut task_context = TaskContext::new(task)
         .with_plan_id(plan_id)
@@ -10786,7 +10789,9 @@ fn build_system_prompt_with_context(
     if let Some(context) = context_layer.filter(|context| !context.trim().is_empty()) {
         task_context = task_context.with_context(context);
     }
-    RoleSystemPromptSpec::new(role, task_context, tools_csv).build()
+    RoleSystemPromptSpec::new(role, task_context, tools_csv)
+        .with_affect_state(affect_state)
+        .build()
 }
 
 fn build_system_prompt_with_context_validated(
@@ -10795,6 +10800,7 @@ fn build_system_prompt_with_context_validated(
     task: &str,
     tools_csv: &str,
     context_layer: Option<&str>,
+    affect_state: Option<PadState>,
     context_window_tokens: usize,
 ) -> Result<String> {
     let mut task_context = TaskContext::new(task)
@@ -10804,6 +10810,7 @@ fn build_system_prompt_with_context_validated(
         task_context = task_context.with_context(context);
     }
     Ok(RoleSystemPromptSpec::new(role, task_context, tools_csv)
+        .with_affect_state(affect_state)
         .build_with_context_window(context_window_tokens)?)
 }
 
@@ -10827,6 +10834,10 @@ fn build_relevant_context_layer(context_sections: &[PromptSection]) -> Option<St
 }
 
 impl PlanRunner {
+    fn current_pad_state(&self) -> PadState {
+        PadState::from(self.daimon.query().pad)
+    }
+
     /// Build the strategist system prompt for the Enriching phase.
     ///
     /// This assembles the same 6-layer system prompt as other agent dispatches,
@@ -10877,6 +10888,7 @@ impl PlanRunner {
                 .with_domain_notes(context_summary),
             tools_csv,
         )
+        .with_affect_state(Some(self.current_pad_state()))
         .with_extra_conventions(
             "Treat enrichment as a pre-dispatch analysis step. Preserve task context, read_files, and dependency ordering so later agent turns receive accurate context.",
         )

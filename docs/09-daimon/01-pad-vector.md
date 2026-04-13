@@ -288,9 +288,9 @@ This ensures that an agent with no recent events settles at "uncertain" rather t
 
 ## Current Status and Gaps
 
-**Implemented**: shared `PadVector` in `roko-core`, `AffectState` and explicit `BehavioralState` in `roko-daimon`, decay mechanics, appraisal rules, persistence, and emotion-tag generation on live Daimon output paths.
+**Implemented**: shared `PadVector` in `roko-core`, `AffectState` and explicit `BehavioralState` in `roko-daimon`, decay mechanics, appraisal rules, persistence, emotion-tag generation on live Daimon output paths, and live PAD injection into prompt assembly and cascade routing.
 
-**Gaps**: The golem implementation needs to be absorbed into the standalone crate per the dissolution plan. The six behavioral states (Engaged/Struggling/Coasting/Exploring/Focused/Resting) from refactoring-prd §2 need to be layered on top of the octant classification. PAD cosine similarity for retrieval scoring is specified but not yet wired into context assembly.
+**Gaps**: The golem implementation still needs to be fully absorbed into the standalone crate per the dissolution plan. PAD cosine similarity / mood-congruent retrieval is now wired into context assembly, but the richer somatic landscape and full VCG auction integration are still missing.
 
 ---
 

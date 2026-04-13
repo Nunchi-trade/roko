@@ -205,11 +205,11 @@ Based on `refactoring-prd/07-implementation-priorities.md`:
 
 1. **Consolidate crates** (Tier 0C): Move roko-golem/daimon.rs into roko-daimon. This unblocks all subsequent work by providing a single canonical implementation.
 
-2. **Wire affect→SystemPromptBuilder** (F7): Inject the Daimon's state into the agent's system prompt. This is the lowest-effort integration point with the highest behavioral impact — the LLM sees the emotional context and adjusts its reasoning accordingly.
+2. **Broaden EmotionalTag propagation** (F6): the type exists and conductor outputs are tagged; the remaining work is to stamp episode creation, Neuro extraction, and retrieval weighting consistently.
 
-3. **Wire affect→CascadeRouter** (F8): Pass adjusted tier thresholds to the CascadeRouter. This creates the compute allocation feedback loop.
+3. **Implement SomaticLandscape** (F9): build the 8D marker space and fast query path so Daimon has a real System 1 pre-filter rather than PAD-only modulation.
 
-4. **Broaden EmotionalTag propagation** (F6): the type exists and conductor outputs are tagged; the remaining work is to stamp episode creation, Neuro extraction, and retrieval weighting consistently.
+4. **Implement VCG affect bidding** (F10): connect PAD urgency / affect-weight multipliers into the cross-subsystem context budget auction.
 
 ---
 

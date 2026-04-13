@@ -23,6 +23,7 @@ fn default_ctx() -> RoutingContext {
         crate_familiarity: 0.5,
         has_prior_failure: false,
         affect_confidence: 0.5,
+        behavioral_state: roko_core::BehavioralState::Engaged,
         thinking_level: None,
         previous_model: None,
         plan_context_tokens: None,

@@ -15,7 +15,7 @@ use roko_agent::provider::{AgentOptions, create_agent_for_model};
 use roko_core::agent::{AgentRole, ModelTier, resolve_model};
 use roko_core::config::schema::{ModelProfile, RokoConfig};
 use roko_core::task::{TaskCategory, TaskComplexityBand};
-use roko_core::{Body as SignalBody, Context, Kind, Signal};
+use roko_core::{Body as SignalBody, Context, Engram, Kind};
 use roko_learn::cascade_router::CascadeRouter;
 use roko_learn::model_router::RoutingContext;
 use roko_learn::provider_health::{HealthState, ProviderStatus};
@@ -144,6 +144,7 @@ async fn explain_routing(
         crate_familiarity: 0.5,
         has_prior_failure: false,
         affect_confidence: 0.5,
+        behavioral_state: roko_core::BehavioralState::Engaged,
         thinking_level: None,
         previous_model: Some(resolved.slug.clone()),
         plan_context_tokens: None,
@@ -597,8 +598,8 @@ fn select_test_model(config: &RokoConfig, provider_id: &str) -> Option<(String, 
     models.into_iter().next()
 }
 
-fn provider_test_prompt() -> Signal {
-    Signal::builder(Kind::Prompt)
+fn provider_test_prompt() -> Engram {
+    Engram::builder(Kind::Prompt)
         .body(SignalBody::text(PROVIDER_TEST_PROMPT))
         .build()
 }

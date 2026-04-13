@@ -291,7 +291,7 @@ elegantly designed.
 **Critical gaps:**
 - Two parallel implementations (roko-daimon 569 LOC + roko-golem/daimon.rs 972 LOC) need consolidation
 - Somatic landscape (k-d tree over 8D strategy space) not implemented
-- CascadeRouter does not read Daimon behavioral state thresholds
+- CascadeRouter now reads live Daimon behavioral state and biases model-tier selection; the remaining affect gaps are somatic landscape and VCG-style bidding
 - VCG context allocation not implemented
 
 **Crate reality:** Code split across roko-golem (scaffold) and roko-core affect types.
@@ -541,7 +541,7 @@ Cross-referencing docs against actual crate code:
 | G2 | **Wire roko-index into ContextProvider** | 15 | Medium | Code-aware context assembly | Agents lack code intelligence |
 | G3 | **Register lang providers in detect_polyglot** | 15 | Low | Multi-language symbol extraction | roko-index has no lang support |
 | G4 | **Expand role prompts from ~20 to ~2,000 tokens** | 02 | Medium | Largest single performance lever | Harness quality < model quality |
-| G5 | **Wire CascadeRouter→Daimon thresholds** | 09 | Low | Behavioral state → tier routing | Struggling agents use wrong model |
+| G5 | **Implement somatic landscape + VCG affect bidding** | 09 | Medium | Complete Daimon control loop | Affect still lacks fast somatic lookup and full auction integration |
 
 ### Tier 1 — High-Leverage Improvements
 

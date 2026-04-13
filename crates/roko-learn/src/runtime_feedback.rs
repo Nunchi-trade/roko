@@ -22,13 +22,13 @@ use crate::cfactor::{CFactor, compute_cfactor};
 use roko_core::metric::TaskMetric;
 
 use crate::cascade_router::CascadeRouter;
-use crate::local_reward::LocalRewardFunction;
 use crate::context_pack_cache::ContextPackCache;
 use crate::costs_db::{CostRecord, CostsDb};
 use crate::costs_log::CostsLog;
 use crate::efficiency::AgentEfficiencyEvent;
 use crate::episode_logger::{Episode, EpisodeLogger, LoggerError};
 use crate::latency::LatencyRegistry;
+use crate::local_reward::LocalRewardFunction;
 use crate::model_router::{RoutingContext, compute_routing_reward_v2};
 use crate::pattern_discovery::{
     CrossEpisodeConsolidationReport, CrossEpisodeConsolidator, EpisodeView, PatternMiner,
@@ -982,6 +982,7 @@ impl LearningRuntime {
             crate_familiarity,
             has_prior_failure: !episode.success,
             affect_confidence: extra_f64(episode, "affect_confidence").unwrap_or(0.5),
+            behavioral_state: roko_core::BehavioralState::Engaged,
             thinking_level: None,
             previous_model: None,
             plan_context_tokens: None,
@@ -2055,6 +2056,7 @@ mod tests {
             crate_familiarity: 0.5,
             has_prior_failure: false,
             affect_confidence: 0.5,
+            behavioral_state: roko_core::BehavioralState::Engaged,
             thinking_level: None,
             previous_model: None,
             plan_context_tokens: None,
@@ -2181,6 +2183,7 @@ mod tests {
             crate_familiarity: 0.5,
             has_prior_failure: false,
             affect_confidence: 0.5,
+            behavioral_state: roko_core::BehavioralState::Engaged,
             thinking_level: None,
             previous_model: None,
             plan_context_tokens: None,
@@ -2385,6 +2388,7 @@ mod tests {
             crate_familiarity: 0.5,
             has_prior_failure: false,
             affect_confidence: 0.5,
+            behavioral_state: roko_core::BehavioralState::Engaged,
             thinking_level: None,
             previous_model: None,
             plan_context_tokens: None,
@@ -2422,6 +2426,7 @@ mod tests {
             crate_familiarity: 0.5,
             has_prior_failure: false,
             affect_confidence: 0.5,
+            behavioral_state: roko_core::BehavioralState::Engaged,
             thinking_level: None,
             previous_model: None,
             plan_context_tokens: None,

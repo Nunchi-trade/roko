@@ -48,6 +48,7 @@ use rand::Rng;
 use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
 pub use roko_core::config::schema::RewardWeights;
 use roko_core::task::{TaskCategory, TaskComplexityBand};
+use roko_core::BehavioralState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -92,6 +93,8 @@ pub struct RoutingContext {
     pub has_prior_failure: bool,
     /// Affect-derived confidence hint in `[0.0, 1.0]`.
     pub affect_confidence: f64,
+    /// Current discrete behavioral state from the Daimon.
+    pub behavioral_state: BehavioralState,
     /// Requested thinking / reasoning level for this task, if any.
     pub thinking_level: Option<String>,
     /// Model used for the previous task in the same plan.
@@ -980,11 +983,17 @@ impl LinUCBRouter {
     /// Return the index of the arm for `model_slug`.
     #[must_use]
     pub fn model_index(&self, model_slug: &str) -> Option<usize> {
-        self.state
-            .read()
+        let state = self.state.read();
+        state
             .arms
             .iter()
-            .position(|arm| slugs_match(&arm.slug, model_slug))
+            .position(|arm| arm.slug == model_slug)
+            .or_else(|| {
+                state
+                    .arms
+                    .iter()
+                    .position(|arm| slugs_match(&arm.slug, model_slug))
+            })
     }
 
     /// Snapshot of all arm statistics (clone under lock).
@@ -1263,6 +1272,7 @@ mod tests {
             crate_familiarity: 0.5,
             has_prior_failure: false,
             affect_confidence: 0.5,
+            behavioral_state: BehavioralState::Engaged,
             thinking_level: None,
             previous_model: None,
             plan_context_tokens: None,

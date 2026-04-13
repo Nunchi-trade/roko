@@ -199,7 +199,7 @@ enum Command {
     },
     /// Walk the lineage DAG rooted at a signal hash and print it.
     Replay {
-        /// Signal hash (64 hex chars) to walk.
+        /// Engram hash (64 hex chars) to walk.
         hash: String,
         /// Directory containing `.roko/` (default: cwd).
         #[arg(long)]
@@ -558,7 +558,7 @@ enum SubscriptionCmd {
         /// Agent template name to invoke.
         #[arg(long)]
         template: String,
-        /// Signal trigger glob to match.
+        /// Engram trigger glob to match.
         #[arg(long)]
         trigger: String,
     },
@@ -1144,10 +1144,7 @@ async fn cmd_dashboard(
 
     if !text && !list_pages && std::io::stdout().is_terminal() {
         // Use the Mori-style interactive TUI with 60fps event loop.
-        if App::new_with_page(&workdir, initial_page)
-            .run()
-            .is_ok()
-        {
+        if App::new_with_page(&workdir, initial_page).run().is_ok() {
             return Ok(EXIT_SUCCESS);
         }
     }
@@ -1710,6 +1707,7 @@ fn cmd_model_route(
         crate_familiarity: 0.0,
         has_prior_failure: false,
         affect_confidence: 0.5,
+        behavioral_state: roko_core::BehavioralState::Engaged,
         thinking_level: None,
         previous_model: Some(requested_slug.clone()),
         plan_context_tokens: None,
@@ -3516,7 +3514,7 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 );
                 println!("⏳ Deep research submitted ({model_slug}). This takes 1-10 min...");
 
-                let input = roko_core::Signal::builder(Kind::Prompt)
+                let input = roko_core::Engram::builder(Kind::Prompt)
                     .body(Body::text(&combined_prompt))
                     .build();
 
@@ -3658,7 +3656,7 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                         },
                     );
 
-                    let input = roko_core::Signal::builder(Kind::Prompt)
+                    let input = roko_core::Engram::builder(Kind::Prompt)
                         .body(Body::text(&combined_prompt))
                         .build();
                     let result = agent.run(&input, &Context::now()).await;
@@ -3728,7 +3726,7 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 )
                 .with_search_options(search_opts);
 
-                let input = roko_core::Signal::builder(Kind::Prompt)
+                let input = roko_core::Engram::builder(Kind::Prompt)
                     .body(Body::text(&combined_prompt))
                     .build();
                 let result = agent.run(&input, &Context::now()).await;
@@ -4325,10 +4323,16 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                 // skeleton left by a failed `new` run, overwrite it.
                 if target.exists() {
                     let existing = std::fs::read_to_string(&target).unwrap_or_default();
-                    let is_skeleton = existing.lines()
-                        .filter(|l| !l.starts_with("---") && !l.starts_with('#')
-                            && !l.starts_with("##") && !l.trim().is_empty())
-                        .count() == 0;
+                    let is_skeleton = existing
+                        .lines()
+                        .filter(|l| {
+                            !l.starts_with("---")
+                                && !l.starts_with('#')
+                                && !l.starts_with("##")
+                                && !l.trim().is_empty()
+                        })
+                        .count()
+                        == 0;
                     if !is_skeleton {
                         eprintln!("Draft already exists with content: {}", target.display());
                         eprintln!("Use: roko prd draft edit {slug}");
@@ -4369,26 +4373,21 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                 );
                 // Snapshot file mtime before agent runs so we can detect
                 // whether a CLI agent wrote the file directly.
-                let mtime_before = std::fs::metadata(&target)
-                    .and_then(|m| m.modified())
-                    .ok();
+                let mtime_before = std::fs::metadata(&target).and_then(|m| m.modified()).ok();
 
-                let (exit_code, output) =
-                    roko_cli::agent_exec::run_agent_capture(AgentExecOpts {
-                        prompt: &task_prompt,
-                        workdir: &workdir,
-                        model: model_ref,
-                        effort: effort_ref,
-                        system_prompt: Some(&system),
-                        resume_session,
-                        env_vars: &gw.vars,
-                    })
-                    .await?;
+                let (exit_code, output) = roko_cli::agent_exec::run_agent_capture(AgentExecOpts {
+                    prompt: &task_prompt,
+                    workdir: &workdir,
+                    model: model_ref,
+                    effort: effort_ref,
+                    system_prompt: Some(&system),
+                    resume_session,
+                    env_vars: &gw.vars,
+                })
+                .await?;
 
                 // Check if the agent already wrote the file (CLI agents with tools).
-                let mtime_after = std::fs::metadata(&target)
-                    .and_then(|m| m.modified())
-                    .ok();
+                let mtime_after = std::fs::metadata(&target).and_then(|m| m.modified()).ok();
                 let file_was_modified = match (mtime_before, mtime_after) {
                     (Some(before), Some(after)) => after > before,
                     _ => false,
@@ -4397,9 +4396,12 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                 if file_was_modified {
                     // Agent wrote the file directly — verify it has content.
                     let content = std::fs::read_to_string(&target).unwrap_or_default();
-                    let has_content = content.lines()
-                        .any(|l| !l.starts_with("---") && !l.starts_with('#')
-                            && !l.starts_with("##") && !l.trim().is_empty());
+                    let has_content = content.lines().any(|l| {
+                        !l.starts_with("---")
+                            && !l.starts_with('#')
+                            && !l.starts_with("##")
+                            && !l.trim().is_empty()
+                    });
                     if has_content {
                         println!("📄 Draft written to {}", target.display());
                     } else {
