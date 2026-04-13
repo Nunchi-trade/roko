@@ -4320,10 +4320,21 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                 let drafts = workdir.join(".roko").join("prd").join("drafts");
                 roko_cli::prd::ensure_dirs(&workdir)?;
                 let target = drafts.join(format!("{slug}.md"));
+                // If the draft exists and has real content (not just scaffold),
+                // point the user to `edit` instead. But if it's only the
+                // skeleton left by a failed `new` run, overwrite it.
                 if target.exists() {
-                    eprintln!("Draft already exists: {}", target.display());
-                    eprintln!("Use: roko prd draft edit {slug}");
-                    return Ok(1);
+                    let existing = std::fs::read_to_string(&target).unwrap_or_default();
+                    let is_skeleton = existing.lines()
+                        .filter(|l| !l.starts_with("---") && !l.starts_with('#')
+                            && !l.starts_with("##") && !l.trim().is_empty())
+                        .count() == 0;
+                    if !is_skeleton {
+                        eprintln!("Draft already exists with content: {}", target.display());
+                        eprintln!("Use: roko prd draft edit {slug}");
+                        return Ok(1);
+                    }
+                    eprintln!("Found empty scaffold from previous run — regenerating.");
                 }
                 // Write scaffold first so agent can read and fill it
                 let frontmatter = roko_cli::prd::new_draft_frontmatter(&slug, &title);
@@ -4339,29 +4350,85 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                     &workdir,
                     &format!(
                         "Fill in the draft PRD at {path}. \
-                         Read the codebase to understand what exists. \
+                         If you have file tools, read the codebase to understand what exists \
+                         and write the PRD directly to {path}. \
+                         If you do NOT have file tools, output the complete PRD markdown \
+                         (with YAML frontmatter) as your response — do not wrap in code fences. \
                          Follow the PRD quality standards in your system prompt exactly.",
                         path = target.display()
                     ),
                 );
                 let task_prompt = format!(
-                    "Read the scaffold at {path} and fill it in completely. \
-                     Search the codebase with grep to understand what exists. \
-                     Include 10+ academic citations, 2+ mermaid diagrams, and \
-                     machine-verifiable acceptance criteria. \
-                     Write the complete PRD to {path}.",
+                    "Generate a complete PRD for: {title}. \
+                     If you have file tools available, search the codebase to understand \
+                     what exists and write the completed PRD to {path}. \
+                     Otherwise, output the complete PRD markdown with YAML frontmatter. \
+                     Include specific requirements, machine-verifiable acceptance criteria, \
+                     and a design section.",
                     path = target.display()
                 );
-                run_agent(AgentExecOpts {
-                    prompt: &task_prompt,
-                    workdir: &workdir,
-                    model: model_ref,
-                    effort: effort_ref,
-                    system_prompt: Some(&system),
-                    resume_session,
-                    env_vars: &gw.vars,
-                })
-                .await
+                // Snapshot file mtime before agent runs so we can detect
+                // whether a CLI agent wrote the file directly.
+                let mtime_before = std::fs::metadata(&target)
+                    .and_then(|m| m.modified())
+                    .ok();
+
+                let (exit_code, output) =
+                    roko_cli::agent_exec::run_agent_capture(AgentExecOpts {
+                        prompt: &task_prompt,
+                        workdir: &workdir,
+                        model: model_ref,
+                        effort: effort_ref,
+                        system_prompt: Some(&system),
+                        resume_session,
+                        env_vars: &gw.vars,
+                    })
+                    .await?;
+
+                // Check if the agent already wrote the file (CLI agents with tools).
+                let mtime_after = std::fs::metadata(&target)
+                    .and_then(|m| m.modified())
+                    .ok();
+                let file_was_modified = match (mtime_before, mtime_after) {
+                    (Some(before), Some(after)) => after > before,
+                    _ => false,
+                };
+
+                if file_was_modified {
+                    // Agent wrote the file directly — verify it has content.
+                    let content = std::fs::read_to_string(&target).unwrap_or_default();
+                    let has_content = content.lines()
+                        .any(|l| !l.starts_with("---") && !l.starts_with('#')
+                            && !l.starts_with("##") && !l.trim().is_empty());
+                    if has_content {
+                        println!("📄 Draft written to {}", target.display());
+                    } else {
+                        eprintln!(
+                            "Agent modified file but left it empty at {}",
+                            target.display()
+                        );
+                    }
+                } else if exit_code == 0 && !output.trim().is_empty() {
+                    // Agent returned content as text — write it to the file.
+                    let content = if output.trim_start().starts_with("---") {
+                        output.clone()
+                    } else {
+                        format!("{scaffold}\n{output}")
+                    };
+                    std::fs::write(&target, content)?;
+                    println!("📄 Draft written to {}", target.display());
+                } else if exit_code != 0 {
+                    eprintln!(
+                        "Agent failed (exit {exit_code}). Scaffold preserved at {}",
+                        target.display()
+                    );
+                } else {
+                    eprintln!(
+                        "Agent returned empty output. Scaffold preserved at {}",
+                        target.display()
+                    );
+                }
+                Ok(exit_code)
             }
             PrdDraftCmd::Edit { slug } => {
                 let draft = workdir.join(".roko/prd/drafts").join(format!("{slug}.md"));

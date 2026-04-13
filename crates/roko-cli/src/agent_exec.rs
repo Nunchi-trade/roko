@@ -31,12 +31,19 @@ pub struct AgentExecOpts<'a> {
     pub env_vars: &'a [(String, String)],
 }
 
-/// Drive `claude` with the given prompt and print the final text output.
+/// Drive `claude` with the given prompt and return just the exit code.
 ///
-/// Returns the exit code. The Claude CLI adapter handles system prompt wiring,
-/// settings hooks, MCP discovery, resume session threading, and stderr
-/// filtering.
+/// Convenience wrapper around [`run_agent_capture`] for callers that
+/// don't need the agent's text output.
 pub async fn run_agent(opts: AgentExecOpts<'_>) -> Result<i32> {
+    run_agent_capture(opts).await.map(|(code, _)| code)
+}
+
+/// Drive `claude` with the given prompt and return `(exit_code, output_text)`.
+///
+/// The Claude CLI adapter handles system prompt wiring, settings hooks,
+/// MCP discovery, resume session threading, and stderr filtering.
+pub async fn run_agent_capture(opts: AgentExecOpts<'_>) -> Result<(i32, String)> {
     let mut routing_config = roko_core::config::load_config(opts.workdir)
         .with_context(|| format!("load routing config from {}", opts.workdir.display()))?;
     routing_config.apply_process_env();
@@ -86,12 +93,12 @@ pub async fn run_agent(opts: AgentExecOpts<'_>) -> Result<i32> {
         .build();
     let result = agent.run(&prompt, &Context::now()).await;
 
-    let rendered = result.output.body.as_text().unwrap_or("");
+    let rendered = result.output.body.as_text().unwrap_or("").to_string();
     if !rendered.is_empty() {
         print!("{rendered}");
     }
 
-    Ok(i32::from(!result.success))
+    Ok((i32::from(!result.success), rendered))
 }
 
 /// Read model from roko.toml config if available.

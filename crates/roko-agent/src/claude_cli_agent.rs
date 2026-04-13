@@ -18,7 +18,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Instant;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 
@@ -299,9 +299,7 @@ impl ClaudeCliAgent {
     fn build_command(&self) -> Command {
         let mut cmd = Command::new(&self.program);
         cmd.args(&self.extra_args);
-        if self.bare_mode {
-            cmd.arg("--bare");
-        }
+        // NOTE: --bare was removed from Claude CLI; skip it.
         cmd.arg("--print")
             .arg("--verbose")
             .arg("--output-format")
@@ -421,7 +419,7 @@ impl Agent for ClaudeCliAgent {
             register_spawned_pid(pid);
         }
         let mut stdout_pipe = child.stdout.take();
-        let mut stderr_pipe = child.stderr.take();
+        let stderr_pipe = child.stderr.take();
 
         if let Some(mut stdin) = child.stdin.take() {
             if let Err(e) = stdin.write_all(prompt_text.as_bytes()).await {
@@ -434,6 +432,26 @@ impl Agent for ClaudeCliAgent {
                 return self.failure(input, &format!("stdin write failed: {e}"), started);
             }
         }
+
+        // Stream stderr to the terminal in real time for user feedback,
+        // while accumulating lines for the trace.
+        let agent_name = self.name.clone();
+        let stderr_handle = tokio::spawn(async move {
+            let Some(pipe) = stderr_pipe else {
+                return String::new();
+            };
+            let reader = BufReader::new(pipe);
+            let mut lines = reader.lines();
+            let mut collected = String::new();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if !line.trim().is_empty() {
+                    eprintln!("[{agent_name}] {line}");
+                }
+                collected.push_str(&line);
+                collected.push('\n');
+            }
+            collected
+        });
 
         let status = match timeout(Duration::from_millis(self.timeout_ms), child.wait()).await {
             Ok(Ok(status)) => status,
@@ -466,7 +484,7 @@ impl Agent for ClaudeCliAgent {
         }
 
         let stdout = read_pipe_to_string(&mut stdout_pipe).await;
-        let stderr = read_pipe_to_string(&mut stderr_pipe).await;
+        let stderr = stderr_handle.await.unwrap_or_default();
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         if !status.success() {
