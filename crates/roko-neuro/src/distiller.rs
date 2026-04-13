@@ -261,6 +261,7 @@ struct EpisodePromptRecord {
     tokens_used: u64,
     duration_secs: f64,
     failure_reason: Option<String>,
+    emotional_tag: Option<roko_core::EmotionalTag>,
     gate_verdicts: Vec<roko_learn::episode_logger::GateVerdict>,
     usage: roko_learn::episode_logger::Usage,
     external_actions: Vec<Value>,
@@ -290,6 +291,7 @@ impl EpisodePromptRecord {
             tokens_used: episode.tokens_used,
             duration_secs: episode.duration_secs,
             failure_reason: episode.failure_reason.clone(),
+            emotional_tag: episode.emotional_tag.clone(),
             gate_verdicts: episode.gate_verdicts.clone(),
             usage: episode.usage.clone(),
             external_actions: episode.external_actions.clone(),
@@ -313,6 +315,7 @@ fn build_prompt(episodes: &[Episode]) -> Result<String> {
          Extract reusable knowledge from the corpus.\n\
          Return only structured JSON that matches the schema in the system prompt.\n\
          Be conservative: emit entries only when the episodes support them.\n\
+         Treat emotional tags as supporting provenance: high-arousal repeated episodes deserve more weight, but do not infer durable knowledge from mood alone.\n\
          Target categories:\n\
          - insight: declarative observations such as file structure, function arity, or stable project facts\n\
          - heuristic: an empirical rule inferred from repeated episode patterns\n\

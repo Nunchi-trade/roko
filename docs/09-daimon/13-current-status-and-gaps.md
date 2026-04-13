@@ -39,7 +39,7 @@ The Daimon affect engine still has two conceptual lineages in the docs, but the 
 | `DispatchStrategy` enum | **Complete** | 5 variants with effort labels: Conservative, Balanced, Exploratory, Escalating, Proactive |
 | `DispatchParams` struct | **Complete** | model + turn_limit + strategy + effort |
 | `queue_wait_arousal()` | **Complete** | Public function for queue-wait arousal computation |
-| `EmotionalTag` generation | **Partial** | Daimon can derive emotional tags and the orchestrator stamps conductor engrams with them |
+| `EmotionalTag` generation | **Partial** | Daimon derives emotional tags, the orchestrator stamps conductor engrams and episodes with them, and Neuro distillation now preserves those tags as provenance |
 | Tests | **Complete** | Appraisal, persistence, modulation, behavioral-state, and emotional-tag coverage |
 
 ### roko-golem/daimon.rs (per-task affect engine)
@@ -90,9 +90,7 @@ These exist as types or stubs but are not wired into the runtime:
 
 | Component | Where | What Exists | What's Missing |
 |---|---|---|---|
-| DispatchStrategy effort labels | roko-daimon | Enum + `effort_label()` method | Not read by any consumer |
-| Daimon context block | roko-compose | Template slot exists | Daimon doesn't write to it |
-| CascadeRouter threshold adjustment | roko-learn | Router exists, thresholds exist | Router doesn't read Daimon thresholds |
+| DispatchStrategy effort labels | roko-daimon | Enum + `effort_label()` method | Still not exposed as a first-class runtime control surface |
 
 ---
 
@@ -109,9 +107,9 @@ These are fully specified in the legacy PRDs and/or `refactoring-prd` but have n
 | F3 | `AffectEvent` enum and `AffectEngine::appraise()` | **Done** |
 | F4 | Temporal decay (exponential, 4h half-life) | **Done** |
 | F5 | Behavior modulation table | **Done** (both crates) |
-| F6 | Affect signatures on episodes | **Partial** — Engrams support `EmotionalTag`, and conductor outputs are tagged, but episode-wide propagation is not complete |
-| F7 | Affect → SystemPromptBuilder | **Not done** — Daimon doesn't write to prompt context |
-| F8 | Affect → CascadeRouter | **Not done** — router doesn't read Daimon thresholds |
+| F6 | Affect signatures on episodes | **Partial** — Engrams, episodes, and Neuro distillation now carry emotional tags, but retrieval weighting still does not fully use them |
+| F7 | Affect → SystemPromptBuilder | **Done** — live Daimon PAD now feeds affect guidance in the system prompt |
+| F8 | Affect → CascadeRouter | **Done** — live Daimon behavioral state and confidence now bias routing decisions |
 | F9 | Persistence (autosave + load) | **Done** |
 
 ### Unimplemented Features by Category
@@ -129,7 +127,7 @@ These are fully specified in the legacy PRDs and/or `refactoring-prd` but have n
 - `kiddo` crate dependency
 
 **Emotional Memory Integration**:
-- Broad `EmotionalTag` propagation across episodes and Neuro outputs
+- Retrieval-time use of `EmotionalTag` beyond provenance tagging
 - Four-factor retrieval scoring (recency × importance × relevance × emotional congruence)
 - PAD cosine similarity for retrieval scoring
 - Emotional provenance tracking on consolidated knowledge
@@ -195,7 +193,7 @@ Based on `refactoring-prd/07-implementation-priorities.md`:
 | **0C** | Dissolve roko-golem, consolidate affect logic into roko-daimon | Not started |
 | **2D** | Daimon PAD tracking (F1-F5, F9) — core appraisal and modulation | **Complete** |
 | **2E** | Behavioral modulation (F5) — behavioral states and dispatch strategy | **Complete** |
-| **2D+** | Affect on episodes (F6), affect→SystemPromptBuilder (F7), affect→CascadeRouter (F8) | Partial |
+| **2D+** | Affect on episodes (F6), affect→SystemPromptBuilder (F7), affect→CascadeRouter (F8) | Mostly complete; retrieval weighting remains |
 | **2G** | Somatic landscape, 8D strategy space, k-d tree | Not started |
 | **2H** | Emotional memory integration (EmotionalTag, four-factor retrieval) | Not started |
 | **2I** | Dream-daimon bridge (emotional load, depotentiation) | Not started |
@@ -205,7 +203,7 @@ Based on `refactoring-prd/07-implementation-priorities.md`:
 
 1. **Consolidate crates** (Tier 0C): Move roko-golem/daimon.rs into roko-daimon. This unblocks all subsequent work by providing a single canonical implementation.
 
-2. **Broaden EmotionalTag propagation** (F6): the type exists and conductor outputs are tagged; the remaining work is to stamp episode creation, Neuro extraction, and retrieval weighting consistently.
+2. **Finish emotional-memory scoring** (F6 follow-through): emotional tags now flow through Engrams, episodes, and Neuro distillation; the remaining work is retrieval weighting, consolidation priority, and diversity-aware selection.
 
 3. **Implement SomaticLandscape** (F9): build the 8D marker space and fast query path so Daimon has a real System 1 pre-filter rather than PAD-only modulation.
 

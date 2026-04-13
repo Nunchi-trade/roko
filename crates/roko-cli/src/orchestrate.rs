@@ -4176,6 +4176,7 @@ impl PlanRunner {
                             cost_usd_without_cache: gate_cost_usd,
                             ..Usage::default()
                         };
+                        self.stamp_episode_affect(&mut ep, "gate", None);
                         ep.gate_verdicts
                             .push(GateVerdict::new(format!("rung-{rung}"), passed));
                         ep.input_signal_hash.clone_from(&plan_id);
@@ -4610,6 +4611,7 @@ impl PlanRunner {
                     output_tokens: u64::from(result.usage.output_tokens),
                     ..Usage::default()
                 };
+                self.stamp_episode_affect(&mut ep, "enrich", Some(&result.output));
                 ep.input_signal_hash = plan_id.to_string();
                 ep.output_signal_hash = result.output.id.to_string();
                 let model = self.effective_model();
@@ -6096,6 +6098,7 @@ impl PlanRunner {
             output_tokens: u64::from(result.usage.output_tokens),
             ..Usage::default()
         };
+        self.stamp_episode_affect(&mut ep, "task_success", Some(&result.output));
         ep.input_signal_hash = plan_id.to_string();
         ep.output_signal_hash = result.output.id.to_string();
         if cascade_router_observed {
@@ -6284,6 +6287,7 @@ impl PlanRunner {
         ep.kind = "replan".to_string();
         ep.success = success;
         ep.failure_reason = failure_reason;
+        self.stamp_episode_affect(&mut ep, "replan", None);
         ep.input_signal_hash = plan_id.to_string();
         ep.output_signal_hash = format!("{plan_id}:{original_task_id}:replan:{strategy}");
         ep.extra
@@ -6970,6 +6974,7 @@ impl PlanRunner {
 
                 let mut ep = Episode::new("Strategist", &task_id).failed(skip_reason);
                 ep.kind = "replan".to_string();
+                self.stamp_episode_affect(&mut ep, "task_skipped", None);
                 ep.input_signal_hash = plan_id.to_string();
                 ep.output_signal_hash = format!("{plan_id}:{task_id}:skipped");
                 ep.extra.insert(
@@ -7396,6 +7401,11 @@ impl PlanRunner {
             self.observe_cascade_router(plan_id, task_id, task_def.as_ref(), model, 0.0);
         }
         let mut ep = Episode::new("Implementer", task_id).failed(error.to_string());
+        self.stamp_episode_affect(
+            &mut ep,
+            "task_failure",
+            result.as_ref().map(|agent_result| &agent_result.output),
+        );
         if let Some(task_def) = task_def.as_ref() {
             ep.extra.insert(
                 "files".to_string(),
@@ -7652,6 +7662,7 @@ impl PlanRunner {
                     output_tokens: u64::from(result.usage.output_tokens),
                     ..Usage::default()
                 };
+                self.stamp_episode_affect(&mut ep, "autofix", Some(&result.output));
                 ep.input_signal_hash = plan_id.to_string();
                 ep.output_signal_hash = result.output.id.to_string();
                 let model = self.effective_model();
@@ -7700,6 +7711,7 @@ impl PlanRunner {
                     output_tokens: u64::from(result.usage.output_tokens),
                     ..Usage::default()
                 };
+                self.stamp_episode_affect(&mut ep, "regen_verify", Some(&result.output));
                 ep.input_signal_hash = plan_id.to_string();
                 ep.output_signal_hash = result.output.id.to_string();
                 let model = self.effective_model();
@@ -7863,6 +7875,7 @@ impl PlanRunner {
                     output_tokens: u64::from(result.usage.output_tokens),
                     ..Usage::default()
                 };
+                self.stamp_episode_affect(&mut ep, "review", Some(&result.output));
                 ep.input_signal_hash = plan_id.to_string();
                 ep.output_signal_hash = result.output.id.to_string();
                 let model = self.effective_model();
@@ -7940,6 +7953,7 @@ impl PlanRunner {
                     output_tokens: u64::from(result.usage.output_tokens),
                     ..Usage::default()
                 };
+                self.stamp_episode_affect(&mut ep, "docs", Some(&result.output));
                 ep.input_signal_hash = plan_id.to_string();
                 ep.output_signal_hash = result.output.id.to_string();
                 let model = self.effective_model();
@@ -8000,6 +8014,7 @@ impl PlanRunner {
                         output_tokens: u64::from(result.usage.output_tokens),
                         ..Usage::default()
                     };
+                    self.stamp_episode_affect(&mut ep, task, Some(&result.output));
                     ep.input_signal_hash = plan_id.to_string();
                     ep.output_signal_hash = result.output.id.to_string();
                     let model = self.effective_model();
@@ -8035,6 +8050,7 @@ impl PlanRunner {
                             wall_ms,
                             ..Usage::default()
                         };
+                        self.stamp_episode_affect(&mut ep, task, None);
                         ep.input_signal_hash = plan_id.to_string();
                         let model = self.effective_model();
                         let role_str = format!("{role:?}");
@@ -10501,6 +10517,14 @@ fn build_success_knowledge_entry(
             tags.push(format!("file:{path}"));
         }
     }
+    if let Some(emotional_tag) = result.output.emotional_tag.as_ref() {
+        tags.push(format!(
+            "emotion_trigger:{}",
+            emotional_tag.trigger.trim().to_ascii_lowercase()
+        ));
+        tags.push(emotion_valence_tag(emotional_tag).to_string());
+        tags.push(emotion_arousal_tag(emotional_tag).to_string());
+    }
     tags.sort();
     tags.dedup();
 
@@ -10521,6 +10545,26 @@ fn build_success_knowledge_entry(
         half_life_days: kind.default_half_life_days(),
         tier: KnowledgeTier::Transient,
         hdc_vector: None,
+    }
+}
+
+fn emotion_valence_tag(tag: &roko_core::EmotionalTag) -> &'static str {
+    if tag.pad.pleasure >= 0.2 {
+        "emotion_valence:positive"
+    } else if tag.pad.pleasure <= -0.2 {
+        "emotion_valence:negative"
+    } else {
+        "emotion_valence:neutral"
+    }
+}
+
+fn emotion_arousal_tag(tag: &roko_core::EmotionalTag) -> &'static str {
+    if tag.pad.arousal >= 0.35 {
+        "emotion_arousal:high"
+    } else if tag.pad.arousal <= -0.35 {
+        "emotion_arousal:low"
+    } else {
+        "emotion_arousal:mid"
     }
 }
 
@@ -10836,6 +10880,17 @@ fn build_relevant_context_layer(context_sections: &[PromptSection]) -> Option<St
 impl PlanRunner {
     fn current_pad_state(&self) -> PadState {
         PadState::from(self.daimon.query().pad)
+    }
+
+    fn stamp_episode_affect(&self, episode: &mut Episode, trigger: &str, output: Option<&Engram>) {
+        if episode.emotional_tag.is_some() {
+            return;
+        }
+        if let Some(tag) = output.and_then(|engram| engram.emotional_tag.clone()) {
+            episode.emotional_tag = Some(tag);
+            return;
+        }
+        episode.emotional_tag = Some(self.daimon.emotional_tag(trigger));
     }
 
     /// Build the strategist system prompt for the Enriching phase.

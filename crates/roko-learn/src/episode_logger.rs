@@ -31,10 +31,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use bardo_primitives::hdc::{HdcVector, text_fingerprint};
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex as SyncMutex;
-use roko_core::Signal;
+use roko_core::{EmotionalTag, Engram};
+use roko_primitives::hdc::{HdcVector, text_fingerprint};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::fs::OpenOptions;
@@ -236,6 +236,9 @@ pub struct Episode {
     /// Optional short reasoning summary for auditing and debugging.
     #[serde(default)]
     pub reasoning_summary: Option<String>,
+    /// Optional affect signature captured when the episode completed.
+    #[serde(default)]
+    pub emotional_tag: Option<EmotionalTag>,
     /// Mark this episode as a headline — headline episodes are never
     /// pruned by [`EpisodeLogger::compact`], regardless of age or count.
     #[serde(default)]
@@ -282,6 +285,7 @@ impl Episode {
             external_actions: Vec::new(),
             failure_reason: None,
             reasoning_summary: None,
+            emotional_tag: None,
             headline: false,
             extra: HashMap::new(),
         }
@@ -299,6 +303,13 @@ impl Episode {
     pub fn failed(mut self, reason: impl Into<String>) -> Self {
         self.success = false;
         self.failure_reason = Some(reason.into());
+        self
+    }
+
+    /// Attach an emotional tag to the episode.
+    #[must_use]
+    pub fn with_emotional_tag(mut self, emotional_tag: EmotionalTag) -> Self {
+        self.emotional_tag = Some(emotional_tag);
         self
     }
 
@@ -385,7 +396,7 @@ fn derive_id(agent_id: &str, task_id: &str, timestamp: DateTime<Utc>) -> String 
     format!("ep_{:016x}", hasher.finish())
 }
 
-fn suggest_template_from_episodes(episodes: &[Episode], signal: &Signal) -> Option<String> {
+fn suggest_template_from_episodes(episodes: &[Episode], signal: &Engram) -> Option<String> {
     let cutoff = Utc::now() - chrono::Duration::days(TEMPLATE_SUGGESTION_MAX_AGE_DAYS);
     let signal_fingerprint = text_fingerprint(&signal_fingerprint_text(signal));
 
@@ -433,7 +444,7 @@ fn normalized_template(template: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-fn signal_fingerprint_text(signal: &Signal) -> String {
+fn signal_fingerprint_text(signal: &Engram) -> String {
     let body_bytes = signal.body.canonical_bytes();
     let body = String::from_utf8_lossy(&body_bytes);
     let agent_template = signal
@@ -617,7 +628,7 @@ impl EpisodeLogger {
     /// Returns a logger error if the episode log cannot be read.
     pub async fn suggest_template_from_recent_episodes(
         path: impl AsRef<Path>,
-        signal: &Signal,
+        signal: &Engram,
     ) -> Result<Option<String>, LoggerError> {
         let episodes = Self::read_all_lossy(path).await?;
         Ok(suggest_template_from_episodes(&episodes, signal))
@@ -753,7 +764,7 @@ pub struct CompactStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roko_core::{Body, Kind, Signal};
+    use roko_core::{Body, Engram, Kind};
     use tempfile::TempDir;
 
     fn tmp_log() -> (TempDir, PathBuf) {
@@ -770,11 +781,11 @@ mod tests {
         ep
     }
 
-    fn suggestion_signal(kind: Kind, body: &str) -> Signal {
-        Signal::builder(kind).body(Body::text(body)).build()
+    fn suggestion_signal(kind: Kind, body: &str) -> Engram {
+        Engram::builder(kind).body(Body::text(body)).build()
     }
 
-    fn episode_for_signal(template: &str, signal: &Signal, completed_at: DateTime<Utc>) -> Episode {
+    fn episode_for_signal(template: &str, signal: &Engram, completed_at: DateTime<Utc>) -> Episode {
         let mut episode = Episode::new("agent-a", "task-a");
         episode.agent_template = template.to_string();
         episode.timestamp = completed_at;
@@ -808,6 +819,24 @@ mod tests {
         assert!(all[0].success);
         assert_eq!(all[0].gate_verdicts.len(), 1);
         assert_eq!(all[0].gate_verdicts[0].gate, "compile");
+    }
+
+    #[tokio::test]
+    async fn emotional_tag_round_trips_through_jsonl() {
+        let (_dir, path) = tmp_log();
+        let logger = EpisodeLogger::new(&path);
+        let ep = sample("agent-a", "task-1", true).with_emotional_tag(EmotionalTag::new(
+            roko_core::PadVector::new(-0.2, 0.5, -0.1),
+            0.8,
+            "gate_failure",
+            roko_core::PadVector::new(-0.2, 0.5, -0.1),
+        ));
+        logger.append(&ep).await.expect("append");
+
+        let all = EpisodeLogger::read_all(&path).await.expect("read");
+        let tag = all[0].emotional_tag.as_ref().expect("emotional tag");
+        assert_eq!(tag.trigger, "gate_failure");
+        assert!((tag.intensity - 0.8).abs() < f32::EPSILON);
     }
 
     #[tokio::test]
@@ -1098,7 +1127,7 @@ mod tests {
             .get(TEXT_FINGERPRINT_KEY)
             .cloned()
             .expect("fingerprint metadata");
-        let decoded: bardo_primitives::hdc::HdcVector =
+        let decoded: roko_primitives::hdc::HdcVector =
             serde_json::from_value(stored).expect("decode fingerprint");
         let expected = text_fingerprint(
             "trigger_kind=webhook_dispatch\nagent_template=template-a\nactions=[{\"kind\":\"comment\",\"target\":\"issue-1\"}]\noutcome=gated",

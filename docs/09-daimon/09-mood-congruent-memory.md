@@ -57,7 +57,7 @@ pub struct EmotionalTag {
 
 The tag is optional — Engrams created before the Daimon is enabled, or during T0 ticks that skip appraisal, have `emotional_tag: None`. The emotional component defaults to a neutral factor (0.5) in the retrieval score for untagged entries.
 
-Current code status: `roko-core::Engram` now carries `Option<EmotionalTag>`, and the orchestrator already stamps conductor engrams with the live Daimon state. Retrieval weighting across Neuro is still only partially implemented, so the storage type is ahead of the full four-factor scoring pipeline.
+Current code status: `roko-core::Engram` now carries `Option<EmotionalTag>`, the orchestrator stamps both conductor engrams and persisted episodes with live Daimon state, and Neuro distillation preserves those tags as supporting provenance. Retrieval weighting across Neuro is still only partially implemented, so the full four-factor scoring pipeline remains ahead of the runtime.
 
 ### Extension to Engram Storage
 

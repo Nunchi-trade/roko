@@ -172,7 +172,8 @@ pub struct EmotionalTag {
 ```
 - `roko-core::Engram` now carries `Option<EmotionalTag>`
 - `roko-cli` currently emits conductor engrams with live Daimon emotional metadata and preserves tags when deriving conductor signals
-- Broader propagation across episodes, Neuro distillation, and retrieval weighting is still incomplete
+- Engrams, episodes, and Neuro distillation now preserve emotional tags as provenance
+- The remaining gap is retrieval-time weighting and consolidation policy that actively uses those tags
 
 ### VCG Auction for Context Budget — PARTIAL
 - Inside Neuro, context chunks now compete via an auction-style allocator with token-cost awareness and a marginal-value stopping rule

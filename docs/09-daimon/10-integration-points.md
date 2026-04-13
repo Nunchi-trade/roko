@@ -255,7 +255,7 @@ The 0.15 threshold prevents event flooding. A shift from Relaxed to Anxious (PAD
 **Not implemented**:
 - Integration Point 3 (VCG auction): The VCG auction is specified but no code exists.
 - Integration Point 4 (somatic landscape): The k-d tree and query protocol are specified but no code exists.
-- Full emotional-memory propagation: `EmotionalTag` exists and live conductor engrams carry it, but Neuro distillation and retrieval weighting are still incomplete.
+- Full emotional-memory propagation: `EmotionalTag` now reaches live conductor engrams, episode logs, and Neuro distillation inputs, but retrieval weighting and consolidation policy are still incomplete.
 
 ---
 
