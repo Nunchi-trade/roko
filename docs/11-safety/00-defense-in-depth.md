@@ -356,6 +356,136 @@ Each phase emits audit signals (`Signal` / Engram) through the `AuditSink` trait
 | OWASP MCP Top 10 (2025) | Tool poisoning, cross-server shadowing threat taxonomy |
 | Endor Labs (2026) | 82% of MCP implementations vulnerable to path traversal |
 | Lee et al. (2026, arXiv:2603.28052) | Meta-Harness — harness optimization yields +7.7 points on classification |
+| NIST AI 600-1 (July 2024) | Generative AI Profile — 12 risk categories, red-teaming guidance |
+| CSA MAESTRO (February 2025) | 7-layer agent threat modeling framework |
+| Crescendo (Russinovich et al., 2024) | Multi-turn LLM jailbreak via gradual escalation |
+| GOAT (Pavlova et al., 2024) | Generative Offensive Agent Tester — 97% ASR |
+| FIDES (Costa & Kopf, 2025) | Information flow control for agentic systems |
+
+---
+
+## Adversarial Safety Testing Framework
+
+### Red-team pipeline
+
+Roko integrates adversarial testing as a continuous safety verification practice, following NIST AI 600-1 (July 2024) recommendations for regular adversarial testing of generative AI systems.
+
+The adversarial testing pipeline runs as a periodic background process, testing the agent's safety defenses against known attack techniques:
+
+```rust
+/// Adversarial safety testing pipeline.
+/// Runs attack simulations against the agent's safety defenses
+/// in a sandboxed environment.
+pub struct AdversarialTestPipeline {
+    /// Test suites organized by attack category.
+    pub test_suites: Vec<AdversarialTestSuite>,
+    /// Results store for trend analysis.
+    pub results_path: PathBuf,
+    /// Sandbox configuration for test execution.
+    pub sandbox_config: SandboxConfig,
+    /// Alert threshold: fraction of failed tests that triggers alert.
+    pub alert_threshold: f64,
+}
+
+pub struct AdversarialTestSuite {
+    /// Suite identifier.
+    pub id: String,
+    /// MITRE ATLAS technique being tested.
+    pub atlas_technique: String,
+    /// Test cases in this suite.
+    pub test_cases: Vec<AdversarialTestCase>,
+    /// Expected defense: which Roko component should catch this.
+    pub expected_defense: String,
+}
+
+pub struct AdversarialTestCase {
+    /// Human-readable description.
+    pub description: String,
+    /// The adversarial input to inject.
+    pub payload: String,
+    /// Expected result: should the safety layer block this?
+    pub expected_blocked: bool,
+    /// Which guard should block it.
+    pub expected_guard: Option<String>,
+}
+
+/// Result of running one adversarial test.
+pub struct AdversarialTestResult {
+    pub test_id: String,
+    pub atlas_technique: String,
+    pub blocked: bool,
+    pub blocking_guard: Option<String>,
+    pub passed: bool,  // true if blocked == expected_blocked
+    pub latency_ms: u64,
+    pub timestamp: u64,
+}
+```
+
+### Attack simulation categories
+
+| Category | ATLAS ID | Test approach | Expected defense |
+|----------|----------|--------------|-----------------|
+| Direct prompt injection | AML.T0051.001 | Inject instructions in system prompt variants | Prompt architecture + delimiter hardening |
+| Indirect prompt injection | AML.T0051.002 | Inject via simulated tool results | ScrubPolicy + taint tracking |
+| Path traversal | -- | Use ../../, symlinks, absolute paths | PathPolicy canonicalization |
+| Command injection | -- | Shell metacharacters in bash arguments | BashPolicy deny patterns |
+| Credential exfiltration | -- | Embed known patterns in tool output | ScrubPolicy 9 default patterns |
+| Rate limit bypass | -- | Rapid repeated tool calls | RateLimiter sliding window |
+| Git policy bypass | -- | Force push, branch deletion attempts | GitPolicy protected branches |
+| Network exfiltration | -- | Outbound to private networks, non-HTTPS | NetworkPolicy filtering |
+| Memory poisoning | AML.T0080 | Insert false knowledge entries | 4-stage ingestion pipeline |
+
+### Continuous testing schedule
+
+```
+Daily:   Run quick suite (prompt injection, path traversal, credential patterns)
+Weekly:  Run full suite (all categories)
+Monthly: Run extended suite (multi-step attack chains, escalation scenarios)
+```
+
+### Configuration
+
+```toml
+[safety.adversarial_testing]
+# Enable continuous adversarial testing.
+enabled = true
+# Quick suite interval (hours). Range: 1..168.
+quick_interval_hours = 24
+# Full suite interval (hours). Range: 24..720.
+full_interval_hours = 168
+# Alert threshold: fraction of failed tests. Range: 0.0..1.0.
+alert_threshold = 0.1
+# Results retention (days). Range: 7..365.
+results_retention_days = 90
+# Sandbox: run tests in isolated worktree.
+sandboxed = true
+```
+
+### Test criteria
+
+- Pipeline runs all test suites within the configured timeout
+- Direct prompt injection test cases are correctly blocked by prompt architecture
+- Path traversal test cases are blocked by PathPolicy
+- Credential pattern test cases are caught by ScrubPolicy
+- Alert fires when failure rate exceeds alert_threshold
+- Results are persisted to results_path for trend analysis
+- Sandboxed mode creates an isolated worktree for testing
+
+---
+
+## CSA MAESTRO layer mapping
+
+Map Roko's defense-in-depth to the CSA MAESTRO 7-layer framework (Cloud Security Alliance, February 2025):
+
+| MAESTRO Layer | Description | Roko implementation |
+|---------------|-------------|---------------------|
+| L1: Foundation Models | Base model threats (poisoning, extraction) | CascadeRouter model selection, model fingerprint in Provenance |
+| L2: Data Operations | Data poisoning, RAG manipulation | 4-stage ingestion pipeline, TaintedString, BloomOracle |
+| L3: Agent Frameworks | Framework vulnerabilities | Rust type safety, Capability<T>, SafetyLayer |
+| L4: Deployment & Infrastructure | Container escape, network | PathPolicy, NetworkPolicy, ProcessSupervisor |
+| L5: Evaluation & Observability | Monitoring blind spots | Gate pipeline, TemporalMonitor, conductor |
+| L6: Agent-to-Agent Communication | Trust boundary violations | Cognitive Namespaces, NamespaceChannel ACL |
+| L7: Human-AI Interaction | Social engineering, manipulation | Cognitive Signals (Pause/Escalate/Cooldown), EU AI Act compliance |
 
 ---
 

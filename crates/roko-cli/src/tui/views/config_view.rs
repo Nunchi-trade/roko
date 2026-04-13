@@ -55,6 +55,9 @@ impl ConfigSource {
 }
 
 /// Render the full config view.
+///
+/// Left panel: section list with cursor. Right panel: all key-value pairs
+/// for the selected section, always visible (no expand gate).
 pub fn render(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -63,17 +66,11 @@ pub fn render(
     _view_state: &ViewState,
     theme: &Theme,
 ) {
-    let mut sections = build_config_sections(data);
-
-    // Apply expansion state from TuiState
-    for (i, section) in sections.iter_mut().enumerate() {
-        section.expanded = tui_state.config_expanded.contains(&i);
-    }
-
-    let selected = tui_state.config_selected;
+    let sections = build_config_sections(data);
+    let selected = tui_state.config_selected.min(sections.len().saturating_sub(1));
 
     let panels =
-        Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)]).split(area);
+        Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)]).split(area);
 
     render_section_list(frame, panels[0], &sections, selected, theme);
     render_section_detail(frame, panels[1], &sections, selected, theme);
@@ -89,7 +86,7 @@ fn render_section_list(
 ) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Sections (j/k:nav Enter:toggle) ")
+        .title(" Sections (j/k to browse) ")
         .border_style(theme.accent());
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -106,7 +103,6 @@ fn render_section_list(
         .iter()
         .enumerate()
         .map(|(i, section)| {
-            let marker = if section.expanded { "\u{25bc}" } else { "\u{25b6}" }; // ▼ / ▶
             let is_selected = i == selected;
             let cursor = if is_selected { "\u{25b8} " } else { "  " }; // ▸
             let name_style = if is_selected {
@@ -116,7 +112,6 @@ fn render_section_list(
             };
             ListItem::new(Line::from(vec![
                 Span::styled(cursor, if is_selected { theme.accent() } else { theme.muted() }),
-                Span::styled(format!("{marker} "), theme.muted()),
                 Span::styled(&section.name, name_style),
                 Span::styled(
                     format!("  ({} keys)", section.entries.len()),
@@ -156,14 +151,6 @@ fn render_section_detail(
         frame.render_widget(empty, inner);
         return;
     };
-
-    if !section.expanded {
-        let hint = Paragraph::new("press Enter to expand this section")
-            .style(theme.muted())
-            .wrap(Wrap { trim: false });
-        frame.render_widget(hint, inner);
-        return;
-    }
 
     if section.entries.is_empty() {
         let empty = Paragraph::new("no entries in this section")
