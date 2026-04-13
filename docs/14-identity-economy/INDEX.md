@@ -104,12 +104,28 @@
 | Structure | Document | Purpose |
 |---|---|---|
 | `KoraiPassport` | `02-korai-passport.md` | Agent identity NFT |
+| `DidDocument` | `01-erc-8004-three-registries.md` | W3C DID document for agent identity |
+| `AgentCredential` | `01-erc-8004-three-registries.md` | W3C Verifiable Credential for agents |
+| `PersonalizedPageRank` | `01-erc-8004-three-registries.md` | Graph-based trust propagation |
+| `SybilRankDetector` | `01-erc-8004-three-registries.md` | Flow-based Sybil detection |
+| `UniquenessAttestation` | `01-erc-8004-three-registries.md` | Proof-of-unique-agent |
+| `PassportDidExtension` | `02-korai-passport.md` | DID interoperability extension |
+| `SoulRecovery` | `02-korai-passport.md` | Reputation-preserving key recovery |
+| `LocalEigenTrust` | `04-reputation-7-domain-ema.md` | Local trust for feedback weighting |
+| `CollusionDetector` | `04-reputation-7-domain-ema.md` | Graph-based collusion ring detection |
+| `ReputationSimConfig` | `04-reputation-7-domain-ema.md` | cadCAD simulation parameters |
+| `DynamicPricingEngine` | `05-knowledge-marketplace.md` | Multi-factor real-time pricing |
 | `BountySpec` | `12-three-hiring-models.md` | Job posting specification |
 | `SparrowBid` | `12-three-hiring-models.md` | Agent bid on a job |
+| `CurationBondingCurve` | `10-korai-tokenomics.md` | Augmented bonding curve for curation |
+| `TokenSimConfig` | `10-korai-tokenomics.md` | Token economic simulation parameters |
+| `HarbergerListingTax` | `10-korai-tokenomics.md` | Partial common ownership for listings |
 | `IsfrSubmission` | `13-isfr-clearing-settlement.md` | Rate submission for collective pricing |
 | `IsfrAggregate` | `13-isfr-clearing-settlement.md` | Computed median rate |
 | `ClearingCertificate` | `13-isfr-clearing-settlement.md` | KKT optimality proof for clearing |
 | `KnowledgeFuture` | `14-knowledge-futures-market.md` | Pre-sale commitment for knowledge |
+| `LmsrMarketMaker` | `14-knowledge-futures-market.md` | LMSR prediction market for futures |
+| `ConditionalOutcomes` | `14-knowledge-futures-market.md` | Multi-dimensional outcome tokens |
 | `Engram` | `15-regulatory-moat-and-current-status.md` | Content-addressed knowledge unit |
 
 ---
@@ -130,11 +146,19 @@ Current focus: Tier 1 (model routing) and Tier 2 (cognitive integration).
 | If you need... | Start with... |
 |---|---|
 | Agent identity and registration | `01-erc-8004-three-registries.md` → `02-korai-passport.md` |
+| W3C DID interoperability | `01-erc-8004-three-registries.md` §9 → `02-korai-passport.md` §8 |
+| Sybil resistance and trust graphs | `01-erc-8004-three-registries.md` §10 |
 | How reputation works | `04-reputation-7-domain-ema.md` |
+| EigenTrust feedback weighting | `04-reputation-7-domain-ema.md` §11 |
+| Collusion detection | `04-reputation-7-domain-ema.md` §12 |
 | How agents get paid | `07-mpp-machine-payment-protocol.md` → `08-x402-micropayments.md` |
 | How the token economy works | `10-korai-tokenomics.md` |
+| Bonding curves for curation | `10-korai-tokenomics.md` §12 |
+| Token simulation (cadCAD) | `10-korai-tokenomics.md` §13 |
 | How jobs are assigned | `12-three-hiring-models.md` → `11-vickrey-reputation-auction.md` |
 | How obligations are settled | `13-isfr-clearing-settlement.md` |
+| Knowledge prediction markets | `14-knowledge-futures-market.md` §10 |
+| Dynamic knowledge pricing | `05-knowledge-marketplace.md` §9 |
 | Regulatory compliance | `15-regulatory-moat-and-current-status.md` |
 | Investment thesis | `00-vision-and-a16z-framing.md` |
 
@@ -145,8 +169,11 @@ Current focus: Tier 1 (model routing) and Tier 2 (cognitive integration).
 The identity-economy layer draws on research from:
 
 - **Mechanism design**: Vickrey 1961, Myerson 1981, Clarke 1971, Groves 1973
-- **Token economics**: Ostrom 1990 (commons governance), Gesell 1916 (demurrage)
-- **Reputation systems**: Bayesian reputation (Beta distribution), Glicko-2, EMA
+- **Token economics**: Ostrom 1990 (commons governance), Gesell 1916 (demurrage), Zargham 2019 (bonding curves)
+- **Reputation systems**: Bayesian reputation (Beta distribution), Glicko-2, EMA, EigenTrust hybrid
+- **Sybil resistance**: Douceur 2002 (Sybil attack), Yu et al. 2006 (SybilGuard), Cao et al. 2012 (SybilRank), Andersen et al. 2006 (PersonalizedPageRank)
+- **Decentralized identity**: W3C DID Core 1.0/1.1, W3C VC Data Model 2.0, Weyl/Ohlhaver/Buterin 2022 (DeSoc / Soulbound Tokens)
+- **Prediction markets**: Hanson 2003/2007 (LMSR), Ommer & Lu 2019 (Gnosis conditional tokens), Chen & Pennock 2007
 - **Collective intelligence**: Woolley et al. 2010 (C-Factor), Reed's Law
 - **Market microstructure**: Arrow & Debreu 1954, Akerlof 1970, Spence 1973
 - **Load balancing**: Ousterhout 2013 (power-of-two-choices)
@@ -154,8 +181,12 @@ The identity-economy layer draws on research from:
 - **Knowledge representation**: Kanerva 2009 (HDC), Plate 2003, Frady et al. 2021
 - **Credit attribution**: Shapley 1953 (Shapley values)
 - **Payment protocols**: Coinbase x402 (2025), ERC-3009, ERC-8183
+- **Token engineering**: Posner & Weyl 2018 (Harberger taxes), Monnot & Chitra 2023 (cadCAD simulation)
+- **Graph trust**: Hamilton et al. 2017 (GraphSAGE), Alvisi et al. 2013 (Sybil defense survey)
 
 ---
 
-*This index was generated after all 16 sub-docs (00-15) were written. All naming
-renames from `context-pack/01-naming-map.md` have been applied throughout.*
+*This index was generated after all 16 sub-docs (00-15) were written. Enhanced
+2026-04-13 with W3C DID, EigenTrust hybrid, Sybil resistance, LMSR prediction markets,
+bonding curves, token simulation, and collusion detection. All naming renames from
+`context-pack/01-naming-map.md` have been applied throughout.*

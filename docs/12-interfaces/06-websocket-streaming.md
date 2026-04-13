@@ -181,6 +181,95 @@ This keeps WebSocket bandwidth reasonable even when multiple agents are producin
 
 ---
 
+## Backpressure and Flow Control
+
+### Ring Buffer for Reconnection Replay
+
+```rust
+/// Fixed-capacity ring buffer for event replay on reconnection.
+/// Retains last N events; older events are overwritten.
+pub struct EventRingBuffer {
+    events: Vec<(u64, ServerEvent)>,  // (seq, event) pairs
+    head: usize,
+    capacity: usize,                   // default: 10_000
+    next_seq: u64,
+}
+
+impl EventRingBuffer {
+    pub fn push(&mut self, event: ServerEvent) -> u64 {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        if self.events.len() < self.capacity {
+            self.events.push((seq, event));
+        } else {
+            self.events[self.head] = (seq, event);
+        }
+        self.head = (self.head + 1) % self.capacity;
+        seq
+    }
+
+    /// Replay events since `after_seq` for reconnecting clients.
+    pub fn replay_from(&self, after_seq: u64) -> Vec<&(u64, ServerEvent)> {
+        self.events.iter().filter(|(seq, _)| *seq > after_seq).collect()
+    }
+}
+```
+
+### Adaptive Event Priority
+
+Under backpressure, low-priority events are coalesced or dropped while high-priority events are always delivered:
+
+| Event Type | Priority | Coalesce Window | Drop Under Pressure? |
+|---|---|---|---|
+| `GateResult` | 10 | None | Never |
+| `PlanPhaseChange` | 9 | None | Never |
+| `CFactorUpdate` | 7 | 30s | Never |
+| `AgentSpawned` | 6 | None | Never |
+| `AgentOutput` | 3 | 100ms | Yes (batch) |
+
+---
+
+## Test Criteria
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ring_buffer_wraps_correctly() {
+        let mut buf = EventRingBuffer::new(3);
+        for i in 0..5 { buf.push(ServerEvent::CFactorUpdate { value: i as f64 }); }
+        let replay = buf.replay_from(2);
+        assert_eq!(replay.len(), 2);
+    }
+
+    #[test]
+    fn ring_buffer_replay_from_zero_returns_all() {
+        let mut buf = EventRingBuffer::new(100);
+        for i in 0..10 { buf.push(ServerEvent::CFactorUpdate { value: i as f64 }); }
+        assert_eq!(buf.replay_from(0).len(), 9);
+    }
+
+    #[test]
+    fn sse_filter_respects_query_param() {
+        let filter = parse_sse_filter("agent_output,gate_result");
+        assert!(filter.accepts("agent_output"));
+        assert!(filter.accepts("gate_result"));
+        assert!(!filter.accepts("cfactor_update"));
+    }
+
+    #[test]
+    fn ws_subscription_message_parses() {
+        let msg = r#"{"subscribe":["agent_output","gate_result"]}"#;
+        let sub: Subscription = serde_json::from_str(msg).unwrap();
+        assert_eq!(sub.events.len(), 2);
+    }
+}
+```
+
+---
+
 ## Current Status and Gaps
 
 **Built:**

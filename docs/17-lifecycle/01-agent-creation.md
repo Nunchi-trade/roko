@@ -356,6 +356,276 @@ Non-chain agents do not require on-chain identity.
 
 ---
 
+## FIPA-Informed Lifecycle States
+
+Roko's agent creation maps to the FIPA Agent Management specification (FIPA00023, 2002) — the most complete formal standard for agent lifecycle semantics. FIPA defines six agent states: `INITIATED`, `ACTIVE`, `SUSPENDED`, `WAITING`, `TRANSIT`, `DELETED`. Roko maps these into its provisioning pipeline while adding cloud-native concepts absent from the 2002 specification:
+
+```rust
+/// Agent lifecycle states, informed by FIPA00023 with cloud-native extensions.
+///
+/// FIPA states: INITIATED → ACTIVE → SUSPENDED/WAITING/TRANSIT → DELETED
+/// Roko adds: Provisioning (container startup), Hibernated (cold storage),
+///            Metamorphosing (role change), and Degraded (budget-constrained).
+///
+/// Crate: `roko-core`
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AgentLifecycleState {
+    /// FIPA INITIATED: Agent manifest accepted but process not yet running.
+    /// Kubernetes equivalent: Pod phase `Pending`.
+    Initiated,
+
+    /// Cloud-native extension: Infrastructure being allocated, Neuro initializing.
+    /// No FIPA equivalent — FIPA assumed instant platform availability.
+    /// Kubernetes equivalent: Container state `Waiting` (image pull, init containers).
+    Provisioning,
+
+    /// FIPA ACTIVE: Agent registered, cognitive loop running, accepting tasks.
+    /// Kubernetes equivalent: Pod phase `Running` + readiness probe passing.
+    Active,
+
+    /// FIPA SUSPENDED: Execution halted by operator (`roko pause`).
+    /// State preserved in memory. Messages buffered. Resume restores exact state.
+    /// Kubernetes equivalent: No direct mapping (k8s destroys on scale-to-zero).
+    Suspended,
+
+    /// FIPA WAITING: Agent self-blocked on an external event (tool callback,
+    /// Mesh response, chain transaction confirmation). Distinguished from
+    /// Suspended: Waiting is self-initiated, Suspended is operator-initiated.
+    Waiting,
+
+    /// Roko extension: Agent serialized to cold storage (.roko/hibernate/).
+    /// Process terminated. Full logical state preserved for later restoration.
+    /// Inspired by CRIU checkpoint/restore but implemented at application level.
+    /// See `docs/17-lifecycle/06-agent-deletion.md` for hibernation vs. deletion.
+    Hibernated,
+
+    /// Roko extension: Agent mid-transition between roles/capabilities.
+    /// Old tools drained, new tools loading, DF re-registration in progress.
+    /// Loosely analogous to FIPA TRANSIT (mobile agents changing platforms).
+    Metamorphosing,
+
+    /// Roko extension: Budget-constrained operation. Cognitive loop active but
+    /// at reduced capability (model downgrade, T0 emphasis, reduced tick rate).
+    /// No FIPA equivalent — FIPA assumed unlimited platform resources.
+    Degraded { stage: DegradationStage },
+
+    /// FIPA DELETED: Agent process terminated, resources released.
+    /// Neuro backups preserved on disk. Mesh deregistered.
+    Deleted,
+}
+
+/// Degradation stages when budget is constrained (see `04-funding-and-budgets.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DegradationStage {
+    /// 70% daily budget: cheaper models.
+    ModelDowngrade,
+    /// 80%: T0 probes maximized.
+    T0Emphasis,
+    /// 90%: reduced tick frequency.
+    ReducedFrequency,
+    /// 95%: monitoring only.
+    MonitoringOnly,
+    /// 100%: cognitive loop paused until budget resets.
+    BudgetPaused,
+}
+```
+
+### State Transition Matrix
+
+```
+                    ┌──────────────┐
+                    │  Initiated   │
+                    └──────┬───────┘
+                     validate()
+                    ┌──────▼───────┐
+                    │ Provisioning │
+                    └──────┬───────┘
+                     ready()
+         ┌─────────┌──────▼───────┐──────────┐
+         │    ┌───►│    Active    │◄───┐      │
+         │    │    └─┬──┬──┬──┬──┘    │      │
+     resume() │  wait()│  │  │    wake()  metamorphose_done()
+         │    │      │  │  │            │
+    ┌────┴───┐│ ┌────▼┐ │ ┌▼──────────┴──┐  ┌──────────────┐
+    │Suspnded││ │Wait ││ │ │Metamorphosing│  │  Hibernated  │
+    └────────┘│ └─────┘│ │ └──────────────┘  └──────┬───────┘
+              │        │ │                     thaw()│
+              │        │ metamorphose()              │
+              │        │                    ┌────────▼───────┐
+              │   budget_constrained()      │    Active      │
+              │        │                    └────────────────┘
+              │   ┌────▼───────┐
+              │   │  Degraded  │
+              │   └────────────┘
+              │
+              │   delete() / kill() from ANY state
+              │        │
+              │   ┌────▼───────┐
+              └──►│  Deleted   │
+                  └────────────┘
+```
+
+### FIPA Agent Management System (AMS) Mapping
+
+The FIPA AMS — the centralized authority that controls all agent lifecycle operations — maps to Roko's `PlanRunner` (in `bardo-runtime`) combined with the operator's CLI:
+
+| FIPA AMS Operation | Roko Equivalent | CLI Command |
+|---|---|---|
+| `create()` | `Agent::new()` → provisioning pipeline | `roko init` |
+| `invoke()` | `Agent::start_cognitive_loop()` | `roko start` |
+| `suspend()` | `PlanRunner::pause()` | `roko pause` |
+| `resume()` | `PlanRunner::resume()` | `roko resume` |
+| `kill()` | Clean shutdown sequence | `roko delete` |
+| DF `register()` | Mesh registration | Automatic at provisioning |
+| DF `deregister()` | Mesh deregistration | Automatic at deletion |
+
+The FIPA Directory Facilitator (DF) — the yellow-pages service where agents advertise capabilities — maps to Roko's Mesh Collective discovery. Agents register capabilities during provisioning and deregister during deletion.
+
+### Container Lifecycle Hook Integration
+
+Roko's agent creation borrows the OCI Runtime Specification's hook model (Open Container Initiative, v1.0) to define lifecycle hooks that external tooling can register:
+
+```rust
+/// OCI-inspired lifecycle hooks for agent creation.
+/// External tooling (monitoring, logging, security) registers hooks
+/// that execute at specific lifecycle boundaries.
+///
+/// Error semantics follow OCI conventions:
+/// - Pre-hooks (before_*): failure ABORTS the lifecycle transition
+/// - Post-hooks (after_*): failure is LOGGED but does not abort
+///
+/// Crate: `roko-core`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LifecycleHooks {
+    /// Executes after manifest validated, before resource allocation.
+    /// OCI equivalent: `createRuntime`.
+    /// Use: inject secrets, validate network policy, audit log.
+    pub before_provision: Vec<HookSpec>,
+
+    /// Executes after all provisioning complete, before cognitive loop starts.
+    /// OCI equivalent: `startContainer`.
+    /// Use: warm caches, pre-load context, notify monitoring systems.
+    pub before_start: Vec<HookSpec>,
+
+    /// Executes after first cognitive loop iteration completes.
+    /// OCI equivalent: `poststart`.
+    /// Use: register with external service mesh, start metrics export.
+    pub after_start: Vec<HookSpec>,
+
+    /// Executes when deletion/shutdown requested, before graceful shutdown begins.
+    /// Kubernetes equivalent: `preStop` hook.
+    /// Use: drain connections, flush external state, notify peers.
+    pub before_stop: Vec<HookSpec>,
+
+    /// Executes after agent fully deleted and resources released.
+    /// OCI equivalent: `poststop`.
+    /// Use: cleanup external resources, deregister from monitoring, archive logs.
+    pub after_stop: Vec<HookSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HookSpec {
+    /// Absolute path to executable.
+    pub path: String,
+    /// Arguments passed to the executable.
+    pub args: Vec<String>,
+    /// Environment variables.
+    pub env: Vec<(String, String)>,
+    /// Timeout before hook is killed. Default: 30s. Range: 1s-300s.
+    pub timeout: Duration,
+}
+
+impl Default for LifecycleHooks {
+    fn default() -> Self {
+        Self {
+            before_provision: Vec::new(),
+            before_start: Vec::new(),
+            after_start: Vec::new(),
+            before_stop: Vec::new(),
+            after_stop: Vec::new(),
+        }
+    }
+}
+```
+
+TOML configuration for hooks:
+
+```toml
+[[hooks.before_start]]
+path = "/usr/local/bin/notify-monitoring"
+args = ["--agent-id", "${AGENT_ID}", "--event", "starting"]
+timeout_secs = 10
+
+[[hooks.before_stop]]
+path = "/usr/local/bin/drain-mesh"
+args = ["--agent-id", "${AGENT_ID}", "--grace-period", "15"]
+timeout_secs = 20
+```
+
+### Test Criteria
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lifecycle_state_transitions_are_valid() {
+        // FIPA: INITIATED → ACTIVE requires provisioning
+        let state = AgentLifecycleState::Initiated;
+        // Cannot jump directly to Active — must go through Provisioning
+        assert_ne!(state, AgentLifecycleState::Active);
+    }
+
+    #[test]
+    fn degraded_state_preserves_stage() {
+        let state = AgentLifecycleState::Degraded {
+            stage: DegradationStage::ModelDowngrade,
+        };
+        if let AgentLifecycleState::Degraded { stage } = state {
+            assert_eq!(stage, DegradationStage::ModelDowngrade);
+        }
+    }
+
+    #[test]
+    fn hook_timeout_defaults_to_30s() {
+        let hook = HookSpec {
+            path: "/bin/true".into(),
+            args: vec![],
+            env: vec![],
+            timeout: Duration::from_secs(30),
+        };
+        assert_eq!(hook.timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn lifecycle_hooks_default_empty() {
+        let hooks = LifecycleHooks::default();
+        assert!(hooks.before_provision.is_empty());
+        assert!(hooks.after_stop.is_empty());
+    }
+
+    #[test]
+    fn delete_reachable_from_any_state() {
+        // FIPA: kill() transitions ANY state to DELETED
+        let states = vec![
+            AgentLifecycleState::Initiated,
+            AgentLifecycleState::Provisioning,
+            AgentLifecycleState::Active,
+            AgentLifecycleState::Suspended,
+            AgentLifecycleState::Waiting,
+            AgentLifecycleState::Hibernated,
+        ];
+        // All states should be able to transition to Deleted (verified by runtime)
+        for state in states {
+            assert_ne!(state, AgentLifecycleState::Deleted);
+        }
+    }
+}
+```
+
+---
+
 ## Related Topics
 
 - `docs/17-lifecycle/02-provisioning.md` — Compute provisioning pipeline

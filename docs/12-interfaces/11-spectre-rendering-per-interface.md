@@ -419,6 +419,173 @@ Breathing rate, phase, and asymmetry values are shared via the Spectre state mod
 
 ---
 
+## Renderer 5: AR/VR Spatial (WebXR / visionOS)
+
+The Spectre extends naturally to spatial computing environments where agents become volumetric entities in shared 3D space.
+
+### WebXR Session Setup
+
+```javascript
+// Request immersive session with hand tracking
+const session = await navigator.xr.requestSession('immersive-vr', {
+  requiredFeatures: ['local-floor'],
+  optionalFeatures: ['hand-tracking', 'bounded-floor']
+});
+
+// Per-eye rendering for Spectre creature
+session.requestAnimationFrame((time, frame) => {
+  const pose = frame.getViewerPose(referenceSpace);
+  for (const view of pose.views) {
+    gl.viewport(...view.viewport);
+    renderSpectre(spectreState, view.projectionMatrix, view.transform.inverse.matrix);
+  }
+});
+```
+
+### Proximity-Based LOD
+
+```javascript
+function updateSpectreLOD(spectreMesh, camera) {
+  const dist = camera.position.distanceTo(spectreMesh.position);
+  if (dist < 1.0) {
+    // Full detail: ray-marched SDF with SSS, live telemetry readout
+    showFullDetail(spectreMesh);
+  } else if (dist < 3.0) {
+    // Medium: polygon mesh with SSS material, status text
+    showMediumDetail(spectreMesh);
+  } else if (dist < 8.0) {
+    // Low: billboard sprite, health color only
+    showLowDetail(spectreMesh);
+  } else {
+    // Minimal: colored point in topology graph
+    showMinimalDetail(spectreMesh);
+  }
+}
+```
+
+### SDF Ray Marching for High-Detail Spectres
+
+At close range (<1m in VR), Spectres are rendered via ray marching through their SDF body definition:
+
+```glsl
+float spectreBodySDF(vec3 p, SpectreParams params) {
+    // Compose body from archetype primitives
+    float body = sdEllipse(p, params.body_size);
+    float head = sdSphere(p - params.head_offset, params.head_radius);
+    float combined = smin(body, head, params.blend_k);
+
+    // Add limbs
+    for (int i = 0; i < params.limb_count; i++) {
+        float limb = sdCapsule(p, params.limb_start[i], params.limb_end[i], params.limb_radius);
+        combined = smin(combined, limb, 0.05);
+    }
+
+    // Apply breathing scale
+    return combined / params.breathing_scale;
+}
+
+// Subsurface scattering approximation for organic appearance
+float wrapDiffuse = max(0.0, dot(N, L) + 0.5) / 1.5;
+// Tint wrap region with warm amber (internal bioluminescence tied to activity)
+vec3 sssColor = mix(spectreColor, vec3(0.83, 0.66, 0.34), wrapDiffuse * activity);
+```
+
+### Spatial Audio Integration
+
+Each Spectre emits 3D-positioned audio via Web Audio HRTF panning:
+
+```javascript
+const panner = new PannerNode(audioCtx, {
+  panningModel: 'HRTF',
+  distanceModel: 'inverse',
+  refDistance: 1,
+  maxDistance: 100,
+  positionX: spectrePosition.x,
+  positionY: spectrePosition.y,
+  positionZ: spectrePosition.z,
+});
+// Agent events become spatially located sounds
+```
+
+### Hand Gesture Interaction
+
+| Gesture | Action | Detection |
+|---|---|---|
+| Index+thumb pinch | Select Spectre / confirm | `distance(thumb-tip, index-tip) < 2cm` |
+| Grab (all fingers curl) | Drag Spectre in topology | All finger-tips to palm < threshold |
+| Open palm facing out | Pause agent | Palm normal · viewDir > 0.8 |
+| Two-handed pull apart | Zoom into agent detail | Bilateral hand separation increasing |
+
+---
+
+## Test Criteria
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_renderers_use_same_state_color_mapping() {
+        let theme = RosedustTheme::default();
+        // Verify all behavioral states have color mappings
+        let states = [
+            BehavioralState::Engaged, BehavioralState::Struggling,
+            BehavioralState::Coasting, BehavioralState::Exploring,
+            BehavioralState::Focused, BehavioralState::Resting,
+        ];
+        for state in &states {
+            let color = state_color(&theme, state);
+            assert_ne!(color, Color::Reset, "{:?} must have a mapped color", state);
+        }
+    }
+
+    #[test]
+    fn breathing_scale_consistent_across_renderers() {
+        let params = BreathingParams { rate: 0.7, depth: 0.6, asymmetry: 0.45, phase: 0.0 };
+        let scale_t0 = breathing_scale(&params, 0.0);
+        let scale_t1 = breathing_scale(&params, 1.0 / 0.7); // one full cycle
+        // After one full cycle, should return near starting scale
+        assert!((scale_t0 - scale_t1).abs() < 0.05, "Breathing should be periodic");
+    }
+
+    #[test]
+    fn spectre_cell_color_respects_theme() {
+        let theme = RosedustTheme::default();
+        let style = spectre_cell(&theme, &BehavioralState::Engaged, PointKind::Body, 1.0, 0.0);
+        assert_eq!(style.fg, Some(theme.rose), "Engaged body should use rose color");
+    }
+
+    #[test]
+    fn viewport_sizing_selects_correct_detail() {
+        assert_eq!(viewport_detail_level(15, 6), DetailLevel::Minimal);
+        assert_eq!(viewport_detail_level(30, 10), DetailLevel::Standard);
+        assert_eq!(viewport_detail_level(50, 14), DetailLevel::Detailed);
+        assert_eq!(viewport_detail_level(80, 20), DetailLevel::Gallery);
+    }
+
+    #[test]
+    fn cli_inline_single_line_format() {
+        let state = SpectreState::mock_engaged();
+        let line = render_inline_single(&state);
+        assert!(line.contains("Engaged"), "Single-line must include state name");
+        assert!(line.contains("◉"), "Engaged state must show open eye");
+    }
+
+    #[test]
+    fn minimal_api_response_is_compact() {
+        let state = SpectreState::mock_engaged();
+        let minimal = state.to_minimal_json();
+        let keys: Vec<&str> = minimal.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        assert!(keys.len() <= 8, "Minimal response should have ≤8 fields");
+        assert!(keys.contains(&"state"));
+        assert!(keys.contains(&"pad"));
+    }
+}
+```
+
+---
+
 ## Current Status and Gaps
 
 **Built:**
@@ -434,6 +601,7 @@ Breathing rate, phase, and asymmetry values are shared via the Spectre state mod
 - Shared morphological parameter generator
 - Spring physics simulation (shared across renderers)
 - Breathing animation system
+- AR/VR spatial renderer (WebXR / visionOS)
 
 ---
 

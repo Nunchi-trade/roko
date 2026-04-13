@@ -208,15 +208,19 @@ The `GoLanguageProvider` handles Go:
 
 Tree-sitter (Brunsfeld 2018) is an incremental parsing framework that generates parsers from grammar specifications. It provides:
 
-1. **Full AST parsing** — Every syntactic construct is represented in a concrete syntax tree. No heuristic gaps.
+1. **Concrete Syntax Trees (CSTs)** — Tree-sitter produces a CST, not an AST. The CST preserves every token including punctuation, operators, and keywords as anonymous nodes alongside semantic named nodes. This lossless representation means the original source can be reconstructed from the tree. Named nodes (e.g., `function_item`, `identifier`) represent semantic constructs; anonymous nodes (e.g., `"+"`, `"{"`, `"fn"`) preserve delimiters and keywords. The `node.named_child()` API filters to named-only traversal, approximating AST behavior.
 
-2. **Incremental updates** — When source text changes, tree-sitter re-parses only the affected regions. A single-character edit re-parses in microseconds, not milliseconds.
+2. **Incremental updates** — When source text changes, tree-sitter re-parses only the affected regions. A single-character edit re-parses in microseconds, not milliseconds. The algorithm (based on Wagner and Graham 1998, "Efficient and Flexible Incremental Parsing") reuses unchanged subtrees via a `ReusableNode` tracker that checks whether old tree nodes at the current parse position remain valid.
 
-3. **Error recovery** — Tree-sitter produces a valid (partial) tree even when the source contains syntax errors. This is critical for coding agents that work with incomplete code.
+3. **Error-tolerant parsing** — Tree-sitter *always* produces a valid tree, even for syntactically broken input. It never fails with an exception. Two special node types handle errors:
+   - **ERROR nodes** — Inserted when the parser encounters tokens with no valid parse action. Skipped tokens become children of the ERROR node. Detected via `node.is_error()`. ERROR nodes have nonzero byte spans.
+   - **MISSING nodes** — Zero-width synthetic nodes inserted when the grammar expects a token that is absent (e.g., a missing semicolon). Detected via `node.is_missing()`. As of tree-sitter v0.25.0 (ABI 15), MISSING nodes are queryable: `(MISSING identifier) @missing_id`.
 
-4. **Consistent API** — The same query and traversal APIs work across all 100+ supported languages.
+4. **GLR error recovery** — When a parse error occurs, tree-sitter forks its parse stack into up to `MAX_VERSION_COUNT = 6` concurrent branches, each attempting a different recovery strategy (stack breakdown or token skipping). Branches are evaluated by an `ErrorStatus` cost model: error state (not-in-error preferred), cumulative error cost (skipped tokens, inserted MISSING nodes), and dynamic precedence. As valid nodes accumulate past the error site, the pruning threshold tightens until only one branch survives. This adaptive convergence is original work by Brunsfeld, going beyond published GLR algorithms.
 
-5. **Performance** — Tree-sitter parsers are generated as C code and run at roughly the speed of a hand-written lexer. Initial parse of a 10,000-line file takes ~10ms.
+5. **Consistent API** — The same query and traversal APIs work across all 300+ supported language grammars (via tree-sitter-language-pack).
+
+6. **Performance** — Tree-sitter parsers are generated as C code and run at roughly the speed of a hand-written lexer. Initial parse of a 10,000-line file takes ~10ms.
 
 ### What tree-sitter enables that heuristics cannot
 
@@ -266,16 +270,42 @@ Each language would have a `LanguageQueries` struct containing pre-compiled tree
 
 The existing `roko-lang-*` crates would be updated to use `TreeSitterProvider` internally while maintaining the same `LanguageProvider` trait interface. Consumer code in `roko-index` would require zero changes.
 
-### Tree-sitter query examples
+### Tree-sitter query language
 
-For Rust, a tree-sitter query to extract function definitions:
+Tree-sitter queries use S-expression patterns (Lisp-like) with captures (`@name`), field names, wildcards, and predicates. The query language supports:
+
+- **Named node matching**: `(function_item name: (identifier) @name)` — match specific grammar rules
+- **Anonymous node matching**: `(binary_expression operator: "!=")` — match literal tokens
+- **Wildcards**: `(_)` matches any named node; `_` matches any node including anonymous
+- **Quantifiers**: `(block (_)+ @statements)` — one or more children
+- **Alternation**: `["if" "while" "for"] @keyword` — match any of a set
+- **Predicates**: filter matches with additional conditions (evaluated by bindings, not the C core)
+
+Key predicates:
+
+| Predicate | Purpose | Example |
+|---|---|---|
+| `#eq?` | Text equality | `((identifier) @x (#eq? @x "self"))` |
+| `#not-eq?` | Text inequality | `((identifier) @x (#not-eq? @x "_"))` |
+| `#match?` | Regex match | `((identifier) @c (#match? @c "^[A-Z][A-Z_0-9]*$"))` |
+| `#not-match?` | Regex negation | `((function_item name: (identifier) @fn) (#not-match? @fn "^test_"))` |
+| `#any-of?` | Multi-string match | `((identifier) @kw (#any-of? @kw "self" "super" "crate"))` |
+| `#is?` / `#is-not?` | Property assertion | Semantic filtering for scope/locality analysis |
+| `#set!` | Metadata annotation | `((comment) @doc (#set! injection.language "markdown"))` |
+
+As of ABI 15 (v0.25.0), **supertype queries** are supported: grammars can declare supertypes (e.g., `expression` as a supertype of `binary_expression`, `unary_expression`, etc.), and queries can match `(expression) @any_expr` instead of long alternations. ERROR and MISSING nodes are also queryable: `(ERROR) @syntax_error`, `(MISSING identifier) @missing_id`.
+
+### Query examples for symbol extraction
+
+For Rust:
 
 ```scheme
-;; Match function definitions
+;; Match function definitions with full context
 (function_item
   name: (identifier) @name
   parameters: (parameters) @params
   return_type: (_)? @return_type
+  body: (block) @body
 ) @definition.function
 
 ;; Match method definitions in impl blocks
@@ -287,6 +317,22 @@ For Rust, a tree-sitter query to extract function definitions:
     ) @definition.method
   )
 )
+
+;; Match call expressions for call graph edges
+(call_expression
+  function: [
+    (identifier) @callee
+    (field_expression field: (field_identifier) @callee)
+    (scoped_identifier name: (identifier) @callee)
+  ]
+) @call_site
+
+;; Match unsafe blocks for security analysis
+(unsafe_block) @unsafe_region
+
+;; Detect ERROR nodes for parse health monitoring
+(ERROR) @parse_error
+(MISSING) @missing_token
 ```
 
 For TypeScript:
@@ -306,6 +352,22 @@ For TypeScript:
 (interface_declaration
   name: (type_identifier) @name
 ) @definition.interface
+
+;; Match call expressions
+(call_expression
+  function: [
+    (identifier) @callee
+    (member_expression property: (property_identifier) @callee)
+  ]
+) @call_site
+
+;; Match arrow functions assigned to const (common pattern)
+(lexical_declaration
+  (variable_declarator
+    name: (identifier) @name
+    value: (arrow_function) @definition.function
+  )
+)
 ```
 
 ### Incremental parsing workflow
@@ -313,7 +375,7 @@ For TypeScript:
 ```
                     Initial Parse
                     ─────────────
-  Source text ──→ tree_sitter::Parser ──→ Tree (full AST)
+  Source text ──→ tree_sitter::Parser ──→ Tree (full CST)
                                             │
                                             ▼
                                      Store tree + hash
@@ -329,10 +391,76 @@ For TypeScript:
                                    New tree (partial re-parse)
                                             │
                                             ▼
-                                   Extract changed symbols only
+                                   ts_tree_get_changed_ranges(old, new)
+                                            │
+                                            ▼
+                                   Re-extract symbols in changed ranges only
 ```
 
-The key insight is that `tree_sitter::Parser::parse()` accepts an optional `old_tree` parameter. When provided, tree-sitter diffs the old and new trees internally and re-parses only the changed regions. For a typical single-function edit, this means re-parsing a few hundred bytes rather than the entire file.
+The key insight is that `tree_sitter::Parser::parse()` accepts an optional `old_tree` parameter. When provided, tree-sitter's `ReusableNode` component checks whether old tree nodes at the current position are still valid (not marked dirty, parse state matches). If valid, **the entire subtree is reused** — no lexing, no parsing. Only dirty regions (those overlapping the `InputEdit`) are re-parsed. For a typical single-function edit, this means re-parsing a few hundred bytes rather than the entire file.
+
+### The InputEdit struct
+
+Before reparsing, the application must describe the edit via `InputEdit`:
+
+```rust
+/// Describes a source text change for incremental reparsing.
+pub struct InputEdit {
+    pub start_byte: usize,          // Byte offset where edit begins
+    pub old_end_byte: usize,        // End of deleted region (before edit)
+    pub new_end_byte: usize,        // End of inserted region (after edit)
+    pub start_position: Point,      // (row, column) at start
+    pub old_end_position: Point,    // (row, column) at old end
+    pub new_end_position: Point,    // (row, column) at new end
+}
+```
+
+Both byte offsets and row/column positions are required because after an edit, the tree cannot re-read source text to derive positions. After calling `tree.edit(&edit)`, dirty flags propagate through the tree, and the next `parser.parse()` call re-parses only the affected subtrees.
+
+### Changed ranges detection
+
+After reparsing, `ts_tree_get_changed_ranges(old_tree, new_tree)` performs a tree diff and returns ranges whose syntactic structure actually changed. These are not simply the edit's byte ranges — structural changes can propagate upward (adding a character to a string literal might close the string and change the containing expression). Node IDs are stable for reused nodes across old and new trees, enabling applications to correlate analysis across incremental parses.
+
+### Error-tolerant parsing for coding agents
+
+Error tolerance is critical for coding agents because agents frequently work with incomplete or in-progress code. Consider the workflow:
+
+1. Agent modifies a function signature (code is temporarily invalid)
+2. Tree-sitter produces a partial tree with ERROR nodes around the broken signature
+3. All other symbols in the file remain correctly parsed
+4. Agent continues modifying the function body
+5. Tree re-parses incrementally — ERROR nodes resolve as the code becomes valid again
+
+Without error tolerance, a single syntax error would prevent parsing the entire file, losing all code intelligence until the error is fixed. Tree-sitter's approach degrades gracefully: intelligence is lost only for the specific broken region.
+
+```rust
+/// Count error and missing nodes in a tree for health assessment.
+pub fn parse_health(tree: &tree_sitter::Tree) -> ParseHealth {
+    let root = tree.root_node();
+    let mut errors = 0u32;
+    let mut missing = 0u32;
+    let mut cursor = root.walk();
+    // DFS traversal
+    loop {
+        let node = cursor.node();
+        if node.is_error() { errors += 1; }
+        if node.is_missing() { missing += 1; }
+        if !cursor.goto_first_child() {
+            while !cursor.goto_next_sibling() {
+                if !cursor.goto_parent() {
+                    return ParseHealth { errors, missing, total_nodes: root.descendant_count() };
+                }
+            }
+        }
+    }
+}
+
+pub struct ParseHealth {
+    pub errors: u32,      // ERROR nodes (unrecognized input)
+    pub missing: u32,     // MISSING nodes (expected but absent tokens)
+    pub total_nodes: usize,
+}
+```
 
 ---
 
@@ -365,11 +493,15 @@ The memory cost is acceptable for a development tool. Trees can be dropped and r
 
 ## Academic Foundations
 
-- **Tree-sitter**: Brunsfeld (2018). Incremental parsing framework. The target backend for `roko-index` language parsing. Supports 100+ languages with consistent API, error recovery, and sub-millisecond incremental updates.
+- **Tree-sitter**: Brunsfeld (2018). Incremental parsing framework. The target backend for `roko-index` language parsing. Supports 300+ languages (via tree-sitter-language-pack) with consistent API, error recovery, and sub-millisecond incremental updates.
+- **Efficient and Flexible Incremental Parsing**: Wagner and Graham (1998). *ACM TOPLAS* 20(5). The primary theoretical foundation for tree-sitter's incremental algorithm. Addresses the limitations of earlier incremental LR(0) parsers (Ghezzi and Mandrioli 1980) by supporting LR(1) and multiple simultaneous edit sites.
+- **Augmenting Parsers to Support Incrementality**: Ghezzi and Mandrioli (1980). *Journal of the ACM* 27(3). The first incremental LR parsing algorithm, restricted to LR(0). Establishes the foundational idea of reusing subtrees across parse passes.
 - **Principles of Program Analysis**: Nielson, Nielson, and Hankin (1999). Foundational text on static analysis. Provides the theoretical basis for extracting structural information from source code.
 - **Code property graphs**: Yamaguchi, Golde, Arp, and Rieck (2014), "Modeling and Discovering Vulnerabilities with Code Property Graphs." *IEEE S&P*. Demonstrates the value of unifying AST, CFG, and PDG into a single queryable structure — the goal for tree-sitter-enhanced parsing.
+- **Syntactic Code Search with Sequence-to-Tree Matching**: Matute and Ni (2024). UC Berkeley EECS Technical Report 2024-93. Uses tree-sitter's error-tolerant parsing for code search, explicitly leveraging error recovery to handle partially-valid query patterns.
 - **Aider repository map**: Gauthier (2024). Uses tree-sitter to build repository maps that improve coding agent context quality. Direct inspiration for `roko-index`'s planned tree-sitter integration.
 - **cAST**: Xiao et al. (2024). Code AST-based methods for understanding and generating code. Demonstrates effectiveness of AST-derived features for code understanding tasks.
+- **mcp-server-tree-sitter**: (2025). Tree-sitter exposed as an MCP tool server for AI agents doing code analysis — validates the MCP context server design pattern for `roko-index`.
 
 ---
 

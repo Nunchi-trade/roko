@@ -294,10 +294,18 @@ pub struct SysMetrics {
     pub mem_total_bytes: u64,
     /// Recent memory usage history (fractional, 0.0..1.0) for sparkline.
     pub mem_history: Vec<f32>,
-    /// Network download bytes per second.
+    /// Network bytes received (cumulative total from OS).
     pub net_down_bytes_sec: u64,
-    /// Disk read bytes per second.
+    /// Network bytes sent (cumulative total from OS).
+    pub net_out_bytes_total: u64,
+    /// Disk bytes read (cumulative total from OS).
     pub disk_read_bytes_sec: u64,
+    /// Disk bytes written (cumulative total from OS).
+    pub disk_write_bytes_total: u64,
+    /// Previous network in total (for rate calculation).
+    pub prev_net_in: u64,
+    /// Previous disk read total (for rate calculation).
+    pub prev_disk_read: u64,
 }
 
 // ---------------------------------------------------------------------------

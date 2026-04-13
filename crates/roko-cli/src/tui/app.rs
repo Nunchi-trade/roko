@@ -262,7 +262,7 @@ impl App {
                     if sys_tx.send(metrics).is_err() {
                         break; // main thread dropped, exit
                     }
-                    std::thread::sleep(Duration::from_secs(5));
+                    std::thread::sleep(Duration::from_secs(3));
                 }
             })
             .ok(); // graceful: TUI works without background thread
@@ -314,7 +314,7 @@ impl App {
                     if git_tx.send(bg).is_err() {
                         break;
                     }
-                    std::thread::sleep(Duration::from_secs(5));
+                    std::thread::sleep(Duration::from_secs(3));
                 }
             })
             .ok();
@@ -1142,10 +1142,44 @@ impl App {
     /// blocking.  Called on every tick and after every keypress so the UI
     /// reflects the latest data produced by background threads.
     fn drain_background_channels(&mut self) {
-        // -- sys metrics --
+        // -- sys metrics (merge, don't replace — keep history) --
         if let Some(rx) = &self.sys_rx {
             while let Ok(snap) = rx.try_recv() {
-                self.tui_state.sys = snap;
+                let sys = &mut self.tui_state.sys;
+
+                // CPU
+                sys.cpu_pct = snap.cpu_pct;
+                sys.cpu_history.push(snap.cpu_pct);
+                if sys.cpu_history.len() > 60 {
+                    sys.cpu_history.remove(0);
+                }
+
+                // Memory
+                sys.mem_used_bytes = snap.mem_used_bytes;
+                sys.mem_total_bytes = snap.mem_total_bytes;
+                let mem_frac = if snap.mem_total_bytes > 0 {
+                    snap.mem_used_bytes as f32 / snap.mem_total_bytes as f32
+                } else {
+                    0.0
+                };
+                sys.mem_history.push(mem_frac);
+                if sys.mem_history.len() > 60 {
+                    sys.mem_history.remove(0);
+                }
+
+                // Network: compute rate from delta of cumulative totals
+                if sys.prev_net_in > 0 && snap.net_down_bytes_sec > sys.prev_net_in {
+                    sys.net_down_bytes_sec = snap.net_down_bytes_sec - sys.prev_net_in;
+                }
+                sys.prev_net_in = snap.net_down_bytes_sec;
+                sys.net_out_bytes_total = snap.net_out_bytes_total;
+
+                // Disk: compute rate from delta of cumulative totals
+                if sys.prev_disk_read > 0 && snap.disk_read_bytes_sec > sys.prev_disk_read {
+                    sys.disk_read_bytes_sec = snap.disk_read_bytes_sec - sys.prev_disk_read;
+                }
+                sys.prev_disk_read = snap.disk_read_bytes_sec;
+                sys.disk_write_bytes_total = snap.disk_write_bytes_total;
             }
         }
 
@@ -1348,80 +1382,71 @@ impl App {
 // Background sys metrics collection (runs on a dedicated thread)
 // ---------------------------------------------------------------------------
 
-/// Collect system metrics (CPU, memory) in a standalone function suitable
-/// for calling from a background thread.  Returns a complete `SysMetrics`
-/// snapshot.
+/// Collect system metrics (CPU, memory, network, disk) from `top -l 2`.
 ///
-/// On macOS this runs `top -l 1` (~1 second) for CPU and `vm_stat` (~10ms)
-/// for memory.  On other platforms it returns zeroed metrics.
+/// Uses two samples to compute rates. Runs on a background thread (~2s).
 fn collect_sys_metrics_bg() -> super::state::SysMetrics {
     let mut metrics = super::state::SysMetrics::default();
 
-    // CPU: use `top -l 1` on macOS to get actual system CPU usage
-    #[cfg(target_os = "macos")]
-    if let Ok(out) = std::process::Command::new("top")
-        .args(["-l", "1", "-n", "0", "-s", "0"])
-        .output()
-    {
-        if out.status.success() {
-            let text = String::from_utf8_lossy(&out.stdout);
-            // Parse line like "CPU usage: 12.5% user, 8.3% sys, 79.1% idle"
-            for line in text.lines() {
-                if line.starts_with("CPU usage:") {
-                    let idle = line
-                        .split(',')
-                        .find(|s| s.contains("idle"))
-                        .and_then(|s| {
-                            s.trim()
-                                .split('%')
-                                .next()
-                                .and_then(|n| n.trim().parse::<f64>().ok())
-                        })
-                        .unwrap_or(0.0);
-                    metrics.cpu_pct = (100.0 - idle).max(0.0).min(100.0) as f32;
-                    break;
-                }
-            }
-        }
-    }
-
-    // Memory: parse from `vm_stat` on macOS
     #[cfg(target_os = "macos")]
     {
-        if let Ok(out) = std::process::Command::new("vm_stat").output() {
+        // Run top with 2 samples to get delta-based rates
+        if let Ok(out) = std::process::Command::new("top")
+            .args(["-l", "2", "-n", "0", "-s", "1"])
+            .output()
+        {
             if out.status.success() {
                 let text = String::from_utf8_lossy(&out.stdout);
-                let page_size = 16384u64; // Apple Silicon default
-                let mut active = 0u64;
-                let mut wired = 0u64;
-                let mut compressed = 0u64;
+                // Use the LAST occurrence of each line (second sample)
+                let mut cpu_idle = 0.0f64;
+                let mut net_in_bytes = 0u64;
+                let mut net_out_bytes = 0u64;
+                let mut disk_read_bytes = 0u64;
+                let mut disk_write_bytes = 0u64;
+                let mut phys_used = 0u64;
+                let mut phys_unused = 0u64;
+
                 for line in text.lines() {
-                    if let Some(val) = extract_vm_stat_value(line, "Pages active") {
-                        active = val * page_size;
-                    }
-                    if let Some(val) = extract_vm_stat_value(line, "Pages wired") {
-                        wired = val * page_size;
-                    }
-                    if let Some(val) =
-                        extract_vm_stat_value(line, "Pages occupied by compressor")
-                    {
-                        compressed = val * page_size;
-                    }
-                }
-                metrics.mem_used_bytes = active + wired + compressed;
-                // Total physical memory from sysctl
-                if let Ok(out) = std::process::Command::new("sysctl")
-                    .args(["-n", "hw.memsize"])
-                    .output()
-                {
-                    if out.status.success() {
-                        if let Ok(v) =
-                            String::from_utf8_lossy(&out.stdout).trim().parse::<u64>()
+                    if line.starts_with("CPU usage:") {
+                        if let Some(idle) = line
+                            .split(',')
+                            .find(|s| s.contains("idle"))
+                            .and_then(|s| {
+                                s.trim()
+                                    .split('%')
+                                    .next()
+                                    .and_then(|n| n.trim().parse::<f64>().ok())
+                            })
                         {
-                            metrics.mem_total_bytes = v;
+                            cpu_idle = idle;
                         }
                     }
+                    if line.starts_with("Networks:") {
+                        // "Networks: packets: 138317421/91G in, 110081166/57G out."
+                        net_in_bytes = parse_top_bytes(line, "in");
+                        net_out_bytes = parse_top_bytes(line, "out");
+                    }
+                    if line.starts_with("Disks:") {
+                        // "Disks: 301657900/4397G read, 292906367/3965G written."
+                        disk_read_bytes = parse_top_bytes(line, "read");
+                        disk_write_bytes = parse_top_bytes(line, "written");
+                    }
+                    if line.starts_with("PhysMem:") {
+                        // "PhysMem: 49G used (4121M wired, ...), 2666M unused."
+                        phys_used = parse_phys_mem_bytes(line, "used");
+                        phys_unused = parse_phys_mem_bytes(line, "unused");
+                    }
                 }
+
+                metrics.cpu_pct = (100.0 - cpu_idle).max(0.0).min(100.0) as f32;
+                metrics.net_down_bytes_sec = net_in_bytes; // total, not rate
+                metrics.disk_read_bytes_sec = disk_read_bytes; // total, not rate
+                metrics.mem_used_bytes = phys_used;
+                metrics.mem_total_bytes = phys_used + phys_unused;
+
+                // Store raw totals for rate calculation in drain_background_channels
+                metrics.net_out_bytes_total = net_out_bytes;
+                metrics.disk_write_bytes_total = disk_write_bytes;
             }
         }
     }
@@ -1432,6 +1457,77 @@ fn collect_sys_metrics_bg() -> super::state::SysMetrics {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Parse a byte value like "91G" or "57M" or "4397G" from a top output line.
+/// Looks for the segment containing `label` (e.g. "in", "read") and extracts
+/// the byte count with unit suffix.
+#[cfg(target_os = "macos")]
+fn parse_top_bytes(line: &str, label: &str) -> u64 {
+    for segment in line.split(',') {
+        let seg = segment.trim().trim_end_matches('.');
+        if seg.ends_with(label) {
+            // Find the "NNN/XXXU" part before the label
+            for part in seg.split_whitespace() {
+                if part.contains('/') {
+                    // "138317421/91G" — take after the slash
+                    if let Some(val_str) = part.split('/').nth(1) {
+                        return parse_size_str(val_str);
+                    }
+                }
+            }
+        }
+    }
+    0
+}
+
+/// Parse a PhysMem value like "49G" from "PhysMem: 49G used (...), 2666M unused."
+#[cfg(target_os = "macos")]
+fn parse_phys_mem_bytes(line: &str, label: &str) -> u64 {
+    for segment in line.split(',') {
+        let seg = segment.trim();
+        if seg.contains(label) {
+            for part in seg.split_whitespace() {
+                let val = parse_size_str(part);
+                if val > 0 {
+                    return val;
+                }
+            }
+        }
+    }
+    // Fallback: look in the main part before first comma
+    if label == "used" {
+        if let Some(main) = line.split(',').next() {
+            for part in main.split_whitespace() {
+                let val = parse_size_str(part);
+                if val > 0 {
+                    return val;
+                }
+            }
+        }
+    }
+    0
+}
+
+/// Parse a size string like "91G", "57M", "4397G", "2666M", "512K" to bytes.
+#[cfg(target_os = "macos")]
+fn parse_size_str(s: &str) -> u64 {
+    let s = s.trim().trim_end_matches('.');
+    if s.is_empty() {
+        return 0;
+    }
+    let last = s.as_bytes()[s.len() - 1];
+    let (num_str, multiplier) = match last {
+        b'G' => (&s[..s.len() - 1], 1_073_741_824u64),
+        b'M' => (&s[..s.len() - 1], 1_048_576u64),
+        b'K' => (&s[..s.len() - 1], 1_024u64),
+        b'B' => (&s[..s.len() - 1], 1u64),
+        _ => (s, 1u64),
+    };
+    num_str
+        .parse::<f64>()
+        .map(|n| (n * multiplier as f64) as u64)
+        .unwrap_or(0)
+}
 
 /// Map a Mori-style Tab to a legacy PageId (best effort).
 fn tab_to_page(tab: Tab) -> Option<PageId> {
