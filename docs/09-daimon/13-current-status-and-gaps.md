@@ -127,10 +127,10 @@ These are fully specified in the legacy PRDs and/or `refactoring-prd` but have n
 - `kiddo` crate dependency
 
 **Emotional Memory Integration**:
-- Retrieval-time use of `EmotionalTag` beyond provenance tagging
-- Four-factor retrieval scoring (recency × importance × relevance × emotional congruence)
-- PAD cosine similarity for retrieval scoring
-- Emotional provenance tracking on consolidated knowledge
+- Retrieval-time use of `EmotionalTag` is now partially implemented in `ContextAssembler`
+- Four-factor retrieval scoring is partially implemented locally in Neuro; the richer cross-subsystem variant is still missing
+- PAD cosine similarity is now used for retrieval congruence scoring
+- Emotional provenance now transfers onto consolidated knowledge entries
 - Emotional diversity as quality signal
 - Consolidation priority boost for high-arousal episodes
 - Mind wandering mechanism (spontaneous retrieval every ~200 ticks)
@@ -195,7 +195,7 @@ Based on `refactoring-prd/07-implementation-priorities.md`:
 | **2E** | Behavioral modulation (F5) — behavioral states and dispatch strategy | **Complete** |
 | **2D+** | Affect on episodes (F6), affect→SystemPromptBuilder (F7), affect→CascadeRouter (F8) | Mostly complete; retrieval weighting remains |
 | **2G** | Somatic landscape, 8D strategy space, k-d tree | Not started |
-| **2H** | Emotional memory integration (EmotionalTag, four-factor retrieval) | Not started |
+| **2H** | Emotional memory integration (EmotionalTag, four-factor retrieval) | Partial |
 | **2I** | Dream-daimon bridge (emotional load, depotentiation) | Not started |
 | **2M** | Collective contagion, somatic field, C-Factor | Not started |
 
@@ -203,7 +203,7 @@ Based on `refactoring-prd/07-implementation-priorities.md`:
 
 1. **Consolidate crates** (Tier 0C): Move roko-golem/daimon.rs into roko-daimon. This unblocks all subsequent work by providing a single canonical implementation.
 
-2. **Finish emotional-memory scoring** (F6 follow-through): emotional tags now flow through Engrams, episodes, and Neuro distillation; the remaining work is retrieval weighting, consolidation priority, and diversity-aware selection.
+2. **Finish emotional-memory scoring** (F6 follow-through): retrieval weighting now uses emotional provenance in Neuro; the remaining work is consolidation priority, diversity-aware selection, and somatic-landscape-backed retrieval.
 
 3. **Implement SomaticLandscape** (F9): build the 8D marker space and fast query path so Daimon has a real System 1 pre-filter rather than PAD-only modulation.
 

@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use chrono::Utc;
-use roko_core::{Body, Engram, PadVector};
+use roko_core::{Body, EmotionalTag, Engram, PadVector};
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
 use serde::de::DeserializeOwned;
 
@@ -186,6 +186,8 @@ pub struct ContextChunk {
     pub confidence: Option<f64>,
     /// Recency proxy for fallback scoring.
     pub recency: Option<f64>,
+    /// Optional emotional provenance for mood-congruent retrieval.
+    pub emotional_tag: Option<EmotionalTag>,
 }
 
 /// Stage 1/2 gatherer and ranker for context assembly.
@@ -530,6 +532,7 @@ impl ContextAssembler {
                 track_record: None,
                 confidence: Some(0.65),
                 recency: Some(relevance),
+                emotional_tag: None,
             });
         }
         chunks
@@ -563,6 +566,7 @@ impl ContextAssembler {
                     track_record: None,
                     confidence: Some(0.45),
                     recency: Some(signal_recency_score(signal.created_at_ms)),
+                    emotional_tag: signal.emotional_tag.clone(),
                 }
             })
             .collect()
@@ -602,6 +606,7 @@ fn knowledge_chunk(entry: KnowledgeEntry, idx: usize) -> ContextChunk {
         track_record: Some(track_record),
         confidence: Some(confidence),
         recency: Some(recency),
+        emotional_tag: entry.emotional_tag,
     }
 }
 
@@ -647,6 +652,7 @@ fn episode_chunk(episode: Episode, relevance: f64, plan_id: &str) -> ContextChun
         track_record: Some(track_record),
         confidence: Some(confidence),
         recency: Some(recency),
+        emotional_tag: episode.emotional_tag.clone(),
     }
 }
 
@@ -1148,15 +1154,25 @@ fn affect_bias(chunk: &ContextChunk, recency: f64, affect_state: Option<&PadStat
         return 0.0;
     };
 
+    let affect_pad = PadVector::new(affect.pleasure, affect.arousal, affect.dominance);
     let arousal = affect.arousal.clamp(0.0, 1.0);
     let low_pleasure = (1.0 - affect.pleasure.clamp(0.0, 1.0)).clamp(0.0, 1.0);
     let action = action_orientation(chunk);
     let caution = caution_orientation(chunk);
+    let emotional_congruence = chunk
+        .emotional_tag
+        .as_ref()
+        .map(|tag| {
+            let congruence = affect_pad.cosine_similarity(tag.mood_snapshot);
+            let intensity = f64::from(tag.intensity).clamp(0.0, 1.0);
+            (congruence - 0.5) * (0.20 + intensity * 0.20)
+        })
+        .unwrap_or(0.0);
 
     let arousal_bias = arousal * (0.30 * recency + 0.35 * action);
     let pleasure_bias = low_pleasure * (1.00 * caution - 0.30 * action);
 
-    arousal_bias + pleasure_bias
+    arousal_bias + pleasure_bias + emotional_congruence
 }
 
 fn action_orientation(chunk: &ContextChunk) -> f64 {
@@ -1355,6 +1371,7 @@ mod tests {
             track_record: None,
             confidence: Some(0.6),
             recency: Some(0.5),
+            emotional_tag: None,
         }
     }
 
@@ -1370,6 +1387,7 @@ mod tests {
             track_record: Some(0.9),
             confidence: Some(0.9),
             recency: Some(0.9),
+            emotional_tag: None,
         }
     }
 
@@ -1385,6 +1403,7 @@ mod tests {
             track_record: None,
             confidence: Some(0.3),
             recency: Some(0.2),
+            emotional_tag: None,
         }
     }
 
@@ -1400,6 +1419,7 @@ mod tests {
             track_record: None,
             confidence: Some(0.5),
             recency: Some(0.5),
+            emotional_tag: None,
         }
     }
 
@@ -1441,6 +1461,7 @@ mod tests {
             track_record: Some(0.8),
             confidence: Some(0.8),
             recency: Some(0.8),
+        emotional_tag: None,
         };
         let regular_chunk = ContextChunk {
             content: "### Knowledge Insight\nConfidence: 0.80\nTags: cluster\n```\nReuse the same cluster pattern for repeatable tasks.\n```"
@@ -1454,6 +1475,7 @@ mod tests {
             track_record: Some(0.8),
             confidence: Some(0.8),
             recency: Some(0.8),
+        emotional_tag: None,
         };
 
         assert!(
@@ -1477,6 +1499,7 @@ mod tests {
             track_record: Some(0.9),
             confidence: Some(0.95),
             recency: Some(0.95),
+        emotional_tag: None,
         };
         let older_caution = ContextChunk {
             content: "### Knowledge AntiKnowledge\nConfidence: 0.90\nTags: deploy, rollback\n```\nNever skip the rollback plan before deploying.\n```"
@@ -1490,6 +1513,7 @@ mod tests {
             track_record: Some(0.8),
             confidence: Some(0.9),
             recency: Some(0.2),
+        emotional_tag: None,
         };
         let neutral = ContextChunk {
             content: "### Knowledge Insight\nConfidence: 0.80\nTags: deploy\n```\nDeployments are scheduled on weekdays.\n```"
@@ -1503,6 +1527,7 @@ mod tests {
             track_record: Some(0.7),
             confidence: Some(0.8),
             recency: Some(0.7),
+        emotional_tag: None,
         };
 
         let high_arousal = PadState::new(0.8, 1.0, 0.5);
@@ -1546,6 +1571,7 @@ mod tests {
                 created_at: Utc::now(),
                 half_life_days: 30.0,
                 tier: KnowledgeTier::Consolidated,
+                emotional_tag: None,
                 hdc_vector: None,
             })
             .expect("add knowledge");
@@ -1640,6 +1666,7 @@ mod tests {
                 created_at: now,
                 half_life_days: 30.0,
                 tier: KnowledgeTier::Consolidated,
+                emotional_tag: None,
                 hdc_vector: None,
             })
             .expect("add strategy fragment");
@@ -1660,6 +1687,7 @@ mod tests {
                 created_at: now - chrono::Duration::days(10),
                 half_life_days: 30.0,
                 tier: KnowledgeTier::Working,
+                emotional_tag: None,
                 hdc_vector: None,
             })
             .expect("add anti-knowledge");
@@ -1680,6 +1708,7 @@ mod tests {
                 created_at: now - chrono::Duration::days(3),
                 half_life_days: 30.0,
                 tier: KnowledgeTier::Consolidated,
+                emotional_tag: None,
                 hdc_vector: None,
             })
             .expect("add insight");
@@ -1735,6 +1764,56 @@ mod tests {
     }
 
     #[test]
+    fn affect_bias_prefers_emotionally_congruent_chunks_when_other_signals_match() {
+        let task_text = "recover the failed rollout safely";
+        let congruent = ContextChunk {
+            content: "### Knowledge Warning\nConfidence: 0.90\nTags: deploy, rollback\n```\nCheck rollback health before retrying a failed rollout.\n```"
+                .into(),
+            source: ContextSource::KnowledgeEntry {
+                entry_id: "warning-congruent".into(),
+                kind: "Warning".into(),
+                source: None,
+            },
+            relevance: 0.8,
+            track_record: Some(0.8),
+            confidence: Some(0.9),
+            recency: Some(0.6),
+            emotional_tag: Some(EmotionalTag::new(
+                PadVector::new(-0.8, 0.5, 0.0),
+                0.9,
+                "rollback_failure",
+                PadVector::new(-0.7, 0.4, 0.0),
+            )),
+        };
+        let incongruent = ContextChunk {
+            content: "### Knowledge Warning\nConfidence: 0.90\nTags: deploy, rollback\n```\nCheck rollback health before retrying a failed rollout.\n```"
+                .into(),
+            source: ContextSource::KnowledgeEntry {
+                entry_id: "warning-incongruent".into(),
+                kind: "Warning".into(),
+                source: None,
+            },
+            relevance: 0.8,
+            track_record: Some(0.8),
+            confidence: Some(0.9),
+            recency: Some(0.6),
+            emotional_tag: Some(EmotionalTag::new(
+                PadVector::new(0.8, -0.2, 0.6),
+                0.9,
+                "clean_success",
+                PadVector::new(0.7, -0.1, 0.5),
+            )),
+        };
+
+        let struggling = PadState::new(-0.8, 0.5, 0.0);
+
+        assert!(
+            score_chunk(task_text, &congruent, Some(&struggling))
+                > score_chunk(task_text, &incongruent, Some(&struggling))
+        );
+    }
+
+    #[test]
     fn low_pleasure_retrieval_keeps_a_contrarian_positive_chunk() {
         let dir = TempDir::new().expect("tempdir");
         let workdir = dir.path();
@@ -1763,6 +1842,7 @@ mod tests {
                     created_at: now,
                     half_life_days: KnowledgeKind::AntiKnowledge.default_half_life_days(),
                     tier: KnowledgeTier::Working,
+                    emotional_tag: None,
                     hdc_vector: None,
                 })
                 .expect("add anti-knowledge");
@@ -1785,6 +1865,7 @@ mod tests {
                 created_at: now,
                 half_life_days: KnowledgeKind::StrategyFragment.default_half_life_days(),
                 tier: KnowledgeTier::Consolidated,
+                emotional_tag: None,
                 hdc_vector: None,
             })
             .expect("add strategy");
@@ -1854,6 +1935,7 @@ mod tests {
                     created_at: now,
                     half_life_days: KnowledgeKind::Heuristic.default_half_life_days(),
                     tier: KnowledgeTier::Consolidated,
+                    emotional_tag: None,
                     hdc_vector: None,
                 })
                 .expect("add heuristic");
@@ -1876,6 +1958,7 @@ mod tests {
                 created_at: now,
                 half_life_days: KnowledgeKind::Warning.default_half_life_days(),
                 tier: KnowledgeTier::Consolidated,
+                emotional_tag: None,
                 hdc_vector: None,
             })
             .expect("add warning");

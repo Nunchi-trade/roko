@@ -4315,6 +4315,7 @@ impl PlanRunner {
                                 half_life_days: KnowledgeKind::AntiKnowledge
                                     .default_half_life_days(),
                                 tier: KnowledgeTier::Working,
+                                emotional_tag: Some(self.daimon.emotional_tag("gate_failure")),
                                 hdc_vector: None,
                             };
                             if let Err(e) = self.knowledge_store.add(anti_entry) {
@@ -10544,6 +10545,7 @@ fn build_success_knowledge_entry(
         created_at: chrono::Utc::now(),
         half_life_days: kind.default_half_life_days(),
         tier: KnowledgeTier::Transient,
+        emotional_tag: result.output.emotional_tag.clone(),
         hdc_vector: None,
     }
 }

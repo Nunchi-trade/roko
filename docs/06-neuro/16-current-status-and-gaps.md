@@ -19,7 +19,7 @@
 
 Neuro's codebase has a solid foundation: the core data types (`KnowledgeEntry`, `KnowledgeKind`, `NeuroStore` trait), the JSONL storage backend (`KnowledgeStore`), the episode distillation pipeline (`Distiller`, `DistillationBackend`), and the tier progression system (`TierProgression` with D1/D2/D3 stages) are all implemented. The HDC vector library (`HdcVector` in `roko-primitives`) is fully functional with bind, bundle, permute, similarity, and deterministic seeding.
 
-However, significant gaps remain between the current implementation and the refactoring-prd design. The tier multiplier system is now implemented on `KnowledgeEntry`, the canonical knowledge types now match the PRD (`Insight`, `Heuristic`, `Warning`, `CausalLink`, `StrategyFragment`, `AntiKnowledge`) with legacy names preserved only as serde aliases, the canonical `ContextAssembler` now lives in `roko-neuro`, AntiKnowledge now enforces its 0.3 confidence floor during decay/GC, CausalLinks now use directional HDC role bindings during ingest and retrieval, and Neuro's local context allocator now performs auction-style budget selection plus a contrarian affect slice instead of naive truncation. Frontier innovations such as the full cross-subsystem VCG attention auction, somatic landscape, and fuller active-inference retrieval are still not implemented.
+However, significant gaps remain between the current implementation and the refactoring-prd design. The tier multiplier system is now implemented on `KnowledgeEntry`, the canonical knowledge types now match the PRD (`Insight`, `Heuristic`, `Warning`, `CausalLink`, `StrategyFragment`, `AntiKnowledge`) with legacy names preserved only as serde aliases, the canonical `ContextAssembler` now lives in `roko-neuro`, AntiKnowledge now enforces its 0.3 confidence floor during decay/GC, CausalLinks now use directional HDC role bindings during ingest and retrieval, `KnowledgeEntry` now carries emotional provenance transferred from episodes and orchestrator-produced engrams, and Neuro's local context allocator now performs auction-style budget selection plus mood-congruent scoring with a contrarian affect slice instead of naive truncation. Frontier innovations such as the full cross-subsystem VCG attention auction, somatic landscape, and fuller active-inference retrieval are still not implemented.
 
 ---
 
@@ -30,7 +30,7 @@ However, significant gaps remain between the current implementation and the refa
 | Component | File | Status | Lines |
 |---|---|---|---|
 | `KnowledgeKind` enum | `lib.rs` | **Implemented** — canonical variants are Insight, Heuristic, Warning, CausalLink, StrategyFragment, AntiKnowledge; legacy names deserialize via aliases | ~50 |
-| `KnowledgeEntry` struct | `lib.rs` | **Implemented** — includes tier, refuted_insight_id, refutation_evidence, hdc_vector | ~60 |
+| `KnowledgeEntry` struct | `lib.rs` | **Implemented** — includes tier, refuted_insight_id, refutation_evidence, emotional_tag, hdc_vector | ~60 |
 | `NeuroStore` trait | `lib.rs` | **Implemented** — init, query, ingest, decay, gc | ~20 |
 | Half-life constants | `lib.rs` | **Implemented** — INSIGHT=30d, HEURISTIC=90d, WARNING=7d, CAUSAL_LINK=60d, STRATEGY_FRAGMENT=14d | ~30 |
 | `refutation_warning()` | `lib.rs` | **Implemented** — generates warning text for AntiKnowledge entries | ~25 |

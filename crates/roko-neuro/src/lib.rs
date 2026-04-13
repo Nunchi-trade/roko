@@ -6,6 +6,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use roko_core::{EmotionalTag, PadVector};
 use serde::{Deserialize, Serialize};
 
 fn default_confidence() -> f64 {
@@ -169,6 +170,9 @@ pub struct KnowledgeEntry {
     /// Retention tier applied on top of the base half-life.
     #[serde(default)]
     pub tier: KnowledgeTier,
+    /// Optional affect provenance transferred from supporting episodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emotional_tag: Option<EmotionalTag>,
     /// Optional HDC fingerprint for similarity search.
     #[serde(default)]
     pub hdc_vector: Option<Vec<u8>>,
@@ -217,6 +221,15 @@ impl KnowledgeEntry {
             self.kind.default_half_life_days()
         };
         base_half_life * self.tier.multiplier() as f64
+    }
+
+    /// PAD vector used for mood-congruent retrieval.
+    #[must_use]
+    pub fn affect_pad(&self) -> PadVector {
+        self.emotional_tag
+            .as_ref()
+            .map(|tag| tag.mood_snapshot)
+            .unwrap_or_else(PadVector::neutral)
     }
 }
 
@@ -291,6 +304,7 @@ mod tests {
             created_at: Utc::now(),
             half_life_days: 20.0,
             tier: KnowledgeTier::Persistent,
+            emotional_tag: None,
             hdc_vector: None,
         };
 

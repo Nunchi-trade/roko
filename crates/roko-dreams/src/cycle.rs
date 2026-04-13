@@ -1326,6 +1326,7 @@ impl DreamDistillationCandidate {
             created_at: Utc::now(),
             half_life_days,
             tier: KnowledgeTier::Working,
+            emotional_tag: None,
             hdc_vector: None,
         })
     }
@@ -1470,6 +1471,7 @@ fn playbook_knowledge_entry(
         created_at,
         half_life_days: KnowledgeKind::StrategyFragment.default_half_life_days(),
         tier: KnowledgeTier::Persistent,
+        emotional_tag: None,
         hdc_vector: None,
     }
 }
@@ -1533,6 +1535,7 @@ fn build_regression_entry(cluster: &DreamCluster, created_at: DateTime<Utc>) -> 
         created_at,
         half_life_days: kind.default_half_life_days(),
         tier: KnowledgeTier::Working,
+        emotional_tag: None,
         hdc_vector: None,
     }
 }
@@ -1667,6 +1670,7 @@ fn generate_cross_domain_strategy_hypotheses(
             created_at,
             half_life_days: KnowledgeKind::Heuristic.default_half_life_days(),
             tier: KnowledgeTier::Working,
+            emotional_tag: None,
             hdc_vector: None,
         });
     }
@@ -1951,6 +1955,7 @@ fn build_mistake_insight_entry(
         created_at,
         half_life_days: KnowledgeKind::Insight.default_half_life_days(),
         tier: KnowledgeTier::Working,
+        emotional_tag: None,
         hdc_vector: None,
     }
 }
@@ -1998,6 +2003,7 @@ fn review_insights_from_heuristics(
             created_at,
             half_life_days: KnowledgeKind::Insight.default_half_life_days(),
             tier: KnowledgeTier::Working,
+            emotional_tag: None,
             hdc_vector: None,
             }
         })

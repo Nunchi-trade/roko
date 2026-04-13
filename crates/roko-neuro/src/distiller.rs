@@ -15,7 +15,7 @@ use chrono::Utc;
 use roko_agent::Agent;
 use roko_agent::claude_agent::ClaudeAgent;
 use roko_agent::nl_to_format::NlToFormatConverter;
-use roko_core::{Body, Context as RokoContext, Engram, Kind, Provenance};
+use roko_core::{Body, Context as RokoContext, EmotionalTag, Engram, Kind, PadVector, Provenance};
 use roko_learn::episode_logger::Episode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -152,11 +152,12 @@ impl DistillationEnvelope {
     fn into_entries(self, episodes: &[Episode]) -> Vec<KnowledgeEntry> {
         let fallback_source = batch_source_episodes(episodes);
         let episode_models = episode_models_by_source(episodes);
+        let episode_affect = episode_affect_by_source(episodes);
 
         self.entries
             .into_iter()
             .filter_map(|candidate| {
-                candidate.into_entry(fallback_source.as_deref(), &episode_models)
+                candidate.into_entry(fallback_source.as_deref(), &episode_models, &episode_affect)
             })
             .collect()
     }
@@ -187,6 +188,7 @@ impl DistillationCandidate {
         mut self,
         fallback_source: Option<&[String]>,
         episode_models: &BTreeMap<String, String>,
+        episode_affect: &BTreeMap<String, EmotionalTag>,
     ) -> Option<KnowledgeEntry> {
         let content = self.content.trim();
         if content.is_empty() {
@@ -222,6 +224,8 @@ impl DistillationCandidate {
             .half_life_days
             .filter(|value| value.is_finite() && *value > 0.0)
             .unwrap_or_else(|| self.kind.default_half_life_days());
+        let emotional_tag =
+            aggregate_emotional_tag(&self.source_episodes, episode_affect, self.kind);
 
         Some(KnowledgeEntry {
             id: derive_knowledge_id(self.kind, content, &self.source_episodes, &self.tags),
@@ -239,6 +243,7 @@ impl DistillationCandidate {
             created_at: Utc::now(),
             half_life_days,
             tier: Default::default(),
+            emotional_tag,
             hdc_vector: None,
         })
     }
@@ -444,6 +449,63 @@ fn episode_models_by_source(episodes: &[Episode]) -> BTreeMap<String, String> {
     models
 }
 
+fn episode_affect_by_source(episodes: &[Episode]) -> BTreeMap<String, EmotionalTag> {
+    let mut affect = BTreeMap::new();
+    for episode in episodes {
+        let Some(tag) = episode.emotional_tag.clone() else {
+            continue;
+        };
+        affect.insert(episode_source_id(episode).to_string(), tag);
+    }
+    affect
+}
+
+fn aggregate_emotional_tag(
+    source_episodes: &[String],
+    episode_affect: &BTreeMap<String, EmotionalTag>,
+    kind: KnowledgeKind,
+) -> Option<EmotionalTag> {
+    let mut pads = Vec::new();
+    let mut moods = Vec::new();
+    let mut intensity_sum = 0.0_f64;
+
+    for source in source_episodes {
+        let Some(tag) = episode_affect.get(source) else {
+            continue;
+        };
+        pads.push(tag.pad);
+        moods.push(tag.mood_snapshot);
+        intensity_sum += f64::from(tag.intensity).clamp(0.0, 1.0);
+    }
+
+    if pads.is_empty() {
+        return None;
+    }
+
+    let average_pad = average_pad_vector(&pads);
+    let average_mood = average_pad_vector(&moods);
+    let mean_intensity = (intensity_sum / pads.len() as f64).clamp(0.0, 1.0) as f32;
+
+    Some(EmotionalTag::new(
+        average_pad,
+        mean_intensity,
+        format!("distilled:{}", kind.as_str()),
+        average_mood,
+    ))
+}
+
+fn average_pad_vector(vectors: &[PadVector]) -> PadVector {
+    if vectors.is_empty() {
+        return PadVector::neutral();
+    }
+
+    let len = vectors.len() as f64;
+    let pleasure = vectors.iter().map(|pad| pad.pleasure).sum::<f64>() / len;
+    let arousal = vectors.iter().map(|pad| pad.arousal).sum::<f64>() / len;
+    let dominance = vectors.iter().map(|pad| pad.dominance).sum::<f64>() / len;
+    PadVector::new(pleasure, arousal, dominance).clamped()
+}
+
 fn inferred_model_scope(
     kind: KnowledgeKind,
     source_model: Option<String>,
@@ -619,6 +681,41 @@ mod tests {
         assert!((entries[0].model_generality - 0.2).abs() < f64::EPSILON);
         assert!(entries[0].applies_to_model("claude-sonnet-4-5"));
         assert!(!entries[0].applies_to_model("gpt-5.4"));
+    }
+
+    #[tokio::test]
+    async fn distiller_transfers_emotional_provenance_from_supporting_episodes() {
+        let backend = MockBackend::new(
+            r#"<|json|>{"entries":[{"kind":"warning","content":"Do not retry the rollout until rollback health is confirmed.","confidence":0.84,"source_episodes":["ep-a","ep-b"],"tags":["deploy","rollback"]}]}<|/json|>"#,
+        );
+        let distiller = Distiller::with_backend(backend);
+        let mut first = episode("signal-a", "ep-a", false);
+        first.emotional_tag = Some(EmotionalTag::new(
+            PadVector::new(-0.8, 0.7, -0.1),
+            0.9,
+            "rollout_failure",
+            PadVector::new(-0.7, 0.6, -0.1),
+        ));
+        let mut second = episode("signal-b", "ep-b", false);
+        second.emotional_tag = Some(EmotionalTag::new(
+            PadVector::new(-0.6, 0.5, 0.0),
+            0.7,
+            "rollback_alarm",
+            PadVector::new(-0.5, 0.4, 0.0),
+        ));
+
+        let entries = distiller.distill(&[first, second]).await.expect("distill");
+        assert_eq!(entries.len(), 1);
+        let tag = entries[0]
+            .emotional_tag
+            .as_ref()
+            .expect("emotional provenance");
+        assert_eq!(tag.trigger, "distilled:warning");
+        assert!((f64::from(tag.intensity) - 0.8).abs() < 0.001);
+        assert!(tag.pad.pleasure < -0.65);
+        assert!(tag.pad.arousal > 0.55);
+        assert!(tag.mood_snapshot.pleasure < -0.55);
+        assert!(tag.mood_snapshot.arousal > 0.45);
     }
 
     #[test]

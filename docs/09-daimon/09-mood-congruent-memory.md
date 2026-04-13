@@ -244,6 +244,8 @@ The 0.3 scaling factor ensures emotional salience is *additive* to the existing 
 
 When episodes are consolidated into Insights and Heuristics, the emotional provenance transfers:
 
+Current implementation note: this is now partially implemented in the live code path. `Episode.emotional_tag` is persisted, `Distiller` aggregates supporting episode affect into `KnowledgeEntry.emotional_tag`, direct success / failure knowledge emitted by `roko-cli` also carries emotional provenance, and `ContextAssembler` uses that tag during retrieval scoring. The richer reliability layer below is still a design target rather than a completed subsystem.
+
 ```rust
 pub struct EmotionalProvenance {
     /// Average PAD vector during evidence accumulation.
@@ -302,6 +304,8 @@ pub fn emotional_diversity(supporting_episodes: &[Episode]) -> f64 {
 ```
 
 A diversity score of 1.0 means every supporting episode had a different emotional label — maximum diversity, highest reliability signal. A score of 0.0 means all episodes had the same label — potential emotional bias in the validation.
+
+Current gap: emotional diversity / validation-arc scoring is not yet computed on `KnowledgeEntry`; today the transferred provenance is PAD + intensity + trigger metadata, and retrieval uses that directly for congruence biasing.
 
 ---
 

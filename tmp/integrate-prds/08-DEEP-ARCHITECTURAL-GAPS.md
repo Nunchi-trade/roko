@@ -157,7 +157,7 @@ KnowledgeEntry now has a `tier` field:
 - The remaining gap is not the wiring path but the richer PRD control surfaces: somatic landscape and VCG-style affect bidding
 
 ### Mood-Congruent Retrieval — PARTIAL
-- `ContextAssembler` now biases retrieval with `PadState` and reserves a contrarian slice of knowledge entries so negative mood does not collapse into pure caution and positive mood does not collapse into pure optimism
+- `ContextAssembler` now biases retrieval with `PadState`, scores chunk-level emotional congruence from `EmotionalTag`, and reserves a contrarian slice of knowledge entries so negative mood does not collapse into pure caution and positive mood does not collapse into pure optimism
 - `Engram` now supports optional `EmotionalTag` metadata, so retrieval has a canonical emotional provenance field to build on
 - The richer Somatic Landscape design is still missing: there is no 8D somatic marker space and no k-d-tree retrieval path
 
@@ -172,8 +172,9 @@ pub struct EmotionalTag {
 ```
 - `roko-core::Engram` now carries `Option<EmotionalTag>`
 - `roko-cli` currently emits conductor engrams with live Daimon emotional metadata and preserves tags when deriving conductor signals
-- Engrams, episodes, and Neuro distillation now preserve emotional tags as provenance
-- The remaining gap is retrieval-time weighting and consolidation policy that actively uses those tags
+- Engrams, episodes, Neuro distillation, and orchestrator-emitted knowledge entries now preserve emotional tags as provenance
+- Retrieval-time weighting now actively uses those tags in Neuro
+- The remaining gap is richer consolidation policy: emotional diversity, validation arcs, and somatic-landscape-backed recall
 
 ### VCG Auction for Context Budget — PARTIAL
 - Inside Neuro, context chunks now compete via an auction-style allocator with token-cost awareness and a marginal-value stopping rule

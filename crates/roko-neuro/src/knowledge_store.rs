@@ -953,6 +953,7 @@ mod tests {
             created_at,
             half_life_days: kind.default_half_life_days(),
             tier: KnowledgeTier::Consolidated,
+            emotional_tag: None,
             hdc_vector: None,
         }
     }
@@ -1055,6 +1056,7 @@ mod tests {
                 created_at,
                 half_life_days: KnowledgeKind::AntiKnowledge.default_half_life_days(),
                 tier: KnowledgeTier::Working,
+                emotional_tag: None,
                 hdc_vector: None,
             })
             .expect("add anti knowledge");
@@ -1214,6 +1216,7 @@ mod tests {
                 created_at: now,
                 half_life_days: KnowledgeKind::AntiKnowledge.default_half_life_days(),
                 tier: KnowledgeTier::Working,
+                emotional_tag: None,
                 hdc_vector: None,
             })
             .expect("add anti knowledge");
@@ -1262,6 +1265,7 @@ mod tests {
                 created_at: now,
                 half_life_days: KnowledgeKind::AntiKnowledge.default_half_life_days(),
                 tier: KnowledgeTier::Working,
+                emotional_tag: None,
                 hdc_vector: None,
             })
             .expect("add anti knowledge");
@@ -1300,6 +1304,7 @@ mod tests {
                 created_at: now - Duration::days(3),
                 half_life_days: KnowledgeKind::Insight.default_half_life_days(),
                 tier: KnowledgeTier::Consolidated,
+                emotional_tag: None,
                 hdc_vector: None,
             })
             .expect("add oldest");
@@ -1320,6 +1325,7 @@ mod tests {
                 created_at: now - Duration::days(1),
                 half_life_days: KnowledgeKind::StrategyFragment.default_half_life_days(),
                 tier: KnowledgeTier::Consolidated,
+                emotional_tag: None,
                 hdc_vector: None,
             })
             .expect("add middle");
@@ -1340,6 +1346,7 @@ mod tests {
                 created_at: now,
                 half_life_days: KnowledgeKind::Insight.default_half_life_days(),
                 tier: KnowledgeTier::Consolidated,
+                emotional_tag: None,
                 hdc_vector: None,
             })
             .expect("add newest");
@@ -1584,6 +1591,7 @@ mod tests {
             created_at: now,
             half_life_days: KnowledgeKind::AntiKnowledge.default_half_life_days(),
             tier: KnowledgeTier::Working,
+            emotional_tag: None,
             hdc_vector: None,
         };
 
