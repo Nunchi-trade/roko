@@ -995,23 +995,44 @@ impl App {
 
     /// Update system metrics (CPU, memory) on each refresh.
     fn update_sys_metrics(&mut self) {
-        // CPU: parse from `ps` (macOS/Linux compatible)
-        if let Ok(out) = std::process::Command::new("ps")
-            .args(["-A", "-o", "%cpu"])
+        // CPU: use `top -l 1` on macOS to get actual system CPU usage
+        #[cfg(target_os = "macos")]
+        if let Ok(out) = std::process::Command::new("top")
+            .args(["-l", "1", "-n", "0", "-s", "0"])
             .output()
         {
             if out.status.success() {
                 let text = String::from_utf8_lossy(&out.stdout);
-                let total: f64 = text
-                    .lines()
-                    .skip(1) // header
-                    .filter_map(|l| l.trim().parse::<f64>().ok())
-                    .sum();
-                self.tui_state.sys.cpu_pct = total.min(100.0) as f32;
+                // Parse line like "CPU usage: 12.5% user, 8.3% sys, 79.1% idle"
+                for line in text.lines() {
+                    if line.starts_with("CPU usage:") {
+                        let idle = line
+                            .split(',')
+                            .find(|s| s.contains("idle"))
+                            .and_then(|s| {
+                                s.trim()
+                                    .split('%')
+                                    .next()
+                                    .and_then(|n| n.trim().parse::<f64>().ok())
+                            })
+                            .unwrap_or(0.0);
+                        self.tui_state.sys.cpu_pct = (100.0 - idle).max(0.0).min(100.0) as f32;
+                        break;
+                    }
+                }
                 self.tui_state.sys.cpu_history.push(self.tui_state.sys.cpu_pct);
                 if self.tui_state.sys.cpu_history.len() > 60 {
                     self.tui_state.sys.cpu_history.remove(0);
                 }
+            }
+        }
+        // Fallback for Linux: parse /proc/stat
+        #[cfg(not(target_os = "macos"))]
+        {
+            // Simple fallback: just show 0 if we can't parse
+            self.tui_state.sys.cpu_history.push(self.tui_state.sys.cpu_pct);
+            if self.tui_state.sys.cpu_history.len() > 60 {
+                self.tui_state.sys.cpu_history.remove(0);
             }
         }
         // Memory: parse from `vm_stat` on macOS
