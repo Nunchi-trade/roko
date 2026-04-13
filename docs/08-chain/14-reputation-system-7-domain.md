@@ -469,7 +469,7 @@ pub struct ReputationAmnesty {
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [06-erc-8004-registries.md](./06-erc-8004-registries.md) for the Reputation Registry contract that stores these scores
 - See [13-vickrey-reputation-auction.md](./13-vickrey-reputation-auction.md) for how reputation affects auction competitiveness

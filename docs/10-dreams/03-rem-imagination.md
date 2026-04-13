@@ -84,6 +84,51 @@ How does this counterfactual change your understanding of the causal relationshi
 
 Counterfactual-level outputs enter the staging buffer at confidence 0.30 — the highest initial confidence for any dream hypothesis — because they involve the deepest level of causal reasoning.
 
+### Level 3+: Backtracking Counterfactuals (2024-2025 Extension)
+
+Standard Pearl counterfactuals fix initial conditions and alter causal laws. **Backtracking counterfactuals** invert this: causal laws are fixed, but differences are "backtracked" to altered exogenous variables. This enables richer reasoning: "what must have been different for this outcome to change?"
+
+**Reference**: "Backtracking Counterfactuals," arXiv:2211.00472, under review ICLR 2024. First general formal semantics for backtracking counterfactuals within SCMs.
+
+**Reference**: "Deep Backtracking Counterfactuals for Causally Compliant Explanations" (DeepBC), *Transactions on Machine Learning Research*, July 2024. arXiv:2310.07665. Implements backtracking counterfactuals via constrained sampling in deep SCMs with two variants: stochastic DeepBC (samples from posterior over exogenous variables) and mode DeepBC (finds most likely exogenous change).
+
+**Reference**: "Natural Counterfactuals with Necessary Backtracking," arXiv:2402.01607, 2024. Combines Pearl's abduction-action-prediction three-step process with a necessary backtracking operator.
+
+**Map to Roko**: During Level 3 counterfactual generation, add a backtracking mode that asks not "what if I had done X instead?" but "what must have been true earlier for outcome Y to be different?" This reveals hidden preconditions and upstream causes that standard intervention-based counterfactuals miss.
+
+```
+Backtracking counterfactual prompt:
+The outcome was: {actual_outcome}
+The desired outcome was: {desired_outcome}
+
+Rather than asking what action to change, reason backward:
+What earlier condition — before your first action — must have been different
+for the desired outcome to have been achievable?
+What upstream dependency, hidden assumption, or environmental state
+was the actual root cause?
+```
+
+Backtracking counterfactuals enter the staging buffer at confidence 0.25 — slightly below standard Level 3 (0.30) because they reason about unobserved exogenous variables, introducing additional uncertainty.
+
+```rust
+/// Backtracking counterfactual configuration.
+/// Based on DeepBC (TMLR 2024), backtracking SCM semantics (arXiv 2211.00472).
+pub struct BacktrackingCounterfactualConfig {
+    /// Whether to enable backtracking counterfactuals during Level 3 reasoning.
+    pub enabled: bool,                     // default: true
+    /// Maximum backtracking depth (how many causal steps backward to trace).
+    pub max_backtrack_depth: usize,        // default: 3, range: 1-8
+    /// Whether to use stochastic (true) or mode (false) backtracking.
+    pub stochastic_mode: bool,             // default: true
+    /// Number of posterior samples for stochastic backtracking.
+    pub posterior_samples: usize,          // default: 5, range: 2-20
+    /// Initial confidence for backtracking hypotheses (lower than standard L3).
+    pub initial_confidence: f64,           // default: 0.25
+    /// Fraction of Level 3 budget allocated to backtracking.
+    pub budget_fraction: f64,              // default: 0.30, range: 0.10-0.50
+}
+```
+
 ---
 
 ## Boden's Three Creativity Modes
@@ -1057,6 +1102,252 @@ In Roko's LLM-based setting, steps 3 and 4 are replaced by the Consolidation eng
 | Bruce et al. (2024), "Genie: Generative Interactive Environments", NeurIPS 2024 | 11B parameter unsupervised world model; 8 latent action codes learned from unlabeled video |
 | Janner et al. (2019), "When to Trust Your Model: Model-Based Policy Optimization" (MBPO), NeurIPS 2019 | Short-horizon fallback; 1-5 step rollouts from real states bound world model error |
 | Lin et al. (2025), "Sleep-time Compute", arXiv:2025.00XXX | 5× test-time compute reduction via offline processing; +13% GSM-Symbolic, +18% AIME |
+| Hafner et al. (2025), Nature, "Mastering diverse control tasks through world models" (DreamerV3) | World model learning: imagination-based planning with RSSM, symlog, and KL balance |
+| Micheli et al. (2024), ICML, "Efficient World Models with Context-Aware Tokenization" (Delta-IRIS) | Delta-encoded world models: focus transformer capacity on stochastic dynamics |
+| Google DeepMind (2024), "Genie 2: A large-scale foundation world model" | Interactive environment generation from prompts for embodied exploration |
+| Google DeepMind (2025), "Genie 3: A new frontier for world models" | Real-time interactive world generation with improved consistency |
+| "Integrational creativity: from combining and blending to transforming and resonating," Inquiry (2024) | Fourth creativity mode: resonance across simultaneously active knowledge domains |
+| "Transformational Creativity in Science: A Graphical Theory," arXiv:2504.18687 (2025) | Enabling constraints: identifying which assumptions to violate for maximal possibility |
+| "Trust the Model Where It Trusts Itself" (MACURA), arXiv (2024) | Uncertainty-aware rollout adaptation for imagination validation |
+| "WHALE: Towards Generalizable and Scalable World Models," arXiv (2024) | Retracing-rollout for imagination uncertainty estimation |
+| "Embedding Safety into RL: A New Take on Trust Region Methods" (C-TRPO), ICML (2025) | Safety-constrained trust regions for imagination-based policy optimization |
+
+---
+
+## World Models for Dream-Based Planning
+
+The world model literature has advanced significantly beyond the RSSM and IRIS architectures described above. Three lines of work are particularly relevant to Roko's REM imagination phase: DreamerV3's scale-invariant world model learning, Delta-IRIS's efficient delta-encoded representations, and Genie's interactive environment generation.
+
+### DreamerV3: Learning World Models for Diverse Domains
+
+**Reference**: Danijar Hafner, Jurgis Pasukonis, Jimmy Ba, and Timothy Lillicrap, "Mastering diverse control tasks through world models," *Nature*, 2025. DOI: 10.1038/s41586-025-08744-2. (Preprint: arXiv:2301.04104.)
+
+DreamerV3 masters a wide range of control domains with **fixed hyperparameters** — no per-domain tuning. Key innovations:
+
+- **Symlog predictions**: `symlog(x) = sign(x) · log(|x| + 1)` handles the enormous dynamic range of rewards across domains. Applied to observations, reward targets, and critic targets.
+- **Two-hot distributional RL**: Reward and critic heads use categorical distributions with two-hot encoding on an exponentially-spaced grid, avoiding commitment to fixed-range buckets.
+- **Percentile return normalization**: `S = EMA(Per(R^λ, 95) − Per(R^λ, 5), 0.99)` — critic targets divided by S prevent value explosion under dense rewards while maintaining signal under sparse rewards.
+- **1% unimix**: Uniform mixture added to all categoricals prevents zero probabilities and KL collapse.
+- **Block-diagonal GRU**: 8 blocks with RMSNorm and SiLU activations for the sequence model.
+- **Stochastic latent**: z_t represented as 32 one-hot vectors from 32 categorical distributions (32 classes each = 1024 total categories).
+- **Model sizes**: 6 configurations from 12M to 400M parameters. Larger models achieve both higher performance and greater data efficiency.
+
+**Performance across 150+ tasks**: Outperforms MuZero on Atari 57 (200M frames), surpasses IRIS/TWM/SimPLe on Atari 100k, exceeds PPG and Rainbow on ProcGen, achieves 10× data efficiency over IMPALA/R2D2+ on DMLab, and is the **first algorithm to collect diamonds in Minecraft from scratch** without human data or curricula.
+
+**Map to Roko's REM phase**: DreamerV3's "dream within the model" is directly analogous to REM imagination. The agent builds an internal world model from its episode history, then generates counterfactual trajectories within that model. The symlog encoding principle translates directly: dream replay should handle episodes with wildly different scales of outcomes (a minor lint warning vs. a catastrophic compilation failure) without requiring per-domain normalization. The key difference: DreamerV3 learns continuous latent dynamics; Roko's REM operates on discrete episodes processed through LLM reasoning.
+
+```rust
+/// World model configuration for dream-based planning.
+/// Inspired by DreamerV3 (Hafner et al., Nature 2025).
+pub struct WorldModelConfig {
+    /// Latent state dimensionality for the learned world model.
+    pub latent_dim: usize,                 // default: 512, range: 128-2048
+    /// Number of imagination rollout steps per counterfactual.
+    pub imagination_horizon: usize,        // default: 15, range: 5-50
+    /// Discount factor for future rewards in imagined trajectories.
+    pub imagination_discount: f64,         // default: 0.997, range: 0.95-0.999
+    /// Whether to use symlog encoding for scale-invariant prediction.
+    pub symlog_encoding: bool,             // default: true
+    /// KL balance coefficient (higher = more deterministic latent states).
+    pub kl_balance: f64,                   // default: 0.8, range: 0.5-0.95
+    /// Free bits threshold: minimum KL divergence before penalty applies.
+    pub free_bits: f64,                    // default: 1.0, range: 0.0-3.0
+}
+```
+
+### Delta-IRIS: Efficient Context-Aware World Models
+
+**Reference**: Vincent Micheli, Eloi Alonso, and François Fleuret, "Efficient World Models with Context-Aware Tokenization," *ICML 2024*. arXiv:2406.19320.
+
+Delta-IRIS conditions the autoencoder on the previous observation and action: `E: S(X × A) × X → Z^K`, encoding only the stochastic delta between frames. The decoder reconstructs from delta-tokens + context, absorbing deterministic dynamics (wall layout, agent position) into the decoder weights.
+
+**Quantitative improvements over IRIS**:
+
+| Metric | Δ-IRIS | IRIS (64-token) | IRIS (16-token) |
+|--------|--------|-----------------|-----------------|
+| Tokens per frame | **4** | 64 | 16 |
+| Parameters | **25M** | 48M | 50M |
+| Training speed (FPS) | **20** | 2 | 6 |
+| Training time ratio | **1×** | ~10× slower | ~3.3× slower |
+
+Architecture: 3-layer transformer, 512 embedding dimension, 8 attention heads, 21-timestep context window. Vocabulary size 1024 for the discrete autoencoder. I-tokens (continuous frame embeddings) act as a "soft Markov blanket" decoupling state from change representation. The encoder produces K=4 delta-tokens per frame, validated by replacing delta-tokens with random samples — the decoder still correctly renders deterministic components while stochastic elements become unpredictable, confirming clean disentanglement.
+
+**Map to Roko**: Rather than encoding full episodes, encode the *delta* between consecutive episodes — what changed. This dramatically reduces the token budget for NREM replay (potentially 16× fewer tokens per episode) and allows the REM phase to focus creative capacity on the stochastic, unpredictable components of agent behavior.
+
+```rust
+/// Delta-encoded episode representation for efficient replay.
+/// Inspired by Delta-IRIS (Micheli et al., ICML 2024).
+pub struct DeltaEpisodeEncoder {
+    /// Whether to encode episodes as deltas from predecessor.
+    pub use_delta_encoding: bool,          // default: true
+    /// Maximum delta token count before falling back to full encoding.
+    pub max_delta_tokens: usize,           // default: 256, range: 64-1024
+    /// Similarity threshold: episodes more similar than this use delta encoding.
+    pub delta_similarity_threshold: f32,   // default: 0.65, range: 0.50-0.85
+    /// Summary token count for trajectory context.
+    pub summary_tokens: usize,            // default: 32, range: 8-128
+}
+```
+
+### Genie 2/3: Generative Interactive Environments
+
+**Reference**: Google DeepMind (2024, 2025). Genie 2 generates 3D interactive environments from a single image prompt. Genie 3 achieves real-time interaction with improved consistency.
+
+**Map to Roko**: Genie's paradigm of generating interactive environments from prompts is the logical extension of REM imagination. Rather than generating single counterfactual scenarios, the agent could generate *interactive* counterfactual environments and explore them through simulated action sequences. This moves beyond "what if X had happened?" to "let me explore the world where X happened."
+
+```rust
+/// Interactive counterfactual environment configuration.
+/// Inspired by Genie 2/3 (Google DeepMind, 2024-2025).
+pub struct InteractiveCounterfactualConfig {
+    /// Maximum exploration steps within a generated environment.
+    pub max_exploration_steps: usize,      // default: 10, range: 3-30
+    /// Whether to allow branching within the counterfactual environment.
+    pub allow_branching: bool,             // default: true
+    /// Maximum branch depth.
+    pub max_branch_depth: usize,           // default: 3, range: 1-5
+    /// Model tier for environment generation.
+    pub environment_model_tier: ModelTier, // default: T1 (Sonnet-class)
+    /// Whether to persist the environment state for future exploration.
+    pub persist_environment: bool,         // default: false
+}
+```
+
+---
+
+## Advances in Computational Creativity Theory
+
+The creativity modes in REM imagination (combinational, exploratory, transformational) derive from Boden's (2004) computational creativity triad. Recent work extends this framework in two important directions: a fourth creativity mode based on integrational resonance, and a formal theory of when transformational creativity succeeds.
+
+### Beyond Boden's Triad: Integrational Creativity
+
+**Reference**: "Integrational creativity: from combining and blending to transforming and resonating," Inquiry (2024).
+
+Proposes a fourth creativity mode — integrational — that incorporates resonance and transformation not captured by Boden's original triad. Integrational creativity emerges when multiple knowledge domains enter a state of mutual resonance, producing insights that none of the contributing domains could generate independently.
+
+**Map to Roko**: Add a fourth creativity mode to the REM phase that fires when HDC similarity analysis detects multiple knowledge clusters simultaneously activating. This produces a "resonance" event that the LLM processes as an integrational creative opportunity.
+
+### Transformational Creativity in Science: Graphical Theory
+
+**Reference**: "Transformational Creativity in Science: A Graphical Theory," arXiv (2025, arXiv:2504.18687).
+
+Synthesizes Boden's enabling-constraints insight with Kuhn's paradigm shifts. Provides a formal graphical theory for when and how scientific transformational creativity occurs. Key insight: transformational creativity requires not just violating a constraint but recognizing which constraint is the right one to violate — the "enabling constraint."
+
+**Map to Roko**: During transformational creativity mode in REM, rather than randomly violating assumptions, the agent should identify which assumptions are "enabling constraints" — assumptions whose violation opens up the largest new possibility space. This can be measured by the HDC distance between the original knowledge cluster and the nearest cluster in the newly accessible space.
+
+```rust
+/// Extended creativity modes including integrational resonance.
+/// Based on Boden (2004) + Inquiry (2024) + arXiv:2504.18687 (2025).
+pub enum CreativityMode {
+    /// Combine elements from unrelated domains.
+    Combinational,
+    /// Push parameters to the boundaries of existing strategy spaces.
+    Exploratory,
+    /// Violate enabling constraints to open new possibility spaces.
+    Transformational {
+        /// The constraint being violated.
+        target_constraint: String,
+        /// HDC distance to nearest accessible cluster after violation.
+        possibility_distance: f32,
+    },
+    /// Mutual resonance across multiple simultaneously active knowledge domains.
+    /// Reference: Inquiry (2024), "Integrational creativity."
+    Integrational {
+        /// Knowledge cluster IDs participating in resonance.
+        resonating_clusters: Vec<String>,
+        /// Resonance strength: mean pairwise activation above baseline.
+        resonance_strength: f64,
+    },
+}
+```
+
+---
+
+## Imagination Validation: Trust Regions for Dreamed Strategies
+
+The Imagination Validation section above establishes the GIRL trust-region framework for controlling imagination quality. Three recent advances extend this framework with uncertainty-adaptive rollout control, behavior-conditioned world models, and safety-constrained trust regions.
+
+### MACURA: Uncertainty-Aware Rollout Adaptation
+
+**Reference**: "Trust the Model Where It Trusts Itself: Model-Based Actor-Critic with Uncertainty-Aware Rollout Adaptation," arXiv (2024).
+
+MACURA uses a spatial uncertainty estimate to determine where model rollouts are trustworthy. Adapts rollout length and branching based on local model accuracy. Rather than applying a fixed imagination horizon globally, MACURA allows longer rollouts in well-modeled regions and truncates early in uncertain regions — the model trusts itself only where it has earned that trust.
+
+### WHALE: Behavior-Conditioned World Models
+
+**Reference**: "WHALE: Towards Generalizable and Scalable World Models for Embodied Decision-making," arXiv (2024).
+
+Introduces a retracing-rollout technique for efficient uncertainty estimation during imagination. Validates imagined trajectories before using them for policy updates. The retracing mechanism replays real trajectories through the world model and compares predicted vs. actual outcomes — the divergence at each step provides a calibrated uncertainty signal that can be applied to novel imagined trajectories.
+
+### C-TRPO: Safety-Constrained Trust Regions
+
+**Reference**: "Embedding Safety into RL: A New Take on Trust Region Methods," ICML (2025).
+
+C-TRPO reshapes policy space geometry so trust regions contain only safe policies, guaranteeing constraint satisfaction throughout training. Rather than checking safety as a post-hoc filter, C-TRPO builds safety into the trust region boundary itself — the agent cannot step outside the safe region even during exploration.
+
+**Map to Roko's GIRL trust-region**: Extend the existing imagination validation framework with uncertainty-adaptive rollout control. The GIRL KL budget provides the outer trust region, MACURA provides local uncertainty truncation within that region, WHALE provides the uncertainty estimation mechanism, and C-TRPO ensures safety constraints are never violated by dreamed strategies.
+
+```rust
+/// Imagination validation with uncertainty-aware trust regions.
+/// Integrates GIRL (existing), MACURA (2024), WHALE (2024), C-TRPO (2025).
+pub struct ImaginationValidator {
+    /// Maximum KL divergence from current policy to accept a dreamed strategy.
+    /// The GIRL trust region radius.
+    pub girl_kl_budget: f64,              // default: 0.10, range: 0.01-0.50
+    /// Uncertainty threshold: rollouts in regions with uncertainty above this
+    /// are truncated. Based on MACURA (2024).
+    pub uncertainty_truncation_threshold: f64, // default: 0.7, range: 0.3-0.95
+    /// Whether to use retracing-rollout for uncertainty estimation.
+    /// Based on WHALE (2024).
+    pub use_retracing_rollout: bool,      // default: true
+    /// Number of retrace steps for uncertainty estimation.
+    pub retrace_depth: usize,             // default: 5, range: 2-15
+    /// Whether to enforce safety constraints on the trust region boundary.
+    /// Based on C-TRPO (ICML 2025).
+    pub safety_constrained: bool,         // default: true
+    /// Safety constraint violation tolerance.
+    pub safety_tolerance: f64,            // default: 0.01, range: 0.001-0.05
+}
+```
+
+### Validation Pipeline Pseudocode
+
+```
+VALIDATE-IMAGINED-STRATEGY(strategy, validator, knowledge_store):
+  // Step 1: GIRL trust region check
+  kl_div = compute_kl_divergence(strategy, current_policy)
+  IF kl_div > validator.girl_kl_budget:
+    RETURN ValidationResult::Rejected { reason: "exceeds trust region" }
+
+  // Step 2: Uncertainty estimation via retracing-rollout (WHALE)
+  IF validator.use_retracing_rollout:
+    uncertainty = retrace_rollout(strategy, validator.retrace_depth, knowledge_store)
+    IF uncertainty > validator.uncertainty_truncation_threshold:
+      RETURN ValidationResult::Truncated {
+        usable_horizon: find_truncation_point(uncertainty_curve),
+        reason: "high uncertainty beyond truncation point"
+      }
+
+  // Step 3: Safety constraint check (C-TRPO)
+  IF validator.safety_constrained:
+    violations = check_safety_constraints(strategy)
+    IF violations.max_violation() > validator.safety_tolerance:
+      RETURN ValidationResult::SafetyRejected { violations }
+
+  RETURN ValidationResult::Accepted { confidence: 1.0 - uncertainty }
+```
+
+### Test Criteria
+
+```
+1. GIRL trust region: strategies with KL > girl_kl_budget are rejected.
+2. MACURA truncation: strategies in high-uncertainty regions are truncated, not rejected entirely.
+3. Retracing consistency: retrace_rollout(strategy, depth=N) produces monotonically non-decreasing
+   uncertainty estimates as depth increases.
+4. Safety constraint: strategies violating safety constraints are rejected regardless of
+   uncertainty or KL divergence.
+5. Accepted confidence: accepted strategies have confidence = 1.0 - uncertainty, in range [0.0, 1.0].
+6. Truncation point: find_truncation_point returns the last step where uncertainty < threshold.
+```
 
 ---
 

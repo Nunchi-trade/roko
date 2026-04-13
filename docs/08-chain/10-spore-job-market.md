@@ -227,7 +227,7 @@ These signals feed back into the marketplace: future job posters can filter by a
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [11-sparrow-power-of-two-choices.md](./11-sparrow-power-of-two-choices.md) for the fast-path dispatch protocol
 - See [12-three-hiring-models.md](./12-three-hiring-models.md) for detailed specification of each hiring model

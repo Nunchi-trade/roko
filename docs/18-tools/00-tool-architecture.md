@@ -604,6 +604,299 @@ the agent acts via tools, verifies via gates, and adapts via policies.
 
 ---
 
+## OpenAPI 3.1 Tool Definitions
+
+Roko tool schemas are JSON Schema Draft 2020-12 compliant, aligning with OpenAPI 3.1.
+This means any Roko `ToolDef` can be exported as an OpenAPI operation, and any OpenAPI spec
+can be imported as Roko tools. The bridge enables interoperability with Claude's function
+calling API (`input_schema`), OpenAI's function calling, and the broader API ecosystem.
+
+### Schema Generation from Rust Types
+
+The `schemars` crate derives JSON Schema from Rust parameter structs at compile time,
+closing the loop between Rust types and tool parameter schemas:
+
+```rust
+use schemars::JsonSchema;
+use serde::Deserialize;
+
+/// Input parameters — schemars derives JSON Schema automatically.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReadFileParams {
+    /// Absolute path to the file to read.
+    pub file_path: String,
+    /// Line number to start reading from (1-indexed).
+    #[schemars(range(min = 1))]
+    pub offset: Option<u32>,
+    /// Number of lines to read.
+    #[schemars(range(min = 1, max = 10000))]
+    pub limit: Option<u32>,
+}
+
+/// Generate the JSON Schema at compile time.
+pub fn schema() -> serde_json::Value {
+    serde_json::to_value(schemars::schema_for!(ReadFileParams)).unwrap()
+}
+```
+
+### Claude/OpenAI/MCP Function Calling Compatibility
+
+Roko tool definitions map directly to LLM provider function calling formats:
+
+| Roko Field | Claude API | OpenAI API | MCP |
+|---|---|---|---|
+| `name` | `name` | `name` | `name` |
+| `description` | `description` | `description` | `description` |
+| `input_schema` (JSON Schema) | `input_schema` | `parameters` | `inputSchema` |
+
+The conversion is mechanical — no information is lost.
+
+### OpenAPI Import
+
+```rust
+/// Convert an OpenAPI 3.1 spec into Roko ToolDefs.
+/// Each path+method pair becomes a separate tool.
+pub fn import_openapi(spec: &openapiv3::OpenAPI) -> Vec<ToolDef> {
+    let mut tools = Vec::new();
+    for (path, item) in &spec.paths.paths {
+        for (method, operation) in item.iter() {
+            let name = operation.operation_id
+                .clone()
+                .unwrap_or_else(|| format!("{}_{}", method, sanitize_path(path)));
+            let input_schema = extract_request_schema(operation);
+            tools.push(ToolDef {
+                name: Box::leak(name.into_boxed_str()),
+                description: Box::leak(
+                    operation.summary.clone().unwrap_or_default().into_boxed_str()
+                ),
+                category: Category::Custom("openapi".into()),
+                capability: match method {
+                    "get" | "head" | "options" => CapabilityTier::Read,
+                    _ => CapabilityTier::Write,
+                },
+                risk_tier: RiskTier::Layer2,
+                // ... remaining fields with defaults
+            });
+        }
+    }
+    tools
+}
+```
+
+---
+
+## Tool Versioning
+
+Tools evolve over time. Parameter schemas change, behaviors shift, new capabilities are added.
+Tool versioning prevents breaking changes from silently corrupting agent behavior.
+
+### Semantic Versioning for Tools
+
+```rust
+/// Extended ToolDef with versioning support.
+pub struct VersionedToolDef {
+    pub def: ToolDef,
+    /// Semantic version of this tool.
+    pub version: semver::Version,
+    /// Deprecation notice (if this version is deprecated).
+    pub deprecated: Option<DeprecationNotice>,
+    /// Changelog entries for this version.
+    pub changelog: &'static [&'static str],
+}
+
+pub struct DeprecationNotice {
+    pub since: &'static str,
+    pub replacement: Option<&'static str>,
+    pub removal_target: Option<&'static str>,
+    pub migration: &'static str,
+}
+```
+
+### Version Semantics
+
+| Change Type | Version Bump | Examples |
+|---|---|---|
+| Breaking schema change | **Major** | Remove required param, change param type |
+| New optional param | **Minor** | Add `include_metadata: Option<bool>` |
+| New output field | **Minor** | Add `created_at` to response |
+| Bug fix | **Patch** | Fix edge case, improve error message |
+
+### Version Resolution
+
+```rust
+impl VersionedToolRegistry {
+    /// Resolve a tool by name and version constraint.
+    /// Returns the highest version matching the constraint.
+    pub fn resolve(
+        &self,
+        name: &str,
+        constraint: &semver::VersionReq,
+    ) -> Option<&VersionedToolDef> {
+        self.tools.get(name)
+            .and_then(|versions| {
+                versions.iter()
+                    .filter(|v| constraint.matches(&v.version))
+                    .max_by(|a, b| a.version.cmp(&b.version))
+            })
+    }
+}
+```
+
+### Configuration
+
+```toml
+# roko.toml — pin tool versions
+[tools.versions]
+"read_file" = ">=1.0.0, <2.0.0"
+"web_search" = "^2.1.0"
+```
+
+---
+
+## Tool Composition and Dataflow
+
+Tools compose into pipelines — sequential chains, parallel fans, and DAGs.
+
+### Composition Patterns
+
+**Sequential (pipe):** Output of tool A feeds input of tool B.
+```
+read_file → grep → edit_file
+```
+
+**Parallel (fan-out):** Multiple independent tools execute concurrently, results merged.
+```
+┌─ web_search("rust async") ──┐
+│                              ├─ merge → compose_answer
+└─ web_search("tokio guide") ─┘
+```
+
+**Iterative (loop):** Tool called repeatedly until condition met.
+```
+loop { edit_file → run_tests → if pass then break }
+```
+
+### ToolPipeline Definition
+
+```rust
+/// A composable pipeline of tool invocations.
+pub struct ToolPipeline {
+    pub stages: Vec<PipelineStage>,
+    pub timeout: Duration,
+    pub fail_fast: bool,
+}
+
+pub enum PipelineStage {
+    /// Single tool invocation.
+    Single {
+        tool: String,
+        params: serde_json::Value,
+        /// JSONPath expression to extract from prior stage output.
+        input_mapping: Option<String>,
+    },
+    /// Parallel fan-out — all tools execute concurrently.
+    Parallel {
+        tools: Vec<(String, serde_json::Value)>,
+        merge_strategy: MergeStrategy,
+    },
+    /// Conditional — select tool based on prior output.
+    Conditional {
+        condition: String,
+        if_true: Box<PipelineStage>,
+        if_false: Option<Box<PipelineStage>>,
+    },
+}
+
+pub enum MergeStrategy {
+    Array,         // Collect all results into an array
+    MergeObjects,  // Merge objects (later overrides earlier)
+    FirstSuccess,  // Take the first successful result
+}
+```
+
+### ReAct-Style Interleaved Composition
+
+The predominant composition pattern in Roko agents is ReAct (Yao et al., 2023): interleaved
+reasoning traces and tool actions. The LLM decides at each step which tool to call based on
+prior observations. This requires no explicit pipeline definition — the LLM IS the pipeline
+controller. The `ToolPipeline` struct above is for programmatic (non-LLM) composition such
+as gate pipelines, automated test sequences, and batch operations.
+
+---
+
+## Tool Discovery Service
+
+Beyond the static registry and MCP discovery, Roko supports capability-based tool discovery
+via semantic search. When an agent encounters a task that no loaded tool handles, it can query
+the discovery service for tools matching the capability description.
+
+```rust
+/// Tool discovery via embedding-based semantic search.
+pub struct ToolDiscoveryService {
+    /// Embedding index over all registered tool descriptions.
+    index: VectorIndex,
+    registry: Arc<dyn ToolRegistry>,
+    embedder: Arc<dyn Embedder>,
+}
+
+impl ToolDiscoveryService {
+    /// Find tools matching a natural-language capability description.
+    pub async fn discover(
+        &self,
+        query: &str,
+        top_k: usize,
+    ) -> Result<Vec<DiscoveredTool>> {
+        let query_embedding = self.embedder.embed(query).await?;
+        let results = self.index.search(&query_embedding, top_k);
+        results.into_iter().map(|hit| {
+            let tool = self.registry.get(&hit.id)
+                .ok_or_else(|| anyhow!("Tool not in registry: {}", hit.id))?;
+            Ok(DiscoveredTool {
+                tool,
+                similarity: hit.score,
+            })
+        }).collect()
+    }
+
+    /// Rebuild the index when tools are added or removed.
+    pub async fn reindex(&mut self) -> Result<()> {
+        let tools = self.registry.all();
+        let descriptions: Vec<&str> = tools.iter().map(|t| t.description).collect();
+        let embeddings = self.embedder.embed_batch(&descriptions).await?;
+        self.index = VectorIndex::build(
+            tools.iter().map(|t| t.name.to_string()).zip(embeddings)
+        );
+        Ok(())
+    }
+}
+
+pub struct DiscoveredTool<'a> {
+    pub tool: &'a ToolDef,
+    pub similarity: f32,
+}
+```
+
+### Configuration
+
+```toml
+[tools.discovery]
+enabled = true
+embedding_model = "text-embedding-3-small"
+similarity_threshold = 0.75
+reindex_on_tool_change = true
+max_results = 10
+```
+
+### Test Criteria
+
+- Discovery returns `read_file` for query "read contents of a file".
+- Discovery returns empty for query with no matching tool.
+- Similarity threshold correctly filters low-confidence matches.
+- Index rebuilds when MCP tools are added at runtime.
+- Discovery latency < 50ms for 500 tools.
+
+---
+
 ## Current Implementation Status
 
 The tool architecture is implemented in `roko-std` (`crates/roko-std/src/tool/`):
@@ -616,3 +909,16 @@ The tool architecture is implemented in `roko-std` (`crates/roko-std/src/tool/`)
 The chain domain plugin tools (423+ DeFi tools) are specified in the legacy PRD
 (`bardo-backup/prd/07-tools/`) and will be implemented as a separate `roko-domain-chain`
 crate following the domain plugin pattern described in `refactoring-prd/10-developer-guide.md`.
+
+---
+
+## References
+
+- **OpenAPI 3.1.0** (OAI, 2021) — JSON Schema 2020-12 alignment.
+  [spec](https://github.com/oai/openapi-specification/blob/main/versions/3.1.0.md)
+- **schemars** — Derive JSON Schema from Rust types.
+  [crate](https://crates.io/crates/schemars)
+- **ReAct** (Yao et al., 2023) — Interleaved reasoning and tool actions.
+  [paper](https://arxiv.org/abs/2210.03629)
+- **AGNTCY Agent Directory** (Cisco, 2025) — Distributed tool discovery.
+  [paper](https://arxiv.org/abs/2509.18787)

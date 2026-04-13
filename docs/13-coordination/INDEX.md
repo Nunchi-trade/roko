@@ -63,7 +63,7 @@ The **C-Factor** and composite **C-Score** metrics quantify coordination effecti
 
 ---
 
-## Related Topics
+## Cross-References
 
 - `00-architecture/` — Engram struct, Synapse Architecture, 5-layer taxonomy
 - `01-cognitive-loop/` — The universal loop that pheromones plug into

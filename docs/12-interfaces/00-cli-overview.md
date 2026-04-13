@@ -299,7 +299,7 @@ roko-cli/src/
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [01-cli-command-reference.md](./01-cli-command-reference.md) for the full command list with syntax
 - See [02-roko-new-scaffolders.md](./02-roko-new-scaffolders.md) for the `roko new` scaffolding system

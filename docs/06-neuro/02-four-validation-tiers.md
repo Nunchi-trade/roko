@@ -282,7 +282,7 @@ An entry can have high confidence at a low tier (e.g., a Transient entry with 0.
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [01-six-knowledge-types.md](./01-six-knowledge-types.md) for the base half-lives per type
 - See [03-type-half-lives.md](./03-type-half-lives.md) for half-life rationale in detail

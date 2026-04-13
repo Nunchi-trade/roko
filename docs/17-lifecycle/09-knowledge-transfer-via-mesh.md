@@ -310,7 +310,7 @@ This enables company-internal Collectives where proprietary knowledge remains wi
 
 ---
 
-## Related Topics
+## Cross-References
 
 - `docs/09-mesh/INDEX.md` — Full Agent Mesh architecture
 - `docs/17-lifecycle/08-selective-restore.md` — Offline knowledge transfer via backup/restore

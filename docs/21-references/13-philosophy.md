@@ -6,6 +6,8 @@
 **Prerequisites**: [Architecture](../00-architecture/INDEX.md)
 **Key sources**: `bardo-backup/prd/shared/citations.md` §5
 
+> **Implementation**: Reference
+
 ---
 
 ## Abstract
@@ -114,7 +116,7 @@ Roko's cognitive architecture is grounded not only in computer science and neuro
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [02-affective-computing.md](./02-affective-computing.md) for Damasio, Bechara in the affect context
 - See [03-dreams-and-offline-learning.md](./03-dreams-and-offline-learning.md) for Derrida and Boden in the dreams context

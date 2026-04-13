@@ -34,6 +34,7 @@ The `Oracle` trait provides the universal interface. Domain-specific implementat
 | 11 | [11-adversarial-signal-robustness.md](./11-adversarial-signal-robustness.md) | Adversarial Signal Robustness | ~300 | Adversarial signal decomposition. HDC prototype matching (~10ns). Robust statistics (trimmed mean, Hodges-Lehmann, MAD, rank transform). Signal cross-validation. Red-team dreaming algorithm. Domain-specific attack prototypes. |
 | 12 | [12-somatic-ta-and-emergent-multiscale.md](./12-somatic-ta-and-emergent-multiscale.md) | Somatic TA & Emergent Multiscale Intelligence | ~320 | Somatic markers (Damasio) as HDC bindings. PAD encoding. Somatic retrieval (~63ns). 15% contrarian retrieval (Bower). IIT Phi over 9 TA subsystems (510 bipartitions). MIB diagnostic. PID synergy detection (Williams & Beer). |
 | 13 | [13-predictive-foraging-and-active-inference.md](./13-predictive-foraging-and-active-inference.md) | Predictive Foraging & Active Inference | ~330 | The complete prediction-resolution-calibration loop. PredictionClaim, ResidualCorrector (~50ns), CalibrationTracker. Active inference POMDP (90 states). EFE decomposition (pragmatic + epistemic - ambiguity). Charnov MVT stopping rule. Thompson Sampling for oracle selection. Collective calibration on Korai. |
+| 14 | [14-sheaf-tropical-geometry.md](./14-sheaf-tropical-geometry.md) | Sheaf-Theoretic Consistency & Tropical Decision Geometry | ~450 | Cellular sheaves for oracle consistency (Hansen & Ghrist). Sheaf Laplacian, cohomology for inconsistency detection. Sheaf neural networks (Bodnar et al.). Tropical semiring (max-plus). Tropical polynomials as oracle decisions. Tropical convexity. Tropical attention (symbolic-neural fusion). Tropical robustness (exact adversarial distances). Tropical VCG auctions. |
 
 ---
 
@@ -57,6 +58,17 @@ The `Oracle` trait provides the universal interface. Domain-specific implementat
 | **Persistence landscapes** | Banach-space elements from TDA for trajectory prediction | [10-predictive-geometry-and-resonant-patterns.md](./10-predictive-geometry-and-resonant-patterns.md) |
 | **Red-team dreaming** | Adversarial self-simulation during Delta Dreams | [11-adversarial-signal-robustness.md](./11-adversarial-signal-robustness.md) |
 | **IIT Phi** | Integrated information metric over 9 TA subsystems | [12-somatic-ta-and-emergent-multiscale.md](./12-somatic-ta-and-emergent-multiscale.md) |
+| **Conformal prediction** | Distribution-free prediction sets with coverage guarantees | [01-oracle-trait.md](./01-oracle-trait.md) |
+| **Oracle composition** | Weighted ensemble, conformal aggregation, recalibration | [01-oracle-trait.md](./01-oracle-trait.md) |
+| **Fisher-Rao metric** | Information-geometric Riemannian metric on oracle parameter space | [07-spectral-liquidity-manifolds.md](./07-spectral-liquidity-manifolds.md) |
+| **Natural gradient** | Coordinate-free optimization on statistical manifolds | [07-spectral-liquidity-manifolds.md](./07-spectral-liquidity-manifolds.md) |
+| **NOTEARS/SDCD** | Continuous optimization for DAG structure learning | [09-causal-microstructure-discovery.md](./09-causal-microstructure-discovery.md) |
+| **DAG-GNN** | Neural causal discovery with GNN encoder | [09-causal-microstructure-discovery.md](./09-causal-microstructure-discovery.md) |
+| **Persistence images** | Stable vector representation of persistent homology | [10-predictive-geometry-and-resonant-patterns.md](./10-predictive-geometry-and-resonant-patterns.md) |
+| **Certified robustness** | Randomized smoothing, Lipschitz bounds, IBP | [11-adversarial-signal-robustness.md](./11-adversarial-signal-robustness.md) |
+| **Cellular sheaves** | Local-to-global consistency via sheaf Laplacian and cohomology | [14-sheaf-tropical-geometry.md](./14-sheaf-tropical-geometry.md) |
+| **Tropical polynomials** | Max-plus algebra for piecewise-linear oracle decisions | [14-sheaf-tropical-geometry.md](./14-sheaf-tropical-geometry.md) |
+| **Tropical attention** | Symbolic-neural fusion via max-plus attention mechanism | [14-sheaf-tropical-geometry.md](./14-sheaf-tropical-geometry.md) |
 
 ---
 
@@ -121,6 +133,33 @@ All academic citations used across this topic's sub-documents:
 | Williams, P. L., & Beer, R. D. (2010). "Nonnegative decomposition." arXiv:1004.2515. | 12 |
 | Thompson, W. R. (1933). "On the Likelihood." *Biometrika*, 25(3-4). | 13 |
 | Raj, V., & Kalyani, S. (2017). "Taming Non-stationary Bandits." arXiv:1707.09727. | 13 |
+| Murphy, A. H. (1973). "A New Vector Partition of the Probability Score." *J. Applied Meteorology*, 12(4). | 01 |
+| Vovk, V., Gammerman, A., & Shafer, G. (2005). *Algorithmic Learning in a Random World*. Springer. | 01 |
+| Angelopoulos, A. N., & Bates, S. (2023). "Conformal Prediction: A Gentle Introduction." arXiv:2107.07511. | 01 |
+| Naeini, M. P., et al. (2015). "Obtaining Well Calibrated Probabilities Using Bayesian Binning." *AAAI 2015*. | 01 |
+| Guo, C., et al. (2017). "On Calibration of Modern Neural Networks." *ICML 2017*. | 01 |
+| Cesa-Bianchi, N., & Lugosi, G. (2006). *Prediction, Learning, and Games*. Cambridge University Press. | 01 |
+| Amari, S. (1998). "Natural Gradient Works Efficiently in Learning." *Neural Computation*, 10(2). | 07 |
+| Amari, S. (2016). *Information Geometry and Its Applications*. Springer. | 07 |
+| Čencov, N. N. (1982). *Statistical Decision Rules and Optimal Inference*. AMS. | 07 |
+| Villani, C. (2009). *Optimal Transport: Old and New*. Springer. | 07 |
+| Martens, J., & Grosse, R. (2015). "Optimizing Neural Networks with K-FAC." *ICML 2015*. | 07 |
+| Zheng, X., et al. (2018). "DAGs with NO TEARS." *NeurIPS 2018*. | 09 |
+| Yu, Y., et al. (2019). "DAG-GNN: Structure Learning with Graph Neural Networks." *ICML 2019*. | 09 |
+| Nazaret, A., et al. (2024). "Stable Differentiable Causal Discovery." *ICML 2024*, PMLR 235. | 09 |
+| Bello, K., et al. (2022). "DAGMA: Learning DAGs via M-matrices." *NeurIPS 2022*. | 09 |
+| Adams, H., et al. (2017). "Persistence Images." *JMLR*, 18(8), 1-35. | 10 |
+| Bauer, U. (2021). "Ripser: Efficient Computation of Vietoris-Rips Persistence Barcodes." *JACT*, 5(1). | 10 |
+| Cohen-Steiner, D., et al. (2007). "Stability of Persistence Diagrams." *DCG*, 37(1). | 10 |
+| Cohen, J. M., et al. (2019). "Certified Adversarial Robustness via Randomized Smoothing." *ICML 2019*. | 11 |
+| Gowal, S., et al. (2018). "Interval Bound Propagation." arXiv:1810.12715. | 11 |
+| Steinhardt, G., et al. (2017). "Certified Defenses for Data Poisoning Attacks." *NeurIPS 2017*. | 11 |
+| Hansen, J., & Ghrist, R. (2019). "Toward a Spectral Theory of Cellular Sheaves." *JACT*, 3. | 14 |
+| Bodnar, C., et al. (2022). "Neural Sheaf Diffusion." arXiv:2202.04579. | 14 |
+| Zhang, L., Naitzat, G., & Lim, L.-H. (2018). "Tropical Geometry of Deep Neural Networks." *ICML 2018*. | 14 |
+| Tran, N. M., & Yu, J. (2019). "Product-Mix Auctions and Tropical Geometry." *MOR*, 44(4). | 14 |
+| Alfarra, M., et al. (2024). "Tropical Decision Boundaries Are Robust." arXiv:2402.00576. | 14 |
+| Gebhart, T., et al. (2023). "Knowledge Sheaves." *PMLR 206*. | 14 |
 
 ---
 
@@ -143,5 +182,6 @@ All academic citations used across this topic's sub-documents:
 - **Source material**: `refactoring-prd/03-cognitive-subsystems.md` §4, `refactoring-prd/09-innovations.md` §I/II/III/VII/XIX, `refactoring-prd/01-synapse-architecture.md`, `bardo-backup/prd/23-ta/*` (11 legacy files), `bardo-backup/tmp/agent-chain/10-predictive-foraging.md`, `tmp/implementation-plans/modelrouting/12-advanced-patterns.md`
 - **Naming map applied**: golem→agent, grimoire→neuro, bardo→roko, Signal→Engram, GNOS→KORAI, clade→collective, Styx→Agent Mesh
 - **Reframe rules applied**: mortality→resource management, death clocks→budget limits, succession→backup/restore
-- **Citation count**: 48 unique academic citations across 14 sub-documents
-- **Total lines**: ~4,200 across 15 files
+- **Citation count**: 76 unique academic citations across 15 sub-documents
+- **Total lines**: ~11,000 across 16 files
+- **2025-04-13 enhancement**: Deep research pass adding oracle calibration/composition (conformal prediction, Brier decomposition), information geometry (Fisher-Rao, natural gradient, α-connections, Wasserstein), continuous DAG learning (NOTEARS, DAG-GNN, SDCD, DAGMA), advanced TDA (persistence images, Ripser, vectorization methods), certified adversarial robustness (randomized smoothing, Lipschitz bounds, IBP), sheaf theory (cellular sheaves, Laplacian, cohomology), and tropical geometry (max-plus semiring, tropical attention, tropical VCG auctions). 28 new citations from 2017-2025 research.

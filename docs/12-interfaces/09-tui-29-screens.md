@@ -1579,7 +1579,7 @@ mod tests {
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [08-tui-main-layout.md](./08-tui-main-layout.md) for the main layout structure
 - See [07-rosedust-design-language.md](./07-rosedust-design-language.md) for the color palette

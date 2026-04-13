@@ -229,7 +229,7 @@ Scherer (2001) proposed evaluating events on multiple appraisal dimensions (nove
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [01-pad-vector.md](./01-pad-vector.md) for the PAD vector specification
 - See [03-occ-scherer-appraisal.md](./03-occ-scherer-appraisal.md) for appraisal rules that generate emotion-layer deltas

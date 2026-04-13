@@ -221,7 +221,7 @@ slippage_tolerance = 0.005  # 0.5%
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [15-chainwitness-event-watching.md](./15-chainwitness-event-watching.md) for step 1 (OBSERVE)
 - See [16-triage-curiosity-midas.md](./16-triage-curiosity-midas.md) for step 3 (ANALYZE)

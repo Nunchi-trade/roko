@@ -6,6 +6,8 @@
 **Prerequisites**: [Architecture](../00-architecture/INDEX.md), [Agent Mesh](../13-coordination/INDEX.md)
 **Key sources**: `bardo-backup/prd/shared/citations.md`, `refactoring-prd/09-innovations.md` §VI
 
+> **Implementation**: Reference
+
 ---
 
 ## Abstract
@@ -75,7 +77,17 @@ Roko's C-Factor metric — `Collective Performance / Sum(Individual Performances
 
 ---
 
-## Cross-references
+## Emergent Collective Intelligence in LLM Systems (2025)
+
+- Emergent Coordination in Multi-Agent Language Models (2025). arXiv:2510.05174.
+  *Grounds: Dynamical emergence — information-theoretic framework measuring whether dynamical emergence is present in multi-agent LLM systems. Shows that combining personas with theory-of-mind instructions produces identity-linked differentiation and goal-directed complementarity — patterns mirroring Woolley et al.'s C-Factor diagnostics. Directly validates Roko's Collective architecture.*
+
+- Large Language Models Miss the Multi-Agent Mark (2025). arXiv:2505.21298.
+  *Grounds: LLM coordination limits — identifies systematic failures in multi-agent LLM coordination, including inability to maintain consistent strategies across extended interactions. Motivates Roko's explicit coordination mechanisms (Pheromone Field, Agent Mesh) rather than relying on LLM implicit coordination.*
+
+---
+
+## Cross-References
 
 - See [04-coordination-and-multi-agent.md](./04-coordination-and-multi-agent.md) for stigmergic coordination
 - See [05-biological-analogues.md](./05-biological-analogues.md) for superorganism theory

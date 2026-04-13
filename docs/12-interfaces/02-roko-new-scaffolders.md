@@ -240,7 +240,7 @@ The `roko new` command family is **not yet implemented**. It is planned for Tier
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [00-cli-overview.md](./00-cli-overview.md) for CLI architecture
 - See topic [00-architecture](../00-architecture/INDEX.md) for the six Synapse traits

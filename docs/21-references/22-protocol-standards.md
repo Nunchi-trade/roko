@@ -6,6 +6,8 @@
 **Prerequisites**: [Architecture](../00-architecture/INDEX.md)
 **Key sources**: `bardo-backup/prd/shared/citations.md` §12
 
+> **Implementation**: Reference
+
 ---
 
 ## Abstract
@@ -95,7 +97,7 @@ Roko agents can operate on-chain via the Korai chain — a dedicated EVM for age
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [08-security-and-provenance.md](./08-security-and-provenance.md) for security architecture
 - See [19-regulatory-compliance.md](./19-regulatory-compliance.md) for compliance frameworks

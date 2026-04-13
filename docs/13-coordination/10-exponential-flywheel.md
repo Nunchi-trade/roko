@@ -457,7 +457,7 @@ superlinear.
 
 ---
 
-## Related Sub-Docs
+## Cross-References
 
 - `00-stigmergy-theory.md` — The coordination mechanism underlying the flywheel
 - `07-morphogenetic-specialization.md` — How diversity is maintained (Mechanism 2, 5)

@@ -288,7 +288,7 @@ Tier demotion happens automatically via Ebbinghaus decay. Tier promotion require
 
 ---
 
-## Related Topics
+## Cross-References
 
 - `docs/17-lifecycle/11-knowledge-demurrage.md` — Token-level knowledge decay
 - `docs/17-lifecycle/12-academic-foundations.md` — Full Ebbinghaus and decay citations

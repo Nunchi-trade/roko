@@ -1,6 +1,6 @@
 # Agent Lifecycle
 
-The **Agent Lifecycle** topic documents how Roko agents are created, configured, funded, operated, backed up, deleted, and recreated — and how knowledge flows between agent generations through user-controlled backup/restore. This topic replaces the legacy Bardo "mortality" system entirely. Where the old architecture treated agents as mortal organisms with death clocks and succession protocols, the new architecture treats agents as user-directed software processes with explicit lifecycle commands. Every academic citation from the mortality research (130+ papers) is preserved and reframed: Ebbinghaus curves now govern knowledge freshness instead of agent lifespan, somatic markers drive strategy retrieval instead of mortality anxiety, and the Baldwin Effect describes backup/restore capacity transfer instead of death-triggered succession.
+> **Abstract:** The Agent Lifecycle topic documents how Roko agents are created, configured, funded, operated, backed up, deleted, and recreated — and how knowledge flows between agent generations through user-controlled backup/restore. This topic replaces the legacy Bardo "mortality" system entirely. Where the old architecture treated agents as mortal organisms with death clocks and succession protocols, the new architecture treats agents as user-directed software processes with explicit lifecycle commands. Every academic citation from the mortality research (130+ papers) is preserved and reframed: Ebbinghaus curves now govern knowledge freshness instead of agent lifespan, somatic markers drive strategy retrieval instead of mortality anxiety, and the Baldwin Effect describes backup/restore capacity transfer instead of death-triggered succession.
 
 ---
 
@@ -68,7 +68,7 @@ Live agents can also share knowledge via the Agent Mesh (`09-knowledge-transfer-
 
 ---
 
-## Related Topics
+## Cross-References
 
 | Topic | Path | Relationship |
 |-------|------|-------------|

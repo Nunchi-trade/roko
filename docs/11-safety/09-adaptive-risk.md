@@ -1093,7 +1093,7 @@ conservation_assertions = true
 
 ---
 
-## Related Topics
+## Cross-References
 
 - [00-defense-in-depth.md](00-defense-in-depth.md) — Hard shields (Layer 1)
 - [05-loop-detection.md](05-loop-detection.md) — Circuit breaker and loop defense

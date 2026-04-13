@@ -544,7 +544,7 @@ Based on `refactoring-prd/07-implementation-priorities.md`:
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [07-rosedust-design-language.md](./07-rosedust-design-language.md) for the color system and contrast ratios
 - See [08-tui-main-layout.md](./08-tui-main-layout.md) for the TUI rendering architecture

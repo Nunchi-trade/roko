@@ -457,7 +457,7 @@ This directly implements the 31.6× faster calibration heuristic from `refactori
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [01-oracle-trait.md](./01-oracle-trait.md) for the Oracle trait interface
 - See [02-chain-oracles.md](./02-chain-oracles.md) for chain domain comparison

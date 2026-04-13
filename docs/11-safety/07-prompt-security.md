@@ -234,7 +234,7 @@ For high-security deployments, the recommendation is to use Roko's 19 built-in t
 
 ---
 
-## Related Topics
+## Cross-References
 
 - [00-defense-in-depth.md](00-defense-in-depth.md) — Overall safety architecture
 - [03-taint-tracking.md](03-taint-tracking.md) — Data flow labels prevent injection propagation

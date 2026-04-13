@@ -220,7 +220,7 @@ Every threshold and mechanism traces to a real failure:
 - **Source material**: 19 roko-conductor source files, 7 refactoring
   PRD documents, 5 implementation plan files, 3 legacy reference docs
 - **Naming**: Roko naming conventions applied throughout (Bardo→Roko,
-  Golem→Agent, Mori→Roko, Grimoire→Neuro, Styx→Korai, Clade→Collective)
+  Golem→Agent, Mori→Roko Orchestrator, Grimoire→Neuro, Styx→Agent Mesh, Clade→Collective)
 - **Citations**: All academic references preserved with full
   attribution
 - **Framing**: Conductor as cybernetic regulator and theory-of-mind,

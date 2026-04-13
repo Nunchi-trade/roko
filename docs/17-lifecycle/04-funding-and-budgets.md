@@ -305,7 +305,178 @@ See `docs/17-lifecycle/11-knowledge-demurrage.md` for the full demurrage specifi
 
 ---
 
-## Related Topics
+## Gesell Demurrage Rate Calibration
+
+The 1% annual KORAI demurrage rate is a design choice informed by historical implementations and economic theory. This section specifies the calibration framework that determines the optimal rate.
+
+### Historical Calibration Data
+
+| Currency | Period | Annual Rate | Observed Velocity Multiplier | Outcome |
+|---|---|---|---|---|
+| Wörgl stamp scrip | 1932-33 | 12% | ~14× vs Austrian schilling | Unemployment fell; Austrian central bank halted it |
+| US Great Depression scrip | 1932-33 | ~52% (1%/week) | >50× exchanges per note | Extremely high velocity; impractical for planning |
+| Chiemgauer (Bavaria) | 2003-present | 6% (reduced from 8%) | 3-5× vs Euro | Stable regional currency; 55%+ adoption among German regional currencies |
+| WIR Bank (Switzerland) | 1934-present | 0% (abandoned 1952) | 2-3× | High velocity sustained via trust network even without demurrage |
+| Freicoin (crypto) | 2012-present | 4.9% | Limited data | Proof of concept; low adoption |
+| Circles UBI (Gnosis) | 2020-present | 7% (continuous) | Limited data | Active pilot; personal token issuance |
+
+### Calibration Framework
+
+The optimal demurrage rate balances three constraints:
+
+```rust
+/// Demurrage rate calibration framework.
+/// Determines the optimal annual rate based on economic objectives.
+///
+/// Crate: `roko-core`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DemurrageCalibration {
+    /// Target velocity increase vs. zero-demurrage baseline.
+    /// Typical: 3-5× (Chiemgauer empirical range).
+    /// Range: 1.0-50.0.
+    pub target_velocity_multiplier: f64,
+
+    /// Hoarding sensitivity coefficient.
+    /// Empirically derived: 1% rate increase → ~0.3-0.5% velocity increase.
+    /// Chiemgauer data: ~0.4. Wörgl data: ~0.3.
+    /// Range: 0.1-1.0.
+    pub hoarding_sensitivity: f64,
+
+    /// Minimum rate for psychological visibility.
+    /// Rates below ~2%/yr are invisible to participants.
+    /// Range: 0.01-0.05.
+    pub minimum_effective_rate: f64,
+
+    /// Maximum rate before transactional friction dominates.
+    /// Rates above ~15%/yr create urgency that undermines planning.
+    /// Range: 0.10-0.20.
+    pub maximum_practical_rate: f64,
+
+    /// Grace period before demurrage begins (Chiemgauer model: 90 days).
+    /// Allows new participants to accumulate before decay starts.
+    /// Range: 0-365 days.
+    pub grace_period_days: u32,
+
+    /// Floor: minimum fraction of face value at any time.
+    /// Prevents asymptotic decay to zero from creating dust tokens.
+    /// Default: 0.01 (1%). Range: 0.001-0.10.
+    pub floor_fraction: f64,
+}
+
+impl DemurrageCalibration {
+    /// Compute recommended annual demurrage rate.
+    ///
+    /// rate = clamp(
+    ///   ln(target_velocity) * hoarding_sensitivity,
+    ///   minimum_effective_rate,
+    ///   maximum_practical_rate
+    /// )
+    ///
+    /// For KORAI defaults (target 3×, sensitivity 0.4):
+    ///   ln(3.0) * 0.4 = 1.099 * 0.4 = 0.044 = 4.4%/yr
+    ///
+    /// The current 1% rate is conservative — deliberately below the
+    /// Chiemgauer-derived optimum to reduce friction during adoption.
+    pub fn recommended_rate(&self) -> f64 {
+        let raw_rate = self.target_velocity_multiplier.ln()
+            * self.hoarding_sensitivity;
+        raw_rate.clamp(self.minimum_effective_rate, self.maximum_practical_rate)
+    }
+
+    /// Compute effective balance after elapsed time.
+    pub fn effective_balance(&self, face_value: f64, elapsed_years: f64) -> f64 {
+        let grace_years = self.grace_period_days as f64 / 365.25;
+        if elapsed_years <= grace_years {
+            return face_value;
+        }
+        let taxable_years = elapsed_years - grace_years;
+        let rate = self.recommended_rate();
+        let decayed = face_value * (-rate * taxable_years).exp();
+        decayed.max(face_value * self.floor_fraction)
+    }
+}
+
+impl Default for DemurrageCalibration {
+    fn default() -> Self {
+        Self {
+            target_velocity_multiplier: 3.0,
+            hoarding_sensitivity: 0.4,
+            minimum_effective_rate: 0.02,
+            maximum_practical_rate: 0.15,
+            grace_period_days: 90,
+            floor_fraction: 0.01,
+        }
+    }
+}
+```
+
+### Fisher Equation Connection (MV = PT)
+
+Gesell's argument, formalized through Fisher's equation of exchange:
+
+- **M** (money supply) = fixed by protocol (KORAI total supply)
+- **V** (velocity) = increased by demurrage (forced circulation)
+- **P** (price level) = stabilized because M is fixed and V is predictable
+- **T** (transactions) = the economic activity we want to maximize
+
+Demurrage cannot change M or T directly. It increases V, which for fixed M means each KORAI does more economic work. The agent economy benefits because the same token supply supports more agent-to-agent transactions, more compute payments, and more Mesh service fees.
+
+### Why 1% For Now
+
+KORAI's current 1% rate is deliberately conservative — below the 4-7% range suggested by historical data. Rationale:
+
+1. **Adoption friction**: Higher rates discourage early adopters who are price-sensitive
+2. **Simplicity**: 1% is easy to reason about and communicate
+3. **Adjustability**: On-chain governance can increase the rate as the ecosystem matures
+4. **Complement to knowledge demurrage**: Engram-level Ebbinghaus decay already provides strong circulation incentives; token demurrage is a secondary pressure
+
+The calibration framework above provides the analytical tools for future rate adjustment.
+
+### Test Criteria
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_recommended_rate_is_conservative() {
+        let cal = DemurrageCalibration::default();
+        let rate = cal.recommended_rate();
+        // ln(3.0) * 0.4 ≈ 0.044
+        assert!(rate > 0.04 && rate < 0.05);
+    }
+
+    #[test]
+    fn grace_period_prevents_early_decay() {
+        let cal = DemurrageCalibration::default();
+        let balance = cal.effective_balance(1000.0, 0.1); // ~36 days
+        assert_eq!(balance, 1000.0, "Within 90-day grace period");
+    }
+
+    #[test]
+    fn floor_prevents_zero_balance() {
+        let cal = DemurrageCalibration::default();
+        let balance = cal.effective_balance(1000.0, 1000.0); // 1000 years
+        assert!(balance >= 1000.0 * cal.floor_fraction);
+    }
+
+    #[test]
+    fn high_velocity_target_increases_rate() {
+        let cal = DemurrageCalibration {
+            target_velocity_multiplier: 10.0,
+            ..Default::default()
+        };
+        let rate = cal.recommended_rate();
+        // ln(10.0) * 0.4 ≈ 0.092 = 9.2%/yr
+        assert!(rate > 0.09);
+    }
+}
+```
+
+---
+
+## Cross-References
 
 - `docs/17-lifecycle/11-knowledge-demurrage.md` — Token-level knowledge decay
 - `docs/02-scaffold/INDEX.md` — VCG Attention Auction, context compression

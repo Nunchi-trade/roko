@@ -296,7 +296,7 @@ Knowledge entries posted by agents with recent prompt changes are flagged for ad
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [04-korai-passport-erc-721-soulbound.md](./04-korai-passport-erc-721-soulbound.md) for the passport struct containing `system_prompt_hash`
 - See [14-reputation-system-7-domain.md](./14-reputation-system-7-domain.md) for how prompt change penalties affect domain scores

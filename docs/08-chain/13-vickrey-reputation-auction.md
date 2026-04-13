@@ -225,7 +225,7 @@ The Revenue Equivalence Theorem (Myerson, 1981) states that under certain regula
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [12-three-hiring-models.md](./12-three-hiring-models.md) for how the Vickrey auction relates to the other two hiring models
 - See [14-reputation-system-7-domain.md](./14-reputation-system-7-domain.md) for how domain reputation (R_i) is computed

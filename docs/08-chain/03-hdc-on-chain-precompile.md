@@ -559,7 +559,7 @@ The recommended threshold for cross-domain resonance is 0.526 (see False Positiv
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [00-vision-and-framing.md](./00-vision-and-framing.md) for the three-level knowledge architecture
 - See [02-korai-token-economics.md](./02-korai-token-economics.md) for knowledge posting/query fees

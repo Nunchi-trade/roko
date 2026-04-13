@@ -299,6 +299,11 @@ Where `attenuation_factor` is 0.15 (a weak bias). The agent's mood gently influe
 | Schaul et al. (2016), ICLR, "Prioritized Experience Replay" | PER: priority p_i = |δ_i| + ε, sampling P(i) = p_i^α / Σ p_j^α with α=0.6, IS weights with β annealing 0.4→1.0 |
 | Andrychowicz et al. (2017), NeurIPS, "Hindsight Experience Replay" | HER: relabeling failed episodes with achieved goals; k=4 virtual goals per transition using "future" strategy |
 | Wang & Ross (2019), "Boosting Soft Actor-Critic: Emphasizing Recent Experience without Forgetting the Past" | ERE: c_k = max(N · η^(k·1000/K), c_min) with η=0.996; dynamic buffer shrinkage emphasizing recent experience |
+| Jensen, Hennequin & Mattar (2024), Nature Neuroscience, "A recurrent network model of planning explains hippocampal replay and human behavior" | Meta-RL planning-integrated replay: variable-length rollouts matching hippocampal patterns |
+| Sagiv, Akam, Witten & Daw (2025), Neuron, "Between planning and map-building: Prioritizing replay when future goals are uncertain" | Goal-uncertain replay: ensemble value functions for generally useful representations |
+| Nature Communications (2024), "Spindle-locked ripples mediate memory reactivation during human NREM sleep" | First direct human evidence for spindle-ripple coupling in memory consolidation |
+| eLife (2024-2025), "Does slow oscillation-spindle coupling contribute to sleep-dependent memory consolidation? A Bayesian meta-analysis" | Strong evidence that frontal SO-fast spindle coupling predicts memory consolidation |
+| Trends in Cognitive Sciences (2024), "Coupled sleep rhythms for memory consolidation" | Review of full SO→spindle→ripple triple coupling mechanism |
 
 ---
 
@@ -1044,6 +1049,320 @@ Roko mapping: the `centroid_window` parameter (default: 50) implements a softer 
 4. **ERE window**: with `centroid_window = 50`, Need computation for an episode outside the window uses a centroid that does not include that episode's vector.
 5. **Buffer eviction**: when the episode log exceeds the configured maximum, the oldest episodes are evicted first (FIFO), not the lowest-priority ones.
 6. **HER gate mapping**: a fully failed episode (no gates pass) produces 0 relabeled virtual episodes (nothing to relabel as achieved).
+
+---
+
+## Recent Advances in Prioritized Replay Theory (2024-2025)
+
+### Jensen, Hennequin & Mattar (2024) — Recurrent Network Model of Planning
+
+**Reference**: Kristopher T. Jensen, Guillaume Hennequin, and Marcelo G. Mattar, "A recurrent network model of planning explains hippocampal replay and human behavior," *Nature Neuroscience* 27, 1340–1348, 2024. DOI: 10.1038/s41593-024-01675-7.
+
+**Architecture**: A GRU-based meta-RL agent (100 hidden units) with an explicit world model (33-unit feedforward network, ReLU). At each timestep the agent chooses either a physical action (400ms cost) or a "think" action that invokes a variable-length rollout through the world model. Rollouts terminate after at most 8 imagined steps OR when the agent imagines reaching the goal. Two temporal cost models were validated: fixed cost (120ms per rollout) and variable cost (24ms per imagined step, yielding 24–192ms for 1–8 steps).
+
+**Key quantitative results**:
+- Correlation between human thinking time and agent rollout probability: r = 0.186 ± 0.007
+- After conditioning on distance-to-goal: residual r = 0.070 ± 0.006
+- Successful rollouts increased π(first simulated action); unsuccessful rollouts decreased it
+- Biological hippocampal replays avoided walls more than chance (P < 0.001), showed goal over-representation (P < 0.001)
+- Human n = 94, RL agents n = 5, rodent sessions n = 37
+
+**Critical insight — variable-length rollouts**: Parameters are trained once and frozen. Subsequent task adaptation occurs entirely through recurrent hidden-state dynamics — no weight updates at test time. After a rollout completes, the imagined trajectory feeds back into the prefrontal RNN's hidden state, modifying future planning. This is integration via recurrent dynamics, not gradient descent.
+
+**Implications for Roko**: The NREM replay phase can incorporate variable-length rollouts rather than fixed episode replay. The agent's planning depth should adapt to task complexity — simple tasks get short rollouts, complex tasks get longer deliberative sequences. The "think" action maps directly to a dream micro-decision: should the agent replay one more step of this episode, or move to the next?
+
+```rust
+/// Adaptive rollout configuration for planning-integrated replay.
+/// Based on Jensen, Hennequin & Mattar (2024), Nature Neuroscience 27:1340-1348.
+pub struct AdaptiveRolloutConfig {
+    /// Minimum rollout length (actions in sequence).
+    pub min_rollout_length: usize,         // default: 3, range: 1-10
+    /// Maximum rollout length (actions in sequence).
+    pub max_rollout_length: usize,         // default: 20, range: 5-50
+    /// Complexity threshold: tasks with prediction error above this
+    /// receive longer rollouts.
+    pub complexity_threshold: f64,         // default: 0.6, range: 0.3-0.9
+    /// Rollout temperature: higher values explore more diverse action sequences.
+    pub rollout_temperature: f64,          // default: 0.8, range: 0.1-2.0
+    /// Whether to use bidirectional rollouts (forward + backward).
+    pub bidirectional: bool,               // default: true
+    /// Fixed cost per rollout in milliseconds (Jensen et al. fixed-cost model).
+    pub fixed_rollout_cost_ms: u64,        // default: 120
+    /// Variable cost per imagined step in milliseconds (Jensen et al. variable-cost model).
+    pub per_step_cost_ms: u64,             // default: 24
+    /// Whether to use the variable-cost model (true) or fixed-cost model (false).
+    pub use_variable_cost: bool,           // default: true
+}
+
+/// Result of a single planning-integrated rollout during NREM.
+pub struct RolloutResult {
+    /// Episode ID being replayed.
+    pub episode_id: String,
+    /// Number of imagined steps taken.
+    pub rollout_length: usize,
+    /// Whether the rollout terminated by reaching a goal state.
+    pub goal_reached: bool,
+    /// Policy update: change in action probabilities for the first simulated action.
+    pub policy_delta: f64,
+    /// Wall-clock cost of the rollout (ms).
+    pub rollout_cost_ms: u64,
+    /// Insights extracted from the rollout.
+    pub insights: Vec<InsightRecord>,
+}
+```
+
+### Pseudocode: Adaptive Rollout During NREM
+
+```
+ADAPTIVE-ROLLOUT(episode, world_model, policy, config):
+  state = episode.initial_state
+  trajectory = []
+
+  FOR step in 1..config.max_rollout_length:
+    // Agent decides: take a real action or "think" (extend rollout)
+    action = policy.sample(state, temperature=config.rollout_temperature)
+
+    IF action == THINK and step < config.max_rollout_length:
+      // Simulate one imagined step through world model
+      next_state = world_model.predict(state, action)
+      trajectory.push((state, action, next_state))
+      state = next_state
+
+      // Early termination: goal reached
+      IF is_goal_state(next_state):
+        break
+    ELSE:
+      break
+
+  // Feed rollout result back into policy (recurrent dynamics)
+  IF trajectory_successful(trajectory):
+    policy.boost(trajectory[0].action, delta=0.1)
+  ELSE:
+    policy.suppress(trajectory[0].action, delta=0.05)
+
+  RETURN RolloutResult {
+    rollout_length: trajectory.len(),
+    goal_reached: is_goal_state(trajectory.last().next_state),
+    ...
+  }
+```
+
+### Test Criteria for Adaptive Rollouts
+
+```
+1. Variable length: rollouts for high-complexity episodes (prediction_error > complexity_threshold)
+   have mean length > 2× rollouts for low-complexity episodes.
+2. Goal termination: rollouts terminate immediately when goal state is reached,
+   even if max_rollout_length is not exhausted.
+3. Policy update direction: successful rollouts increase π(first_action);
+   unsuccessful rollouts decrease it.
+4. Cost model: with use_variable_cost=true, a 5-step rollout costs 5 × per_step_cost_ms.
+   With use_variable_cost=false, it costs fixed_rollout_cost_ms regardless of length.
+5. Bidirectional: with bidirectional=true, both forward and backward rollouts are generated
+   for each episode. Backward rollouts start from the outcome and trace causally backward.
+```
+```
+
+### Sagiv, Akam, Witten & Daw (2025) — Goal-Uncertain Replay Prioritization
+
+**Reference**: Yotam Sagiv, Thomas Akam, Ilana B. Witten, and Nathaniel D. Daw, "Between planning and map building: Prioritizing replay when future goals are uncertain," *Neuron*, 2025. DOI: 10.1016/j.neuron.2025.00709-3. (Preprint: bioRxiv 2024.02.29.582822.)
+
+**Core framework — the Geodesic Representation (GR)**: Instead of a single Q-function, the model maintains a stack of goal-conditioned value functions G(s, a, g), one for each candidate goal g:
+
+```
+G(s, a, g) ≡ E_πg [ Σ_{t=0}^∞ γ^t · 𝟙{s_t = g} | s_0=s, a_0=a ]
+```
+
+The Bellman equation variant:
+```
+G(s,a,g) = E_{s'~P(s'|s,a)}[ 𝟙{s'=g} + γ · 𝟙{s'≠g} · max_{a'} G(s',a',g) ]
+```
+
+**Extended utility formula under goal uncertainty**: The benefit of replaying experience e_k is decomposed following the Mattar-Daw need × gain factorization, but now marginalizing over goal distribution P(g):
+
+```
+e* = argmax_{e_k} E_{g ~ P(g)} [ need(s_k, g) × gain(e_k, g) ]
+```
+
+where:
+```
+need(s_k, g) = Σ_{i=0}^∞ γ^i · P(s → s_k, i, π_{g})
+    (expected discounted future visitation frequency of state s_k under current policy toward g)
+
+gain(e_k, g) = Σ_a [ π_{g,post}(a|s_k) − π_{g,pre}(a|s_k) ] · G_post(s_k, a, g)
+    (expected value improvement from policy change)
+```
+
+**Key extension over Mattar-Daw 2018**: The original Mattar-Daw model computes a single EVB for one current objective. The GR generalizes by: (1) maintaining separate per-goal EVBs, (2) marginalizing over P(g) rather than optimizing for the single active goal, and (3) enabling off-policy learning across goal switches. This resolves the paradoxical finding that replay "lags" behavioral learning — lagged replay destinations reflect prior goals, emerging from slower replay learning rates (η_replay = 0.05) versus behavioral tracking rates (η_behav = 1.0).
+
+**Implications for Roko**: When future task types are uncertain (common in self-development), replay should build general-purpose representations rather than optimizing for the current task type. The goal ensemble enables "map-building" replay — strengthening knowledge that is useful regardless of which future task the agent encounters.
+
+```rust
+/// Goal-uncertain replay prioritization using the Geodesic Representation.
+/// Based on Sagiv, Akam, Witten & Daw (2025), Neuron.
+pub struct GoalEnsembleReplay {
+    /// Maximum number of goal hypotheses to maintain.
+    pub max_goals: usize,                 // default: 8, range: 3-20
+    /// Minimum probability weight for a goal to remain in the ensemble.
+    pub min_goal_probability: f64,        // default: 0.05
+    /// Decay rate for goal probabilities when no evidence observed.
+    pub goal_probability_decay: f64,      // default: 0.95 per dream cycle
+    /// Whether to include "map-building" replay that benefits all goals.
+    pub enable_general_replay: bool,      // default: true
+    /// Fraction of replay budget allocated to general (goal-agnostic) replay.
+    pub general_replay_fraction: f64,     // default: 0.30, range: 0.10-0.50
+    /// Replay learning rate (η_replay in Sagiv et al.); lower = more lag.
+    pub replay_learning_rate: f64,        // default: 0.05, range: 0.01-0.20
+    /// Behavioral tracking rate (η_behav); higher = faster goal tracking.
+    pub behavioral_learning_rate: f64,    // default: 1.0, range: 0.5-2.0
+}
+
+/// A single goal hypothesis in the ensemble.
+pub struct GoalHypothesis {
+    /// Unique identifier for this goal type.
+    pub goal_id: String,
+    /// Human-readable description (e.g., "compile-gate success", "test coverage > 80%").
+    pub description: String,
+    /// Current probability weight P(g) in the ensemble.
+    pub probability: f64,
+    /// Goal-conditioned value function G(s, a, g) — stored as HDC vector similarities.
+    pub value_centroid: Option<HdcVector>,
+    /// Number of episodes observed where this goal was relevant.
+    pub evidence_count: usize,
+    /// Last time this goal was observed as relevant.
+    pub last_evidence_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+```
+
+### Pseudocode: Goal-Ensemble Replay Selection
+
+```
+GOAL-ENSEMBLE-SELECT(episodes, goals, config):
+  // Phase 1: Update goal probabilities from recent evidence
+  FOR goal in goals:
+    IF goal has new evidence since last cycle:
+      goal.probability = min(1.0, goal.probability + config.replay_learning_rate)
+    ELSE:
+      goal.probability *= config.goal_probability_decay
+
+  // Prune goals below minimum probability
+  goals.retain(|g| g.probability >= config.min_goal_probability)
+  normalize_probabilities(goals)
+
+  // Phase 2: Compute per-goal utility for each episode
+  utility_scores = []
+  FOR episode in episodes:
+    ensemble_utility = 0.0
+    FOR goal in goals:
+      gain_g = compute_gain(episode, goal)
+      need_g = compute_need(episode, goal)
+      ensemble_utility += goal.probability * gain_g * need_g
+    ensemble_utility /= spacing_penalty(episode)
+    utility_scores.push((episode, ensemble_utility))
+
+  // Phase 3: Allocate budget between goal-specific and general replay
+  n_general = floor(budget * config.general_replay_fraction)
+  n_specific = budget - n_general
+
+  // General replay: episodes with high utility averaged across ALL goals
+  general_batch = top_k(utility_scores, n_general)
+
+  // Specific replay: episodes with high utility for the highest-probability goal
+  top_goal = goals.max_by(|g| g.probability)
+  specific_scores = [(e, compute_gain(e, top_goal) * compute_need(e, top_goal)) for e in episodes]
+  specific_batch = top_k(specific_scores, n_specific)
+
+  RETURN general_batch + specific_batch
+```
+
+### Test Criteria for Goal-Ensemble Replay
+
+```
+1. Goal pruning: goals with probability below min_goal_probability are removed from the ensemble.
+2. Probability normalization: goal probabilities sum to 1.0 after each update cycle.
+3. Decay convergence: a goal with no evidence for 20 cycles at decay_rate=0.95 has
+   probability ≈ 0.95^20 ≈ 0.36 of initial.
+4. General vs specific split: general_replay_fraction=0.30 with budget=10 yields 3 general + 7 specific.
+5. Ensemble utility: an episode useful for all goals has higher ensemble utility than one useful
+   for a single low-probability goal.
+6. Learning rate asymmetry: with replay_learning_rate << behavioral_learning_rate,
+   replay priorities lag behind behavioral goal switches (reproducing Sagiv et al. finding).
+```
+```
+
+---
+
+## SO-Spindle-Ripple Triple Coupling
+
+**Reference**: "Spindle-locked ripples mediate memory reactivation during human NREM sleep," *Nature Communications* (2024). Also: Helfrich et al. (2023), *Nature Neuroscience*; eLife Bayesian meta-analysis (2024-2025) confirming frontal SO-fast spindle coupling predicts consolidation.
+
+The biological triple coupling mechanism chains three nested oscillations to gate memory consolidation: Slow Oscillations (SO, <1 Hz) provide the global timing frame, Sleep Spindles (12-16 Hz) relay hippocampal signals to cortex at an intermediate frequency, and Sharp-Wave Ripples (80-120 Hz) carry the actual replay content at the fastest timescale. The 2024 Nature Communications paper provides the first direct human evidence: intracranial EEG shows medial temporal lobe ripples coupled to cortical spindles are tightly linked to memory reactivation during NREM. Replay events that occur outside the spindle window are significantly less effective for consolidation.
+
+Mapping to Roko's computational analog:
+
+```
+SO analog  → Dream cycle scheduling (slow, periodic trigger)
+Spindle analog → Episode batch selection (mid-frequency grouping)
+Ripple analog  → Individual episode replay (fast, content-specific)
+```
+
+The SO cycle sets the outermost schedule — how often dream cycles fire. Within each cycle, the spindle analog groups episodes into coherent batches (using HDC clustering). Within each batch, the ripple analog replays individual episodes in rapid succession. This three-level nesting ensures that replay is both structured (episodes within a batch are related) and efficient (related episodes are replayed together, enabling cross-episode pattern extraction).
+
+```rust
+/// Triple coupling replay scheduler inspired by SO-spindle-ripple
+/// neural mechanism for memory consolidation.
+/// Reference: Nature Communications (2024), Helfrich et al. (2023).
+pub struct TripleCouplingScheduler {
+    /// SO period: interval between dream cycle triggers (minutes).
+    pub so_period_mins: u64,              // default: 240 (4 hours), range: 60-480
+    /// Spindle burst size: number of episode batches per SO cycle.
+    pub spindle_burst_count: usize,       // default: 4, range: 2-8
+    /// Ripple replay count: episodes per spindle burst.
+    pub ripple_replay_per_burst: usize,   // default: 3, range: 1-10
+    /// Coupling precision: how tightly ripples lock to spindle peaks.
+    /// Higher = more synchronized but less flexible.
+    pub coupling_precision: f64,          // default: 0.8, range: 0.5-1.0
+    /// Whether to use phase-locked replay timing.
+    pub phase_locked: bool,              // default: true
+}
+```
+
+### Triple Coupling Replay Algorithm
+
+```
+TRIPLE-COUPLING-REPLAY(episodes, config):
+  // SO level: select which dream cycles to run
+  dream_cycles = schedule_so_cycles(config.so_period_mins)
+
+  FOR each cycle in dream_cycles:
+    // Spindle level: group episodes into coherent batches
+    batches = cluster_episodes_into_bursts(
+      episodes,
+      config.spindle_burst_count
+    )
+
+    FOR each batch in batches:
+      // Ripple level: replay individual episodes within the burst
+      selected = mattar_daw_select(batch, config.ripple_replay_per_burst)
+
+      IF config.phase_locked:
+        // Replay in rapid succession (simulating ripple bursts)
+        replay_concurrent(selected)
+      ELSE:
+        replay_sequential(selected)
+
+      consolidate_batch(selected)
+
+    integrate_cycle_results()
+```
+
+### Test Criteria for Triple Coupling
+
+1. **Triple coupling hierarchy**: SO cycles contain spindle bursts which contain ripple replays; no ripple fires outside a spindle burst.
+2. **Coupling precision**: with precision=1.0, all ripples within a burst fire simultaneously; with precision=0.5, replay is staggered within the burst window.
+3. **Phase locking**: phase_locked=true produces deterministic replay ordering; phase_locked=false allows interleaving.
+4. **Batch coherence**: episodes within the same spindle burst have mean HDC similarity > 0.55.
+5. **Burst count**: exactly spindle_burst_count batches produced per cycle (or fewer if episodes insufficient).
 
 ---
 

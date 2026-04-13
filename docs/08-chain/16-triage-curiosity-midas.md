@@ -237,7 +237,7 @@ The thresholds are adaptive — they adjust based on the current background curi
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [15-chainwitness-event-watching.md](./15-chainwitness-event-watching.md) for the upstream block ingestion that feeds this pipeline
 - See [03-hdc-on-chain-precompile.md](./03-hdc-on-chain-precompile.md) for the HDC encoding used in novelty scoring

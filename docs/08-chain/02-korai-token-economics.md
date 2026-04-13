@@ -284,7 +284,7 @@ See `roko/tmp/implementation-plans/12b-chain-layer.md` §L for the 5-item paymen
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [04-korai-passport-erc-721-soulbound.md](./04-korai-passport-erc-721-soulbound.md) for staking tiers
 - See [03-hdc-on-chain-precompile.md](./03-hdc-on-chain-precompile.md) for novelty detection thresholds

@@ -551,6 +551,46 @@ Other domain plugins could implement their own art pipelines: a coding agent mig
 
 ---
 
+## Generative Art Quality Assessment
+
+Dream art quality should be evaluated systematically, not just aesthetically. Map standard image quality metrics to the oneirography pipeline:
+
+```rust
+/// Art quality assessment for dream-generated images.
+pub struct ArtQualityAssessment {
+    /// Cognitive fidelity: does the image reflect the dream's cognitive content?
+    /// Measured by embedding similarity between dream report and image caption.
+    pub cognitive_fidelity: f64,          // range: 0.0-1.0
+    /// Emotional alignment: does the image's mood match the PAD vector at generation?
+    /// Measured by sentiment analysis of image description vs PAD coordinates.
+    pub emotional_alignment: f64,         // range: 0.0-1.0
+    /// Aesthetic quality: FID-like score against a reference distribution.
+    pub aesthetic_score: f64,             // range: 0.0-1.0
+    /// Novelty: how different is this image from the agent's previous outputs?
+    pub novelty_score: f64,              // range: 0.0-1.0
+    /// Steganographic integrity: if state encoding was applied, is it intact?
+    pub stego_integrity: Option<bool>,
+}
+
+/// Portfolio analytics for the oneirography system.
+pub struct PortfolioAnalytics {
+    /// Total images generated.
+    pub total_generated: usize,
+    /// Images by dream phase source.
+    pub by_phase: std::collections::HashMap<String, usize>,
+    /// Mean cognitive fidelity across portfolio.
+    pub mean_cognitive_fidelity: f64,
+    /// Mean emotional alignment across portfolio.
+    pub mean_emotional_alignment: f64,
+    /// Portfolio diversity: mean pairwise distance between image embeddings.
+    pub portfolio_diversity: f64,
+    /// Self-appraisal trend: is the agent rating its recent work higher or lower?
+    pub self_appraisal_trend: f64,        // positive = improving, negative = declining
+}
+```
+
+---
+
 ## Cross-References
 
 | Document | Relevance |

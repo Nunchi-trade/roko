@@ -5,6 +5,8 @@
 > **Crate**: `roko-dreams` (primary), `roko-golem` (legacy scaffold, to be dissolved), `roko-learn` (supporting infrastructure)
 >
 > **Prerequisites**: [00-vision-and-dream-as-death-reframe.md](00-vision-and-dream-as-death-reframe.md)
+>
+> **Implementation**: Scaffold
 
 ---
 

@@ -189,7 +189,7 @@ Based on the gaps and their dependencies:
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [00-vision-and-grimoire-rename.md](./00-vision-and-grimoire-rename.md) for the architectural vision
 - See [10-knowledge-query-api.md](./10-knowledge-query-api.md) for the current API surface

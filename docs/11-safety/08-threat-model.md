@@ -958,7 +958,7 @@ cascade_check_interval_tasks = 5
 
 ---
 
-## Related Topics
+## Cross-References
 
 - [00-defense-in-depth.md](00-defense-in-depth.md) — Six safety guards
 - [07-prompt-security.md](07-prompt-security.md) — Prompt injection defenses in detail

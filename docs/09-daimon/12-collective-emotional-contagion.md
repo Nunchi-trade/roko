@@ -269,7 +269,7 @@ The Daimon exports contagion-related metrics:
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [01-pad-vector.md](./01-pad-vector.md) for PAD vector structure
 - See [06-somatic-markers-damasio.md](./06-somatic-markers-damasio.md) for individual somatic landscape

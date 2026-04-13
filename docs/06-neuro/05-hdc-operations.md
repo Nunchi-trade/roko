@@ -875,7 +875,7 @@ pub fn stochastic_decay(&self, factor: f64, seed: u64) -> Self {
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [04-hdc-vsa-foundations.md](./04-hdc-vsa-foundations.md) for the mathematical foundations and dimension choice
 - See [06-hdc-knowledge-encoding.md](./06-hdc-knowledge-encoding.md) for how these operations encode knowledge entries

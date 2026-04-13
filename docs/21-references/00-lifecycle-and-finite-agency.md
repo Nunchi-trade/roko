@@ -6,6 +6,8 @@
 **Prerequisites**: [Architecture](../00-architecture/INDEX.md)
 **Key sources**: `bardo-backup/prd/02-mortality/14-research-foundations.md`, `bardo-backup/prd/02-mortality/15-references.md`
 
+> **Implementation**: Reference
+
 ---
 
 ## Abstract
@@ -145,7 +147,7 @@ These citations are preserved for historical completeness. They were originally 
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [01-memory-consolidation.md](./01-memory-consolidation.md) for memory-specific citations (McClelland 1995, Ebbinghaus 1885, etc.)
 - See [06-self-learning-systems.md](./06-self-learning-systems.md) for Reflexion, ExpeL, Voyager, and DSPy

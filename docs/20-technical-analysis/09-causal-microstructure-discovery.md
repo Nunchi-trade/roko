@@ -764,6 +764,335 @@ A hypothesis is promoted to "confirmed" at confidence >= 0.8 (requires ~5 suppor
 
 ---
 
+## Continuous Optimization for DAG Learning
+
+The PC algorithm and Granger causality above are constraint-based methods: they use statistical tests to prune edges from a candidate graph. A fundamentally different approach reformulates DAG structure learning as a continuous optimization problem. Instead of testing conditional independence for each pair of variables, these methods optimize a score function over the space of weighted adjacency matrices, subject to a differentiable acyclicity constraint.
+
+This is a significant shift. The combinatorial search over DAG structures is NP-hard (the number of DAGs on d nodes is super-exponential). Continuous relaxation converts this into a smooth optimization problem solvable with gradient descent, at the cost of requiring a tractable acyclicity characterization.
+
+### NOTEARS -- Continuous Acyclicity Constraint
+
+The breakthrough insight of NOTEARS (Zheng et al., 2018) is that acyclicity can be expressed as a smooth equality constraint on the weighted adjacency matrix, eliminating the need for combinatorial search entirely.
+
+```rust
+/// NOTEARS: Non-combinatorial Optimization via Trace Exponential
+/// and Augmented lagRangian for Structure learning.
+///
+/// Key insight (Zheng et al., 2018, NeurIPS):
+/// A weighted adjacency matrix W encodes a DAG if and only if:
+///   h(W) = tr(e^{W ∘ W}) - d = 0
+///
+/// where ∘ is element-wise (Hadamard) product and d = number of variables.
+/// This converts the NP-hard combinatorial DAG constraint into a smooth,
+/// differentiable equality constraint solvable via augmented Lagrangian.
+///
+/// Complexity: O(d³) per iteration (matrix exponential) vs exponential for PC.
+/// Recent improvement SDCD (Nazaret et al., 2024, ICML) replaces trace-exponential
+/// with spectral constraint h(W) = λ_max(|W|) < 1, which is numerically
+/// more stable and scales to thousands of variables.
+pub struct NotearsSolver {
+    /// Maximum number of augmented Lagrangian iterations.
+    pub max_outer_iter: usize,      // default: 10
+    /// Maximum inner optimization iterations per outer step.
+    pub max_inner_iter: usize,      // default: 100
+    /// Augmented Lagrangian penalty parameter.
+    pub rho: f64,                   // default: 1.0, doubles each outer iter
+    /// Lagrangian multiplier growth factor.
+    pub rho_max: f64,               // default: 1e16
+    /// Convergence tolerance for acyclicity constraint.
+    pub h_tol: f64,                 // default: 1e-8
+    /// L1 regularization for sparsity.
+    pub lambda_l1: f64,             // default: 0.1
+    /// Acyclicity constraint type.
+    pub acyclicity: AcyclicityConstraint,
+}
+
+pub enum AcyclicityConstraint {
+    /// Original NOTEARS: h(W) = tr(e^{W∘W}) - d = 0.
+    /// Numerically unstable for large d (matrix exponential overflow).
+    TraceExponential,
+    /// SDCD spectral constraint: h(W) = λ_max(|W|).
+    /// (Nazaret et al., 2024, ICML 2024)
+    /// Numerically stable, differentiable via eigenvector gradients.
+    /// Scales to thousands of variables.
+    Spectral,
+    /// DAGMA log-determinant: h(W) = -log det(sI - W∘W) + d·log(s).
+    /// (Bello et al., 2022) Avoids matrix exponential entirely.
+    LogDeterminant { s: f64 },  // default s: 1.0
+}
+```
+
+The optimization proceeds via augmented Lagrangian method. The unconstrained subproblem at each outer iteration is:
+
+```
+min_W  F(W) + alpha * h(W) + (rho / 2) * h(W)^2
+
+where:
+  F(W)   = (1/2n) ||X - XW||_F^2 + lambda * ||W||_1   (penalized least squares)
+  h(W)   = tr(e^{W∘W}) - d                              (acyclicity constraint)
+  alpha  = Lagrange multiplier (updated each outer iter)
+  rho    = penalty parameter (doubled each outer iter)
+```
+
+The inner optimization uses L-BFGS (limited-memory BFGS) since both F and h have closed-form gradients. The gradient of h with respect to W is:
+
+```
+∇h(W) = (e^{W∘W})^T ∘ 2W
+```
+
+This is computable in O(d^3) via the matrix exponential. The augmented Lagrangian doubles rho each outer iteration until h(W) < h_tol, guaranteeing convergence to a DAG.
+
+**Limitation**: The trace-exponential h(W) = tr(e^{W∘W}) - d suffers from numerical overflow when d > 200. The matrix exponential produces entries of magnitude e^{d}, which exceeds float64 range. This motivated both the DAGMA and SDCD improvements below.
+
+### DAG-GNN -- Neural Causal Discovery
+
+Where NOTEARS assumes linear structural equations (Y = WX + noise), DAG-GNN extends continuous DAG learning to nonlinear relationships using graph neural networks.
+
+```rust
+/// DAG-GNN: Structure learning via Graph Neural Networks.
+///
+/// Yu et al. (2019, ICML): Uses a variational autoencoder with GNN
+/// encoder/decoder to learn the DAG structure alongside functional
+/// relationships. The adjacency matrix is treated as a learnable
+/// parameter, with the acyclicity constraint integrated into the loss.
+///
+/// Advantages over PC/NOTEARS:
+/// - Captures nonlinear causal relationships via neural expressiveness
+/// - Handles mixed variable types (continuous + discrete)
+/// - End-to-end differentiable (gradient-based optimization)
+pub struct DagGnnConfig {
+    /// GNN encoder hidden dimension.
+    pub encoder_hidden: usize,     // default: 64
+    /// Number of GNN message-passing layers.
+    pub n_layers: usize,            // default: 2
+    /// VAE latent dimension.
+    pub latent_dim: usize,          // default: 16
+    /// Edge existence temperature (Gumbel-Softmax for discrete edges).
+    pub temperature: f64,           // default: 0.5
+    /// KL divergence weight in ELBO.
+    pub kl_weight: f64,             // default: 1.0
+    /// Acyclicity penalty weight (grows during training).
+    pub acyclicity_weight: f64,     // default: 1.0
+}
+```
+
+The architecture has two components:
+
+1. **Encoder**: A GNN that maps observed variables X to a latent representation Z. The adjacency matrix A is a learnable parameter that defines the message-passing structure. Edges are sampled via Gumbel-Softmax (Jang et al., 2017) to maintain differentiability while producing discrete edge decisions.
+
+2. **Decoder**: Another GNN that reconstructs X from Z using the same adjacency matrix A. The reconstruction loss trains the model to learn both the graph structure (A) and the functional relationships (GNN weights).
+
+The loss function combines reconstruction, KL divergence, and acyclicity:
+
+```
+L = -ELBO + acyclicity_weight * h(A)
+  = E_q[log p(X|Z,A)] - kl_weight * KL(q(Z|X,A) || p(Z)) + acyclicity_weight * h(A)
+```
+
+The acyclicity term h(A) uses the same trace-exponential constraint as NOTEARS. During training, `acyclicity_weight` increases on a schedule (typically doubling every 100 epochs) to gradually enforce the DAG constraint, allowing the model to first learn approximate relationships before being forced into acyclicity.
+
+**Trade-off**: DAG-GNN captures nonlinear relationships that NOTEARS misses, but requires substantially more data (thousands of samples vs. hundreds for NOTEARS) and is sensitive to hyperparameters (temperature, KL weight, training schedule). For the linear case, NOTEARS is preferred.
+
+### SDCD -- Stable Differentiable Causal Discovery
+
+SDCD (Nazaret et al., 2024) addresses the core numerical instability of NOTEARS via a two-stage approach that separates edge pruning from DAG enforcement.
+
+```rust
+/// SDCD: Two-stage stable causal discovery.
+///
+/// Nazaret et al. (2024, ICML 2024, PMLR 235:37413-37445)
+/// Addresses numerical instability in NOTEARS via two-stage optimization:
+///
+/// Stage 1 (Pruning): Optimize edge weights WITHOUT acyclicity constraint.
+///   Uses L1 regularization to identify likely edges.
+///   Much faster — no expensive matrix exponential.
+///
+/// Stage 2 (DAG Learning): Apply spectral acyclicity constraint
+///   h(A) = λ_max(|A|) on the pruned graph.
+///   Spectral constraint: gradient = right_eigvec · left_eigvec^T.
+///   10-100x faster convergence than NOTEARS.
+pub struct SdcdSolver {
+    /// Stage 1: edge pruning parameters.
+    pub pruning_l1_weight: f64,     // default: 0.1
+    pub pruning_epochs: usize,      // default: 100
+    pub pruning_threshold: f64,     // default: 0.01 (edges below this removed)
+    /// Stage 2: DAG learning parameters.
+    pub dag_learning_rate: f64,     // default: 1e-3
+    pub dag_epochs: usize,          // default: 200
+    /// Spectral constraint gradient method.
+    pub eigvec_method: EigvecMethod,
+}
+
+pub enum EigvecMethod {
+    /// Full eigendecomposition (via LAPACK dsyev).
+    Full,
+    /// Power iteration (faster for single dominant eigenvalue).
+    PowerIteration { max_iter: usize, tol: f64 },
+    /// Lanczos (for sparse adjacency matrices).
+    Lanczos { n_krylov: usize },
+}
+```
+
+The key innovation is the **spectral acyclicity constraint**. Instead of h(W) = tr(e^{W∘W}) - d, SDCD uses:
+
+```
+h(W) = lambda_max(|W|)
+
+where lambda_max is the largest eigenvalue of the element-wise absolute value of W.
+A matrix W encodes a DAG if and only if lambda_max(|W|) < 1.
+```
+
+This constraint is numerically stable (eigenvalues are bounded, no exponential blowup) and its gradient is computed via the eigenvector:
+
+```
+∇h(W) = sign(W) ∘ (v_right · v_left^T)
+
+where v_right, v_left are the right and left eigenvectors
+corresponding to lambda_max(|W|).
+```
+
+The two-stage approach provides additional speedup. Stage 1 runs unconstrained L1-penalized optimization to identify the sparse set of candidate edges. Stage 2 operates only on this pruned graph, which is typically much smaller than the full d x d adjacency matrix. On benchmarks, SDCD achieves 10-100x faster convergence than NOTEARS while producing equal or better structural accuracy.
+
+### DAGMA -- Log-Determinant Acyclicity
+
+DAGMA (Bello et al., 2022) provides a third acyclicity characterization that avoids both the matrix exponential (NOTEARS) and eigenvalue computation (SDCD):
+
+```rust
+/// DAGMA: DAG learning via M-matrices and log-determinant.
+///
+/// Bello et al. (2022, NeurIPS): Uses M-matrix theory to characterize
+/// DAGs via log-determinant:
+///
+///   h(W) = -log det(sI - W∘W) + d·log(s)
+///
+/// where s > 0 is a hyperparameter (default: 1.0).
+/// h(W) = 0 if and only if W encodes a DAG.
+///
+/// Advantages:
+/// - No matrix exponential (avoids NOTEARS overflow)
+/// - Gradient is (sI - W∘W)^{-1}, a matrix inverse (O(d³), stable)
+/// - The log-det is a barrier function: it goes to +infinity as W
+///   approaches a cycle, preventing the optimizer from crossing into
+///   cyclic territory. This self-correcting property eliminates the
+///   need for the augmented Lagrangian outer loop.
+pub struct DagmaSolver {
+    /// Hyperparameter s for the log-det constraint.
+    /// Larger s makes the constraint more permissive initially.
+    pub s: f64,                     // default: 1.0
+    /// Learning rate for gradient descent.
+    pub learning_rate: f64,         // default: 3e-2
+    /// Maximum optimization iterations.
+    pub max_iter: usize,            // default: 5000
+    /// L1 regularization for sparsity.
+    pub lambda_l1: f64,             // default: 0.02
+    /// Convergence tolerance.
+    pub tol: f64,                   // default: 1e-6
+    /// Schedule for decreasing s (annealing toward strict acyclicity).
+    pub s_schedule: Vec<f64>,       // default: [1.0, 0.9, 0.8, 0.7]
+}
+```
+
+The gradient of the DAGMA constraint has a particularly clean form:
+
+```
+∇h(W) = -2W ∘ (sI - W∘W)^{-1}
+```
+
+This requires only a matrix inverse, which is O(d^3) and numerically stable via LU decomposition. Compared to NOTEARS (matrix exponential, overflow-prone) and SDCD (eigendecomposition, requires iterative methods for large d), the matrix inverse is the most numerically well-conditioned operation of the three.
+
+The s-annealing schedule starts with a permissive constraint (large s) that allows the optimizer to explore the space of weighted graphs, then gradually tightens (decreasing s) to enforce strict acyclicity. This eliminates the augmented Lagrangian outer loop entirely, simplifying the optimization to a single-level problem.
+
+### Comparison of acyclicity constraints
+
+| Method | Constraint h(W) | Gradient cost | Numerical stability | Scales to |
+|---|---|---|---|---|
+| NOTEARS (2018) | tr(e^{W∘W}) - d | O(d³) matrix exp | Poor (overflow at d>200) | ~200 variables |
+| DAGMA (2022) | -log det(sI - W∘W) + d·log(s) | O(d³) matrix inverse | Good (LU decomposition) | ~500 variables |
+| SDCD (2024) | lambda_max(\|W\|) | O(d²) power iteration | Good (bounded eigenvalues) | ~2000 variables |
+| DAG-GNN (2019) | tr(e^{A∘A}) - d (on learned A) | O(d³) + backprop | Poor (same as NOTEARS) | ~100 variables (GPU) |
+
+### Critical analysis: known limitations
+
+Ng, Ghassami, & Zhang (2024, CLR 2024) provide a sobering empirical analysis of continuous optimization methods for DAG learning. Key findings relevant to Roko:
+
+1. **Thresholding sensitivity**: All continuous methods produce dense weighted matrices that require post-hoc thresholding to obtain a DAG. The choice of threshold dramatically affects the recovered structure. A threshold too low retains spurious edges; too high removes genuine ones.
+
+2. **Nonlinear settings**: NOTEARS (linear) and DAGMA (linear) degrade significantly on nonlinear data. DAG-GNN handles nonlinearity but at much higher sample and computational cost. For Roko's domains (code dependency graphs, protocol interactions), relationships are often nonlinear.
+
+3. **Equal variance assumption**: NOTEARS assumes equal noise variance across variables. Violation of this assumption (common in real data) biases edge orientation. SDCD partially addresses this via its two-stage approach.
+
+4. **Faithfulness violations**: All continuous methods assume faithfulness (no perfect cancellation of causal effects). In engineered systems like software, faithfulness violations are common (e.g., two bugs that cancel each other's effects).
+
+Zhou, Wang, et al. (2025, NeurIPS 2025) introduce differentiable constraint-based methods that combine the statistical rigor of PC-style independence testing with the scalability of continuous optimization, partially addressing limitation (4).
+
+### Integration with Existing Causal Discovery
+
+Roko combines constraint-based discovery (PC algorithm, described above) with continuous optimization (SDCD) in a hybrid pipeline that leverages the strengths of both approaches.
+
+```rust
+/// Hybrid causal discovery pipeline for Roko.
+///
+/// Combines constraint-based (PC) with continuous optimization (SDCD):
+///
+/// 1. PC algorithm for skeleton discovery (fast, handles small p)
+/// 2. SDCD for edge weight estimation on the PC skeleton
+/// 3. Interventional validation via mirage-rs (ground truth)
+/// 4. Dream-based counterfactual refinement
+///
+/// This hybrid (PC-NOTEARS; Kraskov et al., 2024, Bioinformatics)
+/// achieves the best aggregate performance across structural
+/// and effect size metrics.
+pub struct HybridCausalDiscovery {
+    /// Phase 1: constraint-based skeleton.
+    pub pc_config: PcAlgorithmConfig,
+    /// Phase 2: continuous optimization on skeleton.
+    pub sdcd_config: SdcdSolver,
+    /// Phase 3: interventional validation.
+    pub intervention_config: InterventionalDiscovery,
+    /// Minimum edge weight to retain in final graph.
+    pub final_threshold: f64,       // default: 0.05
+}
+```
+
+The hybrid approach works in four phases:
+
+**Phase 1 (PC skeleton)**: Run the PC algorithm to discover the undirected skeleton. This is fast for small variable counts (d < 50) and produces a sparse graph by removing conditionally independent pairs. The skeleton serves as a mask for the continuous optimization -- SDCD only needs to estimate weights for edges that survive PC's independence tests.
+
+**Phase 2 (SDCD weight estimation)**: Run SDCD on the PC skeleton. Stage 1 (pruning) is skipped since PC already performed edge pruning. Stage 2 applies the spectral acyclicity constraint to orient edges and estimate weights. Operating on the PC skeleton rather than the full d x d matrix dramatically reduces the search space.
+
+**Phase 3 (Interventional validation)**: For high-confidence edges (weight > final_threshold), run interventional experiments via mirage-rs (chain domain) or workspace snapshots (coding domain) to confirm causal direction and measure effect size. This moves from Level 1 (association) to Level 2 (intervention) of Pearl's hierarchy.
+
+**Phase 4 (Counterfactual refinement)**: During REM Dreams, generate counterfactual scenarios from the validated causal model. Counterfactuals that match historical data increase confidence; those that diverge trigger re-examination of the causal structure.
+
+The hybrid pipeline addresses the thresholding sensitivity problem (limitation 1 from Ng et al.) by using PC's independence tests as a principled pruning criterion rather than relying on arbitrary weight thresholds. It addresses the faithfulness problem (limitation 4) by validating with interventional experiments rather than relying solely on observational statistics.
+
+### Domain-specific considerations
+
+**Code dependency graphs**: Function call graphs and import dependencies provide a known partial DAG structure. The hybrid pipeline can incorporate this as a structural prior, constraining SDCD to only discover edges consistent with the known dependency structure. For example, if module A does not import module B, the optimizer is constrained to set W[A,B] = 0.
+
+**Protocol interaction graphs**: Cross-protocol causal relationships (e.g., Uniswap price changes causing Aave liquidations) operate on different time scales. The hybrid pipeline runs separate PC+SDCD passes at each time scale, then merges the results. Edges that appear at multiple time scales receive higher confidence.
+
+### Test criteria for continuous optimization
+
+- **NOTEARS acyclicity**: After optimization with h_tol=1e-8, the acyclicity constraint satisfies h(W) < 1e-8. Verify on random graphs with d=10, 20, 50.
+- **SDCD spectral convergence**: After stage 2, lambda_max(|W|) < 1.0 on all test instances. Verify that the spectral radius monotonically decreases during optimization.
+- **Known DAG recovery**: On synthetic data generated from a known DAG X -> Y -> Z with linear structural equations, each solver (NOTEARS, SDCD, DAGMA) recovers the correct structure with edge weights within 10% of ground truth.
+- **Hybrid consistency**: The PC skeleton is a supergraph of the final SDCD result. That is, every edge in the SDCD output also appears in the PC skeleton. If this invariant is violated, the SDCD solver introduced a spurious edge outside the PC mask.
+- **Nonlinear recovery (DAG-GNN)**: On data generated from Y = sin(X) + noise, Z = X^2 + noise, DAG-GNN recovers X -> Y and X -> Z while NOTEARS (linear) fails to orient X -> Z correctly.
+- **Numerical stability**: SDCD and DAGMA complete without NaN or Inf on graphs with d=500. NOTEARS is expected to overflow and is excluded from this test.
+- **Threshold sensitivity**: For each method, vary the post-optimization threshold from 0.01 to 0.5 and measure structural Hamming distance (SHD). Report the threshold range where SHD < 5 for the ground-truth graph.
+
+### Citations for continuous optimization methods
+
+- Zheng, X., Aragam, B., Ravikumar, P., & Xing, E. P. (2018). "DAGs with NO TEARS: Continuous Optimization for Structure Learning." *NeurIPS 2018*. -- Original continuous acyclicity constraint via trace exponential.
+- Yu, Y., Chen, J., Gao, T., & Yu, M. (2019). "DAG-GNN: DAG Structure Learning with Graph Neural Networks." *ICML 2019*. -- Neural causal discovery with VAE + GNN architecture.
+- Bello, K., Aragam, B., & Ravikumar, P. (2022). "DAGMA: Learning DAGs via M-matrices and a Log-Determinant Acyclicity Characterization." *NeurIPS 2022*. -- Log-determinant acyclicity, eliminates augmented Lagrangian.
+- Nazaret, A., Hoffman, M., et al. (2024). "Stable Differentiable Causal Discovery." *ICML 2024*, PMLR 235:37413-37445. -- Two-stage SDCD with spectral acyclicity constraint.
+- Ng, I., Ghassami, A., & Zhang, K. (2024). "Structure Learning with Continuous Optimization: A Sober Look." *CLR 2024*. -- Critical empirical analysis of continuous DAG learning methods.
+- Zhou, J., Wang, M., et al. (2025). "Differentiable Constraint-Based Causal Discovery." *NeurIPS 2025*. -- Hybrid differentiable + constraint-based approach.
+
+---
+
 ## Academic foundations
 
 - Pearl, J. (2009). *Causality: Models, Reasoning, and Inference*. 2nd ed. Cambridge University Press. — SCM formalism, do-calculus, backdoor criterion.
@@ -774,7 +1103,7 @@ A hypothesis is promoted to "confirmed" at confidence >= 0.8 (requires ~5 suppor
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [01-oracle-trait.md](./01-oracle-trait.md) for how causal models feed oracle predictions
 - See [02-chain-oracles.md](./02-chain-oracles.md) for mirage-rs simulation integration

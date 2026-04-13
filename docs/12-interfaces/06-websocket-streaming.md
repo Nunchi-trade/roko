@@ -285,7 +285,7 @@ mod tests {
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [05-http-api-roko-serve.md](./05-http-api-roko-serve.md) for REST API
 - See [10-spectre-creature-visualization.md](./10-spectre-creature-visualization.md) for Spectre state model

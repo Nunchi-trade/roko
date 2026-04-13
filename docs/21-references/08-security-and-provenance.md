@@ -6,6 +6,8 @@
 **Prerequisites**: [Architecture](../00-architecture/INDEX.md), [Harness](../04-verification/INDEX.md)
 **Key sources**: `bardo-backup/prd/02-mortality/14-research-foundations.md` §9, `bardo-backup/prd/shared/citations.md` §8
 
+> **Implementation**: Reference
+
 ---
 
 ## Abstract
@@ -107,7 +109,20 @@ Agents managing real tasks are attack targets. Memory poisoning (OWASP LLM04:202
 
 ---
 
-## Cross-references
+## Formal Verification for AI Safety (2024-2025)
+
+- Position: Formal Methods are the Principled Foundation of Safe AI (2025). _ICML_, 2025.
+  *Grounds: Formal safety mandate — position paper establishing that formal methods (model checking, theorem proving, abstract interpretation) provide rigorous mathematical frameworks to analyze, specify, and verify AI systems. Validates Roko's structural safety approach: the Gate pipeline implements formal verification principles (compile-pass, test-pass, lint-pass) rather than relying on LLM self-assessment.*
+
+- Towards Guaranteed Safe AI (2024). A Framework for Ensuring Robust and Reliable AI Systems. arXiv:2405.06624.
+  *Grounds: Safety guarantees framework — framework combining world models, safety specifications, and verifiers to provide quantitative safety guarantees for AI systems. Maps directly to Roko's Gate pipeline: the world model (NeuroStore), safety specifications (Policy trait), and verifiers (Gate pipeline) form the three components required for guaranteed safety.*
+
+- Model Checking Deep Neural Networks (2025). _Frontiers in Computer Science_, 2025.
+  *Grounds: Neural network verification — applying temporal logic (LTL, CTL) to verify neural network behavior. Applicable to formal specification of agent behavior constraints in Roko's Policy trait.*
+
+---
+
+## Cross-References
 
 - See [19-regulatory-compliance.md](./19-regulatory-compliance.md) for EU AI Act, SEC/CFTC, and compliance frameworks
 - See [22-protocol-standards.md](./22-protocol-standards.md) for ERC-8004 agent identity

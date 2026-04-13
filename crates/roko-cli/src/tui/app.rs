@@ -351,17 +351,6 @@ impl App {
                 }
             }
 
-            // Process deferred state changes before drawing
-            if self.tui_state.config_toggle_expand {
-                self.tui_state.config_toggle_expand = false;
-                let idx = self.tui_state.config_selected;
-                if self.tui_state.config_expanded.contains(&idx) {
-                    self.tui_state.config_expanded.remove(&idx);
-                } else {
-                    self.tui_state.config_expanded.insert(idx);
-                }
-            }
-
             // Adaptive frame rate: skip frames when idle with no agents
             let user_idle = self.last_input.elapsed() > Duration::from_secs(3);
             let has_agents = self.tui_state.active_agent_count() > 0;
@@ -706,14 +695,18 @@ impl App {
                 self.tui_state.message_input.clear();
             }
             TuiAction::InputChar(c) => {
-                if self.tui_state.input_mode == InputMode::Inject {
+                if self.tui_state.input_mode == InputMode::ConfigEdit {
+                    self.tui_state.config_edit_buffer.push(c);
+                } else if self.tui_state.input_mode == InputMode::Inject {
                     self.tui_state.message_input.push(c);
                 } else if self.tui_state.input_mode == InputMode::Filter {
                     self.tui_state.filter_text.push(c);
                 }
             }
             TuiAction::InputBackspace => {
-                if self.tui_state.input_mode == InputMode::Inject {
+                if self.tui_state.input_mode == InputMode::ConfigEdit {
+                    self.tui_state.config_edit_buffer.pop();
+                } else if self.tui_state.input_mode == InputMode::Inject {
                     self.tui_state.message_input.pop();
                 } else if self.tui_state.input_mode == InputMode::Filter {
                     self.tui_state.filter_text.pop();
@@ -861,19 +854,162 @@ impl App {
                 }
             }
             TuiAction::ConfigUp => {
-                self.tui_state.config_selected = self.tui_state.config_selected.saturating_sub(1);
+                self.tui_state.config_cursor = self.tui_state.config_cursor.saturating_sub(1);
+                // Skip headers when navigating up
+                let items = super::config_meta::build_flat_items(&self.workdir, &self.tui_state.config_pending);
+                while self.tui_state.config_cursor > 0 {
+                    if let Some(super::config_meta::ConfigItem::Header(_)) = items.get(self.tui_state.config_cursor) {
+                        self.tui_state.config_cursor = self.tui_state.config_cursor.saturating_sub(1);
+                    } else {
+                        break;
+                    }
+                }
             }
             TuiAction::ConfigDown => {
-                // ConfigDown clamped in draw (we don't know section count here)
-                self.tui_state.config_selected = self.tui_state.config_selected.saturating_add(1);
+                let items = super::config_meta::build_flat_items(&self.workdir, &self.tui_state.config_pending);
+                let max_idx = items.len().saturating_sub(1);
+                self.tui_state.config_cursor = (self.tui_state.config_cursor + 1).min(max_idx);
+                // Skip headers when navigating down
+                while self.tui_state.config_cursor < max_idx {
+                    if let Some(super::config_meta::ConfigItem::Header(_)) = items.get(self.tui_state.config_cursor) {
+                        self.tui_state.config_cursor += 1;
+                    } else {
+                        break;
+                    }
+                }
             }
-            TuiAction::ConfigLeft => {
-                // Collapse selected section
-                self.tui_state.config_expanded.remove(&self.tui_state.config_selected);
+            TuiAction::ConfigToggle => {
+                let items = super::config_meta::build_flat_items(&self.workdir, &self.tui_state.config_pending);
+                if let Some(item) = items.get(self.tui_state.config_cursor) {
+                    match item {
+                        super::config_meta::ConfigItem::Field { meta, value, source } => {
+                            match &meta.kind {
+                                super::config_meta::ConfigFieldKind::Bool => {
+                                    let new_val = if value == "true" { "false" } else { "true" };
+                                    self.tui_state.config_pending.insert(meta.key.to_string(), new_val.to_string());
+                                }
+                                super::config_meta::ConfigFieldKind::ReadOnly => {}
+                                super::config_meta::ConfigFieldKind::Enum(_)
+                                | super::config_meta::ConfigFieldKind::Int { .. } => {
+                                    // For enums/presets, Enter cycles right
+                                    if *source != super::config_meta::ConfigSource::Env {
+                                        if let Some(new_val) = cycle_field_value(meta, value, true) {
+                                            self.tui_state.config_pending.insert(meta.key.to_string(), new_val);
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    // Start text edit for free-form fields
+                                    if *source != super::config_meta::ConfigSource::Env {
+                                        self.tui_state.config_editing = true;
+                                        self.tui_state.config_edit_buffer = value.clone();
+                                        self.tui_state.config_edit_key = Some(meta.key.to_string());
+                                        self.tui_state.input_mode = InputMode::ConfigEdit;
+                                    }
+                                }
+                            }
+                        }
+                        super::config_meta::ConfigItem::SaveButton => {
+                            // Inline save logic
+                            if self.tui_state.config_pending.is_empty() {
+                                self.notifications.push(super::modals::Notification::info(
+                                    "No pending changes to save",
+                                ));
+                            } else {
+                                match super::config_meta::save_pending_edits(
+                                    &self.workdir,
+                                    &self.tui_state.config_pending,
+                                ) {
+                                    Ok(()) => {
+                                        let count = self.tui_state.config_pending.len();
+                                        self.tui_state.config_pending.clear();
+                                        self.notifications.push(super::modals::Notification::info(
+                                            &format!("Config saved ({count} changes written to roko.toml)"),
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        self.notifications.push(super::modals::Notification::error(
+                                            &format!("Save failed: {e}"),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        super::config_meta::ConfigItem::Header(_) => {}
+                    }
+                }
             }
-            TuiAction::ConfigRight | TuiAction::ConfigSelect => {
-                // Toggle expand/collapse
-                self.tui_state.config_toggle_expand = true;
+            TuiAction::ConfigCycleLeft | TuiAction::ConfigCycleRight => {
+                let items = super::config_meta::build_flat_items(&self.workdir, &self.tui_state.config_pending);
+                if let Some(super::config_meta::ConfigItem::Field { meta, value, source }) =
+                    items.get(self.tui_state.config_cursor)
+                {
+                    if *source == super::config_meta::ConfigSource::Env {
+                        // Env-overridden: not editable
+                    } else {
+                        let direction = matches!(action, TuiAction::ConfigCycleRight);
+                        if let Some(new_val) = cycle_field_value(meta, value, direction) {
+                            self.tui_state.config_pending.insert(meta.key.to_string(), new_val);
+                        }
+                    }
+                }
+            }
+            TuiAction::ConfigStartEdit => {
+                let items = super::config_meta::build_flat_items(&self.workdir, &self.tui_state.config_pending);
+                if let Some(super::config_meta::ConfigItem::Field { meta, value, source }) =
+                    items.get(self.tui_state.config_cursor)
+                {
+                    if *source != super::config_meta::ConfigSource::Env
+                        && !matches!(meta.kind, super::config_meta::ConfigFieldKind::ReadOnly)
+                    {
+                        self.tui_state.config_editing = true;
+                        self.tui_state.config_edit_buffer = value.clone();
+                        self.tui_state.config_edit_key = Some(meta.key.to_string());
+                        self.tui_state.input_mode = InputMode::ConfigEdit;
+                    }
+                }
+            }
+            TuiAction::ConfigCommitEdit => {
+                if self.tui_state.config_editing {
+                    if let Some(key) = self.tui_state.config_edit_key.take() {
+                        let val = self.tui_state.config_edit_buffer.clone();
+                        self.tui_state.config_pending.insert(key, val);
+                    }
+                    self.tui_state.config_editing = false;
+                    self.tui_state.config_edit_buffer.clear();
+                    self.tui_state.input_mode = InputMode::Normal;
+                }
+            }
+            TuiAction::ConfigCancelEdit => {
+                self.tui_state.config_editing = false;
+                self.tui_state.config_edit_buffer.clear();
+                self.tui_state.config_edit_key = None;
+                self.tui_state.input_mode = InputMode::Normal;
+            }
+            TuiAction::ConfigSave => {
+                if self.tui_state.config_pending.is_empty() {
+                    self.notifications.push(super::modals::Notification::info(
+                        "No pending changes to save",
+                    ));
+                } else {
+                    match super::config_meta::save_pending_edits(
+                        &self.workdir,
+                        &self.tui_state.config_pending,
+                    ) {
+                        Ok(()) => {
+                            let count = self.tui_state.config_pending.len();
+                            self.tui_state.config_pending.clear();
+                            self.notifications.push(super::modals::Notification::info(
+                                &format!("Config saved ({count} changes written to roko.toml)"),
+                            ));
+                        }
+                        Err(e) => {
+                            self.notifications.push(super::modals::Notification::error(
+                                &format!("Save failed: {e}"),
+                            ));
+                        }
+                    }
+                }
             }
             TuiAction::MouseClick { x, y } => {
                 // Use hit_test to determine zone
@@ -1375,6 +1511,43 @@ impl App {
         execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)
             .context("leave alternate screen")?;
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Config field value cycling
+// ---------------------------------------------------------------------------
+
+/// Cycle an enum/preset field value left (false) or right (true).
+fn cycle_field_value(
+    meta: &super::config_meta::ConfigFieldMeta,
+    current: &str,
+    forward: bool,
+) -> Option<String> {
+    match &meta.kind {
+        super::config_meta::ConfigFieldKind::Enum(opts) => {
+            let idx = opts.iter().position(|&o| o == current).unwrap_or(0);
+            let new_idx = if forward {
+                (idx + 1) % opts.len()
+            } else {
+                (idx + opts.len() - 1) % opts.len()
+            };
+            Some(opts[new_idx].to_string())
+        }
+        super::config_meta::ConfigFieldKind::Int { presets, .. } if !presets.is_empty() => {
+            let cur: i64 = current.parse().unwrap_or(0);
+            let idx = presets.iter().position(|&p| p == cur).unwrap_or(0);
+            let new_idx = if forward {
+                (idx + 1) % presets.len()
+            } else {
+                (idx + presets.len() - 1) % presets.len()
+            };
+            Some(presets[new_idx].to_string())
+        }
+        super::config_meta::ConfigFieldKind::Bool => {
+            Some(if current == "true" { "false" } else { "true" }.to_string())
+        }
+        _ => None,
     }
 }
 

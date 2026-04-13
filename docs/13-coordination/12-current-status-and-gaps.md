@@ -306,7 +306,7 @@ implementation plan follows a tier progression from types (Tier 1) through local
 
 ---
 
-## Related Sub-Docs
+## Cross-References
 
 - All preceding sub-docs (00–11) — this sub-doc surveys their implementation status
 - `INDEX.md` — Table of contents for the full coordination topic

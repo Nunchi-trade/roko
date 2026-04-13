@@ -533,7 +533,7 @@ When multiple developers work on the same roko project:
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [00-cli-overview.md](./00-cli-overview.md) for the CLI command structure
 - See [04-configuration-layered-resolution.md](./04-configuration-layered-resolution.md) for the configuration system

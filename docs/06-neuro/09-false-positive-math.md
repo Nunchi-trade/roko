@@ -194,7 +194,7 @@ Somatic markers (see [13-somatic-integration.md](./13-somatic-integration.md)) a
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [04-hdc-vsa-foundations.md](./04-hdc-vsa-foundations.md) for the dimension choice
 - See [08-cross-domain-hdc-transfer.md](./08-cross-domain-hdc-transfer.md) for how resonance detection uses these thresholds

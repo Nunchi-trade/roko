@@ -569,7 +569,7 @@ compute_coords(action, context)        // raw 8D coordinates
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [06-somatic-markers-damasio.md](./06-somatic-markers-damasio.md) for k-d tree query over strategy space
 - See [07-15-percent-contrarian-retrieval.md](./07-15-percent-contrarian-retrieval.md) for contrarian retrieval in strategy space

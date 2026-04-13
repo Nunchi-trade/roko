@@ -6,6 +6,8 @@
 **Prerequisites**: [Architecture](../00-architecture/INDEX.md)
 **Key sources**: `bardo-backup/prd/shared/citations.md` §6, `bardo-backup/tmp/agent-chain/08-references.md`
 
+> **Implementation**: Reference
+
 ---
 
 ## Abstract
@@ -108,7 +110,7 @@ Roko's architecture is fundamentally cybernetic: a system that regulates itself 
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [04-coordination-and-multi-agent.md](./04-coordination-and-multi-agent.md) for stigmergic coordination
 - See [16-active-inference.md](./16-active-inference.md) for free energy as cybernetic principle

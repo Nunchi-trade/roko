@@ -195,7 +195,7 @@ Local identity enables agent management, episode attribution, and knowledge prov
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [05-ventriloquist-defense.md](./05-ventriloquist-defense.md) for system prompt hash verification
 - See [06-erc-8004-registries.md](./06-erc-8004-registries.md) for the three ERC-8004 registries

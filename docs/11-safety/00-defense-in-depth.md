@@ -489,7 +489,7 @@ Map Roko's defense-in-depth to the CSA MAESTRO 7-layer framework (Cloud Security
 
 ---
 
-## Related Topics
+## Cross-References
 
 - [01-capability-tokens.md](01-capability-tokens.md) — Compile-time enforcement via `Capability<T>`
 - [02-audit-chain.md](02-audit-chain.md) — Cryptographic audit trail

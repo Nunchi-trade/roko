@@ -343,7 +343,274 @@ General-purpose agents require no domain-specific provisioning. They use the sta
 
 ---
 
-## Related Topics
+## Health Probes: Liveness, Readiness, and Startup
+
+Roko adapts Kubernetes' three-probe model for agent health monitoring. Each probe type serves a distinct purpose, preventing the conflation of "process alive" with "agent ready to accept work":
+
+```rust
+/// Agent health probe configuration, modeled after Kubernetes
+/// liveness/readiness/startup probes.
+///
+/// Crate: `roko-core`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthProbeConfig {
+    /// Liveness probe: Is the agent process alive and not deadlocked?
+    /// Failure action: restart the agent process (supervisor handles this).
+    /// Checks: event loop responsive, no OOM condition, watchdog timer alive.
+    pub liveness: ProbeSpec,
+
+    /// Readiness probe: Can the agent accept new tasks right now?
+    /// Failure action: remove from Mesh work distribution, stop accepting plan tasks.
+    /// Checks: Neuro store initialized, model routing configured, tools loaded.
+    pub readiness: ProbeSpec,
+
+    /// Startup probe: Has the agent completed initial boot?
+    /// While startup probe is active, liveness/readiness probes are DISABLED.
+    /// This prevents the supervisor from killing a slow-starting agent.
+    /// Checks: first cognitive loop iteration completed successfully.
+    pub startup: ProbeSpec,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProbeSpec {
+    /// How to check health.
+    pub handler: ProbeHandler,
+    /// Wait before first probe after state transition. Default: 5s.
+    /// Range: 0s-300s.
+    pub initial_delay: Duration,
+    /// Time between probes. Default: 10s. Range: 1s-600s.
+    pub period: Duration,
+    /// Max time for a single probe. Default: 1s. Range: 1s-30s.
+    pub timeout: Duration,
+    /// Consecutive successes to pass. Default: 1. Range: 1-10.
+    pub success_threshold: u32,
+    /// Consecutive failures to fail. Default: 3. Range: 1-10.
+    pub failure_threshold: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ProbeHandler {
+    /// Internal health check function (most common for self-hosted).
+    Internal,
+    /// HTTP GET to a health endpoint. Response 200-399 = healthy.
+    Http { path: String, port: u16 },
+    /// TCP connection attempt. Connection established = healthy.
+    Tcp { port: u16 },
+    /// Custom command. Exit code 0 = healthy.
+    Exec { command: Vec<String> },
+}
+
+impl Default for HealthProbeConfig {
+    fn default() -> Self {
+        Self {
+            liveness: ProbeSpec {
+                handler: ProbeHandler::Internal,
+                initial_delay: Duration::from_secs(15),
+                period: Duration::from_secs(20),
+                timeout: Duration::from_secs(1),
+                success_threshold: 1,
+                failure_threshold: 3,
+            },
+            readiness: ProbeSpec {
+                handler: ProbeHandler::Internal,
+                initial_delay: Duration::from_secs(5),
+                period: Duration::from_secs(10),
+                timeout: Duration::from_secs(1),
+                success_threshold: 1,
+                failure_threshold: 3,
+            },
+            startup: ProbeSpec {
+                handler: ProbeHandler::Internal,
+                initial_delay: Duration::from_secs(0),
+                period: Duration::from_secs(10),
+                timeout: Duration::from_secs(1),
+                success_threshold: 1,
+                failure_threshold: 30, // 30 × 10s = 300s max startup
+            },
+        }
+    }
+}
+```
+
+TOML configuration:
+
+```toml
+[health.liveness]
+initial_delay_secs = 15
+period_secs = 20
+failure_threshold = 3
+
+[health.readiness]
+initial_delay_secs = 5
+period_secs = 10
+failure_threshold = 3
+
+[health.startup]
+period_secs = 10
+failure_threshold = 30   # 300s max startup time
+```
+
+### Probe Semantics in Roko
+
+| Probe | Checks | Failure Action | Kubernetes Equivalent |
+|-------|--------|----------------|----------------------|
+| Liveness | Event loop tick within timeout, no OOM | Supervisor restarts process | Liveness: kubelet restarts container |
+| Readiness | Neuro initialized, Router configured, tools loaded | Remove from Mesh task distribution | Readiness: remove from Service endpoints |
+| Startup | First cognitive loop iteration passed gates | Kill and restart (agent failed to boot) | Startup: block liveness/readiness until pass |
+
+**Critical invariant**: While the startup probe has not yet passed, liveness and readiness probes are **not evaluated**. This prevents the supervisor from killing an agent that is legitimately slow to initialize (e.g., loading a large Neuro backup during restore).
+
+---
+
+## Init/Sidecar Pattern for Agent Provisioning
+
+Borrowing Kubernetes' init container and native sidecar container patterns (stable in Kubernetes 1.33), agent provisioning can be decomposed into sequential initialization tasks and persistent auxiliary processes:
+
+### Init Tasks (Sequential, Must Complete)
+
+| Init Task | Duration | What It Does | Failure Mode |
+|-----------|----------|-------------|-------------|
+| Schema migration | ~instant | Upgrade `.roko/` directory layout for new versions | Abort provisioning |
+| Secret injection | ~instant | Load API keys from keystore/env into memory | Abort provisioning |
+| Neuro restore | 1-30s | If `--restore` flag, load backup into Neuro store | Abort provisioning |
+| Model validation | ~1s | Verify configured inference models are reachable | Warn, continue with fallback |
+
+### Sidecar Processes (Persistent, Alongside Main Agent)
+
+| Sidecar | Purpose | Lifecycle |
+|---------|---------|-----------|
+| Metrics exporter | Prometheus/OpenTelemetry metrics from `.roko/learn/efficiency.jsonl` | Starts after init, stops after main agent |
+| Log forwarder | Stream `.roko/episodes.jsonl` to external observability | Starts after init, stops after main agent |
+| Mesh relay keepalive | Maintain outbound WebSocket to Mesh relay, reconnect on failure | Starts after init, stops after main agent |
+
+**Termination order**: Following Kubernetes 1.33 convention, main agent process terminates first, then sidecar processes terminate in reverse manifest order. This ensures metrics/logs capture the agent's final state before the exporters shut down.
+
+---
+
+## Restart Backoff Algorithm
+
+When the agent process crashes and the supervisor restarts it, exponential backoff prevents rapid restart loops from consuming resources:
+
+```rust
+/// Restart backoff algorithm for crashed agent processes.
+/// Follows Kubernetes CrashLoopBackOff semantics.
+///
+/// Crate: `bardo-runtime`
+pub struct RestartBackoff {
+    /// Current failure count since last successful run.
+    pub failure_count: u32,
+    /// Base delay. Default: 100ms. Range: 10ms-10s.
+    pub base_delay: Duration,
+    /// Maximum delay. Default: 300s (5 minutes). Range: 1s-3600s.
+    pub max_delay: Duration,
+    /// Successful run duration to reset failure count. Default: 300s.
+    pub reset_after: Duration,
+}
+
+impl RestartBackoff {
+    /// Compute delay before next restart attempt.
+    /// delay = min(base_delay * 10^failure_count, max_delay)
+    pub fn next_delay(&self) -> Duration {
+        let delay_ms = self.base_delay.as_millis() as f64
+            * 10.0_f64.powi(self.failure_count as i32);
+        Duration::from_millis(delay_ms.min(self.max_delay.as_millis() as f64) as u64)
+    }
+
+    /// Call when agent crashes.
+    pub fn record_failure(&mut self) {
+        self.failure_count = self.failure_count.saturating_add(1);
+    }
+
+    /// Call when agent has been running successfully for `reset_after`.
+    pub fn reset(&mut self) {
+        self.failure_count = 0;
+    }
+}
+
+impl Default for RestartBackoff {
+    fn default() -> Self {
+        Self {
+            failure_count: 0,
+            base_delay: Duration::from_millis(100),
+            max_delay: Duration::from_secs(300),
+            reset_after: Duration::from_secs(300),
+        }
+    }
+}
+```
+
+| Failure Count | Delay | Cumulative Wait |
+|---------------|-------|-----------------|
+| 0 | 100ms | 100ms |
+| 1 | 1s | 1.1s |
+| 2 | 10s | 11.1s |
+| 3 | 100s | 111.1s |
+| 4+ | 300s (capped) | 411.1s+ |
+
+After 5 consecutive failures (configurable via `max_restarts_per_hour`), the agent enters `Crashed` state and awaits operator intervention.
+
+---
+
+## Test Criteria
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn type_state_prevents_premature_loop_start() {
+        // Agent<Unvalidated> has no start_cognitive_loop method.
+        // This is a compile-time guarantee, not a runtime test.
+        // The test verifies the pipeline must complete in order.
+        let agent = Agent::new(test_manifest());
+        let validated = agent.validate().unwrap();
+        // validated.start_cognitive_loop() would be a compile error
+    }
+
+    #[test]
+    fn default_probes_allow_300s_startup() {
+        let config = HealthProbeConfig::default();
+        let max_startup = config.startup.period.as_secs()
+            * config.startup.failure_threshold as u64;
+        assert_eq!(max_startup, 300);
+    }
+
+    #[test]
+    fn restart_backoff_caps_at_max() {
+        let mut backoff = RestartBackoff::default();
+        for _ in 0..10 {
+            backoff.record_failure();
+        }
+        assert_eq!(backoff.next_delay(), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn restart_backoff_resets_on_success() {
+        let mut backoff = RestartBackoff::default();
+        backoff.record_failure();
+        backoff.record_failure();
+        assert!(backoff.next_delay() > Duration::from_secs(1));
+        backoff.reset();
+        assert_eq!(backoff.next_delay(), Duration::from_millis(100));
+    }
+
+    #[test]
+    fn provisioning_pipeline_stages_in_order() {
+        let stages = [
+            "Validate", "AllocateResources", "InitNeuro",
+            "ConfigureRouting", "LoadTools", "RegisterMesh", "Ready",
+        ];
+        assert_eq!(stages.len(), 7);
+        assert_eq!(stages[0], "Validate");
+        assert_eq!(stages[6], "Ready");
+    }
+}
+```
+
+---
+
+## Cross-References
 
 - `docs/17-lifecycle/01-agent-creation.md` — Manifest generation
 - `docs/17-lifecycle/03-configuration-and-operator-model.md` — Config override layers

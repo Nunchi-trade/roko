@@ -419,7 +419,7 @@ access control.
 
 ---
 
-## Related Sub-Docs
+## Cross-References
 
 - `05-pheromone-scope.md` — The three-scope hierarchy that subnets refine
 - `06-agent-mesh-sync.md` — Transport layer that enforces scope boundaries

@@ -605,7 +605,7 @@ mod tests {
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [10-spectre-creature-visualization.md](./10-spectre-creature-visualization.md) for the Spectre data model and behavioral state mapping
 - See [12-spectre-as-collective-display.md](./12-spectre-as-collective-display.md) for multi-agent rendering

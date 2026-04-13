@@ -112,7 +112,7 @@ Deep research and enhancement of 7 documents across all major subsystems:
 
 ---
 
-## Cross-references to Other Topics
+## Cross-References
 
 | Topic | Relationship |
 |---|---|

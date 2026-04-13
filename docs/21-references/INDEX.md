@@ -10,7 +10,7 @@
 
 ## Overview
 
-This reference collection catalogs **200+ academic citations** across 24 research domains that ground Roko's cognitive architecture. Each citation appears in exactly one domain sub-doc, with cross-references to related domains. Every citation includes:
+This reference collection catalogs **260+ academic citations** across 25 research domains that ground Roko's cognitive architecture. Each citation appears in exactly one domain sub-doc, with cross-references to related domains. Every citation includes:
 
 1. Standard academic format (authors, year, title, venue, arXiv ID when available)
 2. A 1-2 sentence annotation explaining which Roko subsystem the paper grounds and how
@@ -32,31 +32,32 @@ All mortality-era citations are preserved with reframed annotations: "because th
 | # | Domain | File | Key Citations | Count |
 |---|---|---|---|---|
 | 00 | [Lifecycle and Finite Agency](./00-lifecycle-and-finite-agency.md) | Resource-bounded cognition, plasticity loss, evolutionary computing | Ray 1991, Dohare 2024, Shuvaev 2024, Hinton 2022 | ~30 |
-| 01 | [Memory Consolidation](./01-memory-consolidation.md) | CLS theory, forgetting, retrieval, replay, agent memory | McClelland 1995, Ebbinghaus 1885, Park 2023, Mem0 | ~25 |
-| 02 | [Affective Computing](./02-affective-computing.md) | PAD model, somatic markers, mood-congruent retrieval, ALMA | Mehrabian 1996, Damasio 1994, Zhang SIGDIAL 2024 | ~20 |
-| 03 | [Dreams and Offline Learning](./03-dreams-and-offline-learning.md) | Hypnagogia, world models, sleep-time compute, wake-sleep | Lacaux 2021, DreamerV3, Lin 2025, WSCL 2024 | ~16 |
-| 04 | [Coordination and Multi-Agent](./04-coordination-and-multi-agent.md) | Stigmergy, cooperation, pheromone field, mesh coordination | Grassé 1959, Dorigo 1997, Kreps 1982, Simard 2012 | ~18 |
-| 05 | [Biological Analogues](./05-biological-analogues.md) | Foraging, immune selection, niche construction, morphogenesis | Charnov 1976, Kauffman 1993, Turing 1952, Hölldobler 2008 | ~16 |
-| 06 | [Self-Learning Systems](./06-self-learning-systems.md) | Reflexion, ExpeL, Voyager, Meta-Harness, EvoSkills, ADAS | Lee 2026, Shinn 2023, Hu 2025, DSPy | ~20 |
+| 01 | [Memory Consolidation](./01-memory-consolidation.md) | CLS theory, forgetting, retrieval, replay, agent memory surveys | McClelland 1995, Ebbinghaus 1885, Park 2023, Mem0, Liu 2025 | ~29 |
+| 02 | [Affective Computing](./02-affective-computing.md) | PAD model, somatic markers, mood-congruent retrieval, ALMA, emotion-in-loop | Mehrabian 1996, Damasio 1994, Zhang 2024, Yin 2025 | ~23 |
+| 03 | [Dreams and Offline Learning](./03-dreams-and-offline-learning.md) | Hypnagogia, world models, sleep-time compute, NeuroDream, SleepGate | Lacaux 2021, DreamerV3, Lin 2025, NeuroDream 2025 | ~21 |
+| 04 | [Coordination and Multi-Agent](./04-coordination-and-multi-agent.md) | Stigmergy, cooperation, emergent coordination, LLM collectives | Grassé 1959, Dorigo 1997, Emergence 2025, Stigmergy PDE 2024 | ~24 |
+| 05 | [Biological Analogues](./05-biological-analogues.md) | Foraging, immune selection, niche construction, swarm robotics | Charnov 1976, Kauffman 1993, Turing 1952, Stigmergy 2024 | ~18 |
+| 06 | [Self-Learning Systems](./06-self-learning-systems.md) | Reflexion, ExpeL, Voyager, SAMULE, multi-agent reflection | Lee 2026, Shinn 2023, Hu 2025, SAMULE 2025 | ~22 |
 | 07 | [Context Engineering](./07-context-engineering.md) | ACE, CSO, ACON, RAG, context position, compression | ACE 2026, Liu 2024, Lewis 2020, Wei 2022 | ~16 |
-| 08 | [Security and Provenance](./08-security-and-provenance.md) | CaMeL, OWASP, safe interruptibility, content provenance | Debenedetti 2025, Cohen 1987, C2PA, Orseau 2016 | ~16 |
-| 09 | [HDC and VSA](./09-hdc-vsa.md) | Binary Spatter Codes, learned hashing, resonator networks | Kanerva 1988/2009, Kleyko 2022, JL 1984, Ganesan 2021 | ~16 |
+| 08 | [Security and Provenance](./08-security-and-provenance.md) | CaMeL, OWASP, formal verification AI, safety guarantees | Debenedetti 2025, Cohen 1987, C2PA, Formal Methods 2025 | ~19 |
+| 09 | [HDC and VSA](./09-hdc-vsa.md) | BSC, learned hashing, FLASH adaptive encoder, HDC++ systems | Kanerva 1988/2009, Kleyko 2022, FLASH 2024, HPVM-HDC 2024 | ~20 |
 | 10 | [Market Microstructure](./10-market-microstructure.md) | AMM theory, vault mechanisms, risk/decision theory | Milionis 2023, Kelly 1956, Peters 2019, Taleb 2012 | ~12 |
 | 11 | [Streaming Algorithms](./11-streaming-algorithms.md) | Adaptive windowing, calibration, distributional RL | Bifet 2007, Farquhar 2024, Dabney 2018/2020 | ~10 |
-| 12 | [Signal Processing](./12-signal-processing.md) | TDA, information theory, computational thermodynamics | Shannon 1948, Carlsson 2009, Landauer 1961 | ~12 |
+| 12 | [Signal Processing](./12-signal-processing.md) | TDA, persistent homology advances, information theory | Shannon 1948, Carlsson 2009, TDA Beyond PH 2025 | ~16 |
 | 13 | [Philosophy](./13-philosophy.md) | Temporality, hauntology, embodiment, agency, narrative | Heidegger 1927, Derrida 1993, Camus 1942, Merleau-Ponty | ~18 |
 | 14 | [Agent Harnesses and Tool Use](./14-agent-harnesses-and-tool-use.md) | Meta-Harness, SWE-agent, Aider, benchmarks | Lee 2026, Yang 2024, SWE-bench, RAGAS | ~14 |
 | 15 | [Cybernetics and VSM](./15-cybernetics-and-vsm.md) | VSM, Good Regulator, autopoiesis, OODA, triple-loop | Beer 1972, Conant-Ashby 1970, Ashby 1956, Wiener 1948 | ~18 |
-| 16 | [Active Inference](./16-active-inference.md) | FEP, Expected Free Energy, Bayesian surprise, pymdp | Friston 2006/2010/2015, Parr 2022, Rao 1999 | ~12 |
+| 16 | [Active Inference](./16-active-inference.md) | FEP, DR-FREE robust inference, multi-LLM active inference | Friston 2006/2010/2015, Shafiei 2025, Koudahl 2024 | ~15 |
 | 17 | [Process Reward Models](./17-process-reward-models.md) | Step-level verification, generation-verification gap | Lightman 2024, Song 2025, Huang 2024 | ~8 |
-| 18 | [Collective Intelligence](./18-collective-intelligence.md) | C-Factor, network effects, Thousand Brains, swarm | Woolley 2010, Metcalfe, Hawkins 2017, Holland 1995 | ~12 |
+| 18 | [Collective Intelligence](./18-collective-intelligence.md) | C-Factor, dynamical emergence, LLM collectives, Thousand Brains | Woolley 2010, Emergence 2025, Hawkins 2017, Holland 1995 | ~14 |
 | 19 | [Regulatory Compliance](./19-regulatory-compliance.md) | EU AI Act, SEC/CFTC, GDPR, SOX, C2PA | EU AI Act 2024, MiFID II, HIPAA, GDPR | ~8 |
-| 20 | [Cognitive Architectures](./20-cognitive-architectures.md) | CoALA, dual-process, ACT-R, SOAR, CLARION | Sumers 2023, Kahneman 2011, Anderson 1993 | ~12 |
-| 21 | [Mechanism Design](./21-mechanism-design.md) | VCG auctions, reputation, demurrage, commons | Vickrey 1961, Clarke 1971, Groves 1973, Ostrom 1990 | ~14 |
+| 20 | [Cognitive Architectures](./20-cognitive-architectures.md) | CoALA, dual-process, agentic AI surveys, cognitive LLMs | Sumers 2023, Kahneman 2011, Agentic AI Survey 2025 | ~15 |
+| 21 | [Mechanism Design](./21-mechanism-design.md) | VCG auctions, agent exchange, LLM mechanism design | Vickrey 1961, AEX 2025, Duetting 2024, Ostrom 1990 | ~17 |
 | 22 | [Protocol Standards](./22-protocol-standards.md) | ERC-8004, x402, ERC-4337, ERC-721, cryptographic | ERC-8004, x402, Merkle 1987, Goldwasser 1985 | ~16 |
 | 23 | [Generational and Evolutionary](./23-generational-and-evolutionary.md) | Digital evolution, memetics, cultural transmission | Ray 1991, Dawkins 1976, Price 1970, Baldwin 1896 | ~18 |
+| 24 | [2025 Additions](./24-additions-2025.md) | Cross-domain 2024-2025 papers, emerging research frontiers | DR-FREE 2025, NeuroDream 2025, SAMULE 2025, AEX 2025 | ~60 |
 
-**Total**: ~200+ unique citations across 24 domains.
+**Total**: ~260+ unique citations across 25 domains.
 
 ---
 
@@ -82,6 +83,11 @@ Some papers are foundational to multiple domains. These appear in their primary 
 - **Park (2023) Generative Agents** — Primary: [01-memory](./01-memory-consolidation.md), Cross-ref: [03-dreams](./03-dreams-and-offline-learning.md), [14-harnesses](./14-agent-harnesses-and-tool-use.md)
 - **Lee et al. (2026) Meta-Harness** — Primary: [14-harnesses](./14-agent-harnesses-and-tool-use.md), Cross-ref: [06-self-learning](./06-self-learning-systems.md)
 - **Friston (2010) FEP** — Primary: [16-active-inference](./16-active-inference.md), Cross-ref: [15-cybernetics](./15-cybernetics-and-vsm.md)
+- **Shafiei et al. (2025) DR-FREE** — Primary: [16-active-inference](./16-active-inference.md), Cross-ref: [24-additions-2025](./24-additions-2025.md)
+- **Emergent Coordination (2025)** — Primary: [04-coordination](./04-coordination-and-multi-agent.md), Cross-ref: [18-collective-intelligence](./18-collective-intelligence.md)
+- **NeuroDream (2025)** — Primary: [03-dreams](./03-dreams-and-offline-learning.md), Cross-ref: [24-additions-2025](./24-additions-2025.md)
+- **SAMULE (2025)** — Primary: [06-self-learning](./06-self-learning-systems.md), Cross-ref: [24-additions-2025](./24-additions-2025.md)
+- **Stigmergy PDE (2024)** — Primary: [04-coordination](./04-coordination-and-multi-agent.md), Cross-ref: [05-biological](./05-biological-analogues.md)
 
 ---
 

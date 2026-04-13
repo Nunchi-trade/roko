@@ -926,7 +926,7 @@ The two mechanisms operate at different timescales and reinforce each other: mor
 
 ---
 
-## Related Sub-Docs
+## Cross-References
 
 - `03-digital-pheromones.md` — Pheromone struct, decay mechanics, confirmation
 - `05-pheromone-scope.md` — How pheromone scope controls propagation

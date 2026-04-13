@@ -804,7 +804,7 @@ the metrics stream and emits configuration-adjustment Engrams.
 
 ---
 
-## Related Sub-Docs
+## Cross-References
 
 - `00-stigmergy-theory.md` — The coordination mechanism being measured
 - `07-morphogenetic-specialization.md` — Specialization metrics

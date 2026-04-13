@@ -245,7 +245,7 @@ Deletion of the agent's **data** requires separate action (`rm -rf .roko/`). Thi
 
 ---
 
-## Related Topics
+## Cross-References
 
 - `docs/17-lifecycle/05-knowledge-backup-export.md` — Back up before deleting
 - `docs/17-lifecycle/07-new-agent-creation.md` — Create a fresh agent after deletion

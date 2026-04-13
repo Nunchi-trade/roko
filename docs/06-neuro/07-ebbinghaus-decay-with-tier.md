@@ -240,7 +240,7 @@ This property is important for auditability: given an entry's creation time, typ
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [02-four-validation-tiers.md](./02-four-validation-tiers.md) for tier multiplier details
 - See [03-type-half-lives.md](./03-type-half-lives.md) for base half-life rationale

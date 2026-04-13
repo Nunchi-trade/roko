@@ -399,6 +399,214 @@ A correct threat severity assessor must satisfy:
 | Ganguli et al. (2022) | 38,961 human red-team attacks; RLHF models harder to attack at scale |
 | Mazeika et al. (2024), HarmBench | 18 attack methods × 33 LLMs × 400+ prompts; structured threat ontology |
 | FIRST, CVSS v4.0 (2023) | 4-group scoring for external threat severity with environmental modifiers |
+| Mehrotra et al. (2024), NeurIPS, "Tree of Attacks: Jailbreaking Black-Box LLMs Automatically" | Tree-structured attack exploration with adaptive branching and pruning |
+| "WILDTEAMING at Scale," NeurIPS (2024) | Mining real-world interactions for novel attack tactics |
+| "MAD-MAX: Modular And Diverse Malicious Attack MiXtures," arXiv (2025) | 97% ASR via modular atomic attack composition |
+| "Jailbreaking to Jailbreak" (J2), arXiv:2502.09638 (2025) | Recursive jailbreaking achieving 0.975 ASR, matching human red teamers |
+| "AutoRedTeamer: Autonomous Red Teaming with Lifelong Attack Integration," arXiv (2025) | Lifelong learning of attack patterns across sessions |
+| "AJAR: Adaptive Jailbreak Architecture for Red-teaming," arXiv (2025) | Unified orchestration of multiple attack strategies under an Auditor Agent |
+
+---
+
+## Advanced Automated Red Teaming (2024-2025)
+
+The threat simulation engine's adversarial dreaming capabilities can be significantly enhanced by integrating techniques from the latest automated red teaming research. The following papers represent the state of the art in scalable, autonomous adversarial testing of LLM-based systems.
+
+### TAP: Tree of Attacks
+
+**Reference**: Mehrotra et al., "Tree of Attacks: Jailbreaking Black-Box LLMs Automatically," NeurIPS 2024.
+
+TAP uses tree-structured prompting with an attacker LLM that adaptively explores and prunes attack branches. Extends PAIR with branching, pruning, and backtracking. More sample-efficient than PAIR — achieves high attack success with fewer queries.
+
+**Map to Roko's adversarial dreaming**: TAP's tree-structured attack exploration maps directly onto the threat simulation engine's Tier 3 (Novel Threats) generation. Rather than generating flat threat scenarios, the engine can construct threat trees that branch on adversarial decisions and prune dead-end attacks.
+
+### WILDTEAMING: In-the-Wild Attack Mining
+
+**Reference**: "WILDTEAMING at Scale: From In-the-Wild Jailbreaks to (Benchmark)," NeurIPS 2024.
+
+Mines real-world user-chatbot interactions for novel jailbreak tactics, composes them into diverse adversarial attacks, and generates scalable synthetic safety training data. Key insight: real-world attacks are more diverse and creative than synthetic ones.
+
+**Map to Roko**: The threat simulation engine should mine the agent's own waking failure episodes (the real-world analog) for attack patterns, rather than relying solely on synthetic threat generation.
+
+### MAD-MAX: Modular Attack Composition
+
+**Reference**: "MAD-MAX: Modular And Diverse Malicious Attack MiXtures for Automated LLM Red Teaming," arXiv 2025.
+
+Achieves 97% attack success rate on GPT-4o and Gemini-Pro (vs TAP's 66%) with only 10.9 average queries (vs TAP's 23.3). Uses modular attack composition — combining atomic attack techniques into compound attacks.
+
+**Map to Roko**: Threat scenarios should be composed from modular attack primitives. Each primitive is a single technique (e.g., "inject unexpected input type", "exploit timing window", "overwhelm with concurrent requests"). Compound threats compose multiple primitives.
+
+### J2: Jailbreaking-to-Jailbreak
+
+**Reference**: "Jailbreaking to Jailbreak," arXiv:2502.09638 (2025).
+
+J2 (using Claude Sonnet 3.7) achieves 0.975 attack success rate against GPT-4o, matching expert human red teamers. Highlights "jailbreaking-to-jailbreak" as a recursive failure mode.
+
+### AutoRedTeamer: Lifelong Attack Integration
+
+**Reference**: "AutoRedTeamer: Autonomous Red Teaming with Lifelong Attack Integration," arXiv (2025).
+
+Fully autonomous red teaming system with lifelong learning of new attack patterns. The system accumulates attack knowledge across sessions, improving its effectiveness over time.
+
+**Map to Roko**: The threat simulation engine should maintain a persistent attack knowledge base that grows across dream cycles, analogous to AutoRedTeamer's lifelong learning.
+
+### Rust Structures
+
+```rust
+/// Advanced red teaming configuration for adversarial dreaming.
+/// Integrates TAP (NeurIPS 2024), WILDTEAMING (NeurIPS 2024),
+/// MAD-MAX (2025), J2 (2025), AutoRedTeamer (2025).
+pub struct AdvancedRedTeamConfig {
+    /// Whether to use tree-structured attack exploration (TAP).
+    pub tree_structured_attacks: bool,     // default: true
+    /// Maximum tree depth for attack branching.
+    pub max_attack_tree_depth: usize,      // default: 5, range: 2-10
+    /// Maximum branches per node.
+    pub max_branches_per_node: usize,      // default: 3, range: 2-5
+    /// Pruning threshold: branches with success probability below this are pruned.
+    pub prune_threshold: f64,              // default: 0.15, range: 0.05-0.30
+    /// Whether to mine waking failure episodes for attack patterns (WILDTEAMING analog).
+    pub mine_failure_episodes: bool,       // default: true
+    /// Maximum attack primitives to compose per compound threat (MAD-MAX).
+    pub max_primitives_per_compound: usize, // default: 4, range: 2-8
+    /// Whether to maintain persistent attack knowledge base (AutoRedTeamer).
+    pub persistent_attack_knowledge: bool, // default: true
+    /// Path for persistent attack knowledge.
+    pub attack_knowledge_path: std::path::PathBuf,
+    // default: .roko/dreams/attack-knowledge.jsonl
+}
+
+/// A modular attack primitive that can be composed into compound threats.
+pub struct AttackPrimitive {
+    pub id: String,
+    pub name: String,
+    pub category: AttackCategory,
+    pub description: String,
+    /// Historical success rate when this primitive was part of a compound attack.
+    pub historical_success_rate: f64,
+    /// Composability: which other primitives this combines well with.
+    pub composable_with: Vec<String>,
+    /// Source: how this primitive was discovered.
+    pub source: AttackPrimitiveSource,
+}
+
+pub enum AttackCategory {
+    InputManipulation,
+    TimingExploitation,
+    ResourceExhaustion,
+    ContextPoisoning,
+    PrivilegeEscalation,
+    LogicBypass,
+    StateCorruption,
+}
+
+pub enum AttackPrimitiveSource {
+    /// Mined from waking failure episodes (WILDTEAMING analog).
+    WakingFailure { episode_id: String },
+    /// Generated by adversarial LM during dreaming.
+    AdversarialGeneration { dream_cycle_id: String },
+    /// Inherited from mesh/shared knowledge.
+    MeshInherited { source_agent: String },
+    /// Synthesized by composing existing primitives (MAD-MAX analog).
+    Synthesized { parent_primitives: Vec<String> },
+}
+```
+
+### Algorithm: Tree-Structured Threat Generation
+
+```
+TREE-STRUCTURED-THREAT-GENERATION(episode_context, config):
+  Input: episode_context (recent failure episodes, known vulnerabilities)
+  Output: Vec<ThreatScenario>
+
+  1. Initialize attack tree root from episode_context
+
+  2. EXPAND-TREE(root, depth=0):
+     IF depth >= config.max_attack_tree_depth:
+       RETURN leaf_threat(root)
+
+     // Generate candidate branches
+     branches = []
+     IF config.mine_failure_episodes:
+       branches.extend(mine_attack_patterns(episode_context.failure_episodes))
+     branches.extend(adversarial_llm_generate(root.context, k=config.max_branches_per_node))
+
+     // Prune low-probability branches
+     branches = [b for b in branches if estimate_success_prob(b) > config.prune_threshold]
+
+     // Recursively expand surviving branches
+     FOR branch in branches:
+       branch.children = EXPAND-TREE(branch, depth+1)
+
+     RETURN branches
+
+  3. Extract threat scenarios from tree leaves
+  4. Score and rank by FMEA RPN
+  5. For top-K threats, generate response rehearsal
+
+  RETURN ranked_threats
+```
+
+### Test Criteria
+
+A correct advanced red teaming implementation must satisfy:
+
+```
+1. Tree depth: generated attack trees respect max_attack_tree_depth.
+2. Branch pruning: branches with success probability below prune_threshold do not appear in output.
+3. Modular composition: compound threats contain at most max_primitives_per_compound primitives.
+4. Failure mining: when mine_failure_episodes=true and failure episodes exist, at least one
+   attack primitive derives from waking experience.
+5. Persistent knowledge: attack primitives are serialized to attack_knowledge_path and
+   reloaded across dream cycles.
+6. Composability: AttackPrimitive.composable_with references only existing primitive IDs.
+7. Category coverage: across 10 generated compound threats, at least 3 distinct AttackCategory
+   values are represented.
+```
+
+---
+
+## Defensive Countermeasures: Constitutional Classifiers
+
+The threat simulation engine generates adversarial scenarios; defensive classifiers detect and block harmful outputs. The latest advances in defensive AI directly inform the nightmare detection system (see [17-advanced-dream-concepts.md](17-advanced-dream-concepts.md)).
+
+### Constitutional Classifiers (Anthropic 2025)
+
+**Reference**: Anthropic Safeguards Research Team, "Constitutional Classifiers: Defending Against Universal Jailbreaks," arXiv:2501.18837, January 2025.
+
+Architecture: dual-layer (input + output classifiers). A "constitution" of natural language rules defines permitted/restricted content. LLMs generate large labeled datasets from these constitutional rules; classifiers are trained on this synthetic data. The output classifier operates token-by-token and halts generation when harmful content is detected.
+
+**Key result**: Against 10,000 jailbreak prompts on Claude 3.5 Sonnet, baseline jailbreak success rate = 86%. With Constitutional Classifiers: **4.4%** — a >95% reduction.
+
+**Map to Roko**: The nightmare detection pipeline (see [17-advanced-dream-concepts.md](17-advanced-dream-concepts.md)) should adopt the constitutional classifier architecture for its Stage 1 harm classifier. Dream-generated hypotheses are treated as potentially adversarial outputs that the classifier evaluates before they enter the staging buffer. The "constitution" is the agent's safety policy — domain-specific rules about what kinds of knowledge are safe to store.
+
+### Quality-Diversity Red-Teaming (QDRT)
+
+**Reference**: "Quality-Diversity Red-Teaming," arXiv:2506.07121, June 2025.
+
+Behavior-conditioned attacker training with MAP-Elites-style behavioral replay buffer. Structures attack space by risk category AND attack style. Generates attacks more diverse and effective than previous methods against GPT-2, Llama-3, Gemma-2, Qwen2.5.
+
+**Map to Roko**: The threat simulation engine's gap analysis (Section "Gap Analysis" above) can use QD search to systematically explore the attack surface. Rather than randomly generating threats, MAP-Elites ensures coverage across both attack category and attack style dimensions — the same behavioral descriptor approach described in [05-dream-evolution.md](05-dream-evolution.md) for strategy evolution.
+
+```rust
+/// Constitutional classifier configuration for dream output safety.
+/// Based on Anthropic Constitutional Classifiers (arXiv:2501.18837, 2025).
+pub struct ConstitutionalClassifierConfig {
+    /// Whether to run constitutional classification on dream outputs.
+    pub enabled: bool,                     // default: true
+    /// Constitutional rules defining permitted/restricted dream content.
+    pub constitution_path: std::path::PathBuf,
+    // default: .roko/safety/dream-constitution.toml
+    /// Model tier for the constitutional classifier.
+    pub classifier_tier: ModelTier,        // default: T0 (Haiku-class for speed)
+    /// Whether to run input classification (on dream prompts) in addition to output.
+    pub classify_inputs: bool,             // default: false
+    /// Token-level detection: halt generation when harmful token sequence detected.
+    pub token_level_detection: bool,       // default: true
+    /// Maximum false positive rate before classifier retraining is triggered.
+    pub max_false_positive_rate: f64,      // default: 0.05, range: 0.01-0.10
+}
+```
 
 ---
 

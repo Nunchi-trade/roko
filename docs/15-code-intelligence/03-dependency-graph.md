@@ -290,6 +290,98 @@ Three symbols in a circular dependency:
 
 ---
 
+## Program Dependence Graphs: Beyond Import Edges
+
+### From dependency graphs to program dependence graphs
+
+The current `SymbolGraph` captures *module-level* dependencies via import edges. This answers "which modules reference which other modules" but cannot answer deeper questions: "which statements affect the value of this variable" or "would this code execute if that condition were false." Program Dependence Graphs (PDGs) (Ferrante, Ottenstein, and Warren 1987) address these limitations by encoding two additional relationship types:
+
+**Control dependence edges**: Statement Y is control-dependent on predicate X if X is a branch and Y's execution depends on which branch is taken. Computed via the post-dominance frontier of the reverse CFG.
+
+**Data dependence edges** (flow dependence): Statement S1 defines variable `v`; statement S2 uses `v`; there is a def-clear path from S1 to S2 (no intervening redefinition). This captures "where does this value come from?"
+
+```rust
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum EdgeKind {
+    // Module-level edges (current)
+    Calls,          // Function call (tree-sitter required)
+    Imports,        // Import/use statement (built)
+    Implements,     // Trait/interface implementation
+    Contains,       // Scope nesting (method in impl block)
+    // PDG-style edges (planned, tree-sitter + CFG analysis)
+    ControlDep,     // Y executes conditionally based on X
+    DataFlow,       // Value flows from definition at X to use at Y
+}
+```
+
+### System Dependence Graphs for interprocedural analysis
+
+PDGs model a single function. The System Dependence Graph (SDG) (Horwitz, Reps, and Binkley 1990) extends PDGs across function boundaries with call/return nodes, formal/actual parameter nodes, and **summary edges** that encode the net effect of a function call. Summary edges enable interprocedural slicing that respects calling context — you never follow a return to the wrong call site.
+
+### Code Property Graph: the unified model
+
+The Code Property Graph (CPG) (Yamaguchi et al. 2014, IEEE Test-of-Time Award 2024) merges AST, CFG, and PDG into a single queryable property graph. This enables cross-view queries like "find calls to unsafe functions where the size argument has a data-flow dependence on external input." Joern, the reference CPG implementation, supports 8+ language frontends and uses an embedded graph store (OverflowDB).
+
+### Program slicing via graph traversal
+
+Program slicing (Weiser 1981) extracts the minimal set of statements relevant to a computation:
+
+- **Backward slice**: follow dependence edges *backward* to find all statements affecting a value. Use: debugging, root-cause analysis.
+- **Forward slice**: follow edges *forward* to find all statements affected by a change. Use: impact analysis.
+- **Thin slice** (Sridharan et al. 2007): backward slice excluding data-structure routing dependences. 1.5–5× smaller while retaining programmer-relevant statements.
+
+```rust
+/// Planned: Backward slice computation on the dependency graph
+pub fn backward_slice(
+    graph: &SymbolGraph,
+    seed: &SymbolId,
+    max_depth: usize,
+    edge_filter: Option<&[EdgeKind]>,
+) -> HashSet<SymbolId> {
+    let mut visited = HashSet::new();
+    let mut queue = VecDeque::new();
+    queue.push_back((seed.clone(), 0usize));
+    visited.insert(seed.clone());
+    while let Some((current, depth)) = queue.pop_front() {
+        if depth >= max_depth { continue; }
+        for (source, kind) in graph.reverse_neighbors_with_kind(&current) {
+            if edge_filter.map_or(true, |f| f.contains(&kind)) {
+                if visited.insert(source.clone()) {
+                    queue.push_back((source.clone(), depth + 1));
+                }
+            }
+        }
+    }
+    visited
+}
+```
+
+### LLM-aware program analysis (2024–2025)
+
+- **BugLens** (OOPSLA 2024): Feeding PDG slices as structured context into LLMs improves precision from 0.10 (naive prompting) to 0.72.
+- **LLMxCPG** (USENIX Security 2025): LLM generates CPG traversal queries, achieving 67–91% code reduction while preserving vulnerability-relevant structure.
+
+This validates Roko's design: graph-based slicing produces compact, dependency-aware context that LLMs reason about more effectively than raw file dumps.
+
+```toml
+[index.graph]
+max_slice_depth = 5              # Maximum traversal depth for slicing. Range: 1..20.
+enable_control_dependence = true # Extract control dependence edges. Range: true/false.
+enable_data_flow = false         # Extract data flow edges. Expensive. Range: true/false.
+thin_slice_mode = true           # Use thin slicing. Range: true/false.
+```
+
+### Test criteria for PDG enhancements
+
+- Backward slice returns all symbols in transitive reverse dependency closure
+- Forward slice returns all potentially affected symbols
+- Thin slice is strictly a subset of full backward slice
+- Slicing with `edge_filter` restricts traversal to specified edge kinds
+- Empty graph produces empty slices without panics
+
+---
+
 ## Planned Enhancements
 
 ### Call graph edges
@@ -373,11 +465,16 @@ This enables the Composer to include "the neighborhood of symbols relevant to th
 
 ## Academic Foundations
 
-- **Code property graphs**: Yamaguchi, Golde, Arp, and Rieck (2014), "Modeling and Discovering Vulnerabilities with Code Property Graphs." *IEEE S&P*. The model for unifying AST, control flow, and data flow into a single queryable graph. `SymbolGraph` is a simplified version focused on dependency relationships.
-- **PageRank**: Page, Brin, Motwani, and Winograd (1999), "The PageRank Citation Ranking: Bringing Order to the Web." Stanford InfoLab. The algorithm adapted for symbol importance scoring. See [04-pagerank-symbol-importance.md](./04-pagerank-symbol-importance.md).
-- **Program dependence graph**: Ferrante, Ottenstein, and Warren (1987), "The Program Dependence Graph and Its Use in Optimization." *TOPLAS*. The theoretical foundation for directed dependency graphs in program analysis.
-- **Call graph construction**: Grove and Chambers (2001), "A Framework for Call Graph Construction Algorithms." *TOPLAS*. Survey of call graph construction techniques, relevant to the planned `Calls` edge extraction.
-- **AriGraph**: (2024). Graph-based approach to code understanding, demonstrating the effectiveness of explicit graph structures for navigating code relationships.
+- **Program Dependence Graph**: Ferrante, Ottenstein, and Warren (1987), "The Program Dependence Graph and Its Use in Optimization." *ACM TOPLAS* 9(3):319–349. The foundational formulation of control dependence and data dependence edges in a unified graph representation.
+- **System Dependence Graph**: Horwitz, Reps, and Binkley (1990), "Interprocedural Slicing Using Dependence Graphs." *ACM TOPLAS* 12(1):26–60. Extends the PDG for interprocedural analysis with call/return nodes and context-sensitive summary edges.
+- **Program slicing**: Weiser (1981), "Program Slicing." *ICSE*. The original formulation of extracting the minimal code subset relevant to a computation.
+- **Thin slicing**: Sridharan, Fink, and Bodik (2007), "Thin Slicing." *PLDI*. Backward slicing that excludes data-structure routing dependences, producing 1.5–5× smaller slices.
+- **Code Property Graphs**: Yamaguchi, Golde, Arp, and Rieck (2014), "Modeling and Discovering Vulnerabilities with Code Property Graphs." *IEEE S&P*. Merges AST, CFG, and PDG into a single queryable graph. IEEE Test-of-Time Award 2024.
+- **PageRank**: Page, Brin, Motwani, and Winograd (1999), "The PageRank Citation Ranking." Stanford InfoLab. The algorithm adapted for symbol importance scoring.
+- **Call graph construction**: Grove and Chambers (2001), "A Framework for Call Graph Construction Algorithms." *TOPLAS*. Survey of call graph construction techniques.
+- **LLMxCPG**: Lekssays et al. (2025), "LLMxCPG: Leveraging Large Language Models and Code Property Graphs for Vulnerability Detection." *USENIX Security 2025*. LLM-generated CPG queries for scalable vulnerability detection.
+- **IRIS**: (2025), "LLM-Assisted Static Analysis for Detecting Security Vulnerabilities." LLMs infer taint specifications for conventional static analysis, doubling detection rates.
+- **BugLens**: (OOPSLA 2024). Structured Analysis Guidance prompts with PDG slices improve LLM vulnerability analysis precision from 0.10 to 0.72.
 
 ---
 

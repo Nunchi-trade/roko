@@ -1,6 +1,12 @@
 # CLI reference
 
-Complete reference for the `roko` command-line interface. Commands are grouped by category. Every command supports these global flags:
+> **Abstract:** Complete reference for the `roko` command-line interface. Commands are grouped by category.
+
+> **Implementation**: Shipping
+
+---
+
+Every command supports these global flags:
 
 ```
 --config <path>     Override the config file (default: ./roko.toml)

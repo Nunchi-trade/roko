@@ -371,7 +371,7 @@ Complex coordinated behavior emerged from simple local interactions with the sha
 
 ---
 
-## Related Sub-Docs
+## Cross-References
 
 - `00-stigmergy-theory.md` — Core stigmergy definitions and theory
 - `03-digital-pheromones.md` — The explicit pheromone system layered on top of Git

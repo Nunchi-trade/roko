@@ -350,7 +350,7 @@ Heartbeat is the highest-bandwidth topic. Agents that do not need liveness data 
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [07-4-tier-gossip-architecture.md](./07-4-tier-gossip-architecture.md) for the 4-tier gossip infrastructure these topics ride on
 - See [09-peer-scoring-3-layer.md](./09-peer-scoring-3-layer.md) for how gossip behavior on these topics affects peer scores

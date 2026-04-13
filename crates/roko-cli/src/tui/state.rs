@@ -503,15 +503,19 @@ pub struct TuiState {
     /// Selected wave index for wave prev/next navigation.
     pub selected_wave_idx: usize,
 
-    // -- config navigation --
-    /// Selected row in the config view.
-    pub config_selected: usize,
-    /// Scroll offset in the config view.
-    pub config_scroll: usize,
-    /// Flag to toggle expand/collapse on the selected config section (consumed each frame).
-    pub config_toggle_expand: bool,
-    /// Which config sections are expanded (indices).
-    pub config_expanded: std::collections::HashSet<usize>,
+    // -- config editor --
+    /// Cursor index into the flat config item list.
+    pub config_cursor: usize,
+    /// Viewport scroll offset for the config view.
+    pub config_scroll_offset: usize,
+    /// Unsaved edits: config key -> new value string.
+    pub config_pending: HashMap<String, String>,
+    /// Whether text-input mode is active for a config field.
+    pub config_editing: bool,
+    /// Text input buffer for the field being edited.
+    pub config_edit_buffer: String,
+    /// Which config key is currently being text-edited.
+    pub config_edit_key: Option<String>,
 
     // -- agent pane --
     /// Active agent pane display group (cycles through available groups).
@@ -612,10 +616,12 @@ impl Default for TuiState {
 
             selected_wave_idx: 0,
 
-            config_selected: 0,
-            config_scroll: 0,
-            config_toggle_expand: false,
-            config_expanded: std::collections::HashSet::new(),
+            config_cursor: 0,
+            config_scroll_offset: 0,
+            config_pending: HashMap::new(),
+            config_editing: false,
+            config_edit_buffer: String::new(),
+            config_edit_key: None,
 
             agent_pane_group: 0,
         }

@@ -795,6 +795,179 @@ Oracle::predict()
 
 ---
 
+## Advanced TDA: Persistence Images, Vectorization, and Computation
+
+### Persistence Images — ML-Compatible TDA Features
+
+Persistence diagrams are sets of points — not vectors. This makes them incompatible with standard ML algorithms (SVMs, random forests, neural networks) that require fixed-dimensional inputs. Persistence images solve this by transforming diagrams into stable, finite-dimensional vector representations.
+
+```rust
+/// Persistence images: stable vector representation of persistent homology.
+///
+/// Adams et al. (2017, JMLR 18(8), 1-35): Transforms persistence diagrams
+/// into finite-dimensional vectors compatible with standard ML algorithms.
+///
+/// Algorithm:
+/// 1. Transform (birth, death) → (birth, persistence) where persistence = death - birth
+/// 2. Apply weighting function w(b,p) (e.g., linear ramp w = p, or Gaussian)
+/// 3. Sum weighted Gaussians centered at each (b,p) point
+/// 4. Discretize on n×n grid → flatten to n²-dimensional vector
+///
+/// Stability: If d_W1(D, D') < ε, then ||PI(D) - PI(D')|| < C·ε
+/// for Lipschitz weighting functions.
+pub struct PersistenceImageConfig {
+    /// Grid resolution per axis.
+    pub resolution: usize,           // default: 50 (produces 2500-dim vector)
+    /// Gaussian bandwidth for kernel density estimation.
+    pub sigma: f64,                  // default: auto (median persistence / 5)
+    /// Weighting function for persistence points.
+    pub weight: PersistenceWeight,
+    /// Birth range for the grid.
+    pub birth_range: Option<(f64, f64)>,
+    /// Persistence range for the grid.
+    pub persistence_range: Option<(f64, f64)>,
+}
+
+pub enum PersistenceWeight {
+    /// Linear ramp: w(b,p) = p (long-lived features weighted more).
+    Linear,
+    /// Gaussian: w(b,p) = 1 - exp(-p²/2σ²).
+    Gaussian { sigma: f64 },
+    /// Uniform: w(b,p) = 1 (all features equal).
+    Uniform,
+    /// Custom function.
+    Custom(Box<dyn Fn(f64, f64) -> f64 + Send + Sync>),
+}
+```
+
+The key design choice is the weighting function. Linear weighting (`w(b,p) = p`) emphasizes long-lived topological features and suppresses noise near the diagonal, which is the right default for time series analysis where persistent structure matters more than transient features. Gaussian weighting provides a softer transition and is preferred when even short-lived features carry signal (e.g., detecting brief microstructure anomalies). Uniform weighting treats all features equally and should only be used when the persistence distribution itself is the signal of interest.
+
+The bandwidth parameter `sigma` controls smoothing. Too small and the image is a collection of spikes (overfitting to specific diagram points). Too large and distinct features blur together. The default heuristic — median persistence divided by 5 — provides a reasonable starting point that can be tuned via cross-validation on downstream task performance.
+
+**Computational cost**: For a diagram with `m` points on an `n x n` grid, computing a persistence image costs `O(m * n²)`. With typical values (m ~ 100, n = 50), this is ~250K multiplications — negligible compared to the persistence computation itself.
+
+**Integration with HDC**: Persistence image vectors can be binarized (threshold at the median value) to produce HDC-compatible binary vectors. This enables combining topological features with the existing HDC signal encoding pipeline via BIND and BUNDLE operations.
+
+### Computational Backends: Ripser and Alpha Complexes
+
+The choice of computational backend determines both the speed and the class of input data that can be processed. The three main complex types — Vietoris-Rips, Alpha, and Cubical — cover different data geometries:
+
+```rust
+/// TDA computation backend selection.
+///
+/// Ripser (Bauer, 2021, JACT 5(1), 91-119): Fastest known algorithm
+/// for Vietoris-Rips persistence. Uses persistent cohomology, apparent
+/// pairs optimization (eliminates ~99% of pairs before main algorithm),
+/// and implicit coboundary representation.
+///
+/// Alpha complexes (Edelsbrunner & Harer, 2010): Subset of Delaunay
+/// triangulation. Sparser than Rips, faster in low dimensions (d ≤ 3),
+/// but exponential in ambient dimension.
+pub struct TdaBackendConfig {
+    /// Which complex to build.
+    pub complex_type: ComplexType,
+    /// Maximum homological dimension.
+    pub max_dim: usize,              // default: 1
+    /// Maximum filtration value.
+    pub max_filtration: f64,         // default: f64::MAX
+    /// Point cloud subsampling (for large datasets).
+    pub max_points: usize,           // default: 2000
+    /// Vectorization method for ML integration.
+    pub vectorization: VectorizationMethod,
+}
+
+pub enum ComplexType {
+    /// Vietoris-Rips: works in any dimension, O(n²) distance matrix.
+    /// Use for d > 3 or abstract metric spaces.
+    VietorisRips,
+    /// Alpha complex: subset of Delaunay, O(n^{d/2}) construction.
+    /// Use for d ≤ 3 with Euclidean data.
+    Alpha,
+    /// Cubical: for gridded data (images, volumes). O(n) construction.
+    Cubical,
+}
+
+pub enum VectorizationMethod {
+    /// Persistence images (Adams et al., 2017).
+    PersistenceImage(PersistenceImageConfig),
+    /// Persistence landscapes (Bubenik, 2015).
+    PersistenceLandscape { n_layers: usize, n_grid: usize },
+    /// Betti curve: β_k(t) = count of features alive at scale t.
+    BettiCurve { n_grid: usize },
+    /// Persistence entropy: H = -Σ (l_i/L) log(l_i/L) where l_i = lifetime.
+    Entropy,
+    /// Persistence silhouette (weighted Betti curve).
+    Silhouette { power: f64 },
+}
+```
+
+**Backend selection guide**:
+
+| Data type | Recommended complex | Reason |
+|---|---|---|
+| Delay-embedded time series (d = 3) | Alpha | Sparser complex, exact Delaunay geometry |
+| Delay-embedded time series (d > 3) | Vietoris-Rips | Alpha is exponential in d |
+| Abstract metric space (non-Euclidean) | Vietoris-Rips | Only option for non-Euclidean |
+| Gridded data (heatmaps, images) | Cubical | O(n) construction, natural fit |
+| Large point cloud (n > 5000) | Vietoris-Rips + subsampling | Ripser handles large n with max_filtration cutoff |
+
+**Ripser optimizations**: Ripser achieves its speed through three key techniques. First, persistent cohomology computes the same barcode as homology but with a more cache-friendly access pattern. Second, the apparent pairs optimization identifies simplex pairs that must be paired together without running the full reduction — this eliminates approximately 99% of pairs in typical datasets. Third, the implicit coboundary representation avoids materializing the full boundary matrix, keeping memory at O(n^2) for the distance matrix alone.
+
+**GPU acceleration**: Zhang et al. (2020) demonstrate GPU-accelerated Vietoris-Rips computation achieving 20-50x speedup over CPU Ripser for point clouds with n > 10,000. This is relevant for batch processing of historical time series but not for real-time computation where n is typically capped at 2,000.
+
+### Vectorization Method Comparison
+
+Each vectorization method trades off different properties:
+
+| Method | Output dimension | Stability | Interpretability | Cost |
+|---|---|---|---|---|
+| Persistence image | n² (e.g., 2500) | W1-stable | Moderate (heatmap) | O(m * n²) |
+| Persistence landscape | k * n_grid | Lp-stable | High (layer functions) | O(m * n_grid) |
+| Betti curve | n_grid | Not stable | High (feature count) | O(m * n_grid) |
+| Entropy | 1 | Stable | High (single scalar) | O(m) |
+| Silhouette | n_grid | Stable | Moderate | O(m * n_grid) |
+
+**Persistence landscapes** (already detailed in Part I) live in a Banach space and support arithmetic. They are the right choice when you need to compute means, perform hypothesis tests, or do regression on topological features.
+
+**Betti curves** count the number of topological features alive at each scale. They are the simplest vectorization and the most interpretable, but they are not stable under perturbations (a single noisy point can create a spurious feature that shifts the curve). Use Betti curves for visualization and exploratory analysis, not for ML features.
+
+**Persistence entropy** compresses the entire diagram into a single scalar measuring disorder. High entropy means many features with similar lifetimes (uniform structure). Low entropy means a few dominant features (concentrated structure). This is useful as a regime indicator: high entropy regimes are noisy/chaotic, low entropy regimes have clear structure.
+
+**Persistence silhouettes** are weighted Betti curves where longer-lived features contribute more. The `power` parameter controls the weighting: power = 1 gives equal weight, power > 1 emphasizes long-lived features, power < 1 emphasizes short-lived features. Silhouettes are stable and provide a middle ground between Betti curves (unstable but interpretable) and persistence images (stable but less interpretable).
+
+### Composition with Existing Pipeline
+
+The vectorization methods integrate into the existing `Oracle::predict()` pipeline at the point where persistence diagrams are converted to features:
+
+```
+Oracle::predict()
+  -> ... (existing pipeline up to PersistenceDiagram)
+  -> TdaBackendConfig selects complex type and vectorization
+  -> VectorizationMethod produces fixed-dimensional vector
+  -> if PersistenceImage: binarize → HdcVector for BIND/BUNDLE
+  -> if PersistenceLandscape: use existing Banach space arithmetic
+  -> if Entropy: feed as scalar feature to CascadeRouter
+  -> encode as Engram via existing HDC pipeline
+```
+
+### Citations
+
+- Adams, H., et al. (2017). "Persistence Images: A Stable Vector Representation of Persistent Homology." *JMLR*, 18(8), 1-35. — Persistence images: stable vectorization of persistence diagrams for ML.
+- Bauer, U. (2021). "Ripser: Efficient Computation of Vietoris-Rips Persistence Barcodes." *JACT*, 5(1), 91-119. — Fastest known algorithm for Rips persistence.
+- Zhang, S., Xiao, M., & Wang, H. (2020). "GPU-Accelerated Computation of Vietoris-Rips Persistence Barcodes." *SoCG 2020*. — GPU parallelization of Ripser.
+- Cohen-Steiner, D., Edelsbrunner, H., & Harer, J. (2007). "Stability of Persistence Diagrams." *DCG*, 37(1), 103-120. — Foundational stability theorem for persistence.
+- Luchinsky, A., & Islambekov, U. (2025). "TDAvec: Vectorization of Persistence Diagrams." *JOSS*, 10(114). — Unified vectorization library and comparative analysis.
+
+### Test criteria
+
+- **PI stability**: Adding noise with stddev sigma to a point cloud shifts the PI vector by at most O(sigma). Verify by computing PI on 100 noisy copies of a reference point cloud and checking that the maximum L2 deviation scales linearly with sigma.
+- **Ripser vs Alpha agreement**: For 2D Euclidean data, both Vietoris-Rips and Alpha complex backends produce identical persistence diagrams (up to floating-point tolerance of 1e-10).
+- **Vectorization determinism**: Same diagram produces identical vectors across runs. Verify by computing each vectorization method 10 times on the same diagram and asserting bitwise equality.
+- **Binarization round-trip**: Binarizing a persistence image and computing Hamming similarity between two diagrams preserves the rank ordering of W1 distances (Spearman correlation > 0.9).
+- **Entropy monotonicity**: A diagram with one dominant feature has lower entropy than a diagram with many equal-lifetime features. Verify on synthetic diagrams.
+
+---
+
 ## Academic foundations
 
 - Bubenik, P. (2015). "Statistical Topological Data Analysis using Persistence Landscapes." *JMLR*, 16(3), 77-102. — Persistence landscapes as Banach space elements.
@@ -807,7 +980,7 @@ Oracle::predict()
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [06-hyperdimensional-ta.md](./06-hyperdimensional-ta.md) for HDC genome encoding
 - See [07-spectral-liquidity-manifolds.md](./07-spectral-liquidity-manifolds.md) for Riemannian geometry (complementary to TDA)

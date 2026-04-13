@@ -157,7 +157,7 @@ See `tmp/implementation-plans/12a-cognitive-layer.md` §F (F1–F9) for the full
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [01-pad-vector.md](./01-pad-vector.md) for the full PAD model specification
 - See [04-six-behavioral-states.md](./04-six-behavioral-states.md) for the cyclical behavioral states

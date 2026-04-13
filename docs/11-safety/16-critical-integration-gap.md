@@ -249,7 +249,7 @@ Until this gap is closed, the safety architecture described in this topic (00-de
 
 ---
 
-## Related Topics
+## Cross-References
 
 - [00-defense-in-depth.md](00-defense-in-depth.md) — The overall safety architecture that this gap undermines
 - [04-permits-allowlists.md](04-permits-allowlists.md) — ToolPermission system that is not enforced without ToolDispatcher

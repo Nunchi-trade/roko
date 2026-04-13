@@ -6,6 +6,8 @@
 **Prerequisites**: [Architecture](../00-architecture/INDEX.md), [Agent Mesh](../13-coordination/INDEX.md)
 **Key sources**: `bardo-backup/prd/02-mortality/14-research-foundations.md` §5, `bardo-backup/prd/shared/citations.md` §22, `bardo-backup/tmp/agent-chain/08-references.md`
 
+> **Implementation**: Reference
+
 ---
 
 ## Abstract
@@ -95,7 +97,27 @@ Agents do not operate in isolation. A group of agents owned by one user is a Col
 
 ---
 
-## Cross-references
+## Emergent Coordination in LLM Agents (2025)
+
+- Emergence in Multi-Agent Language Models (2025). Emergent Coordination in Multi-Agent Language Models. arXiv:2510.05174.
+  *Grounds: Higher-order collectives — information-theoretic framework proves that multi-agent LLM systems can be steered from mere aggregates to higher-order collectives via prompt design. Identity-linked differentiation and goal-directed complementarity mirror C-Factor diagnostics. Validates Roko's collective coordination through pheromone-based signaling.*
+
+- Multi-Agent Collaboration Mechanisms: A Survey of LLMs (2025). arXiv:2501.06322.
+  *Grounds: Collaboration mechanisms — taxonomizes collaboration patterns including role-based division, debate-style refinement, and stigmergic coordination. Validates Roko's role-based agent dispatch with pheromone-field coordination.*
+
+---
+
+## Stigmergic Mathematical Foundations (2024)
+
+- Stigmergy: From Mathematical Modelling to Control (2024). _Proceedings of the Royal Society A_, 2024.
+  *Grounds: Mathematical stigmergy — formal mathematical framework modeling swarms as fluids, designing control at the continuum level in terms of trace density. Transforms stigmergic coordination into a single PDE. Provides rigorous mathematical foundation for Roko's Pheromone Field dynamics.*
+
+- Automatic Design of Stigmergy-Based Behaviours for Robot Swarms (2024). _Communications Engineering_, Nature, 2024.
+  *Grounds: Automatic stigmergy design — strategy to automatically design stigmergy-based collective behaviors, validated through simulation and real-robot experiments. Validates automatic pheromone-type design in Roko's multi-trail system.*
+
+---
+
+## Cross-References
 
 - See [00-lifecycle-and-finite-agency.md](./00-lifecycle-and-finite-agency.md) for cooperation under resource constraints
 - See [15-cybernetics-and-vsm.md](./15-cybernetics-and-vsm.md) for Beer's VSM mapping to agent coordination

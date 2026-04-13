@@ -452,7 +452,7 @@ pub struct SubscriptionPrivacyConfig {
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [08-eight-gossip-topics.md](./08-eight-gossip-topics.md) for the 8 specific gossip topics carried over these tiers
 - See [09-peer-scoring-3-layer.md](./09-peer-scoring-3-layer.md) for how gossip behavior affects peer reputation

@@ -313,7 +313,7 @@ Both gates implement the `Gate` trait from `roko-core` (see topic [04-gates](../
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [18-mirage-rs-evm-simulator.md](./18-mirage-rs-evm-simulator.md) for the mirage-rs implementation of `ChainClient`
 - See [15-chainwitness-event-watching.md](./15-chainwitness-event-watching.md) for how `ChainClient` is used in block ingestion

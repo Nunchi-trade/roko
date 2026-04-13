@@ -569,7 +569,7 @@ FILTER  [↑/↓] results   [Enter] select  [Esc] cancel          filter: _
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [09-tui-29-screens.md](./09-tui-29-screens.md) for the full 29-screen inventory
 - See [07-rosedust-design-language.md](./07-rosedust-design-language.md) for the color palette

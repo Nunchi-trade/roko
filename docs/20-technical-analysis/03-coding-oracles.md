@@ -527,7 +527,7 @@ HDC fingerprints from `roko-index` enable structural similarity search across co
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [01-oracle-trait.md](./01-oracle-trait.md) for the Oracle trait these implement
 - See [02-chain-oracles.md](./02-chain-oracles.md) for the chain equivalents

@@ -351,7 +351,7 @@ See `roko/tmp/implementation-plans/12b-chain-layer.md` for the full 76-item impl
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [01-korai-chain-spec.md](./01-korai-chain-spec.md) for Korai mainnet technical specification
 - See [02-korai-token-economics.md](./02-korai-token-economics.md) for KORAI/DAEJI tokenomics

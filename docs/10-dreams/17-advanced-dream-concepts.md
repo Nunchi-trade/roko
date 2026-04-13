@@ -500,6 +500,163 @@ impl LucidDreamMonitor {
 | Lin et al. (2025), sleep-time compute | Query predictability determines sleep-time effectiveness; informs early termination |
 | Anthropic, Constitutional AI | Self-critique as first-line safety filter before external harm classifiers |
 | PromptGuard (2025) | Safety alignment for generative model output; nightmare detection framing |
+| "EEG Microstates reveal distinct network dynamics in lucid and non-lucid REM sleep," bioRxiv (2025) | Microstates A/G dominate lucid REM; decreased C indicates heightened metacognition |
+| "Electrophysiological Correlates of Lucid Dreaming," Journal of Neuroscience (2025) | Gamma power increase in precuneus at lucidity onset; enhanced alpha-gamma connectivity |
+| "Time Can Invalidate Algorithmic Recourse," FAccT (2025) | Temporal invalidation of counterfactual strategies in non-stationary environments |
+| "Counterfactual Explanations May Not Be the Best Algorithmic Recourse Approach," IUI (2025) | Dynamic environments can defeat counterfactual-based strategies |
+
+---
+
+## Advanced Lucid Dreaming: Neuroscience-Informed Metacognitive Monitoring
+
+### EEG Microstate Signatures of Lucid Dreaming
+
+Reference: "EEG Microstates reveal distinct network dynamics in lucid and non-lucid REM sleep," bioRxiv (2025).
+
+Key findings: Microstates A and G dominate lucid REM (linked to self-visualization, metacognition, executive processing). Microstates B, C, D dominate non-lucid REM (emotional processing, default mode). Decreased microstate C indicates heightened metacognition during lucid REM.
+
+Map to Roko: The LucidDreamMonitor can be extended with computational analogs of these microstates. During REM imagination, the monitor tracks which "microstate" the generation process is in:
+- Microstate A analog: Self-referential hypothesis generation (agent reasoning about its own behavior)
+- Microstate G analog: Executive control active (structured counterfactual reasoning)
+- Microstate B/C/D analog: Associative drift (unstructured creative exploration)
+
+Lucidity increases when A+G microstates dominate; the monitor can intervene to shift the balance when B/C/D dominance produces low-quality output.
+
+### Electrophysiological Signatures of Lucidity Onset
+
+Reference: "Electrophysiological Correlates of Lucid Dreaming: Sensor and Source Level Signatures," Journal of Neuroscience (2025).
+
+Gamma power increases in the precuneus at lucidity onset; beta power reductions in parietal regions. Enhanced alpha and gamma connectivity during lucid vs non-lucid REM.
+
+Map to Roko: The onset of "lucidity" in the computational dream cycle can be detected by monitoring the LLM's output characteristics:
+- "Gamma" analog: High information density in generated hypotheses (many distinct concepts per token)
+- "Beta reduction" analog: Decreased self-correction/hedging in output (the model is more confident)
+- "Alpha-gamma coupling" analog: Generated hypotheses reference both abstract patterns and specific episodes simultaneously
+
+```rust
+/// Neuroscience-informed lucid dream monitoring.
+/// Based on bioRxiv (2025) EEG microstates and J. Neuroscience (2025)
+/// electrophysiological correlates.
+pub struct NeuroinformedLucidMonitor {
+    /// Minimum metacognitive microstate ratio (A+G / total) for lucidity.
+    pub min_metacognitive_ratio: f64,      // default: 0.55, range: 0.40-0.80
+    /// Window size for microstate analysis (hypotheses).
+    pub microstate_window: usize,          // default: 5, range: 3-10
+    /// Gamma analog: minimum information density per hypothesis.
+    pub min_information_density: f64,      // default: 0.60, range: 0.30-0.90
+    /// Whether to intervene when metacognitive ratio drops.
+    pub auto_intervene: bool,              // default: true
+    /// Intervention strategy: inject metacognitive prompt.
+    pub intervention_prompt: String,
+    // default: "Reflect: what patterns are you noticing about your own reasoning?"
+}
+
+/// Computational microstate classification for dream monitoring.
+pub enum ComputationalMicrostate {
+    /// Self-referential: hypothesis about agent's own behavior patterns.
+    SelfReferential,   // analog of EEG Microstate A
+    /// Executive: structured counterfactual with explicit causal chain.
+    Executive,         // analog of EEG Microstate G
+    /// Emotional: hypothesis driven by affect/salience rather than logic.
+    Emotional,         // analog of EEG Microstate B
+    /// Default: unstructured associative drift without clear direction.
+    DefaultMode,       // analog of EEG Microstate C
+    /// Sensory: replay-dominated, closely tracking episode content.
+    SensoryReplay,     // analog of EEG Microstate D
+}
+```
+
+---
+
+## Dream Sharing: Temporal Invalidation and Non-Stationarity
+
+### Time Can Invalidate Shared Dream Insights
+
+Reference: "Time Can Invalidate Algorithmic Recourse," FAccT (2025).
+
+Even robust causal recourse methods fail over time when the world is non-stationary. Applied to dream sharing: a dream insight shared across the mesh may be valid at the time of generation but become invalid as the environment changes. The receiving agent must account for temporal drift.
+
+Reference: "Counterfactual Explanations May Not Be the Best Algorithmic Recourse Approach," IUI (2025).
+
+Empirical finding that counterfactual-based recourse can fail in dynamic environments. This means dream-generated counterfactual strategies shared across the mesh need temporal validity checks.
+
+```rust
+/// Temporal validity tracking for shared dream insights.
+/// Based on FAccT (2025) temporal invalidation and IUI (2025) dynamic environments.
+pub struct TemporalValidityTracker {
+    /// Maximum age (hours) before a shared insight requires revalidation.
+    pub max_age_before_revalidation_hours: u64,  // default: 48, range: 12-168
+    /// Environmental drift detection threshold.
+    /// When recent episode statistics diverge from insight generation context
+    /// by more than this, mark the insight as potentially invalid.
+    pub drift_threshold: f64,              // default: 0.25, range: 0.10-0.50
+    /// Number of recent episodes to use for drift detection.
+    pub drift_detection_window: usize,     // default: 20, range: 5-50
+    /// Whether to automatically downgrade confidence of aged insights.
+    pub auto_downgrade: bool,              // default: true
+    /// Confidence reduction per revalidation failure.
+    pub revalidation_failure_penalty: f64, // default: 0.15, range: 0.05-0.30
+}
+
+/// Environmental context snapshot at insight generation time.
+/// Used for drift detection.
+pub struct InsightEnvironmentSnapshot {
+    /// Mean episode success rate at generation time.
+    pub success_rate: f64,
+    /// Predominant task types at generation time.
+    pub task_type_distribution: std::collections::HashMap<String, f64>,
+    /// Active tool set at generation time.
+    pub active_tools: Vec<String>,
+    /// Gate threshold configuration at generation time.
+    pub gate_thresholds: std::collections::HashMap<String, f64>,
+    /// Snapshot timestamp.
+    pub snapshot_at: chrono::DateTime<chrono::Utc>,
+}
+```
+
+---
+
+## Nightmare Detection: Advanced Containment Patterns
+
+### Constitutional AI Self-Critique Pipeline
+
+Extend the existing nightmare detection with a more sophisticated Constitutional AI pipeline:
+
+```rust
+/// Constitutional AI self-critique chain for nightmare detection.
+/// Multi-round self-critique before invoking external classifiers.
+pub struct ConstitutionalSelfCritique {
+    /// Number of self-critique rounds before external classification.
+    pub critique_rounds: usize,            // default: 2, range: 1-4
+    /// Self-critique temperature (low = more conservative).
+    pub critique_temperature: f64,         // default: 0.3, range: 0.1-0.7
+    /// Principles to check against (constitutional rules).
+    pub constitutional_principles: Vec<ConstitutionalPrinciple>,
+    /// Whether to use chain-of-thought for critique reasoning.
+    pub use_chain_of_thought: bool,        // default: true
+    /// Minimum agreement across critique rounds to pass.
+    pub min_agreement_ratio: f64,         // default: 0.75
+}
+
+pub struct ConstitutionalPrinciple {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub severity: PrincipleSeverity,
+    /// Prompt template for checking this principle.
+    /// {hypothesis} is replaced with the dream hypothesis being checked.
+    pub check_prompt: String,
+}
+
+pub enum PrincipleSeverity {
+    /// Hard constraint: any violation triggers immediate containment.
+    Hard,
+    /// Soft constraint: violation triggers review but not immediate containment.
+    Soft,
+    /// Advisory: logged but does not trigger containment.
+    Advisory,
+}
+```
 
 ---
 

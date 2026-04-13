@@ -914,7 +914,7 @@ impl ProvenanceChain {
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [04-hdc-vsa-foundations.md](./04-hdc-vsa-foundations.md) for mathematical foundations
 - See [05-hdc-operations.md](./05-hdc-operations.md) for operation details

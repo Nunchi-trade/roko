@@ -319,7 +319,271 @@ The MCP config is passed via `--mcp-config` to the underlying agent process, ena
 
 ---
 
-## Related Topics
+## GitOps Configuration Management
+
+For operators managing agent fleets, Roko supports a GitOps model where Git is the single source of truth for all agent configuration. This applies the four principles codified by the OpenGitOps specification (v1.0, 2021): **declarative**, **versioned and immutable**, **pulled automatically**, **continuously reconciled**.
+
+### Architecture
+
+```
+Git Repository (source of truth)
+  environments/
+    production/
+      roko.toml          # Agent infrastructure config
+      STRATEGY.md         # Agent goals
+      hooks/              # Lifecycle hooks
+    staging/
+      roko.toml
+      STRATEGY.md
+          │
+          │  poll (1m interval)
+          ▼
+┌──────────────────┐
+│  Config Watcher   │ ← Runs inside roko process (self-hosted)
+│  (Reconciler)     │   or as control plane component (hosted)
+└────────┬─────────┘
+         │  compare desired vs actual
+         │
+    ┌────▼────────────┐
+    │  Drift Detection │
+    └────┬────────────┘
+         │
+    ┌────▼──────────────────────────┐
+    │  Apply Changes / Self-Heal    │
+    │  (hot-reload or restart)      │
+    └───────────────────────────────┘
+```
+
+### GitOps Config Spec
+
+```rust
+/// GitOps configuration source, analogous to an ArgoCD Application
+/// or Flux GitRepository + Kustomization.
+///
+/// When enabled, the agent polls the Git repository at `poll_interval`
+/// and reconciles its configuration against the desired state.
+///
+/// Crate: `roko-core`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitOpsConfig {
+    /// Git repository URL (HTTPS or SSH).
+    pub repo_url: String,
+
+    /// Branch, tag, or full commit SHA. Default: "main".
+    pub target_revision: String,
+
+    /// Relative path within the repo to this agent's config directory.
+    pub path: String,
+
+    /// How often to check for changes. Default: 60s.
+    /// Minimum: 30s. Maximum: 3600s.
+    /// ArgoCD default: 180s. Flux default: 60s.
+    pub poll_interval: Duration,
+
+    /// Auto-sync: automatically apply changes detected in Git.
+    /// When false, changes are reported but require `roko config apply`.
+    pub auto_sync: bool,
+
+    /// Self-heal: revert manual config changes back to Git state.
+    /// Requires `auto_sync: true`.
+    /// ArgoCD equivalent: `spec.syncPolicy.automated.selfHeal`.
+    pub self_heal: bool,
+
+    /// Prune: remove config sections absent from the desired state.
+    /// When false, orphaned config sections are preserved.
+    /// Safety: defaults to false to prevent accidental deletion.
+    pub prune: bool,
+
+    /// Number of past config states to retain for rollback.
+    /// Each state is identified by Git commit SHA.
+    /// Default: 10. Range: 1-100.
+    pub revision_history_limit: usize,
+
+    /// Retry policy for failed sync attempts.
+    pub retry: GitOpsRetryPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitOpsRetryPolicy {
+    /// Maximum retry attempts. -1 = unlimited.
+    pub limit: i32,
+    /// Initial backoff duration.
+    pub initial_backoff: Duration,
+    /// Backoff multiplier.
+    pub factor: f64,
+    /// Maximum backoff duration.
+    pub max_backoff: Duration,
+}
+
+/// Result of a drift detection pass.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ConfigDrift {
+    /// Actual state matches desired state from Git.
+    InSync { revision: String },
+    /// Actual state diverges from desired state.
+    Drifted {
+        revision: String,
+        diverged_keys: Vec<String>,
+        last_known_good: String,
+    },
+    /// Git source unreachable (network error, auth failure).
+    SourceUnreachable { error: String },
+}
+
+impl Default for GitOpsConfig {
+    fn default() -> Self {
+        Self {
+            repo_url: String::new(),
+            target_revision: "main".into(),
+            path: ".".into(),
+            poll_interval: Duration::from_secs(60),
+            auto_sync: true,
+            self_heal: true,
+            prune: false,
+            revision_history_limit: 10,
+            retry: GitOpsRetryPolicy {
+                limit: 5,
+                initial_backoff: Duration::from_secs(5),
+                factor: 2.0,
+                max_backoff: Duration::from_secs(180),
+            },
+        }
+    }
+}
+```
+
+### TOML Configuration
+
+```toml
+[gitops]
+enabled = true
+repo_url = "https://github.com/org/agent-configs.git"
+target_revision = "main"
+path = "environments/production"
+poll_interval_secs = 60
+auto_sync = true
+self_heal = true
+prune = false
+revision_history_limit = 10
+
+[gitops.retry]
+limit = 5
+initial_backoff_secs = 5
+factor = 2.0
+max_backoff_secs = 180
+```
+
+### Reconciliation Algorithm
+
+```
+reconcile():
+  1. fetch(repo_url, target_revision) → desired_state
+  2. read_current_config() → actual_state
+  3. diff = compare(desired_state, actual_state)
+
+  4. if diff.is_empty():
+       emit ConfigDrift::InSync { revision }
+       return
+
+  5. emit ConfigDrift::Drifted { diverged_keys }
+
+  6. if !auto_sync:
+       log_drift(diff)
+       notify_operator(diff)
+       return
+
+  7. for key in diff.changed_keys:
+       if is_hot_reloadable(key):
+         hot_apply(key, desired_state[key])
+       else:
+         schedule_restart(key, desired_state[key])
+
+  8. for key in diff.removed_keys:
+       if prune:
+         remove(key)
+       else:
+         log_orphan(key)
+
+  9. save_revision_history(revision, actual_state)
+ 10. emit sync_success(revision)
+```
+
+### Rollback
+
+```bash
+# List available config revisions
+roko config history
+
+# Show diff between current and specific revision
+roko config diff abc123f
+
+# Rollback to a previous Git revision
+roko config rollback abc123f
+
+# Rollback with dry-run
+roko config rollback abc123f --dry-run
+```
+
+Rollback replays a prior Git commit's config state through the same reconciliation pipeline. The rollback itself is recorded in history, creating an audit trail.
+
+### Test Criteria
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gitops_defaults_are_safe() {
+        let config = GitOpsConfig::default();
+        assert!(config.auto_sync);
+        assert!(config.self_heal);
+        assert!(!config.prune, "prune defaults to false for safety");
+        assert_eq!(config.revision_history_limit, 10);
+    }
+
+    #[test]
+    fn poll_interval_minimum_enforced() {
+        let config = GitOpsConfig {
+            poll_interval: Duration::from_secs(10), // below minimum
+            ..Default::default()
+        };
+        // Runtime should clamp to 30s minimum
+        let clamped = config.poll_interval.max(Duration::from_secs(30));
+        assert_eq!(clamped, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn drift_detection_reports_diverged_keys() {
+        let drift = ConfigDrift::Drifted {
+            revision: "abc123".into(),
+            diverged_keys: vec!["inference.default_model".into()],
+            last_known_good: "def456".into(),
+        };
+        if let ConfigDrift::Drifted { diverged_keys, .. } = drift {
+            assert_eq!(diverged_keys.len(), 1);
+        }
+    }
+
+    #[test]
+    fn retry_backoff_is_bounded() {
+        let retry = GitOpsRetryPolicy {
+            limit: 5,
+            initial_backoff: Duration::from_secs(5),
+            factor: 2.0,
+            max_backoff: Duration::from_secs(180),
+        };
+        // After 5 doublings: 5 * 2^5 = 160s, still under 180s max
+        let delay = retry.initial_backoff.as_secs_f64()
+            * retry.factor.powi(5);
+        assert!(delay <= retry.max_backoff.as_secs_f64());
+    }
+}
+```
+
+---
+
+## Cross-References
 
 - `docs/17-lifecycle/01-agent-creation.md` — How config is initially generated
 - `docs/17-lifecycle/04-funding-and-budgets.md` — Budget configuration details

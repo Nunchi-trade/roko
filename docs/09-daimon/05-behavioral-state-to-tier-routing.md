@@ -248,7 +248,7 @@ The turn limit affects both cost (more turns = more API calls) and latency (more
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [04-six-behavioral-states.md](./04-six-behavioral-states.md) for behavioral state definitions and PAD thresholds
 - See [10-integration-points.md](./10-integration-points.md) for how tier routing connects with VCG bidding and dispatch

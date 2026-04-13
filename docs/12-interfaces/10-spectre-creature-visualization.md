@@ -919,7 +919,7 @@ mod tests {
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [11-spectre-rendering-per-interface.md](./11-spectre-rendering-per-interface.md) for per-renderer implementation details
 - See [12-spectre-as-collective-display.md](./12-spectre-as-collective-display.md) for multi-agent Spectre visualization

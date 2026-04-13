@@ -406,7 +406,7 @@ During development, mirage-rs (see [18-mirage-rs-evm-simulator.md](./18-mirage-r
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [04-korai-passport-erc-721-soulbound.md](./04-korai-passport-erc-721-soulbound.md) for the passport struct stored in the Identity Registry
 - See [05-ventriloquist-defense.md](./05-ventriloquist-defense.md) for the prompt hash field in the Identity Registry

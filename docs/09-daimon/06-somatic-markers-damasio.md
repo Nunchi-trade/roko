@@ -555,7 +555,7 @@ The weak valence (+0.11) signals that this region of strategy space has produced
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [07-15-percent-contrarian-retrieval.md](./07-15-percent-contrarian-retrieval.md) for contrarian retrieval mechanism
 - See [08-8-dimensional-strategy-space.md](./08-8-dimensional-strategy-space.md) for strategy space dimensions

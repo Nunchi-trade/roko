@@ -203,6 +203,47 @@ Dreams interact deeply with the other cognitive cross-cuts:
 
 ---
 
+## Dream Quality Metrics and Self-Assessment
+
+Over time, the dream subsystem should be able to evaluate its own effectiveness. Are dreams actually improving waking performance, or are they burning compute for no return? The `DreamQualityDashboard` aggregates quality signals across dream cycles:
+
+```rust
+/// Aggregate dream quality metrics tracked across cycles.
+pub struct DreamQualityDashboard {
+    /// Cycles tracked.
+    pub total_cycles: usize,
+    /// Mean promotion rate: fraction of staged hypotheses eventually promoted.
+    pub mean_promotion_rate: f64,
+    /// Mean diversity: average pairwise HDC distance of generated hypotheses.
+    pub mean_hypothesis_diversity: f64,
+    /// Mean waking improvement: estimated reduction in task retries attributable to dreams.
+    pub mean_waking_improvement: f64,
+    /// Nightmare rate: nightmares detected per dream cycle.
+    pub nightmare_rate: f64,
+    /// Cost efficiency: waking improvement per dollar spent on dreams.
+    pub cost_efficiency: f64,
+    /// Trend: is dream quality improving, declining, or stable?
+    pub trend: DreamQualityTrend,
+}
+
+pub enum DreamQualityTrend {
+    Improving { slope: f64 },
+    Stable,
+    Declining { slope: f64 },
+}
+```
+
+Key metrics explained:
+
+- **Promotion rate** measures whether dreams generate *useful* hypotheses. A low promotion rate (< 0.10) suggests dreams are producing noise. A high rate (> 0.40) suggests dreams may not be exploring broadly enough. The healthy range is 0.15-0.35.
+- **Hypothesis diversity** uses pairwise HDC cosine distance to measure whether dreams are exploring diverse territory or converging on the same patterns. Low diversity triggers the Hypnagogia engine's stochastic resonance to inject more noise.
+- **Waking improvement** estimates the causal effect of dreams on waking performance by comparing task retry rates and gate pass rates before and after dream consolidation cycles. This is the bottom-line metric: are dreams making the agent better at its job?
+- **Nightmare rate** tracks how often the nightmare detection system (see [17-advanced-dream-concepts.md](17-advanced-dream-concepts.md)) fires. A rising nightmare rate may indicate the agent is encountering genuinely novel failure modes that warrant attention.
+- **Cost efficiency** normalizes waking improvement by dream compute cost, ensuring that dreams provide positive ROI. If cost efficiency drops below 1.0, the dream scheduler should reduce frequency or switch to cheaper models.
+- **Trend** fits a linear regression over the last N cycles (default: 20) to determine whether dream quality is improving, stable, or declining. A declining trend triggers diagnostic logging and may adjust dream parameters (e.g., increasing REM allocation, changing model tier).
+
+---
+
 ## What to Read Next
 
 - [01-three-phase-cycle.md](01-three-phase-cycle.md) — The core NREM→REM→Integration cycle with full technical detail

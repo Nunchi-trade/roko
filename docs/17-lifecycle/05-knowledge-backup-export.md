@@ -340,7 +340,7 @@ The backup format is designed so that a fresh agent reading just the backup can 
 
 ---
 
-## Related Topics
+## Cross-References
 
 - `docs/17-lifecycle/06-agent-deletion.md` — Clean shutdown before backup
 - `docs/17-lifecycle/07-new-agent-creation.md` — Creating a fresh agent for restore

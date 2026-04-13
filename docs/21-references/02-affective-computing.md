@@ -6,6 +6,8 @@
 **Prerequisites**: [Architecture](../00-architecture/INDEX.md), [Daimon](../09-daimon/INDEX.md)
 **Key sources**: `bardo-backup/prd/02-mortality/14-research-foundations.md` §3, `bardo-backup/prd/shared/citations.md` §28
 
+> **Implementation**: Reference
+
 ---
 
 ## Abstract
@@ -109,7 +111,20 @@ The Daimon is not cosmetic. Five independent research lines — somatic markers,
 
 ---
 
-## Cross-references
+## Affective Computing Surveys and Frameworks (2025)
+
+- Yin, Y. et al. (2025). Emotions in Artificial Intelligence. arXiv:2505.01462.
+  *Grounds: Teleology-driven affect — proposes a teleology-driven affective computing framework unifying major emotion theories under the premise that affect is adaptive and goal-directed. Emphasizes aligning agent responses with both individual and collective well-being over extended timescales. Validates the Daimon as a goal-directed computational system, not a cosmetic overlay.*
+
+- Intelligent Agents with Emotional Intelligence (2025). Current Trends, Challenges, and Future Prospects. arXiv:2511.20657.
+  *Grounds: Emotionally intelligent agents — survey of agents with emotional intelligence identifying key challenges in development. Validates the architectural necessity of emotional intelligence in agent systems, supporting Roko's Daimon as an integral subsystem.*
+
+- Emotions in the Loop (2025). A Survey of Affective Computing for Emotional Support. arXiv:2505.01542.
+  *Grounds: Affect-in-the-loop — comprehensive survey of affective computing integrated into agent interaction loops. Validates Roko's approach of integrating affect (Daimon) into the cognitive loop rather than treating it as a post-hoc analysis layer.*
+
+---
+
+## Cross-References
 
 - See [03-dreams-and-offline-learning.md](./03-dreams-and-offline-learning.md) for Walker & van der Helm emotional depotentiation in the dreams context
 - See [01-memory-consolidation.md](./01-memory-consolidation.md) for mood-congruent retrieval in the memory context

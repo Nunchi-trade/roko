@@ -169,7 +169,7 @@ The escalation path ensures jobs are not lost. If the network is at capacity, th
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [10-spore-job-market.md](./10-spore-job-market.md) for the full marketplace protocol that Sparrow complements
 - See [12-three-hiring-models.md](./12-three-hiring-models.md) for how RandomVRF relates to the other hiring models

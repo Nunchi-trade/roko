@@ -792,7 +792,7 @@ The universal enforcement path extends this to cover all action types:
 
 ---
 
-## Related Topics
+## Cross-References
 
 - [00-defense-in-depth.md](00-defense-in-depth.md) — Kernel primitives as another defense layer
 - [01-capability-tokens.md](01-capability-tokens.md) — Capability<T> tokens are the fine-grained permission system within Engram Syscalls

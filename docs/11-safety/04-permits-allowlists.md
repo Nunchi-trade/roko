@@ -222,7 +222,7 @@ The `orchestrate.rs` module in `roko-cli` assigns roles and permissions when dis
 
 ---
 
-## Related Topics
+## Cross-References
 
 - [00-defense-in-depth.md](00-defense-in-depth.md) — Overall safety architecture
 - [01-capability-tokens.md](01-capability-tokens.md) — Compile-time capability enforcement

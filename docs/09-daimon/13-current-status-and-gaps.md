@@ -211,7 +211,7 @@ Based on `refactoring-prd/07-implementation-priorities.md`:
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [00-vision-and-mortality-incompatibility.md](./00-vision-and-mortality-incompatibility.md) for why mortality files are skipped
 - See [10-integration-points.md](./10-integration-points.md) for the four integration points and their wiring status

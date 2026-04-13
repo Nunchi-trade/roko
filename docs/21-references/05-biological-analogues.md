@@ -6,6 +6,8 @@
 **Prerequisites**: [Architecture](../00-architecture/INDEX.md)
 **Key sources**: `bardo-backup/prd/02-mortality/14-research-foundations.md` §6, `bardo-backup/tmp/agent-chain/14-academic-foundations.md` §§5-7
 
+> **Implementation**: Reference
+
 ---
 
 ## Abstract
@@ -107,7 +109,17 @@ Roko's cognitive architecture draws structural analogies from biological systems
 
 ---
 
-## Cross-references
+## Swarm Robotics and Bio-Inspired Coordination (2024-2025)
+
+- Stigmergy: From Mathematical Modelling to Control (2024). _Proceedings of the Royal Society A_, 2024.
+  *Grounds: Mathematical biology of coordination — formal mathematical framework treating swarms as fluids, designing control at continuum level. The PDE-based approach provides rigorous foundations for the activator-inhibitor dynamics in Roko's Pheromone Field. Cross-referenced in [04-coordination-and-multi-agent.md](./04-coordination-and-multi-agent.md).*
+
+- Enhancing Radioactive Environment Exploration with Bio-Inspired Swarm Robotics (2024). _Robotics and Autonomous Systems_, 2024.
+  *Grounds: Stigmergy vs Levy flight — comparative analysis showing stigmergy-based coordination outperforms Levy flight in hazardous environments. Validates stigmergic coordination for agent exploration in uncertain, high-risk task domains.*
+
+---
+
+## Cross-References
 
 - See [00-lifecycle-and-finite-agency.md](./00-lifecycle-and-finite-agency.md) for Hayflick, Kirkwood, and Hanahan & Weinberg
 - See [04-coordination-and-multi-agent.md](./04-coordination-and-multi-agent.md) for stigmergy and cooperation

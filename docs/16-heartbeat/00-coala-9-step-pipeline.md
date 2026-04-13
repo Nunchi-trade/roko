@@ -306,6 +306,200 @@ Without gating (every tick at T2): daily cost would be $100-500+ depending on ti
 
 ---
 
+## Pipeline Instrumentation: CognitiveCycleSpan
+
+Every execution of the 9-step pipeline must be instrumented for observability, cost tracking, and dual-process validation. The `CognitiveCycleSpan` record captures per-step latency, token accounting, and tier routing metadata — the missing bridge between per-turn `AgentEfficiencyEvent` (which covers an entire turn) and per-tool `ToolTrace` (which covers one tool call).
+
+This design follows the OpenTelemetry gen_ai semantic conventions (OTel SIG, 2025) which define a span hierarchy: `invoke_agent` → `chat` → `execute_tool`, plus the ABBench/TAMAS paper (arXiv:2503.06745) which found 63% coefficient of variation in agent execution flow, making per-step instrumentation essential for understanding non-deterministic paths.
+
+```rust
+/// One complete CoALA decision cycle: OBSERVE → RETRIEVE → ANALYZE → GATE
+/// → [SIMULATE] → [VALIDATE] → EXECUTE → VERIFY → REFLECT.
+///
+/// Emitted once per cycle within a multi-turn agent session.
+/// Complements `AgentEfficiencyEvent` (entire turn) and `ToolTrace` (one tool call).
+///
+/// Maps to OTel span: invoke_agent > cognitive_cycle > {per-step child spans}.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CognitiveCycleSpan {
+    // ── Identity ────────────────────────────────────────────────────
+    /// UUID v4 hex, unique per cycle.
+    pub span_id: String,
+    /// Links to the parent `AgentEfficiencyEvent`.
+    pub parent_turn_id: String,
+    pub agent_id: String,
+    pub plan_id: String,
+    pub task_id: String,
+    /// Monotonic within a turn (0-indexed).
+    pub cycle_index: u32,
+    /// Which cognitive frequency spawned this cycle.
+    pub frequency: OperatingFrequency,
+
+    // ── Per-step latencies (milliseconds) ────────────────────────────
+    /// Step 1: OBSERVE — probe execution + environment reads.
+    pub observe_latency_ms: u64,
+    /// Step 2: RETRIEVE — Neuro scoring + knowledge retrieval.
+    pub retrieve_latency_ms: u64,
+    /// Step 3: ANALYZE — prediction error computation + Daimon update.
+    pub analyze_latency_ms: u64,
+    /// Step 4: GATE — tier routing decision.
+    pub gate_latency_ms: u64,
+    /// Step 5: SIMULATE — domain pre-flight (0 if skipped).
+    pub simulate_latency_ms: u64,
+    /// Step 6: VALIDATE — safety constraint checks (0 if skipped).
+    pub validate_latency_ms: u64,
+    /// Step 7: EXECUTE — LLM call + tool dispatch (0 if T0).
+    pub execute_latency_ms: u64,
+    /// Step 8: VERIFY — gate pipeline wall time (0 if no action).
+    pub verify_latency_ms: u64,
+    /// Step 9: REFLECT — episode logging + affect update.
+    pub reflect_latency_ms: u64,
+    /// Total cycle wall time (end-to-end).
+    pub total_latency_ms: u64,
+
+    // ── Token accounting ─────────────────────────────────────────────
+    /// Tokens retrieved from Neuro in RETRIEVE step.
+    pub retrieval_tokens: u64,
+    /// Tokens in assembled context window (INTEGRATE).
+    pub context_tokens: u64,
+    /// LLM output tokens (0 for T0).
+    pub reasoning_tokens: u64,
+    /// Tokens in tool call results.
+    pub tool_result_tokens: u64,
+
+    // ── Cost ──────────────────────────────────────────────────────────
+    pub cycle_cost_usd: f64,
+
+    // ── Dual-process routing ──────────────────────────────────────────
+    /// Tier selected by the GATE step.
+    pub tier: InferenceTier,
+    /// Prediction error that drove the gating decision.
+    pub prediction_error: f32,
+    /// Adaptive threshold at decision time.
+    pub threshold: f32,
+    /// Number of probes that flagged anomalous.
+    pub anomaly_count: u32,
+    /// Whether a playbook rule fired at T0.
+    pub playbook_rule_id: Option<String>,
+
+    // ── Outcome ───────────────────────────────────────────────────────
+    /// Primary action taken (e.g. "tool:Bash", "no-op", "playbook:rule_42").
+    pub action_selected: String,
+    pub action_succeeded: bool,
+    /// Gate verdict from VERIFY step.
+    pub gate_passed: Option<bool>,
+
+    // ── Meta ──────────────────────────────────────────────────────────
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+```
+
+### Per-Step Metric Taxonomy
+
+The instrumentation bridges CoALA's theoretical phases to concrete, measurable quantities:
+
+| CoALA Step | Roko Step | Key Metrics | OTel Span Kind |
+|---|---|---|---|
+| OBSERVE | `Substrate.query()` | `observe_latency_ms`, probe count, anomaly count | INTERNAL |
+| RETRIEVE | `Scorer.score()` | `retrieve_latency_ms`, candidates scored, retrieval tokens | CLIENT (if Neuro RPC) |
+| ANALYZE | Daimon cross-cut | `analyze_latency_ms`, prediction error, PAD delta | INTERNAL |
+| GATE | `Router.select()` | `gate_latency_ms`, tier selected, threshold, confidence | INTERNAL |
+| SIMULATE | Domain Gate | `simulate_latency_ms`, simulation verdict | INTERNAL |
+| VALIDATE | `Gate.verify()` | `validate_latency_ms`, safety check count | INTERNAL |
+| EXECUTE | `Agent.execute()` | `execute_latency_ms`, reasoning tokens, TTFT, model ID | CLIENT |
+| VERIFY | `Gate.verify()` | `verify_latency_ms`, gate name, passed/failed, diff size | INTERNAL |
+| REFLECT | `Policy.decide()` | `reflect_latency_ms`, episodes written, Neuro mutations | INTERNAL |
+
+### OpenTelemetry Span Hierarchy
+
+The cognitive cycle maps to a nested OTel span tree following the gen_ai semantic conventions:
+
+```
+invoke_agent {roko-agent}                          [CLIENT span]
+│   gen_ai.agent.id, gen_ai.operation.name
+│
+├── cognitive_cycle {cycle_index=0}                 [INTERNAL span]
+│   │   roko.cycle.frequency = "gamma"
+│   │   roko.cycle.tier = "T2"
+│   │
+│   ├── perceive                                    [INTERNAL]
+│   │       roko.probes.anomaly_count = 3
+│   ├── evaluate                                    [INTERNAL]
+│   │       roko.retrieval.candidates = 42
+│   ├── attend                                      [INTERNAL]
+│   │       roko.gating.prediction_error = 0.35
+│   │       roko.gating.tier = "T2"
+│   ├── integrate                                   [INTERNAL]
+│   │       roko.context.tokens = 28500
+│   ├── chat {claude-opus-4-6}                      [CLIENT]
+│   │   │   gen_ai.usage.input_tokens = 28500
+│   │   │   gen_ai.usage.output_tokens = 1200
+│   │   └── execute_tool {Bash}                     [INTERNAL]
+│   │           gen_ai.tool.name = "Bash"
+│   ├── verify                                      [INTERNAL]
+│   │       roko.gate.name = "CompileGate"
+│   │       roko.gate.passed = true
+│   ├── persist                                     [INTERNAL]
+│   └── reflect                                     [INTERNAL]
+│           roko.episodes_written = 1
+│
+├── cognitive_cycle {cycle_index=1, tier="T0"}      [INTERNAL span]
+│   └── perceive + attend (only)                    [steps 5-8 skipped]
+...
+```
+
+### Frequency Transition Events
+
+To track when and why the scheduler promotes between cognitive speeds, a `FrequencyTransitionEvent` captures inter-loop coordination:
+
+```rust
+/// Records a transition between cognitive frequencies.
+///
+/// Theta decides to escalate gamma; delta fires after idle detection.
+/// These transitions are the dual-process system's metacognitive decisions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FrequencyTransitionEvent {
+    pub from_frequency: OperatingFrequency,
+    pub to_frequency: OperatingFrequency,
+    pub trigger: TransitionTrigger,
+    /// Did the escalation improve outcomes? (filled retrospectively)
+    pub outcome_improved: Option<bool>,
+    /// Cost of the higher-frequency processing.
+    pub incremental_cost_usd: f64,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TransitionTrigger {
+    /// Gamma count threshold reached (N=5 gamma cycles → theta).
+    GammaCountThreshold { count: u32 },
+    /// Episode completed, triggering theta reflection.
+    EpisodeCompletion { task_id: String },
+    /// Idle timeout triggered delta consolidation.
+    IdleTimeout { idle_secs: u64 },
+    /// Episode count exceeded delta threshold.
+    EpisodeCountThreshold { count: usize },
+    /// Theta intervention forced gamma escalation.
+    ThetaEscalation { reason: String },
+    /// External signal (user steer, safety alert).
+    ExternalSignal { signal: String },
+}
+```
+
+### Test Criteria for Instrumentation
+
+| Test | Assertion |
+|---|---|
+| T0 cycle produces span with `execute_latency_ms = 0` | Steps 5-8 latencies are zero |
+| T2 cycle populates all 9 step latencies | No step latency is None |
+| `total_latency_ms >= sum(step latencies)` | Overhead is bounded |
+| CognitiveCycleSpan serializes to JSON < 2KB | Efficient episode storage |
+| `prediction_error` and `threshold` match TierDecision | Consistent gating record |
+| FrequencyTransitionEvent round-trips serde | All fields preserved |
+| OTel span parent-child: cognitive_cycle → chat | Span hierarchy maintained |
+
+---
+
 ## Current Status and Gaps
 
 **What exists in the codebase today:**
@@ -314,12 +508,19 @@ Without gating (every tick at T2): daily cost would be $100-500+ depending on ti
 - `bardo-primitives/src/tier.rs` (to be renamed `roko-primitives`) defines the `InferenceTier` enum (T0/T1/T2) and the `TierRouter` for model selection.
 - `roko-learn/src/episode_logger.rs` implements Step 9 (REFLECT) episode logging.
 - `roko-gate` implements Step 8 (VERIFY) with 11 gate types.
+- `roko-core/src/metric.rs` provides `TaskMetric` per-gate-execution records.
+- `roko-learn/src/efficiency.rs` provides `AgentEfficiencyEvent` per-turn records with token accounting.
+- `roko-core/src/tool/trace.rs` provides `ToolTrace` per-tool-call event sequences.
+- `roko-core/src/obs/metrics.rs` defines 7 Prometheus-format metric families (`roko_plans_total`, `roko_gate_verdicts_total`, `roko_llm_tokens_total`, etc.).
 
 **What is missing:**
 - Formal OBSERVE step with the 16 T0 probes running at every tick (see implementation plan `12a-cognitive-layer.md` §I).
 - Neuro-aware RETRIEVE step with multi-factor scoring (see `12a-cognitive-layer.md` §E).
 - Daimon-modulated ANALYZE step with prediction error computation (see `12a-cognitive-layer.md` §F).
 - Full `DecisionCycleRecord` struct capturing the complete tick state (currently, episodes capture partial information).
+- `CognitiveCycleSpan` linking per-step latencies to per-turn records.
+- `FrequencyTransitionEvent` tracking inter-loop promotions and their outcomes.
+- OTel span integration via `tracing-opentelemetry` for the nested cognitive loop hierarchy.
 
 ---
 

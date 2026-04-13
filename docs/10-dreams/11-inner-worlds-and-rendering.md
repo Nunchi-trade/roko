@@ -126,6 +126,63 @@ Dream rendering is **not yet implemented**. The TUI is currently text-only (item
 
 ---
 
+## Dream Rendering Pipeline: Technical Specification
+
+Formalize the rendering pipeline for when the TUI is fully wired with ratatui:
+
+```rust
+/// Dream rendering configuration for the TUI portal.
+pub struct DreamRenderConfig {
+    /// Maximum frames per second for dream animations.
+    pub target_fps: u16,                  // default: 10, range: 4-30
+    /// Phosphene pattern rotation speed (degrees per second).
+    pub phosphene_rotation_speed: f64,    // default: 15.0, range: 5.0-45.0
+    /// Fragment surface duration (milliseconds).
+    pub fragment_surface_ms: u64,         // default: 3000, range: 1000-8000
+    /// Connection flash duration (milliseconds).
+    pub connection_flash_ms: u64,         // default: 200, range: 100-500
+    /// Whether to render braille phosphenes in hypnagogia.
+    pub braille_phosphenes: bool,         // default: true
+    /// Dream phase transition animation duration (milliseconds).
+    pub phase_transition_ms: u64,         // default: 1500, range: 500-3000
+    /// Opacity for dream portal mode (0.0-1.0).
+    pub dream_opacity: f64,              // default: 0.85, range: 0.60-1.0
+}
+
+/// Dream phase visual treatment specification.
+pub struct PhaseVisualSpec {
+    pub phase: DreamPhase,
+    pub border_style: BorderStyle,
+    pub content_opacity: f64,
+    pub animation_type: AnimationType,
+    pub color_palette: ColorPalette,
+}
+
+pub enum BorderStyle {
+    /// Stable double-line borders for NREM (calm, structured).
+    StableDouble,
+    /// Dashed borders for REM counterfactuals.
+    Dashed,
+    /// Blurred/oscillating borders for hypnagogia.
+    Oscillating { frequency_hz: f64 },
+    /// No borders for integration (knowledge crystallization).
+    None,
+}
+
+pub enum AnimationType {
+    /// Static with periodic updates (NREM vignettes).
+    StaticPeriodic { update_interval_ms: u64 },
+    /// Continuously drifting (hypnagogia fragments).
+    Drift { speed_chars_per_sec: f64 },
+    /// Typing animation (integration crystallization).
+    TypeWriter { chars_per_sec: f64 },
+    /// Decision tree expansion (REM counterfactuals).
+    TreeGrowth { branch_delay_ms: u64 },
+}
+```
+
+---
+
 ## Cross-References
 
 | Document | Relevance |

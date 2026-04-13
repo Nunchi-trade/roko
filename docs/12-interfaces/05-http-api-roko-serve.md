@@ -245,7 +245,7 @@ Built-in event sources (cron scheduler, file watcher) are started automatically 
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [06-websocket-streaming.md](./06-websocket-streaming.md) for real-time streaming
 - See [00-cli-overview.md](./00-cli-overview.md) for `roko serve` command

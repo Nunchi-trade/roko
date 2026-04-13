@@ -436,7 +436,7 @@ Fast episodic memory (Gamma/Theta) captures details. Slow semantic memory (Delta
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [01-oracle-trait.md](./01-oracle-trait.md) for the Oracle trait that witnesses feed
 - See [02-chain-oracles.md](./02-chain-oracles.md) for chain witness integration

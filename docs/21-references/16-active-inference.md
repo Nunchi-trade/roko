@@ -6,6 +6,8 @@
 **Prerequisites**: [Architecture](../00-architecture/INDEX.md)
 **Key sources**: `bardo-backup/tmp/agent-chain/14-academic-foundations.md` §4, `bardo-backup/prd/shared/citations.md` §4
 
+> **Implementation**: Reference
+
 ---
 
 ## Abstract
@@ -85,7 +87,24 @@ Active inference provides the principled answer to "how should an agent decide w
 
 ---
 
-## Cross-references
+## Distributionally Robust Active Inference (2025)
+
+- Shafiei, A., Jesawada, H., Friston, K., & Russo, G. (2025). Distributionally Robust Free Energy Principle for Decision-Making. _Nature Communications_, 17, 707.
+  *Grounds: Robust active inference — DR-FREE model instills robustness by design, combining a robust extension of the free energy principle with a resolution engine. Agents complete tasks even when state-of-the-art models fail under training-environment ambiguity. Directly applicable to Roko's tier routing under model uncertainty — the agent should route robustly even when the domain model is imperfect.*
+
+---
+
+## Active Inference for LLM Systems (2024-2025)
+
+- Koudahl, M.T. et al. (2024). Active Inference for Self-Organizing Multi-LLM Systems: A Bayesian Thermodynamic Approach to Adaptation. arXiv:2412.10425.
+  *Grounds: Multi-LLM active inference — cognitive layer above LLM-based agents dynamically adjusts prompts and search strategies through principled information-seeking behavior. Validates Roko's active-inference-driven context assembly: the agent selects which knowledge to retrieve by minimizing expected free energy.*
+
+- Synthetic Active Inference Agents (2024). Realising Synthetic Active Inference Agents, Part II: Variational Message Updates. arXiv:2306.02733.
+  *Grounds: Scalable active inference — message passing on free-form Forney-style Factor Graphs minimizes generalized free energy objectives. Provides a scalable implementation path for Roko's EFE-based tier routing beyond toy state spaces.*
+
+---
+
+## Cross-References
 
 - See [12-signal-processing.md](./12-signal-processing.md) for predictive processing
 - See [15-cybernetics-and-vsm.md](./15-cybernetics-and-vsm.md) for cybernetic regulation

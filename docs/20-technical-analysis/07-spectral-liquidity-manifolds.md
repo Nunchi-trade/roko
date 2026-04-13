@@ -727,6 +727,456 @@ ChainOracle::predict()
 
 ---
 
+## Information Geometry and Statistical Manifold Extensions
+
+The spectral liquidity manifold described above uses Riemannian geometry to model execution costs. This section extends the framework into **information geometry** -- the Riemannian geometry of probability distributions. When oracles produce probabilistic predictions, the space of those prediction distributions is itself a manifold with rich geometric structure. Information geometry provides coordinate-free tools for measuring distances between distributions, optimizing oracle parameters, and detecting distribution drift.
+
+The key bridge: the liquidity manifold's metric tensor measures execution cost; the Fisher-Rao metric measures **statistical distinguishability**. Combining both gives a product manifold where geodesics jointly optimize execution cost and prediction accuracy.
+
+### Fisher-Rao Metric on Oracle Distributions
+
+```rust
+/// Information-geometric extension of the liquidity manifold.
+///
+/// The Fisher-Rao metric is the UNIQUE Riemannian metric invariant
+/// under sufficient statistics (Cencov's theorem, 1982).
+///
+/// When oracle predictions form a parametric family p(y|theta),
+/// the Fisher information matrix defines a natural Riemannian metric:
+///   G_ij(theta) = E[d(log p(y|theta))/d(theta_i) * d(log p(y|theta))/d(theta_j)]
+///
+/// This metric captures the "distinguishability" of nearby parameter values.
+/// Two parameter values theta and theta + d(theta) are "far apart" if the
+/// distributions p(y|theta) and p(y|theta + d(theta)) are easy to distinguish
+/// from samples. The Fisher-Rao distance is the geodesic distance under
+/// this metric.
+///
+/// For the oracle prediction pipeline, this means:
+/// - Parameters that strongly affect predictions are "far" from each other.
+/// - Parameters with redundant effects are "close" (the manifold collapses
+///   in those directions, reflected by small eigenvalues of G).
+/// - The volume element sqrt(det(G)) gives the Jeffreys prior --
+///   the uninformative prior that is invariant under reparameterization.
+///
+/// (Amari & Nagaoka, 2000, "Methods of Information Geometry")
+pub struct FisherRaoManifold {
+    /// Dimension of the parameter space.
+    pub dim: usize,
+    /// Fisher information matrix at a point.
+    /// Given parameter vector theta, returns the dim x dim Fisher matrix G(theta).
+    pub fisher_matrix: Box<dyn Fn(&[f64]) -> Vec<Vec<f64>> + Send + Sync>,
+    /// Alpha-connection parameter (alpha in [-1, 1]).
+    /// alpha = 0: Levi-Civita connection (Riemannian, metric-compatible)
+    /// alpha = 1: e-connection (exponential family natural parameters)
+    /// alpha = -1: m-connection (mixture family natural parameters)
+    /// Other values interpolate between these extremes.
+    pub alpha: f64,
+}
+
+impl FisherRaoManifold {
+    /// Compute the Fisher-Rao distance between two parameter values.
+    ///
+    /// This is the geodesic distance under the Fisher metric.
+    /// For univariate Gaussians N(mu, sigma^2), the Fisher-Rao distance
+    /// has a known closed form; for general families, we integrate
+    /// numerically along the geodesic.
+    pub fn distance(&self, theta_1: &[f64], theta_2: &[f64]) -> f64 {
+        // Construct geodesic between theta_1 and theta_2 on the
+        // Fisher-Rao manifold and integrate sqrt(g_ij dx^i dx^j).
+        let geodesic = self.compute_geodesic(theta_1, theta_2, 200);
+        let mut length = 0.0;
+        for step in 0..geodesic.len() - 1 {
+            let p = &geodesic[step];
+            let q = &geodesic[step + 1];
+            let g = (self.fisher_matrix)(p);
+            let dp: Vec<f64> = q.iter().zip(p.iter()).map(|(a, b)| a - b).collect();
+            let mut local_sq = 0.0;
+            for i in 0..self.dim {
+                for j in 0..self.dim {
+                    local_sq += g[i][j] * dp[i] * dp[j];
+                }
+            }
+            length += local_sq.max(0.0).sqrt();
+        }
+        length
+    }
+
+    /// Spectral decomposition of the Fisher matrix at a point.
+    ///
+    /// Eigenvalues reveal which parameter directions are most "informative":
+    /// - Large eigenvalue: small changes in that direction produce distinguishable distributions.
+    /// - Small eigenvalue: parameter is poorly identified (sloppy direction).
+    ///
+    /// This directly informs oracle parameter pruning:
+    /// parameters along sloppy directions can be fixed without loss of predictive power.
+    pub fn fisher_spectrum(&self, theta: &[f64]) -> (Vec<f64>, Vec<Vec<f64>>) {
+        let g = (self.fisher_matrix)(theta);
+        symmetric_eigendecomposition(&g)
+    }
+}
+```
+
+The Fisher-Rao manifold connects to the liquidity manifold through a product structure: the full state space is M_liq x M_stat, where M_liq carries the execution cost metric and M_stat carries the Fisher-Rao metric. Geodesics on the product manifold optimize both execution cost and parameter estimation simultaneously.
+
+### Natural Gradient for Oracle Parameter Updates
+
+```rust
+/// Natural gradient descent on the oracle parameter manifold.
+///
+/// Standard gradient descent ignores the geometry of parameter space.
+/// In Euclidean gradient descent, the update direction depends on how
+/// the parameters are chosen (e.g., mu vs. mu^2). This is a fundamental
+/// flaw: the optimizer's behavior changes under reparameterization.
+///
+/// Natural gradient (Amari, 1998) corrects for curvature:
+///   theta_{t+1} = theta_t - eta * G(theta_t)^{-1} * grad(L(theta_t))
+///
+/// where G(theta) is the Fisher information matrix.
+///
+/// Key properties:
+/// - Equivalent to steepest descent in the KL-divergence metric.
+/// - Convergence: O(1/t) regardless of parameterization (coordinate-free).
+/// - For exponential families: natural gradient in natural parameters
+///   reduces to standard gradient in expectation parameters (and vice versa).
+/// - Achieves the Cramer-Rao bound asymptotically: no other first-order
+///   method converges faster in the information-geometric sense.
+///
+/// (Amari, 1998, "Natural Gradient Works Efficiently in Learning")
+pub struct NaturalGradientOptimizer {
+    pub learning_rate: f64,
+    /// Tikhonov damping to regularize Fisher matrix inversion.
+    /// G_reg = G + lambda * I (prevents singularity for flat directions).
+    /// Interpretation: adds a small isotropic component to the metric,
+    /// ensuring all directions have at least lambda curvature.
+    /// Larger lambda -> more regularization -> closer to standard gradient.
+    pub damping: f64,  // default: 1e-4
+    /// Fisher matrix estimation method.
+    pub fisher_method: FisherEstimation,
+}
+
+impl NaturalGradientOptimizer {
+    /// Compute one natural gradient step.
+    ///
+    /// Returns the parameter update: delta_theta = -eta * G_reg^{-1} * grad_L.
+    pub fn step(
+        &self,
+        theta: &[f64],
+        gradient: &[f64],
+        fisher_fn: &dyn Fn(&[f64]) -> Vec<Vec<f64>>,
+    ) -> Vec<f64> {
+        let dim = theta.len();
+        let mut g = (fisher_fn)(theta);
+
+        // Apply Tikhonov damping: G_reg = G + lambda * I
+        for i in 0..dim {
+            g[i][i] += self.damping;
+        }
+
+        // Solve G_reg * delta = gradient via Cholesky decomposition.
+        // G_reg is symmetric positive-definite (given damping > 0),
+        // so Cholesky is numerically stable and O(d^3 / 3).
+        let natural_grad = cholesky_solve(&g, gradient);
+
+        // Scale by learning rate
+        natural_grad.iter().map(|&ng| -self.learning_rate * ng).collect()
+    }
+}
+
+pub enum FisherEstimation {
+    /// Exact: compute full Fisher matrix (O(d^2) per sample).
+    /// Requires access to the log-likelihood's analytical Hessian.
+    Exact,
+    /// Empirical: Monte Carlo estimate from samples.
+    /// G_hat = (1/N) sum_{n=1}^{N} grad(log p(y_n|theta)) * grad(log p(y_n|theta))^T
+    /// Unbiased but high variance for small N.
+    Empirical { n_samples: usize },
+    /// Kronecker-factored (K-FAC, Martens & Grosse, 2015).
+    /// Approximates G as Kronecker product of two smaller matrices: G ~= A (x) B.
+    /// For neural network layers with d_in inputs and d_out outputs:
+    ///   Full Fisher: d_in*d_out x d_in*d_out (huge)
+    ///   K-FAC: d_in x d_in and d_out x d_out (manageable)
+    /// Reduces inversion cost from O((d_in*d_out)^3) to O(d_in^3 + d_out^3).
+    KroneckerFactored,
+    /// Diagonal approximation (cheapest, O(d) per sample).
+    /// Keeps only the diagonal of the Fisher matrix.
+    /// Equivalent to adaptive learning rates (like Adam without momentum).
+    /// Loses off-diagonal structure (parameter correlations).
+    Diagonal,
+}
+```
+
+**Configuration parameters**:
+
+| Parameter | Default | Range | Notes |
+|---|---|---|---|
+| `learning_rate` | 0.01 | 1e-4 - 1.0 | Standard learning rate. Natural gradient is less sensitive to this than standard gradient. |
+| `damping` | 1e-4 | 1e-8 - 1.0 | Too small: G may be singular. Too large: reverts to standard gradient. |
+| `n_samples` (empirical) | 100 | 10 - 10000 | Variance of Fisher estimate scales as O(1/N). |
+
+### Alpha-Connections and Dually Flat Structure
+
+```rust
+/// Alpha-connection family on the statistical manifold.
+///
+/// The alpha-connection nabla^(alpha) interpolates between the exponential (alpha=1)
+/// and mixture (alpha=-1) connections:
+///   nabla^(alpha) = (1+alpha)/2 * nabla^(e) + (1-alpha)/2 * nabla^(m)
+///
+/// When alpha = 0, this recovers the Levi-Civita (metric-compatible) connection.
+///
+/// For exponential families, the (1,-1)-connections make the manifold
+/// DUALLY FLAT: both natural parameters theta and expectation parameters eta
+/// yield flat coordinate systems. The canonical divergence is the
+/// Bregman divergence (= KL divergence for exponential families).
+///
+/// Why this matters for oracle predictions:
+/// - The natural parameter theta represents the "raw" oracle model parameters.
+/// - The expectation parameter eta = E[T(y)] represents the sufficient statistics.
+/// - The Legendre transform F(theta) <-> F*(eta) converts between them.
+/// - The Bregman divergence D_F(p, q) = KL(p || q) measures prediction error
+///   in a way that respects the manifold geometry.
+///
+/// (Amari, 2016, "Information Geometry and Its Applications", Springer)
+pub struct DuallyFlatManifold {
+    /// Natural (theta) coordinate system.
+    /// For a Gaussian: theta = (mu/sigma^2, -1/(2*sigma^2)).
+    pub theta_coords: Vec<f64>,
+    /// Expectation (eta) coordinate system.
+    /// For a Gaussian: eta = (mu, mu^2 + sigma^2).
+    pub eta_coords: Vec<f64>,
+    /// Legendre transform: F(theta) -> F*(eta) where eta = grad(F(theta)).
+    /// F(theta) = log-partition function (log normalizer) for exponential families.
+    pub potential: Box<dyn Fn(&[f64]) -> f64 + Send + Sync>,
+    /// Conjugate potential: F*(eta) = theta . eta - F(theta).
+    /// F*(eta) = negative entropy for exponential families.
+    pub conjugate_potential: Box<dyn Fn(&[f64]) -> f64 + Send + Sync>,
+}
+
+impl DuallyFlatManifold {
+    /// Bregman divergence (= canonical divergence on dually flat manifold).
+    ///
+    /// D_F(p, q) = F(theta_p) - F(theta_q) - grad(F(theta_q)) . (theta_p - theta_q)
+    ///
+    /// Properties:
+    /// - D_F(p, q) >= 0 with equality iff p = q.
+    /// - D_F(p, q) != D_F(q, p) in general (asymmetric).
+    /// - For exponential families: D_F(p, q) = KL(q || p).
+    ///   Note the argument swap: Bregman in theta coords = reverse KL.
+    /// - The symmetrized Bregman (D_F(p,q) + D_F(q,p))/2 = (theta_p - theta_q) . (eta_p - eta_q).
+    pub fn bregman_divergence(&self, p: &[f64], q: &[f64]) -> f64 {
+        let f_p = (self.potential)(p);
+        let f_q = (self.potential)(q);
+        let grad_q = numerical_gradient(self.potential.as_ref(), q);
+        f_p - f_q - dot(&grad_q, &subtract(p, q))
+    }
+
+    /// Convert natural parameters to expectation parameters.
+    /// eta = grad(F(theta))
+    pub fn theta_to_eta(&self, theta: &[f64]) -> Vec<f64> {
+        numerical_gradient(self.potential.as_ref(), theta)
+    }
+
+    /// Convert expectation parameters to natural parameters.
+    /// theta = grad(F*(eta))
+    pub fn eta_to_theta(&self, eta: &[f64]) -> Vec<f64> {
+        numerical_gradient(self.conjugate_potential.as_ref(), eta)
+    }
+
+    /// m-geodesic: straight line in eta (expectation) coordinates.
+    ///
+    /// The mixture geodesic is flat in eta space:
+    ///   eta(t) = (1 - t) * eta_p + t * eta_q
+    ///
+    /// This corresponds to mixing distributions:
+    ///   p_t = (1-t) * p + t * q  (in the mixture sense)
+    pub fn m_geodesic(
+        &self,
+        eta_p: &[f64],
+        eta_q: &[f64],
+        n_steps: usize,
+    ) -> Vec<Vec<f64>> {
+        (0..=n_steps)
+            .map(|step| {
+                let t = step as f64 / n_steps as f64;
+                eta_p.iter()
+                    .zip(eta_q.iter())
+                    .map(|(&a, &b)| (1.0 - t) * a + t * b)
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// e-geodesic: straight line in theta (natural) coordinates.
+    ///
+    /// The exponential geodesic is flat in theta space:
+    ///   theta(t) = (1 - t) * theta_p + t * theta_q
+    ///
+    /// This corresponds to exponential tilting of distributions.
+    pub fn e_geodesic(
+        &self,
+        theta_p: &[f64],
+        theta_q: &[f64],
+        n_steps: usize,
+    ) -> Vec<Vec<f64>> {
+        (0..=n_steps)
+            .map(|step| {
+                let t = step as f64 / n_steps as f64;
+                theta_p.iter()
+                    .zip(theta_q.iter())
+                    .map(|(&a, &b)| (1.0 - t) * a + t * b)
+                    .collect()
+            })
+            .collect()
+    }
+}
+```
+
+The dually flat structure provides two complementary views of the same oracle prediction manifold. The e-geodesic interpolates in log-likelihood space (exponential tilting), while the m-geodesic interpolates in moment space (mixture averaging). The Pythagorean theorem holds: for any triple (p, q, r) where the e-geodesic from p to r is orthogonal to the m-geodesic from q to r, we have D_F(p, q) = D_F(p, r) + D_F(r, q). This generalizes the Euclidean Pythagorean theorem to information geometry.
+
+### Wasserstein Geometry for Distribution Transport
+
+```rust
+/// Wasserstein-2 geometry on the space of oracle prediction distributions.
+///
+/// The W_2 metric measures the cost of optimally transporting one distribution
+/// to another. Unlike KL divergence, W_2 is a true metric (symmetric,
+/// satisfies triangle inequality) and is defined even when distributions
+/// have non-overlapping support.
+///
+/// For Gaussian predictions N(mu_1, Sigma_1) and N(mu_2, Sigma_2):
+///
+///   W_2^2 = ||mu_1 - mu_2||^2 + tr(Sigma_1 + Sigma_2 - 2*(Sigma_1^{1/2} Sigma_2 Sigma_1^{1/2})^{1/2})
+///
+/// The Bures metric (infinitesimal W_2 on Gaussians) defines a Riemannian
+/// metric on the space of Gaussian distributions. This is NOT the Fisher-Rao
+/// metric -- it captures different geometric structure:
+/// - Fisher-Rao: statistical distinguishability (hypothesis testing).
+/// - Wasserstein: physical transport cost (mass movement).
+///
+/// The W_2 metric captures distribution shift -- when oracle prediction
+/// distributions change over time, the Wasserstein distance quantifies
+/// how much the predictions have drifted. Unlike KL divergence, this
+/// drift measure is bounded and interpretable as a physical distance.
+///
+/// (Villani, 2009, "Optimal Transport: Old and New", Springer)
+pub struct WassersteinDistanceComputer {
+    /// Distribution representation.
+    pub representation: DistributionRepr,
+}
+
+pub enum DistributionRepr {
+    /// Gaussian: track mean and covariance.
+    /// W_2 has closed form for Gaussians (Bures distance).
+    Gaussian { mean: Vec<f64>, cov: Vec<Vec<f64>> },
+    /// Empirical: track samples.
+    /// W_2 computed via linear programming (exact) or Sinkhorn (approximate).
+    Empirical { samples: Vec<f64> },
+    /// Histogram: discretized distribution.
+    /// W_2 computed via the transportation simplex or Sinkhorn regularization.
+    Histogram { bins: Vec<f64>, counts: Vec<f64> },
+}
+
+impl WassersteinDistanceComputer {
+    /// Compute W_2 distance between two Gaussian distributions.
+    ///
+    /// Uses the closed-form Bures distance formula.
+    /// Requires matrix square root computation (via Schur decomposition).
+    pub fn gaussian_w2(
+        mean_1: &[f64],
+        cov_1: &[Vec<f64>],
+        mean_2: &[f64],
+        cov_2: &[Vec<f64>],
+    ) -> f64 {
+        let mean_diff_sq: f64 = mean_1.iter()
+            .zip(mean_2.iter())
+            .map(|(a, b)| (a - b).powi(2))
+            .sum();
+
+        // tr(Sigma_1 + Sigma_2 - 2 * (Sigma_1^{1/2} Sigma_2 Sigma_1^{1/2})^{1/2})
+        let sqrt_1 = matrix_sqrt(cov_1);
+        let product = matrix_multiply(&matrix_multiply(&sqrt_1, cov_2), &sqrt_1);
+        let sqrt_product = matrix_sqrt(&product);
+        let trace_term = trace(cov_1) + trace(cov_2) - 2.0 * trace(&sqrt_product);
+
+        (mean_diff_sq + trace_term).max(0.0).sqrt()
+    }
+
+    /// Compute W_2 distance between empirical distributions via Sinkhorn.
+    ///
+    /// Sinkhorn divergence is an entropy-regularized approximation to W_2:
+    ///   W_2^epsilon = min_P <P, C> + epsilon * KL(P || a (x) b)
+    ///
+    /// where C is the cost matrix, P is the transport plan, and epsilon
+    /// controls regularization (epsilon -> 0 recovers exact W_2).
+    ///
+    /// Complexity: O(n^2 / epsilon^2) vs O(n^3 log n) for exact W_2.
+    pub fn sinkhorn_w2(
+        samples_1: &[f64],
+        samples_2: &[f64],
+        epsilon: f64,    // regularization, default: 0.01
+        max_iter: usize, // default: 100
+    ) -> f64 {
+        let n = samples_1.len();
+        let m = samples_2.len();
+
+        // Cost matrix: C_ij = |x_i - y_j|^2
+        let cost: Vec<Vec<f64>> = (0..n)
+            .map(|i| (0..m).map(|j| (samples_1[i] - samples_2[j]).powi(2)).collect())
+            .collect();
+
+        // Gibbs kernel: K_ij = exp(-C_ij / epsilon)
+        let kernel: Vec<Vec<f64>> = cost.iter()
+            .map(|row| row.iter().map(|&c| (-c / epsilon).exp()).collect())
+            .collect();
+
+        // Sinkhorn iterations: alternating row/column normalization
+        let mut u = vec![1.0 / n as f64; n];
+        let mut v = vec![1.0 / m as f64; m];
+
+        for _ in 0..max_iter {
+            // u = a ./ (K * v)
+            for i in 0..n {
+                let kv: f64 = (0..m).map(|j| kernel[i][j] * v[j]).sum();
+                u[i] = (1.0 / n as f64) / kv.max(1e-30);
+            }
+            // v = b ./ (K^T * u)
+            for j in 0..m {
+                let ku: f64 = (0..n).map(|i| kernel[i][j] * u[i]).sum();
+                v[j] = (1.0 / m as f64) / ku.max(1e-30);
+            }
+        }
+
+        // Transport cost: sum_ij u_i K_ij v_j C_ij
+        let mut total = 0.0;
+        for i in 0..n {
+            for j in 0..m {
+                total += u[i] * kernel[i][j] * v[j] * cost[i][j];
+            }
+        }
+        total.max(0.0).sqrt()
+    }
+}
+```
+
+The Wasserstein distance connects to the liquidity manifold through **distribution drift detection**. When the chain oracle's prediction distribution shifts (measured by W_2), the manifold metric must be recomputed. The rate of Wasserstein drift serves as a signal for metric staleness: if W_2(p_t, p_{t-1}) exceeds a threshold, the cached metric tensor and Christoffel symbols are invalidated and recomputed from fresh pool states.
+
+### Test criteria
+
+- **Fisher-Rao positive definiteness**: For any exponential family, the Fisher matrix has all positive eigenvalues. Verify by constructing the Fisher matrix for a Gaussian family at multiple parameter values and checking that all eigenvalues exceed zero.
+- **Natural gradient coordinate invariance**: The natural gradient produces the same update (in distribution space) regardless of parameterization. Verify by computing the natural gradient update in both natural and mean parameterizations of a Gaussian and confirming that the resulting distributions match within numerical tolerance.
+- **Bregman divergence non-negativity**: D_F(p, q) >= 0 with equality iff p = q. Verify for the Gaussian log-partition potential with random parameter pairs.
+- **Wasserstein triangle inequality**: W_2(p, r) <= W_2(p, q) + W_2(q, r). Verify for triples of Gaussian distributions using the closed-form Bures distance.
+
+### Information geometry references
+
+- Amari, S. (1998). "Natural Gradient Works Efficiently in Learning." *Neural Computation*, 10(2), 251-276.
+- Amari, S. (2016). *Information Geometry and Its Applications*. Springer.
+- Cencov, N. N. (1982). *Statistical Decision Rules and Optimal Inference*. AMS.
+- Villani, C. (2009). *Optimal Transport: Old and New*. Springer.
+- Martens, J., & Grosse, R. (2015). "Optimizing Neural Networks with Kronecker-Factored Approximate Curvature." *ICML 2015*.
+
+---
+
 ## Academic foundations
 
 - Amari, S., & Nagaoka, H. (2000). *Methods of Information Geometry*. AMS/Oxford. — Riemannian geometry for statistical manifolds.
@@ -737,7 +1187,7 @@ ChainOracle::predict()
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [02-chain-oracles.md](./02-chain-oracles.md) for chain oracle integration
 - See [06-hyperdimensional-ta.md](./06-hyperdimensional-ta.md) for HDC encoding of manifold features

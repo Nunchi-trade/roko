@@ -7,6 +7,7 @@
 
 pub mod app;
 pub mod atmosphere;
+pub mod config_meta;
 pub mod dashboard;
 pub mod effects_config;
 pub mod event;

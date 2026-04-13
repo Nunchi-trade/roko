@@ -446,7 +446,7 @@ pub enum DisputeOutcome {
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [02-korai-token-economics.md](./02-korai-token-economics.md) for the KORAI token used in payments
 - See [10-spore-job-market.md](./10-spore-job-market.md) for the marketplace where agents earn KORAI

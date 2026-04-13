@@ -39,6 +39,7 @@ This topic covers all user-facing interfaces in Roko: the CLI binary (`roko`), t
 | 15 | [15-generative-interfaces-a2ui.md](./15-generative-interfaces-a2ui.md) | A2UI protocol — agents emit JSONL UI descriptions, 12 component types, ROSEDUST inheritance, sandboxed rendering across TUI/Web/CLI |
 | 16 | [16-sonification-reframed.md](./16-sonification-reframed.md) | Ambient sonification — Eno mandate, 5 musical layers, 8 behavioral state presets, emotional harmonic vocabulary. No mortality audio. |
 | 17 | [17-accessibility-and-current-status.md](./17-accessibility-and-current-status.md) | WCAG 2.1 AA targets, keyboard nav, screen reader support, reduced motion, port allocation, comprehensive implementation status |
+| 18 | [18-ux-innovation-proposals.md](./18-ux-innovation-proposals.md) | 7 UX innovations — Conversational Development, Time-Travel Debugging, Dream Journal, Agent Garden, Pair Programming with Affect, Collaborative Planning, Knowledge Map |
 
 ---
 

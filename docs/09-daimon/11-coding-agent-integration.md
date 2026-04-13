@@ -322,7 +322,7 @@ This context block is assembled by the Composer (see `roko-compose`) and injecte
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [04-six-behavioral-states.md](./04-six-behavioral-states.md) for behavioral states
 - See [08-8-dimensional-strategy-space.md](./08-8-dimensional-strategy-space.md) for coding-domain strategy space dimensions

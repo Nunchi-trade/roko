@@ -358,7 +358,7 @@ pub async fn replay(
 
 ---
 
-## Related Topics
+## Cross-References
 
 - [02-audit-chain.md](02-audit-chain.md) — The linear audit chain that Forensic AI replays
 - [12-witness-dag.md](12-witness-dag.md) — The DAG that provides rich cognitive provenance for replays

@@ -246,19 +246,119 @@ The weighting scheme, informed by measurements from the Aider project (Gauthier 
 | Test file symbol | 0.5× | Tests depend on code, not usually reverse |
 | Default (no special condition) | 1.0× | Baseline |
 
-### Personalized PageRank
+### Personalized PageRank (PPR)
 
-An alternative to global edge weighting is Personalized PageRank (PPR), where the teleportation distribution is biased toward task-relevant nodes:
+Personalized PageRank (Haveliwala 2002, "Topic-Sensitive PageRank") replaces uniform teleportation with a biased distribution. Instead of jumping to any random node with probability `(1-d)/N`, the random surfer teleports to task-relevant seed nodes with higher probability:
 
 ```
 PPR(v) = (1 - d) × teleport(v) + d × Σ(PPR(u) / out_degree(u))
 ```
 
-Instead of uniform teleportation `1/N`, PPR uses a custom distribution:
-- Task-mentioned symbols get `teleport(v) = 0.5 / |task_symbols|`
-- Other symbols get `teleport(v) = 0.5 / (N - |task_symbols|)`
+PPR can also be understood as a geometric mixture of random walk distributions:
+```
+PPR_α(s, *) = Σ_{t=0}^{∞} α × (1-α)^t × walk_t(s, *)
+```
+where `walk_t(s, *)` is the probability distribution after `t` random walk steps from seed `s`, and `α` (teleportation probability, typically 0.15–0.20) controls locality radius.
 
-This biases the ranking toward symbols structurally connected to the task without completely ignoring globally important symbols.
+The teleportation distribution encodes task context:
+- Task-mentioned symbols: `teleport(v) = 0.5 / |task_symbols|`
+- All other symbols: `teleport(v) = 0.5 / (N - |task_symbols|)`
+
+```rust
+/// Planned: Personalized PageRank with task-biased teleportation.
+pub fn personalized_pagerank(
+    graph: &SymbolGraph,
+    seeds: &[SymbolId],
+    iterations: u32,
+    damping: f64,
+) -> HashMap<SymbolId, f64> {
+    let all_nodes: Vec<&SymbolId> = graph.nodes().iter().collect();
+    let n = all_nodes.len();
+    if n == 0 || seeds.is_empty() { return HashMap::new(); }
+
+    let seed_set: HashSet<&SymbolId> = seeds.iter().collect();
+    let n_f = n as f64;
+    let seed_count = seeds.len() as f64;
+
+    let teleport = |id: &SymbolId| -> f64 {
+        if seed_set.contains(id) {
+            0.5 / seed_count + 0.5 / n_f
+        } else {
+            0.5 / n_f
+        }
+    };
+
+    let mut rank: HashMap<SymbolId, f64> = all_nodes
+        .iter().map(|id| ((*id).clone(), teleport(id))).collect();
+
+    for _ in 0..iterations {
+        let mut new_rank = HashMap::with_capacity(n);
+        for &node in &all_nodes {
+            let base = (1.0 - damping) * teleport(node);
+            let mut incoming = 0.0_f64;
+            for (src, _) in graph.reverse_neighbors_with_kind(node) {
+                let src_rank = rank.get(&src).copied().unwrap_or(0.0);
+                let out_deg = graph.out_degree(&src).max(1) as f64;
+                incoming += src_rank / out_deg;
+            }
+            new_rank.insert(node.clone(), damping.mul_add(incoming, base));
+        }
+        rank = new_rank;
+    }
+    rank
+}
+```
+
+### Local PPR via push algorithm
+
+For large graphs, the push algorithm (Andersen, Chung, and Lang 2006) computes approximate PPR *locally* with running time proportional to the output set, not the graph size:
+
+```
+push_ppr(graph, seed, alpha=0.15, epsilon=1e-4):
+    residual = {seed: 1.0}
+    estimate = {}
+    while any residual[v] > epsilon × out_degree(v):
+        pop v with highest residual
+        estimate[v] += alpha × residual[v]
+        push = (1 - alpha) × residual[v] / out_degree(v)
+        for neighbor u of v:
+            residual[u] += push
+        residual[v] = 0
+    return estimate
+```
+
+This is ideal for the `get_context` MCP tool: given a few task-relevant seed symbols, compute local PPR to find structurally relevant neighbors without scanning the entire graph.
+
+### Topic-sensitive multi-concern ranking
+
+Haveliwala's original formulation pre-computes one PPR vector per topic. For code intelligence, topics map to development concerns:
+
+| Concern | Seed heuristic | Use case |
+|---|---|---|
+| Architecture | Symbols with high import in-degree | Understanding structural pillars |
+| Testing | Symbols in test files | Test-aware context |
+| API surface | Public symbols | API change impact |
+| Recent activity | Symbols in recently modified files | Active development focus |
+| Current task | Symbols mentioned in task prompt | Task-specific context |
+
+Pre-computing 5 PPR vectors and interpolating at query time (`score = Σ w_k × PPR_k(v)`) gives topic-sensitive ranking without per-query PPR computation.
+
+```toml
+[index.pagerank]
+damping_factor = 0.85          # Standard damping. Range: 0.5..0.99.
+max_iterations = 30            # For global PageRank. Range: 5..100.
+convergence_tolerance = 1e-6   # Early termination threshold.
+ppr_alpha = 0.15               # Push algorithm teleportation. Range: 0.05..0.30.
+ppr_epsilon = 1e-4             # Push algorithm residual threshold. Range: 1e-6..1e-2.
+```
+
+### Test criteria for PPR
+
+- PPR with seeds returns higher scores for symbols closer to seeds than global PageRank
+- PPR with a single seed node returns that node with the highest score
+- Local push algorithm terminates in time proportional to output set size
+- PPR on a disconnected graph ranks seed-reachable nodes above unreachable ones
+- Topic-sensitive interpolation with equal weights reduces to standard PPR
 
 ---
 
@@ -326,7 +426,8 @@ For very large codebases, incremental PageRank can avoid full recomputation:
 ## Academic Foundations
 
 - **PageRank**: Page, Brin, Motwani, and Winograd (1999), "The PageRank Citation Ranking: Bringing Order to the Web." Stanford InfoLab Technical Report. The original algorithm, adapted here for code dependency graphs instead of web link graphs.
-- **Personalized PageRank**: Haveliwala (2002), "Topic-Sensitive PageRank." *WWW*. The variant where teleportation is biased toward topic-relevant nodes, applicable to task-aware symbol ranking.
+- **Topic-Sensitive PageRank**: Haveliwala (2002), "Topic-Sensitive PageRank." *WWW*. Pre-computes biased PageRank vectors per topic; interpolates at query time for personalized ranking.
+- **Local Graph Partitioning**: Andersen, Chung, and Lang (2006), "Local Graph Partitioning Using PageRank Vectors." *FOCS*. The push algorithm for approximate local PPR computation in time proportional to output size, not graph size.
 - **Code importance ranking**: Allamanis, Barr, Bird, and Sutton (2014), "Learning Natural Coding Conventions." *FSE*. Demonstrated that code structural properties (including dependency centrality) correlate with developer attention and modification frequency.
 - **Meta-Harness**: Lee et al. (2026), "Meta-Harness: Automated Scaffolding Optimization for LLM Agents." arXiv:2603.28052. Shows that better context allocation (which PageRank enables) yields measurable improvements in agent task performance.
 - **Graph centrality in software**: Zimmermann and Nagappan (2008), "Predicting Defects Using Network Analysis on Dependency Graphs." *ICSE*. Found that graph centrality metrics on code dependency graphs predict defect-prone modules — the same structural signal PageRank captures.

@@ -3,8 +3,10 @@
 > Academic foundations for HDC/VSA: the 10,240-bit Binary Spatter Code algebra, learned hashing, similarity search, and HDC-based knowledge representation in Roko.
 
 **Topic**: [References](./INDEX.md)
-**Prerequisites**: [Architecture](../00-architecture/INDEX.md), [Primitives](../00-architecture/02-primitives.md)
+**Prerequisites**: [Architecture](../00-architecture/INDEX.md), [Engram Data Type](../00-architecture/02-engram-data-type.md)
 **Key sources**: `bardo-backup/prd/shared/hdc-vsa.md`, `bardo-backup/tmp/agent-chain/08-references.md`, `bardo-backup/tmp/agent-chain/14-academic-foundations.md` §2
+
+> **Implementation**: Reference
 
 ---
 
@@ -112,7 +114,23 @@ Roko uses 10,240-bit Binary Spatter Codes (BSC) as the universal representation 
 
 ---
 
-## Cross-references
+## HDC Frameworks and Applications (2024-2025)
+
+- Rahimi, A. et al. (2024). Hyperdimensional Computing: A Framework for Stochastic Computation and Symbolic AI. _Journal of Big Data_, 2024.
+  *Grounds: Unified HDC framework — comprehensive treatment of HDC as both a stochastic computation framework and symbolic AI system. Covers GraphHD for graph classification and HD hashing for dynamic similarity search. Validates BSC as a general-purpose computation substrate for Roko's knowledge representation.*
+
+- FLASH (2024). Hyperdimensional Computing with Holographic and Adaptive Encoder. _Frontiers in AI_, 2024.
+  *Grounds: Learnable HDC encoding — adaptive and learnable encoder design learning the encoder matrix distribution via gradient descent. Bridges fixed random projection (Phase 1) and fully learned encoding (Phase 2) in Roko's HDC pipeline.*
+
+- HPVM-HDC (2024). A Heterogeneous Programming System for Accelerating HDC. arXiv:2410.15179.
+  *Grounds: HDC systems programming — unified programming model (HDC++) for writing HDC applications across heterogeneous hardware (CPU/GPU/FPGA). Informs Roko's HDC implementation portability.*
+
+- Hyperdimensional Computing in Biomedical Sciences (2025). _PMC_, 2025.
+  *Grounds: HDC applications survey — comprehensive review demonstrating practical HDC deployment across bioinformatics, NLP, and ML. Validates HDC as a production-ready computation paradigm, not just theoretical.*
+
+---
+
+## Cross-References
 
 - See [01-memory-consolidation.md](./01-memory-consolidation.md) for HDC-encoded knowledge retrieval
 - See [03-dreams-and-offline-learning.md](./03-dreams-and-offline-learning.md) for HDC counterfactual synthesis

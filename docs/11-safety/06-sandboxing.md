@@ -195,7 +195,7 @@ This is a Tier 3 implementation target. The current filesystem and process sandb
 
 ---
 
-## Related Topics
+## Cross-References
 
 - [00-defense-in-depth.md](00-defense-in-depth.md) — PathPolicy as Guard 5
 - [01-capability-tokens.md](01-capability-tokens.md) — Tool-level capability enforcement

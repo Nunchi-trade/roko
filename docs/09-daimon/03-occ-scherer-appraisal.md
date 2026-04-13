@@ -241,7 +241,7 @@ The following triggers are specified in the legacy PRD but not yet implemented i
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [01-pad-vector.md](./01-pad-vector.md) for PAD vector structure and octant classification
 - See [02-alma-three-layer-temporal.md](./02-alma-three-layer-temporal.md) for how deltas interact with the three temporal layers

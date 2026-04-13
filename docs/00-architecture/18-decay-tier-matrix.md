@@ -337,7 +337,7 @@ Signal flow:
 
 ---
 
-## Cross-references
+## Cross-References
 
 - [04-decay-variants.md](04-decay-variants.md) -- Decay enum specification and formulas
 - [13-cognitive-cross-cuts.md](13-cognitive-cross-cuts.md) -- Neuro knowledge tiers

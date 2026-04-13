@@ -333,7 +333,7 @@ Cross-domain knowledge transfer is also possible through HDC (Hyperdimensional C
 
 ---
 
-## Related Topics
+## Cross-References
 
 - `docs/17-lifecycle/05-knowledge-backup-export.md` — Backup format specification
 - `docs/17-lifecycle/09-knowledge-transfer-via-mesh.md` — Live agent-to-agent knowledge sharing

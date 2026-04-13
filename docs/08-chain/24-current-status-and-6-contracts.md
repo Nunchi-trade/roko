@@ -238,7 +238,7 @@ The recommended build order:
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [00-vision-and-framing.md](./00-vision-and-framing.md) for why Tier 6 is deferred
 - See [01-korai-chain-spec.md](./01-korai-chain-spec.md) for the chain that hosts these contracts

@@ -338,7 +338,7 @@ Without dreams, the triangle degenerates: emotional memories accumulate without 
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [01-pad-vector.md](./01-pad-vector.md) for PAD vector structure
 - See [07-15-percent-contrarian-retrieval.md](./07-15-percent-contrarian-retrieval.md) for contrarian injection details

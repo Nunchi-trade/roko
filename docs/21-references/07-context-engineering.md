@@ -6,6 +6,8 @@
 **Prerequisites**: [Architecture](../00-architecture/INDEX.md), [Scaffold](../01-orchestration/INDEX.md)
 **Key sources**: `bardo-backup/prd/02-mortality/14-research-foundations.md` §8, `bardo-backup/prd/shared/citations.md` §27, `bardo-backup/tmp/mori-agents/12-references.md`
 
+> **Implementation**: Reference
+
 ---
 
 ## Abstract
@@ -89,7 +91,7 @@ Context failures, not model failures, cause most agent breakdowns. For agents ru
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [06-self-learning-systems.md](./06-self-learning-systems.md) for ACE in the learning context
 - See [14-agent-harnesses-and-tool-use.md](./14-agent-harnesses-and-tool-use.md) for Meta-Harness

@@ -1536,7 +1536,7 @@ auto_query_interval_tasks = 5
 
 ---
 
-## Related Topics
+## Cross-References
 
 - [02-audit-chain.md](02-audit-chain.md) — The linear Merkle hash-chain that the DAG extends
 - [11-temporal-logic.md](11-temporal-logic.md) — Temporal verdicts enrich witness records

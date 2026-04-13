@@ -203,7 +203,7 @@ On the Korai chain, knowledge entries are economic assets:
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [02-four-validation-tiers.md](./02-four-validation-tiers.md) for how imported entries start at Transient
 - See [11-antiknowledge-challenge.md](./11-antiknowledge-challenge.md) for the challenge mechanism on imported knowledge

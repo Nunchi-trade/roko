@@ -6,6 +6,8 @@
 **Prerequisites**: [Architecture](../00-architecture/INDEX.md), [Learning](../05-learning/INDEX.md)
 **Key sources**: `bardo-backup/prd/02-mortality/14-research-foundations.md` §§1, 10, `bardo-backup/prd/shared/citations.md` §§9, 35
 
+> **Implementation**: Reference
+
 ---
 
 ## Abstract
@@ -102,7 +104,7 @@ Knowledge evolves. The research here establishes how knowledge compression throu
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [00-lifecycle-and-finite-agency.md](./00-lifecycle-and-finite-agency.md) for resource-bounded agency
 - See [05-biological-analogues.md](./05-biological-analogues.md) for biological evolution analogues

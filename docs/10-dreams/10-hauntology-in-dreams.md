@@ -97,6 +97,50 @@ During dreams, inherited (restored) knowledge entries carry a `provenance: "impo
 
 ---
 
+## Computational Hauntology: Measuring Spectral Influence
+
+The hauntological frame is evocative but needs computational grounding. How do we measure whether "spectral traces" are actually influencing dream processing?
+
+```rust
+/// Spectral influence metrics for hauntological analysis.
+pub struct SpectralInfluenceMetrics {
+    /// Provenance depth: how many generations back the deepest inherited entry goes.
+    pub max_provenance_depth: usize,
+    /// Spectral density: fraction of active knowledge entries with inherited provenance.
+    pub spectral_density: f64,
+    /// Emotional residue: mean arousal of inherited entries vs self-generated.
+    pub inherited_arousal_delta: f64,
+    /// Foreclosure index: fraction of knowledge space unreachable from current focus
+    /// (surfaced only through anti-correlated retrieval).
+    pub foreclosure_index: f64,
+    /// Ghost influence: fraction of dream insights that reference inherited entries.
+    pub ghost_influence_fraction: f64,
+}
+
+/// Spectral trace provenance for knowledge entries.
+pub struct SpectralProvenance {
+    pub original_agent_id: String,
+    pub generation_depth: usize,
+    pub confidence_at_origin: f64,
+    pub confidence_after_transit: f64,
+    pub emotional_charge_at_origin: f64,
+    pub transit_path: Vec<String>,
+    pub created_at_origin: chrono::DateTime<chrono::Utc>,
+}
+```
+
+### Test Criteria
+
+```
+1. Spectral density: for an agent with zero inherited entries, spectral_density = 0.0.
+2. Provenance depth: for self-generated entries, generation_depth = 0.
+3. Confidence decay: confidence_after_transit = confidence_at_origin * 0.85^generation_depth.
+4. Ghost influence: ghost_influence_fraction ∈ [0.0, 1.0].
+5. Foreclosure index: for an agent that has retrieved all entries at least once, foreclosure_index ≈ 0.0.
+```
+
+---
+
 ## Cross-References
 
 | Document | Relevance |

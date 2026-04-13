@@ -570,7 +570,7 @@ The collective calibration heuristic (1/sqrt(N×t), see `refactoring-prd/09-inno
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [01-oracle-trait.md](./01-oracle-trait.md) for the Oracle trait that predictions use
 - See [00-vision-ta-generalized.md](./00-vision-ta-generalized.md) for the vision of universal oracle primitives

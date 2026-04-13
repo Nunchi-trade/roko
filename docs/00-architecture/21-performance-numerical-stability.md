@@ -4,6 +4,8 @@
 > Status: **Specification** -- guidelines for implementation
 > Canonical source: various crates (see per-section references)
 
+> **Implementation**: Specified
+
 ---
 
 ## Purpose
@@ -329,7 +331,7 @@ fn bench_hdc_hamming_10240(b: &mut Bencher) {
 
 ---
 
-## Cross-references
+## Cross-References
 
 - [04-decay-variants.md](04-decay-variants.md) -- Decay math
 - [03-score-7-axis-appraisal.md](03-score-7-axis-appraisal.md) -- Score normalization

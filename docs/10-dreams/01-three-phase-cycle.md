@@ -304,6 +304,70 @@ Reports are stored as `dream-{unix_timestamp_ms}.json` in `.roko/dreams/`. The `
 
 ---
 
+## Biological Fidelity: The Four-Phase Sleep Architecture
+
+The three-phase cycle (NREM → REM → Integration) maps cleanly to biological sleep but omits a critical fourth element: the **transition phases**. Diekelmann & Born (2010) and the WSCL computational model (Skenderi et al., 2024) both demonstrate that the transitions between phases are not dead time — they are computationally active periods where the brain/model switches processing modes.
+
+In Roko, the hypnagogia engine (see [07-hypnagogia-engine.md](07-hypnagogia-engine.md)) serves as the WAKE→NREM transition. A complementary REM→WAKE transition could serve as a "dream integration review" — a brief metacognitive pass where the agent evaluates what it learned from the dream before fully resuming waking operations.
+
+```rust
+/// Extended dream cycle with transition phases.
+pub enum ExtendedDreamPhase {
+    /// No dream in progress.
+    Idle,
+    /// Transition: waking → sleep. Hypnagogia engine runs here.
+    HypnagogicTransition {
+        fragments_generated: usize,
+        fragments_retained: usize,
+    },
+    /// NREM replay phase.
+    NremReplay {
+        episodes_to_replay: usize,
+        episodes_replayed: usize,
+    },
+    /// Transition: NREM → REM. Episode clusters finalized, seeds selected.
+    NremToRemTransition,
+    /// REM imagination phase.
+    RemImagination {
+        counterfactuals_to_generate: usize,
+        counterfactuals_generated: usize,
+    },
+    /// Integration phase.
+    Integration {
+        hypotheses_to_evaluate: usize,
+        hypotheses_evaluated: usize,
+    },
+    /// Transition: sleep → waking. Metacognitive dream review.
+    HypnopompicTransition {
+        insights_summarized: usize,
+    },
+}
+```
+
+---
+
+## Micro-Consolidation: Between-Task Dream Fragments
+
+Short idle gaps (2-5 minutes) between tasks can support micro-consolidation — a single high-priority episode replay without the full dream cycle. Unlike a full NREM→REM→Integration sequence, micro-consolidation replays only the highest-utility episode (by Mattar-Daw scoring) and does not enter the REM imagination phase. This allows the agent to strengthen its most critical recent memory without the overhead of a complete dream cycle.
+
+Micro-consolidation is triggered when the agent detects an idle gap that meets the minimum duration but falls short of the full `idle_threshold_mins` required for a complete dream cycle. Because micro-consolidation skips REM and integration, it cannot generate new hypotheses or promote knowledge — it can only reinforce existing episodic memory.
+
+```rust
+/// Micro-consolidation for brief idle gaps.
+pub struct MicroConsolidation {
+    /// Minimum idle duration to trigger micro-consolidation (seconds).
+    pub min_idle_secs: u64,               // default: 120, range: 60-300
+    /// Maximum episodes to replay in micro-consolidation.
+    pub max_micro_replays: usize,         // default: 1, range: 1-3
+    /// Whether micro-consolidation can stage hypotheses.
+    pub can_stage: bool,                  // default: false
+    /// Model tier for micro-consolidation.
+    pub model_tier: ModelTier,            // default: T0 (Haiku-class)
+}
+```
+
+---
+
 ## Cross-References
 
 | Document | Relevance |

@@ -1,6 +1,6 @@
 # Roko Implementation Status
 
-> **Last updated**: 2026-04-12
+> **Last updated**: 2026-04-13
 >
 > Single source of truth for what's implemented vs. specified across the Roko system.
 > For naming conventions, see [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
@@ -155,6 +155,23 @@ The self-hosting loop works today (`prd` → `plan run` → gate → persist →
 3. **Feedback loop** (Section 05) — Failed task gates feed back into the plan generator for automatic re-planning, closing the learn-from-failure cycle.
 
 After these three, Roko can fully self-host: read its own PRDs, generate plans, execute them, validate results, learn from failures, and iterate — without human intervention beyond initial PRD creation.
+
+---
+
+## Documentation Quality
+
+As of 2026-04-13, the 398-file documentation corpus passes the following consistency checks:
+
+| Check | Status | Count |
+|-------|--------|-------|
+| `> **Implementation**: X` annotations | All non-meta docs | 373 / 377 (4 meta-docs exempt) |
+| `> **Abstract:**` blockquotes | All non-INDEX docs | 393 / 398 |
+| `---` separator after abstract | Consistent | 398 / 398 |
+| `## Cross-References` header | Standardized | 258 files |
+| Naming glossary compliance | Clean | 0 violations |
+| Internal link integrity | Verified | 2,837 links, 0 broken |
+
+**Annotation value distribution**: Shipping (106), Specified (94), Built (78), Scaffold (41), Reference (26), Deferred (21).
 
 ---
 

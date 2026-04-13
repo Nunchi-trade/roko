@@ -796,7 +796,7 @@ datalog_policy_path = ".roko/policies/taint.dl"
 
 ---
 
-## Related Topics
+## Cross-References
 
 - [00-defense-in-depth.md](00-defense-in-depth.md) — Overall safety architecture
 - [07-prompt-security.md](07-prompt-security.md) — Prompt injection defense

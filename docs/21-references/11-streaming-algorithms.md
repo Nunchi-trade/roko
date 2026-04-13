@@ -6,6 +6,8 @@
 **Prerequisites**: [Architecture](../00-architecture/INDEX.md)
 **Key sources**: `bardo-backup/prd/shared/citations.md` §§10-11
 
+> **Implementation**: Reference
+
 ---
 
 ## Abstract
@@ -57,7 +59,7 @@ Roko agents process continuous data streams at Gamma frequency (~5-15s ticks). S
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [12-signal-processing.md](./12-signal-processing.md) for Kalman filtering and spectral methods
 - See [16-active-inference.md](./16-active-inference.md) for free energy-based uncertainty

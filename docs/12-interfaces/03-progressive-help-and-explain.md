@@ -273,7 +273,7 @@ ROKO CONFIGURATION WIZARD
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [00-cli-overview.md](./00-cli-overview.md) for CLI design principles
 - See [04-configuration-layered-resolution.md](./04-configuration-layered-resolution.md) for config resolution

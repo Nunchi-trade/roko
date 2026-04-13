@@ -605,7 +605,7 @@ fn classify_behavioral_state(state: &AffectState) -> BehavioralState {
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [01-pad-vector.md](./01-pad-vector.md) for PAD vector structure and octant classification
 - See [02-alma-three-layer-temporal.md](./02-alma-three-layer-temporal.md) for temporal dynamics of state changes

@@ -64,6 +64,13 @@ loop, and the frontier innovations that emerge from the architecture.
 | 22 | [Error Handling and Recovery](./22-error-handling-recovery.md) | Four error classes, exponential backoff, circuit breaker, 7-level graceful degradation |
 | 23 | [Architectural Analysis and Improvements](./23-architectural-analysis-improvements.md) | Coherence analysis: trait sufficiency, layer violations, category theory, cognitive architecture comparison, novel proposals |
 | 24 | [Cross-Section Integration Map](./24-cross-section-integration-map.md) | Full 22×22 dependency matrix, 20 missing integrations (prioritized), event bus proposal, data flow diagrams, integration roadmap (~2,070 LOC) |
+| 25 | [Attention as Universal Cognitive Currency](./25-attention-as-currency.md) | Attention tokens as universal unit of account, VCG auction for Engram selection, budget-aware CascadeRouter, Daimon affect modulation, cross-speed token economics |
+| 26 | [Cognitive Immune System](./26-cognitive-immune-system.md) | 5-layer defense against knowledge corruption: taint propagation, anomaly detection, quarantine, red-team probes, immune memory with HDC signatures |
+| 27 | [Temporal Knowledge Topology](./27-temporal-knowledge-topology.md) | Allen's 13 interval relations, event calculus (fluents/events/causation), three-tier temporal KG (episodes/entities/communities), temporal queries |
+| 28 | [Emergent Goal Structures](./28-emergent-goal-structures.md) | Goals emerge from affect×knowledge×experience interaction, 5 built-in detectors, intrinsic motivation scoring, EFE ranking, somatic markers, goal lifecycle |
+| 29 | [Cognitive Energy Model](./29-cognitive-energy-model.md) | Explicit energy pool with depletion and recovery, 5 energy zones, affect-energy bidirectional coupling, capacity growth, Delta sleep cycles |
+| 30 | [Cross-Pollination Innovations](./30-cross-pollination-innovations.md) | Innovation transfer patterns across sections |
+| 32 | [Comprehensive Test Strategy](./32-comprehensive-test-strategy.md) | Per-crate unit test specs, property-based testing (proptest), integration matrix, performance benchmarks (criterion/iai), adversarial/safety testing (ATLAS-mapped), regression prevention for self-improving agents, test count roadmap 1,568→2,810 |
 
 ---
 
@@ -162,8 +169,8 @@ This topic connects to:
 
 - **Generated**: 2026-04-11
 - **Model**: Claude Opus 4.6
-- **Sub-docs produced**: 24
-- **Total lines**: ~8,500+
+- **Sub-docs produced**: 29
+- **Total lines**: ~10,500+
 - **Primary sources consulted**:
   - `/Users/will/dev/nunchi/roko/refactoring-prd/00-overview.md` through `09-innovations.md`
   - `/Users/will/dev/nunchi/roko/roko/crates/roko-core/src/` (signal.rs, traits.rs, score.rs, decay.rs, kind.rs, provenance.rs, loop_tick.rs, query.rs, verdict.rs, context.rs, body.rs, hash.rs, operating_frequency.rs, lib.rs)

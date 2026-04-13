@@ -782,7 +782,7 @@ This ordering improves D1 extraction quality because the distillation LLM builds
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [01-six-knowledge-types.md](./01-six-knowledge-types.md) for the types produced at each stage
 - See [02-four-validation-tiers.md](./02-four-validation-tiers.md) for how tiers are assigned during promotion

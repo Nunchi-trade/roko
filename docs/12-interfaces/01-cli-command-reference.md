@@ -428,7 +428,7 @@ All subcommands in the "Orchestration", "PRD Lifecycle", "Research", "Knowledge"
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [00-cli-overview.md](./00-cli-overview.md) for mode architecture and design principles
 - See [05-http-api-roko-serve.md](./05-http-api-roko-serve.md) for the REST/WebSocket API

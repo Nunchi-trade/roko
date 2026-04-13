@@ -787,7 +787,7 @@ The emerging hybrid approach (arXiv:2603.29997, 2025) uses LLMs to generate stru
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [06-hdc-knowledge-encoding.md](./06-hdc-knowledge-encoding.md) for the encoding pipeline
 - See [09-false-positive-math.md](./09-false-positive-math.md) for threshold derivation

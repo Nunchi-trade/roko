@@ -307,7 +307,7 @@ This ensures that an agent with no recent events settles at "uncertain" rather t
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [02-alma-three-layer-temporal.md](./02-alma-three-layer-temporal.md) for the three-layer temporal model
 - See [03-occ-scherer-appraisal.md](./03-occ-scherer-appraisal.md) for appraisal triggers

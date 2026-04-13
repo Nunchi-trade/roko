@@ -221,7 +221,7 @@ See `tmp/implementation-plans/modelrouting/12-advanced-patterns.md` for the Thom
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [01-oracle-trait.md](./01-oracle-trait.md) for the full Rust trait signature and Prediction struct
 - See [02-chain-oracles.md](./02-chain-oracles.md) for chain-specific TA primitives

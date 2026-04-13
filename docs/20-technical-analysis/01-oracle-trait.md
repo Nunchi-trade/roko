@@ -720,6 +720,187 @@ This pattern — predict, resolve, correct, repeat — is the same regardless of
 
 ---
 
+## Oracle Calibration and Composition Theory
+
+The Oracle trait defines prediction and evaluation. This section addresses the next layer: how to **compose** multiple oracles into calibrated ensembles, how to provide **finite-sample coverage guarantees** via conformal prediction, and how to **diagnose calibration quality** through Brier score decomposition.
+
+These techniques are essential for production oracle systems where no single predictor is uniformly best. Composition extracts value from diverse oracles; conformal prediction provides distribution-free uncertainty quantification; Brier decomposition separates calibration from discrimination, enabling targeted improvements.
+
+---
+
+### Oracle Composition — Combining Multiple Oracles
+
+```rust
+/// Compose multiple oracles into a single calibrated meta-oracle.
+///
+/// Oracle composition follows the theory of expert aggregation
+/// (Cesa-Bianchi & Lugosi, 2006, "Prediction, Learning, and Games")
+/// and conformal prediction (Vovk et al., 2005).
+///
+/// Three composition strategies:
+/// 1. Weighted ensemble: predictions weighted by calibration quality
+/// 2. Conformal aggregation: produce prediction sets with coverage guarantees
+/// 3. Stacking: meta-learner over oracle predictions
+pub struct OracleComposer {
+    /// Individual oracle instances.
+    pub oracles: Vec<Arc<dyn Oracle>>,
+    /// Per-oracle calibration quality (Brier score decomposition).
+    pub calibration_quality: Vec<CalibrationQuality>,
+    /// Composition strategy.
+    pub strategy: CompositionStrategy,
+}
+
+pub struct CalibrationQuality {
+    /// Brier score decomposition (Murphy, 1973).
+    /// Brier = Reliability - Resolution + Uncertainty
+    pub reliability: f64,     // lower is better (0 = perfect calibration)
+    pub resolution: f64,      // higher is better (distinguishes outcomes)
+    pub uncertainty: f64,     // base rate uncertainty (irreducible)
+    pub brier_score: f64,     // overall score = REL - RES + UNC
+    /// Expected Calibration Error (Naeini et al., 2015).
+    /// ECE = Σ (|B_m|/n) |acc(B_m) - conf(B_m)|
+    pub ece: f64,
+    /// Maximum Calibration Error.
+    pub mce: f64,
+    /// Calibration sharpness (resolution of prediction intervals).
+    pub sharpness: f64,
+}
+
+pub enum CompositionStrategy {
+    /// Weighted average by inverse Brier score.
+    WeightedEnsemble,
+    /// Conformal prediction: output prediction set with coverage α.
+    /// Vovk, Gammerman & Shafer (2005), "Algorithmic Learning in a Random World"
+    Conformal { target_coverage: f64 },
+    /// Isotonic regression recalibration (Zadrozny & Elkan, 2002).
+    IsotonicRecalibration,
+    /// Platt scaling (Platt, 1999) — logistic recalibration.
+    PlattScaling,
+    /// Temperature scaling (Guo et al., 2017) — single parameter.
+    TemperatureScaling { temperature: f64 },
+}
+```
+
+The `OracleComposer` holds a vector of oracle instances alongside their calibration diagnostics. The `CompositionStrategy` enum captures the principal approaches from the calibration literature:
+
+- **WeightedEnsemble** uses inverse Brier scores as weights, so better-calibrated oracles contribute more. This is the simplest strategy and works well when oracles are approximately independent.
+- **Conformal** wraps the ensemble output in a prediction set with a coverage guarantee. The `target_coverage` parameter (e.g., 0.90) controls the width of the prediction set.
+- **IsotonicRecalibration** and **PlattScaling** are post-hoc recalibration methods that transform raw oracle outputs to better-calibrated probabilities.
+- **TemperatureScaling** applies a single learned parameter to soften or sharpen the prediction distribution, following Guo et al. (2017).
+
+---
+
+### Conformal Prediction for Oracle Uncertainty
+
+```rust
+/// Conformal prediction wrapper for any Oracle implementation.
+///
+/// Produces prediction SETS with finite-sample validity guarantees:
+/// P(y_new ∈ C(x_new)) ≥ 1 - α for any distribution, any sample size.
+///
+/// No distributional assumptions required — only exchangeability.
+/// (Vovk et al., 2005; Angelopoulos & Bates, 2023, arXiv:2107.07511)
+pub struct ConformalOracle {
+    base_oracle: Arc<dyn Oracle>,
+    /// Nonconformity scores from calibration set.
+    calibration_scores: Vec<f64>,
+    /// Target miscoverage rate α (e.g., 0.10 for 90% coverage).
+    alpha: f64,
+}
+
+impl ConformalOracle {
+    /// Compute prediction set for a new query.
+    ///
+    /// The prediction set C(x) = {y : s(x,y) ≤ q̂}
+    /// where q̂ = ⌈(1-α)(n+1)⌉/n quantile of calibration scores.
+    pub async fn predict_set(
+        &self,
+        query: &OracleQuery,
+        ctx: &Context,
+    ) -> Result<PredictionSet> {
+        let base = self.base_oracle.predict(query, ctx).await?;
+        let n = self.calibration_scores.len();
+        let quantile_idx = ((1.0 - self.alpha) * (n + 1) as f64).ceil() as usize;
+        let threshold = self.calibration_scores
+            .get(quantile_idx.min(n - 1))
+            .copied()
+            .unwrap_or(f64::MAX);
+
+        Ok(PredictionSet {
+            point_prediction: base,
+            coverage_guarantee: 1.0 - self.alpha,
+            prediction_interval: PredictionInterval {
+                lower: base.value.as_numeric()? - threshold,
+                upper: base.value.as_numeric()? + threshold,
+                coverage: 1.0 - self.alpha,
+            },
+            n_calibration: n,
+        })
+    }
+}
+```
+
+The key property of conformal prediction is **distribution-free finite-sample validity**: the coverage guarantee `P(y_new in C(x_new)) >= 1 - alpha` holds for any underlying distribution, requiring only that the calibration and test data are exchangeable. This is strictly stronger than asymptotic guarantees from parametric models.
+
+The `calibration_scores` vector stores nonconformity scores computed on a held-out calibration set. The quantile computation `ceil((1-alpha)(n+1))/n` is the split conformal prediction threshold from Vovk et al. (2005). Larger calibration sets produce tighter prediction intervals without sacrificing coverage.
+
+In the Roko context, each oracle maintains its own calibration set of recent (prediction, outcome) pairs. The `ConformalOracle` wrapper can be applied to any `Oracle` implementation — chain, coding, research, or custom — to add rigorous uncertainty quantification at negligible computational cost.
+
+---
+
+### Brier Score Decomposition — Calibration Diagnostics
+
+```rust
+/// Murphy (1973) decomposition of the Brier score.
+///
+/// Brier = (1/N) Σ (f_i - o_i)² = REL - RES + UNC
+///
+/// REL (reliability): (1/N) Σ n_k (f̄_k - ō_k)²
+///   Measures calibration: do predicted probabilities match observed frequencies?
+///
+/// RES (resolution): (1/N) Σ n_k (ō_k - ō)²
+///   Measures discrimination: do different forecasts correspond to different outcomes?
+///
+/// UNC (uncertainty): ō(1 - ō)
+///   Base rate uncertainty (irreducible).
+pub fn brier_decomposition(
+    predictions: &[(f64, bool)], // (predicted_probability, actual_outcome)
+    n_bins: usize,               // default: 10
+) -> CalibrationQuality {
+    // ... implementation
+}
+```
+
+The Brier score decomposition separates three orthogonal components:
+
+- **Reliability (REL)** measures pure calibration error. An oracle that says "80% chance" should be right 80% of the time. REL = 0 means perfect calibration. This is what `ResidualCorrector` targets — subtracting systematic bias drives REL toward zero.
+- **Resolution (RES)** measures discrimination ability. An oracle that always predicts the base rate has RES = 0 (no skill). High RES means the oracle's predictions actually distinguish between different outcomes. This is intrinsic to the oracle's predictive power and cannot be improved by recalibration alone.
+- **Uncertainty (UNC)** is the base rate entropy, a property of the prediction task itself. It is irreducible — no oracle can reduce it.
+
+The decomposition identity `Brier = REL - RES + UNC` means an oracle improves by either reducing REL (better calibration) or increasing RES (better discrimination). The `CalibrationTracker` in Roko tracks both components separately, enabling targeted diagnostics: if REL is high, apply `ResidualCorrector` or `PlattScaling`; if RES is low, the oracle's features or model need improvement.
+
+The Expected Calibration Error (ECE) from Naeini et al. (2015) provides an alternative calibration metric based on binned accuracy-confidence gaps. ECE is more interpretable than REL for practitioners but provides less diagnostic information.
+
+---
+
+### Calibration and composition citations
+
+- Murphy, A. H. (1973). "A New Vector Partition of the Probability Score." *J. Applied Meteorology*, 12(4), 595-600.
+- Vovk, V., Gammerman, A., & Shafer, G. (2005). *Algorithmic Learning in a Random World*. Springer.
+- Angelopoulos, A. N., & Bates, S. (2023). "Conformal Prediction: A Gentle Introduction." *Foundations and Trends in ML*. arXiv:2107.07511.
+- Naeini, M. P., Cooper, G., & Hauskrecht, M. (2015). "Obtaining Well Calibrated Probabilities Using Bayesian Binning." *AAAI 2015*.
+- Guo, C., Pleiss, G., Sun, Y., & Weinberger, K. Q. (2017). "On Calibration of Modern Neural Networks." *ICML 2017*.
+- Cesa-Bianchi, N., & Lugosi, G. (2006). *Prediction, Learning, and Games*. Cambridge University Press.
+
+### Test criteria
+
+- **Conformal coverage**: Over 1000 test samples, empirical coverage >= (1-alpha) - 0.01.
+- **Brier decomposition additivity**: REL - RES + UNC = Brier score within f64 epsilon.
+- **Composition monotonicity**: Adding a well-calibrated oracle to the ensemble does not increase Brier score.
+- **Temperature scaling idempotence**: Applying temperature scaling twice with T=1.0 produces identical predictions.
+
+---
+
 ## Academic foundations
 
 - Ousterhout, J. (2018). *A Philosophy of Software Design*. Yaknyam Press. — Deep module design principle motivating the 2-method Oracle trait.
@@ -734,7 +915,7 @@ This pattern — predict, resolve, correct, repeat — is the same regardless of
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [00-vision-ta-generalized.md](./00-vision-ta-generalized.md) for why TA is generalized across domains
 - See [02-chain-oracles.md](./02-chain-oracles.md) for `ChainOracle` implementation

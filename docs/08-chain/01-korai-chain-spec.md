@@ -381,7 +381,7 @@ The Binary Fuse filter works across all chains because it operates on u64 hashes
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [00-vision-and-framing.md](./00-vision-and-framing.md) for why a dedicated chain exists
 - See [03-hdc-on-chain-precompile.md](./03-hdc-on-chain-precompile.md) for HDC precompile details

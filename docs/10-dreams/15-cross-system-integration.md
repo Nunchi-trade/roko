@@ -451,6 +451,91 @@ The complete event flow for a dream cycle touching all subsystems:
 
 ---
 
+## Dreams x Fleet Coordination
+
+When multiple agents operate as a fleet (the Roko term for a coordinated group of agents, formerly "clade"), dream coordination becomes important. Without coordination, fleet members may all dream simultaneously — wasting compute on redundant consolidation when staggered cycles would allow one agent's dream insights to benefit another's waking work before that agent dreams.
+
+```rust
+/// Fleet-level dream coordination.
+pub struct FleetDreamCoordinator {
+    /// Whether to stagger dream cycles across fleet members.
+    pub stagger_cycles: bool,             // default: true
+    /// Minimum stagger interval between any two agents dreaming (minutes).
+    pub min_stagger_mins: u64,            // default: 10, range: 5-60
+    /// Whether to aggregate fleet dream insights for collective trend analysis.
+    pub aggregate_insights: bool,         // default: true
+    /// Collective insight confidence boost when N+ agents independently discover same pattern.
+    pub collective_confirmation_boost: f64, // default: 0.15, range: 0.05-0.30
+    /// Minimum agents confirming a pattern for collective boost.
+    pub min_confirming_agents: usize,     // default: 2, range: 2-5
+}
+```
+
+Fleet dream coordination operates through the Agent Mesh (formerly "Styx"):
+
+- **Staggered scheduling**: The fleet coordinator assigns dream slots so that no two agents dream simultaneously. This ensures continuous waking coverage and allows dream insights from early dreamers to propagate to later dreamers' waking contexts before they sleep.
+- **Insight aggregation**: When `aggregate_insights` is enabled, the coordinator collects dream insights from all fleet members and performs collective trend analysis. Patterns discovered independently by multiple agents receive a confidence boost (`collective_confirmation_boost`), reflecting the epistemic value of independent confirmation.
+- **Collective confirmation**: If `min_confirming_agents` or more fleet members independently discover the same pattern (measured by HDC cosine similarity > 0.85), the pattern receives the collective confirmation boost. This is a fleet-level implementation of the Grossman-Stiglitz information aggregation principle described in the Mesh integration section above.
+
+---
+
+## Dreams x Configuration System
+
+Dream configuration flows from `roko.toml` through the standard Roko configuration system. The complete dream configuration reference:
+
+```toml
+# Complete dream configuration reference
+[dreams]
+auto_dream = true
+idle_threshold_mins = 15
+min_episodes_for_dream = 5
+scheduled_interval_hours = 4
+budget_fraction = 0.15
+intensive_threshold = 50
+intensive_low_water = 10
+batch_size = 10
+
+[dreams.agent]
+command = "claude"
+model = "claude-haiku-4-5-20251001"
+bare_mode = true
+effort = "low"
+timeout_ms = 120000
+
+[dreams.privacy]
+nrem_provider = "local"
+rem_provider = "api"
+hypnagogia_provider = "api"
+
+[dreams.sharing]
+mode = "selective"
+confidence_threshold = 0.75
+novelty_threshold = 0.60
+evaporation_rate = 0.05
+hop_decay = 0.85
+max_hops = 3
+
+[dreams.nightmare]
+enable_detection = true
+classifier_tier = "T2"
+capability_delta_threshold = 0.50
+cooldown_cycles = 3
+```
+
+Configuration sections explained:
+
+| Section | Purpose |
+|---------|---------|
+| `[dreams]` | Top-level scheduling and resource allocation. `auto_dream` enables idle-triggered dreaming. `budget_fraction` caps dream compute at 15% of total agent budget. `intensive_threshold` / `intensive_low_water` control intensive consolidation mode (see [13-scheduling-and-triggers.md](13-scheduling-and-triggers.md)). |
+| `[dreams.agent]` | Agent backend configuration for dream inference. Dreams typically use a cheaper model (Haiku) with `bare_mode = true` (no tool use) and `effort = "low"` for cost efficiency. |
+| `[dreams.privacy]` | Provider routing per dream phase. `"local"` runs inference locally (no data leaves the machine); `"api"` uses the configured API backend. NREM replay defaults to local since it processes raw episode data. |
+| `[dreams.sharing]` | Controls how dream insights propagate through the Agent Mesh. `mode` can be `"none"`, `"selective"` (share only high-confidence, high-novelty insights), or `"all"`. `hop_decay` (0.85) reduces confidence by 15% per mesh hop. `evaporation_rate` (0.05) reduces shared insight confidence over time. |
+| `[dreams.nightmare]` | Nightmare detection and containment configuration. See [17-advanced-dream-concepts.md](17-advanced-dream-concepts.md) for the nightmare detection system. `capability_delta_threshold` is the maximum acceptable capability regression before a dream output is flagged as a nightmare. |
+
+The configuration is loaded by `DreamLoopConfig::from_roko_toml()` and propagated to the `DreamRunner` at initialization. Runtime overrides are possible via the `roko config set dreams.<key> <value>` CLI command.
+
+---
+
 ## Cross-References
 
 | Document | Relevance |

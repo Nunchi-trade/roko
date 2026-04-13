@@ -419,7 +419,7 @@ For critical Korai contracts (KORAI token, escrow, reputation registry), mirage-
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [17-chain-client-wallet-traits.md](./17-chain-client-wallet-traits.md) for the `ChainClient` and `ChainWallet` traits that mirage-rs implements
 - See [03-hdc-on-chain-precompile.md](./03-hdc-on-chain-precompile.md) for the HDC precompile that mirage-rs emulates

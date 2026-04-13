@@ -783,6 +783,8 @@ pub struct HypnagogiaInsightPipeline {
 | Wallas (1926), "The Art of Thought" | Preparation → Incubation → Illumination → Verification; incubation enforced structurally |
 | Collins & Loftus (1975, Psychological Review), "A Spreading-Activation Theory of Semantic Processing" | Spreading activation formula; decay rate per path length; time decay λ |
 | Koestler (1964), "The Act of Creation" | Bisociation: creative collision of incompatible matrices of thought; cross-cluster HDC binding |
+| "Embracing sleep-onset complexity," Trends in Neurosciences (2024) | Alpha->theta transition as gradual oscillating process; N1 as creative sweet spot with cross-region synchrony |
+| "Hypnagogia: A Comprehensive Literature Review," academia.edu (2024) | Neural correlates of hypnagogic hallucinations: same regions as directed imagination minus executive control |
 
 ### Test Criteria
 
@@ -796,6 +798,132 @@ pub struct HypnagogiaInsightPipeline {
 8. **Staging confidence**: a hypothesis staged with `initial_confidence = 0.22` reads back from the staging buffer with confidence 0.22 (no rounding or truncation).
 9. **Pipeline without elaboration**: with `elaborate_fragments = false`, retained fragments are staged as raw text fragments without LLM expansion; no elaboration call is made.
 10. **End-to-end staging**: a full pipeline run produces at least one staged hypothesis in the staging buffer when the NeuroStore has ≥ 10 entries and at least one Dali fragment passes the Observer.
+
+---
+
+## Hypnagogic Neuroscience: Recent Advances (2024)
+
+### Embracing Sleep-Onset Complexity
+
+**Reference**: "Embracing sleep-onset complexity," Trends in Neurosciences (2024).
+
+Comprehensive review confirming that sleep onset serves key cognitive functions for memory and creativity. Validates the Edison/Dali technique. Characterizes N1 stage as a "creative sweet spot" with alpha->theta transition (4-12 Hz) marking reduced neural excitability and cross-region synchrony.
+
+Key findings for Roko's hypnagogia engine:
+
+1. The alpha->theta transition is NOT a sudden switch but a gradual, oscillating process with multiple micro-transitions
+2. Creativity peaks not at any single EEG frequency but at the boundary between alpha (relaxed wakefulness) and theta (early sleep) -- the "edge of chaos"
+3. Cross-region neural synchrony increases during N1, enabling long-range associative connections that are suppressed during alert wakefulness
+
+**Map to Roko**: The Executive Loosener's temperature parameter should not be a fixed value (T=1.3) but should gradually increase during the hypnagogic phase, mimicking the alpha->theta transition. The creative peak occurs not at maximum temperature but at the boundary -- the computational "edge of chaos" where the model is loosened enough for novel associations but structured enough for coherent output.
+
+```rust
+/// Dynamic temperature curve for the hypnagogic transition.
+/// Based on "Embracing sleep-onset complexity" (Trends in Neurosciences, 2024).
+/// The alpha->theta transition is modeled as a gradual sigmoid.
+pub struct HypnagogicTemperatureCurve {
+    /// Starting temperature (alpha state -- alert, structured).
+    pub alpha_temperature: f64,           // default: 0.7, range: 0.3-1.0
+    /// Peak temperature (theta state -- creative, loosened).
+    pub theta_temperature: f64,           // default: 1.5, range: 1.0-2.0
+    /// Transition midpoint: fraction of hypnagogic phase at which
+    /// temperature reaches the midpoint between alpha and theta.
+    pub transition_midpoint: f64,         // default: 0.4, range: 0.2-0.6
+    /// Transition steepness: higher = sharper transition.
+    pub transition_steepness: f64,        // default: 5.0, range: 2.0-10.0
+    /// Whether to add micro-oscillations around the trend.
+    /// Mimics the biological oscillating micro-transitions.
+    pub micro_oscillations: bool,         // default: true
+    /// Amplitude of micro-oscillations (+-).
+    pub oscillation_amplitude: f64,       // default: 0.1, range: 0.02-0.20
+}
+
+impl HypnagogicTemperatureCurve {
+    /// Compute temperature at a given phase progress (0.0 = start, 1.0 = end).
+    pub fn temperature_at(&self, progress: f64) -> f64 {
+        let base = self.alpha_temperature + (self.theta_temperature - self.alpha_temperature)
+            * sigmoid((progress - self.transition_midpoint) * self.transition_steepness);
+        if self.micro_oscillations {
+            // Add sinusoidal micro-oscillations
+            let oscillation = self.oscillation_amplitude
+                * (progress * std::f64::consts::PI * 8.0).sin();
+            (base + oscillation).clamp(self.alpha_temperature, self.theta_temperature)
+        } else {
+            base
+        }
+    }
+}
+
+fn sigmoid(x: f64) -> f64 {
+    1.0 / (1.0 + (-x).exp())
+}
+```
+
+### Targeted Dream Incubation (TDI) at Sleep Onset
+
+**Reference**: Adam Haar Horowitz et al., "Targeted dream incubation at sleep onset increases post-sleep creative performance," *Scientific Reports* 13, 2023. DOI: 10.1038/s41598-023-31361-w.
+
+N = 50 participants. TDI group used "tree" cue; control used neutral cue. Key quantitative results:
+- TDI increased post-nap creativity by **43%** compared to no-cue nap group
+- Over **90% of TDI participants** reported at least one cue-related hypnagogic content
+- TDI responses showed greater **semantic distance** between concepts, indicating more remote associative thinking
+- Effect persisted across three distinct creativity tasks on the cued theme
+
+**Reference**: Horowitz et al., "Targeted dream incubation at a distance," *Frontiers in Sleep*, 2024. DOI: 10.3389/frsle.2024.1258345. Validates TDI without EEG hardware, extending to ecologically valid (remote) settings.
+
+**Map to Roko**: The goal priming in Layer 1 (Thalamic Gate) is a computational analog of TDI. The research validates that priming the hypnagogic transition with a specific topic produces measurably more creative output on that topic. The 43% creativity boost justifies the `goal_priming_weight` parameter — stronger priming yields more domain-relevant creative insights at the cost of reduced exploration breadth.
+
+```rust
+/// Targeted Dream Incubation configuration for hypnagogia.
+/// Based on Horowitz et al. (2023, Scientific Reports; 2024, Frontiers in Sleep).
+pub struct TargetedDreamIncubation {
+    /// Whether to prime the hypnagogic transition with a specific topic.
+    pub enabled: bool,                     // default: true
+    /// Source of the incubation cue (current task, recent failure, manual topic).
+    pub cue_source: IncubationCueSource,   // default: CurrentTask
+    /// Cue reinforcement interval: re-inject the cue every N fragments.
+    pub reinforcement_interval: usize,     // default: 3, range: 1-10
+    /// Semantic distance target: how far from the cue topic should
+    /// generated associations range? Lower = more focused, higher = more exploratory.
+    pub semantic_distance_target: f64,     // default: 0.50, range: 0.20-0.80
+}
+
+pub enum IncubationCueSource {
+    /// Current active task or problem.
+    CurrentTask,
+    /// Most recent failure episode.
+    RecentFailure,
+    /// Topic with highest unresolved prediction error.
+    HighestPredictionError,
+    /// Manually specified topic.
+    Manual { topic: String },
+}
+```
+
+### N2 Sleep and Perceptual Insight
+
+**Reference**: "N2 sleep promotes the occurrence of 'aha' moments in a perceptual insight task," *PLOS Biology*, 2024. DOI: 10.1371/journal.pbio.3003185.
+
+Complementary to Lacaux's N1 findings: N2 sleep supports perceptual insight via spindle-mediated consolidation. This suggests a **staged creativity architecture** across sleep stages — N1 (hypnagogia) generates novel associations, N2 consolidates perceptual insights, and deeper NREM replays and strengthens. Roko's transition from Hypnagogia → NREM → REM mirrors this staged architecture.
+
+### Hypnagogia Literature Review (2024)
+
+**Reference**: "Hypnagogia: A Comprehensive Literature Review on Sleep Onset Hallucinations and Transitional Consciousness," academia.edu (2024).
+
+Surveys neural correlates and phenomenology. Key insight: hypnagogic hallucinations involve the same brain regions active during directed imagination but WITHOUT the executive control overlay. This is exactly what Roko's Executive Loosener implements — same reasoning capacity, reduced executive filtering.
+
+**Test criteria for the temperature curve**:
+
+```
+1. Temperature monotonicity: temperature_at(0.0) <= temperature_at(0.5) <= temperature_at(1.0)
+   (modulo micro-oscillations).
+2. Boundary values: temperature_at(0.0) ≈ alpha_temperature; temperature_at(1.0) ≈ theta_temperature.
+3. Midpoint: temperature_at(transition_midpoint) ≈ (alpha_temperature + theta_temperature) / 2.
+4. Micro-oscillation bounds: with oscillations enabled, temperature never exceeds theta_temperature
+   or drops below alpha_temperature.
+5. Steepness effect: with steepness=10.0, the transition from 20% to 80% of range occurs within
+   a narrower progress window than with steepness=2.0.
+```
 
 ---
 

@@ -385,7 +385,7 @@ mechanisms described in `10-exponential-flywheel.md`.
 
 ---
 
-## Related Sub-Docs
+## Cross-References
 
 - `00-stigmergy-theory.md` — Why stigmergy scales better than alternatives
 - `06-agent-mesh-sync.md` — Transport layer scaling characteristics

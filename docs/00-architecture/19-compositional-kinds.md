@@ -5,6 +5,8 @@
 > Canonical source: `crates/roko-core/src/kind.rs`
 > Cross-references: [02-engram-data-type.md](02-engram-data-type.md), [08-scorer-gate-router-composer-policy.md](08-scorer-gate-router-composer-policy.md)
 
+> **Implementation**: Specified
+
 ---
 
 ## Purpose
@@ -278,7 +280,7 @@ impl Kind {
 
 ---
 
-## Cross-references
+## Cross-References
 
 - [02-engram-data-type.md](02-engram-data-type.md) -- Signal struct with Kind field
 - [08-scorer-gate-router-composer-policy.md](08-scorer-gate-router-composer-policy.md) -- Trait dispatch by Kind

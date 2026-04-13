@@ -1,6 +1,8 @@
 # Dreams (Offline Learning and Consolidation)
 
-Dreams are one of three cognitive cross-cuts in Roko — subsystems that span multiple architectural layers rather than living at a single layer. While Neuro provides persistent memory and Daimon provides emotional context, Dreams provide the offline consolidation mechanism that transforms raw episodic experience into durable semantic knowledge, creative hypotheses, and strategic insights. Dreams are the agent's sleep: a periodic offline process where the agent replays recent episodes, generates counterfactual scenarios, depotentiates emotional charge, discovers cross-episode patterns, and stages new knowledge for waking validation. Dreams are idle-triggered and scheduled — they fire when the agent has capacity, not in response to any mortality or termination signal.
+> **Abstract:** Dreams are one of three cognitive cross-cuts in Roko — subsystems that span multiple architectural layers rather than living at a single layer. While Neuro provides persistent memory and Daimon provides emotional context, Dreams provide the offline consolidation mechanism that transforms raw episodic experience into durable semantic knowledge, creative hypotheses, and strategic insights. Dreams are the agent's sleep: a periodic offline process where the agent replays recent episodes, generates counterfactual scenarios, depotentiates emotional charge, discovers cross-episode patterns, and stages new knowledge for waking validation. Dreams are idle-triggered and scheduled — they fire when the agent has capacity, not in response to any mortality or termination signal.
+
+---
 
 ## Prerequisites
 
@@ -35,7 +37,7 @@ Before reading this topic, familiarity with the following is helpful:
 | 16 | [16-implementation-status.md](16-implementation-status.md) | Current code status, implementation plan items, roko-golem dissolution plan, roadmap, open questions |
 | 17 | [17-advanced-dream-concepts.md](17-advanced-dream-concepts.md) | Dream sharing across mesh, nightmare detection and containment, persistent dream journals, lucid dream monitoring |
 
-## Related Topics
+## Cross-References
 
 | Topic | Relationship |
 |-------|-------------|
@@ -92,13 +94,40 @@ The dream subsystem draws on extensive academic research:
 | Micheli et al., *ICLR*, 2023 (IRIS) | Discrete world model with transformers |
 | Bruce et al., *ICML*, 2024 (Genie) | Generative interactive environments from unlabeled video |
 | Filevich et al., *Journal of Neuroscience*, 2015 | Metacognitive mechanisms underlying lucid dreaming |
+| Jensen, Hennequin & Mattar, *Nature Neuroscience*, 2024 | Meta-RL planning-integrated replay with variable-length rollouts |
+| Sagiv, Akam, Witten & Daw, *Neuron*, 2025 | Goal-uncertain replay prioritization with ensemble value functions |
+| "Embracing sleep-onset complexity," *Trends in Neurosciences*, 2024 | Alpha->theta transition as gradual oscillating process; N1 creative sweet spot |
+| "Spindle-locked ripples mediate memory reactivation," *Nature Communications*, 2024 | First direct human evidence for spindle-ripple coupling in NREM consolidation |
+| Tononi lab, *Science*, 2024 | First causal demonstration of Synaptic Homeostasis Hypothesis via SYNCit-K |
+| Skenderi et al. (WSCL), *IEEE*, 2024 | Three-phase wake-NREM-REM architecture achieves SOTA continual learning |
+| Lin et al., arXiv:2504.13171, 2025 | Sleep-time compute: pre-computed summaries reduce test-time compute 5x |
+| Mehrotra et al. (TAP), *NeurIPS*, 2024 | Tree-structured automated red teaming with adaptive branching |
+| "MAD-MAX," arXiv, 2025 | Modular attack composition achieving 97% ASR |
+| "EEG Microstates in lucid REM," *bioRxiv*, 2025 | Microstate A/G dominance in lucid REM linked to metacognition |
+| Ley et al. (GLOBE-CE), *ICML*, 2023 | Global counterfactual explanations via translation vectors |
+| "Transport-based Counterfactual Models," *JMLR*, 2024 | Optimal transport counterfactuals respecting data manifold geometry |
+| Micheli et al. (Delta-IRIS), *ICML*, 2024 | Efficient delta-encoded world models: 4 tokens/frame vs IRIS's 64, 10× faster |
+| Google DeepMind (Genie 2/3), 2024-2025 | Generative interactive environments from single image prompts |
+| "Backtracking Counterfactuals," arXiv:2211.00472, ICLR 2024 | First formal semantics for backtracking counterfactuals within SCMs |
+| "Deep Backtracking Counterfactuals (DeepBC)," *TMLR*, July 2024 | Constrained sampling for causally compliant backtracking explanations |
+| Horowitz et al., "Targeted dream incubation," *Scientific Reports*, 2023 | TDI increases post-nap creativity by 43%, 90% cue incorporation |
+| Horowitz et al., "TDI at a distance," *Frontiers in Sleep*, 2024 | Remote TDI validated without EEG hardware |
+| "N2 sleep promotes 'aha' moments," *PLOS Biology*, 2024 | Staged creativity: N1 associations, N2 perceptual insight |
+| Espírito Santo et al., "Towards a Formal Creativity Theory," arXiv:2405.02148, 2024 | Formalizes Boden's transformational creativity via Formal Learning Theory |
+| Mouret & Clune, "MAP-Elites," arXiv:1504.04909, 2015 | Quality-diversity search for diverse solution archives |
+| DCRL-MAP-Elites, *ACM TELO*, 2024 | Descriptor-conditioned RL actors within MAP-Elites |
+| Samvelyan et al. (Rainbow Teaming), *NeurIPS*, 2024 | MAP-Elites for LLM vulnerability mapping, >90% ASR |
+| "Quality-Diversity Red-Teaming," arXiv:2506.07121, 2025 | Behavior-conditioned attack generation by category and style |
+| Anthropic, "Constitutional Classifiers," arXiv:2501.18837, 2025 | Dual-layer classifiers reducing jailbreak success from 86% to 4.4% |
+| Sawada et al., "Prefrontal synaptic regulation," *Science*, 2024 | First causal SHY demonstration via SYNCit-K |
+| "PP2Acα regulates sleep homeostasis," *Communications Biology*, 2025 | Phosphatase regulation of synaptic homeostasis |
 
 ---
 
 ## Generation Notes
 
 - **Sub-docs produced**: 18 (00 through 17) plus INDEX.md
-- **Total line count**: ~8,100+ lines across all sub-docs
+- **Total line count**: ~10,000+ lines across all sub-docs
 - **Key legacy sources consulted**:
   - `bardo-backup/prd/05-dreams/` — dream cycle architecture, consolidation, scheduling
   - `bardo-backup/prd/06-hypnagogia/` — hypnagogia engine, inner worlds, divergence
@@ -117,3 +146,13 @@ The dream subsystem draws on extensive academic research:
   - The `roko-golem` crate still exports `ScaffoldEngine` which `roko-dreams/src/lib.rs` re-exports. This dependency should be removed when `roko-golem` is dissolved.
   - The Daimon (affect engine) is referenced extensively in dream design but is not yet implemented in the codebase.
   - HDC vectors (`bardo-primitives`) are built but not called from the dream subsystem.
+- **2025-04 enhancement (pass 1)**: Added 25+ recent citations (2024-2025), Rust structs, pseudocode, test criteria, and configuration parameters throughout
+- **2025-04 enhancement (pass 2)**: Deep research enhancement of all 18 sub-docs. Key additions:
+  - **02-nrem-replay**: Jensen et al. 2024 variable-length rollouts with full quantitative results (r=0.186±0.007 human correlation); Sagiv et al. 2025 goal-uncertain replay with Geodesic Representation formalism and extended utility formula; adaptive rollout pseudocode and test criteria
+  - **03-rem-imagination**: DreamerV3 quantitative performance (150+ tasks, Minecraft diamonds, symlog/two-hot/percentile normalization details); Delta-IRIS efficiency gains (4 tokens vs 64, 10× speed); backtracking counterfactuals (DeepBC TMLR 2024, natural counterfactuals arXiv 2024) with Rust config and prompts
+  - **04-consolidation**: SHY causal evidence upgraded with full Sawada et al. Science 2024 quantitative findings (SYNCit-K 2h vs >6h spine persistence); PP2Acα Communications Biology 2025 excitatory-specific mechanism
+  - **05-dream-evolution**: MAP-Elites quality-diversity search with archive architecture, QD-score algorithm, behavioral descriptor dimensions; citations from DCRL-MAP-Elites ACM TELO 2024 and Rainbow Teaming NeurIPS 2024
+  - **07-hypnagogia**: Targeted Dream Incubation (Horowitz et al. 2023: 43% creativity boost, 90% cue incorporation; 2024 remote TDI); N2 aha moments (PLOS Biology 2024); incubation cue source config
+  - **09-threat-simulation**: Constitutional Classifiers (Anthropic 2025: 86%→4.4% jailbreak success); Quality-Diversity Red-Teaming (arXiv 2025)
+  - **12-sleep-time-compute**: Lin et al. 2025 detailed mechanism (rethink_memory function calling, query predictability metric log P(q|c), 10× cost weighting, 2.5× multi-query amortization)
+  - **INDEX.md**: 17 new citations added to the academic citations table

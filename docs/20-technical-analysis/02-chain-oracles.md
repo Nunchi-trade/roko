@@ -525,7 +525,7 @@ The on-chain prediction infrastructure connects to the Knowledge Futures Market 
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [01-oracle-trait.md](./01-oracle-trait.md) for the Oracle trait signature
 - See [03-coding-oracles.md](./03-coding-oracles.md) for coding domain equivalents of these indicators

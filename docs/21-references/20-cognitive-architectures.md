@@ -6,6 +6,8 @@
 **Prerequisites**: [Architecture](../00-architecture/INDEX.md)
 **Key sources**: `bardo-backup/prd/shared/citations.md` §3, `bardo-backup/tmp/agent-chain/08-references.md`
 
+> **Implementation**: Reference
+
 ---
 
 ## Abstract
@@ -78,7 +80,20 @@ Roko's universal cognitive loop is not an ad-hoc design but an implementation of
 
 ---
 
-## Cross-references
+## Agentic AI Architecture Surveys (2025)
+
+- Agentic AI: A Comprehensive Survey of Architectures, Applications, and Future Directions (2025). _Artificial Intelligence Review_, Springer, 2025.
+  *Grounds: Agentic AI taxonomy — unified taxonomy decomposes LLM-based agents into six modular dimensions: Core Components (perception, memory, action, profiling), Cognitive Architecture (planning, reflection), Learning, Multi-Agent Systems, Environments, and Evaluation. Validates Roko's modular architecture (6 Synapse traits + Daimon + Dreams + NeuroStore).*
+
+- Wu, S. et al. (2025). Cognitive LLMs: Toward Human-Like Artificial Intelligence by Integrating Cognitive Architectures and Large Language Models. _SAGE Journals_, 2025.
+  *Grounds: Cognitive LLM integration — integrates classical cognitive architectures (ACT-R, SOAR) with modern LLMs for manufacturing decision-making. Validates Roko's approach of layering cognitive architecture principles onto LLM-based agents rather than treating the LLM as a standalone reasoner.*
+
+- Agentic AI: Architectures, Taxonomies, and Evaluation of LLM Agents (2025). arXiv:2601.12560.
+  *Grounds: Agent evaluation taxonomy — systematic evaluation framework for agentic AI systems. Data shows clear paradigm shift: symbolic/hybrid cognitive architectures dominated 2018-2021, while neural orchestration frameworks dominate post-2022. Validates Roko's neural-first design with structured cognitive overlays.*
+
+---
+
+## Cross-References
 
 - See [01-memory-consolidation.md](./01-memory-consolidation.md) for CLS and memory systems
 - See [02-affective-computing.md](./02-affective-computing.md) for PAD and somatic markers

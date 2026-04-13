@@ -6,6 +6,8 @@
 **Prerequisites**: [Architecture](../00-architecture/INDEX.md), [Neuro](../06-neuro/INDEX.md)
 **Key sources**: `bardo-backup/prd/04-memory/10-research.md`, `bardo-backup/prd/02-mortality/14-research-foundations.md`
 
+> **Implementation**: Reference
+
 ---
 
 ## Abstract
@@ -110,6 +112,22 @@ Memory consolidation research provides the theoretical foundation for Roko's Neu
 
 ---
 
+## Agent Memory Surveys and Taxonomies (2025)
+
+- Liu, S. et al. (2025). Memory in the Age of AI Agents: A Survey. arXiv:2512.13564.
+  *Grounds: Agent memory taxonomy — finer-grained taxonomy distinguishing factual, experiential, and working memory. Analyzes how memory is formed, evolved, and retrieved over time. Validates NeuroStore's multi-type knowledge architecture.*
+
+- Wang, Z. et al. (2025). Rethinking Memory in LLM-based Agents: Representations, Operations, and Emerging Topics. arXiv:2505.00675.
+  *Grounds: Memory operations taxonomy — formalizes six core operations: Consolidation, Updating, Indexing, Forgetting, Retrieval, and Condensation. Directly maps to NeuroStore's Curator cycle (consolidation, indexing, pruning, retrieval).*
+
+- Memory for Autonomous LLM Agents (2026). Mechanisms, Evaluation, and Emerging Frontiers. arXiv:2603.07670.
+  *Grounds: Agent memory formalization — formalizes agent memory as a write-manage-read loop coupled with perception and action. Five mechanism families: context-resident compression, retrieval-augmented stores, reflective self-improvement, hierarchical virtual context, and policy-learned management. Validates Roko's separation of memory management from inference.*
+
+- Yehudai, M. et al. (2025). Human-Like Remembering and Forgetting in LLM Agents: An ACT-R-Inspired Memory Architecture. _HAI_, 2025.
+  *Grounds: ACT-R memory for agents — implements ACT-R decay and retrieval functions in LLM agent memory. Validates the Ebbinghaus-based decay and retrieval-boost mechanisms in NeuroStore with a complementary cognitive-science-grounded approach.*
+
+---
+
 ## Knowledge Compression and Transfer
 
 - Bartlett, F.C. (1932). _Remembering: A Study in Experimental and Social Psychology_. Cambridge University Press.
@@ -117,7 +135,7 @@ Memory consolidation research provides the theoretical foundation for Roko's Neu
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [00-lifecycle-and-finite-agency.md](./00-lifecycle-and-finite-agency.md) for lifecycle-level forgetting motivation
 - See [03-dreams-and-offline-learning.md](./03-dreams-and-offline-learning.md) for sleep-dependent consolidation mechanisms

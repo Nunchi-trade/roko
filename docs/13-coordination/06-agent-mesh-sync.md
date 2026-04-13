@@ -1024,7 +1024,7 @@ monthly_budget = 10.00     # Max USDC per month
 
 ---
 
-## Related Sub-Docs
+## Cross-References
 
 - `03-digital-pheromones.md` — What gets transported (pheromone types and decay)
 - `05-pheromone-scope.md` — Scope model (Local, Mesh, Global)

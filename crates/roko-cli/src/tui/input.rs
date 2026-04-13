@@ -24,6 +24,8 @@ pub enum InputMode {
     Filter,
     /// Confirmation dialog: yes/no prompt for destructive actions.
     Confirm,
+    /// Config text-edit mode: typing a value for a config field.
+    ConfigEdit,
 }
 
 // ---------------------------------------------------------------------------
@@ -214,12 +216,16 @@ pub enum TuiAction {
     // -- notifications --
     DismissNotification,
 
-    // -- config navigation --
+    // -- config editor --
     ConfigUp,
     ConfigDown,
-    ConfigLeft,
-    ConfigRight,
-    ConfigSelect,
+    ConfigToggle,
+    ConfigCycleLeft,
+    ConfigCycleRight,
+    ConfigStartEdit,
+    ConfigCommitEdit,
+    ConfigCancelEdit,
+    ConfigSave,
 
     // -- force / reset --
     ForceAdvance,
@@ -305,6 +311,9 @@ pub fn handle_key(key: KeyEvent, mode: InputMode, active_tab: Tab, focus: FocusZ
     }
 
     // Text input modes
+    if mode == InputMode::ConfigEdit {
+        return handle_config_edit_key(key);
+    }
     if mode == InputMode::Inject {
         return handle_inject_key(key);
     }
@@ -598,12 +607,27 @@ fn handle_logs_key(key: KeyEvent, _focus: FocusZone) -> TuiAction {
 }
 
 fn handle_config_key(key: KeyEvent) -> TuiAction {
+    // Ctrl-S saves pending config edits
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s') {
+        return TuiAction::ConfigSave;
+    }
     match key.code {
         KeyCode::Up | KeyCode::Char('k') => TuiAction::ConfigUp,
         KeyCode::Down | KeyCode::Char('j') => TuiAction::ConfigDown,
-        KeyCode::Left | KeyCode::Char('h') => TuiAction::ConfigLeft,
-        KeyCode::Right | KeyCode::Char('l') => TuiAction::ConfigRight,
-        KeyCode::Enter => TuiAction::ConfigSelect,
+        KeyCode::Left | KeyCode::Char('h') => TuiAction::ConfigCycleLeft,
+        KeyCode::Right | KeyCode::Char('l') => TuiAction::ConfigCycleRight,
+        KeyCode::Enter | KeyCode::Char(' ') => TuiAction::ConfigToggle,
+        _ => TuiAction::None,
+    }
+}
+
+/// Key handler for config text-edit mode (typing a value).
+fn handle_config_edit_key(key: KeyEvent) -> TuiAction {
+    match key.code {
+        KeyCode::Enter => TuiAction::ConfigCommitEdit,
+        KeyCode::Esc => TuiAction::ConfigCancelEdit,
+        KeyCode::Backspace => TuiAction::InputBackspace,
+        KeyCode::Char(c) => TuiAction::InputChar(c),
         _ => TuiAction::None,
     }
 }

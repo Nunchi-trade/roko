@@ -6,6 +6,8 @@
 **Prerequisites**: [Architecture](../00-architecture/INDEX.md), [Framework](../00-architecture/INDEX.md), [Harness](../04-verification/INDEX.md)
 **Key sources**: `bardo-backup/tmp/mori-agents/12-references.md`, `bardo-backup/prd/shared/citations.md` §3
 
+> **Implementation**: Reference
+
 ---
 
 ## Abstract
@@ -83,7 +85,7 @@ The Roko thesis — "the scaffold IS the product" — is grounded in empirical e
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [06-self-learning-systems.md](./06-self-learning-systems.md) for self-improvement mechanisms
 - See [07-context-engineering.md](./07-context-engineering.md) for context assembly optimization

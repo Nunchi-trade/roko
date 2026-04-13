@@ -321,7 +321,7 @@ protocol_behavior = 0.5
 
 ---
 
-## Related Topics
+## Cross-References
 
 - `docs/17-lifecycle/10-ebbinghaus-for-knowledge-not-agents.md` — Ebbinghaus decay mechanics
 - `docs/08-chain/INDEX.md` — KORAI/DAEJI token economics

@@ -848,7 +848,323 @@ healthy_reset_secs = 300        # Sustained healthy time to reset restart counte
 - Process lifecycle managed by `bardo-runtime` ProcessSupervisor
 - Language-agnostic: any language that speaks MCP works
 
-### Test criteria
+---
+
+## Mechanism 4: WASM Plugin System
+
+WASM plugins provide sandboxed, language-agnostic plugin execution with capability-based
+security. This is the recommended mechanism for untrusted third-party tools.
+
+### Architecture
+
+WASM plugins are compiled to `.wasm` modules and loaded at runtime via Wasmtime (Bytecode
+Alliance) or Extism (which wraps Wasmtime). Each plugin runs in an isolated linear memory
+space with explicit capability grants — no ambient authority.
+
+```
+Host (roko runtime)
+    │
+    ├── Wasmtime Engine (shared across plugins)
+    │   ├── Module Cache (compiled .wasm → native code)
+    │   └── Epoch Interruption (wall-clock timeout)
+    │
+    ├── Plugin Instance A
+    │   ├── Linear Memory (256MB max)
+    │   ├── WASI Capabilities: [read: /data/*, net: api.example.com]
+    │   └── Fuel Metering: 10M instructions
+    │
+    └── Plugin Instance B
+        ├── Linear Memory (256MB max)
+        ├── WASI Capabilities: [none]
+        └── Fuel Metering: 5M instructions
+```
+
+### WIT (WebAssembly Interface Types) Contract
+
+The tool interface is defined using WIT, the Component Model's IDL:
+
+```wit
+// wit/roko-tool.wit
+package roko:tool@0.1.0;
+
+interface types {
+    record tool-input {
+        name: string,
+        arguments: string,  // JSON-encoded
+        context: option<string>,  // Optional context JSON
+    }
+
+    record tool-output {
+        content: string,  // JSON-encoded result
+        is-error: bool,
+        metadata: option<string>,  // Optional metadata JSON
+    }
+
+    record tool-definition {
+        name: string,
+        description: string,
+        input-schema: string,  // JSON Schema
+        version: string,       // semver
+        read-only: bool,
+    }
+}
+
+interface tool {
+    use types.{tool-input, tool-output, tool-definition};
+
+    /// Return the tool definitions this plugin provides.
+    list-tools: func() -> list<tool-definition>;
+
+    /// Execute a tool with the given input.
+    execute: func(input: tool-input) -> tool-output;
+}
+
+world roko-plugin {
+    export tool;
+
+    /// Optional: import host functions for logging and metrics.
+    import roko:host/log;
+    import roko:host/metrics;
+}
+```
+
+### WASM Plugin Loader
+
+```rust
+use wasmtime::{Engine, Module, Store, Linker, Config as WasmConfig};
+use wasmtime_wasi::preview2::WasiCtxBuilder;
+
+/// WASM plugin loader with capability-based security.
+pub struct WasmPluginLoader {
+    engine: Engine,
+    /// Compiled module cache (avoid recompilation).
+    module_cache: HashMap<PathBuf, Module>,
+}
+
+impl WasmPluginLoader {
+    pub fn new() -> Result<Self> {
+        let mut config = WasmConfig::new();
+        config.consume_fuel(true);          // Enable fuel metering
+        config.epoch_interruption(true);    // Enable timeout
+        config.wasm_component_model(true);  // Enable Component Model
+        config.cache_config_load_default()?; // Enable module cache
+
+        Ok(Self {
+            engine: Engine::new(&config)?,
+            module_cache: HashMap::new(),
+        })
+    }
+
+    /// Load a WASM plugin with specific capability grants.
+    pub async fn load(
+        &mut self,
+        wasm_path: &Path,
+        permissions: &WasmPermissions,
+    ) -> Result<WasmPlugin> {
+        // Compile or retrieve from cache
+        let module = match self.module_cache.get(wasm_path) {
+            Some(m) => m.clone(),
+            None => {
+                let bytes = tokio::fs::read(wasm_path).await?;
+                let module = Module::new(&self.engine, &bytes)?;
+                self.module_cache.insert(wasm_path.to_path_buf(), module.clone());
+                module
+            }
+        };
+
+        // Build WASI context with capability grants
+        let mut wasi_builder = WasiCtxBuilder::new();
+
+        // Filesystem access: only explicitly granted paths
+        for path in &permissions.read_paths {
+            wasi_builder.preopened_dir(
+                path, path.to_str().unwrap(),
+                wasmtime_wasi::DirPerms::READ,
+                wasmtime_wasi::FilePerms::READ,
+            )?;
+        }
+        for path in &permissions.write_paths {
+            wasi_builder.preopened_dir(
+                path, path.to_str().unwrap(),
+                wasmtime_wasi::DirPerms::all(),
+                wasmtime_wasi::FilePerms::all(),
+            )?;
+        }
+
+        // Network access: only explicitly granted hosts
+        if !permissions.allowed_hosts.is_empty() {
+            wasi_builder.allow_ip_name_lookup(true);
+            // Host allowlist enforced at the WASI layer
+        }
+
+        let wasi = wasi_builder.build();
+        let mut store = Store::new(&self.engine, wasi);
+
+        // Set resource limits
+        store.set_fuel(permissions.fuel_limit)?;
+        store.epoch_deadline_trap();
+
+        // Start epoch timer for wall-clock timeout
+        let engine = self.engine.clone();
+        let timeout = permissions.timeout;
+        tokio::spawn(async move {
+            tokio::time::sleep(timeout).await;
+            engine.increment_epoch();
+        });
+
+        // Instantiate
+        let mut linker = Linker::new(&self.engine);
+        wasmtime_wasi::preview2::command::add_to_linker(&mut linker)?;
+        let instance = linker.instantiate(&mut store, &module)?;
+
+        Ok(WasmPlugin { store, instance, module })
+    }
+}
+
+/// Capability grants for a WASM plugin.
+pub struct WasmPermissions {
+    /// Filesystem paths this plugin can read.
+    pub read_paths: Vec<PathBuf>,
+    /// Filesystem paths this plugin can write.
+    pub write_paths: Vec<PathBuf>,
+    /// HTTP hosts this plugin can contact.
+    pub allowed_hosts: Vec<String>,
+    /// Maximum WASM instructions (fuel).
+    pub fuel_limit: u64,       // default: 10_000_000 (~100ms)
+    /// Wall-clock timeout.
+    pub timeout: Duration,     // default: 5s
+    /// Maximum linear memory.
+    pub max_memory: usize,     // default: 256MB
+}
+
+impl Default for WasmPermissions {
+    fn default() -> Self {
+        Self {
+            read_paths: vec![],
+            write_paths: vec![],
+            allowed_hosts: vec![],
+            fuel_limit: 10_000_000,
+            timeout: Duration::from_secs(5),
+            max_memory: 256 * 1024 * 1024,
+        }
+    }
+}
+```
+
+### Extism Integration (Simplified Path)
+
+For simpler plugin development, the Extism framework wraps Wasmtime with a higher-level API:
+
+```rust
+use extism::{Plugin, Manifest, Wasm};
+
+/// Load a WASM tool plugin via Extism.
+pub fn load_extism_plugin(
+    wasm_path: &Path,
+    permissions: &WasmPermissions,
+) -> Result<Plugin> {
+    let manifest = Manifest::new([Wasm::file(wasm_path)])
+        .with_timeout(permissions.timeout);
+
+    // Add allowed hosts for HTTP access
+    let manifest = permissions.allowed_hosts.iter()
+        .fold(manifest, |m, host| m.with_allowed_host(host));
+
+    let plugin = Plugin::new(&manifest, [], true)?; // WASI enabled
+    Ok(plugin)
+}
+
+/// Call a tool in an Extism plugin.
+pub async fn call_extism_tool(
+    plugin: &mut Plugin,
+    input: &ToolInput,
+) -> Result<ToolOutput> {
+    let input_json = serde_json::to_string(input)?;
+    let output_json: String = plugin.call("execute", &input_json)?;
+    let output: ToolOutput = serde_json::from_str(&output_json)?;
+    Ok(output)
+}
+```
+
+### Writing a WASM Plugin (Rust PDK)
+
+```rust
+// my-tool-plugin/src/lib.rs
+use extism_pdk::*;
+use serde::{Deserialize, Serialize};
+
+#[derive(Deserialize)]
+struct Input {
+    name: String,
+    arguments: String,
+}
+
+#[derive(Serialize)]
+struct Output {
+    content: String,
+    is_error: bool,
+}
+
+#[plugin_fn]
+pub fn execute(input: String) -> FnResult<String> {
+    let input: Input = serde_json::from_str(&input)?;
+    let args: serde_json::Value = serde_json::from_str(&input.arguments)?;
+
+    let result = match input.name.as_str() {
+        "my_custom_tool" => {
+            let query = args["query"].as_str().unwrap_or("");
+            let processed = process_query(query);
+            Output { content: serde_json::to_string(&processed)?, is_error: false }
+        }
+        _ => Output {
+            content: format!("Unknown tool: {}", input.name),
+            is_error: true,
+        }
+    };
+
+    Ok(serde_json::to_string(&result)?)
+}
+```
+
+Build and deploy:
+```bash
+cargo build --target wasm32-wasip1 --release
+cp target/wasm32-wasip1/release/my_tool_plugin.wasm plugins/
+```
+
+### WASM Plugin Configuration
+
+```toml
+# roko.toml
+[[plugins.wasm]]
+name = "custom-analytics"
+path = "plugins/analytics.wasm"
+version = "1.2.0"
+
+[plugins.wasm.permissions]
+read_paths = ["/data/analytics"]
+write_paths = []
+allowed_hosts = ["api.analytics.com"]
+fuel_limit = 50_000_000        # ~500ms of computation
+timeout_secs = 10
+max_memory_mb = 128
+```
+
+### Security Properties
+
+| Property | Guarantee |
+|---|---|
+| Memory isolation | WASM linear memory — plugin cannot read host memory |
+| No ambient authority | Only explicitly granted capabilities (WASI) |
+| Computation limits | Fuel metering prevents infinite loops |
+| Time limits | Epoch interruption enforces wall-clock timeout |
+| Filesystem isolation | Only pre-opened directories accessible |
+| Network isolation | Only allowlisted hosts reachable |
+| No raw syscalls | WASI abstraction prevents direct kernel access |
+
+---
+
+## Test Criteria
 
 - `CronEventSource` emits events at the correct schedule interval
 - `FsWatcherEventSource` debounces rapid file changes into a single event
@@ -860,3 +1176,28 @@ healthy_reset_secs = 300        # Sustained healthy time to reset restart counte
 - `PluginHealthMonitor::check()` triggers `CircuitBreak` when error rate exceeds threshold
 - Auto-restart backoff doubles on each attempt and gives up at `max_restarts`
 - Restart counter resets after `healthy_reset_secs` of healthy operation
+- WASM plugin with no filesystem permissions cannot read any files
+- WASM plugin with no network permissions cannot make HTTP requests
+- WASM plugin exceeding fuel limit is terminated with `FuelExhausted` error
+- WASM plugin exceeding wall-clock timeout is terminated with `EpochInterruption`
+- WASM plugin returning write requests are validated through safety hook chain
+- WIT interface correctly serializes/deserializes tool-input and tool-output
+
+---
+
+## References
+
+- **Extism** — Cross-language WASM plugin framework.
+  [docs](https://extism.org/docs/concepts/plug-in-system/)
+- **Wasmtime** (Bytecode Alliance) — Production WASM runtime for Rust.
+  [docs](https://docs.wasmtime.dev/)
+- **WASI Preview 2 Component Model** — Capability-based system interface.
+  [spec](https://component-model.bytecodealliance.org/)
+- **WIT (WebAssembly Interface Types)** — IDL for component interfaces.
+  [docs](https://component-model.bytecodealliance.org/design/wit.html)
+- **Sy Brand, "Building Native Plugin Systems with WebAssembly Components"** (2024) —
+  Practical guide to WASM plugins in Rust.
+  [blog](https://tartanllama.xyz/posts/wasm-plugins/)
+- **Capsicum: Practical Capabilities for UNIX** (Watson et al., 2010) — Capability-based
+  security model that inspired WASI.
+  [paper](https://papers.freebsd.org/2010/rwatson-capsicum.files/rwatson-capsicum-paper.pdf)

@@ -641,7 +641,7 @@ mod tests {
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [10-spectre-creature-visualization.md](./10-spectre-creature-visualization.md) for individual Spectre specification
 - See [11-spectre-rendering-per-interface.md](./11-spectre-rendering-per-interface.md) for per-renderer implementation

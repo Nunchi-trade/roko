@@ -508,7 +508,7 @@ See [17-accessibility-and-current-status.md](./17-accessibility-and-current-stat
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [05-http-api-roko-serve.md](./05-http-api-roko-serve.md) for the REST API consumed by the Portal
 - See [06-websocket-streaming.md](./06-websocket-streaming.md) for the WebSocket endpoints

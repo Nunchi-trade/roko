@@ -604,7 +604,7 @@ scope model (`05-pheromone-scope.md`), and transport layer (`06-agent-mesh-sync.
 
 ---
 
-## Related Sub-Docs
+## Cross-References
 
 - `01-stigmergy-beyond-termites.md` — Stigmergy in non-biological systems
 - `02-git-as-stigmergy.md` — Version control as a stigmergic environment

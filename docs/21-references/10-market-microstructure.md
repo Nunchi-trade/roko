@@ -6,6 +6,8 @@
 **Prerequisites**: [Architecture](../00-architecture/INDEX.md)
 **Key sources**: `bardo-backup/prd/shared/citations.md` §§1-2, §§14-20
 
+> **Implementation**: Reference
+
 ---
 
 ## Abstract
@@ -62,7 +64,7 @@ Roko is domain-agnostic, but its first domain plugin is DeFi. This section colle
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [21-mechanism-design.md](./21-mechanism-design.md) for Vickrey auctions and VCG mechanism
 - See [22-protocol-standards.md](./22-protocol-standards.md) for ERC standards

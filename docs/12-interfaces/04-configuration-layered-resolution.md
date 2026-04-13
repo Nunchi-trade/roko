@@ -238,7 +238,7 @@ The layered configuration system is **fully implemented** in `roko-cli/src/confi
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [00-cli-overview.md](./00-cli-overview.md) for CLI modes
 - See [03-progressive-help-and-explain.md](./03-progressive-help-and-explain.md) for `roko config wizard`

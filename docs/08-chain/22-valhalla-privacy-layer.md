@@ -178,7 +178,7 @@ Higher privacy tiers always cost more (computation for ZK proofs, TEE operation 
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [04-korai-passport-erc-721-soulbound.md](./04-korai-passport-erc-721-soulbound.md) for TEE attestation in the passport
 - See [05-ventriloquist-defense.md](./05-ventriloquist-defense.md) for TEE + prompt hash verification

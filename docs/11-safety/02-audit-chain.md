@@ -329,7 +329,7 @@ The linear hash-chain described above is extended by the Witness DAG (see [12-wi
 
 ---
 
-## Related Topics
+## Cross-References
 
 - [00-defense-in-depth.md](00-defense-in-depth.md) — Overall safety architecture
 - [12-witness-dag.md](12-witness-dag.md) — Extended DAG with ZK proofs

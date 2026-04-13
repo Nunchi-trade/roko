@@ -278,7 +278,7 @@ The combination makes sybil attacks expensive (economic), detectable (applicatio
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [07-4-tier-gossip-architecture.md](./07-4-tier-gossip-architecture.md) for the gossip infrastructure where peer scoring operates
 - See [08-eight-gossip-topics.md](./08-eight-gossip-topics.md) for per-topic scoring parameters

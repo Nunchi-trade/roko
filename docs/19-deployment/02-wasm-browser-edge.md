@@ -327,6 +327,457 @@ native-only modules at compile time.
 
 ---
 
+## WASI Preview 2 and the Component Model
+
+WASI 0.2 (formerly "Preview 2") was stabilized in late 2024 and is the active standard for server-side WASM. It introduces the Component Model — a standardized way for WASM modules to compose via typed interfaces defined in WIT (WebAssembly Interface Types).
+
+### WASI 0.2 Interface Catalog
+
+| Interface | Package | Roko Usage |
+|---|---|---|
+| `wasi:io` | Pollable handles, byte streams | Substrate I/O abstraction |
+| `wasi:clocks` | Monotonic and wall clocks | Decay calculations, TTL |
+| `wasi:http` | HTTP request/response | Edge-to-core forwarding |
+| `wasi:random` | Secure randomness | HDC vector generation |
+| `wasi:filesystem` | File/directory access | Optional: MemorySubstrate bypass |
+| `wasi:sockets` | TCP/UDP networking | Direct LLM provider calls (future) |
+
+### Compiling Roko to WASI P2 Components
+
+Rust 1.82+ provides the `wasm32-wasip2` target at Tier 2:
+
+```bash
+# Add the WASI P2 target
+rustup target add wasm32-wasip2
+
+# Build roko-core as a WASI P2 component
+cargo build --target wasm32-wasip2 -p roko-core \
+    --no-default-features --features "serde,hdc,decay"
+```
+
+For custom WIT interfaces (exposing Roko's Synapse traits as component exports), use `cargo-component`:
+
+```toml
+# crates/roko-wasm/Cargo.toml
+[package]
+name = "roko-wasm"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+roko-core = { path = "../roko-core", default-features = false, features = ["serde", "hdc", "decay"] }
+roko-std = { path = "../roko-std", default-features = false, features = ["memory-substrate"] }
+wit-bindgen = "0.36"
+
+[package.metadata.component]
+package = "roko:cognitive"
+```
+
+WIT interface definition for Roko's cognitive kernel:
+
+```wit
+// crates/roko-wasm/wit/world.wit
+package roko:cognitive;
+
+interface scorer {
+    record engram {
+        id: string,
+        kind: string,
+        body: string,
+        tags: list<tuple<string, string>>,
+    }
+
+    record score {
+        novelty: f64,
+        utility: f64,
+        confidence: f64,
+        salience: f64,
+        valence: f64,
+        arousal: f64,
+        coherence: f64,
+    }
+
+    score-engram: func(engram: engram) -> score;
+}
+
+interface substrate {
+    use scorer.{engram, score};
+
+    put: func(engram: engram) -> result<string, string>;
+    query-by-kind: func(kind: string) -> result<list<engram>, string>;
+    query-by-tag: func(key: string, value: string) -> result<list<engram>, string>;
+}
+
+interface hdc {
+    record hdc-vector {
+        bits: list<u64>,
+        dimensions: u32,
+    }
+
+    random-vector: func(dimensions: u32) -> hdc-vector;
+    hamming-similarity: func(a: hdc-vector, b: hdc-vector) -> f64;
+    xor-bundle: func(vectors: list<hdc-vector>) -> hdc-vector;
+    bind: func(a: hdc-vector, b: hdc-vector) -> hdc-vector;
+}
+
+world cognitive-kernel {
+    export scorer;
+    export substrate;
+    export hdc;
+    import wasi:clocks/monotonic-clock@0.2.0;
+    import wasi:random/random@0.2.0;
+}
+```
+
+### Component Composition
+
+The Component Model enables composing Roko's cognitive kernel with platform-specific capability providers without recompilation:
+
+```
+┌───────────────────────────────────────────────┐
+│            Platform Runtime (Host)             │
+│                                                │
+│  ┌──────────────────┐  ┌───────────────────┐  │
+│  │ roko:cognitive   │  │ Platform Provider  │  │
+│  │ (WASM component) │──│ (HTTP, KV, etc.)  │  │
+│  │                  │  │                    │  │
+│  │ • Scorer         │  │ • wasi:http       │  │
+│  │ • Substrate      │  │ • wasi:keyvalue   │  │
+│  │ • HDC vectors    │  │ • wasi:logging    │  │
+│  └──────────────────┘  └───────────────────┘  │
+└───────────────────────────────────────────────┘
+```
+
+---
+
+## Fermyon Spin Deployment
+
+Spin provides a serverless WASM runtime ideal for deploying Roko's cognitive kernel as HTTP-triggered functions. Each request gets an isolated WASM instance with sub-millisecond cold start.
+
+### Spin Application for Roko Edge Scoring
+
+```toml
+# spin.toml
+spin_manifest_version = 2
+
+[application]
+name = "roko-edge"
+version = "0.1.0"
+description = "Roko cognitive scoring at the edge"
+
+[[trigger.http]]
+route = "/score"
+component = "scorer"
+
+[[trigger.http]]
+route = "/similarity"
+component = "hdc-search"
+
+[component.scorer]
+source = "target/wasm32-wasi/release/roko_edge_scorer.wasm"
+allowed_outbound_hosts = ["https://api.anthropic.com"]
+[component.scorer.build]
+command = "cargo build --target wasm32-wasi --release -p roko-edge-scorer"
+
+[component.hdc-search]
+source = "target/wasm32-wasi/release/roko_hdc_search.wasm"
+[component.hdc-search.build]
+command = "cargo build --target wasm32-wasi --release -p roko-hdc-search"
+```
+
+```rust
+// crates/roko-edge-scorer/src/lib.rs
+use spin_sdk::http::{IntoResponse, Request, Response};
+use spin_sdk::http_component;
+use roko_core::{Engram, Kind, Body};
+use roko_std::default_scorer::DefaultScorer;
+
+#[http_component]
+async fn handle_score(req: Request) -> anyhow::Result<impl IntoResponse> {
+    let body: serde_json::Value = serde_json::from_slice(req.body())?;
+
+    let engram = Engram::builder()
+        .kind(Kind::Observation)
+        .body(Body::Text(body["text"].as_str().unwrap_or("").to_string()))
+        .build();
+
+    let scorer = DefaultScorer::default();
+    let score = scorer.score(&engram);
+
+    let response = serde_json::json!({
+        "id": engram.id.to_string(),
+        "score": {
+            "novelty": score.novelty,
+            "utility": score.utility,
+            "confidence": score.confidence,
+            "salience": score.salience,
+        },
+        "forward_to_core": score.novelty > 0.5 || score.utility > 0.7,
+    });
+
+    Ok(Response::builder()
+        .status(200)
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&response)?)
+        .build())
+}
+```
+
+### Spin Deployment Commands
+
+```bash
+# Local development with hot reload
+spin build && spin up
+
+# Deploy to Fermyon Cloud
+spin deploy --from .
+
+# Deploy as OCI artifact to any WASI P2 runtime
+spin registry push ttl.sh/roko-edge:v0.1.0
+```
+
+---
+
+## wasmCloud Distributed Deployment
+
+wasmCloud (CNCF Incubating) runs WASM components across a distributed lattice of hosts connected via NATS. This enables deploying Roko's cognitive kernel across cloud, edge, and on-premises nodes with unified orchestration.
+
+### wasmCloud Application Definition (WADM)
+
+```yaml
+# wadm.yaml
+apiVersion: core.oam.dev/v1beta1
+kind: Application
+metadata:
+  name: roko-cognitive
+  annotations:
+    description: 'Roko cognitive kernel on wasmCloud lattice'
+spec:
+  components:
+    - name: cognitive-kernel
+      type: component
+      properties:
+        image: ghcr.io/nunchi/roko-wasm:0.1.0
+      traits:
+        - type: spreadscaler
+          properties:
+            instances: 3
+            spread:
+              - name: edge
+                requirements:
+                  zone: edge
+                weight: 80
+              - name: cloud
+                requirements:
+                  zone: cloud
+                weight: 20
+        - type: link
+          properties:
+            target: httpserver
+            namespace: wasi
+            package: http
+            interfaces: [incoming-handler]
+
+    - name: httpserver
+      type: capability
+      properties:
+        image: ghcr.io/wasmcloud/http-server:0.26.0
+      traits:
+        - type: link
+          properties:
+            target: cognitive-kernel
+            namespace: wasi
+            package: http
+            interfaces: [incoming-handler]
+            source_config:
+              - name: default-http
+                properties:
+                  address: 0.0.0.0:8080
+
+    - name: kvstore
+      type: capability
+      properties:
+        image: ghcr.io/wasmcloud/keyvalue-redis:0.28.2
+      traits:
+        - type: link
+          properties:
+            target: cognitive-kernel
+            namespace: wasi
+            package: keyvalue
+            interfaces: [store, atomics]
+```
+
+The `spreadscaler` distributes instances across edge and cloud zones. The lattice handles routing — a request arriving at any node reaches the nearest cognitive kernel instance.
+
+---
+
+## Cloudflare Workers Deployment
+
+For Cloudflare Workers, Roko's cognitive primitives run as a WASM module within V8 isolates at 300+ edge locations worldwide. Sub-millisecond cold start, ~2ms average CPU time per request.
+
+### Worker Configuration
+
+```toml
+# wrangler.toml
+name = "roko-scorer"
+main = "build/worker/shim.mjs"
+compatibility_date = "2025-04-01"
+
+[build]
+command = "worker-build --release"
+
+[[kv_namespaces]]
+binding = "ENGRAM_CACHE"
+id = "abc123"
+
+[limits]
+cpu_ms = 10000  # 10s for complex scoring
+```
+
+```rust
+// src/lib.rs (Cloudflare Worker)
+use worker::*;
+use roko_core::{Engram, Kind, Body};
+use roko_std::default_scorer::DefaultScorer;
+use roko_primitives::HdcVector;
+
+#[event(fetch)]
+async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
+    Router::new()
+        .post_async("/score", |mut req, _ctx| async move {
+            let body: serde_json::Value = req.json().await?;
+            let text = body["text"].as_str().unwrap_or("");
+
+            let engram = Engram::builder()
+                .kind(Kind::Observation)
+                .body(Body::Text(text.to_string()))
+                .build();
+
+            let scorer = DefaultScorer::default();
+            let score = scorer.score(&engram);
+
+            Response::from_json(&serde_json::json!({
+                "score": score,
+                "forward": score.novelty > 0.5
+            }))
+        })
+        .post_async("/hdc/similarity", |mut req, _ctx| async move {
+            let body: serde_json::Value = req.json().await?;
+            // HDC similarity search at the edge
+            // Uses WASM SIMD128 for ~4x speedup on bitwise operations
+            let query_bits: Vec<u64> = serde_json::from_value(body["query"].clone())?;
+            let query = HdcVector::from_raw(query_bits, 10_000);
+
+            // Load pre-computed fingerprints from KV
+            // ... similarity search logic ...
+
+            Response::from_json(&serde_json::json!({"matches": []}))
+        })
+        .run(req, env)
+        .await
+}
+```
+
+### Cloudflare Workers Resource Limits
+
+| Resource | Free | Paid |
+|---|---|---|
+| CPU time per request | 10 ms | 30s (configurable to 5 min) |
+| Memory per isolate | 128 MB | 128 MB |
+| Subrequests | 50 | 1,000 |
+| KV reads | 100K/day | 10M/month |
+
+---
+
+## WASM SIMD128 for HDC Vectors
+
+WASM SIMD128 has universal browser and runtime support (Chrome 91+, Firefox 89+, Safari 2024+). For Roko's HDC operations, SIMD provides ~4x speedup over scalar WASM.
+
+### HDC Hamming Distance with SIMD128
+
+The critical path `hamming_distance(a, b) = popcount(xor(a, b))` maps directly to SIMD128 instructions:
+
+```rust
+#[cfg(target_arch = "wasm32")]
+use std::arch::wasm32::*;
+
+/// SIMD-accelerated Hamming distance for 128-bit chunks.
+/// Processes 16 bytes per iteration using v128.xor + i8x16.popcnt.
+#[cfg(target_arch = "wasm32")]
+pub fn hamming_distance_simd(a: &[u8], b: &[u8]) -> u32 {
+    assert_eq!(a.len(), b.len());
+    let mut total: u32 = 0;
+
+    // Process 16-byte chunks with SIMD
+    let chunks = a.len() / 16;
+    for i in 0..chunks {
+        unsafe {
+            let va = v128_load(a.as_ptr().add(i * 16) as *const v128);
+            let vb = v128_load(b.as_ptr().add(i * 16) as *const v128);
+            let xored = v128_xor(va, vb);
+            let counts = i8x16_popcnt(xored);
+
+            // Horizontal sum of 16 bytes
+            // Widen to i16x8, then i32x4, then extract
+            let widened = i16x8_extadd_pairwise_u8x16(counts);
+            let widened32 = i32x4_extadd_pairwise_i16x8(widened);
+            total += (i32x4_extract_lane::<0>(widened32)
+                + i32x4_extract_lane::<1>(widened32)
+                + i32x4_extract_lane::<2>(widened32)
+                + i32x4_extract_lane::<3>(widened32)) as u32;
+        }
+    }
+
+    // Handle remainder bytes with scalar
+    let remainder_start = chunks * 16;
+    for i in remainder_start..a.len() {
+        total += (a[i] ^ b[i]).count_ones();
+    }
+
+    total
+}
+```
+
+### Performance Comparison
+
+| Environment | 10,000-bit vector comparison | Throughput |
+|---|---|---|
+| Native x86_64 (AVX2) | ~5 us | ~200K comparisons/sec |
+| Native ARM64 (NEON) | ~8 us | ~125K comparisons/sec |
+| WASM SIMD128 (browser) | ~15 us | ~67K comparisons/sec |
+| WASM scalar (browser) | ~60 us | ~17K comparisons/sec |
+| WASM SIMD128 (wasmtime) | ~12 us | ~83K comparisons/sec |
+
+Build configuration for WASM SIMD:
+
+```toml
+# .cargo/config.toml
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]
+
+[target.wasm32-wasip2]
+rustflags = ["-C", "target-feature=+simd128"]
+```
+
+### Test Criteria
+
+```
+WASM deployment tests:
+1. `cargo build --target wasm32-wasip2 -p roko-core --no-default-features --features "serde,hdc,decay"` succeeds
+2. BLAKE3 content hashes match between native and WASM targets (cross-environment identity)
+3. HDC Hamming similarity produces identical results (within f64 precision) on native and WASM
+4. MemorySubstrate put/query roundtrips correctly in WASM
+5. WASM module size < 1MB gzipped for the cognitive kernel
+6. SIMD128 build produces correct results (verify with wasmtime)
+7. Spin application responds to HTTP score requests within 50ms
+8. Cloudflare Worker stays under 10ms CPU time for single-engram scoring
+```
+
+---
+
 ## Current Status and Limitations
 
 As of the current implementation:

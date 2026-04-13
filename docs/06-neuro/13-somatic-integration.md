@@ -190,7 +190,7 @@ The Walker & van der Helm (2009) SFSR (Sleep to Forget, Sleep to Remember) model
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [01-six-knowledge-types.md](./01-six-knowledge-types.md) for how types interact with emotional retrieval
 - See [07-ebbinghaus-decay-with-tier.md](./07-ebbinghaus-decay-with-tier.md) for knowledge decay (distinct from emotional decay)

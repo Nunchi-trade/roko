@@ -6,6 +6,8 @@
 **Prerequisites**: [Architecture](../00-architecture/INDEX.md), [Learning](../05-learning/INDEX.md)
 **Key sources**: `bardo-backup/prd/02-mortality/14-research-foundations.md` §7, `bardo-backup/tmp/mori-agents/12-references.md`
 
+> **Implementation**: Reference
+
 ---
 
 ## Abstract
@@ -107,7 +109,17 @@ An agent that does not improve is an expensive cron job. The research here estab
 
 ---
 
-## Cross-references
+## Multi-Level Reflection (2025)
+
+- SAMULE (2025). Self-Learning Agents Enhanced by Multi-level Reflection. _EMNLP_, 2025. arXiv:2509.20562.
+  *Grounds: Multi-level reflection — integrates self-reflection into post-training; reflection across trajectories substantially outperforms single-trajectory reflection (Reflexion). Error classification and clustering extract insight from failures. Validates Roko's Theta-frequency reflection operating across episodes, not just within single task runs.*
+
+- MAR (2025). Multi-Agent Reflexion Improves Reasoning Abilities in LLMs. arXiv:2512.20845.
+  *Grounds: Multi-agent reflection — extends Reflexion from single-agent to multi-agent settings, addressing systematic shortcomings of single-agent self-correction. Validates the separation of reflection across multiple agents in Roko Collectives rather than relying on individual agent self-correction.*
+
+---
+
+## Cross-References
 
 - See [07-context-engineering.md](./07-context-engineering.md) for ACE, CSO, ACON context self-improvement
 - See [14-agent-harnesses-and-tool-use.md](./14-agent-harnesses-and-tool-use.md) for SWE-agent, Aider, and harness engineering

@@ -4,6 +4,8 @@
 > Status: **Specification** -- recovery patterns for every subsystem
 > Canonical source: various crates (see per-subsystem references)
 
+> **Implementation**: Specified
+
 ---
 
 ## Purpose
@@ -372,7 +374,7 @@ roko plan run plans/ --resume .roko/state/executor.json
 
 ---
 
-## Cross-references
+## Cross-References
 
 - [../07-conductor/](../07-conductor/INDEX.md) -- Circuit breaker and health monitoring
 - [../05-learning/09-provider-health-circuit-breaker.md](../05-learning/09-provider-health-circuit-breaker.md) -- Provider health registry

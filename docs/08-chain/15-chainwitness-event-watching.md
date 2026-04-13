@@ -245,7 +245,7 @@ Filter hit rate (`hits / (hits + misses)`) is the primary tuning metric. If it e
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [16-triage-curiosity-midas.md](./16-triage-curiosity-midas.md) for the downstream consumer of witness output
 - See [17-chain-client-wallet-traits.md](./17-chain-client-wallet-traits.md) for the `ChainClient` trait that provides RPC methods

@@ -243,7 +243,7 @@ Only Tier 0 (Protocol) and Tier 1 (Sovereign) agents are eligible for direct hir
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [10-spore-job-market.md](./10-spore-job-market.md) for the marketplace framework containing these models
 - See [11-sparrow-power-of-two-choices.md](./11-sparrow-power-of-two-choices.md) for the RandomVRF dispatch protocol

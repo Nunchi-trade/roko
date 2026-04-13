@@ -5,6 +5,8 @@
 > Canonical source: `crates/roko-core/src/config/schema.rs`, `roko.toml`
 > Cross-references: [15-crate-map.md](15-crate-map.md)
 
+> **Implementation**: Shipping
+
 ---
 
 ## Purpose
@@ -402,7 +404,7 @@ adaptive_thresholds = true
 
 ---
 
-## Cross-references
+## Cross-References
 
 - [15-crate-map.md](15-crate-map.md) -- Crate layout including roko-core
 - `crates/roko-core/src/config/schema.rs` -- All config structs and defaults

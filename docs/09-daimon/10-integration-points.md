@@ -259,7 +259,7 @@ The 0.15 threshold prevents event flooding. A shift from Relaxed to Anxious (PAD
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [04-six-behavioral-states.md](./04-six-behavioral-states.md) for behavioral state definitions
 - See [05-behavioral-state-to-tier-routing.md](./05-behavioral-state-to-tier-routing.md) for tier routing details

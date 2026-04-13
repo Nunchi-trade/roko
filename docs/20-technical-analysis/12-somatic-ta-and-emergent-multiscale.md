@@ -802,7 +802,7 @@ DELTA TICK (every few hours):
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [06-hyperdimensional-ta.md](./06-hyperdimensional-ta.md) for HDC encoding of somatic markers
 - See [08-adaptive-signal-metabolism.md](./08-adaptive-signal-metabolism.md) for the signal ecosystem that somatic markers modulate

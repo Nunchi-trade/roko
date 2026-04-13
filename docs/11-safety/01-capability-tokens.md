@@ -296,7 +296,7 @@ See `implementation-plans/03-safety-hooks.md`:
 
 ---
 
-## Related Topics
+## Cross-References
 
 - [00-defense-in-depth.md](00-defense-in-depth.md) — Overall safety architecture
 - [04-permits-allowlists.md](04-permits-allowlists.md) — Tool permission system details

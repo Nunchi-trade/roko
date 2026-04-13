@@ -6,6 +6,8 @@
 **Prerequisites**: [Architecture](../00-architecture/INDEX.md), [Harness](../04-verification/INDEX.md)
 **Key sources**: `bardo-backup/prd/shared/citations.md` §§8, 12, `refactoring-prd/09-innovations.md` §IX
 
+> **Implementation**: Reference
+
 ---
 
 ## Abstract
@@ -68,7 +70,7 @@ Autonomous agents operating in regulated domains (financial services, healthcare
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [08-security-and-provenance.md](./08-security-and-provenance.md) for security architecture
 - See [22-protocol-standards.md](./22-protocol-standards.md) for ERC standards

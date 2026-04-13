@@ -98,6 +98,75 @@ Three types of alpha (edge) emerge from the divergence architecture:
 
 ---
 
+## Quantifying Divergence: Information-Theoretic Metrics
+
+### Collective Intelligence and Optimal Diversity
+
+Woolley et al. (2010), Science 330(6004) demonstrated that collective intelligence correlates more strongly with group diversity than with individual member capability. This section extends the qualitative divergence metrics above with formal information-theoretic quantification, enabling the system to measure and regulate divergence precisely.
+
+Jensen-Shannon divergence (JSD) provides the foundation: it is symmetric, bounded, and well-suited for comparing probability distributions over knowledge entries. Combined with HDC similarity metrics already available in `roko-primitives`, these metrics give the fleet a continuous readout of its divergence health.
+
+```rust
+/// Divergence quantification across a fleet of agents.
+pub struct DivergenceMetrics {
+    /// Jensen-Shannon divergence between agent knowledge distributions.
+    /// JSD is symmetric and bounded [0, 1] (for log base 2).
+    pub knowledge_jsd: f64,
+    /// Normalized knowledge overlap (mean pairwise HDC similarity of top-K entries).
+    pub knowledge_overlap: f64,
+    /// Strategy entropy across PLAYBOOK.md heuristics.
+    pub strategy_entropy: f64,
+    /// Insight novelty: mean HDC distance of dream insights from collective centroid.
+    pub insight_novelty: f64,
+    /// Complementarity: fraction of each agent's knowledge that is unique to it.
+    pub mean_uniqueness_fraction: f64,
+}
+
+/// Optimal divergence targets based on collective intelligence research.
+pub struct DivergenceTargets {
+    /// Target JSD range. Too low = monoculture; too high = no shared context.
+    pub target_jsd_range: (f64, f64),     // default: (0.20, 0.60)
+    /// Target knowledge overlap range.
+    pub target_overlap_range: (f64, f64), // default: (0.35, 0.65)
+    /// Minimum strategy entropy across agents.
+    pub min_strategy_entropy: f64,        // default: 2.0 bits
+    /// Minimum insight novelty.
+    pub min_insight_novelty: f64,         // default: 0.25
+}
+```
+
+---
+
+## Divergence Feedback Loops
+
+Divergence metrics feed back into the hypnagogia engine (see [07-hypnagogia-engine.md](07-hypnagogia-engine.md)) to maintain divergence within the optimal range. The feedback operates automatically each dream cycle:
+
+```
+Divergence too low (JSD < target_jsd_range.0):
+  → Increase Executive Loosener temperature by 0.2
+  → Increase anti-correlation radius in Thalamic Gate
+  → Allocate more REM budget to transformational creativity mode
+
+Divergence too high (JSD > target_jsd_range.1):
+  → Decrease Executive Loosener temperature by 0.1
+  → Increase mesh knowledge sharing frequency
+  → Allocate more REM budget to combinational creativity mode
+```
+
+This creates a homeostatic system: divergence self-corrects toward the target range. When the fleet becomes too homogeneous, creativity parameters are loosened to drive exploration. When agents drift too far apart, sharing is increased and creativity is constrained to combinational mode (which builds on existing shared knowledge rather than generating entirely novel fragments).
+
+### Test Criteria
+
+```
+1. JSD symmetry: JSD(A, B) == JSD(B, A) for any two agent knowledge distributions.
+2. JSD bounds: JSD is always in [0.0, 1.0] (using log base 2).
+3. Strategy entropy: for N agents each with unique heuristics, entropy ≈ log2(N).
+4. Feedback response: when JSD < target range, hypnagogia temperature increases on next cycle.
+5. Uniqueness fraction: for agents with zero shared knowledge, mean_uniqueness_fraction = 1.0.
+```
+
+---
+
 ## Cross-References
 
 | Document | Relevance |

@@ -210,7 +210,7 @@ Steps 1-2 and 3-4 are paired, but all four steps are independently executable. A
 
 ---
 
-## Related Topics
+## Cross-References
 
 - `docs/17-lifecycle/01-agent-creation.md` — Full creation flow specification
 - `docs/17-lifecycle/08-selective-restore.md` — How to restore knowledge into the new agent

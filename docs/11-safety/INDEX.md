@@ -1,8 +1,6 @@
 # Safety & Provenance
 
-Roko's safety architecture is a defense-in-depth system that combines structural enforcement (compile-time capabilities, content-addressed audit chains), behavioral enforcement (runtime guards, rate limiters, sandboxing), and cognitive enforcement (temporal logic monitoring, adaptive risk, human intervention signals). Safety is not a bolt-on layer — it is woven into every step of the Universal Cognitive Loop through the Synapse traits. Every Engram carries provenance, every tool call passes through a gated pipeline, every knowledge entry traces back to its evidential basis.
-
-This topic covers the full safety stack: from low-level guards (bash command filtering, path sandboxing, secret scrubbing) through mid-level verification (Gate pipeline, threat modeling, adaptive risk) to high-level safety capabilities (temporal logic verification, witness DAGs, forensic AI, formal verification). It also documents the critical integration gap — the #1 priority for making the safety architecture effective in production.
+> **Abstract:** Roko's safety architecture is a defense-in-depth system that combines structural enforcement (compile-time capabilities, content-addressed audit chains), behavioral enforcement (runtime guards, rate limiters, sandboxing), and cognitive enforcement (temporal logic monitoring, adaptive risk, human intervention signals). Safety is not a bolt-on layer — it is woven into every step of the Universal Cognitive Loop through the Synapse traits. Every Engram carries provenance, every tool call passes through a gated pipeline, every knowledge entry traces back to its evidential basis. This topic covers the full safety stack: from low-level guards (bash command filtering, path sandboxing, secret scrubbing) through mid-level verification (Gate pipeline, threat modeling, adaptive risk) to high-level safety capabilities (temporal logic verification, witness DAGs, forensic AI, formal verification). It also documents the critical integration gap — the #1 priority for making the safety architecture effective in production.
 
 ---
 
@@ -81,7 +79,7 @@ Before reading this topic, readers should be familiar with:
 
 ---
 
-## Related Topics
+## Cross-References
 
 - `docs/01-architecture/` — Synapse Architecture, Engram struct, Five Layers
 - `docs/03-cognitive/` — Neuro (knowledge), Daimon (affect modulation of risk), Dreams (offline consolidation)

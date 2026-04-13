@@ -475,7 +475,7 @@ the Weismann barrier principle in a digital context.
 
 ---
 
-## Related Sub-Docs
+## Cross-References
 
 - `03-digital-pheromones.md` — Pheromone struct, decay, confirmation
 - `04-pheromone-kinds.md` — Pheromone type taxonomy

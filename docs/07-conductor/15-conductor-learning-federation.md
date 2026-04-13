@@ -559,7 +559,7 @@ levels computationally.
 
 ---
 
-## Cross-references
+## Cross-References
 
 - [02-circuit-breaker.md](02-circuit-breaker.md) -- Circuit breaker, half-open state
 - [07-ooda-cybernetic-loop.md](07-ooda-cybernetic-loop.md) -- OODA loop, nested loops, IG&C

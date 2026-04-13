@@ -338,7 +338,7 @@ Mattar and Daw (2018) showed that the hippocampus preferentially replays memorie
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [01-six-knowledge-types.md](./01-six-knowledge-types.md) for detailed coverage of all knowledge types
 - See [02-four-validation-tiers.md](./02-four-validation-tiers.md) for the tier progression system

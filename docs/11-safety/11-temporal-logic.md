@@ -1150,7 +1150,7 @@ slow_escalation_max_growth_rate = 0.1
 
 ---
 
-## Related Topics
+## Cross-References
 
 - [09-adaptive-risk.md](09-adaptive-risk.md) — Layer 4 observation feeds temporal monitors
 - [12-witness-dag.md](12-witness-dag.md) — Temporal traces stored in content-addressed DAG

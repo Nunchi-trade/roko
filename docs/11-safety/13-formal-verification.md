@@ -1302,7 +1302,7 @@ monitor_check_interval = 1
 
 ---
 
-## Related Topics
+## Cross-References
 
 - [08-threat-model.md](08-threat-model.md) — Threats that formal verification mitigates
 - [10-mev-protection.md](10-mev-protection.md) — MEV detection (runtime) complements formal verification (pre-deployment)

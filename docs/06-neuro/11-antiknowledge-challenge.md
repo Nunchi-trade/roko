@@ -921,7 +921,7 @@ The knowledge immune system draws from three epistemological traditions:
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [01-six-knowledge-types.md](./01-six-knowledge-types.md) for all six knowledge types
 - See [07-ebbinghaus-decay-with-tier.md](./07-ebbinghaus-decay-with-tier.md) for decay mechanics

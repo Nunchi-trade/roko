@@ -626,7 +626,7 @@ mod tests {
 
 ---
 
-## Related Topics
+## Cross-References
 
 - `docs/17-lifecycle/02-provisioning.md` — Compute provisioning pipeline
 - `docs/17-lifecycle/03-configuration-and-operator-model.md` — Config override layers, operator controls

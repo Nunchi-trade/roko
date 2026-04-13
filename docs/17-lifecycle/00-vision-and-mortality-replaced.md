@@ -205,7 +205,7 @@ The research is better served by the new framing. Software agents are not organi
 
 ---
 
-## Related Topics
+## Cross-References
 
 - `docs/03-neuro/` — Neuro (knowledge store), Engram decay, tier management
 - `docs/04-daimon/` — Daimon PAD computation, behavioral states

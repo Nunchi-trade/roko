@@ -15,7 +15,7 @@
 
 ## The Sleep-Time Compute Thesis
 
-Lin et al. (2025, arXiv:2504.11651, "Scaling LLM Test-Time Compute Optimally with Sleep-Time Compute") demonstrated that dedicating computation to offline processing during idle periods yields a **5× reduction in test-time compute requirements**. The key insight: agents can perform significant cognitive work (knowledge organization, strategy refinement, counterfactual exploration) during idle periods, making their waking performance dramatically more efficient.
+Lin et al. (2025, arXiv:2504.13171, "Sleep-time Compute: Beyond Inference Scaling at Test-time") demonstrated that dedicating computation to offline processing during idle periods yields a **5× reduction in test-time compute requirements**. The key insight: agents can perform significant cognitive work (knowledge organization, strategy refinement, counterfactual exploration) during idle periods, making their waking performance dramatically more efficient.
 
 WSCL (2024, "Wake-Sleep Continual Learning") showed a complementary result: interleaving wake and sleep processing phases produces a **38% reduction in catastrophic forgetting** compared to continuous waking-only learning. Sleep consolidation prevents new knowledge from overwriting old knowledge — the CLS architecture in action.
 
@@ -139,14 +139,116 @@ hypnagogia_provider = "api"    # Use API for hypnagogia
 
 ---
 
+## Sleep-Time Compute: Detailed Mechanism (Lin et al. 2025)
+
+**Reference**: Lin, Packer, Wooders et al. (2025), "Sleep-time Compute: Beyond Inference Scaling at Test-time," arXiv:2504.13171 (Letta / UC Berkeley Sky Computing Lab).
+
+### Core Mechanism
+
+The model processes persistent context (codebases, documents, conversation history) offline before queries arrive. Given a persistent context c, the model runs a sleep-time computation phase S(c) → c', transforming c into an enhanced representation c'. At test time, the query is answered from c' rather than c, decoupling thinking cost from latency.
+
+Implementation uses function calling: the model has access to `rethink_memory(new_string)` (replaces current context with new_string) and `finish_rethinking()` (terminates sleep-time process). The model calls `rethink_memory` up to 10 times, progressively rewriting and condensing context into dense summaries optimized for anticipated queries.
+
+Results: reduces test-time compute by ~5× on Stateful GSM-Symbolic and AIME with equal accuracy; further scaling sleep-time compute boosts accuracy by up to 13% on GSM-Symbolic and 18% on AIME. On multi-query workloads: **2.5× reduction in average cost-per-query** when amortizing across 10 queries per context.
+
+### Query Predictability Metric
+
+The key predictor of sleep-time compute efficacy is **query predictability**, operationalized as log P(q | c) — the log-probability of query q given context c under a base model. Examples are binned into 5 quantiles by this score. Higher log P(q | c) → larger accuracy gain from sleep-time compute. Intuitively: if the context already makes the question predictable, pre-computing answers to likely questions is high-yield.
+
+Budget allocation by model type:
+- Non-reasoning models (GPT-4o): verbosity prompts (levels 0–4) controlling explanation depth
+- Reasoning models (o1, o3-mini): API-level compute control parameters
+- Amortization cost model: test-time tokens weighted **10×** the cost of sleep-time tokens
+
+Datasets validated: Stateful GSM-Symbolic (5,000 + 2,500 examples), Stateful AIME (60 problems), Multi-Query GSM-Symbolic (12,043 questions across 1,095 contexts), SWE-Features (33 pull requests).
+
+### Key Insight for Roko
+
+Sleep-time compute is most effective for long-lived contexts with predictable, repeated queries. Agent episodes are exactly this kind of context — recurring task patterns, repeated failure modes, consistent tool chains. The dream cycle's NREM replay should produce dense pre-computed summaries that accelerate waking inference. The 10× cost weighting for test-time vs. sleep-time tokens makes dream-time processing extremely cost-efficient.
+
+### Configuration
+
+```rust
+/// Sleep-time compute pre-computation configuration.
+/// Based on Lin et al. (2025), arXiv:2504.13171.
+pub struct SleepTimePrecompute {
+    /// Whether to generate pre-computed summaries during NREM.
+    pub enable_precompute: bool,           // default: true
+    /// Maximum summary token count per pre-computed context chunk.
+    pub max_summary_tokens: usize,         // default: 512, range: 128-2048
+    /// Query predictability threshold: only pre-compute for queries
+    /// with predictability score above this.
+    pub predictability_threshold: f64,     // default: 0.6, range: 0.3-0.9
+    /// Maximum pre-computed summaries to cache.
+    pub max_cached_summaries: usize,       // default: 100, range: 20-500
+    /// TTL for cached summaries (hours).
+    pub cache_ttl_hours: u64,             // default: 24, range: 4-168
+    /// Whether to measure and log test-time compute savings.
+    pub measure_savings: bool,            // default: true
+}
+
+/// Pre-computed summary for a recurring query pattern.
+pub struct PrecomputedSummary {
+    pub id: String,
+    pub query_pattern: String,
+    pub summary_content: String,
+    pub token_count: usize,
+    pub predictability_score: f64,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub times_used: usize,
+    pub estimated_tokens_saved: usize,
+}
+```
+
+### Pre-Computation Algorithm
+
+```
+SLEEP-TIME-PRECOMPUTE(episodes, existing_summaries, config):
+  // Phase 1: Identify predictable query patterns
+  patterns = extract_recurring_patterns(episodes)
+  predictable = [p for p in patterns if p.predictability > config.predictability_threshold]
+
+  // Phase 2: Generate dense summaries for predictable patterns
+  FOR pattern in predictable:
+    IF pattern.id NOT IN existing_summaries OR summary_expired(pattern.id):
+      context = gather_relevant_episodes(pattern, episodes)
+      summary = llm_summarize(context, max_tokens=config.max_summary_tokens)
+      cache_summary(PrecomputedSummary {
+        id: pattern.id,
+        query_pattern: pattern.description,
+        summary_content: summary,
+        predictability_score: pattern.predictability,
+        expires_at: now + config.cache_ttl_hours,
+      })
+
+  // Phase 3: Evict stale summaries
+  evict_expired(existing_summaries)
+  IF existing_summaries.len() > config.max_cached_summaries:
+    evict_least_used(existing_summaries)
+```
+
+### Test Criteria
+
+```
+1. Predictability filtering: patterns below predictability_threshold do not get summaries.
+2. Summary token limit: no generated summary exceeds max_summary_tokens.
+3. Cache eviction: expired summaries are removed; least-used evicted when count exceeds max.
+4. Token savings measurement: times_used * original_context_tokens - times_used * summary_tokens > 0.
+5. TTL enforcement: summaries older than cache_ttl_hours are not served.
+```
+
+---
+
 ## Academic Citations
 
 | Paper | How It Informs Sleep-Time Compute |
 |-------|----------------------------------|
-| Lin et al. (2025), arXiv:2504.11651 | 5× reduction in test-time compute via sleep-time processing |
+| Lin et al. (2025), arXiv:2504.13171 | 5× reduction in test-time compute via sleep-time processing |
 | WSCL (2024), "Wake-Sleep Continual Learning" | 38% reduction in catastrophic forgetting |
 | Sumers et al. (2023), arXiv:2309.02427, CoALA | Cognitive architecture with three operating frequencies |
 | Tononi & Cirelli (2006), "Synaptic homeostasis hypothesis" | Sleep as global synaptic renormalization |
+| Lin, Packer, Wooders et al. (2025), arXiv:2504.13171, "Sleep-time Compute: Beyond Inference Scaling at Test-time" | Pre-computed dense summaries reduce test-time compute by 5x; query predictability determines effectiveness |
 
 ---
 

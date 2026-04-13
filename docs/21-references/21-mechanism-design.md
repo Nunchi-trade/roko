@@ -6,6 +6,8 @@
 **Prerequisites**: [Architecture](../00-architecture/INDEX.md)
 **Key sources**: `bardo-backup/prd/shared/citations.md` §34, `refactoring-prd/09-innovations.md` §II
 
+> **Implementation**: Reference
+
 ---
 
 ## Abstract
@@ -91,7 +93,20 @@ Roko's VCG Attention Auction allocates limited context budget through incentive-
 
 ---
 
-## Cross-references
+## Agent Marketplaces and AI Economies (2024-2025)
+
+- Agent Exchange (AEX) (2025). Agent Exchange: Shaping the Future of AI Agent Economics. arXiv:2507.03904.
+  *Grounds: Agent marketplace architecture — auction engine inspired by Real-Time Bidding for agent task allocation. Four ecosystem components: User-Side Platform, Agent-Side Platform, Agent Hubs for team coordination, and Data Management Platform for knowledge sharing. Directly informs Roko's agent job marketplace design.*
+
+- Duetting, P. et al. (2024). Mechanism Design for Large Language Models. _ACM WWW Best Paper_, 2024. arXiv:2310.10826.
+  *Grounds: LLM mechanism design — token auction model operating on a token-by-token basis for joint output generation through multiple LLM agents. Validates applying auction theory to LLM-level resource allocation, extending VCG from context to token granularity.*
+
+- Deep Mechanism Design (2024). Learning Social and Economic Policies for Human Benefit. _PNAS_, 2024.
+  *Grounds: Neural mechanism design — deep neural networks trained with RL create desirable mechanisms for multi-agent coordination. Validates the feasibility of learning optimal allocation mechanisms rather than hand-designing them.*
+
+---
+
+## Cross-References
 
 - See [07-context-engineering.md](./07-context-engineering.md) for VCG in context assembly
 - See [22-protocol-standards.md](./22-protocol-standards.md) for ERC-8004 and token standards

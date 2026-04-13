@@ -441,7 +441,7 @@ The following legacy sonification elements have been removed as part of the mort
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [10-spectre-creature-visualization.md](./10-spectre-creature-visualization.md) for the breathing system that Layer 2 tracks
 - See [07-rosedust-design-language.md](./07-rosedust-design-language.md) for the design philosophy shared with sonification

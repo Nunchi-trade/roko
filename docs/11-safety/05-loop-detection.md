@@ -198,7 +198,7 @@ This creates a self-regulating safety system: an agent that repeatedly fails gat
 
 ---
 
-## Related Topics
+## Cross-References
 
 - [00-defense-in-depth.md](00-defense-in-depth.md) — SafetyLayer composition including rate limiter and scrubber
 - [09-adaptive-risk.md](09-adaptive-risk.md) — Bayesian adaptive guardrails

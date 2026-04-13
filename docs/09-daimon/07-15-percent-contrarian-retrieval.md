@@ -536,7 +536,7 @@ contrarian_alpha = 0.5
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [06-somatic-markers-damasio.md](./06-somatic-markers-damasio.md) for somatic landscape query protocol
 - See [09-mood-congruent-memory.md](./09-mood-congruent-memory.md) for full four-factor retrieval model

@@ -288,7 +288,7 @@ Reconciliation requires adding the new variants and updating the `default_half_l
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [01-six-knowledge-types.md](./01-six-knowledge-types.md) for the six types and their definitions
 - See [02-four-validation-tiers.md](./02-four-validation-tiers.md) for the tier multiplier system

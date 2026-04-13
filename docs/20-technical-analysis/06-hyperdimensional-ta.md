@@ -696,7 +696,7 @@ The asymmetric update (slower increase, faster decrease) follows the principle t
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [06-neuro](../06-neuro/INDEX.md) for HDC fundamentals and the Neuro knowledge store
 - See [08-adaptive-signal-metabolism.md](./08-adaptive-signal-metabolism.md) for evolutionary dynamics of HDC-encoded signals

@@ -1258,7 +1258,7 @@ pub struct HdcBackendConfig {
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [05-hdc-operations.md](./05-hdc-operations.md) for detailed coverage of each HDC operation
 - See [06-hdc-knowledge-encoding.md](./06-hdc-knowledge-encoding.md) for how knowledge entries are encoded as HDC vectors

@@ -836,6 +836,213 @@ pub fn form_adversarial_marker(
 
 ---
 
+## Certified Adversarial Robustness
+
+The methods above — prototype matching, robust statistics, red-team dreaming — are empirical defenses. They work well in practice but offer no formal guarantees. Certified adversarial robustness provides provable bounds: given a perturbation budget, the system can guarantee that its predictions will not change. This section covers three complementary certification approaches.
+
+### Randomized Smoothing for Signal Certification
+
+Randomized smoothing converts any base predictor into a certifiably robust one by averaging over random noise. The key insight: if a prediction is stable under random perturbations, it must also be stable under adversarial perturbations of bounded magnitude.
+
+```rust
+/// Certified robustness via randomized smoothing.
+///
+/// Cohen et al. (2019, ICML): Given a base classifier f, construct
+/// a smoothed classifier g(x) = argmax_c P[f(x + δ) = c] where δ ~ N(0, σ²I).
+///
+/// Certification guarantee: If g(x) = c with probability p̄_A, then
+/// g is certifiably robust within L₂ radius R = σ · Φ⁻¹(p̄_A).
+///
+/// For oracle predictions: this guarantees prediction stability
+/// under bounded signal perturbations (market noise, sensor drift).
+pub struct RandomizedSmoothing {
+    /// Noise standard deviation (controls robustness-accuracy tradeoff).
+    pub sigma: f64,                  // default: 0.25
+    /// Number of samples for probability estimation.
+    pub n_samples: usize,            // default: 1000
+    /// Confidence level for Clopper-Pearson bound.
+    pub confidence: f64,             // default: 0.999
+}
+
+impl RandomizedSmoothing {
+    /// Certify a prediction's robustness radius.
+    pub fn certify(
+        &self,
+        base_oracle: &dyn Oracle,
+        query: &OracleQuery,
+        ctx: &Context,
+    ) -> CertificationResult {
+        // Sample n predictions with Gaussian noise
+        let mut predictions = Vec::with_capacity(self.n_samples);
+        for _ in 0..self.n_samples {
+            let noisy_query = add_gaussian_noise(query, self.sigma);
+            predictions.push(base_oracle.predict(&noisy_query, ctx));
+        }
+
+        // Compute top class probability via Clopper-Pearson
+        let (top_class, count) = most_common(&predictions);
+        let p_lower = clopper_pearson_lower(count, self.n_samples, 1.0 - self.confidence);
+
+        // Certification radius
+        let radius = self.sigma * normal_quantile_inv(p_lower);
+
+        CertificationResult {
+            prediction: top_class,
+            certified_radius: radius,
+            confidence: self.confidence,
+            n_samples: self.n_samples,
+        }
+    }
+}
+```
+
+**Robustness-accuracy tradeoff**: Larger sigma yields larger certified radii but degrades base prediction accuracy (the noise blurs fine-grained signal features). The optimal sigma depends on the domain:
+
+| Domain | Recommended sigma | Rationale |
+|---|---|---|
+| Chain (price signals) | 0.1 - 0.3 | Prices are noisy; moderate smoothing preserves trend direction |
+| Coding (quality metrics) | 0.05 - 0.15 | Code metrics are more stable; less smoothing needed |
+| Research (citation signals) | 0.2 - 0.5 | Citation data is sparse; heavier smoothing appropriate |
+
+**Computational cost**: Certification requires `n_samples` forward passes through the base oracle. At 1000 samples, this is feasible for T2 (deep reasoning) frequency but too expensive for Gamma (real-time) frequency. Use randomized smoothing for high-stakes predictions where certification justifies the cost.
+
+**Clopper-Pearson bound**: The certification uses a one-sided Clopper-Pearson confidence interval (not the normal approximation) to compute a rigorous lower bound on the top-class probability. This is critical — using a normal approximation would yield invalid certificates for small `p_lower` values.
+
+### Lipschitz-Bounded Oracle Certification
+
+When the oracle's prediction function has a known Lipschitz constant, certification is free at inference time — no sampling required.
+
+```rust
+/// Lipschitz-based deterministic robustness certification.
+///
+/// If an oracle's prediction function f has Lipschitz constant L,
+/// then for any perturbation δ with ||δ|| ≤ ε:
+///   ||f(x+δ) - f(x)|| ≤ L · ε
+///
+/// This provides zero-overhead certification at inference time
+/// (no sampling required, unlike randomized smoothing).
+///
+/// ECLipsE (NeurIPS 2024): compositional Lipschitz estimation
+/// achieves 1000x speedup over global SDP methods.
+pub struct LipschitzCertifier {
+    /// Estimated Lipschitz constant of the oracle.
+    pub lipschitz_constant: f64,
+    /// Estimation method.
+    pub method: LipschitzMethod,
+}
+
+pub enum LipschitzMethod {
+    /// Spectral norm: L = ∏ σ_max(W_i) for each layer.
+    /// Fast but loose bound.
+    SpectralNorm,
+    /// ECLipsE: per-layer SDP, grows linearly with depth.
+    /// (NeurIPS 2024) Tight and fast.
+    Eclipse { per_layer_sdp_size: usize },
+    /// Empirical: sample-based estimate (not a guarantee).
+    Empirical { n_samples: usize },
+}
+
+impl LipschitzCertifier {
+    /// Certify maximum output change under ε-bounded perturbation.
+    pub fn certify(&self, epsilon: f64) -> f64 {
+        self.lipschitz_constant * epsilon
+    }
+
+    /// Certify minimum perturbation needed to change prediction.
+    pub fn minimum_adversarial_perturbation(&self, margin: f64) -> f64 {
+        margin / self.lipschitz_constant
+    }
+}
+```
+
+**Spectral norm estimation** computes the product of the largest singular values across all layers. This is fast (one SVD per layer) but produces loose bounds because it assumes worst-case alignment across layers. In practice, the true Lipschitz constant is often 10-100x smaller than the spectral norm product.
+
+**ECLipsE** (NeurIPS 2024) improves on spectral norm by solving a small semidefinite program (SDP) per layer and composing the results. The key insight is that compositional estimation grows linearly with network depth (not exponentially), achieving bounds that are 10-50x tighter than spectral norm at 1000x less cost than global SDP methods.
+
+**Empirical estimation** samples random perturbations and measures the maximum observed output change. This is not a formal guarantee (it is a lower bound on L, not an upper bound), but it is useful for calibrating expectations and detecting when formal bounds are excessively loose.
+
+**Application to oracle pipelines**: For the roko oracle pipeline, the Lipschitz constant can be estimated per stage:
+- HDC encoding: L = 1 (Hamming distance is bounded by dimension)
+- Scorer functions: estimate L empirically or via spectral norm if differentiable
+- Gate thresholds: L = 0 (discontinuous, but the prediction itself is continuous)
+
+The overall pipeline Lipschitz constant is the product of per-stage constants, modulo non-differentiable components which must be handled separately.
+
+### Interval Bound Propagation for Signal Pipelines
+
+IBP provides an alternative to Lipschitz certification that works for non-differentiable pipelines. Instead of bounding the gradient, it propagates interval bounds through each processing stage.
+
+```rust
+/// Interval bound propagation (IBP) for verifying signal processing pipelines.
+///
+/// IBP propagates interval bounds through each processing stage:
+///   [x - ε, x + ε] → layer → [y_min, y_max]
+///
+/// If the output interval is unambiguous (same prediction class
+/// for all values in [y_min, y_max]), the pipeline is certifiably robust.
+///
+/// For sequential signals: O(T · L · n²) where T = sequence length.
+/// (Gowal et al., 2018; Mao et al., 2024, ICLR)
+pub struct IntervalBoundPropagation {
+    /// Input perturbation radius per dimension.
+    pub epsilon: Vec<f64>,
+    /// Propagation through each pipeline stage.
+    pub stages: Vec<Box<dyn BoundPropagator + Send + Sync>>,
+}
+
+pub trait BoundPropagator: Send + Sync {
+    /// Propagate interval bounds through this stage.
+    fn propagate(&self, lower: &[f64], upper: &[f64]) -> (Vec<f64>, Vec<f64>);
+}
+```
+
+**IBP for common operations**:
+
+| Operation | Bound propagation rule |
+|---|---|
+| Linear: y = Wx + b | y_min = W⁺x_min + W⁻x_max + b, y_max = W⁺x_max + W⁻x_min + b |
+| ReLU: y = max(0, x) | y_min = max(0, x_min), y_max = max(0, x_max) |
+| Multiplication: y = x₁ * x₂ | y_min = min(products of all corner combinations) |
+| Normalization: y = x / ||x|| | Requires interval arithmetic on the norm |
+
+Where W⁺ = max(W, 0) and W⁻ = min(W, 0) denotes the positive and negative parts of the weight matrix.
+
+**Tightness vs. speed**: IBP produces bounds that are fast to compute (single forward pass) but can be loose — especially for deep pipelines where interval overestimation compounds multiplicatively. For a pipeline with L stages and overestimation factor r per stage, the final interval width is O(r^L) times the true range. Mao et al. (2024) show that certified training (training specifically to minimize IBP bounds) produces tighter bounds at the cost of some nominal accuracy.
+
+**Application to signal pipelines**: The roko signal pipeline is a natural fit for IBP because it consists of discrete stages (encoding, scoring, routing, composition) that can each implement `BoundPropagator`. The epsilon vector can be set per signal dimension based on the expected noise or adversarial perturbation budget for that dimension.
+
+### Combining Certification Methods
+
+The three certification methods are complementary:
+
+| Method | Cost | Tightness | Applicability |
+|---|---|---|---|
+| Randomized smoothing | High (n_samples forward passes) | Tight for L₂ | Any base predictor |
+| Lipschitz certification | Zero (at inference) | Depends on estimation method | Differentiable pipelines |
+| IBP | Low (single forward pass) | Loose for deep pipelines | Staged pipelines with interval arithmetic |
+
+**Recommended strategy**: Use Lipschitz certification at Gamma frequency (free, always-on monitoring of prediction stability). Use IBP at Theta frequency (cheap, periodic verification of pipeline robustness). Use randomized smoothing at Delta frequency (expensive, thorough certification of high-stakes predictions).
+
+When methods disagree — e.g., Lipschitz says a prediction is robust but IBP finds the interval ambiguous — take the conservative answer (not robust). The disagreement itself is a signal worth logging: it may indicate that the Lipschitz bound is too loose for the specific input region.
+
+### Citations
+
+- Cohen, J. M., Rosenfeld, E., & Kolter, Z. (2019). "Certified Adversarial Robustness via Randomized Smoothing." *ICML 2019*. — Foundational randomized smoothing certification.
+- Gowal, S., et al. (2018). "On the Effectiveness of Interval Bound Propagation for Training Verifiably Robust Models." arXiv:1810.12715. — IBP for certified training.
+- Mao, Z., et al. (2024). "Understanding Certified Training with Interval Bound Propagation." *ICLR 2024*. — Analysis of IBP tightness and certified training dynamics.
+- NeurIPS 2024. "ECLipsE: Efficient Compositional Lipschitz Constant Estimation for Deep Neural Networks." — Compositional Lipschitz estimation with 1000x speedup.
+- Steinhardt, G., Koh, P. W., & Liang, P. S. (2017). "Certified Defenses for Data Poisoning Attacks." *NeurIPS 2017*. — Certified defenses against training-time attacks.
+
+### Test criteria
+
+- **Smoothing coverage**: Over 1000 certified predictions, the empirical attack success rate within the certified radius is 0. Verify by running projected gradient descent (PGD) attacks with L₂ budget equal to the certified radius and confirming zero successful attacks.
+- **Lipschitz bound soundness**: No observed output change exceeds L times epsilon for any test input. Verify by sampling 10,000 random perturbations with ||delta|| = epsilon and checking that max observed output change is less than L times epsilon.
+- **IBP soundness**: For all inputs in [x-epsilon, x+epsilon], the actual output falls within [y_min, y_max]. Verify by grid-sampling the input interval at 100 points per dimension (for low-dimensional inputs) and confirming containment.
+- **Certification consistency**: When all three methods certify a prediction as robust at radius R, no attack within radius R succeeds. When methods disagree, the conservative (smallest radius) answer is correct.
+- **Sigma sensitivity**: Increasing smoothing sigma by 2x increases the certified radius by approximately 2x (for predictions with high top-class probability). Verify on 100 test queries.
+
+---
+
 ## Academic foundations
 
 - Huber, P. J. (1964). "Robust Estimation of a Location Parameter." *Annals of Mathematical Statistics*, 35(1), 73-101. — Robust statistics foundations.
@@ -846,7 +1053,7 @@ pub fn form_adversarial_marker(
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [02-chain-oracles.md](./02-chain-oracles.md) for MEV detection context
 - See [04-research-oracles.md](./04-research-oracles.md) for p-hacking detection

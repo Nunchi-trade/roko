@@ -224,7 +224,7 @@ The `MevDetector` feeds detection results into the Neuro knowledge store as Engr
 
 ---
 
-## Related Topics
+## Cross-References
 
 - [08-threat-model.md](08-threat-model.md) — MEV in the attack taxonomy
 - [09-adaptive-risk.md](09-adaptive-risk.md) — Layer 5 domain threat detection

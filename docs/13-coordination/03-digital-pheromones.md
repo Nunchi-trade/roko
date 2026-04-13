@@ -716,7 +716,7 @@ systems.
 
 ---
 
-## Related Sub-Docs
+## Cross-References
 
 - `04-pheromone-kinds.md` — Full taxonomy of `PheromoneKind`
 - `05-pheromone-scope.md` — Local, Mesh, and Global scoping

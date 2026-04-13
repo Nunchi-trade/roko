@@ -1255,7 +1255,7 @@ operation rather than an engineered feature.
 
 ---
 
-## Related Sub-Docs
+## Cross-References
 
 - `00-stigmergy-theory.md` — Stigmergy foundations
 - `03-digital-pheromones.md` — Pheromone mechanics underlying role coordination

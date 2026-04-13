@@ -238,7 +238,7 @@ The clearing operator (a Protocol-tier agent or validator) bears the computation
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [10-spore-job-market.md](./10-spore-job-market.md) for the marketplace that generates clearing inputs
 - See [14-reputation-system-7-domain.md](./14-reputation-system-7-domain.md) for the reputation weights used in aggregation

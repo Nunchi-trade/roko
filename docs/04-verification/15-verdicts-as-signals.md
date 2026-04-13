@@ -5,6 +5,8 @@
 > Canonical source: `crates/roko-gate/`, `crates/roko-core/src/kind.rs` (Kind::GateVerdict)
 > Cross-references: [00-gate-trait.md](00-gate-trait.md), [03-gate-pipeline.md](03-gate-pipeline.md)
 
+> **Implementation**: Specified
+
 ---
 
 ## Purpose
@@ -311,7 +313,7 @@ Estimated LOC: ~120 for transformation + Substrate writes, ~60 for Router query,
 
 ---
 
-## Cross-references
+## Cross-References
 
 - [00-gate-trait.md](00-gate-trait.md) -- Gate trait and Verdict type
 - [03-gate-pipeline.md](03-gate-pipeline.md) -- 6-rung gate pipeline

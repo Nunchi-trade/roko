@@ -392,7 +392,7 @@ A ROSEDUST-branded heat gradient for sparklines and heat maps, interpolated in O
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [08-tui-main-layout.md](./08-tui-main-layout.md) for TUI layout using ROSEDUST
 - See [10-spectre-creature-visualization.md](./10-spectre-creature-visualization.md) for Spectre colors

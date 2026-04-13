@@ -730,6 +730,9 @@ GENERATE-DIVERSE-COUNTERFACTUALS(episode, config):
 | Wachter, Mittelstadt & Russell (2017/2018, Harvard JOLT), "Counterfactual Explanations without Opening the Black Box" | Original CF formulation: MAD-weighted L1 + λ proximity-validity tradeoff |
 | Kulesza & Taskar (2012, Foundations and Trends in ML), "Determinantal Point Processes for Machine Learning" | DPP theory: P(S) ∝ det(L_S), greedy MAP inference |
 | Verma et al. (2020, ICLR workshop), "Counterfactual Explanations for Machine Learning: A Review" | Validity/proximity/sparsity/diversity evaluation taxonomy |
+| Ley et al. (2023), ICML, "GLOBE-CE: A Translation Based Approach for Global Counterfactual Explanations" | Global population-level counterfactuals via translation vectors |
+| "Transport-based Counterfactual Models," JMLR Volume 25 (2024) | Optimal transport counterfactuals that naturally respect data manifold geometry |
+| "Time Can Invalidate Algorithmic Recourse," FAccT (2025) | Temporal invalidation of counterfactual strategies under non-stationarity |
 
 ### Test Criteria
 
@@ -882,6 +885,9 @@ pub struct PlausibilityReport {
 | Karimi, Barthe, Balle & Valera (2021, FAccT), "Algorithmic Recourse: from Counterfactual Explanations to Interventions" | Distinction between CF explanations and actionable recourse; causal consistency via Pearl's framework |
 | Pearl (2009), "Causality: Models, Reasoning, and Inference" | Structural causal models; do-calculus for intervention consistency |
 | Kingma & Welling (2013), arXiv:1312.6114, "Auto-Encoding Variational Bayes" | VAE reconstruction error as off-manifold indicator |
+| Ley et al. (2023), ICML, "GLOBE-CE: A Translation Based Approach for Global Counterfactual Explanations" | Global population-level counterfactuals via translation vectors |
+| "Transport-based Counterfactual Models," JMLR Volume 25 (2024) | Optimal transport counterfactuals that naturally respect data manifold geometry |
+| "Time Can Invalidate Algorithmic Recourse," FAccT (2025) | Temporal invalidation of counterfactual strategies under non-stationarity |
 
 ### Test Criteria
 
@@ -895,6 +901,73 @@ pub struct PlausibilityReport {
 8. **Manifold proximity**: a CF vector with similarity < `manifold_proximity_threshold` to all NeuroStore entries is flagged as off-manifold regardless of other scores.
 9. **LOF with k=1**: single-entry NeuroStore returns LOF = 1.0 for all candidates (no neighborhood to compare against); no panic.
 10. **FACE path weight**: increasing `path_weight` lowers the composite score for CFs that require traversal through low-density regions.
+
+---
+
+## Global Counterfactual Explanations: GLOBE-CE
+
+**Reference**: Ley et al. (2023), "GLOBE-CE: A Translation Based Approach for Global Counterfactual Explanations," ICML 2023.
+
+GLOBE-CE generates global (population-level) counterfactual explanations via translation vectors. Rather than generating individual counterfactuals per episode, GLOBE-CE finds a single translation direction that flips the decision for a maximal fraction of the population. This enables the dream engine to discover universal improvement directions rather than episode-specific corrections.
+
+```rust
+/// Global counterfactual explanation via translation vectors.
+/// Based on GLOBE-CE (Ley et al., ICML 2023).
+pub struct GlobalCounterfactualConfig {
+    /// Number of candidate translation directions to evaluate.
+    pub n_candidates: usize,              // default: 50, range: 10-200
+    /// Minimum population coverage for a valid global CF.
+    pub min_coverage: f64,                // default: 0.60, range: 0.30-0.90
+    /// Maximum translation magnitude (HDC Hamming distance).
+    pub max_translation_magnitude: f32,   // default: 0.25, range: 0.10-0.50
+    /// Whether to use HDC permutation directions as candidates.
+    pub use_hdc_permutation_candidates: bool, // default: true
+}
+
+pub struct GlobalCounterfactual {
+    pub translation_direction: HdcVector,
+    pub magnitude: f32,
+    pub coverage: f64,
+    pub mean_proximity: f64,
+    pub affected_episode_ids: Vec<String>,
+}
+```
+
+---
+
+## Transport-Based Counterfactuals
+
+**Reference**: "Transport-based Counterfactual Models," JMLR Volume 25 (2024).
+
+Uses optimal transport instead of SCMs or nearest-instance approaches for counterfactual generation. Applicable to recourse, adversarial defense, fairness. The key advantage: optimal transport naturally respects the data manifold geometry, producing counterfactuals that lie on or near the manifold of real episodes.
+
+**Map to Roko**: Transport-based counterfactuals complement the existing HDC approach. When the agent needs counterfactuals that are guaranteed to be realistic (on-manifold), use optimal transport. When the agent needs creative, off-manifold exploration, use HDC permutation.
+
+```rust
+/// Transport-based counterfactual generation.
+/// Based on JMLR Volume 25 (2024), "Transport-based Counterfactual Models."
+pub struct TransportCounterfactualConfig {
+    /// Regularization strength for the Sinkhorn transport plan.
+    pub sinkhorn_regularization: f64,     // default: 0.01, range: 0.001-0.1
+    /// Maximum transport iterations.
+    pub max_iterations: usize,            // default: 100, range: 50-500
+    /// Convergence threshold for the Sinkhorn algorithm.
+    pub convergence_threshold: f64,       // default: 1e-5
+    /// Whether to use the entropic regularized OT or exact OT.
+    pub use_entropic_ot: bool,            // default: true (faster)
+    /// Cost function: hamming (HDC native) or l2 (requires embedding).
+    pub cost_function: TransportCostFunction,
+}
+
+pub enum TransportCostFunction {
+    /// Hamming distance between HDC vectors (native, fast).
+    Hamming,
+    /// L2 distance in embedding space (requires embedding model).
+    L2Embedding,
+    /// Mahalanobis distance (accounts for feature correlations).
+    Mahalanobis,
+}
+```
 
 ---
 

@@ -194,7 +194,7 @@ Published entries are encoded as HDC vectors on-chain and can be discovered by a
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [02-four-validation-tiers.md](./02-four-validation-tiers.md) for why Transient tier is the entry point
 - See [14-library-of-babel.md](./14-library-of-babel.md) for the five inflow channels and confidence discounting

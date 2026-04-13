@@ -239,7 +239,7 @@ Both mechanisms are necessary. Standard sharing captures opportunistic knowledge
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [02-korai-token-economics.md](./02-korai-token-economics.md) for the KORAI token used in staking and rewards
 - See [14-reputation-system-7-domain.md](./14-reputation-system-7-domain.md) for reputation effects of futures fulfillment

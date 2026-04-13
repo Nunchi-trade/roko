@@ -6,6 +6,8 @@
 **Prerequisites**: [Architecture](../00-architecture/INDEX.md), [Dreams](../10-dreams/INDEX.md)
 **Key sources**: `bardo-backup/prd/02-mortality/14-research-foundations.md` §4, `bardo-backup/prd/shared/citations.md` §28
 
+> **Implementation**: Reference
+
 ---
 
 ## Abstract
@@ -98,7 +100,26 @@ The brain dedicates 25-33% of its runtime to a state that prevents environmental
 
 ---
 
-## Cross-references
+## Sleep-Inspired Architectures for LLMs (2025)
+
+- Language Models Need Sleep (2025). Learning to Self-Modify and Consolidate Memories. OpenReview.
+  *Grounds: LLM sleep paradigm — introduces a sleep paradigm with two stages: Memory Consolidation (RL-based Knowledge Seeding for parameter expansion) and Dreaming (self-improvement via synthetic data generation). Directly validates Roko's NREM/REM two-phase dream architecture at the LLM level.*
+
+- Tutuncuoglu, B.T. (2025). NeuroDream: A Sleep-Inspired Memory Consolidation Framework for Artificial Neural Networks. SSRN:5377250.
+  *Grounds: Dream-phase framework — explicit dream phase where models disconnect from input and engage in internally generated simulations from stored latent embeddings. Up to 38% reduction in forgetting, 17.6% increase in zero-shot transfer. Validates Roko's REM counterfactual generation producing genuine knowledge recombination.*
+
+- LightMem (2025). Lightweight and Efficient Memory-Augmented Generation. arXiv:2510.18866.
+  *Grounds: Sleep-time memory update — offline consolidation procedure decouples memory management from online inference; up to 10.9% accuracy improvement with 117x token reduction. Validates Delta-frequency consolidation operating asynchronously from Gamma-frequency execution.*
+
+- SleepGate (2025). Learning to Forget: Sleep-Inspired Memory Consolidation for Resolving Proactive Interference in LLMs. arXiv:2603.14517.
+  *Grounds: Active learned forgetting — brain's solution to proactive interference is an active, learned curation process. Validates NeuroStore's Curator as an active forgetting agent, not a passive decay mechanism.*
+
+- CosmoCore (2025). Affective Dream-Replay Reinforcement Learning for Code Generation. arXiv:2510.18895.
+  *Grounds: Affect-modulated dreams — combines affective states with dream-replay RL for code generation. Validates the intersection of Daimon (affect) and Dreams (offline consolidation) subsystems.*
+
+---
+
+## Cross-References
 
 - See [01-memory-consolidation.md](./01-memory-consolidation.md) for Wilson & McNaughton 1994, Mattar & Daw 2018, and other replay citations
 - See [02-affective-computing.md](./02-affective-computing.md) for Walker & van der Helm 2009 emotional depotentiation

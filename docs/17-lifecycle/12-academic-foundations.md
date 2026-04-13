@@ -435,7 +435,7 @@ These citations ground the knowledge transfer (backup/restore), generational con
 
 ---
 
-## Related Topics
+## Cross-References
 
 - `docs/00-architecture/INDEX.md` — System architecture overview
 - `docs/03-neuro/INDEX.md` — Neuro store where Ebbinghaus decay is implemented

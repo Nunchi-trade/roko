@@ -6,6 +6,8 @@
 **Prerequisites**: [Architecture](../00-architecture/INDEX.md)
 **Key sources**: `bardo-backup/prd/shared/citations.md` §§30-31
 
+> **Implementation**: Reference
+
 ---
 
 ## Abstract
@@ -63,7 +65,23 @@ Roko agents operate at three cognitive frequencies — Gamma (~5-15s), Theta (~7
 
 ---
 
-## Cross-references
+## TDA Advances (2024-2025)
+
+- Topological Data Analysis and Topological Deep Learning Beyond Persistent Homology (2025). _Artificial Intelligence Review_, Springer, 2025.
+  *Grounds: Beyond persistent homology — comprehensive review of TDA extensions including persistent topological Laplacians that capture both topological invariants and homotopic shape evolution during filtration. Addresses the limitation that standard persistent homology misses geometric evolution. Applicable to detecting subtle structural changes in agent performance metrics that don't involve topological transitions.*
+
+- Persistent Homology-Based Algorithm for Unsupervised Anomaly Detection in Time Series (2025). OpenReview.
+  *Grounds: TDA anomaly detection — algorithm using delay embeddings and 1-dimensional persistent homology from distance-to-measure Rips filtration for unsupervised anomaly detection. Competitive with state-of-the-art methods. Applicable to Roko's drift detection in agent performance streams.*
+
+- Multivariate Time-Series Anomaly Detection with Topological Analysis (2024). arXiv:2408.13082.
+  *Grounds: Graph-TDA anomaly detection — enhanced GAT modeling higher-order topological features as persistent homology groups under varying graph filtering degrees. Improves accuracy of inter-feature dependency modeling. Applicable to monitoring correlated agent performance metrics.*
+
+- Change Point Detection in Financial Time Series Using TDA (2025). _Systems_, 13(10), 875.
+  *Grounds: TDA change points — Takens embedding and sliding window techniques transform time series into high-dimensional topological space for change point detection. Applicable to detecting regime changes in agent execution patterns.*
+
+---
+
+## Cross-References
 
 - See [11-streaming-algorithms.md](./11-streaming-algorithms.md) for ADWIN and online statistics
 - See [16-active-inference.md](./16-active-inference.md) for free energy and prediction error

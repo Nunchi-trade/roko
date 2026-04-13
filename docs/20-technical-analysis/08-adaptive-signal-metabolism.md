@@ -646,7 +646,7 @@ The sum-to-1.0 convention means weights are interpretable as probability distrib
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [06-hyperdimensional-ta.md](./06-hyperdimensional-ta.md) for HDC encoding fundamentals
 - See [05-witness-as-ta-generalized.md](./05-witness-as-ta-generalized.md) for the data pipeline that feeds signals

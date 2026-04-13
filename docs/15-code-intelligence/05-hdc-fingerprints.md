@@ -353,6 +353,150 @@ HDC excels for structural similarity (same kind, similar names, similar context)
 
 ---
 
+## Code Clone Detection: HDC + Neural Hybrid
+
+### The clone taxonomy
+
+Code clones (Roy and Cordy 2007) fall into four types:
+
+| Type | Definition | HDC detects | Neural detects |
+|---|---|---|---|
+| Type-1 | Exact copies (whitespace/comments differ) | Yes (similarity ~0.95+) | Yes |
+| Type-2 | Renamed identifiers/literals | Partially (trigram overlap) | Yes |
+| Type-3 | Near-miss (statements added/deleted/modified) | Weakly (context diverges) | Yes |
+| Type-4 | Semantic clones (same behavior, different syntax) | No | Yes (embeddings) |
+
+HDC fingerprints reliably detect Type-1 clones and partially detect Type-2 (names share trigrams). For Type-3 and Type-4, neural embeddings are needed.
+
+### Neural code embedding models
+
+The planned embedding layer supports pluggable models:
+
+| Model | Parameters | Embed dim | Context | Strengths |
+|---|---|---|---|---|
+| CodeBERT (Feng et al. 2020) | 125M | 768 | 512 tok | Bimodal NL+PL; clone detection F1 >96% on Type-1/2/3 |
+| UniXcoder (Guo et al. 2022) | 125M | 768 | 512 tok | AST-aware cross-modal; best Type-4 via comment alignment |
+| StarCoder2 (Lozhkov et al. 2024) | 3B–15B | varies | 16K tok | Fill-in-the-middle; long context for full-function comparison |
+| CodeSage (Zhang et al. 2024) | 130M–1.3B | 1024 | varies | Contrastive learning; outperforms ada-002 by 41% on code-to-code search |
+| Jina Code v2 (2024) | 161M | 768 | 8K tok | 30+ languages; text-to-code, code-to-code, code-to-completion modes |
+
+CodeSage's two-stage training is notable: (1) MLM + identifier deobfuscation (predicting original names from minified code), then (2) contrastive learning with hard negatives. CodeSage v2 adds consistency filtering (removing low-quality training pairs) and Matryoshka Representation Learning (truncatable embeddings with minimal loss).
+
+### Hybrid clone detection pipeline
+
+The planned approach uses HDC as a fast first pass and neural embeddings for refinement:
+
+```rust
+/// Planned: Hybrid clone detection pipeline
+pub struct CloneDetector {
+    hdc_index: HdcIndex,
+    embedding_model: Option<EmbeddingModel>,
+    config: CloneConfig,
+}
+
+pub struct CloneConfig {
+    /// HDC similarity threshold for candidate generation. Range: 0.55..0.80.
+    pub hdc_candidate_threshold: f64,
+    /// Neural similarity threshold for confirmed clones. Range: 0.70..0.95.
+    pub neural_confirm_threshold: f64,
+    /// Maximum candidates from HDC pass. Range: 50..500.
+    pub max_candidates: usize,
+    /// Minimum clone size (tokens). Range: 20..200.
+    pub min_clone_tokens: usize,
+}
+
+impl Default for CloneConfig {
+    fn default() -> Self {
+        Self {
+            hdc_candidate_threshold: 0.6,
+            neural_confirm_threshold: 0.85,
+            max_candidates: 100,
+            min_clone_tokens: 30,
+        }
+    }
+}
+
+impl CloneDetector {
+    /// Two-phase clone detection: HDC candidate gen → neural confirmation.
+    pub fn detect_clones(
+        &self,
+        query: &SymbolId,
+    ) -> Vec<ClonePair> {
+        // Phase 1: Fast HDC candidate generation (brute-force or HNSW)
+        let candidates = self.hdc_index.query(
+            &self.hdc_index.fingerprint(query),
+            self.config.max_candidates,
+        );
+
+        // Phase 2: Neural refinement (if model available)
+        if let Some(model) = &self.embedding_model {
+            let query_emb = model.embed(query);
+            candidates.into_iter()
+                .filter(|(id, _)| {
+                    let emb = model.embed(id);
+                    cosine_similarity(&query_emb, &emb) >= self.config.neural_confirm_threshold
+                })
+                .map(|(id, hdc_sim)| ClonePair {
+                    source: query.clone(),
+                    target: id,
+                    clone_type: classify_clone_type(hdc_sim),
+                    hdc_similarity: hdc_sim,
+                })
+                .collect()
+        } else {
+            // HDC-only mode: lower confidence, no Type-4 detection
+            candidates.into_iter()
+                .filter(|(_, sim)| *sim >= self.config.hdc_candidate_threshold)
+                .map(|(id, sim)| ClonePair {
+                    source: query.clone(),
+                    target: id,
+                    clone_type: classify_clone_type(sim),
+                    hdc_similarity: sim,
+                })
+                .collect()
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ClonePair {
+    pub source: SymbolId,
+    pub target: SymbolId,
+    pub clone_type: CloneType,
+    pub hdc_similarity: f64,
+}
+
+#[derive(Clone, Debug)]
+pub enum CloneType {
+    Type1,  // HDC sim > 0.95
+    Type2,  // HDC sim 0.80..0.95
+    Type3,  // HDC sim 0.60..0.80
+    Type4,  // HDC sim < 0.60 but neural sim > threshold
+}
+
+fn classify_clone_type(hdc_sim: f64) -> CloneType {
+    if hdc_sim > 0.95 { CloneType::Type1 }
+    else if hdc_sim > 0.80 { CloneType::Type2 }
+    else if hdc_sim > 0.60 { CloneType::Type3 }
+    else { CloneType::Type4 }
+}
+```
+
+### PPR re-ranking for clone results
+
+Personalized PageRank (see [04-pagerank-symbol-importance.md](./04-pagerank-symbol-importance.md)) can re-rank clone results by structural proximity: candidates that are both similar AND structurally adjacent to the query (sharing callers, callees, or type dependencies) are ranked higher. This suppresses false positives from textually similar but architecturally unrelated code.
+
+### Test criteria for clone detection
+
+- Type-1 clones (identical symbols) have HDC similarity > 0.95
+- Type-2 clones (renamed identifiers) have HDC similarity > 0.80
+- Neural refinement rejects candidates with low semantic similarity
+- Clone detection without embedding model falls back to HDC-only mode
+- Minimum clone size filter excludes trivially small fragments
+- PPR re-ranking boosts structurally adjacent clones above distant ones
+
+---
+
 ## Planned Enhancements
 
 ### HNSW index for fast nearest-neighbor search

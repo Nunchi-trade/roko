@@ -184,6 +184,44 @@ timeout_ms = 120000
 
 ---
 
+## Circadian-Inspired Scheduling
+
+Biological sleep follows circadian rhythms — not purely reactive. Roko agents operating on long-running tasks benefit from a circadian-like scheduling pattern that ensures dream cycles happen at regular intervals even when idle gaps are plentiful.
+
+The circadian scheduler layers on top of the idle-time and scheduled triggers described above. It does not replace them — it biases the timing of dreams toward preferred hours while still respecting the `min_episodes_for_dream` and `idle_threshold_mins` constraints. When `circadian_strength` is 0.0, the scheduler behaves identically to the standard idle-time trigger. When `circadian_strength` is 1.0, dreams are strictly gated to `preferred_hours`.
+
+The `max_interval_mins` parameter acts as a safety net: even if a continuously busy agent never hits a preferred hour while idle, a dream cycle will fire within the maximum interval to prevent unbounded consolidation debt.
+
+```rust
+/// Circadian-inspired dream scheduling.
+/// Ensures regular consolidation rhythm even when idle time is abundant.
+pub struct CircadianScheduler {
+    /// Preferred dream times (hours of day, 0-23). Agent dreams more willingly
+    /// during these hours. Empty = no circadian preference.
+    pub preferred_hours: Vec<u8>,         // default: [2, 6, 14, 22]
+    /// Circadian strength: how strongly preferred hours bias scheduling.
+    /// 0.0 = no bias, 1.0 = only dream during preferred hours.
+    pub circadian_strength: f64,          // default: 0.3, range: 0.0-1.0
+    /// Minimum interval between dream cycles (minutes).
+    pub min_interval_mins: u64,           // default: 60, range: 30-480
+    /// Maximum interval between dream cycles (minutes).
+    /// Ensures consolidation even when the agent is continuously busy.
+    pub max_interval_mins: u64,           // default: 360, range: 120-720
+    /// Whether to align dream cycles with task completion boundaries.
+    pub align_to_task_boundaries: bool,   // default: true
+}
+```
+
+### Test Criteria
+
+1. **Circadian preference**: with `circadian_strength=1.0`, dreams only fire during `preferred_hours`.
+2. **Min interval**: no two dream cycles fire within `min_interval_mins` of each other.
+3. **Max interval**: a dream cycle always fires within `max_interval_mins`, even without idle time.
+4. **Task alignment**: with `align_to_task_boundaries=true`, dreams never interrupt a running task.
+5. **Zero strength**: with `circadian_strength=0.0`, `preferred_hours` has no effect on scheduling.
+
+---
+
 ## Cross-References
 
 | Document | Relevance |

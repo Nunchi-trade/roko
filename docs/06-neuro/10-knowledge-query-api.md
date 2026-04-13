@@ -225,7 +225,7 @@ See [12-4-tier-distillation-pipeline.md](./12-4-tier-distillation-pipeline.md) f
 
 ---
 
-## Cross-references
+## Cross-References
 
 - See [07-ebbinghaus-decay-with-tier.md](./07-ebbinghaus-decay-with-tier.md) for how decay affects retrieval scoring
 - See [06-hdc-knowledge-encoding.md](./06-hdc-knowledge-encoding.md) for HDC-based similarity search

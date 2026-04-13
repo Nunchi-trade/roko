@@ -52,7 +52,7 @@ Before reading this topic, we recommend:
 
 ---
 
-## Cross-references
+## Cross-References
 
 This topic connects to:
 
