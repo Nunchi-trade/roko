@@ -135,6 +135,257 @@ The Daimon's affect engine (see `../04-daimon/INDEX.md`) interacts with threat s
 
 ---
 
+---
+
+## Threat Scenario Generation
+
+Adversarial dreaming requires a systematic process for enumerating and cataloging failure modes — not merely replaying past failures, but constructing a comprehensive threat space before any individual threat has materialized. Two complementary engineering methodologies are applied: Failure Mode and Effects Analysis (FMEA) and Fault Tree Analysis (FTA).
+
+### FMEA: Bottom-Up Failure Enumeration
+
+FMEA proceeds component-by-component, asking "what could go wrong here?" for each element of the agent system. For each failure mode, three factors are rated on a 1–10 scale:
+
+- **Severity (S)**: How bad is the outcome if this failure occurs?
+- **Occurrence (O)**: How likely is this failure to occur?
+- **Detection (D)**: How difficult is it to detect before it causes harm? (10 = hardest to detect)
+
+The Risk Priority Number is the product: **RPN = S × O × D**
+
+Prioritization thresholds:
+
+| RPN Range | Action |
+|-----------|--------|
+| ≥ 200 | Immediate mitigation required |
+| 100 – 199 | Schedule for next dream cycle |
+| < 100 | Monitor; no immediate action |
+
+Reference: **MITRE ATLAS v5.1.0 (2025)** — Adversarial Threat Landscape for AI Systems. Provides 16 tactics, 84 techniques, and 56 sub-techniques specifically for AI/ML systems. The tactic taxonomy (Reconnaissance, Resource Development, Initial Access, ML Attack Staging, Exfiltration, Impact, etc.) maps directly onto the failure mode taxonomy used in adversarial dreaming.
+
+### FTA: Top-Down Failure Decomposition
+
+Fault Tree Analysis starts from an undesired top-level event ("agent produces harmful output", "agent fails to complete task within deadline") and decomposes it through AND/OR logic gates until reaching basic, independently quantifiable events.
+
+Gate logic:
+- **OR gate**: Top event occurs if ANY input occurs: P(top) = 1 - Π(1 - P(i))
+- **AND gate**: Top event occurs only if ALL inputs occur: P(top) = Π P(i)
+
+The **Minimal Cut Set** (MCS) is the smallest combination of basic event failures that is sufficient to cause the top event. MCS analysis reveals which single points of failure or which pairs/triplets of simultaneous failures pose the greatest risk. Mitigation resources should be directed toward the smallest MCSs with the highest combined probability.
+
+### Adversarial LM-Based Threat Generation
+
+Beyond structural enumeration, the threat generator uses an adversarial language model to discover failure modes that systematic enumeration might miss — especially novel threat patterns that require creative recombination:
+
+- **Perez et al. (2022, EMNLP)** "Red Teaming Language Models with Language Models": Train an attacker LM to generate test cases using three strategies: (1) zero-shot (the attacker generates freely), (2) supervised (trained on human red-team examples), (3) reinforcement learning (reward = high harmfulness score from a separate classifier). This paper provides the foundation for automated, scalable threat case generation.
+- **Ganguli et al. (2022)** "Red Teaming Language Models to Reduce Harms": 38,961 human red-team attacks across model scales and RLHF conditions. Key finding: RLHF-trained models become harder to attack at scale, but a small number of successful attacks persisted across all scales — exactly the Tier 3 (novel) threats that adversarial dreaming targets.
+- **HarmBench (Mazeika et al. 2024)**: Standardized evaluation framework with 18 attack methods × 33 LLMs × 400+ behavior prompts, organized into semantic categories (chemical, biological, cybersecurity, disinformation). Provides a structured threat ontology that informs the threat taxonomy in Tier 2 and Tier 3 scenario generation.
+
+### Rust Structures
+
+```rust
+pub struct ThreatGenerator {
+    /// FMEA parameters.
+    pub severity_threshold: u8,           // default: 7, range: 1-10
+    pub rpn_immediate_threshold: u16,     // default: 200
+    pub rpn_scheduled_threshold: u16,     // default: 100
+    /// Maximum failure modes to enumerate per component.
+    pub max_modes_per_component: usize,   // default: 10
+    /// FTA maximum tree depth.
+    pub max_fta_depth: usize,             // default: 5
+    /// Whether to use adversarial LM for novel threat generation.
+    pub use_adversarial_generation: bool, // default: true
+    /// Model tier for adversarial generation.
+    pub adversarial_model_tier: ModelTier, // default: T1 (Sonnet-class)
+}
+
+pub struct FailureMode {
+    pub id: String,
+    pub component: String,
+    pub description: String,
+    pub severity: u8,
+    pub occurrence: u8,
+    pub detection: u8,
+    pub rpn: u16,
+    pub tier: ThreatTier,
+    pub mitigation: Option<String>,
+    pub early_warning_signs: Vec<String>,
+}
+
+pub struct FaultTree {
+    pub top_event: String,
+    pub gates: Vec<FaultGate>,
+    pub basic_events: Vec<BasicEvent>,
+    pub minimal_cut_sets: Vec<Vec<String>>,
+}
+
+pub enum FaultGateType {
+    And,
+    Or,
+}
+
+pub struct FaultGate {
+    pub id: String,
+    pub gate_type: FaultGateType,
+    pub inputs: Vec<String>,
+    pub output: String,
+}
+```
+
+### Algorithm: Systematic Threat Enumeration
+
+```
+procedure enumerate_threats(agent_components, config):
+    all_failure_modes = []
+
+    # Phase 1: FMEA — bottom-up enumeration
+    for component in agent_components:
+        modes = generate_failure_modes(component, max=config.max_modes_per_component)
+        for mode in modes:
+            mode.rpn = mode.severity * mode.occurrence * mode.detection
+            mode.tier = classify_tier(mode, known_episodes, heuristics)
+            all_failure_modes.append(mode)
+
+    # Phase 2: FTA — top-down decomposition for high-RPN modes
+    top_events = [m for m in all_failure_modes if m.rpn >= config.rpn_immediate_threshold]
+    fault_trees = []
+    for top_event in top_events:
+        tree = build_fault_tree(top_event, depth=config.max_fta_depth)
+        tree.minimal_cut_sets = find_minimal_cut_sets(tree)
+        fault_trees.append(tree)
+
+    # Phase 3: Adversarial LM — novel threat discovery
+    if config.use_adversarial_generation:
+        novel_threats = adversarial_llm_generate(
+            existing_modes=all_failure_modes,
+            model_tier=config.adversarial_model_tier,
+            strategy="rl",   # Perez et al. RL strategy
+        )
+        # Assign RPN for novel threats via LM self-assessment
+        for threat in novel_threats:
+            threat.rpn = llm_estimate_rpn(threat)
+            threat.tier = ThreatTier::Novel
+        all_failure_modes.extend(novel_threats)
+
+    # Phase 4: Prioritize and return
+    all_failure_modes.sort_by(|a, b| b.rpn.cmp(&a.rpn))
+    return all_failure_modes, fault_trees
+```
+
+---
+
+## Threat Severity Assessment
+
+Once threat scenarios are generated, they must be ranked for prioritization. Raw FMEA RPN scores are a useful first pass but do not capture probabilistic context, asset sensitivity, or defender economics. The severity assessor integrates multiple frameworks to produce a unified priority ranking.
+
+### Risk Matrix: Likelihood × Impact
+
+The foundational tool is a 5 × 5 risk matrix. Likelihood and Impact are each rated 1–5:
+
+| | Impact 1 | Impact 2 | Impact 3 | Impact 4 | Impact 5 |
+|---|---|---|---|---|---|
+| **Likelihood 5** | Medium | High | High | Critical | Critical |
+| **Likelihood 4** | Medium | Medium | High | High | Critical |
+| **Likelihood 3** | Low | Medium | Medium | High | High |
+| **Likelihood 2** | Low | Low | Medium | Medium | High |
+| **Likelihood 1** | Low | Low | Low | Medium | Medium |
+
+Risk score = (Likelihood × Impact) / 25, normalized to [0, 1]:
+- Critical: ≥ 0.68 (17/25)
+- High: 0.40 – 0.67 (10–16/25)
+- Medium: 0.20 – 0.39 (5–9/25)
+- Low: < 0.20
+
+Any threat where Impact ≥ 9 (on a 1–10 underlying scale, mapped to Level 5) is automatically escalated to Critical regardless of Likelihood, implementing a fail-safe override for catastrophic events.
+
+### CVSS v4.0 Integration
+
+For threats involving external exploitation, scoring uses **CVSS v4.0 (2023, FIRST)**:
+
+Four metric groups:
+1. **Base**: Attack Vector (Network/Adjacent/Local/Physical), Attack Complexity (Low/High), Attack Requirements (None/Present), Privileges Required, User Interaction, Confidentiality/Integrity/Availability impact (None/Low/High)
+2. **Threat**: Exploit Maturity (Attacked/PoC/Unreported)
+3. **Environmental**: Asset sensitivity modifiers (modified Base metrics + Safety/Automatable/Recovery)
+4. **Supplemental**: Human Oversight, Provider Urgency, Value Density
+
+CVSS scores range 0.0–10.0. Mapping to risk zones: Critical ≥ 9.0, High 7.0–8.9, Medium 4.0–6.9, Low < 4.0.
+
+### DREAD Model
+
+For rapid assessment without full CVSS instrumentation, the DREAD model (Microsoft) provides a five-factor average:
+
+```
+DREAD_score = (Damage + Reproducibility + Exploitability + Affected_users + Discoverability) / 5
+```
+
+Each factor rated 1–10. DREAD scores map to the same zone thresholds as the normalized risk matrix.
+
+### Bayesian Threat Prioritization
+
+Threat probability estimates are updated using Bayes' theorem as evidence accumulates:
+
+```
+P(threat | evidence) = P(evidence | threat) × P(threat) / P(evidence)
+```
+
+Default prior: P(threat) = 0.10 for novel threats with no supporting evidence.
+
+**Expected Value of Mitigation (EVM)** determines which mitigations are worth deploying. For control j defending against threat i:
+
+```
+EVM_j = P(attack_i) × Impact_i - P(attack_i | control_j) × Impact_i - cost_j
+        = Impact_i × [P(attack_i) - P(attack_i | control_j)] - cost_j
+```
+
+A mitigation is worth deploying when EVM_j > 0. When resources are constrained, sort threats by risk-adjusted expected loss (P × I) in descending order and allocate mitigations greedily until the budget is exhausted.
+
+### Rust Structures
+
+```rust
+pub struct ThreatSeverityAssessor {
+    /// Risk matrix dimensions.
+    pub likelihood_levels: usize,          // default: 5
+    pub impact_levels: usize,              // default: 5
+    /// Thresholds for risk zones.
+    pub critical_threshold: f64,           // default: 0.68 (17/25)
+    pub high_threshold: f64,               // default: 0.40 (10/25)
+    pub medium_threshold: f64,             // default: 0.20 (5/25)
+    /// Severity override: any threat with impact >= this is auto-critical.
+    pub impact_override_level: u8,         // default: 9
+    /// Bayesian prior for threat probability.
+    pub default_prior: f64,               // default: 0.10
+}
+
+pub struct ThreatAssessment {
+    pub threat_id: String,
+    pub likelihood: f64,
+    pub impact: f64,
+    pub risk_score: f64,
+    pub risk_zone: RiskZone,
+    pub expected_loss: f64,
+    pub mitigation_evm: f64,
+    pub priority_rank: usize,
+}
+
+pub enum RiskZone {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+```
+
+### Test Criteria
+
+A correct threat severity assessor must satisfy:
+
+1. **RPN ordering**: All threats with RPN ≥ 200 appear before threats with RPN 100–199 in priority output.
+2. **Impact override**: Any threat with `impact_override_level` ≥ 9 maps to `RiskZone::Critical` regardless of likelihood.
+3. **Bayesian update**: After observing n positive evidence events, P(threat | evidence) must increase monotonically with n.
+4. **EVM sign**: A mitigation with cost > Impact × P(attack) must produce EVM < 0 and be excluded from the greedy allocation.
+5. **Zone thresholds**: The four risk zones partition [0, 1] without gap or overlap at the configured threshold values.
+6. **CVSS mapping**: A CVSS v4.0 base score ≥ 9.0 maps to `RiskZone::Critical`; a score < 4.0 maps to `RiskZone::Low`.
+
+---
+
 ## Academic Citations
 
 | Paper | How It Informs Threat Simulation |
@@ -143,6 +394,11 @@ The Daimon's affect engine (see `../04-daimon/INDEX.md`) interacts with threat s
 | Revonsuo & Valli (2000), Consciousness and Cognition | Threat content is over-represented in dreams relative to waking |
 | Walker & van der Helm (2009), Psychological Bulletin | REM depotentiation reduces emotional charge of threatening memories |
 | Damasio (1994), Descartes' Error | Somatic markers tag threatening experiences for preferential processing |
+| MITRE ATLAS v5.1.0 (2025) | 16 tactics, 84 techniques, 56 sub-techniques for AI/ML adversarial threats |
+| Perez et al. (2022, EMNLP) | Red teaming via attacker LM: zero-shot, supervised, and RL strategies |
+| Ganguli et al. (2022) | 38,961 human red-team attacks; RLHF models harder to attack at scale |
+| Mazeika et al. (2024), HarmBench | 18 attack methods × 33 LLMs × 400+ prompts; structured threat ontology |
+| FIRST, CVSS v4.0 (2023) | 4-group scoring for external threat severity with environmental modifiers |
 
 ---
 

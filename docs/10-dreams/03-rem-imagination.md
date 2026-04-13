@@ -686,6 +686,380 @@ orchestrate.rs
 
 ---
 
+## Imagination Validation
+
+Every counterfactual simulation is only as good as the world model it runs inside. World models accumulate errors over long rollouts through three compounding failure modes: **exposure bias** (the model was never trained on its own imagined states, so errors compound at each step), **distribution shift** (latent representations drift away from the training manifold), and **value hallucination** (the critic assigns high value to imagined states that the real environment would score poorly). Without a principled quality check, long imagined rollouts become increasingly detached from reality.
+
+### The Trust-Region Approach (GIRL 2025)
+
+The Generative Imagination RL with Information-Theoretic Hallucination Control (GIRL) framework addresses this with a per-step KL divergence budget. After each imagination step, the drift from the prior world model is measured:
+
+```
+Δ_t = KL(q_posterior || p_prior)
+```
+
+where `q_posterior` is the world model's belief after conditioning on the imagined observation, and `p_prior` is the unconditional prior. When `Δ_t` accumulates beyond the trust region `δ_t`, the rollout is terminated or restarted from a real observation.
+
+The trust region itself is adaptive. After each dream cycle it is updated based on two signals:
+
+- **EIG_t** (Expected Information Gain): the value of continuing imagination further — if imagination is teaching the agent something new, expand the trust region
+- **RPL_t** (Rollout Prediction Loss): the error of predictions against later real observations — if imagination was systematically wrong, shrink the trust region
+
+The update rule:
+
+```
+δ_{t+1} = clip(δ_t + η_δ(τ_EIG · EIG_t - τ_RPL · RPL_t), δ_min, δ_max)
+```
+
+where `η_δ` is the adaptation learning rate, `τ_EIG` and `τ_RPL` are the relative weights of each signal, and the clip ensures the trust region stays within valid bounds.
+
+### Cross-Modal Grounding
+
+For agents with access to a frozen foundation model (DINO, CLIP), cross-modal grounding provides an independent plausibility signal. The imagined latent state is decoded into an observation and compared against the real observation's embedding:
+
+```
+L_cm = ||DINO(decode(z_t)) - DINO(o_t)||²
+```
+
+with a weighting coefficient μ = 0.1. A low cross-modal loss means the imagined state is semantically consistent with the real observation — the agent is imagining something that "looks like" reality, even if the exact pixels differ. This is disabled by default (requires a foundation model to be available) but is the highest-quality plausibility signal when available.
+
+### IDM Turing Test
+
+The Inverse Dynamics Model (IDM) Turing Test is a model-free plausibility check. An IDM is trained on real trajectories to predict what action was taken between two observations:
+
+```
+action_pred = IDM(o_t, o_{t+1})
+```
+
+When this IDM is applied to imagined trajectories — given two consecutive imagined states, can the IDM recover the intended action? — physically implausible imagined trajectories fail this test because the imagined state transitions don't correspond to any action the agent could actually take. If the IDM cannot recover the action, the imagined transition is not physically grounded.
+
+### Short-Horizon Fallback (MBPO)
+
+When the trust region shrinks to very small values, the system falls back to MBPO-style (Model-Based Policy Optimization, Janner et al. 2019) short-horizon imagination: rollouts are restricted to 1–5 steps from real starting states. At these short horizons, world model error is bounded because the cumulative KL drift is small. The tradeoff is reduced temporal depth — the agent cannot reason about sequences longer than 5 steps — but this is preferable to hallucinated long-horizon rollouts.
+
+### Phase-Transition Threshold for Sparse Rewards
+
+In sparse-reward settings, imagination is only useful if the imagined horizon is long enough to reach a reward signal. The minimum viable horizon `H*` is determined by:
+
+```
+ε* · H = (1 - γ)² · R_thresh / (2γ)
+```
+
+where `ε*` is the per-step model error bound, `γ` is the discount factor, and `R_thresh` is the minimum reward magnitude worth learning from. If the trust region restricts `H` below `H*`, imagination in sparse-reward settings should be suspended until more real data is collected to improve the world model.
+
+### Calibration Metrics
+
+Beyond plausibility, imagination quality is measured through calibration — does the world model's confidence match its actual accuracy?
+
+- **Expected Calibration Error (ECE)**: partition prediction confidence into bins; ECE = Σ_b |acc(b) - conf(b)| · |b| / N. A well-calibrated model has ECE close to 0.
+- **Reliability diagrams**: plot actual accuracy vs. predicted confidence. A diagonal line indicates perfect calibration; systematic deviation indicates over- or under-confidence.
+- **Negative Log-Likelihood (NLL)**: for probabilistic world models, NLL measures how well the model's distribution fits the observed data. Lower NLL = better calibration.
+
+DreamerV3 uses the symlog transform to improve calibration across reward scales:
+
+```
+symlog(x) = sign(x) · ln(|x| + 1)
+```
+
+This transform prevents value hallucination at extreme reward magnitudes — the world model cannot assign astronomically large or small values to imagined states because symlog compresses the output range.
+
+### Rust Implementation
+
+```rust
+pub struct ImaginationValidator {
+    /// Maximum allowed KL drift per imagination step.
+    pub max_drift_per_step: f64,           // default: 0.05, range: 0.01-0.20
+    /// Trust region adaptation rate.
+    pub trust_region_lr: f64,              // default: 0.01
+    /// Minimum trust region (never restrict imagination below this).
+    pub trust_region_min: f64,             // default: 0.01
+    /// Maximum trust region.
+    pub trust_region_max: f64,             // default: 0.50
+    /// Maximum imagination depth before forced termination.
+    pub max_imagination_depth: usize,      // default: 5
+    /// Minimum plausibility score for counterfactual acceptance.
+    pub plausibility_threshold: f64,       // default: 0.60, range: 0.40-0.80
+    /// Whether to use cross-modal grounding (requires foundation model).
+    pub cross_modal_grounding: bool,       // default: false
+}
+
+pub struct ImaginationQualityReport {
+    pub total_counterfactuals: usize,
+    pub accepted: usize,
+    pub rejected_drift: usize,
+    pub rejected_plausibility: usize,
+    pub mean_drift: f64,
+    pub mean_plausibility: f64,
+    pub max_depth_reached: usize,
+}
+```
+
+### Validation Pipeline Pseudocode
+
+```
+VALIDATE_IMAGINATION(counterfactuals, world_model, trust_region_δ):
+    accepted = []
+    rejected_drift = []
+    rejected_plausibility = []
+
+    cumulative_drift = 0.0
+    for each step t in rollout:
+        Δ_t = KL(world_model.posterior(step_t) || world_model.prior())
+        cumulative_drift += Δ_t
+        if cumulative_drift > trust_region_δ:
+            terminate rollout
+            break
+
+    for each counterfactual c in counterfactuals:
+        if c.cumulative_drift > max_drift_per_step * c.depth:
+            rejected_drift.push(c)
+            continue
+
+        plausibility = compute_plausibility(c, world_model)
+        if cross_modal_grounding:
+            plausibility = blend(plausibility, cross_modal_score(c), μ=0.1)
+
+        if plausibility < plausibility_threshold:
+            rejected_plausibility.push(c)
+            continue
+
+        accepted.push(c)
+
+    // Adaptive trust region update
+    EIG = compute_expected_information_gain(accepted)
+    RPL = compute_rollout_prediction_loss(accepted)
+    trust_region_δ = clip(
+        trust_region_δ + lr · (τ_EIG · EIG - τ_RPL · RPL),
+        trust_region_min,
+        trust_region_max
+    )
+
+    return ImaginationQualityReport { accepted, rejected_drift, rejected_plausibility, ... }
+```
+
+---
+
+## Imagination Budget
+
+Imagination is not free. Every counterfactual simulation costs tokens (for LLM-based reasoning), wall-clock time, and USD. The budget system prevents a single dream cycle from consuming unbounded compute while ensuring each creativity mode receives enough resources to produce meaningful outputs.
+
+### The Explore-Exploit Tradeoff in Imagination
+
+DreamerV3 resolves the compute allocation problem with fixed hyperparameters: imagination horizon H = 15 steps, discount γ = 0.997, λ = 0.95 for the lambda-return estimator, and batch dimensions of 16 sequences × 64 time steps. These constants were derived empirically across 150+ Atari and continuous control tasks and represent a stable operating point.
+
+For Roko's LLM-based agent imagination, the tradeoff is different: the cost is per-LLM-call rather than per-environment-step, and the "horizon" is measured in reasoning depth rather than timesteps. Deeper causal chains (Level 3 counterfactual) cost more than shallow associations (Level 1), and transformational creativity (which requires enumerating assumptions and then inverting them) costs more than combinational creativity (which mostly cross-references existing episode structure).
+
+### Breadth vs. Depth Tradeoff
+
+For a fixed compute budget, the agent must choose between:
+
+- **More breadth**: explore many different counterfactual starting points at shallow depth — good for finding unexpected correlations, poor for deep causal reasoning
+- **More depth**: follow fewer chains further — good for understanding complex multi-step consequences, expensive per hypothesis
+
+Binary branching (b = 2, each imagination step produces at most two child states) maximizes depth for a fixed compute budget. With branching factor b and depth d, the total nodes explored is `b^d - 1`; binary branching at depth 5 produces 31 nodes at the cost of 5 sequential LLM calls — equivalent to 5 linear chains at depth 1. In practice the REM engine defaults to binary branching with `max_chain_depth = 5`.
+
+### Adaptive Allocation Across Creativity Modes
+
+The four canonical creativity modes have different compute profiles:
+
+| Mode | Typical depth | Compute profile | IRIS/DreamerV3 analog |
+|------|--------------|-----------------|----------------------|
+| Combinational | Shallow (2 inputs → 1 output) | Low — cross-domain transfer is cheap at inference time | Cross-domain generalization learned at training time |
+| Exploratory | Medium (H = 15–20 on-policy rollouts) | Medium-high — requires pushing parameters through the model | DreamerV3 H = 15 on-policy imagination |
+| Transformational | Deep (enumerating + inverting assumptions) | Very high — requires LLM to reason about meta-structure | Sleep-time compute (Lin et al. 2025) |
+| Association | Minimal (statistical scan) | Negligible — operates on cached episode statistics | Not applicable |
+
+The default budget allocation reflects these profiles, with `association` receiving a small slice (it is cheap) and `transformational` receiving a full 15% despite being expensive per call (because it produces the most structurally novel hypotheses).
+
+### Sleep-Time Compute (Lin et al. 2025)
+
+Lin et al. (2025) demonstrated that moving expensive reasoning offline — performing it during "sleep" rather than at inference time — reduces test-time compute by 5× while improving accuracy by +13% on GSM-Symbolic and +18% on AIME. In Roko's terms, the `Transformational` mode is explicitly scheduled as sleep-time compute: it runs during the dream cycle (when the agent is not handling live tasks) rather than during active task execution. This is why transformational creativity receives the `offline` scheduling flag in the configuration.
+
+IRIS (Micheli et al. 2023) uses a similar offline compute strategy: a discrete-token world model (VQ-VAE tokenizer + GPT-style transformer) trains on imagined sequences for 200 steps per epoch with a 20-step imagination horizon, all offline between environment interactions.
+
+### Rust Implementation
+
+```rust
+pub struct ImaginationBudget {
+    /// Total budget for this dream cycle's REM phase in USD.
+    pub total_budget_usd: f64,             // default: 0.05
+    /// Budget allocation per creativity mode (fractions, must sum to 1.0).
+    pub mode_allocations: ImaginationModeAllocations,
+    /// Maximum depth of causal chain exploration.
+    pub max_chain_depth: usize,            // default: 5, range: 1-10
+    /// Maximum number of counterfactuals per dream cycle.
+    pub max_counterfactuals: usize,        // default: 10, range: 3-30
+    /// Whether to use adaptive budget allocation based on past ROI.
+    pub adaptive_allocation: bool,         // default: true
+    /// Minimum budget fraction for any single mode (prevents starvation).
+    pub min_mode_fraction: f64,            // default: 0.05
+}
+
+pub struct ImaginationModeAllocations {
+    pub association: f64,        // default: 0.10
+    pub intervention: f64,       // default: 0.20
+    pub counterfactual: f64,     // default: 0.25
+    pub combinational: f64,      // default: 0.15
+    pub exploratory: f64,        // default: 0.15
+    pub transformational: f64,   // default: 0.15
+}
+
+pub struct ImaginationROITracker {
+    /// Per-mode tracking of return on investment.
+    mode_stats: HashMap<GenerationMode, ModeROI>,
+}
+
+pub struct ModeROI {
+    pub mode: GenerationMode,
+    pub total_hypotheses: usize,
+    pub promoted_hypotheses: usize,
+    pub promotion_rate: f64,
+    pub mean_confidence_at_promotion: f64,
+    pub total_budget_spent: f64,
+    pub cost_per_promoted_hypothesis: f64,
+}
+```
+
+### ROI Formula and Adaptive Reallocation
+
+The return on investment for each mode is computed after the Integration phase, once the Consolidation engine has decided which hypotheses to promote to NeuroStore:
+
+```
+ROI(mode) = (promoted_hypotheses × mean_confidence_at_promotion) / budget_spent
+```
+
+A mode that produces hypotheses with high confidence at promotion time, at low cost, has high ROI. The numerator rewards quality (confidence-weighted promotion count); the denominator penalizes cost.
+
+After each dream cycle, allocations are updated proportionally to ROI:
+
+```
+ADAPTIVE_REALLOCATE(mode_stats, current_allocations, min_mode_fraction):
+    roi_scores = {mode: compute_roi(mode_stats[mode]) for mode in modes}
+
+    // Normalize ROI scores to sum to 1.0
+    total_roi = sum(roi_scores.values())
+    if total_roi == 0:
+        return current_allocations  // no data yet, keep defaults
+
+    raw_allocs = {mode: roi_scores[mode] / total_roi for mode in modes}
+
+    // Apply minimum fraction constraint
+    // Modes below min_mode_fraction are floored; the excess is taken from the top modes
+    for mode in modes:
+        if raw_allocs[mode] < min_mode_fraction:
+            raw_allocs[mode] = min_mode_fraction
+
+    // Re-normalize after flooring
+    total = sum(raw_allocs.values())
+    new_allocs = {mode: raw_allocs[mode] / total for mode in modes}
+
+    return new_allocs
+```
+
+The minimum fraction constraint (`min_mode_fraction = 0.05`) prevents any mode from being starved entirely. Even if `transformational` produces zero promoted hypotheses over many cycles, it retains a 5% allocation — because a single successful transformational insight can outweigh many combinational ones.
+
+---
+
+## World Models for Agent Imagination
+
+The mathematical foundation of imagination is the world model: a learned function that predicts how the environment will respond to actions without requiring real environment interactions. Every counterfactual simulation in the REM phase is implicitly an inference through the agent's world model.
+
+### DreamerV3 RSSM Architecture
+
+The Recurrent State-Space Model (RSSM) in DreamerV3 (Hafner et al. 2023) maintains a factored latent state consisting of a deterministic recurrent state `h_t` and a stochastic latent variable `z_t`:
+
+```
+Recurrent:   h_t  = f(h_{t-1}, z_{t-1}, a_{t-1})
+Posterior:   z_t  ~ q(z_t | h_t, x_t)         // conditioned on real observation
+Prior:       z̃_t ~ p(z̃_t | h_t)               // conditioned only on recurrent state
+```
+
+The key design: the prior `p(z̃_t | h_t)` enables imagination — given only the recurrent state (no real observation), the model can sample plausible next latent states and chain them together for multi-step rollouts. The posterior `q(z_t | h_t, x_t)` enables grounding — when a real observation is available, the model updates its belief accordingly.
+
+DreamerV3 represents `z_t` as 32 × 32 categorical variables (1024 bits total), which is compact enough for fast simulation but expressive enough to model complex environment dynamics. The fixed hyperparameters — H = 15 imagination horizon, γ = 0.997, λ = 0.95 — were found to work across 150+ environments without domain-specific tuning.
+
+### Mapping to Roko's Causal Graph
+
+Roko's agent does not have an explicit RSSM, but it has a functional equivalent: the causal graph built in the REM phase from episode data. The correspondence is:
+
+| DreamerV3 RSSM component | Roko equivalent |
+|--------------------------|-----------------|
+| Recurrent state `h_t` | The trajectory of episode outcomes up to the current task |
+| Stochastic latent `z_t` | The inferred latent state from the abduction step (Level 3 SCM) |
+| Prior `p(z̃_t | h_t)` | Causal graph edge predictions from Level 2 intervention |
+| Posterior `q(z_t | h_t, x_t)` | Association-level posterior after observing a real gate outcome |
+| Imagination rollout | The counterfactual engine's multi-step causal chain traversal |
+
+The counterfactual simulation IS imagination within Roko's world model. When the Level 3 engine traverses a causal chain of depth 4, it is executing a 4-step imagined rollout through the agent's learned causal structure.
+
+### IRIS Discrete World Model
+
+IRIS (Micheli et al. 2023) demonstrates that a pure transformer-based world model (no recurrent state) can achieve competitive imagination quality by discretizing observations:
+
+1. **VQ-VAE tokenizer**: observations are compressed into discrete tokens (codebook size 512, sequence length 16)
+2. **GPT-style transformer**: predicts the next token in the discretized sequence — effectively modeling `p(o_{t+1} | o_{t}, a_t)`
+3. **Imagination**: sample from the transformer autoregressively for 20 steps; use the resulting imagined sequence for policy improvement
+
+The IRIS approach trades off architectural elegance (pure transformer, no special recurrent components) for inference cost (autoregressive generation is sequential). Its 200 training steps per epoch on imagined sequences is the offline sleep-time compute phase.
+
+### Genie: Unsupervised World Models from Video
+
+Genie (Bruce et al. 2024) pushes world model learning further by removing the need for action labels entirely. Trained on 11 billion parameters from unlabeled video of human gameplay, Genie learns:
+
+- **8 latent action codes**: a discrete action space inferred from video, without being told what actions the human took
+- **Generative interactive environment**: given a single image frame, generate a playable interactive environment
+
+For Roko, Genie represents the horizon of what world models could become: an agent that builds its world model from observation alone, without requiring explicitly labeled action-outcome pairs. The 8 latent actions correspond to abstract "affordances" in the environment — the kinds of interventions the world supports, discovered unsupervised.
+
+### The Imagination-to-Planning Pipeline
+
+The full pipeline from world model to policy improvement:
+
+```
+IMAGINATION_TO_PLANNING(world_model, policy, episodes):
+
+    // 1. Encode: compress real episodes into latent representations
+    latents = [world_model.encode(episode) for episode in episodes]
+
+    // 2. Imagine: unroll the world model from each latent state
+    imagined_rollouts = []
+    for latent in latents:
+        rollout = []
+        h_t = latent
+        for step in range(imagination_horizon):
+            a_t  = policy.sample(h_t)             // sample action from current policy
+            h_t1 = world_model.prior(h_t, a_t)    // predict next state (no real obs)
+            r_t  = world_model.reward(h_t1)        // predict reward
+            rollout.append((h_t, a_t, h_t1, r_t))
+            h_t = h_t1
+        imagined_rollouts.append(rollout)
+
+    // 3. Evaluate: compute returns over imagined rollouts
+    returns = [compute_lambda_return(rollout, γ, λ) for rollout in imagined_rollouts]
+
+    // 4. Update policy: gradient step on imagined returns
+    policy.update(imagined_rollouts, returns)
+
+    // 5. Update world model: gradient step on prediction errors
+    world_model.update(episodes)
+
+    return updated_policy, updated_world_model
+```
+
+In Roko's LLM-based setting, steps 3 and 4 are replaced by the Consolidation engine (Integration phase): the "policy" is the agent's NeuroStore of heuristics, and "updating the policy" means promoting accepted counterfactual hypotheses into NeuroStore with confidence scores derived from their plausibility.
+
+### Academic Citations
+
+| Paper | Contribution |
+|-------|-------------|
+| Hafner et al. (2023), "Mastering Diverse Domains with World Models" (DreamerV3), arXiv:2301.04104 | RSSM architecture: h_t, z_t factored latent state; 32×32 categorical latents; fixed hyperparameters H=15, γ=0.997, λ=0.95 |
+| Micheli et al. (2023), "Transformers are Sample-Efficient World Models" (IRIS), ICLR 2023 | Discrete VQ-VAE + GPT world model; 20-step imagination; 200 training steps per epoch |
+| Bruce et al. (2024), "Genie: Generative Interactive Environments", NeurIPS 2024 | 11B parameter unsupervised world model; 8 latent action codes learned from unlabeled video |
+| Janner et al. (2019), "When to Trust Your Model: Model-Based Policy Optimization" (MBPO), NeurIPS 2019 | Short-horizon fallback; 1-5 step rollouts from real states bound world model error |
+| Lin et al. (2025), "Sleep-time Compute", arXiv:2025.00XXX | 5× test-time compute reduction via offline processing; +13% GSM-Symbolic, +18% AIME |
+
+---
+
 ## Cross-References
 
 | Document | Relevance |

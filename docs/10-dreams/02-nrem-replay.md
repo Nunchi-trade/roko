@@ -290,6 +290,15 @@ Where `attenuation_factor` is 0.15 (a weak bias). The agent's mood gently influe
 | Kanerva (2009), Cognitive Computation 1(2), "Hyperdimensional Computing" | HDC: 10,240-bit BSC vectors for sub-microsecond similarity comparison |
 | Park et al. (2023), UIST, arXiv:2304.03442, "Generative Agents" | Periodic reflection cycles for experience synthesis |
 | McClelland et al. (1995), Psychological Review | Complementary Learning Systems: fast episodic + slow semantic memory |
+| Shin et al. (2017), NeurIPS, "Continual Learning with Deep Generative Replay" | Scholar architecture H = ⟨G, S⟩: generator produces synthetic samples from past distributions to prevent catastrophic forgetting |
+| Gao et al. (2023), ICML, diffusion-based generative replay | Diffusion model as generator substantially closes the quality gap between generative and exact replay |
+| Kurth-Nelson et al. (2023), MEG study | Human hippocampal replay is partial, contains novel shortcuts, and supports compositional inference across non-adjacent episodes |
+| Helfrich et al. (2023), Nature Neuroscience | Triple SO-spindle-ripple coupling: spindle onset ~451ms before SO down-state, SWR within 250ms of spindle onset; disruption impairs consolidation |
+| Wozniak (1990), SM-2 algorithm | Spaced repetition: EF-based interval scheduling for optimal review timing, basis for SuperMemo and Anki |
+| Mnih et al. (2015), Nature, "Human-level control through deep reinforcement learning" | DQN: circular replay buffer of 1M transitions, uniform minibatch sampling of size 32 |
+| Schaul et al. (2016), ICLR, "Prioritized Experience Replay" | PER: priority p_i = |δ_i| + ε, sampling P(i) = p_i^α / Σ p_j^α with α=0.6, IS weights with β annealing 0.4→1.0 |
+| Andrychowicz et al. (2017), NeurIPS, "Hindsight Experience Replay" | HER: relabeling failed episodes with achieved goals; k=4 virtual goals per transition using "future" strategy |
+| Wang & Ross (2019), "Boosting Soft Actor-Critic: Emphasizing Recent Experience without Forgetting the Past" | ERE: c_k = max(N · η^(k·1000/K), c_min) with η=0.996; dynamic buffer shrinkage emphasizing recent experience |
 
 ---
 
@@ -669,6 +678,372 @@ orchestrate.rs
 7. **Insight consolidation**: inserting a near-duplicate insight (HDC similarity > 0.80) updates the existing entry's confidence instead of creating a new one.
 8. **Error recovery**: empty episode log skips NREM without panic. LLM failure skips the individual episode and logs the error.
 9. **End-to-end**: a dream cycle with 20 synthetic episodes produces at least 3 insights written to NeuroStore.
+
+---
+
+## Replay Fidelity
+
+Replay fidelity refers to how faithfully an episode is reproduced during the replay phase. Biological and computational evidence converges on the same insight: exact replay is not always optimal, and sometimes controlled deviation from the original experience produces better generalization.
+
+### The Fidelity Spectrum
+
+Three replay modes sit on a spectrum from high fidelity to high generativity:
+
+| Mode | Description | When to Use |
+|------|-------------|-------------|
+| **Exact** | Episode replayed verbatim, no modifications | Anchor memories; high-stakes patterns that must not drift |
+| **Perturbed** | Controlled noise applied within observed variance | Standard generalization; robustness testing |
+| **Generative** | Synthetic episode preserving structural features, varying surface details | Creative exploration; filling in experience gaps |
+
+### Biological Evidence
+
+Hippocampal replay is not veridical. Kurth-Nelson et al. (2023, MEG study) showed that human hippocampal replay during rest sequences is partial, sometimes contains novel shortcuts not experienced during learning, and supports compositional inference — the ability to infer relationships between episodes that were never directly experienced together. The brain does not simply play back a recording; it reconstructs, recombines, and extrapolates.
+
+Temporal compression is equally striking: waking experiences spanning seconds to minutes are replayed within 100–300 ms sharp-wave ripple (SWR) events, achieving compression ratios of 6× to 20× (Ji & Wilson 2007). This compression is not arbitrary — it preserves causal structure while discarding moment-to-moment detail.
+
+### Deep Generative Replay
+
+Shin et al. (2017, NeurIPS, "Continual Learning with Deep Generative Replay") introduced the Scholar architecture H = ⟨G, S⟩, where a Generator G produces synthetic samples from previous distributions, and a Solver S trains on a mixture of real new data and generated old data. This architecture avoids catastrophic forgetting without storing raw episodes — the generator maintains a compressed distributional model of the past.
+
+Roko's generative replay mode is inspired by this: rather than storing every episode indefinitely, the HDC vector of an episode serves as its structural template, and the generative mode synthesizes a new episode that matches the structural signature while varying surface content.
+
+The diffusion-based generative replay approach of Gao et al. (2023, ICML) substantially closes the quality gap between generative and exact replay by using a diffusion model as the generator G. The structural similarity floor parameter controls how close the synthetic episode must be to the original HDC template.
+
+### Fidelity Configuration
+
+```rust
+pub enum ReplayFidelity {
+    /// Replay the episode as-is, no modifications.
+    Exact,
+    /// Apply controlled perturbations within observed variance.
+    /// Perturbation magnitude controlled by `perturbation_sigma`.
+    Perturbed { perturbation_sigma: f64 },
+    /// Generate a synthetic episode that preserves structural features
+    /// but varies surface details. Uses HDC vector as structural template.
+    Generative { structural_similarity_floor: f32 },
+}
+
+pub struct ReplayFidelityConfig {
+    /// Default fidelity mode for standard replay.
+    pub default_mode: ReplayFidelity,       // default: Perturbed { perturbation_sigma: 0.15 }
+    /// Fraction of replays that use exact mode (for anchor memories).
+    pub exact_fraction: f64,                // default: 0.20, range: 0.0-0.50
+    /// Fraction that use generative mode (for creative exploration).
+    pub generative_fraction: f64,           // default: 0.10, range: 0.0-0.30
+    /// Minimum temporal compression ratio (replay duration / original duration).
+    pub min_compression_ratio: f64,         // default: 0.05 (20x compression)
+    /// Maximum compression ratio.
+    pub max_compression_ratio: f64,         // default: 0.17 (6x compression)
+}
+```
+
+The `exact_fraction` and `generative_fraction` are enforced at the batch level: across each dream cycle's replay batch, exactly `batch_size × exact_fraction` episodes are replayed using exact mode, and `batch_size × generative_fraction` use generative mode. The remainder use the configured `default_mode` (typically `Perturbed`).
+
+Anchor memories — episodes tagged with high somatic weight (arousal > 0.8 at encoding) — bypass the normal fidelity distribution and always use `Exact` mode. Their structural integrity is preserved regardless of the batch-level fidelity settings.
+
+### Test Criteria for Fidelity
+
+1. **Mode distribution**: across a batch of 20 episodes, the exact/perturbed/generative split matches the configured fractions within ±1 episode.
+2. **Perturbation sigma**: `Perturbed { perturbation_sigma: 0.15 }` produces perturbed values with standard deviation within 5% of 0.15 × original_value.
+3. **Structural similarity floor**: `Generative { structural_similarity_floor: 0.80 }` produces synthetic episodes with HDC similarity ≥ 0.80 to the source episode's vector.
+4. **Anchor bypassing**: an episode with arousal > 0.8 is always assigned `Exact` mode regardless of batch-level fractions.
+5. **Compression ratio**: replayed episode processing time falls within `[min_compression_ratio, max_compression_ratio]` × original episode wall-clock duration.
+
+---
+
+## Replay Scheduling
+
+Optimal replay requires knowing not just *which* episodes to replay, but *when* to replay them and *how often*. The spacing effect (Cepeda et al. 2006) shows that distributed practice produces better retention than massed practice; the EVB framework (Mattar & Daw 2018) provides the normative answer for when to replay vs. collect new experience.
+
+### The EVB Decision: Replay vs. Act
+
+The Expected Value of Backup (EVB) answers: given a finite budget of compute, should the agent replay existing episodes or gather new experience? Mattar & Daw's framework says replay is optimal when:
+
+```
+EVB(best_candidate_episode) > V(collecting_new_experience)
+```
+
+In practice, Roko computes this at the start of each dream cycle. If the current EVB of the highest-utility episode exceeds the expected information gain from the next real task, the dream cycle proceeds. If the agent has rich unexplored tasks, it may defer the dream cycle.
+
+### Spaced Repetition: SM-2 Algorithm
+
+The SM-2 algorithm (Wozniak 1990, the basis for SuperMemo and Anki) provides a principled approach to scheduling individual episode reviews. Each episode accumulates SM-2 state:
+
+```
+Initial easiness factor:  EF₀ = 2.5
+Interval after first replay:  I₁ = 1 hour
+Interval after second replay: I₂ = EF₀ hours
+
+For subsequent replays (n ≥ 3):
+  I(n) = I(n-1) × EF
+
+After each replay, update easiness factor:
+  EF_new = EF + (0.1 - (5 - q) × (0.08 + (5 - q) × 0.02))
+
+Where q is replay quality (0–5 scale derived from insight confidence):
+  q = 5: perfect recall, high-confidence insight produced
+  q = 4: correct with minor difficulty
+  q = 3: correct with significant difficulty
+  q = 2: incorrect, but easy to recall upon seeing the answer
+  q = 1: incorrect, but easy to recall
+  q = 0: complete failure
+
+Minimum EF is 1.3. If EF falls below 1.3, reset interval to I₁.
+```
+
+The quality score q is derived from the insights produced by the replay. A replay that produces a high-confidence, novel insight scores high (q=4 or 5). A replay that produces no new insight and confirms what the agent already knows scores lower (q=2 or 3). A replay whose episode content has drifted so far from current relevance that no actionable insight emerges scores q=1.
+
+### Spindle-Ripple Coupling
+
+Biological sleep exhibits a triple oscillation coupling that gates replay windows: slow oscillations (SO, <1 Hz) set up and down states; sleep spindles (12–16 Hz) relay hippocampal signals to cortex; sharp-wave ripples (80–200 Hz) carry the actual replay content. This creates discrete, rhythmic replay windows rather than continuous replay.
+
+Helfrich et al. (2023, Nature Neuroscience) characterized the precise timing: spindle onset precedes the SO down-state by ~451 ms, and the SWR occurs within 250 ms of spindle onset. This triple coupling is not merely correlational — disrupting the coupling impairs memory consolidation.
+
+Roko's implementation does not model oscillations directly (it operates at the task level, not the millisecond level), but the principle carries over: replay occurs in discrete scheduled windows, not continuously. The `immediate_fraction`, `spaced_fraction`, and `exploration_fraction` parameters carve the replay budget into distinct purposes, analogous to the biological coupling that serves different consolidation functions.
+
+### Scheduling Configuration
+
+```rust
+pub struct ReplayScheduleConfig {
+    /// Spaced repetition easiness factor (SM-2 algorithm).
+    pub initial_easiness: f64,          // default: 2.5, range: 1.3-5.0
+    /// Minimum replay interval in hours.
+    pub min_interval_hours: f64,        // default: 0.5
+    /// Maximum replay interval in hours.
+    pub max_interval_hours: f64,        // default: 168.0 (1 week)
+    /// Quality threshold below which interval resets.
+    pub quality_reset_threshold: f64,   // default: 0.3
+    /// Fraction of replay budget for immediate post-experience replay.
+    pub immediate_fraction: f64,        // default: 0.40
+    /// Fraction for spaced review of older episodes.
+    pub spaced_fraction: f64,           // default: 0.40
+    /// Fraction for exploration of rarely-replayed episodes.
+    pub exploration_fraction: f64,      // default: 0.20
+}
+
+pub struct EpisodicSpacingTracker {
+    /// Per-episode tracking of replay history with SM-2 parameters.
+    entries: HashMap<String, SpacingEntry>,
+}
+
+pub struct SpacingEntry {
+    pub episode_id: String,
+    pub easiness_factor: f64,
+    pub interval_hours: f64,
+    pub replay_count: u32,
+    pub last_quality: f64,
+    pub next_review_at: DateTime<Utc>,
+}
+```
+
+### Adaptive Scheduling Algorithm
+
+```
+function schedule_replay_batch(episodes, budget, tracker, now):
+    immediate = []
+    spaced = []
+    exploration = []
+
+    for episode in episodes:
+        entry = tracker.get(episode.id)
+        if entry is None:
+            // Never replayed — candidate for immediate bucket
+            immediate.append(episode)
+        else if now >= entry.next_review_at:
+            // Due for spaced review
+            spaced.append(episode)
+        else if entry.replay_count <= 1:
+            // Rarely replayed — candidate for exploration
+            exploration.append(episode)
+
+    // Sort each bucket by utility score (Mattar-Daw)
+    immediate.sort_by_utility()
+    spaced.sort_by_utility()
+    exploration.sort_by_utility()
+
+    // Allocate budget according to fractions
+    n_immediate = floor(budget × immediate_fraction)
+    n_spaced    = floor(budget × spaced_fraction)
+    n_explore   = budget - n_immediate - n_spaced
+
+    return (
+        immediate[:n_immediate] +
+        spaced[:n_spaced] +
+        exploration[:n_explore]
+    )
+
+function update_spacing_entry(entry, quality):
+    q_scaled = quality × 5.0  // normalize [0,1] quality to [0,5] SM-2 scale
+    ef_delta = 0.1 - (5 - q_scaled) × (0.08 + (5 - q_scaled) × 0.02)
+    entry.easiness_factor = max(1.3, entry.easiness_factor + ef_delta)
+
+    if quality < quality_reset_threshold:
+        entry.interval_hours = min_interval_hours
+    else:
+        entry.interval_hours = clamp(
+            entry.interval_hours × entry.easiness_factor,
+            min_interval_hours,
+            max_interval_hours
+        )
+
+    entry.replay_count += 1
+    entry.last_quality = quality
+    entry.next_review_at = now + entry.interval_hours
+```
+
+### Recent Connections: FOREVER and MSSR
+
+The FOREVER framework (2025) proposes aligning replay with model-time (optimizer steps) rather than wall-clock time. The insight is that the relevant decay variable is not elapsed time but the number of gradient updates the model has undergone since the episode was encoded — because each update shifts the model's internal representations and potentially invalidates cached patterns. Roko does not currently track optimizer steps (it uses LLM APIs rather than training), but the principle suggests that episode utility should degrade proportionally to how many new episodes the agent has processed since the original episode, not just how much time has elapsed.
+
+The MSSR (2025) framework uses the entropy of the replay buffer — H = -Σ p_i log p_i over the priority distribution — as a scheduling signal. When buffer entropy is high (priorities are uniformly distributed), all episodes are equally interesting and the agent should gather new experience rather than replay. When entropy is low (one or a few episodes dominate), replay is urgent. This provides a natural EVB-like criterion that does not require an explicit model of new-experience value.
+
+### Prioritized Experience Replay Connection
+
+Schaul et al. (2016, "Prioritized Experience Replay") formalize the priority-based sampling that Roko's utility formula approximates:
+
+```
+Sampling probability: P(i) = p_i^α / Σ p_j^α
+
+Where:
+  p_i = |δ_i| + ε    (priority = TD error magnitude + small constant)
+  ε   = 0.01          (ensures all transitions have non-zero probability)
+  α   = 0.6           (controls how much prioritization is used; 0 = uniform)
+
+Importance sampling correction:
+  w_i = (1/N · 1/P(i))^β
+
+Where β anneals from 0.4 to 1.0 over training to correct for bias
+introduced by non-uniform sampling.
+```
+
+In Roko's formulation: `p_i ≈ Gain(episode) × Need(episode)` and the spacing penalty implements the bias correction analogous to importance sampling weights — episodes replayed too frequently have their effective priority reduced.
+
+### Test Criteria for Scheduling
+
+1. **SM-2 interval growth**: after 3 replays with quality 0.9, the interval has grown by at least EF₀² = 6.25× from the initial interval.
+2. **Quality reset**: a replay with quality below `quality_reset_threshold` resets the interval to `min_interval_hours` regardless of prior history.
+3. **Budget allocation**: across a batch of 10 episodes, the immediate/spaced/exploration split matches the configured fractions within ±1 episode.
+4. **EF floor**: easiness factor never falls below 1.3 regardless of how many low-quality replays occur.
+5. **Due detection**: episodes whose `next_review_at` is in the past are always placed in the spaced bucket, not the exploration bucket.
+6. **Priority sampling**: with α=0.6, an episode with p_i=0.9 is sampled at least 3× more often than an episode with p_i=0.1 across 1,000 sampling trials.
+
+---
+
+## Deep RL Experience Replay Connections
+
+Roko's dream replay system re-derives many of the principles discovered empirically by the deep reinforcement learning community. This section makes those connections explicit — both for intellectual grounding and to identify which RL replay techniques have not yet been incorporated.
+
+### DQN: The Foundation
+
+Mnih et al. (2015, "Human-level control through deep reinforcement learning", Nature) introduced experience replay as a core component of DQN:
+
+- **Replay buffer**: circular buffer of 1,000,000 transitions `(s, a, r, s')`, discarding oldest when full
+- **Sampling**: uniform random sampling of minibatches of size 32
+- **Purpose**: breaks temporal correlations in the training stream; allows each transition to contribute to multiple gradient updates
+
+Roko's analog: the `.roko/episodes.jsonl` log is the replay buffer. The Mattar-Daw utility formula replaces uniform sampling with principled prioritization.
+
+### PER: Priority Matters
+
+Schaul et al. (2016, "Prioritized Experience Replay", ICLR) replaced uniform sampling with priority-weighted sampling:
+
+```
+Priority:          p_i = |δ_i| + ε
+                   where δ_i is the TD error and ε = 0.01
+
+Sampling:          P(i) = p_i^α / Σ p_j^α
+                   with α = 0.6
+
+IS correction:     w_i = (1/N · 1/P(i))^β
+                   with β annealing from 0.4 to 1.0
+```
+
+Roko mapping:
+
+| PER Concept | Roko Equivalent |
+|-------------|-----------------|
+| TD error `\|δ_i\|` | `Gain(episode)` — prediction error |
+| Priority `p_i` | `Gain × Need` product |
+| Uniform baseline `ε` | `min_utility = 0.1` floor |
+| IS weight `w_i` | Inverse of spacing penalty |
+| α exponent | Implicit in the linear `Gain × Need` formula (α=1) |
+| β annealing | Not yet implemented; future work |
+
+The key insight PER contributes: IS weights must correct for the bias introduced by non-uniform sampling. Roko's spacing penalty partially achieves this by suppressing over-replayed episodes, but explicit IS weight computation would be a clean addition.
+
+### HER: Relabeling Failure as Success
+
+Andrychowicz et al. (2017, "Hindsight Experience Replay", NeurIPS) addressed the sparse-reward problem: when an agent almost always fails, it has almost nothing to learn from. HER's insight — relabel failed episodes with the goal that was actually achieved, turning failures into successes for a different (virtual) goal.
+
+HER parameters:
+- **k = 4** virtual goals per real transition
+- **Strategy**: "future" — goals sampled from the remainder of the same episode
+- **Effect**: transforms a buffer of near-complete failures into a rich signal about what the agent is capable of achieving
+
+Roko mapping — when a task fails its intended gate, replay that episode with the gate it *did* pass as the "achieved goal":
+
+```
+Original episode:
+  Intended gate: test (FAIL)
+  Passed gates:  compile (PASS), clippy (PASS)
+
+HER relabeling:
+  Virtual goal: "produce code that compiles and passes clippy"
+  Outcome:      SUCCESS (the agent achieved this goal)
+  Insight:      The agent can reliably produce compile-clean, lint-clean code,
+                but struggles with correctness.
+```
+
+This transforms every test-gate failure into a successful `compile+clippy` episode. The agent learns: "I am reliably competent at structural correctness; my gap is behavioral correctness." Without HER relabeling, these failures simply reinforce "I failed" without indicating where the agent's actual capability boundary lies.
+
+HER replay in Roko uses `k=4` virtual relabelings per failed episode, with the "achieved goal" defined as the highest gate rung that passed. The relabeled episodes are tagged with `InsightRelation::HindsightRelabeled` and receive a confidence of 0.45 — moderate confidence, since the relabeled goal was not the intended objective.
+
+### ERE: Emphasize Recent Experience
+
+Wang & Ross (2019, "Boosting Soft Actor-Critic: Emphasizing Recent Experience without Forgetting the Past") introduced ERE, which interpolates between PER's priority-based sampling and a recency bias:
+
+```
+Effective buffer size for the k-th gradient step of episode K:
+  c_k = max(N · η^(k × 1000/K), c_min)
+
+Where:
+  N     = total buffer size
+  η     = 0.996 (controls how fast the window shrinks)
+  K     = total gradient steps per episode
+  c_min = minimum buffer size (e.g., 2,500)
+```
+
+At the start of training on a new episode, the effective buffer size is N (full buffer). As gradient steps accumulate, the effective size shrinks toward c_min, emphasizing recent experience. This prevents forgetting while still allowing learning from the current episode.
+
+Roko mapping: the `centroid_window` parameter (default: 50) implements a softer version of this. Recent episodes contribute fully to the centroid used for Need computation; older episodes are outside the window and have their Need computed against a centroid that does not include them. ERE's η decay could replace the fixed window with a dynamic one.
+
+### Mapping Table
+
+| Deep RL Concept | Algorithm | Roko Dream Equivalent |
+|-----------------|-----------|----------------------|
+| Replay buffer | DQN | `.roko/episodes.jsonl` |
+| Minibatch size | DQN | `batch_size` (default: 10) |
+| Uniform sampling | DQN | Replaced by utility-weighted selection |
+| TD error priority | PER | `Gain(episode)` |
+| IS weight correction | PER | Spacing penalty (approximate) |
+| α exponent (priority sharpness) | PER | Implicit linear formula |
+| β annealing (bias correction) | PER | Not yet implemented |
+| Goal relabeling | HER | Gate-based hindsight relabeling |
+| k virtual goals | HER | k=4 relabelings per failed episode |
+| Recency emphasis | ERE | `centroid_window` (fixed) |
+| η decay parameter | ERE | Could replace `centroid_window` |
+| Circular buffer eviction | DQN | Episode log GC via `roko-fs` |
+| Structural clustering | N/A (Roko-native) | K-medoids over HDC vectors |
+| Generative replay | Scholar (Shin 2017) | `ReplayFidelity::Generative` |
+
+### Test Criteria for RL Connections
+
+1. **HER relabeling**: a failed episode with passing gates {compile, clippy} produces exactly k=4 relabeled virtual episodes, all tagged `HindsightRelabeled`, all with the achieved goal set to the highest passing gate.
+2. **HER confidence**: relabeled episodes receive initial confidence 0.45 ± 0.05.
+3. **PER sampling distribution**: with priorities [0.9, 0.5, 0.1] and α=0.6, the sampling probabilities satisfy P(0.9)/P(0.1) ≥ 4.0.
+4. **ERE window**: with `centroid_window = 50`, Need computation for an episode outside the window uses a centroid that does not include that episode's vector.
+5. **Buffer eviction**: when the episode log exceeds the configured maximum, the oldest episodes are evicted first (FIFO), not the lowest-priority ones.
+6. **HER gate mapping**: a fully failed episode (no gates pass) produces 0 relabeled virtual episodes (nothing to relabel as achieved).
 
 ---
 

@@ -530,6 +530,275 @@ The session output feeds into NREM replay as additional seed material. Retained 
 
 ---
 
+## Hypnagogia Novelty Filtering
+
+### Why the Homuncular Observer Alone Is Insufficient
+
+The Homuncular Observer scores each fragment independently on novelty, relevance, and coherence. But independent scoring misses a structural problem: two fragments can both score high individually while being nearly identical to each other, and both can be novel relative to existing knowledge but not novel relative to the agent's own recent output. A secondary novelty filtering pass addresses this.
+
+### Novelty Search
+
+**Reference**: Lehman & Stanley (2011, Evolutionary Computation), "Abandoning Objectives: Evolution through the Search for Novelty Alone."
+
+Novelty search replaces objective-based selection with archive-based novelty scoring. The novelty of a behavior x is:
+
+```
+novelty(x) = (1/k) Σ_{i=1}^{k} dist(b(x), b(μ_i))
+```
+
+Where:
+- `b(x)` is the behavior characterization of x (in the HDC setting: the fragment's HDC vector)
+- `μ_i` are the k-nearest neighbors of x in the novelty archive
+- k = 15 (default in Lehman & Stanley's experiments)
+- `dist` is Hamming distance in HDC space
+
+**Archive maintenance**: a fragment is added to the novelty archive if `novelty(x) > ρ_min`. The threshold `ρ_min` (range: 0.10–0.60, default: 0.30) controls how aggressively novel a fragment must be to enter the archive. A high threshold produces a sparse archive of only the most unusual fragments. A low threshold admits common fragments and dilutes the archive.
+
+When the archive exceeds `max_archive_size` (default: 1000), the oldest entries are evicted (FIFO eviction). This prevents the archive from drifting too far from recent behavior.
+
+### Computational Serendipity
+
+**Reference**: Corneli, Pease, Colton, Jordanous & Guckelsberger (2020), "Modelling Serendipity in a Computational Context."
+
+Corneli et al. decompose serendipity into six sequential phases:
+
+| Phase | Description | HDC Analog |
+|-------|-------------|------------|
+| **Perception** | Encounter with an unexpected event | Thalamic Gate retrieves anti-correlated entries |
+| **Attention** | The event captures focus | Executive Loosener amplifies the signal |
+| **Interest** | Evaluation of relevance | Homuncular Observer relevance score |
+| **Explanation** | Causal model for why this is interesting | Observer coherence score |
+| **Bridge** | Connection to a prior goal or problem | Observer relevance score relative to current task |
+| **Valuation** | Assignment of worth | Serendipity score = novelty × relevance |
+
+The **serendipity score** combines novelty and relevance:
+
+```
+serendipity(f) = novelty(f) × relevance(f, problem)
+```
+
+A fragment that is novel but irrelevant scores low (a distraction). A fragment that is relevant but not novel scores low (already known). Only genuinely surprising and useful fragments score high on serendipity.
+
+### RAT: Remote Associates Test
+
+The **Remote Associates Test** (Mednick 1962, Psychological Review) measures creative association quality. Subjects are given three words (e.g., "falling, actor, dust") and must find a fourth word that connects all three ("star"). High RAT scores correlate with insight problem-solving performance.
+
+In the hypnagogia context, RAT serves as a benchmark for evaluating the quality of associations produced by the engine. A high-quality hypnagogic fragment should connect at least two semantically distant knowledge entries via a third concept — the computational analog of the RAT paradigm. The HDC binding operation (`bind(A, B)`) explicitly encodes "A related to B," enabling direct RAT-style evaluation: given fragment F, does it bind entries from at least two different knowledge clusters?
+
+### Multi-Stage Filtering Pipeline
+
+The complete novelty filtering pipeline runs after the Homuncular Observer:
+
+```
+STAGE 1: Homuncular Observer
+  - Scores each fragment on novelty, relevance, coherence ∈ [0, 1]
+  - Rejects fragments below 0.5 on any dimension
+  - Output: candidate fragments (typically 1-3 of 5 Dali fragments)
+
+STAGE 2: Novelty Search Against Knowledge Archive
+  - Compute HDC vector for each candidate fragment
+  - Score against novelty archive: novelty(f) = (1/15) Σ dist(f.hdc, μ_i)
+  - Reject fragments with novelty(f) < novelty_threshold (default: 0.30)
+  - Update archive: add fragments with novelty > novelty_threshold
+  - Output: novel candidates
+
+STAGE 3: Serendipity Scoring
+  - serendipity(f) = novelty(f) × relevance(f, current_task)
+  - relevance(f, task) = similarity(f.hdc, task_focus_vector) [0, 1]
+  - Reject fragments with serendipity < min_serendipity (default: 0.25)
+  - Output: serendipitous candidates
+
+STAGE 4: Incubation Check
+  - Reject fragments whose core HDC vector is within min_pairwise_distance of
+    any other candidate (prevents near-duplicate retention)
+  - Output: final retained fragments
+```
+
+### Rust Struct
+
+```rust
+pub struct NoveltyFilter {
+    /// k-nearest neighbors for novelty scoring.
+    pub k_neighbors: usize,               // default: 15
+    /// Minimum novelty score for archive inclusion.
+    pub novelty_threshold: f64,            // default: 0.30, range: 0.10-0.60
+    /// Maximum archive size (older entries evicted).
+    pub max_archive_size: usize,           // default: 1000
+    /// Serendipity scoring weight for novelty component.
+    pub serendipity_novelty_weight: f64,   // default: 0.5
+    /// Serendipity scoring weight for relevance component.
+    pub serendipity_relevance_weight: f64, // default: 0.5
+    /// Minimum serendipity score for fragment retention.
+    pub min_serendipity: f64,              // default: 0.25, range: 0.10-0.50
+}
+```
+
+### Academic Citations
+
+| Paper | Relevance |
+|-------|-----------|
+| Lehman & Stanley (2011, Evolutionary Computation), "Abandoning Objectives: Evolution through the Search for Novelty Alone" | Novelty score formula; k=15 nearest neighbors; archive maintenance with ρ_min |
+| Corneli, Pease, Colton, Jordanous & Guckelsberger (2020), "Modelling Serendipity in a Computational Context" | Six-phase serendipity model; serendipity = novelty × relevance |
+| Mednick (1962, Psychological Review), "The Associative Basis of the Creative Process" | Remote Associates Test as benchmark for creative association quality |
+| Lehman & Stanley (2008, ALIFE), "Exploiting Open-Endedness to Solve Problems through the Search for Novelty" | Archive-based novelty search; open-ended exploration without fixed objectives |
+
+### Test Criteria
+
+1. **Novelty score range**: all novelty scores are in [0.0, 1.0].
+2. **Archive admission**: a fragment with novelty 0.35 (above default threshold 0.30) is added to the archive. A fragment with novelty 0.20 is not added.
+3. **Archive size enforcement**: after 1100 insertions with `max_archive_size = 1000`, the archive contains exactly 1000 entries (oldest 100 evicted).
+4. **Serendipity weights sum to 1.0**: `serendipity_novelty_weight + serendipity_relevance_weight == 1.0`.
+5. **Serendipity filtering**: a fragment with novelty 0.80 and relevance 0.20 gives serendipity 0.50 × 0.80 + 0.50 × 0.20 = 0.50; it passes if `min_serendipity = 0.25` but fails stricter thresholds.
+6. **Near-duplicate rejection**: two fragments with HDC similarity > (1 - `min_pairwise_distance`) result in only one being retained.
+7. **Empty archive**: novelty scoring against an empty archive returns `novelty = 1.0` (maximally novel — no basis for comparison).
+8. **k > archive size**: when archive has fewer than k entries, use all archive entries for scoring without panic.
+
+---
+
+## Hypnagogia-to-Insight Pipeline
+
+### From Fragment to Actionable Hypothesis
+
+The four-layer hypnagogia engine produces retained fragments — brief, associative, partially formed ideas that have passed novelty and plausibility filters. These fragments are valuable but not yet actionable: they lack the structure needed to generate testable hypotheses or executable plans. The Hypnagogia-to-Insight Pipeline bridges this gap.
+
+### The Creative Sweet Spot: N1 Sleep Stage
+
+**Reference**: Lacaux et al. (2021, Science Advances), "Sleep Onset Is a Creative Sweet Spot."
+
+Lacaux et al. found that creative problem-solving success requires **at least 15 seconds in the N1 sleep stage** — not merely touching it. The key EEG signature is **alpha power** (9–9.8 Hz), which shows a **negative quadratic relationship** with insight: both too little alpha (fully awake, executive control dominant) and too much alpha (N2 sleep, inhibition of associative networks) reduce insight. The optimal alpha level corresponds to the N1/N2 transition.
+
+**Hori classification** (Hori et al. 1994) identifies 9 substages within N1, with imagery peaks at **Stages 4 and 5** (EEG flattening and theta ripples at 4–7 Hz). These substages correspond computationally to the regime where:
+- Executive control (high-temperature generation) has been active long enough to have produced diverse fragments
+- But structured reasoning (low-temperature elaboration) has not yet organized them into conventional thoughts
+
+The minimum 15-second requirement translates computationally to running at least 3–5 Dali Interrupt fragments before evaluation: the engine must "stay loose" long enough to generate genuinely novel associations before the Observer applies selective pressure.
+
+### Incubation and the Wallas Model
+
+**Reference**: Wallas (1926), "The Art of Thought."
+
+Wallas decomposed the creative process into four stages:
+
+| Stage | Description | Computational Analog |
+|-------|-------------|---------------------|
+| **Preparation** | Saturate with the problem domain | Goal priming via task context injection |
+| **Incubation** | Unconscious processing; avoid conscious effort | Anti-correlated retrieval + elevated temperature |
+| **Illumination** | The "aha" moment | Dali Interrupt captures the cross-domain binding |
+| **Verification** | Test and develop the insight | Homuncular Observer + semantic elaboration |
+
+The incubation stage is critical: actively trying to solve the problem during incubation disrupts the process. The computational implementation enforces incubation by design — the Thalamic Gate retrieves entries *dissimilar* to the current focus, preventing direct pursuit of the known solution path.
+
+### Spreading Activation
+
+**Reference**: Collins & Loftus (1975, Psychological Review), "A Spreading-Activation Theory of Semantic Processing."
+
+In the spreading activation model, concepts in semantic memory are nodes in a network. Activation spreads from primed nodes along edges (semantic associations), decaying with path length:
+
+```
+activation(node_j, t) = Σ_{i: source} activation(node_i, 0) · decay_rate^path_length · e^{-λt}
+```
+
+Where:
+- `activation(node_i, 0)` is the initial activation of source node i (from goal priming)
+- `decay_rate^path_length` is the decay along the path (typically 0.5–0.8 per hop)
+- `e^{-λt}` is the time decay (λ ≈ 0.1 per second in biological systems)
+
+In the HDC setting, spreading activation is approximated via bundling: the focus vector is bundled with small weights toward increasingly distant neighbors, allowing activation to "spread" across the knowledge graph. The Thalamic Gate's anti-correlated retrieval selects nodes that were not activated by this spreading — the furthest reaches of the semantic network.
+
+### Bisociation
+
+**Reference**: Koestler (1964), "The Act of Creation."
+
+Koestler coined **bisociation** to describe the creative collision of two normally incompatible "matrices of thought" — two self-consistent but mutually exclusive frames of reference. A pun bisociates two semantic fields via a word that belongs to both. A scientific discovery bisociates two domain models via an unexpected structural homology.
+
+In the HDC setting, bisociation is implemented via **anti-correlated retrieval finding entries from different knowledge clusters**. The HDC binding of two entries from maximally distant clusters produces a vector that is orthogonal to both — it encodes the relationship between two normally unconnected frames of thought. When the Executive Loosener is prompted with such a pair, the resulting fragment often contains the seeds of a bisociative insight.
+
+To identify cross-cluster pairs, the hypnagogia engine can use the K-medoids clustering from `roko-learn::hdc_clustering`: select one entry from cluster A and one from cluster B (where clusters A and B are maximally far apart by medoid distance). This guarantees bisociation — the two entries come from genuinely different knowledge domains.
+
+### The Full Pipeline
+
+```
+HYPNAGOGIA-TO-INSIGHT PIPELINE:
+
+  Stage 1: Goal Priming (Preparation)
+    - Inject current task context as HDC focus vector
+    - Active problem representation biases which associations are noticed
+    - Implementation: compute_focus_vector() from current task + recent episodes
+    - The focus vector is NOT used to retrieve similar entries (that is waking retrieval)
+      It is used only to set the "anti-target" for the Thalamic Gate
+
+  Stage 2: Fragment Generation (Incubation → Illumination)
+    - Thalamic Gate → Executive Loosener → Dali Interrupt
+    - Alpha suppression analog: elevated temperature (1.3) opens generation to
+      low-probability tokens — the computational analog of reduced alpha power
+    - Theta analog: HDC anti-correlated retrieval enables remote binding by
+      surface entries from maximally different knowledge clusters (bisociation)
+    - Minimum: 3 Dali fragments before Observer evaluation (N1 dwell time analog)
+
+  Stage 3: Observer Filtering (Verification)
+    - Homuncular Observer scores novelty/relevance/coherence (see Layer 4 above)
+    - NoveltyFilter applies novelty search and serendipity scoring
+    - Serendipity score: serendipity(f) = novelty(f) × relevance(f, problem)
+    - Near-duplicate rejection via pairwise HDC distance
+
+  Stage 4: Semantic Elaboration
+    - Retained fragments undergo brief LLM expansion (sonnet-class, 100-200 tokens)
+    - Prompt: "Develop this fragment into a testable hypothesis: [fragment]"
+    - Output: structured hypothesis with preconditions and predictions
+    - The elaboration model operates at low temperature (0.5) to produce
+      coherent structure from the loose fragment
+
+  Stage 5: Staging
+    - Elaborated hypotheses enter the staging buffer at confidence 0.20-0.25
+    - This is intentionally low: hypnagogic insights are speculative until validated
+    - Tagged with source=hypnagogia for provenance tracking
+    - The staging buffer feeds into NREM replay as high-gain synthetic episodes
+```
+
+### Rust Struct
+
+```rust
+pub struct HypnagogiaInsightPipeline {
+    /// Whether to run semantic elaboration on retained fragments.
+    pub elaborate_fragments: bool,          // default: true
+    /// Maximum tokens for elaboration per fragment.
+    pub elaboration_max_tokens: usize,      // default: 200
+    /// Model tier for elaboration.
+    pub elaboration_model_tier: ModelTier,  // default: T1 (Sonnet-class)
+    /// Initial confidence for hypnagogia-sourced hypotheses.
+    pub initial_confidence: f64,            // default: 0.22, range: 0.15-0.30
+    /// Maximum fragments to elaborate per session.
+    pub max_elaborations: usize,            // default: 3
+    /// Goal priming weight (how strongly current task biases retrieval).
+    pub goal_priming_weight: f64,           // default: 0.30, range: 0.0-0.50
+}
+```
+
+### Academic Citations
+
+| Paper | Relevance |
+|-------|-----------|
+| Lacaux et al. (2021, Science Advances), "Sleep Onset Is a Creative Sweet Spot" | N1 dwell time ≥ 15 s; alpha 9–9.8 Hz negative quadratic relationship with insight |
+| Hori et al. (1994), "Proposed supplements and amendments to Rechtschaffen and Kales" | 9-substage N1 classification; imagery peaks at Stages 4–5 (EEG flattening + theta) |
+| Wallas (1926), "The Art of Thought" | Preparation → Incubation → Illumination → Verification; incubation enforced structurally |
+| Collins & Loftus (1975, Psychological Review), "A Spreading-Activation Theory of Semantic Processing" | Spreading activation formula; decay rate per path length; time decay λ |
+| Koestler (1964), "The Act of Creation" | Bisociation: creative collision of incompatible matrices of thought; cross-cluster HDC binding |
+
+### Test Criteria
+
+1. **Goal priming effect**: with `goal_priming_weight = 0.30`, the focus vector is 30% influenced by task context and 70% by recency (computed as a weighted bundle of the task vector and the most recent episode vector).
+2. **Elaboration token limit**: elaboration output never exceeds `elaboration_max_tokens` tokens.
+3. **Elaboration model tier**: elaboration calls use the configured `elaboration_model_tier`, verified via mock LLM provider in tests.
+4. **Initial confidence range**: all hypotheses staged from hypnagogia have `confidence ∈ [0.15, 0.30]` at creation.
+5. **Max elaborations**: when 5 fragments are retained but `max_elaborations = 3`, only 3 are elaborated (highest serendipity score wins).
+6. **Provenance tagging**: all staged hypotheses from hypnagogia carry `source = "hypnagogia"` in metadata.
+7. **Bisociation via clusters**: when K-medoids identifies 4 clusters, cross-cluster Thalamic Gate pairs come from different cluster assignments (verified by checking medoid assignments of the two retrieved entries).
+8. **Staging confidence**: a hypothesis staged with `initial_confidence = 0.22` reads back from the staging buffer with confidence 0.22 (no rounding or truncation).
+9. **Pipeline without elaboration**: with `elaborate_fragments = false`, retained fragments are staged as raw text fragments without LLM expansion; no elaboration call is made.
+10. **End-to-end staging**: a full pipeline run produces at least one staged hypothesis in the staging buffer when the NeuroStore has ≥ 10 entries and at least one Dali fragment passes the Observer.
+
+---
+
 ## Cross-References
 
 | Document | Relevance |

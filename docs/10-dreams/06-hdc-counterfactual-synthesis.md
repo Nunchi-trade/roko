@@ -548,6 +548,356 @@ DreamCycle::run()
 
 ---
 
+## Counterfactual Diversity
+
+### Why Single Counterfactuals Are Insufficient
+
+Generating only a single counterfactual for an episode is inadequate for three structural reasons:
+
+1. **Single recourse path**: One counterfactual gives one direction to move — but the real decision boundary may be irregular, and multiple paths of different cost exist. The agent needs options.
+2. **Decision boundary geometry is hidden**: A single counterfactual tells you one point on the decision boundary, not its shape. The agent cannot distinguish between a flat boundary (many paths) and a sharp ridge (one narrow path) from a single example.
+3. **Sensitivity to perturbations**: A single counterfactual may lie in a low-density region of knowledge space — plausible in theory but unreachable in practice, or unstable under small perturbations. Diverse counterfactuals make it possible to select the most robust option.
+
+### DiCE: Diverse Counterfactual Explanations
+
+**Reference**: Mothilal, Sharma & Tan (2020, FAT*), "Explaining Machine Learning Classifiers through Diverse Counterfactual Explanations."
+
+DiCE generates a set of k counterfactuals that are jointly optimized for proximity to the original and diversity from each other. The loss function is:
+
+```
+L = L_yloss + λ_p · L_proximity - λ_d · det(K)
+```
+
+Where:
+- `L_yloss` = classification loss (counterfactual must flip the decision)
+- `L_proximity` = distance from the original episode (weighted by MAD-normalized L1)
+- `det(K)` = determinant of the kernel matrix K — maximized to spread counterfactuals apart
+- `K_{i,j} = 1 / (1 + dist(c_i, c_j))` for counterfactuals i, j in the generated set
+
+**Default parameters**: λ_p = 0.5, λ_d = 1.0, k = 3–5 counterfactuals.
+
+The kernel matrix K is a Gram matrix: `det(K)` measures the volume spanned by the counterfactual set in feature space. Maximizing the determinant forces counterfactuals to cover different regions of the feature space, producing a geometrically diverse set.
+
+### DPP Sampling
+
+**Determinantal Point Process (DPP)** sampling provides a principled way to select a diverse subset from a larger candidate pool. For a ground set Y = {c_1, ..., c_N} of candidate counterfactuals and a kernel matrix L (where L_{i,j} encodes similarity between c_i and c_j):
+
+```
+P(S ⊆ Y) ∝ det(L_S)  for |S| = k
+```
+
+`L_S` is the submatrix of L indexed by S. The probability of selecting a subset S is proportional to the volume it spans in the kernel space. Subsets containing highly similar items (small volume, small determinant) are selected with low probability. Diverse subsets (large volume, large determinant) are selected with high probability.
+
+In the HDC context, the kernel matrix is constructed from HDC Hamming similarities:
+
+```rust
+fn build_kernel_matrix(counterfactuals: &[HdcVector]) -> Vec<Vec<f64>> {
+    let n = counterfactuals.len();
+    let mut k = vec![vec![0.0; n]; n];
+    for i in 0..n {
+        for j in 0..n {
+            let sim = counterfactuals[i].similarity(&counterfactuals[j]) as f64;
+            k[i][j] = if i == j { 1.0 } else { sim };
+        }
+    }
+    k
+}
+```
+
+### Wachter et al. Original Formulation
+
+**Reference**: Wachter, Mittelstadt & Russell (2017/2018, Harvard JOLT), "Counterfactual Explanations without Opening the Black Box."
+
+The original single-counterfactual formulation minimizes:
+
+```
+L(x, x', y', λ) = λ · (f̂(x') - y')² + d(x, x')
+```
+
+Where `d(x, x')` is the MAD-weighted L1 distance:
+
+```
+d(x, x') = Σ_j |x_j - x'_j| / MAD_j
+```
+
+`MAD_j = median(|x_j - median(x_j)|)` is the Median Absolute Deviation of feature j across the dataset. MAD normalization makes the distance scale-invariant — a change of 1 unit in a high-variance feature is penalized less than the same change in a low-variance feature.
+
+DiCE extends this to k counterfactuals by adding the DPP diversity term. In the HDC setting, `d(x, x')` is replaced by Hamming distance between the original episode vector and the counterfactual vector.
+
+### Coverage Metrics
+
+**Coverage** measures the fraction of users (or episodes) for whom at least one counterfactual in the generated set is actionable. A high-diversity set may still fail to cover certain subgroups if all counterfactuals are clustered in one region of the feature space. Coverage is the primary population-level evaluation metric.
+
+### Evaluation Metrics
+
+| Metric | Definition | Target |
+|--------|-----------|--------|
+| **Validity** | Fraction of CFs that actually flip the decision | > 0.95 |
+| **Proximity** | Mean MAD-weighted distance from original | Minimize |
+| **Sparsity** | Mean fraction of features changed | Minimize |
+| **Diversity (IM1)** | Mean pairwise distance within the CF set | Maximize |
+| **Diversity (IM2)** | Determinant of pairwise distance matrix | Maximize |
+| **Plausibility** | Fraction of CFs in high-density regions of training data | > 0.70 |
+| **Actionability** | Fraction of CFs satisfying domain constraints | > 0.80 |
+| **Coverage** | Fraction of episodes with at least one actionable CF | > 0.60 |
+
+### Rust Structs
+
+```rust
+pub struct CounterfactualDiversityConfig {
+    /// Number of diverse counterfactuals to generate per episode.
+    pub k: usize,                          // default: 5, range: 2-10
+    /// Proximity weight (pulls CFs toward original).
+    pub proximity_weight: f64,             // default: 0.5, range: 0.1-2.0
+    /// Diversity weight (spreads CFs apart via DPP).
+    pub diversity_weight: f64,             // default: 1.0, range: 0.1-5.0
+    /// Minimum pairwise HDC distance between counterfactuals.
+    pub min_pairwise_distance: f32,        // default: 0.15, range: 0.05-0.40
+    /// Maximum feature changes per counterfactual (sparsity constraint).
+    pub max_features_changed: usize,       // default: 3, range: 1-10
+}
+
+pub struct CounterfactualSet {
+    pub original_episode: String,
+    pub counterfactuals: Vec<CounterfactualHypothesis>,
+    pub diversity_score: f64,
+    pub coverage_score: f64,
+    pub mean_proximity: f64,
+    pub mean_sparsity: f64,
+}
+```
+
+### Algorithm: Diverse CF Generation Using DPP
+
+```
+GENERATE-DIVERSE-COUNTERFACTUALS(episode, config):
+
+  Input: episode (HDC vector + feature dict), config: CounterfactualDiversityConfig
+  Output: CounterfactualSet
+
+  1. Generate candidate pool (M = k * 10 candidates):
+     FOR i = 1..M:
+       shift ← random_element([1, 2, 4, 8, 16, 32, 64])
+       candidate_vec ← episode.hdc_vector.permute(shift)
+       // Optionally blend with a randomly retrieved anti-correlated entry
+       IF rand() < 0.3:
+         anti_entry ← anti_correlated_retrieval(episode.hdc_vector, 1)[0]
+         blend_ratio ← Uniform(0.1, 0.5)
+         candidate_vec ← counterfactual_blend(candidate_vec, anti_entry.hdc_vector, blend_ratio)
+       candidates.push(candidate_vec)
+
+  2. Filter by validity (decision flip):
+     valid_candidates ← [c for c in candidates if flips_decision(episode, c)]
+
+  3. Filter by sparsity (max features changed):
+     sparse_candidates ← [c for c in valid_candidates
+                           if count_feature_changes(episode, c) <= config.max_features_changed]
+
+  4. If |sparse_candidates| <= k:
+     RETURN CounterfactualSet from all sparse_candidates
+
+  5. DPP selection — greedy MAP inference:
+     Build kernel matrix K where K[i][j] = similarity(sparse_candidates[i], sparse_candidates[j])
+     selected ← []
+     WHILE |selected| < k AND sparse_candidates not empty:
+       // Greedy: add the candidate that maximizes det(L_{selected ∪ {candidate}})
+       best ← argmax over remaining candidates of det_increment(selected, candidate, K)
+       selected.push(best)
+       // Enforce minimum pairwise distance constraint
+       sparse_candidates ← [c for c in sparse_candidates
+                             if similarity(c, best) < (1.0 - config.min_pairwise_distance)]
+
+  6. Compute metrics:
+     diversity_score ← det(K_selected) ^ (1/k)
+     mean_proximity ← mean(hamming_distance(episode.hdc_vector, c) for c in selected)
+     mean_sparsity ← mean(count_feature_changes(episode, c) / total_features for c in selected)
+
+  7. RETURN CounterfactualSet {
+       original_episode: episode.id,
+       counterfactuals: selected,
+       diversity_score,
+       coverage_score: 0.0,  // computed separately at population level
+       mean_proximity,
+       mean_sparsity,
+     }
+```
+
+### Academic Citations
+
+| Paper | Relevance |
+|-------|-----------|
+| Mothilal, Sharma & Tan (2020, FAT*), "Explaining Machine Learning Classifiers through Diverse Counterfactual Explanations" | DiCE loss function, DPP determinant term, diversity metrics IM1/IM2 |
+| Wachter, Mittelstadt & Russell (2017/2018, Harvard JOLT), "Counterfactual Explanations without Opening the Black Box" | Original CF formulation: MAD-weighted L1 + λ proximity-validity tradeoff |
+| Kulesza & Taskar (2012, Foundations and Trends in ML), "Determinantal Point Processes for Machine Learning" | DPP theory: P(S) ∝ det(L_S), greedy MAP inference |
+| Verma et al. (2020, ICLR workshop), "Counterfactual Explanations for Machine Learning: A Review" | Validity/proximity/sparsity/diversity evaluation taxonomy |
+
+### Test Criteria
+
+1. **DPP diversity**: generated sets of k=5 CFs have mean pairwise Hamming distance > `min_pairwise_distance`.
+2. **Validity**: all CFs in the set have similarity below the original episode's decision threshold (they are in a different region of knowledge space).
+3. **Sparsity**: no CF changes more than `max_features_changed` features from the original.
+4. **Kernel matrix symmetry**: `K[i][j] == K[j][i]` for all i, j; diagonal entries are 1.0.
+5. **Greedy selection monotonicity**: adding each successive CF to the selected set increases the determinant of the kernel submatrix.
+6. **Coverage**: across 100 episodes, at least 60% have at least one CF within proximity threshold of the original.
+7. **Empty candidate pool**: if no valid candidates survive validity + sparsity filtering, return a set with 0 counterfactuals without panic.
+8. **Metric ranges**: `diversity_score` ∈ [0, 1]; `mean_proximity` ∈ [0, 1]; `mean_sparsity` ∈ [0, 1].
+
+---
+
+## Counterfactual Plausibility Scoring
+
+A counterfactual that is diverse and proximate may still be useless if it represents an unreachable or incoherent state — a point in HDC space that no real episode would ever occupy. Plausibility scoring filters out these "off-manifold" counterfactuals.
+
+### FACE: Feasible Actionable Counterfactuals via Density-Weighted Paths
+
+**Reference**: Poyiadzi, Sokol, Santos-Rodriguez, De Bie & Flach (2020, AIES), "FACE: Feasible and Actionable Counterfactual Explanations."
+
+FACE replaces the direct L1 proximity measure with a **density-weighted shortest path** cost. The idea: a CF reachable only through low-density regions of knowledge space requires traversing states that are rare or impossible. The path cost penalizes such routes:
+
+```
+D_{f,γ} = ∫_γ f(γ(t)) · |γ'(t)| dt
+```
+
+Where:
+- `γ(t)` is a path from the original episode to the counterfactual in feature space
+- `|γ'(t)|` is the speed of traversal (arc length element)
+- `f(γ(t)) = 1 / density(γ(t))` — low-density regions cost more to traverse
+
+The integral measures cumulative cost along the path, weighted by the inverse of the local density. A CF reachable through high-density regions (many real examples nearby at each step) has low FACE cost. A CF only reachable through sparse, rarely-observed states has high FACE cost.
+
+**Graph approximation**: FACE approximates the continuous integral with a graph where nodes are training episodes and edges are weighted by `1 / (density_A + density_B)` for adjacent nodes A, B. Shortest paths in this graph approximate the integral. In the HDC context, nodes are NeuroStore entries and edge weights are derived from local KDE estimates.
+
+### Density-Based Plausibility: KDE Scoring
+
+Kernel Density Estimation scores how likely a counterfactual is relative to the distribution of known episodes:
+
+```
+p̂(x') = (1 / (N · h^d)) Σ_{i=1}^{N} K((x' - x_i) / h)
+```
+
+Where:
+- `x_i` are the N training episodes
+- `h` is the bandwidth (smoothing parameter)
+- `d` is the feature dimension
+- `K` is the kernel function (Gaussian in continuous space; approximate via HDC similarity in vector space)
+
+In the HDC setting, the continuous KDE is approximated as:
+
+```rust
+fn hdc_kde_score(candidate: &HdcVector, store: &[HdcVector], bandwidth: f32) -> f64 {
+    let n = store.len() as f64;
+    let sum: f64 = store.iter()
+        .map(|x_i| {
+            let sim = candidate.similarity(x_i) as f64;
+            // Gaussian kernel: K(u) = exp(-u²/2), u = (1 - sim) / bandwidth
+            let u = (1.0 - sim) / bandwidth as f64;
+            (-u * u / 2.0).exp()
+        })
+        .sum();
+    sum / n
+}
+```
+
+A high KDE score indicates the counterfactual lies in a densely populated region of knowledge space — similar to many known episodes. A low score indicates an outlier.
+
+### Local Outlier Factor
+
+**LOF** (Breunig et al. 2000, SIGMOD) measures the local density deviation of a point compared to its k-nearest neighbors:
+
+```
+LOF_k(x') = (1/k) Σ_{o ∈ N_k(x')} [lrd_k(o) / lrd_k(x')]
+```
+
+Where `lrd_k(x') = 1 / (mean reachability distance of x' from its k-nearest neighbors)`.
+
+- `LOF_k(x') ≈ 1.0`: point has similar density to its neighbors (not an outlier)
+- `LOF_k(x') >> 1.0`: point is in a lower-density region than its neighbors (outlier)
+
+Counterfactuals with `LOF > 2.0` (default threshold) are rejected as outliers — they lie in regions of knowledge space that are significantly less dense than the surrounding area, indicating they are off-manifold.
+
+### VAE-Based Plausibility
+
+A Variational Autoencoder trained on the episode distribution can detect off-manifold counterfactuals via reconstruction error: if the VAE cannot reconstruct a candidate well, the candidate is not on the learned manifold. In the HDC setting, this is approximated by checking whether the candidate vector can be expressed as a bundle of known episode vectors with reasonable weight magnitudes. High reconstruction error → low plausibility.
+
+### Causal Consistency
+
+**Reference**: Karimi, Barthe, Balle & Valera (2021, FAccT), "Algorithmic Recourse: from Counterfactual Explanations to Interventions."
+
+Karimi et al. distinguish between:
+- **Counterfactual explanation**: tells you where to end up (the CF point)
+- **Algorithmic recourse**: tells you what actions to take (the intervention sequence)
+
+Causal consistency requires that the counterfactual be reachable via a valid sequence of interventions in the causal graph. Using Pearl's do-calculus, a causally consistent CF must satisfy all structural equations when the intervened variables are set to their CF values. In the HDC setting, causal consistency is checked by verifying that the feature changes implied by the CF do not violate known causal dependencies (encoded in the `CausalGraph` struct).
+
+### Composite Plausibility
+
+The three components are combined into a single composite plausibility score:
+
+```
+composite_plausibility =
+    path_weight · (1 / (1 + FACE_cost)) +
+    density_weight · KDE_score +
+    causal_weight · causal_consistency_score
+```
+
+Default weights: `path_weight = 0.30`, `density_weight = 0.40`, `causal_weight = 0.30`. These sum to 1.0. Density receives the highest weight because it is the most directly computable and least assumption-dependent measure.
+
+### Rust Structs
+
+```rust
+pub struct PlausibilityScorer {
+    /// Minimum density score for CF acceptance (KDE-based).
+    pub min_density_score: f64,            // default: 0.30, range: 0.10-0.70
+    /// LOF threshold: CFs with LOF above this are rejected as outliers.
+    pub max_lof: f64,                      // default: 2.0, range: 1.5-5.0
+    /// Whether to check causal consistency against the CausalGraph.
+    pub check_causal_consistency: bool,    // default: true
+    /// HDC manifold proximity threshold.
+    pub manifold_proximity_threshold: f32, // default: 0.55, range: 0.40-0.70
+    /// Weight for path-based plausibility (FACE-style).
+    pub path_weight: f64,                  // default: 0.30
+    /// Weight for density-based plausibility.
+    pub density_weight: f64,               // default: 0.40
+    /// Weight for causal consistency.
+    pub causal_weight: f64,                // default: 0.30
+}
+
+pub struct PlausibilityReport {
+    pub counterfactual_id: String,
+    pub density_score: f64,
+    pub lof_score: f64,
+    pub causal_consistency: bool,
+    pub manifold_proximity: f32,
+    pub composite_plausibility: f64,
+    pub accepted: bool,
+}
+```
+
+### Academic Citations
+
+| Paper | Relevance |
+|-------|-----------|
+| Poyiadzi, Sokol, Santos-Rodriguez, De Bie & Flach (2020, AIES), "FACE: Feasible and Actionable Counterfactual Explanations" | Density-weighted shortest path cost; graph approximation |
+| Breunig, Kriegel, Ng & Sander (2000, SIGMOD), "LOF: Identifying Density-Based Local Outliers" | LOF outlier detection; local reachability density |
+| Karimi, Barthe, Balle & Valera (2021, FAccT), "Algorithmic Recourse: from Counterfactual Explanations to Interventions" | Distinction between CF explanations and actionable recourse; causal consistency via Pearl's framework |
+| Pearl (2009), "Causality: Models, Reasoning, and Inference" | Structural causal models; do-calculus for intervention consistency |
+| Kingma & Welling (2013), arXiv:1312.6114, "Auto-Encoding Variational Bayes" | VAE reconstruction error as off-manifold indicator |
+
+### Test Criteria
+
+1. **KDE score range**: all returned scores are in [0.0, 1.0].
+2. **LOF threshold enforcement**: a point isolated from all neighbors (LOF >> 2.0) is rejected when `max_lof = 2.0`.
+3. **KDE high density**: a counterfactual identical to a known episode scores near 1.0 on KDE.
+4. **KDE low density**: a counterfactual constructed as the XOR of two random unrelated vectors scores near 0.0 on KDE.
+5. **Causal consistency flag**: a CF that inverts a feature that is a known effect (not a cause) is flagged as causally inconsistent when `check_causal_consistency = true`.
+6. **Composite weight sum**: `path_weight + density_weight + causal_weight == 1.0` (enforced at config construction).
+7. **PlausibilityReport.accepted**: set to `true` iff `composite_plausibility >= min_density_score` AND `lof_score <= max_lof` AND (not `check_causal_consistency` OR `causal_consistency == true`).
+8. **Manifold proximity**: a CF vector with similarity < `manifold_proximity_threshold` to all NeuroStore entries is flagged as off-manifold regardless of other scores.
+9. **LOF with k=1**: single-entry NeuroStore returns LOF = 1.0 for all candidates (no neighborhood to compare against); no panic.
+10. **FACE path weight**: increasing `path_weight` lowers the composite score for CFs that require traversal through low-density regions.
+
+---
+
 ## Cross-References
 
 | Document | Relevance |
