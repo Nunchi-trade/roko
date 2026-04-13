@@ -266,8 +266,10 @@ impl App {
         }
 
         // Content: dispatch to active tab view
-        let content_idx = if has_waves { 2 } else { 1 };
-        let footer_idx = if has_waves { 3 } else { 2 };
+        // Layout always has 4 slots: [0]=header [1]=wave [2]=content [3]=footer
+        // The wave slot is 0-height when idle, but indices don't change.
+        let content_idx = 2;
+        let footer_idx = 3;
 
         let view_state = ViewState {
             scroll: self.tui_state.plan_scroll_offset as u16,
