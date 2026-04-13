@@ -516,6 +516,285 @@ This state is sufficient for any renderer (TUI ASCII, Web Portal WebGL, or custo
 
 ---
 
+## Procedural Generation Techniques
+
+### L-System Body Construction
+
+Spectre body topology can be generated using stochastic L-systems — parallel rewriting grammars that produce organic branching structures. The agent's shape seed selects production rules:
+
+```rust
+/// L-system for organic Spectre body topology generation.
+pub struct SpectreGrammar {
+    pub axiom: String,
+    pub rules: Vec<ProductionRule>,
+    pub iterations: u32,
+}
+
+pub struct ProductionRule {
+    pub symbol: char,
+    pub probability: f32,
+    pub replacement: String,
+}
+
+/// Interpret L-system string as 3D turtle geometry.
+/// F = forward, + = yaw left, - = yaw right,
+/// ^ = pitch up, & = pitch down, [ = push, ] = pop
+pub fn interpret_lsystem(program: &str, step: f32, angle: f32) -> Vec<SpectrePoint> {
+    let mut points = Vec::new();
+    let mut stack = Vec::new();
+    let mut pos = [0.0f32; 3];
+    let mut heading = [0.0, 1.0, 0.0]; // up
+    for ch in program.chars() {
+        match ch {
+            'F' => {
+                pos[0] += heading[0] * step;
+                pos[1] += heading[1] * step;
+                pos[2] += heading[2] * step;
+                points.push(SpectrePoint {
+                    position: pos,
+                    weight: 1.0,
+                    kind: PointKind::Body,
+                    color: None,
+                });
+            }
+            '[' => stack.push((pos, heading)),
+            ']' => { if let Some((p, h)) = stack.pop() { pos = p; heading = h; } }
+            '+' => rotate_yaw(&mut heading, angle),
+            '-' => rotate_yaw(&mut heading, -angle),
+            _ => {}
+        }
+    }
+    points
+}
+```
+
+### Reaction-Diffusion Surface Textures
+
+The `domain_texture` parameter uses a Gray-Scott reaction-diffusion model to generate unique surface patterns. The model evolves two concentrations `A` and `B` on a 2D grid via coupled PDEs:
+
+```
+∂A/∂t = DA·∇²A − A·B² + f·(1 − A)
+∂B/∂t = DB·∇²B + A·B² − (f + k)·B
+```
+
+**Pattern classes by (f, k) parameters (Pearson classification):**
+
+| Class | f | k | Visual Pattern | Domain Texture |
+|---|---|---|---|---|
+| α | 0.010 | 0.047 | Scattered spots | `crystalline` |
+| δ | 0.026 | 0.051 | Spots + stripes | `geometric` |
+| η | 0.034 | 0.063 | Labyrinthine worms | `organic` |
+| μ | 0.046 | 0.059 | Fingerprint waves | `fluid` |
+
+The shape seed's `domain_texture` bytes select (f, k) parameters, producing deterministic patterns unique to each agent:
+
+```rust
+/// Gray-Scott reaction-diffusion step.
+pub fn gray_scott_step(
+    a: &mut [[f32; W]; H], b: &mut [[f32; W]; H],
+    f: f32, k: f32, da: f32, db: f32,
+) {
+    let (a_prev, b_prev) = (a.clone(), b.clone());
+    for y in 1..H-1 {
+        for x in 1..W-1 {
+            let lap_a = laplacian_9pt(&a_prev, x, y);
+            let lap_b = laplacian_9pt(&b_prev, x, y);
+            let ab2 = a_prev[y][x] * b_prev[y][x] * b_prev[y][x];
+            a[y][x] = (a_prev[y][x] + da * lap_a - ab2 + f * (1.0 - a_prev[y][x]))
+                      .clamp(0.0, 1.0);
+            b[y][x] = (b_prev[y][x] + db * lap_b + ab2 - (f + k) * b_prev[y][x])
+                      .clamp(0.0, 1.0);
+        }
+    }
+}
+```
+
+### Fractional Brownian Motion for Organic Variation
+
+Fine-grained organic detail uses fBm noise layered on body point positions:
+
+```rust
+/// Fractional Brownian Motion — multi-octave coherent noise.
+pub fn fbm(x: f32, y: f32, seed: u32, octaves: u32) -> f32 {
+    let mut value = 0.0f32;
+    let mut amplitude = 0.5f32;
+    let mut frequency = 1.0f32;
+    for _ in 0..octaves {
+        value += amplitude * simplex_noise(x * frequency, y * frequency, seed);
+        amplitude *= 0.5;      // gain: each octave half amplitude
+        frequency *= 2.0;      // lacunarity: each octave double frequency
+    }
+    value
+}
+```
+
+### Verlet Integration for Spring Physics
+
+Spring physics use Verlet integration — time-reversible, symplectic (energy-preserving), and O(h⁴) error without explicit velocity:
+
+```rust
+/// Verlet integration step for spring-mass system.
+pub fn verlet_step(nodes: &mut [PhysicsNode], springs: &[Spring], dt: f32, gravity: [f32; 3]) {
+    // Position update via Verlet
+    for node in nodes.iter_mut().filter(|n| !n.pinned) {
+        let vel = [
+            node.pos[0] - node.prev[0],
+            node.pos[1] - node.prev[1],
+            node.pos[2] - node.prev[2],
+        ];
+        node.prev = node.pos;
+        node.pos[0] += vel[0] + gravity[0] * dt * dt;
+        node.pos[1] += vel[1] + gravity[1] * dt * dt;
+        node.pos[2] += vel[2] + gravity[2] * dt * dt;
+    }
+
+    // Spring constraint satisfaction
+    for s in springs {
+        let delta = [
+            nodes[s.b].pos[0] - nodes[s.a].pos[0],
+            nodes[s.b].pos[1] - nodes[s.a].pos[1],
+            nodes[s.b].pos[2] - nodes[s.a].pos[2],
+        ];
+        let dist = (delta[0]*delta[0] + delta[1]*delta[1] + delta[2]*delta[2]).sqrt().max(0.0001);
+        let stretch = dist - s.rest_length;
+        let correction = stretch * s.stiffness * 0.5;
+        let dir = [delta[0]/dist, delta[1]/dist, delta[2]/dist];
+        if !nodes[s.a].pinned {
+            nodes[s.a].pos[0] += dir[0] * correction;
+            nodes[s.a].pos[1] += dir[1] * correction;
+            nodes[s.a].pos[2] += dir[2] * correction;
+        }
+        if !nodes[s.b].pinned {
+            nodes[s.b].pos[0] -= dir[0] * correction;
+            nodes[s.b].pos[1] -= dir[1] * correction;
+            nodes[s.b].pos[2] -= dir[2] * correction;
+        }
+    }
+}
+
+pub struct PhysicsNode {
+    pub pos: [f32; 3],
+    pub prev: [f32; 3],
+    pub mass: f32,
+    pub pinned: bool,
+}
+```
+
+### Phase-Space Portrait for Behavioral State Display
+
+The Spectre's behavioral trajectory can be visualized as a phase-space portrait — plotting (Energy, Arousal) over a history window. This reveals attractor basins corresponding to behavioral modes:
+
+- **Fixed points** (equilibria): circles where trajectory velocity → 0 (stable behavioral states)
+- **Limit cycles** (periodic behavior): closed loops representing work-rest oscillations
+- **Separatrices**: curves dividing different attractor basins
+
+```rust
+/// Phase portrait data for behavioral state visualization.
+pub struct PhasePortrait {
+    pub history: VecDeque<(f32, f32)>,  // (energy, arousal) samples
+    pub max_history: usize,             // default: 200 samples
+}
+
+impl PhasePortrait {
+    pub fn push(&mut self, energy: f32, arousal: f32) {
+        self.history.push_back((energy, arousal));
+        if self.history.len() > self.max_history {
+            self.history.pop_front();
+        }
+    }
+
+    /// Render as braille canvas in a ratatui Rect.
+    pub fn render(&self, area: Rect, buf: &mut Buffer, theme: &RosedustTheme) {
+        // Map history to braille canvas coordinates
+        // Color-code by recency (newer = brighter)
+        // Draw trajectory as connected points
+    }
+}
+```
+
+### SDF Body Shape Composition
+
+Body silhouettes are composed using Signed Distance Fields — combining primitives with smooth blending:
+
+```rust
+/// 2D SDF primitives for body shape composition.
+pub fn sd_circle(p: [f32; 2], r: f32) -> f32 {
+    (p[0]*p[0] + p[1]*p[1]).sqrt() - r
+}
+
+pub fn sd_ellipse(p: [f32; 2], ab: [f32; 2]) -> f32 {
+    // Approximate: scale space then use circle
+    let q = [p[0] / ab[0], p[1] / ab[1]];
+    ((q[0]*q[0] + q[1]*q[1]).sqrt() - 1.0) * ab[0].min(ab[1])
+}
+
+/// Smooth union (Inigo Quilez) — organic blending of shapes.
+pub fn op_smooth_union(d1: f32, d2: f32, k: f32) -> f32 {
+    let h = (k - (d1 - d2).abs()).max(0.0) / k;
+    d1.min(d2) - h * h * k * 0.25
+}
+
+/// Compose a Spectre body from archetype parameters.
+pub fn compose_body(p: [f32; 2], archetype: BodyArchetype, seed: &ShapeSeed) -> f32 {
+    match archetype {
+        BodyArchetype::Orb => sd_circle(p, 0.4),
+        BodyArchetype::Teardrop => {
+            let head = sd_circle([p[0], p[1] - 0.2], 0.25);
+            let body = sd_ellipse(p, [0.3, 0.5]);
+            op_smooth_union(head, body, 0.15)
+        }
+        BodyArchetype::Ring => {
+            let outer = sd_circle(p, 0.4);
+            let inner = sd_circle(p, 0.2);
+            outer.max(-inner)  // annular (hollow)
+        }
+        // ... other archetypes
+        _ => sd_circle(p, 0.3),
+    }
+}
+```
+
+### Procedural Iris Generation
+
+Eyes use radially symmetric procedural textures with fiber patterns:
+
+```rust
+/// Generate eye iris texture for a Spectre.
+pub struct IrisParams {
+    pub pupil_dilation: f32,  // 0.15 (constricted) to 0.65 (dilated)
+    pub base_color: [u8; 3],  // from behavioral state
+    pub fiber_count: u32,     // 20–60, from shape seed
+    pub ring_frequency: f32,  // 40–80, from shape seed
+}
+
+impl IrisParams {
+    /// Sample iris color at point p relative to eye center.
+    pub fn sample(&self, p: [f32; 2]) -> Option<[u8; 3]> {
+        let r = (p[0]*p[0] + p[1]*p[1]).sqrt();
+        let theta = p[1].atan2(p[0]);
+
+        // Pupil
+        if r < self.pupil_dilation { return Some([5, 5, 8]); }
+
+        // Outside iris
+        if r > 1.0 { return None; }
+
+        // Radial fibers + concentric rings
+        let fiber = (theta * self.fiber_count as f32).sin();
+        let ring = (r * self.ring_frequency).sin() * 0.5 + 0.5;
+        let intensity = 0.6 + 0.4 * fiber * ring;
+
+        Some([
+            (self.base_color[0] as f32 * intensity) as u8,
+            (self.base_color[1] as f32 * intensity) as u8,
+            (self.base_color[2] as f32 * intensity) as u8,
+        ])
+    }
+}
+```
+
+---
+
 ## Design Principles
 
 ### 1. Glanceable, Not Decorative
@@ -537,6 +816,86 @@ Spectres do not die, decay to nothing, or display terminal states. The Resting s
 ### 5. Collective Coherence
 
 When viewed together (Spectre Gallery, Screen 6.4), Spectres should create a visual ensemble that itself encodes collective state. Synchronized breathing indicates coordination. Diverse states indicate healthy role distribution. A gallery of all-Struggling Spectres is an immediate visual alarm.
+
+---
+
+## Test Criteria
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shape_seed_is_deterministic() {
+        let seed1 = shape_seed("agent-01", "code-implementer");
+        let seed2 = shape_seed("agent-01", "code-implementer");
+        assert_eq!(seed1, seed2, "Same identity must produce same seed");
+    }
+
+    #[test]
+    fn different_agents_produce_different_seeds() {
+        let seed1 = shape_seed("agent-01", "code-implementer");
+        let seed2 = shape_seed("agent-02", "code-implementer");
+        assert_ne!(seed1, seed2);
+    }
+
+    #[test]
+    fn body_archetype_from_seed_in_range() {
+        for i in 0..256u8 {
+            let seed = [i; 32];
+            let archetype = body_archetype_from_seed(&seed);
+            assert!((archetype as u8) < 8, "Archetype must be 0–7");
+        }
+    }
+
+    #[test]
+    fn breathing_scale_is_bounded() {
+        let params = BreathingParams { rate: 1.4, depth: 1.0, asymmetry: 0.3, phase: 0.0 };
+        for t in (0..1000).map(|i| i as f64 * 0.01) {
+            let scale = breathing_scale(&params, t);
+            assert!(scale > 0.85 && scale < 1.15, "Breathing scale must stay within ±15%");
+        }
+    }
+
+    #[test]
+    fn spring_physics_converges() {
+        let mut nodes = vec![
+            PhysicsNode { pos: [0.0, 0.0, 0.0], prev: [0.0, 0.0, 0.0], mass: 1.0, pinned: true },
+            PhysicsNode { pos: [2.0, 0.0, 0.0], prev: [2.0, 0.0, 0.0], mass: 1.0, pinned: false },
+        ];
+        let springs = vec![Spring { a: 0, b: 1, rest_length: 1.0, stiffness: 0.5, damping: 0.6 }];
+        for _ in 0..1000 {
+            verlet_step(&mut nodes, &springs, 0.016, [0.0, 0.0, 0.0]);
+        }
+        let dist = ((nodes[1].pos[0] - nodes[0].pos[0]).powi(2)).sqrt();
+        assert!((dist - 1.0).abs() < 0.1, "Spring should converge toward rest length");
+    }
+
+    #[test]
+    fn sdf_smooth_union_is_symmetric() {
+        let d1 = 0.5;
+        let d2 = 0.3;
+        let k = 0.1;
+        let r1 = op_smooth_union(d1, d2, k);
+        let r2 = op_smooth_union(d2, d1, k);
+        assert!((r1 - r2).abs() < 1e-6, "Smooth union must be commutative");
+    }
+
+    #[test]
+    fn gray_scott_concentration_stays_bounded() {
+        let mut a = [[1.0f32; 64]; 64];
+        let mut b = [[0.0f32; 64]; 64];
+        // Seed a small perturbation
+        for y in 28..36 { for x in 28..36 { b[y][x] = 0.25; a[y][x] = 0.75; } }
+        for _ in 0..100 {
+            gray_scott_step(&mut a, &mut b, 0.034, 0.063, 1.0, 0.5);
+        }
+        for row in &a { for &v in row { assert!(v >= 0.0 && v <= 1.0); } }
+        for row in &b { for &v in row { assert!(v >= 0.0 && v <= 1.0); } }
+    }
+}
+```
 
 ---
 

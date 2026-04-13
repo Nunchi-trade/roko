@@ -628,7 +628,291 @@ ones.
 
 ---
 
-## 11. Academic Citations
+## 11. EigenTrust Hybrid Layer
+
+While §3.4 explains why pure EigenTrust was rejected for the primary scoring algorithm,
+a localized EigenTrust computation serves as a secondary trust signal for cross-agent
+feedback weighting. This hybrid approach captures the best of both: EMA for individual
+domain scoring, EigenTrust for calibrating how much to trust a rater's feedback.
+
+### 11.1 Local EigenTrust for Feedback Weighting
+
+When agent A rates agent B, the weight of that feedback depends on A's own
+trustworthiness. Local EigenTrust computes this without requiring global convergence:
+
+```rust
+/// Local EigenTrust computation for feedback weighting.
+/// Instead of global convergence (Kamvar 2003), this runs a bounded
+/// number of trust propagation steps from the rater to compute a
+/// local trust score that weights their feedback.
+///
+/// Parameters:
+///   max_hops: propagation depth (default 3, range [2, 5])
+///   damping:  damping factor (default 0.5, range [0.3, 0.7])
+///   pre_trusted: Protocol-tier agents with trust = 1.0
+pub struct LocalEigenTrust {
+    pub max_hops: u32,        // default 3
+    pub damping: f64,         // default 0.5
+    pub pre_trusted: Vec<u256>,
+}
+
+impl LocalEigenTrust {
+    /// Compute local trust score for a specific rater agent.
+    /// Returns trust in [0.0, 1.0] — used to weight their feedback.
+    pub fn rater_trust(
+        &self,
+        rater: u256,
+        graph: &FeedbackGraph,
+    ) -> f64 {
+        // Normalized local trust values
+        // c_ij = max(s_ij, 0) / Σ_j max(s_ij, 0)
+        // where s_ij = (satisfactory interactions with j) - (unsatisfactory)
+        let mut trust = if self.pre_trusted.contains(&rater) {
+            1.0
+        } else {
+            0.0
+        };
+
+        for _hop in 0..self.max_hops {
+            let mut new_trust = 0.0;
+            for neighbor in graph.in_neighbors(rater) {
+                let c_ij = graph.normalized_local_trust(neighbor, rater);
+                let t_j = self.rater_trust_cached(neighbor, graph);
+                new_trust += c_ij * t_j;
+            }
+            trust = self.damping * new_trust + (1.0 - self.damping) * self.pre_trust(rater);
+        }
+
+        trust.clamp(0.0, 1.0)
+    }
+
+    fn pre_trust(&self, agent: u256) -> f64 {
+        if self.pre_trusted.contains(&agent) {
+            1.0 / self.pre_trusted.len() as f64
+        } else {
+            0.0
+        }
+    }
+}
+```
+
+### 11.2 Trust-Weighted EMA Update
+
+The EMA update from §2.1 is modified to incorporate rater trust:
+
+```
+R_new = (α × rater_trust × O) + (1 - α × rater_trust) × R_old
+```
+
+When `rater_trust = 1.0` (fully trusted rater), the formula reduces to the standard
+EMA. When `rater_trust = 0.3` (partially trusted rater), the observation's influence
+is dampened by 70%.
+
+```rust
+/// Trust-weighted reputation update combining EMA with local EigenTrust.
+pub fn update_reputation_weighted(
+    track: &mut ReputationTrack,
+    outcome: f64,
+    rater: u256,
+    eigentrust: &LocalEigenTrust,
+    graph: &FeedbackGraph,
+) {
+    let rater_trust = eigentrust.rater_trust(rater, graph);
+    let job_count = track.feedback_count as f64 + 1.0;
+    let alpha_ema = (2.0 / (job_count + 1.0)).min(0.3);
+
+    // Effective alpha is dampened by rater trust
+    let effective_alpha = alpha_ema * rater_trust;
+    let old_score = track.score as f64 / 1000.0;
+    let new_score = effective_alpha * outcome + (1.0 - effective_alpha) * old_score;
+
+    track.score = (new_score * 1000.0).clamp(0.0, 1000.0) as u16;
+    track.feedback_count += 1;
+}
+```
+
+### 11.3 EigenTrust Configuration
+
+| Parameter | Default | Range | Effect |
+|---|---|---|---|
+| `max_hops` | 3 | [2, 5] | Deeper propagation = more global, slower |
+| `damping` | 0.5 | [0.3, 0.7] | Higher = more weight on network trust vs. pre-trust |
+| `pre_trusted` count | 10-20 | [5, 50] | More seeds = more robust but slower |
+| `refresh_interval` | 1 hour | [10 min, 24 hr] | How often trust scores are recomputed |
+
+---
+
+## 12. Graph-Based Collusion Detection
+
+### 12.1 Collusion Threat Model
+
+Colluding agents form a ring to inflate each other's reputation. The attack:
+1. Agent A gives Agent B a perfect score
+2. Agent B gives Agent C a perfect score
+3. Agent C gives Agent A a perfect score
+4. All three have inflated reputations despite no genuine performance
+
+### 12.2 Detection Algorithm
+
+```rust
+/// Multi-signal collusion detector that combines graph structural
+/// analysis, temporal correlation, and behavioral anomaly detection.
+pub struct CollusionDetector {
+    /// Minimum reciprocity ratio to flag a cluster (default 0.6)
+    pub reciprocity_threshold: f64,
+    /// Minimum Pearson correlation in feedback timing (default 0.8)
+    pub temporal_correlation_threshold: f64,
+    /// Minimum internal edge density relative to random (default 5.0×)
+    pub density_multiplier_threshold: f64,
+    /// Sliding window for temporal analysis (default 30 days)
+    pub analysis_window: Duration,
+}
+
+pub struct CollusionReport {
+    pub suspected_rings: Vec<CollusionRing>,
+    pub confidence: f64,                  // 0.0-1.0
+    pub evidence: Vec<CollusionEvidence>,
+    pub recommended_actions: Vec<CollusionAction>,
+}
+
+pub struct CollusionRing {
+    pub members: Vec<u256>,               // passport IDs
+    pub reciprocity_ratio: f64,           // fraction of bidirectional edges
+    pub avg_temporal_correlation: f64,     // timing coordination signal
+    pub internal_density: f64,            // edge density within ring
+    pub external_connectivity: f64,        // edges to outside (sparse = suspicious)
+    pub formation_date: u64,              // estimated when ring formed
+}
+
+pub enum CollusionEvidence {
+    HighReciprocity { ratio: f64 },
+    TemporalSynchronization { correlation: f64 },
+    DenseSubgraph { density: f64, expected: f64 },
+    IsolatedCluster { external_edges: u32 },
+    ScoreInflation { avg_given: f64, network_avg: f64 },
+}
+
+pub enum CollusionAction {
+    /// Reduce collective voting weight to sqrt(n) instead of n
+    ReduceCollectiveWeight { factor: f64 },
+    /// Apply reputation penalty to individual members
+    ReputationPenalty { amount: f64 },
+    /// Escalate discipline state
+    DisciplineEscalation,
+    /// Void specific feedback events from the ring
+    VoidFeedback { feedback_ids: Vec<Blake3Hash> },
+    /// Flag for human review (high-value agents only)
+    FlagForReview,
+}
+```
+
+### 12.3 Detection Signals
+
+| Signal | Computation | Threshold | Weight |
+|---|---|---|---|
+| **Reciprocity** | `\|bidirectional edges\| / \|total edges\|` in cluster | > 0.6 | 0.30 |
+| **Temporal sync** | Pearson correlation of feedback timestamps | > 0.8 | 0.25 |
+| **Density** | Internal edge density vs. random graph expectation | > 5.0× | 0.20 |
+| **Score inflation** | Avg score given by cluster members vs. network avg | > 1.5× | 0.15 |
+| **Isolation** | External edges / internal edges | < 0.2 | 0.10 |
+
+Combined confidence: weighted sum of signal strengths, thresholded at 0.7 for action.
+
+### 12.4 Test Criteria
+
+```rust
+#[cfg(test)]
+mod collusion_tests {
+    #[test]
+    fn test_3_agent_ring_detected() {
+        let mut graph = FeedbackGraph::new();
+        // Honest background: 50 agents with natural feedback patterns
+        add_organic_feedback(&mut graph, 50, 500);
+        // Collusion ring: 3 agents, each rates others 1.0 repeatedly
+        add_collusion_ring(&mut graph, &[101, 102, 103], 1.0, 20);
+
+        let detector = CollusionDetector::default();
+        let report = detector.analyze(&graph);
+
+        assert!(!report.suspected_rings.is_empty());
+        let ring = &report.suspected_rings[0];
+        assert_eq!(ring.members.len(), 3);
+        assert!(ring.reciprocity_ratio > 0.9);
+    }
+
+    #[test]
+    fn test_organic_cluster_not_flagged() {
+        let mut graph = FeedbackGraph::new();
+        // Domain specialists naturally rate each other more often
+        add_domain_specialists(&mut graph, 10, "defi", 0.7);
+
+        let detector = CollusionDetector::default();
+        let report = detector.analyze(&graph);
+
+        // Should not flag organic domain specialists
+        assert!(report.suspected_rings.is_empty()
+            || report.confidence < 0.5);
+    }
+}
+```
+
+---
+
+## 13. Reputation Simulation Parameters
+
+For cadCAD/radCAD token engineering simulation of the reputation system:
+
+```rust
+/// Simulation configuration for reputation dynamics modeling.
+/// Used in cadCAD-style agent-based simulation to validate
+/// parameters before deployment.
+pub struct ReputationSimConfig {
+    /// Number of agents in simulation
+    pub agent_count: u32,               // default 1000
+    /// Simulation duration in days
+    pub duration_days: u32,             // default 365
+    /// Fraction of agents that are honest
+    pub honest_fraction: f64,           // default 0.90
+    /// Fraction of agents that collude
+    pub collusion_fraction: f64,        // default 0.05
+    /// Fraction of agents that are Sybil
+    pub sybil_fraction: f64,            // default 0.05
+    /// Tasks per agent per day (Poisson mean)
+    pub tasks_per_day: f64,             // default 3.0
+    /// Honest agent outcome distribution: Beta(a, b)
+    pub honest_outcome_alpha: f64,      // default 8.0
+    pub honest_outcome_beta: f64,       // default 2.0
+    /// Collusion ring size
+    pub collusion_ring_size: u32,       // default 5
+    /// EMA alpha cap
+    pub alpha_cap: f64,                 // default 0.3
+    /// Decay half-life in days
+    pub decay_half_life_days: f64,      // default 30.0
+}
+
+/// Simulation output metrics.
+pub struct ReputationSimOutput {
+    pub avg_honest_reputation: f64,     // target: > 0.7
+    pub avg_collusion_reputation: f64,  // target: < 0.5 (detected)
+    pub avg_sybil_reputation: f64,      // target: < 0.3
+    pub false_positive_rate: f64,       // honest flagged as colluder
+    pub false_negative_rate: f64,       // colluder not detected
+    pub gini_coefficient: f64,          // reputation inequality
+    pub time_to_convergence_days: f64,  // when scores stabilize
+    pub collusion_detection_rate: f64,  // fraction of rings detected
+}
+```
+
+**Validation criteria**: A deployment-ready parameter set must achieve:
+- Average honest reputation > 0.7 after 90 days
+- Collusion detection rate > 0.85
+- False positive rate < 0.05
+- Sybil agents' reputation stays below 0.3
+- Gini coefficient < 0.4 (not too concentrated)
+
+---
+
+## 14. Academic Citations
 
 - Jøsang 2002 — A Logic for Uncertain Probabilities (Beta reputation systems)
 - Kamvar, Schlosser, Garcia-Molina 2003 — The EigenTrust Algorithm for Reputation
@@ -640,10 +924,18 @@ ones.
 - Haldar et al. 2025 — Reputation Systems for AI Agent Coordination
 - Lau et al. 2026 — Adaptive Reputation Scoring for Multi-Agent Systems
 - Ostrom 1990 — Governing the Commons (graduated sanctions)
+- Andersen, Chung & Lang 2006 — Local Graph Partitioning using PageRank Vectors (FOCS)
+- Cao, Yu, Voelker 2012 — SybilRank (NDSS)
+- Yu et al. 2006 — SybilGuard (SIGCOMM)
+- Alvisi et al. 2013 — SoK: Evolution of Sybil Defense Mechanisms (IEEE S&P)
+- Chiang & Bazzan 2024 — Graph Neural Networks for Trust Inference in Multi-Agent Systems
+- Page, Brin, Motwani & Winograd 1999 — The PageRank Citation Ranking (Stanford tech
+  report — foundation for trust propagation)
+- Tran, Min, Li & Subramanian 2009 — Sybil-Resilient Online Content Voting (NSDI)
 
 ---
 
-## 12. Cross-References
+## 15. Cross-References
 
 | Document | Relevance |
 |---|---|

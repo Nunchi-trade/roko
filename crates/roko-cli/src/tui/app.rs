@@ -43,7 +43,10 @@ use super::views::{self, ViewState};
 /// Supports two rendering paths:
 /// - **Mori-style tabs** (F1-F7): full TuiState + views + modals + postfx
 /// - **Legacy scaffold pages**: original PageId-based rendering
-#[derive(Debug)]
+///
+/// All expensive I/O (system metrics, file reads, git commands) runs on
+/// background threads.  The render path does zero I/O -- it only reads
+/// `&self.tui_state` and `&self.data` and writes to the frame buffer.
 pub struct App {
     workdir: PathBuf,
 
@@ -72,8 +75,6 @@ pub struct App {
     pub running: bool,
     /// Timestamp of the last data refresh.
     pub last_refresh: Instant,
-    /// Last time sys metrics (CPU/MEM) were updated (expensive, runs every 10s).
-    pub last_sys_update: Instant,
     /// Per-page scroll position (legacy).
     pub scroll_offset: HashMap<PageId, u16>,
     /// Selected signal row on the Signals page (legacy).
@@ -82,6 +83,44 @@ pub struct App {
     pub gate_failure_selection: usize,
     /// Active overlay, if any (legacy help/detail).
     overlay: Option<OverlayState>,
+
+    // -- Background I/O channels --
+    /// Background system metrics receiver (CPU/MEM collected off main thread).
+    sys_rx: Option<std::sync::mpsc::Receiver<super::state::SysMetrics>>,
+    /// Background data refresh receiver (file reads off main thread).
+    data_rx: Option<std::sync::mpsc::Receiver<DashboardData>>,
+    /// Background git data receiver (git commands off main thread).
+    git_rx: Option<std::sync::mpsc::Receiver<GitBgData>>,
+    /// Frame counter for adaptive frame rate.
+    frame_counter: u64,
+    /// Last user input time for adaptive frame rate.
+    last_input: Instant,
+}
+
+/// Bundle of git data collected by the background git thread.
+struct GitBgData {
+    /// Full git view data for the F4 Git tab.
+    view_data: super::views::git_view::GitViewData,
+    /// Summary lines for the dashboard sub-tab.
+    summary_lines: Vec<String>,
+    /// Git branch name.
+    branch: String,
+    /// Short commit hash.
+    commit_short: String,
+    /// Commit age string (e.g. "3 hours ago").
+    age: String,
+}
+
+// Manual Debug impl because mpsc::Receiver does not implement Debug.
+impl std::fmt::Debug for App {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("App")
+            .field("workdir", &self.workdir)
+            .field("running", &self.running)
+            .field("current_page", &self.current_page)
+            .field("frame_counter", &self.frame_counter)
+            .finish_non_exhaustive()
+    }
 }
 
 type TuiTerminal = Terminal<CrosstermBackend<Stdout>>;
@@ -157,12 +196,17 @@ impl App {
             scaffold,
             running: true,
             last_refresh: Instant::now(),
-            last_sys_update: Instant::now(),
             scroll_offset: HashMap::new(),
             signal_selection: 0,
             gate_failure_selection: 0,
             overlay: None,
+            sys_rx: None,
+            data_rx: None,
+            git_rx: None,
+            frame_counter: 0,
+            last_input: Instant::now(),
         };
+        // Populate git info synchronously on first load (fast enough for startup).
         app.populate_git_info();
         app
     }
@@ -205,15 +249,94 @@ impl App {
 
     fn main_loop(&mut self, terminal: &mut TuiTerminal) -> Result<()> {
         let mut events = EventHandler::new(Duration::from_millis(16)); // ~60fps
+
+        // ---------------------------------------------------------------
+        // Spawn background sys metrics collector thread
+        // ---------------------------------------------------------------
+        let (sys_tx, sys_rx) = std::sync::mpsc::channel::<super::state::SysMetrics>();
+        std::thread::Builder::new()
+            .name("tui-sys-metrics".into())
+            .spawn(move || {
+                loop {
+                    let metrics = collect_sys_metrics_bg();
+                    if sys_tx.send(metrics).is_err() {
+                        break; // main thread dropped, exit
+                    }
+                    std::thread::sleep(Duration::from_secs(5));
+                }
+            })
+            .ok(); // graceful: TUI works without background thread
+        self.sys_rx = Some(sys_rx);
+
+        // ---------------------------------------------------------------
+        // Spawn background data refresh thread
+        // ---------------------------------------------------------------
+        let (data_tx, data_rx) = std::sync::mpsc::channel::<DashboardData>();
+        let data_workdir = self.workdir.clone();
+        std::thread::Builder::new()
+            .name("tui-data-refresh".into())
+            .spawn(move || {
+                loop {
+                    let data = DashboardData::load_best_effort(&data_workdir);
+                    if data_tx.send(data).is_err() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+            })
+            .ok();
+        self.data_rx = Some(data_rx);
+
+        // ---------------------------------------------------------------
+        // Spawn background git data collector thread
+        // ---------------------------------------------------------------
+        let (git_tx, git_rx) = std::sync::mpsc::channel::<GitBgData>();
+        std::thread::Builder::new()
+            .name("tui-git-refresh".into())
+            .spawn(move || {
+                loop {
+                    let view_data = super::views::git_view::collect_git_data();
+                    let summary_lines = super::views::dashboard_view::collect_git_summary();
+                    let branch = view_data.current_branch.clone();
+                    let commit_short = view_data
+                        .commits
+                        .first()
+                        .map(|c| c.hash_short.clone())
+                        .unwrap_or_default();
+                    let age = String::new(); // age comes from git log, already in summary
+                    let bg = GitBgData {
+                        view_data,
+                        summary_lines,
+                        branch,
+                        commit_short,
+                        age,
+                    };
+                    if git_tx.send(bg).is_err() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_secs(5));
+                }
+            })
+            .ok();
+        self.git_rx = Some(git_rx);
+
+        // ---------------------------------------------------------------
+        // Initial draw
+        // ---------------------------------------------------------------
         terminal
             .draw(|frame| self.draw(frame))
             .context("initial TUI draw")?;
 
+        // ---------------------------------------------------------------
+        // Event loop
+        // ---------------------------------------------------------------
         while self.running {
             match events.next().context("poll TUI event")? {
                 Event::Key(key) => {
+                    self.last_input = Instant::now();
                     self.handle_key(key);
-                    // Immediate redraw after keypress for responsiveness
+                    // Drain background channels before immediate redraw
+                    self.drain_background_channels();
                     terminal
                         .draw(|frame| self.draw(frame))
                         .context("TUI redraw after key")?;
@@ -223,7 +346,7 @@ impl App {
                 Event::Tick => {
                     self.atmosphere.tick();
                     self.tui_state.atmosphere.tick();
-                    self.refresh_snapshot_if_needed();
+                    self.drain_background_channels();
                     self.expire_notifications();
                 }
             }
@@ -239,9 +362,21 @@ impl App {
                 }
             }
 
-            terminal
-                .draw(|frame| self.draw(frame))
-                .context("TUI redraw")?;
+            // Adaptive frame rate: skip frames when idle with no agents
+            let user_idle = self.last_input.elapsed() > Duration::from_secs(3);
+            let has_agents = self.tui_state.active_agent_count() > 0;
+            let should_draw = if user_idle && !has_agents {
+                self.frame_counter % 3 == 0 // ~20fps when idle
+            } else {
+                true // ~60fps when active
+            };
+
+            if should_draw {
+                terminal
+                    .draw(|frame| self.draw(frame))
+                    .context("TUI redraw")?;
+            }
+            self.frame_counter = self.frame_counter.wrapping_add(1);
         }
 
         Ok(())
@@ -940,10 +1075,14 @@ impl App {
         }
     }
 
+    /// Manual refresh triggered by Ctrl-R.  Loads data synchronously as a
+    /// one-shot fallback (the normal path uses background threads).
     fn refresh_snapshot(&mut self) {
         self.data = DashboardData::load_best_effort(&self.workdir);
         self.scaffold = DashboardScaffold::new_in(&self.workdir);
         self.tui_state.update_from_snapshot(&self.data);
+        // Git info is refreshed by the background git thread; only
+        // populate synchronously on first load (when fields are empty).
         self.populate_git_info();
         self.last_refresh = Instant::now();
         self.clamp_signal_selection();
@@ -996,100 +1135,54 @@ impl App {
         }
     }
 
-    /// Update system metrics (CPU, memory) on each refresh.
-    fn update_sys_metrics(&mut self) {
-        // CPU: use `top -l 1` on macOS to get actual system CPU usage
-        #[cfg(target_os = "macos")]
-        if let Ok(out) = std::process::Command::new("top")
-            .args(["-l", "1", "-n", "0", "-s", "0"])
-            .output()
-        {
-            if out.status.success() {
-                let text = String::from_utf8_lossy(&out.stdout);
-                // Parse line like "CPU usage: 12.5% user, 8.3% sys, 79.1% idle"
-                for line in text.lines() {
-                    if line.starts_with("CPU usage:") {
-                        let idle = line
-                            .split(',')
-                            .find(|s| s.contains("idle"))
-                            .and_then(|s| {
-                                s.trim()
-                                    .split('%')
-                                    .next()
-                                    .and_then(|n| n.trim().parse::<f64>().ok())
-                            })
-                            .unwrap_or(0.0);
-                        self.tui_state.sys.cpu_pct = (100.0 - idle).max(0.0).min(100.0) as f32;
-                        break;
-                    }
-                }
-                self.tui_state.sys.cpu_history.push(self.tui_state.sys.cpu_pct);
-                if self.tui_state.sys.cpu_history.len() > 60 {
-                    self.tui_state.sys.cpu_history.remove(0);
-                }
-            }
-        }
-        // Fallback for Linux: parse /proc/stat
-        #[cfg(not(target_os = "macos"))]
-        {
-            // Simple fallback: just show 0 if we can't parse
-            self.tui_state.sys.cpu_history.push(self.tui_state.sys.cpu_pct);
-            if self.tui_state.sys.cpu_history.len() > 60 {
-                self.tui_state.sys.cpu_history.remove(0);
-            }
-        }
-        // Memory: parse from `vm_stat` on macOS
-        #[cfg(target_os = "macos")]
-        {
-            if let Ok(out) = std::process::Command::new("vm_stat").output() {
-                if out.status.success() {
-                    let text = String::from_utf8_lossy(&out.stdout);
-                    let page_size = 16384u64; // Apple Silicon default
-                    let mut active = 0u64;
-                    let mut wired = 0u64;
-                    let mut compressed = 0u64;
-                    for line in text.lines() {
-                        if let Some(val) = extract_vm_stat_value(line, "Pages active") {
-                            active = val * page_size;
-                        }
-                        if let Some(val) = extract_vm_stat_value(line, "Pages wired") {
-                            wired = val * page_size;
-                        }
-                        if let Some(val) =
-                            extract_vm_stat_value(line, "Pages occupied by compressor")
-                        {
-                            compressed = val * page_size;
-                        }
-                    }
-                    self.tui_state.sys.mem_used_bytes = active + wired + compressed;
-                    // Total physical memory from sysctl
-                    if self.tui_state.sys.mem_total_bytes == 0 {
-                        if let Ok(out) = std::process::Command::new("sysctl")
-                            .args(["-n", "hw.memsize"])
-                            .output()
-                        {
-                            if out.status.success() {
-                                if let Ok(v) =
-                                    String::from_utf8_lossy(&out.stdout).trim().parse::<u64>()
-                                {
-                                    self.tui_state.sys.mem_total_bytes = v;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // `update_sys_metrics` removed -- see `collect_sys_metrics_bg()` standalone
+    // function below, called from the background thread.
 
-    fn refresh_snapshot_if_needed(&mut self) {
-        if self.last_refresh.elapsed() >= Duration::from_millis(500) {
-            self.refresh_snapshot();
+    /// Drain all background channels (sys metrics, data refresh, git) without
+    /// blocking.  Called on every tick and after every keypress so the UI
+    /// reflects the latest data produced by background threads.
+    fn drain_background_channels(&mut self) {
+        // -- sys metrics --
+        if let Some(rx) = &self.sys_rx {
+            while let Ok(snap) = rx.try_recv() {
+                self.tui_state.sys = snap;
+            }
         }
-        // Sys metrics are expensive (top takes ~1s) — only update every 10 seconds
-        if self.last_sys_update.elapsed() >= Duration::from_secs(10) {
-            self.last_sys_update = Instant::now();
-            self.update_sys_metrics();
+
+        // -- dashboard data --
+        if let Some(rx) = &self.data_rx {
+            let mut got_data = false;
+            while let Ok(new_data) = rx.try_recv() {
+                self.data = new_data;
+                got_data = true;
+            }
+            if got_data {
+                self.tui_state.update_from_snapshot(&self.data);
+                self.scaffold = DashboardScaffold::new_in(&self.workdir);
+                self.last_refresh = Instant::now();
+                self.clamp_signal_selection();
+                self.clamp_gate_failure_selection();
+                if self.pages().scaffold(self.current_page).is_none() {
+                    self.current_page = self.scaffold.active_page();
+                }
+            }
+        }
+
+        // -- git data --
+        if let Some(rx) = &self.git_rx {
+            while let Ok(bg) = rx.try_recv() {
+                self.tui_state.git_view_data = Some(bg.view_data);
+                self.tui_state.git_summary_lines = bg.summary_lines;
+                if !bg.branch.is_empty() {
+                    self.tui_state.git_branch = bg.branch;
+                }
+                if !bg.commit_short.is_empty() {
+                    self.tui_state.git_commit_short = bg.commit_short;
+                }
+                if !bg.age.is_empty() {
+                    self.tui_state.git_age = bg.age;
+                }
+            }
         }
     }
 
@@ -1249,6 +1342,91 @@ impl App {
             .context("leave alternate screen")?;
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Background sys metrics collection (runs on a dedicated thread)
+// ---------------------------------------------------------------------------
+
+/// Collect system metrics (CPU, memory) in a standalone function suitable
+/// for calling from a background thread.  Returns a complete `SysMetrics`
+/// snapshot.
+///
+/// On macOS this runs `top -l 1` (~1 second) for CPU and `vm_stat` (~10ms)
+/// for memory.  On other platforms it returns zeroed metrics.
+fn collect_sys_metrics_bg() -> super::state::SysMetrics {
+    let mut metrics = super::state::SysMetrics::default();
+
+    // CPU: use `top -l 1` on macOS to get actual system CPU usage
+    #[cfg(target_os = "macos")]
+    if let Ok(out) = std::process::Command::new("top")
+        .args(["-l", "1", "-n", "0", "-s", "0"])
+        .output()
+    {
+        if out.status.success() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            // Parse line like "CPU usage: 12.5% user, 8.3% sys, 79.1% idle"
+            for line in text.lines() {
+                if line.starts_with("CPU usage:") {
+                    let idle = line
+                        .split(',')
+                        .find(|s| s.contains("idle"))
+                        .and_then(|s| {
+                            s.trim()
+                                .split('%')
+                                .next()
+                                .and_then(|n| n.trim().parse::<f64>().ok())
+                        })
+                        .unwrap_or(0.0);
+                    metrics.cpu_pct = (100.0 - idle).max(0.0).min(100.0) as f32;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Memory: parse from `vm_stat` on macOS
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(out) = std::process::Command::new("vm_stat").output() {
+            if out.status.success() {
+                let text = String::from_utf8_lossy(&out.stdout);
+                let page_size = 16384u64; // Apple Silicon default
+                let mut active = 0u64;
+                let mut wired = 0u64;
+                let mut compressed = 0u64;
+                for line in text.lines() {
+                    if let Some(val) = extract_vm_stat_value(line, "Pages active") {
+                        active = val * page_size;
+                    }
+                    if let Some(val) = extract_vm_stat_value(line, "Pages wired") {
+                        wired = val * page_size;
+                    }
+                    if let Some(val) =
+                        extract_vm_stat_value(line, "Pages occupied by compressor")
+                    {
+                        compressed = val * page_size;
+                    }
+                }
+                metrics.mem_used_bytes = active + wired + compressed;
+                // Total physical memory from sysctl
+                if let Ok(out) = std::process::Command::new("sysctl")
+                    .args(["-n", "hw.memsize"])
+                    .output()
+                {
+                    if out.status.success() {
+                        if let Ok(v) =
+                            String::from_utf8_lossy(&out.stdout).trim().parse::<u64>()
+                        {
+                            metrics.mem_total_bytes = v;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    metrics
 }
 
 // ---------------------------------------------------------------------------

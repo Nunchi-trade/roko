@@ -22,10 +22,10 @@ Before reading this topic, readers should be familiar with:
 
 | # | Sub-doc | Description | Lines |
 |---|---|---|---|
-| 00 | [00-defense-in-depth.md](00-defense-in-depth.md) | Overall safety architecture: three defense categories (structural, behavioral, cognitive), six runtime guards, SafetyLayer composition, integration with Synapse Loop | 366 |
+| 00 | [00-defense-in-depth.md](00-defense-in-depth.md) | Overall safety architecture: three defense categories (structural, behavioral, cognitive), six runtime guards, SafetyLayer composition, integration with Synapse Loop, adversarial safety testing framework (9 attack categories), CSA MAESTRO 7-layer mapping | 499 |
 | 01 | [01-capability-tokens.md](01-capability-tokens.md) | Current ToolPermission system and target Capability<T> design: PhantomData type safety, three tool tiers, compile-time enforcement | 301 |
 | 02 | [02-audit-chain.md](02-audit-chain.md) | Engram lineage DAG, SHA-256 / BLAKE3 Merkle hash-chain, AuditSink trait, FileSubstrate persistence, on-chain anchoring | 333 |
-| 03 | [03-taint-tracking.md](03-taint-tracking.md) | TaintLabel enum, TaintedString with zeroize, DataSink flow matrix, 4-stage ingestion pipeline, Bloom Oracle, causal rollback | 256 |
+| 03 | [03-taint-tracking.md](03-taint-tracking.md) | TaintLabel enum, TaintedString with zeroize, DataSink flow matrix, 4-stage ingestion pipeline, Bloom Oracle, causal rollback, taint propagation algebra (Denning lattice, SecurityLabel with confidentiality/integrity dimensions, join operator), FIDES integration, RTBAS dynamic taint tracking, Prompt Flow Integrity (PFI), PCAS Datalog policy language | 804 |
 
 ### Runtime Guards
 
@@ -40,17 +40,17 @@ Before reading this topic, readers should be familiar with:
 | # | Sub-doc | Description | Lines |
 |---|---|---|---|
 | 07 | [07-prompt-security.md](07-prompt-security.md) | Prompt architecture with XML delimiters, CaMeL dual-LLM (Debenedetti et al. 2025), ventriloquist defense, Tool-Guard pattern, MCP avoidance | 238 |
-| 08 | [08-threat-model.md](08-threat-model.md) | General-purpose attack trees (prompt injection, sandbox escape, credential exfiltration, resource exhaustion), chain-domain attack trees, 8 residual risks, formal safety analysis | 291 |
-| 09 | [09-adaptive-risk.md](09-adaptive-risk.md) | Five-layer adaptive risk: hard shields, Kelly sizing with confidence multiplier, Beta-Binomial OperationalConfidenceTracker, health scoring, Daimon integration | 214 |
+| 08 | [08-threat-model.md](08-threat-model.md) | General-purpose attack trees (prompt injection, sandbox escape, credential exfiltration, resource exhaustion), chain-domain attack trees, 8 residual risks, formal safety analysis, NIST AI RMF alignment (4 functions), MITRE ATLAS technique mapping (10 techniques), STRIDE-AI classification (6 categories), OWASP Agentic Top 10 mapping (ASI01-ASI10), cascading failure analysis with blast radius modeling, adversarial testing framework | 968 |
+| 09 | [09-adaptive-risk.md](09-adaptive-risk.md) | Five-layer adaptive risk: hard shields, Kelly sizing with confidence multiplier, Beta-Binomial OperationalConfidenceTracker, health scoring, Daimon integration, safety budgets (5 dimensions: irreversibility, blast radius, footprint, uncertainty, cost), hierarchical budget delegation with conservation laws, automatic allocation strategies (equal, proportional, risk-weighted) | 1101 |
 
 ### Domain-Specific Safety (Chain)
 
 | # | Sub-doc | Description | Lines |
 |---|---|---|---|
 | 10 | [10-mev-protection.md](10-mev-protection.md) | MEV taxonomy (sandwich, front-run, back-run, JIT, arbitrage), detection algorithms, protection strategies, Gate pipeline integration, MEV as intelligence signal | 228 |
-| 11 | [11-temporal-logic.md](11-temporal-logic.md) | LTL Buchi automata for runtime monitoring, CTL pre-execution plan verification, safety/liveness/fairness properties, 40 DeFi temporal patterns, category-theoretic composition, TemporalMonitor as Policy | 226 |
-| 12 | [12-witness-dag.md](12-witness-dag.md) | BLAKE3 content-addressed DAG, five vertex types (Observation, Prediction, Decision, Resolution, NeuroEntry), ZK proofs for strategy auditing, SQLite storage, on-chain anchoring, DAG-based trust | 605 |
-| 13 | [13-formal-verification.md](13-formal-verification.md) | Five-stage verification pipeline: Heimdall-rs decompilation → Slither static analysis → Echidna fuzzing → hevm symbolic execution → Certora/Kontrol formal proofs | 751 |
+| 11 | [11-temporal-logic.md](11-temporal-logic.md) | LTL Buchi automata for runtime monitoring, CTL pre-execution plan verification, safety/liveness/fairness properties, 40 DeFi temporal patterns, category-theoretic composition, TemporalMonitor as Policy, extended temporal pattern library (11 code agent + 3 multi-agent patterns), past-time LTL, temporal attack pattern detection (3-tier: node/edge/path anomaly scoring), boiling frog and slow escalation detectors | 1157 |
+| 12 | [12-witness-dag.md](12-witness-dag.md) | BLAKE3 content-addressed DAG, five vertex types (Observation, Prediction, Decision, Resolution, NeuroEntry), ZK proofs for strategy auditing, SQLite storage, on-chain anchoring, DAG-based trust, DAG query language (6 query types), Datalog provenance queries via Datafrog, safety-specific query patterns (TOCTOU, escalation chain, exfiltration, circular reasoning) | 1544 |
+| 13 | [13-formal-verification.md](13-formal-verification.md) | Five-stage verification pipeline: Heimdall-rs decompilation → Slither static analysis → Echidna fuzzing → hevm symbolic execution → Certora/Kontrol formal proofs, verification-guided agent design (17 host-agent + 14 task-lifecycle properties), tool behavioral contracts (pre/post/invariant), VeriGuard dual-stage verification, ContractEnforcingDispatcher | 1310 |
 
 ### Advanced Safety
 
@@ -93,7 +93,7 @@ Before reading this topic, readers should be familiar with:
 ## Generation Notes
 
 - **Sub-docs produced**: 17 (00 through 16)
-- **Total line count**: ~5,560 lines across 17 sub-docs (after expansion of short files)
+- **Total line count**: ~10,679 lines across 17 sub-docs (expanded from ~7,600 in April 2026 enhancement pass)
 - **Key legacy sources consulted**:
   - `bardo-backup/prd/10-safety/00-defense.md` (defense-in-depth, capability tokens, taint tracking, audit chain)
   - `bardo-backup/prd/10-safety/05-threat-model.md` (adversary types, attack trees, residual risks)

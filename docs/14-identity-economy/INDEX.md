@@ -83,6 +83,7 @@
 |---|---|---|
 | EMA: `R_new = α × O + (1-α) × R_old` | `04-reputation-7-domain-ema.md` | §2.2 |
 | Adaptive alpha: `α = min(0.3, 2/(job_count+1))` | `04-reputation-7-domain-ema.md` | §2.3 |
+| Trust-weighted EMA: `R_new = (α × rater_trust × O) + (1 - α × rater_trust) × R_old` | `04-reputation-7-domain-ema.md` | §11.2 |
 | Reputation multiplier: `rep_mult(R) = 0.1 + 2.9 × R^1.7` | `04-reputation-7-domain-ema.md` | §3.1 |
 | Effective weight: `base_stake × rep_mult × tier_mult × discipline` | `04-reputation-7-domain-ema.md` | §3.2 |
 | Vickrey score: `s_i = p_i × (1 + (1 - R_i))` | `11-vickrey-reputation-auction.md` | §1.2 |
@@ -91,6 +92,10 @@
 | Alpha-decay pricing: `P(t) = P_base × rep_mult × e^(-λ × t)` | `05-knowledge-marketplace.md` | §4.1 |
 | Insight half-life: `w(t) = w_0 × e^(-0.693 × t / τ_eff)` | `10-korai-tokenomics.md` | §5.1 |
 | Half-life extension: `τ_eff = τ_base × (1 + √(confirmations) × 2)` | `10-korai-tokenomics.md` | §5.2 |
+| Bonding curve: `price(S) = m × S^n + b` | `10-korai-tokenomics.md` | §12.1 |
+| LMSR cost: `cost(q) = b × ln(Σ e^(q_i / b))` | `14-knowledge-futures-market.md` | §10.2 |
+| LMSR price: `p_i = e^(q_i/b) / Σ e^(q_j/b)` | `14-knowledge-futures-market.md` | §10.2 |
+| PersonalizedPageRank: `t_i = α × seed + (1-α) × Σ(c_ij × t_j)` | `01-erc-8004-three-registries.md` | §10.1 |
 
 ---
 

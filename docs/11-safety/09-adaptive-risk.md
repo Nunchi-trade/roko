@@ -799,6 +799,300 @@ confidence_scaling = true
 
 ---
 
+## Hierarchical Budget Delegation
+
+When a parent agent (the orchestrator) delegates work to child agents (task executors), safety budgets must be subdivided with formal conservation guarantees. Without conservation enforcement, child budgets can silently exceed the parent's allocation -- a subtle failure mode where each child looks safe in isolation but the aggregate blows through plan-level limits.
+
+This design draws on Ye and Tan's Agent Contracts framework (arXiv:2601.08815, January 2025; COINE 2026), which demonstrated 90% token reduction and zero conservation violations across multi-agent hierarchies.
+
+### Conservation law
+
+For a parent agent P with budget B_P delegating to child agents C_1, ..., C_n:
+
+```
+For every resource dimension d:
+    SUM_i(budget(C_i, d)) <= budget(P, d)
+
+Equivalently:
+    budget(P, d) - SUM_i(budget(C_i, d)) >= 0    (surplus is held in reserve)
+```
+
+This is enforced at delegation time. If a subdivision request would violate conservation, it is rejected before any child begins execution.
+
+### BudgetDelegator
+
+```rust
+/// Hierarchical budget delegation with conservation enforcement.
+/// Ensures child budgets never exceed parent budget in any dimension.
+pub struct BudgetDelegator {
+    /// The parent's total budget.
+    parent_budget: SafetyBudget,
+    /// Already-delegated amounts per child.
+    delegations: HashMap<String, SafetyBudget>,
+    /// Remaining budget (parent - sum of delegations).
+    remaining: SafetyBudget,
+}
+
+impl BudgetDelegator {
+    pub fn new(parent_budget: SafetyBudget) -> Self {
+        Self {
+            remaining: parent_budget.clone(),
+            parent_budget,
+            delegations: HashMap::new(),
+        }
+    }
+
+    /// Delegate a budget to a child agent.
+    /// Returns Err if delegation would violate conservation in any dimension.
+    pub fn delegate(
+        &mut self,
+        child_id: &str,
+        requested: SafetyBudget,
+    ) -> Result<SafetyBudget, BudgetDelegationError> {
+        // Check conservation for each dimension
+        if requested.irreversibility_limit > self.remaining.irreversibility_limit {
+            return Err(BudgetDelegationError::ExceedsRemaining {
+                dimension: BudgetDimension::Irreversibility,
+                requested: requested.irreversibility_limit,
+                remaining: self.remaining.irreversibility_limit,
+            });
+        }
+        if requested.blast_radius_file_limit > self.remaining.blast_radius_file_limit {
+            return Err(BudgetDelegationError::ExceedsRemaining {
+                dimension: BudgetDimension::BlastRadius,
+                requested: requested.blast_radius_file_limit as f64,
+                remaining: self.remaining.blast_radius_file_limit as f64,
+            });
+        }
+        if requested.footprint_limit > self.remaining.footprint_limit {
+            return Err(BudgetDelegationError::ExceedsRemaining {
+                dimension: BudgetDimension::Footprint,
+                requested: requested.footprint_limit as f64,
+                remaining: self.remaining.footprint_limit as f64,
+            });
+        }
+        if requested.uncertainty_tokens > self.remaining.uncertainty_tokens {
+            return Err(BudgetDelegationError::ExceedsRemaining {
+                dimension: BudgetDimension::Uncertainty,
+                requested: requested.uncertainty_tokens as f64,
+                remaining: self.remaining.uncertainty_tokens as f64,
+            });
+        }
+        if requested.cost_limit_usd > self.remaining.cost_limit_usd {
+            return Err(BudgetDelegationError::ExceedsRemaining {
+                dimension: BudgetDimension::Cost,
+                requested: requested.cost_limit_usd,
+                remaining: self.remaining.cost_limit_usd,
+            });
+        }
+
+        // Deduct from remaining
+        self.remaining.irreversibility_limit -= requested.irreversibility_limit;
+        self.remaining.blast_radius_file_limit -= requested.blast_radius_file_limit;
+        self.remaining.footprint_limit -= requested.footprint_limit;
+        self.remaining.uncertainty_tokens -= requested.uncertainty_tokens;
+        self.remaining.cost_limit_usd -= requested.cost_limit_usd;
+
+        self.delegations.insert(child_id.to_string(), requested.clone());
+        Ok(requested)
+    }
+
+    /// Reclaim budget from a completed child agent.
+    /// Unused budget returns to the parent's remaining pool.
+    pub fn reclaim(
+        &mut self,
+        child_id: &str,
+        actual_usage: &SafetyBudgetUsage,
+    ) -> Result<(), BudgetDelegationError> {
+        let delegated = self.delegations.remove(child_id)
+            .ok_or(BudgetDelegationError::UnknownChild)?;
+
+        // Return unused portion to remaining
+        let unused_irreversibility = delegated.irreversibility_limit
+            - actual_usage.irreversibility_consumed;
+        let unused_files = delegated.blast_radius_file_limit
+            - actual_usage.files_touched.len();
+        let unused_footprint = delegated.footprint_limit
+            - actual_usage.footprint_count;
+        let unused_uncertainty = delegated.uncertainty_tokens
+            - actual_usage.uncertainty_tokens_used;
+        let unused_cost = delegated.cost_limit_usd
+            - actual_usage.cost_consumed_usd;
+
+        self.remaining.irreversibility_limit += unused_irreversibility.max(0.0);
+        self.remaining.blast_radius_file_limit += unused_files;
+        self.remaining.footprint_limit += unused_footprint;
+        self.remaining.uncertainty_tokens += unused_uncertainty;
+        self.remaining.cost_limit_usd += unused_cost.max(0.0);
+
+        Ok(())
+    }
+
+    /// Verify the conservation invariant: parent - delegated - remaining = zero.
+    /// Non-zero indicates a bug. Checked as a debug assertion.
+    pub fn conservation_check(&self) -> bool {
+        let total_delegated_irrev: f64 = self.delegations.values()
+            .map(|b| b.irreversibility_limit)
+            .sum();
+        let expected = self.parent_budget.irreversibility_limit
+            - total_delegated_irrev
+            - self.remaining.irreversibility_limit;
+        expected.abs() < 1e-10 // floating point tolerance
+    }
+}
+
+pub enum BudgetDelegationError {
+    ExceedsRemaining {
+        dimension: BudgetDimension,
+        requested: f64,
+        remaining: f64,
+    },
+    UnknownChild,
+    ConservationViolation,
+}
+```
+
+### Automatic budget allocation strategies
+
+Three strategies for dividing a parent budget among child tasks:
+
+| Strategy | Rule | When to use |
+|----------|------|-------------|
+| Equal | Each task gets `parent / n` | Uniform tasks of similar scope |
+| Proportional | Budget scales with estimated complexity | Heterogeneous task sizes |
+| Risk-weighted | Higher cascade risk receives a smaller share | Plan contains high-risk tasks that should be tightly constrained |
+
+```rust
+/// Strategy for automatically allocating budget to child tasks.
+pub enum BudgetAllocationStrategy {
+    /// Equal shares: each task gets parent_budget / num_tasks.
+    Equal,
+    /// Proportional to estimated task complexity.
+    ProportionalToComplexity,
+    /// Risk-weighted: high-cascade-risk tasks get smaller budgets.
+    RiskWeighted,
+}
+
+impl BudgetAllocationStrategy {
+    pub fn allocate(
+        &self,
+        parent_budget: &SafetyBudget,
+        tasks: &[TaskInfo],
+        cascade_risks: &HashMap<TaskId, f64>,
+    ) -> Vec<(TaskId, SafetyBudget)> {
+        match self {
+            Self::Equal => {
+                let n = tasks.len();
+                let share = parent_budget.divide_equally(n);
+                tasks.iter().map(|t| (t.id.clone(), share.clone())).collect()
+            }
+            Self::ProportionalToComplexity => {
+                let total_complexity: f64 = tasks.iter()
+                    .map(|t| t.estimated_complexity)
+                    .sum();
+                tasks.iter().map(|t| {
+                    let fraction = t.estimated_complexity / total_complexity;
+                    (t.id.clone(), parent_budget.scale(fraction))
+                }).collect()
+            }
+            Self::RiskWeighted => {
+                // Higher cascade risk -> smaller budget (inversely proportional).
+                let total_inv_risk: f64 = tasks.iter()
+                    .map(|t| 1.0 / (cascade_risks.get(&t.id).unwrap_or(&0.1) + 0.01))
+                    .sum();
+                tasks.iter().map(|t| {
+                    let risk = cascade_risks.get(&t.id).unwrap_or(&0.1);
+                    let inv_risk = 1.0 / (risk + 0.01);
+                    let fraction = inv_risk / total_inv_risk;
+                    (t.id.clone(), parent_budget.scale(fraction))
+                }).collect()
+            }
+        }
+    }
+}
+
+impl SafetyBudget {
+    /// Divide budget equally among n recipients.
+    pub fn divide_equally(&self, n: usize) -> SafetyBudget {
+        SafetyBudget {
+            irreversibility_limit: self.irreversibility_limit / n as f64,
+            blast_radius_file_limit: self.blast_radius_file_limit / n,
+            footprint_limit: self.footprint_limit / n,
+            uncertainty_tokens: self.uncertainty_tokens / n,
+            cost_limit_usd: self.cost_limit_usd / n as f64,
+        }
+    }
+
+    /// Scale budget by a fraction (0.0..1.0).
+    pub fn scale(&self, fraction: f64) -> SafetyBudget {
+        SafetyBudget {
+            irreversibility_limit: self.irreversibility_limit * fraction,
+            blast_radius_file_limit: (self.blast_radius_file_limit as f64 * fraction).ceil() as usize,
+            footprint_limit: (self.footprint_limit as f64 * fraction).ceil() as usize,
+            uncertainty_tokens: (self.uncertainty_tokens as f64 * fraction).ceil() as usize,
+            cost_limit_usd: self.cost_limit_usd * fraction,
+        }
+    }
+}
+```
+
+### Integration wiring
+
+```
+orchestrate.rs: PlanRunner::run_plan()
+  |
+  +--> BudgetDelegator::new(plan_budget)
+  |
+  +--> For each task in topological order:
+  |      |
+  |      +--> BudgetAllocationStrategy::allocate()
+  |      |      compute task budget from remaining plan budget
+  |      |
+  |      +--> BudgetDelegator::delegate(task_id, task_budget)
+  |      |      conservation check, deduct from remaining
+  |      |
+  |      +--> SafetyBudgetTracker::new(task_budget)
+  |      |      per-task budget enforcement during execution
+  |      |
+  |      +--> [execute task with budget tracker]
+  |      |
+  |      +--> BudgetDelegator::reclaim(task_id, actual_usage)
+  |             return unused budget to pool
+  |
+  +--> BudgetDelegator::conservation_check()
+         verify: parent = delegated + remaining + reclaimed
+```
+
+The key property: tasks that finish under-budget release their surplus back to the pool. Late-stage tasks that need more headroom can draw from what earlier tasks left behind, without ever exceeding the plan-level budget.
+
+### Configuration
+
+```toml
+[agent.risk.budget.delegation]
+# Budget allocation strategy. Options: "equal", "proportional", "risk_weighted".
+allocation_strategy = "risk_weighted"
+# Reserve fraction: hold this fraction of parent budget as buffer.
+# Range: 0.0..0.5. Default: 0.1.
+reserve_fraction = 0.1
+# Enable automatic budget reclamation from completed tasks.
+auto_reclaim = true
+# Enable conservation assertion checks (recommended for debug builds).
+conservation_assertions = true
+```
+
+### Test criteria
+
+- `BudgetDelegator::delegate()` rejects requests exceeding remaining budget
+- `BudgetDelegator::reclaim()` correctly returns unused budget to remaining pool
+- `BudgetDelegator::conservation_check()` returns true after any sequence of delegate/reclaim operations
+- Equal allocation: N tasks each get 1/N of parent budget
+- Proportional allocation: task with 2x complexity gets 2x budget
+- Risk-weighted allocation: task with 2x cascade risk gets a smaller budget
+- Reserve fraction: allocation respects `reserve_fraction` (only allocates `1 - reserve_fraction`)
+- Zero conservation violations across 100 random delegation/reclamation sequences
+
+---
+
 ## Related Topics
 
 - [00-defense-in-depth.md](00-defense-in-depth.md) — Hard shields (Layer 1)

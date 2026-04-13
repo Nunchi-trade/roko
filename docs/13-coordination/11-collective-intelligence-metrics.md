@@ -361,6 +361,359 @@ influenced by but not determined by each other's signals.
 
 ---
 
+## Collective Pathology Detection
+
+Multi-agent collectives can develop pathological coordination patterns analogous to groupthink, information cascades, and herding in human groups. Detecting these pathologies early is critical for maintaining genuine collective intelligence rather than mere collective agreement.
+
+### Pathology 1: Information Cascades (Herding)
+
+An information cascade occurs when agents ignore their private signals and copy the actions of previous agents, causing the collective to converge on a potentially incorrect decision [Bikhchandani, S., Hirshleifer, D. & Welch, I. "A Theory of Fads, Fashion, Custom, and Cultural Change as Informational Cascades." *Journal of Political Economy*, 100(5):992-1026, 1992].
+
+In Roko, cascades manifest when agents confirm pheromones without independent verification — the confirmation count grows, but the information content does not.
+
+**Detection**: Compare the rate of unique observations to the rate of confirmations. A healthy ratio is > 0.3 (at least 30% of deposits are original observations, not confirmations).
+
+```rust
+/// Detect information cascade risk in the pheromone field.
+///
+/// An information cascade occurs when agents confirm existing pheromones
+/// without generating independent observations. The cascade ratio measures
+/// original deposits vs confirmations.
+///
+/// # Returns
+/// - `cascade_ratio`: original_deposits / total_deposits. Range [0, 1].
+/// - Values < 0.2 indicate active cascade (agents copying, not observing)
+/// - Values 0.2-0.4 indicate mild herding tendency
+/// - Values > 0.4 indicate healthy independent observation
+///
+/// # References
+/// Bikhchandani, Hirshleifer & Welch 1992, "Informational Cascades"
+/// Banerjee, A.V. "A Simple Model of Herd Behavior." QJE 107(3), 1992.
+pub struct CascadeDetector {
+    /// Window size for measurement (ticks).
+    /// Default: 200. Range: [50, 2000].
+    pub window_size: u64,
+
+    /// Threshold below which a cascade warning is emitted.
+    /// Default: 0.2. Range: [0.05, 0.5].
+    pub cascade_threshold: f64,
+
+    /// Minimum deposits in window before detection activates.
+    /// Default: 20. Range: [5, 200].
+    pub min_deposits: usize,
+}
+
+impl Default for CascadeDetector {
+    fn default() -> Self {
+        Self {
+            window_size: 200,
+            cascade_threshold: 0.2,
+            min_deposits: 20,
+        }
+    }
+}
+
+/// Result of cascade analysis for a pheromone field window.
+pub struct CascadeAnalysis {
+    /// Fraction of deposits that are original observations (not confirmations).
+    pub cascade_ratio: f64,
+    /// Number of unique originating agents in the window.
+    pub unique_originators: usize,
+    /// Number of agents that only confirmed (never originated) in the window.
+    pub pure_followers: usize,
+    /// Whether the cascade threshold is breached.
+    pub cascade_detected: bool,
+}
+
+pub fn analyze_cascade(
+    deposits: &[PheromoneDeposit],
+    confirmations: &[PheromoneConfirmation],
+    config: &CascadeDetector,
+) -> CascadeAnalysis {
+    let total = deposits.len() + confirmations.len();
+    if total < config.min_deposits {
+        return CascadeAnalysis {
+            cascade_ratio: 1.0, // insufficient data → assume healthy
+            unique_originators: deposits.iter()
+                .map(|d| &d.source).collect::<std::collections::HashSet<_>>().len(),
+            pure_followers: 0,
+            cascade_detected: false,
+        };
+    }
+    let originals = deposits.len();
+    let ratio = originals as f64 / total as f64;
+
+    let originators: std::collections::HashSet<_> = deposits.iter()
+        .map(|d| &d.source).collect();
+    let confirmers: std::collections::HashSet<_> = confirmations.iter()
+        .map(|c| &c.confirmer).collect();
+    let pure_followers = confirmers.difference(&originators).count();
+
+    CascadeAnalysis {
+        cascade_ratio: ratio,
+        unique_originators: originators.len(),
+        pure_followers,
+        cascade_detected: ratio < config.cascade_threshold,
+    }
+}
+```
+
+**Mitigation**: When a cascade is detected, the system can:
+1. Temporarily increase the pheromone sensing threshold (agents must look harder before following)
+2. Boost the noise parameter in morphogenetic dynamics (more exploration)
+3. Emit a `Anomaly` pheromone flagging the cascade itself
+
+### Pathology 2: Groupthink (Premature Consensus)
+
+Groupthink occurs when a collective reaches consensus too quickly, before sufficient evidence has accumulated. Unlike cascades (where agents passively follow), groupthink involves active convergence — agents suppress dissenting observations to maintain group cohesion [Janis, I.L. *Victims of Groupthink*. Houghton Mifflin, 1972].
+
+In Roko, groupthink manifests as rapid Consensus pheromone formation without adequate Pattern → Wisdom → Consensus progression.
+
+**Detection**: Measure the average time from Pattern deposit to Consensus formation. Healthy progression takes 200+ ticks across the promotion pipeline.
+
+```rust
+/// Detect groupthink risk based on consensus formation speed.
+///
+/// Groupthink is flagged when Consensus pheromones form faster than
+/// the minimum healthy progression time, indicating that agents are
+/// skipping the validation pipeline.
+///
+/// # Healthy Pipeline Timing
+/// Pattern (deposit) → [3+ confirmations, age > 50% half-life] → Wisdom
+/// Wisdom  → [4+ confirmations] → Consensus
+///
+/// Minimum healthy time ≈ 0.5 × Pattern half-life + confirmation accumulation
+/// For default settings: 0.5 × 12h = 6h + ~2h for confirmations = ~8h
+/// At 4 ticks/min: ~1920 ticks minimum.
+///
+/// # References
+/// Janis 1972, "Victims of Groupthink"
+/// Bénabou, R. "Groupthink: Collective Delusions in Organizations and Markets."
+///   Review of Economic Studies, 80(2):429-462, 2013.
+pub struct GroupthinkDetector {
+    /// Minimum ticks from first Pattern to Consensus formation.
+    /// Consensus forming faster than this is flagged.
+    /// Default: 500 ticks. Range: [100, 5000].
+    pub min_progression_ticks: u64,
+
+    /// Minimum unique agents that must contribute to the promotion chain.
+    /// Consensus from fewer than this many agents is suspicious.
+    /// Default: 3. Range: [2, 20].
+    pub min_contributor_agents: usize,
+
+    /// Whether to block fast consensus or just warn.
+    /// Default: false (warn only).
+    pub block_fast_consensus: bool,
+}
+
+impl Default for GroupthinkDetector {
+    fn default() -> Self {
+        Self {
+            min_progression_ticks: 500,
+            min_contributor_agents: 3,
+            block_fast_consensus: false,
+        }
+    }
+}
+```
+
+### Pathology 3: Echo Chambers (Scope Isolation)
+
+Echo chambers form when subsets of agents interact only with each other, reinforcing shared beliefs while ignoring contradictory signals from the broader Collective [Sunstein, C.R. "#Republic: Divided Democracy in the Age of Social Media." Princeton University Press, 2017].
+
+In Roko, echo chambers are detected by measuring the **inter-group pheromone flow** — how often pheromones cross the boundaries between agent subgroups.
+
+```rust
+/// Detect echo chamber formation within a Collective.
+///
+/// An echo chamber is a subgroup of agents that primarily confirm each
+/// other's pheromones while ignoring signals from the rest of the Collective.
+///
+/// # Detection Method
+/// 1. Build a confirmation graph: edge (A→B) if A confirmed B's pheromone
+/// 2. Detect communities using modularity maximization
+/// 3. If modularity > threshold, echo chambers exist
+/// 4. Measure inter-community flow: pheromones that cross community boundaries
+///
+/// # Healthy Range
+/// - Modularity < 0.3: good mixing (no echo chambers)
+/// - Modularity 0.3-0.6: mild clustering (may be healthy specialization)
+/// - Modularity > 0.6: strong echo chambers (pathological isolation)
+///
+/// # References
+/// Newman, M.E.J. "Modularity and Community Structure in Networks."
+///   PNAS 103(23):8577-8582, 2006.
+pub struct EchoChamberDetector {
+    /// Modularity threshold for echo chamber warning.
+    /// Default: 0.6. Range: [0.3, 0.9].
+    pub modularity_threshold: f64,
+
+    /// Minimum inter-community pheromone flow rate.
+    /// Default: 0.15 (15% of confirmations cross community boundaries).
+    /// Range: [0.05, 0.5].
+    pub min_cross_community_flow: f64,
+
+    /// Window size for community detection (ticks).
+    /// Default: 500. Range: [100, 5000].
+    pub window_size: u64,
+}
+
+impl Default for EchoChamberDetector {
+    fn default() -> Self {
+        Self {
+            modularity_threshold: 0.6,
+            min_cross_community_flow: 0.15,
+            window_size: 500,
+        }
+    }
+}
+```
+
+### Pathology 4: Cascading Hallucinations
+
+Unique to AI multi-agent systems, cascading hallucinations occur when one agent's incorrect output (a "hallucination") is treated as ground truth by subsequent agents, each building on the error and potentially amplifying it [arXiv:2501.06322, "Multi-Agent Collaboration Mechanisms: A Survey of LLMs", 2025].
+
+In Roko, this manifests as a Pattern or Wisdom pheromone based on incorrect information that gets confirmed because agents verify against each other's outputs rather than ground truth.
+
+```rust
+/// Detect cascading hallucination risk in the pheromone field.
+///
+/// Hallucination cascades are detected by measuring the "grounding ratio":
+/// the fraction of confirmed pheromones whose root observation has been
+/// independently verified against ground truth (gate results, test outcomes,
+/// external data).
+///
+/// A pheromone confirmed only by other pheromones (no ground truth anchor)
+/// is at risk of being a cascading hallucination.
+///
+/// # Detection
+/// - Grounding ratio > 0.5: healthy (>50% of confirmed signals have ground truth)
+/// - Grounding ratio 0.2-0.5: moderate risk
+/// - Grounding ratio < 0.2: high hallucination cascade risk
+pub struct HallucinationCascadeDetector {
+    /// Minimum grounding ratio before warning.
+    /// Default: 0.3. Range: [0.1, 0.7].
+    pub min_grounding_ratio: f64,
+
+    /// Maximum allowed chain depth without ground truth verification.
+    /// Pheromone lineage chains (parent → child → grandchild...) deeper
+    /// than this without a ground-truth-anchored ancestor trigger a warning.
+    /// Default: 3. Range: [2, 10].
+    pub max_ungrounded_depth: usize,
+
+    /// Tags that indicate ground-truth verification.
+    /// Default: ["gate_pass", "test_verified", "external_confirmed"].
+    pub ground_truth_tags: Vec<String>,
+}
+
+impl Default for HallucinationCascadeDetector {
+    fn default() -> Self {
+        Self {
+            min_grounding_ratio: 0.3,
+            max_ungrounded_depth: 3,
+            ground_truth_tags: vec![
+                "gate_pass".into(),
+                "test_verified".into(),
+                "external_confirmed".into(),
+            ],
+        }
+    }
+}
+```
+
+### Pathology 5: Pheromone Deadlock
+
+Pheromone deadlock occurs when two or more pheromone signals create a circular dependency that prevents any agent from acting:
+
+- Threat A says "don't touch module X until bug Y is fixed"
+- Opportunity B says "fix bug Y by modifying module X"
+- Result: no agent acts because the Threat blocks the Opportunity's prerequisite
+
+```rust
+/// Detect pheromone deadlock — circular dependencies in the pheromone field
+/// that prevent agents from acting.
+///
+/// # Detection Method
+/// 1. Build a dependency graph: pheromone A blocks action B, pheromone B
+///    blocks action C, etc.
+/// 2. Detect cycles in the dependency graph
+/// 3. If cycles exist and no agent has acted on any node in the cycle
+///    for `stall_threshold` ticks, flag a deadlock
+///
+/// # Resolution
+/// The lowest-intensity pheromone in the cycle is temporarily suppressed
+/// (intensity forced to 0 for one update cycle), breaking the deadlock.
+/// The suppressed pheromone resumes normal decay after the cycle.
+pub struct DeadlockDetector {
+    /// Ticks of inaction before a cycle is flagged as deadlock.
+    /// Default: 100 ticks. Range: [20, 500].
+    pub stall_threshold: u64,
+
+    /// Maximum cycle length to search for. Longer cycles are rare
+    /// and expensive to detect.
+    /// Default: 5. Range: [2, 20].
+    pub max_cycle_length: usize,
+}
+
+impl Default for DeadlockDetector {
+    fn default() -> Self {
+        Self {
+            stall_threshold: 100,
+            max_cycle_length: 5,
+        }
+    }
+}
+```
+
+### Composite Pathology Dashboard
+
+All five pathology detectors integrate into the collective intelligence dashboard:
+
+```
+Collective Health: Pathology Detection
+═══════════════════════════════════════════════════════════
+Cascade risk:      0.42 [▓▓▓▓░░░░░░] (threshold: < 0.2) ✓
+Groupthink risk:   OK   [░░░░░░░░░░] (no fast consensus)  ✓
+Echo chambers:     0.28 [▓▓▓░░░░░░░] (modularity < 0.6)   ✓
+Hallucination:     0.61 [▓▓▓▓▓▓░░░░] (grounding > 0.3)    ✓
+Deadlocks:         0    [░░░░░░░░░░] (no cycles detected)  ✓
+
+Overall:           HEALTHY — no pathologies detected
+═══════════════════════════════════════════════════════════
+```
+
+### Pathology Response Configuration
+
+```toml
+[collective.pathology_detection]
+enabled = true
+
+[collective.pathology_detection.cascade]
+window_size = 200
+threshold = 0.2
+min_deposits = 20
+
+[collective.pathology_detection.groupthink]
+min_progression_ticks = 500
+min_contributor_agents = 3
+block_fast_consensus = false
+
+[collective.pathology_detection.echo_chamber]
+modularity_threshold = 0.6
+min_cross_community_flow = 0.15
+window_size = 500
+
+[collective.pathology_detection.hallucination]
+min_grounding_ratio = 0.3
+max_ungrounded_depth = 3
+
+[collective.pathology_detection.deadlock]
+stall_threshold = 100
+max_cycle_length = 5
+```
+
+---
+
 ## Population-Level A/B Testing
 
 For rigorous evaluation of coordination mechanisms, Roko supports population-level A/B testing:

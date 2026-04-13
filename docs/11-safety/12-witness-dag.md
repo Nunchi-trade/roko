@@ -1153,6 +1153,389 @@ Calautti et al. (2024, ACM PODS) showed that why-provenance for Datalog is NP-co
 
 ---
 
+## DAG Query Language
+
+The Witness DAG is only as useful as the queries you can run against it. This section defines a typed query interface for structural, temporal, and provenance queries over the content-addressed DAG. The design draws on three foundations: GQL (ISO/IEC 39075:2024, the first ISO-standard graph query language), Datalog for recursive provenance queries, and petgraph for Rust-native graph algorithms.
+
+### Query types
+
+Five categories of queries cover the forensic and safety use cases:
+
+```rust
+/// A query over the Witness DAG.
+/// Supports structural, temporal, provenance, pattern, and aggregate queries.
+pub enum DagQuery {
+    /// Reachability: did vertex A causally influence vertex B?
+    Reachability {
+        source: VertexHash,
+        target: VertexHash,
+    },
+    /// Ancestry: all predecessors of a vertex (full causal history).
+    Ancestry {
+        vertex: VertexHash,
+        /// Maximum depth. None = unbounded.
+        max_depth: Option<usize>,
+    },
+    /// Provenance chain: the causal path from source to target.
+    ProvenanceChain {
+        source: VertexHash,
+        target: VertexHash,
+        /// Return all paths or just shortest.
+        all_paths: bool,
+    },
+    /// Pattern match: find subgraph patterns (twig queries).
+    PatternMatch {
+        pattern: DagPattern,
+    },
+    /// Temporal slice: all vertices within a time window.
+    TemporalSlice {
+        start_ms: i64,
+        end_ms: i64,
+        /// Filter by vertex type.
+        vertex_types: Option<Vec<VertexType>>,
+    },
+    /// Aggregate: compute metrics over the DAG.
+    Aggregate {
+        metric: DagMetric,
+        scope: AggregateScope,
+    },
+}
+
+/// A structural pattern for subgraph matching.
+/// Inspired by GQL Regular Path Queries (ISO/IEC 39075:2024).
+pub struct DagPattern {
+    /// Pattern nodes with variable bindings.
+    pub nodes: Vec<PatternNode>,
+    /// Edge constraints between pattern nodes.
+    pub edges: Vec<PatternEdge>,
+    /// Filter predicates on node/edge attributes.
+    pub predicates: Vec<PatternPredicate>,
+}
+
+pub struct PatternNode {
+    /// Variable name for this node (e.g., "a", "b").
+    pub variable: String,
+    /// Required vertex type (None = any type).
+    pub vertex_type: Option<VertexType>,
+    /// Required tag constraints.
+    pub tag_constraints: Vec<(String, String)>,
+}
+
+pub struct PatternEdge {
+    /// Source node variable.
+    pub from: String,
+    /// Target node variable.
+    pub to: String,
+    /// Edge type constraint.
+    pub edge_type: Option<EdgeType>,
+    /// Minimum hops (for path queries). Default: 1.
+    pub min_hops: usize,
+    /// Maximum hops (for path queries). None = unbounded.
+    pub max_hops: Option<usize>,
+}
+
+pub enum PatternPredicate {
+    /// Node attribute equals value.
+    NodeAttrEq { variable: String, attr: String, value: String },
+    /// Node timestamp within range.
+    NodeTimestampRange { variable: String, start_ms: i64, end_ms: i64 },
+    /// Edge timestamp ordering: from.timestamp < to.timestamp.
+    TemporalOrder { from: String, to: String },
+}
+
+/// Metrics computable over DAG subgraphs.
+pub enum DagMetric {
+    /// Count of vertices matching criteria.
+    VertexCount,
+    /// Maximum depth of the DAG from roots.
+    MaxDepth,
+    /// Average branching factor (out-degree).
+    AvgBranchingFactor,
+    /// Longest path (in edges).
+    LongestPath,
+    /// Count of vertices by type.
+    TypeDistribution,
+}
+
+pub enum AggregateScope {
+    /// Entire DAG.
+    Global,
+    /// Subgraph reachable from a vertex.
+    SubgraphFrom(VertexHash),
+    /// Vertices within a time window.
+    TimeWindow { start_ms: i64, end_ms: i64 },
+}
+```
+
+### Query execution engine
+
+```rust
+/// Executes queries against the Witness DAG.
+/// Uses petgraph for graph algorithms and SQLite for indexed lookups.
+pub struct DagQueryEngine {
+    /// In-memory graph representation (petgraph).
+    graph: petgraph::Graph<WitnessVertex, WitnessEdge>,
+    /// Node index lookup by vertex hash.
+    hash_to_node: HashMap<VertexHash, NodeIndex>,
+    /// SQLite connection for persistent queries.
+    db: rusqlite::Connection,
+}
+
+impl DagQueryEngine {
+    /// Execute a query and return results.
+    pub fn execute(&self, query: &DagQuery) -> Result<QueryResult> {
+        match query {
+            DagQuery::Reachability { source, target } => {
+                let src = self.resolve(source)?;
+                let tgt = self.resolve(target)?;
+                let reachable = petgraph::algo::has_path_connecting(
+                    &self.graph, src, tgt, None
+                );
+                Ok(QueryResult::Boolean(reachable))
+            }
+            DagQuery::Ancestry { vertex, max_depth } => {
+                let node = self.resolve(vertex)?;
+                let ancestors = self.collect_ancestors(node, *max_depth);
+                Ok(QueryResult::Vertices(ancestors))
+            }
+            DagQuery::ProvenanceChain { source, target, all_paths } => {
+                let src = self.resolve(source)?;
+                let tgt = self.resolve(target)?;
+                if *all_paths {
+                    let paths = self.all_simple_paths(src, tgt);
+                    Ok(QueryResult::Paths(paths))
+                } else {
+                    let path = self.shortest_path(src, tgt);
+                    Ok(QueryResult::Paths(path.into_iter().collect()))
+                }
+            }
+            DagQuery::PatternMatch { pattern } => {
+                let matches = self.match_pattern(pattern);
+                Ok(QueryResult::PatternMatches(matches))
+            }
+            DagQuery::TemporalSlice { start_ms, end_ms, vertex_types } => {
+                let vertices = self.temporal_slice(*start_ms, *end_ms, vertex_types);
+                Ok(QueryResult::Vertices(vertices))
+            }
+            DagQuery::Aggregate { metric, scope } => {
+                let value = self.compute_aggregate(metric, scope);
+                Ok(QueryResult::Aggregate(value))
+            }
+        }
+    }
+
+    /// Collect ancestors via reverse BFS with optional depth bound.
+    fn collect_ancestors(
+        &self,
+        node: NodeIndex,
+        max_depth: Option<usize>,
+    ) -> Vec<WitnessVertex> {
+        let reversed = petgraph::visit::Reversed(&self.graph);
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+        queue.push_back((node, 0usize));
+        visited.insert(node);
+        let mut result = Vec::new();
+
+        while let Some((current, depth)) = queue.pop_front() {
+            if let Some(max) = max_depth {
+                if depth > max { continue; }
+            }
+            if current != node {
+                result.push(self.graph[current].clone());
+            }
+            for neighbor in reversed.neighbors(current) {
+                if visited.insert(neighbor) {
+                    queue.push_back((neighbor, depth + 1));
+                }
+            }
+        }
+        result
+    }
+
+    /// Pattern matching using stack-based twig algorithm.
+    /// Matches structural patterns against the DAG.
+    fn match_pattern(&self, pattern: &DagPattern) -> Vec<PatternMatch> {
+        // For each candidate node matching the first pattern node:
+        //   Try to extend the match by finding neighbors matching
+        //   subsequent pattern nodes and edges.
+        // Uses backtracking search with pruning by vertex type
+        // and tag constraints.
+        // ...
+    }
+}
+
+pub enum QueryResult {
+    Boolean(bool),
+    Vertices(Vec<WitnessVertex>),
+    Paths(Vec<Vec<WitnessVertex>>),
+    PatternMatches(Vec<PatternMatch>),
+    Aggregate(AggregateValue),
+}
+
+pub struct PatternMatch {
+    /// Variable bindings: variable name -> matched vertex.
+    pub bindings: HashMap<String, WitnessVertex>,
+}
+
+pub enum AggregateValue {
+    Count(usize),
+    Float(f64),
+    Distribution(HashMap<String, usize>),
+}
+```
+
+### Datalog provenance queries
+
+For recursive provenance queries (transitive closure, fixed-point computations), embed Datafrog (the lightweight Datalog engine used by the Rust compiler's Polonius borrow checker):
+
+```rust
+use datafrog::{Iteration, Relation, RelationLeaper};
+
+/// Compute transitive influence relation over the Witness DAG.
+/// Given direct edges (A -> B), computes all transitive pairs (A ->* B).
+pub fn transitive_influence(
+    direct_edges: &[(VertexHash, VertexHash)],
+) -> Vec<(VertexHash, VertexHash)> {
+    let mut iteration = Iteration::new();
+    let edges = iteration.variable::<(VertexHash, VertexHash)>("edges");
+    let influences = iteration.variable::<(VertexHash, VertexHash)>("influences");
+
+    // Seed with direct edges.
+    edges.insert(Relation::from_vec(direct_edges.to_vec()));
+    influences.insert(Relation::from_vec(direct_edges.to_vec()));
+
+    // Fixed-point: influences(a, c) :- influences(a, b), edges(b, c).
+    while iteration.changed() {
+        influences.from_join(&influences, &edges, |&_b, &a, &c| (a, c));
+    }
+
+    influences.complete().into_iter().collect()
+}
+
+/// Find all vertices that were influenced by tainted data.
+/// tainted(V) :- source_tainted(V).
+/// tainted(V) :- tainted(U), edge(U, V).
+pub fn taint_reachability(
+    edges: &[(VertexHash, VertexHash)],
+    tainted_sources: &[VertexHash],
+) -> Vec<VertexHash> {
+    let mut iteration = Iteration::new();
+    let edge_rel = iteration.variable::<(VertexHash, VertexHash)>("edges");
+    let tainted = iteration.variable::<(VertexHash, ())>("tainted");
+
+    edge_rel.insert(Relation::from_vec(edges.to_vec()));
+    tainted.insert(Relation::from_vec(
+        tainted_sources.iter().map(|v| (v.clone(), ())).collect(),
+    ));
+
+    while iteration.changed() {
+        // tainted(v) :- tainted(u), edge(u, v).
+        tainted.from_join(&tainted, &edge_rel, |&_u, &(), &v| (v, ()));
+    }
+
+    tainted.complete().into_iter().map(|(v, _)| v).collect()
+}
+```
+
+### Safety-specific query patterns
+
+Pre-built queries for common safety analysis tasks:
+
+| Query Name | Pattern | Use Case |
+|---|---|---|
+| `toctou_detection` | `read(F) ->* modify(F) ->* use(F)` where `modify.agent != read.agent` | Detect time-of-check/time-of-use races |
+| `escalation_chain` | `action(A1) -> action(A2) -> ... -> action(AN)` where `permission(A_i) < permission(A_{i+1})` | Detect privilege escalation sequences |
+| `data_exfiltration` | `read(sensitive) ->* network_call(external)` | Detect potential data exfiltration paths |
+| `circular_reasoning` | cycle in `decision -> observation -> decision` | Detect reasoning loops |
+| `orphaned_approvals` | `Decision` vertex with no child `Resolution` vertex | Find decisions that were never resolved |
+
+```rust
+/// Pre-built safety query patterns.
+pub struct SafetyQueries;
+
+impl SafetyQueries {
+    /// Detect TOCTOU: file read by agent A, modified by agent B,
+    /// then used by agent A without re-reading.
+    pub fn toctou_detection() -> DagPattern {
+        DagPattern {
+            nodes: vec![
+                PatternNode { variable: "read".into(), vertex_type: Some(VertexType::Observation), tag_constraints: vec![("tool".into(), "read_file".into())] },
+                PatternNode { variable: "modify".into(), vertex_type: Some(VertexType::Decision), tag_constraints: vec![("tool".into(), "write_file".into())] },
+                PatternNode { variable: "use".into(), vertex_type: Some(VertexType::Observation), tag_constraints: vec![("tool".into(), "read_file".into())] },
+            ],
+            edges: vec![
+                PatternEdge { from: "read".into(), to: "modify".into(), edge_type: None, min_hops: 1, max_hops: Some(10) },
+                PatternEdge { from: "modify".into(), to: "use".into(), edge_type: None, min_hops: 1, max_hops: Some(10) },
+            ],
+            predicates: vec![
+                PatternPredicate::TemporalOrder { from: "read".into(), to: "modify".into() },
+                PatternPredicate::TemporalOrder { from: "modify".into(), to: "use".into() },
+            ],
+        }
+    }
+
+    /// Detect privilege escalation sequences.
+    pub fn escalation_chain(min_length: usize) -> DagPattern {
+        // Pattern: sequence of decisions with monotonically increasing
+        // permission levels.
+        DagPattern {
+            nodes: (0..min_length).map(|i| PatternNode {
+                variable: format!("action_{}", i),
+                vertex_type: Some(VertexType::Decision),
+                tag_constraints: vec![],
+            }).collect(),
+            edges: (0..min_length-1).map(|i| PatternEdge {
+                from: format!("action_{}", i),
+                to: format!("action_{}", i + 1),
+                edge_type: None,
+                min_hops: 1,
+                max_hops: Some(5),
+            }).collect(),
+            predicates: vec![],
+        }
+    }
+}
+```
+
+### Configuration
+
+```toml
+[safety.dag_query]
+# Enable the DAG query engine.
+enabled = true
+# Maximum query execution time in milliseconds.
+# Range: 100..60000. Default: 5000.
+max_query_time_ms = 5000
+# Maximum result set size.
+# Range: 10..100000. Default: 10000.
+max_results = 10000
+# Enable Datalog recursive queries.
+enable_datalog = true
+# Maximum fixed-point iterations for Datalog.
+# Range: 10..10000. Default: 1000.
+max_datalog_iterations = 1000
+# Pre-built safety queries to run automatically per task.
+auto_queries = ["toctou_detection", "escalation_chain", "orphaned_approvals"]
+# Interval for automatic safety queries (in tasks completed).
+# Range: 1..100. Default: 5.
+auto_query_interval_tasks = 5
+```
+
+### Test criteria
+
+- `DagQueryEngine::execute(Reachability)` returns true for connected vertices and false for disconnected
+- `DagQueryEngine::execute(Ancestry)` with max_depth=2 returns only vertices within 2 hops
+- `DagQueryEngine::execute(ProvenanceChain)` returns shortest path when all_paths=false
+- `DagQueryEngine::execute(PatternMatch)` with TOCTOU pattern detects the `read -> modify -> use` sequence
+- `transitive_influence()` computes correct transitive closure for a 5-node chain
+- `taint_reachability()` correctly propagates taint through 3+ hops
+- `SafetyQueries::toctou_detection()` pattern matches when agents differ between read and modify
+- Auto-queries run every `auto_query_interval_tasks` completed tasks
+- Query execution respects `max_query_time_ms` timeout
+
+---
+
 ## Related Topics
 
 - [02-audit-chain.md](02-audit-chain.md) — The linear Merkle hash-chain that the DAG extends

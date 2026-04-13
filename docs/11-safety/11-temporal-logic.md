@@ -832,6 +832,324 @@ violation_response = "alert"  # "log" | "alert" | "pause" | "abort"
 
 ---
 
+## Temporal Attack Pattern Detection
+
+Beyond verifying safety properties, the TemporalMonitor must detect *adversarial temporal patterns* -- multi-step attack sequences that are benign individually but malicious in aggregate. This section draws on three recent works: Temporal Attack Pattern Detection in Multi-Agent Workflows (arXiv:2601.00848, January 2025), SentinelAgent graph-based anomaly detection (arXiv:2505.24201, May 2025), and AgentSpec runtime enforcement DSL (Wang et al., ICSE '26).
+
+### Three-tier anomaly detection
+
+Following SentinelAgent's architecture, temporal anomalies are detected at three levels:
+
+```rust
+/// Three-tier temporal anomaly detection.
+/// Node-level: individual action anomalies.
+/// Edge-level: anomalous transitions between actions.
+/// Path-level: anomalous multi-step execution paths.
+pub struct TemporalAnomalyDetector {
+    /// Node-level detectors: flag individual anomalous actions.
+    pub node_detectors: Vec<Box<dyn NodeAnomalyDetector>>,
+    /// Edge-level detectors: flag anomalous transitions.
+    pub edge_detectors: Vec<Box<dyn EdgeAnomalyDetector>>,
+    /// Path-level detectors: flag anomalous execution paths.
+    pub path_detectors: Vec<Box<dyn PathAnomalyDetector>>,
+    /// Sliding window of recent agent actions.
+    pub window: SlidingActionWindow,
+    /// Anomaly score threshold for alerting.
+    /// Range: 0.0..1.0. Default: 0.7.
+    pub alert_threshold: f64,
+}
+
+/// Sliding window over recent agent actions for temporal analysis.
+pub struct SlidingActionWindow {
+    /// Actions in chronological order.
+    actions: VecDeque<TimestampedAction>,
+    /// Maximum window size (actions). Range: 10..10000. Default: 200.
+    max_size: usize,
+    /// Maximum window duration. Default: 30 minutes.
+    max_duration: Duration,
+}
+
+pub struct TimestampedAction {
+    pub timestamp: Instant,
+    pub agent_id: String,
+    pub tool_name: String,
+    pub tool_args_hash: [u8; 32],
+    pub result_status: ActionStatus,
+    pub permission_level: u8,
+    pub files_accessed: Vec<String>,
+    pub taint_label: Option<SecurityLabel>,
+}
+
+pub enum ActionStatus { Success, Failure, Timeout, Blocked }
+```
+
+### Node-level: individual action anomalies
+
+```rust
+pub trait NodeAnomalyDetector: Send + Sync {
+    fn score(&self, action: &TimestampedAction, context: &WindowContext) -> f64;
+    fn name(&self) -> &str;
+}
+
+/// Detect actions with unusually high permission levels for the current phase.
+pub struct PermissionAnomalyDetector {
+    /// Expected permission level per task phase.
+    pub phase_permission_map: HashMap<String, u8>,
+}
+
+/// Detect tool calls at unusual times (e.g., network calls during compile phase).
+pub struct PhaseToolAnomalyDetector {
+    /// Expected tools per task phase.
+    pub phase_tool_map: HashMap<String, HashSet<String>>,
+}
+
+/// Detect actions targeting unusual files (outside normal working set).
+pub struct FileAccessAnomalyDetector {
+    /// Baseline file access patterns (learned from first N actions).
+    pub baseline_files: HashSet<String>,
+    /// Anomaly score for accessing non-baseline files.
+    pub novel_file_score: f64, // Default: 0.3
+}
+```
+
+### Edge-level: anomalous transitions
+
+```rust
+pub trait EdgeAnomalyDetector: Send + Sync {
+    fn score(
+        &self,
+        from: &TimestampedAction,
+        to: &TimestampedAction,
+        context: &WindowContext,
+    ) -> f64;
+    fn name(&self) -> &str;
+}
+
+/// Detect rapid tool switching (may indicate confused or adversarial agent).
+pub struct RapidSwitchDetector {
+    /// Minimum expected interval between different tools (ms).
+    /// Range: 0..10000. Default: 100.
+    pub min_interval_ms: u64,
+}
+
+/// Detect read-then-exfiltrate patterns.
+pub struct ReadExfiltrateDetector {
+    /// Sensitive file patterns (glob).
+    pub sensitive_patterns: Vec<String>,
+    /// Network tools that could exfiltrate.
+    pub network_tools: HashSet<String>,
+}
+
+/// Detect permission level increases across consecutive actions.
+pub struct PermissionEscalationDetector {
+    /// Number of consecutive escalation steps to flag.
+    /// Range: 2..10. Default: 3.
+    pub escalation_threshold: usize,
+}
+```
+
+### Path-level: multi-step attack sequences
+
+```rust
+pub trait PathAnomalyDetector: Send + Sync {
+    fn score(&self, window: &SlidingActionWindow) -> f64;
+    fn name(&self) -> &str;
+}
+
+/// Detect the "boiling frog" pattern: small incremental changes
+/// that individually pass gates but cumulatively are harmful.
+pub struct BoilingFrogDetector {
+    /// Cumulative diff threshold (lines changed across window).
+    /// Range: 100..100000. Default: 5000.
+    pub cumulative_diff_threshold: usize,
+    /// Per-action diff that would individually pass gates.
+    pub per_action_max_diff: usize,
+}
+
+/// Detect reconnaissance chains: sequences of read-only operations
+/// that together map the system's attack surface.
+pub struct ReconnaissanceDetector {
+    /// Sequence patterns that indicate reconnaissance.
+    pub recon_patterns: Vec<Vec<String>>,
+    // Default patterns:
+    // ["glob", "read_file", "grep"] -- mapping the codebase
+    // ["read_file(.env)", "read_file(.git/config)", "read_file(Cargo.toml)"] -- collecting secrets/config
+}
+
+/// Detect delayed exfiltration: data staged early, exfiltrated later.
+/// Combines taint tracking with temporal analysis.
+pub struct DelayedExfiltrationDetector {
+    /// Maximum delay between taint acquisition and exfiltration (seconds).
+    /// Range: 1..86400. Default: 3600.
+    pub max_delay_secs: u64,
+    /// Taint labels that indicate sensitive data.
+    pub sensitive_labels: Vec<TaintLabel>,
+}
+
+/// Detect slow privilege escalation: gradual widening of permissions
+/// over many tasks that individually appear benign.
+pub struct SlowEscalationDetector {
+    /// Window size (tasks) for measuring permission drift.
+    /// Range: 5..100. Default: 20.
+    pub window_size: usize,
+    /// Maximum permission set growth rate (new permissions per task).
+    /// Range: 0.0..1.0. Default: 0.1.
+    pub max_growth_rate: f64,
+}
+```
+
+### Composite anomaly scoring
+
+```rust
+impl TemporalAnomalyDetector {
+    /// Process a new action and compute composite anomaly score.
+    /// Returns anomalies that exceed the alert threshold.
+    pub fn process_action(
+        &mut self,
+        action: TimestampedAction,
+    ) -> Vec<TemporalAnomaly> {
+        // Add to sliding window
+        self.window.push(action.clone());
+        let context = self.window.context();
+        let mut anomalies = Vec::new();
+
+        // Node-level scoring
+        for detector in &self.node_detectors {
+            let score = detector.score(&action, &context);
+            if score > self.alert_threshold {
+                anomalies.push(TemporalAnomaly {
+                    level: AnomalyLevel::Node,
+                    detector_name: detector.name().to_string(),
+                    score,
+                    description: format!(
+                        "Node anomaly: {} scored {:.2} for action {}",
+                        detector.name(), score, action.tool_name
+                    ),
+                    timestamp: action.timestamp,
+                });
+            }
+        }
+
+        // Edge-level scoring (compare with previous action)
+        if let Some(prev) = self.window.previous() {
+            for detector in &self.edge_detectors {
+                let score = detector.score(prev, &action, &context);
+                if score > self.alert_threshold {
+                    anomalies.push(TemporalAnomaly {
+                        level: AnomalyLevel::Edge,
+                        detector_name: detector.name().to_string(),
+                        score,
+                        description: format!(
+                            "Edge anomaly: {} scored {:.2} for {} -> {}",
+                            detector.name(), score, prev.tool_name, action.tool_name
+                        ),
+                        timestamp: action.timestamp,
+                    });
+                }
+            }
+        }
+
+        // Path-level scoring (analyze full window)
+        for detector in &self.path_detectors {
+            let score = detector.score(&self.window);
+            if score > self.alert_threshold {
+                anomalies.push(TemporalAnomaly {
+                    level: AnomalyLevel::Path,
+                    detector_name: detector.name().to_string(),
+                    score,
+                    description: format!(
+                        "Path anomaly: {} scored {:.2} over window",
+                        detector.name(), score
+                    ),
+                    timestamp: action.timestamp,
+                });
+            }
+        }
+
+        anomalies
+    }
+}
+
+pub struct TemporalAnomaly {
+    pub level: AnomalyLevel,
+    pub detector_name: String,
+    pub score: f64,
+    pub description: String,
+    pub timestamp: Instant,
+}
+
+pub enum AnomalyLevel { Node, Edge, Path }
+```
+
+### Integration with TemporalMonitor
+
+The `TemporalAnomalyDetector` operates alongside the `TemporalMonitor` (LTL property verification):
+
+```
+Agent events stream
+    |
+    +--> TemporalMonitor (property verification)
+    |       Checks: "does this event sequence satisfy LTL properties?"
+    |       Output: violation Engrams for property breaches
+    |
+    +--> TemporalAnomalyDetector (pattern detection)
+    |       Checks: "does this event sequence match known attack patterns?"
+    |       Output: anomaly Engrams with confidence scores
+    |
+    +--> Conductor
+            Aggregates: violations + anomalies -> health score -> circuit breaker
+```
+
+### Configuration
+
+```toml
+[safety.temporal.anomaly]
+# Enable temporal anomaly detection.
+enabled = true
+# Alert threshold for anomaly scores. Range: 0.0..1.0. Default: 0.7.
+alert_threshold = 0.7
+# Sliding window size (actions). Range: 10..10000. Default: 200.
+window_size = 200
+# Window duration (seconds). Range: 60..86400. Default: 1800.
+window_duration_secs = 1800
+# Enable specific detectors.
+enable_boiling_frog = true
+enable_reconnaissance = true
+enable_delayed_exfiltration = true
+enable_slow_escalation = true
+enable_permission_escalation = true
+enable_read_exfiltrate = true
+# Boiling frog cumulative diff threshold.
+boiling_frog_diff_threshold = 5000
+# Slow escalation window (tasks).
+slow_escalation_window = 20
+# Slow escalation max growth rate.
+slow_escalation_max_growth_rate = 0.1
+```
+
+### Test criteria
+
+- `SlidingActionWindow` evicts actions beyond `max_size` and `max_duration`
+- `BoilingFrogDetector` flags when cumulative diff exceeds threshold despite each individual diff being small
+- `ReconnaissanceDetector` flags `["glob", "read_file", "grep"]` sequence targeting config files
+- `PermissionEscalationDetector` flags 3+ consecutive permission increases
+- `DelayedExfiltrationDetector` flags `read_file(.env) ... web_fetch(external)` with delay < max_delay_secs
+- `SlowEscalationDetector` flags permission set growth > max_growth_rate per task over window
+- Composite scoring correctly combines node + edge + path scores
+- Anomalies exceeding `alert_threshold` produce Engrams routed to conductor
+- Integration with TemporalMonitor: both property violations and anomalies feed conductor health score
+
+### Academic references for this section
+
+| Paper | Contribution |
+|---|---|
+| Temporal Attack Patterns (arXiv:2601.00848, 2025) | Fine-tuned detection of temporal attacks in multi-agent workflows |
+| SentinelAgent (arXiv:2505.24201, 2025) | Three-tier graph-based anomaly detection for multi-agent systems |
+| AgentSpec (Wang et al., ICSE '26, arXiv:2503.18666) | Runtime enforcement DSL for LLM agent constraints |
+| AgentGuard (Koohestani et al., 2025, arXiv:2509.23864) | Dynamic probabilistic assurance via MDP model checking |
+
+---
+
 ## Related Topics
 
 - [09-adaptive-risk.md](09-adaptive-risk.md) — Layer 4 observation feeds temporal monitors

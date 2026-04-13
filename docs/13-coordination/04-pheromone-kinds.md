@@ -735,6 +735,172 @@ prevents casual erosion of collective agreements.
 
 ---
 
+## Pheromone-Driven Task Allocation
+
+Beyond signaling, pheromone kinds drive emergent task allocation — agents select work based on the ambient pheromone gradient rather than explicit assignment. This mechanism is directly inspired by division of labor in social insect colonies, where task selection is governed by response thresholds to pheromone signals [Bonabeau, E., Theraulaz, G. & Deneubourg, J.-L. "Fixed Response Thresholds and the Regulation of Division of Labor in Insect Societies." *Bulletin of Mathematical Biology*, 60(4):753-807, 1998].
+
+### Response Threshold Model
+
+Each agent has a per-kind response threshold that determines when the agent switches from its current activity to respond to a pheromone signal. The probability of responding follows a sigmoid function of the pheromone intensity relative to the threshold:
+
+```
+P(respond to kind k) = I_k^n / (I_k^n + θ_k^n)
+```
+
+Where:
+- `I_k` = current intensity of pheromone kind k
+- `θ_k` = agent's response threshold for kind k
+- `n` = Hill coefficient (steepness of the response curve). Default: 2.
+
+```rust
+/// Per-agent response thresholds for pheromone-driven task allocation.
+///
+/// Each agent maintains thresholds per pheromone kind. These thresholds
+/// determine the probability of switching from the current task to respond
+/// to an ambient pheromone signal.
+///
+/// Thresholds adapt over time:
+/// - Successfully responding to a kind lowers its threshold (reinforcement)
+/// - Ignoring a kind raises its threshold (habituation)
+///
+/// This produces emergent division of labor: agents that succeed at
+/// threat response develop lower Threat thresholds, making them more
+/// likely to respond to future threats — specializing as "threat responders"
+/// without explicit role assignment.
+///
+/// # References
+/// Bonabeau, Theraulaz & Deneubourg 1998, "Fixed Response Thresholds"
+/// Theraulaz, Bonabeau & Deneubourg 1998, "Response Threshold Reinforcement"
+pub struct ResponseThresholds {
+    /// Per-kind response thresholds. Key = PheromoneKind discriminant.
+    /// Range per value: [0.01, 1.0]. Lower = more responsive.
+    pub thresholds: HashMap<PheromoneKind, f64>,
+
+    /// Hill coefficient controlling response curve steepness.
+    /// Default: 2. Range: [1, 5].
+    /// n=1: linear response. n=2: sigmoid. n=5: near-binary.
+    pub hill_coefficient: u32,
+
+    /// Learning rate for threshold adaptation.
+    /// Default: 0.05. Range: [0.01, 0.2].
+    pub learning_rate: f64,
+
+    /// Minimum threshold (maximum responsiveness).
+    /// Default: 0.05. Range: [0.01, 0.3].
+    pub min_threshold: f64,
+
+    /// Maximum threshold (minimum responsiveness).
+    /// Default: 0.95. Range: [0.5, 1.0].
+    pub max_threshold: f64,
+}
+
+impl ResponseThresholds {
+    /// Compute the probability of responding to a pheromone of given kind
+    /// and intensity.
+    ///
+    /// Uses the Hill function: P = I^n / (I^n + θ^n)
+    pub fn response_probability(&self, kind: &PheromoneKind, intensity: f64) -> f64 {
+        let theta = self.thresholds.get(kind).copied().unwrap_or(0.5);
+        let n = self.hill_coefficient as f64;
+        let i_n = intensity.powf(n);
+        let theta_n = theta.powf(n);
+        i_n / (i_n + theta_n)
+    }
+
+    /// Update threshold after a successful response (lower threshold = more responsive).
+    pub fn reinforce(&mut self, kind: &PheromoneKind) {
+        if let Some(theta) = self.thresholds.get_mut(kind) {
+            *theta = (*theta - self.learning_rate).max(self.min_threshold);
+        }
+    }
+
+    /// Update threshold after ignoring a signal (raise threshold = less responsive).
+    pub fn habituate(&mut self, kind: &PheromoneKind) {
+        if let Some(theta) = self.thresholds.get_mut(kind) {
+            *theta = (*theta + self.learning_rate * 0.5).min(self.max_threshold);
+        }
+    }
+}
+
+#[cfg(test)]
+mod threshold_tests {
+    use super::*;
+
+    #[test]
+    fn high_intensity_high_probability() {
+        let thresholds = ResponseThresholds {
+            thresholds: HashMap::from([(PheromoneKind::Threat, 0.5)]),
+            hill_coefficient: 2,
+            learning_rate: 0.05,
+            min_threshold: 0.05,
+            max_threshold: 0.95,
+        };
+        let p = thresholds.response_probability(&PheromoneKind::Threat, 0.9);
+        // P = 0.81 / (0.81 + 0.25) = 0.764
+        assert!(p > 0.7, "high intensity → high response probability");
+    }
+
+    #[test]
+    fn low_intensity_low_probability() {
+        let thresholds = ResponseThresholds {
+            thresholds: HashMap::from([(PheromoneKind::Threat, 0.5)]),
+            hill_coefficient: 2,
+            learning_rate: 0.05,
+            min_threshold: 0.05,
+            max_threshold: 0.95,
+        };
+        let p = thresholds.response_probability(&PheromoneKind::Threat, 0.1);
+        // P = 0.01 / (0.01 + 0.25) = 0.038
+        assert!(p < 0.1, "low intensity → low response probability");
+    }
+
+    #[test]
+    fn reinforcement_lowers_threshold() {
+        let mut thresholds = ResponseThresholds {
+            thresholds: HashMap::from([(PheromoneKind::Threat, 0.5)]),
+            hill_coefficient: 2,
+            learning_rate: 0.05,
+            min_threshold: 0.05,
+            max_threshold: 0.95,
+        };
+        thresholds.reinforce(&PheromoneKind::Threat);
+        assert_eq!(thresholds.thresholds[&PheromoneKind::Threat], 0.45);
+    }
+}
+```
+
+### Emergent Division of Labor
+
+The response threshold model produces emergent division of labor through a positive feedback loop:
+
+```
+Agent succeeds at responding to Threat
+    ↓
+Threshold for Threat decreases (reinforcement)
+    ↓
+Agent is more likely to respond to future Threats
+    ↓
+Agent becomes a "threat specialist" without explicit assignment
+    ↓
+Other agents' Threat thresholds drift upward (habituation from non-response)
+    ↓
+Complementary specialization emerges: some agents handle threats, others handle opportunities
+```
+
+This mechanism is complementary to — but distinct from — morphogenetic specialization (07-morphogenetic-specialization.md):
+
+| Mechanism | Morphogenetic Specialization | Response Threshold Allocation |
+|-----------|------|------|
+| **Timescale** | 500-2000 ticks (strategic role formation) | 10-100 ticks (tactical task selection) |
+| **Granularity** | 8 broad strategy dimensions | Per-pheromone-kind response |
+| **Mechanism** | Reaction-diffusion dynamics | Reinforcement learning on thresholds |
+| **Coordination** | Collective pheromone inhibition | Individual threshold adaptation |
+| **Reversibility** | Slow (requires niche vacancy or conflict) | Fast (thresholds adapt continuously) |
+
+The two mechanisms operate at different timescales and reinforce each other: morphogenetic specialization determines the agent's *strategic role* (e.g., "verification specialist"), while response thresholds determine its *tactical responsiveness* (e.g., "responds quickly to Anomaly pheromones within the verification domain").
+
+---
+
 ## Summary Table
 
 | Kind | Half-Life | Intensity | Confirmation Effect | Biological Analog |

@@ -696,7 +696,343 @@ contracts.
 
 ---
 
-## 9. Academic Citations
+## 9. W3C DID Integration Bridge
+
+ERC-8004 identities interoperate with the W3C Decentralized Identifiers (DID) ecosystem
+via a resolution bridge. This enables Roko agents to present verifiable credentials to
+non-blockchain systems and interoperate with any DID-compliant identity framework.
+
+### 9.1 DID Method: `did:korai`
+
+Each Korai Passport maps to a DID using the `did:korai` method:
+
+```
+did:korai:<chain-id>:<passport-id>
+
+Examples:
+  did:korai:1:42         — Korai mainnet, passport #42
+  did:korai:31337:7      — Daeji testnet, passport #7
+```
+
+The DID Document is constructed deterministically from on-chain passport data:
+
+```json
+{
+  "@context": ["https://www.w3.org/ns/did/v1.1", "https://w3id.org/security/v2"],
+  "id": "did:korai:1:42",
+  "controller": "did:ethr:0x1234...abcd",
+  "alsoKnownAs": ["did:ethr:0x1234...abcd", "did:pkh:eip155:8453:0x1234...abcd"],
+  "verificationMethod": [{
+    "id": "did:korai:1:42#key-1",
+    "type": "EcdsaSecp256k1VerificationKey2019",
+    "controller": "did:korai:1:42",
+    "blockchainAccountId": "eip155:1:0x1234...abcd"
+  }],
+  "authentication": ["did:korai:1:42#key-1"],
+  "assertionMethod": ["did:korai:1:42#key-1"],
+  "service": [{
+    "id": "did:korai:1:42#agent-card",
+    "type": "AgentCard",
+    "serviceEndpoint": "https://roko-alpha.fly.dev/agent-card.json"
+  }, {
+    "id": "did:korai:1:42#a2a",
+    "type": "AgentToAgent",
+    "serviceEndpoint": "https://roko-alpha.fly.dev/a2a"
+  }]
+}
+```
+
+### 9.2 DID Resolution
+
+```rust
+/// Resolve a did:korai identifier to a DID Document.
+/// Reads on-chain passport data and constructs the W3C-compliant document.
+///
+/// Conforms to DIF DID Resolution v0.3 specification.
+pub async fn resolve_did_korai(
+    did: &str,
+    registry: &IdentityRegistryInstance,
+) -> Result<DidDocument, DidResolutionError> {
+    let parts: Vec<&str> = did.split(':').collect();
+    if parts.len() != 4 || parts[0] != "did" || parts[1] != "korai" {
+        return Err(DidResolutionError::InvalidDid(did.to_string()));
+    }
+    let chain_id: u64 = parts[2].parse()?;
+    let passport_id: U256 = parts[3].parse()?;
+
+    let passport = registry.passports(passport_id).call().await?;
+    let owner = registry.ownerOf(passport_id).call().await?;
+
+    Ok(DidDocument {
+        context: vec![
+            "https://www.w3.org/ns/did/v1.1".into(),
+            "https://w3id.org/security/v2".into(),
+        ],
+        id: did.to_string(),
+        controller: format!("did:ethr:{owner}"),
+        also_known_as: vec![
+            format!("did:ethr:{owner}"),
+            format!("did:pkh:eip155:{chain_id}:{owner}"),
+        ],
+        verification_method: vec![VerificationMethod {
+            id: format!("{did}#key-1"),
+            method_type: "EcdsaSecp256k1VerificationKey2019".into(),
+            controller: did.to_string(),
+            blockchain_account_id: format!("eip155:{chain_id}:{owner}"),
+        }],
+        service: build_service_endpoints(did, &passport.agentCardUri),
+        authentication: vec![format!("{did}#key-1")],
+        assertion_method: vec![format!("{did}#key-1")],
+    })
+}
+```
+
+### 9.3 Verifiable Credentials for Agent Capabilities
+
+Agents issue and present W3C Verifiable Credentials (VC 2.0, W3C Recommendation
+May 2025) to prove capabilities, reputation, and compliance status to external systems:
+
+```rust
+/// A Verifiable Credential issued by the Korai network.
+/// Conformant with W3C VC Data Model 2.0.
+pub struct AgentCredential {
+    pub context: Vec<String>,         // ["https://www.w3.org/ns/credentials/v2"]
+    pub credential_type: Vec<String>, // ["VerifiableCredential", "AgentCapabilityCredential"]
+    pub issuer: String,               // did:korai:1:0 (protocol passport)
+    pub valid_from: String,           // ISO 8601
+    pub valid_until: Option<String>,
+    pub credential_subject: AgentCredentialSubject,
+    pub proof: DataIntegrityProof,    // Ed25519 or EcdsaSecp256k1
+}
+
+pub struct AgentCredentialSubject {
+    pub id: String,                         // did:korai:1:42
+    pub passport_tier: u8,
+    pub capabilities: Vec<String>,
+    pub domain_reputations: HashMap<String, f64>,
+    pub tee_attested: bool,
+    pub compliance_templates: Vec<String>,  // e.g., ["SEC-Trading", "GDPR-Data"]
+}
+```
+
+**Use case**: Agent presents `AgentCapabilityCredential` to a non-Roko enterprise API to
+prove it is a registered, reputable agent without requiring the service to query the
+Korai chain directly.
+
+**Research foundation**: W3C DID Core 1.0 (Recommendation 2022), W3C DID Core 1.1
+(Candidate Recommendation March 2026), W3C VC Data Model 2.0 (Recommendation May 2025),
+DIF DID Resolution specification v0.3.
+
+---
+
+## 10. Advanced Sybil Resistance
+
+Beyond the 5-layer defense described in §2.4, ERC-8004 incorporates graph-based and
+cryptographic Sybil resistance mechanisms drawn from recent research.
+
+### 10.1 Social Graph Trust Propagation
+
+Trust propagates through the agent interaction graph using personalized PageRank
+(Andersen, Chung & Lang 2006). Each agent's trust score depends not just on its own
+history but on the trust of agents that vouch for it:
+
+```rust
+/// Personalized PageRank trust propagation.
+/// Computes trust scores relative to a seed set of trusted agents.
+///
+/// Parameters:
+///   alpha:          teleport probability (default 0.15, range [0.05, 0.30])
+///   seed_set:       Protocol-tier agents (known trusted)
+///   max_iterations: convergence limit (default 100)
+///   epsilon:        convergence threshold (default 1e-6)
+pub struct PersonalizedPageRank {
+    pub alpha: f64,
+    pub seed_set: Vec<u256>,
+    pub max_iterations: u32,
+    pub epsilon: f64,
+}
+
+impl PersonalizedPageRank {
+    pub fn compute(&self, graph: &InteractionGraph) -> HashMap<u256, f64> {
+        let seed_score = 1.0 / self.seed_set.len() as f64;
+        let mut scores: HashMap<u256, f64> = self.seed_set.iter()
+            .map(|&id| (id, seed_score))
+            .collect();
+
+        for _iter in 0..self.max_iterations {
+            let mut new_scores = HashMap::new();
+            let mut max_delta = 0.0_f64;
+
+            for node in graph.nodes() {
+                let teleport = if self.seed_set.contains(&node) {
+                    self.alpha * seed_score
+                } else { 0.0 };
+
+                let propagation: f64 = graph.in_neighbors(node)
+                    .map(|nb| {
+                        let nb_score = scores.get(&nb).copied().unwrap_or(0.0);
+                        (1.0 - self.alpha) * nb_score / graph.out_degree(nb).max(1) as f64
+                    })
+                    .sum();
+
+                let new = teleport + propagation;
+                let old = scores.get(&node).copied().unwrap_or(0.0);
+                max_delta = max_delta.max((new - old).abs());
+                new_scores.insert(node, new);
+            }
+            scores = new_scores;
+            if max_delta < self.epsilon { break; }
+        }
+
+        let max_s = scores.values().copied().fold(0.0_f64, f64::max);
+        if max_s > 0.0 { for s in scores.values_mut() { *s /= max_s; } }
+        scores
+    }
+}
+```
+
+### 10.2 Flow-Based Sybil Detection (SybilRank)
+
+Sybil clusters are detected by analyzing trust flow between honest and suspect graph
+regions (Yu et al. 2006 — SybilGuard, Cao et al. 2012 — SybilRank):
+
+```rust
+/// SybilRank detector. Sybil nodes cluster in graph regions with sparse
+/// connections to the honest subgraph. Short random walks from trusted
+/// seeds assign low probability to Sybil nodes.
+///
+/// Parameters:
+///   walk_length: O(log n) random walk steps
+///   trust_seed:  Protocol-tier agents
+///   threshold:   nodes below this are flagged (default 0.05)
+pub struct SybilRankDetector {
+    pub walk_length: u32,       // default: ceil(log2(n))
+    pub trust_seed: Vec<u256>,
+    pub threshold: f64,         // default 0.05
+}
+
+pub struct SybilScanResult {
+    pub flagged_agents: Vec<u256>,
+    pub clusters: Vec<SybilCluster>,
+    pub honest_region_size: usize,
+    pub scan_timestamp: u64,
+}
+
+pub struct SybilCluster {
+    pub members: Vec<u256>,
+    pub internal_edge_density: f64,   // edges_within / possible_edges
+    pub external_edge_count: u32,     // attack edges to honest region
+    pub estimated_sybil_probability: f64,
+}
+```
+
+### 10.3 Proof-of-Unique-Agent
+
+For high-stakes operations (Protocol tier election, governance votes), agents optionally
+provide proof-of-unique-agent attestation via external protocols:
+
+| Protocol | Mechanism | Integration |
+|---|---|---|
+| **World ID** | Iris biometric → ZK uniqueness proof | Proof hash stored on passport |
+| **BrightID** | Social graph uniqueness verification | Attestation submitted to ValidationRegistry |
+| **Gitcoin Passport** | Composable stamps (GitHub, ENS, etc.) | Stamp score ≥ 20 grants "Verified" badge |
+| **TEE Attestation** | Hardware proof of unique execution environment | AWS Nitro hash on passport |
+
+```rust
+pub struct UniquenessAttestation {
+    pub attestation_type: UniquenessType,
+    pub proof_hash: [u8; 32],
+    pub verified_at: u64,       // block number
+    pub expiry: u64,            // typically 1 year
+    pub verifier: u256,         // passport ID of verifying entity
+}
+
+pub enum UniquenessType {
+    WorldId,            // Worldcoin iris proof (ZK)
+    BrightId,           // social graph uniqueness
+    GitcoinPassport,    // composable stamp score ≥ 20
+    TeeAttestation,     // hardware uniqueness
+    GovernanceVouch,    // 3+ Protocol-tier vouches
+}
+```
+
+### 10.4 Collusion Ring Detection
+
+Continuous monitoring for collusion rings — groups that systematically inflate each
+other's reputation through coordinated feedback:
+
+```
+Algorithm: Collusion Ring Detection
+
+1. Build feedback graph G = (V, E) where:
+   V = agents with reputation tracks
+   E = {(a, b, w) : a submitted feedback for b, w = frequency}
+
+2. Detect dense subgraphs:
+   Spectral clustering on adjacency matrix
+   Flag clusters where internal_density > 5× random expectation
+
+3. Temporal correlation:
+   Pairwise feedback timing correlation
+   Pearson r > 0.8 → strong collusion signal
+
+4. Reciprocity analysis:
+   reciprocity_ratio = |{(a,b)∈E : (b,a)∈E}| / |E|
+   Cluster reciprocity > 0.6 → suspicious
+
+5. Action:
+   Flagged clusters: collective voting weight → sqrt(count)
+   Individual members: reputation penalty -0.05 per detection
+   After 3 detections: discipline escalation to Warning
+```
+
+### 10.5 Sybil Resistance Test Criteria
+
+```rust
+#[cfg(test)]
+mod sybil_tests {
+    #[test]
+    fn test_sybil_cluster_detection() {
+        let mut graph = InteractionGraph::new();
+        add_honest_agents(&mut graph, 100);
+        add_sybil_cluster(&mut graph, 10, 1); // 10 fake, 1 attack edge
+
+        let detector = SybilRankDetector {
+            walk_length: 7,
+            trust_seed: protocol_agents(),
+            threshold: 0.05,
+        };
+        let result = detector.scan(&graph);
+
+        assert!(result.flagged_agents.len() >= 8);
+        assert_eq!(result.clusters.len(), 1);
+        assert!(result.clusters[0].internal_edge_density > 0.8);
+    }
+
+    #[test]
+    fn test_ppr_trust_propagation() {
+        let graph = build_test_graph_with_newcomers();
+        let ppr = PersonalizedPageRank {
+            alpha: 0.15, seed_set: protocol_agents(),
+            max_iterations: 100, epsilon: 1e-6,
+        };
+        let scores = ppr.compute(&graph);
+
+        assert!(scores[&well_connected_newcomer()] > 0.3);
+        assert!(scores[&isolated_newcomer()] < 0.1);
+    }
+}
+```
+
+**Research foundation**: Yu et al. 2006 (SybilGuard, SIGCOMM), Yu et al. 2008
+(SybilLimit, IEEE S&P), Cao, Yu & Voelker 2012 (SybilRank, NDSS), Andersen, Chung &
+Lang 2006 (Local graph partitioning, FOCS), Alvisi et al. 2013 (SoK: Evolution of Sybil
+Defense Mechanisms, IEEE S&P), Weyl, Ohlhaver & Buterin 2022 (Decentralized Society:
+Finding Web3's Soul).
+
+---
+
+## 11. Academic Citations
 
 - Bryan 2025a — ERC-8004: Agent Identity, Reputation, and Validation Registries
 - Douceur 2002 — The Sybil Attack (peer-to-peer identity challenges)
@@ -707,10 +1043,21 @@ contracts.
 - Lens Protocol Guardian — Time-locked governance pattern for safe upgrades
 - ENS Fuses — Permission revocation pattern (irreversible capability removal)
 - TOB-L3 — Three-layer trust model (identity → reputation → validation)
+- W3C DID Core 1.0 (2022) — Decentralized Identifiers specification
+- W3C DID Core 1.1 (2026) — Candidate Recommendation Snapshot (March 2026)
+- W3C VC Data Model 2.0 (2025) — Verifiable Credentials (Recommendation May 2025)
+- DIF DID Resolution v0.3 — resolve(did, options) specification
+- Yu, Kaminsky, Gibbons, Flaxman 2006 — SybilGuard (SIGCOMM)
+- Yu et al. 2008 — SybilLimit (IEEE S&P)
+- Cao, Yu, Voelker 2012 — SybilRank (NDSS)
+- Andersen, Chung & Lang 2006 — Local Graph Partitioning using PageRank Vectors (FOCS)
+- Alvisi et al. 2013 — SoK: Evolution of Sybil Defense Mechanisms (IEEE S&P)
+- Weyl, Ohlhaver & Buterin 2022 — Decentralized Society: Finding Web3's Soul
+- Hamilton, Ying & Leskovec 2017 — GraphSAGE (NeurIPS)
 
 ---
 
-## 10. Cross-References
+## 12. Cross-References
 
 | Document | Relevance |
 |---|---|

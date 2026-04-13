@@ -739,9 +739,230 @@ Three public benchmarks provide standardized test suites for agent safety:
 
 ---
 
+## 11. OWASP Top 10 for Agentic Applications mapping
+
+The OWASP Top 10 for Agentic Applications (December 2025) identifies the most critical security risks in autonomous AI agent systems. Published by the OWASP Agentic AI Security Initiative, this list targets the gap between traditional web application security and the emergent risks of agents that plan, use tools, and operate with delegated authority. Each risk maps to concrete Roko defense components.
+
+### Risk identifiers
+
+```rust
+/// OWASP Top 10 for Agentic Applications risk identifiers.
+/// Based on OWASP Agentic AI Security Initiative (2025/2026).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OwaspAgenticRisk {
+    /// ASI01 — Excessive Agency: tools beyond scope, excessive permissions.
+    ExcessiveAgency,
+    /// ASI02 — Insufficient Access Controls: broken auth in tool pipeline.
+    InsufficientAccessControls,
+    /// ASI03 — Insecure Output Handling: unvalidated agent outputs.
+    InsecureOutputHandling,
+    /// ASI04 — Prompt Injection: direct and indirect.
+    PromptInjection,
+    /// ASI05 — Overreliance on Agent Output: blind trust in LLM reasoning.
+    OverrelianceOnOutput,
+    /// ASI06 — Memory and Context Poisoning: reshaping behavior post-interaction.
+    MemoryContextPoisoning,
+    /// ASI07 — Insecure Inter-Agent Communication: spoofed messages.
+    InsecureInterAgentComm,
+    /// ASI08 — Cascading Failures: false signals through automated pipelines.
+    CascadingFailures,
+    /// ASI09 — Human-Agent Trust Exploitation: confident misleading explanations.
+    HumanAgentTrustExploitation,
+    /// ASI10 — Rogue Agents: misaligned, concealing, self-directed.
+    RogueAgents,
+}
+
+impl OwaspAgenticRisk {
+    pub fn owasp_id(&self) -> &'static str {
+        match self {
+            Self::ExcessiveAgency => "ASI01",
+            Self::InsufficientAccessControls => "ASI02",
+            Self::InsecureOutputHandling => "ASI03",
+            Self::PromptInjection => "ASI04",
+            Self::OverrelianceOnOutput => "ASI05",
+            Self::MemoryContextPoisoning => "ASI06",
+            Self::InsecureInterAgentComm => "ASI07",
+            Self::CascadingFailures => "ASI08",
+            Self::HumanAgentTrustExploitation => "ASI09",
+            Self::RogueAgents => "ASI10",
+        }
+    }
+}
+```
+
+### Risk-to-defense mapping
+
+| OWASP ID | Risk | Roko Mitigation | Component | Coverage |
+|---|---|---|---|---|
+| ASI01 | Excessive Agency | `ToolPermission` per-role filtering; task-level allowed/denied tool lists; `Capability<T>` single-use tokens | `roko-core`, `roko-agent` | Strong |
+| ASI02 | Insufficient Access Controls | 7-stage `ToolDispatcher` pipeline; `SafetyLayer` pre-execution checks; `PathPolicy` canonicalization | `roko-agent` | Strong (when wired) |
+| ASI03 | Insecure Output Handling | Gate pipeline (compile, test, clippy, diff); `ScrubPolicy` post-execution; output truncation | `roko-gate`, `roko-agent` | Strong |
+| ASI04 | Prompt Injection | 6-layer `SystemPromptBuilder`; delimiter hardening; CaMeL dual-LLM (design target) | `roko-compose`, `roko-agent` | Partial |
+| ASI05 | Overreliance on Output | Gate pipeline as independent verification; `OperationalConfidenceTracker` trust management | `roko-gate`, `roko-learn` | Moderate |
+| ASI06 | Memory/Context Poisoning | 4-stage ingestion pipeline; HDC anomaly detection; causal rollback; Bloom Oracle | `roko-golem` (Neuro) | Partial |
+| ASI07 | Insecure Inter-Agent Comms | Cognitive Namespaces with ACL; `NamespaceChannel` kind filtering + rate limiting; reputation-weighted trust | Target: Tier 3 | Design only |
+| ASI08 | Cascading Failures | Circuit breaker pattern; `ProcessSupervisor` lifecycle management; adaptive gate thresholds (EMA) | `roko-conductor`, `bardo-runtime` | Strong |
+| ASI09 | Human-Agent Trust Exploitation | Cognitive Signals (Pause/Escalate/Cooldown); Forensic AI replay for decision audit | Target: Tier 2/3 | Partial |
+| ASI10 | Rogue Agents | `TemporalMonitor` behavioral drift detection; safety budgets; `SafetyLayer` architectural enforcement | `roko-gate`, `roko-agent` | Partial |
+
+### Coverage analysis
+
+Four of the ten risks have strong coverage through existing, wired components: Excessive Agency (ASI01), Insufficient Access Controls (ASI02), Insecure Output Handling (ASI03), and Cascading Failures (ASI08). These are enforced on every tool call via the `SafetyLayer` and validated after every task via the gate pipeline.
+
+Three risks have partial coverage with functioning defenses that do not catch all variants: Prompt Injection (ASI04), Memory/Context Poisoning (ASI06), and Rogue Agents (ASI10). Prompt injection remains the highest residual risk across all frameworks in this threat model.
+
+Two risks have partial coverage through Tier 2/3 features not yet fully wired: Human-Agent Trust Exploitation (ASI09) relies on Cognitive Signals that are built but not integrated into the main orchestration loop, and Overreliance on Output (ASI05) depends on confidence tracking that covers gate results but not broader reasoning quality.
+
+One risk is design-only: Insecure Inter-Agent Communication (ASI07). The Cognitive Namespace architecture is specified but the implementation is a Tier 3 target. Until then, Roko agents do not communicate directly with each other outside the plan DAG's task dependency structure, which limits but does not eliminate the attack surface.
+
+### Test criteria
+
+- [ ] Every `OwaspAgenticRisk` variant maps to at least one Roko defense component
+- [ ] `owasp_id()` returns correct ASI identifier strings (ASI01 through ASI10)
+- [ ] Coverage report via `roko status --owasp` lists all 10 risks with defense status
+- [ ] Integration tests simulate each risk scenario and verify the corresponding defense activates
+- [ ] No `OwaspAgenticRisk` variant returns "None" for its defense mapping — every risk has at least a design-level mitigation
+
+---
+
+## 12. Cascading failure analysis
+
+A minor error in tool selection or a low-impact injection can cascade into high-impact safety harms when tasks depend on each other. The plan executor runs tasks in a DAG where each task's output feeds into its dependents. If a compromised task produces subtly wrong output that passes its gate checks, every downstream task inherits that corruption. The blast radius grows with the depth and fan-out of the dependency graph.
+
+This section models cascade propagation and defines the defenses against it.
+
+### Cascade propagation model
+
+```rust
+/// Cascading failure analysis for multi-agent plan execution.
+/// Models how errors propagate through task dependency DAGs.
+pub struct CascadeAnalyzer {
+    /// Task dependency graph.
+    pub task_dag: petgraph::Graph<TaskNode, DependencyEdge>,
+    /// Failure propagation rules.
+    pub propagation_rules: Vec<PropagationRule>,
+    /// Maximum cascade depth before triggering circuit breaker.
+    /// Range: 1..20. Default: 5.
+    pub max_cascade_depth: usize,
+    /// Blast radius threshold: max fraction of tasks affected.
+    /// Range: 0.01..1.0. Default: 0.3.
+    pub blast_radius_threshold: f64,
+}
+
+/// How a failure in one task propagates to dependents.
+pub struct PropagationRule {
+    /// Source failure type.
+    pub source_failure: FailureType,
+    /// Probability of propagation to each dependent.
+    /// Range: 0.0..1.0.
+    pub propagation_probability: f64,
+    /// Whether the failure amplifies (severity increases) or dampens.
+    pub amplification_factor: f64,
+}
+
+pub enum FailureType {
+    GateFailure,
+    ToolError,
+    TimeoutExpired,
+    BudgetExhausted,
+    TaintViolation,
+    TemporalViolation,
+}
+
+impl CascadeAnalyzer {
+    /// Simulate failure propagation from a source task.
+    /// Returns the set of affected tasks and their failure severity.
+    pub fn simulate_cascade(
+        &self,
+        source_task: NodeIndex,
+        failure: FailureType,
+    ) -> CascadeResult {
+        // BFS from source through dependency edges
+        // At each hop: check propagation probability
+        // Track depth; halt at max_cascade_depth
+        // Compute blast radius as fraction of total tasks
+        // ...
+    }
+
+    /// Pre-execution cascade risk assessment.
+    /// For each task in the DAG, compute worst-case blast radius.
+    /// Tasks with high cascade risk get tighter safety budgets.
+    pub fn assess_cascade_risk(&self) -> HashMap<NodeIndex, f64> {
+        // For each node: simulate cascade with each failure type
+        // Return max blast radius per node
+        // ...
+    }
+}
+
+pub struct CascadeResult {
+    pub affected_tasks: Vec<(NodeIndex, f64)>, // (task, severity)
+    pub cascade_depth: usize,
+    pub blast_radius: f64, // fraction of total tasks affected
+    pub should_halt: bool, // true if blast_radius > threshold
+}
+```
+
+### Failure type propagation characteristics
+
+Not all failures propagate equally. A `GateFailure` is the safest — the gate caught the problem, the task is marked failed, and dependents do not execute. A `ToolError` is similar: explicit failure, clean signal, dependents blocked. These produce narrow cascades.
+
+The dangerous failures are the ones that do not look like failures. A task that passes its gate checks but produces subtly wrong output — a `TaintViolation` where tainted data leaked into a non-tainted context, or a `TemporalViolation` where a time-dependent operation used stale state — propagates silently. Each dependent task builds on the corrupted output, and the error amplifies.
+
+The `amplification_factor` in `PropagationRule` models this. Values above 1.0 mean the severity grows at each hop. Values below 1.0 mean natural dampening — each dependent task's own gate checks have some chance of catching the problem. The default rules:
+
+| Failure type | Propagation probability | Amplification factor | Rationale |
+|---|---|---|---|
+| `GateFailure` | 0.0 | 0.0 | Gate caught it; dependents blocked |
+| `ToolError` | 0.0 | 0.0 | Explicit failure; dependents blocked |
+| `TimeoutExpired` | 0.1 | 0.5 | Partial output may propagate; dampens quickly |
+| `BudgetExhausted` | 0.2 | 0.8 | Truncated results may look valid |
+| `TaintViolation` | 0.7 | 1.2 | Silent; amplifies through dependent reasoning |
+| `TemporalViolation` | 0.6 | 1.1 | Stale state compounds across dependent tasks |
+
+### Cascade prevention strategies
+
+**Firewall tasks.** Insert verification-only tasks between high-risk phases of the plan. A firewall task runs no agent — it re-runs the gate pipeline on the preceding task's outputs with tighter thresholds. If the firewall task fails, the cascade stops there instead of propagating to the next phase. The `CascadeAnalyzer` identifies insertion points: any edge in the DAG where the source node's cascade risk exceeds 0.5 and the target node has three or more transitive dependents.
+
+**Blast radius budgets.** Each task's safety budget — the number of tool calls, token spend, and allowed retries — inversely scales with its cascade risk score. A task at the root of a deep dependency chain gets a tighter budget than a leaf task with no dependents. This makes high-cascade-risk tasks fail fast and fail loudly rather than producing ambiguous outputs that propagate.
+
+**Progressive rollback.** When the circuit breaker detects a cascade (blast radius exceeds threshold), it does not halt the entire plan. It rolls back affected tasks in reverse topological order, starting from the most downstream affected task and working back toward the source. Each rolled-back task's outputs are invalidated. The plan executor then re-queues the source task with a tighter safety budget and the `firewall_tasks` flag enabled.
+
+### Configuration
+
+```toml
+[safety.cascade]
+max_cascade_depth = 5
+blast_radius_threshold = 0.3
+enable_firewall_tasks = true
+cascade_check_interval_tasks = 5
+```
+
+`max_cascade_depth` caps how far the analyzer simulates propagation. Deeper simulations are more accurate but slower. The default of 5 covers most plan structures — plans with more than 5 levels of sequential dependency are rare, and the circuit breaker catches anything beyond this depth at runtime.
+
+`blast_radius_threshold` triggers the `should_halt` flag in `CascadeResult`. At the default of 0.3, the circuit breaker activates when more than 30% of the plan's tasks are affected by a single cascade. Lower values are more conservative; production deployments handling irreversible operations should use 0.1.
+
+`enable_firewall_tasks` controls automatic insertion. When enabled, the plan executor calls `assess_cascade_risk()` before execution and inserts firewall tasks at high-risk edges. When disabled, the cascade analysis still runs for reporting but does not modify the plan.
+
+`cascade_check_interval_tasks` controls how often the analyzer re-evaluates cascade risk during execution. The default of 5 means re-assessment happens every 5 completed tasks. Set to 1 for maximum safety at the cost of overhead.
+
+### Test criteria
+
+- [ ] `CascadeAnalyzer::simulate_cascade()` halts at `max_cascade_depth` — a chain of 10 tasks with depth limit 5 produces a cascade of depth 5
+- [ ] `CascadeAnalyzer::assess_cascade_risk()` returns higher risk scores for tasks with many dependents than for leaf tasks
+- [ ] `blast_radius_threshold` triggers `should_halt` when exceeded — a cascade affecting 4 of 10 tasks (0.4) with threshold 0.3 sets `should_halt = true`
+- [ ] Firewall tasks break cascade propagation chains — a `TaintViolation` cascade stops at the firewall task boundary
+- [ ] `GateFailure` and `ToolError` produce zero propagation — their `propagation_probability` is 0.0
+- [ ] `TaintViolation` cascades amplify — severity at depth 3 exceeds severity at depth 1 when `amplification_factor` is 1.2
+- [ ] Progressive rollback processes tasks in reverse topological order — the most downstream task is rolled back first
+- [ ] Configuration values outside valid ranges are rejected: `max_cascade_depth` outside 1..20, `blast_radius_threshold` outside 0.01..1.0
+
+---
+
 ## Related Topics
 
 - [00-defense-in-depth.md](00-defense-in-depth.md) — Six safety guards
 - [07-prompt-security.md](07-prompt-security.md) — Prompt injection defenses in detail
 - [09-adaptive-risk.md](09-adaptive-risk.md) — Adaptive guardrails
 - [10-mev-protection.md](10-mev-protection.md) — MEV-specific protections
+- Section 11 (this document) — OWASP Top 10 for Agentic Applications mapping
+- Section 12 (this document) — Cascading failure analysis

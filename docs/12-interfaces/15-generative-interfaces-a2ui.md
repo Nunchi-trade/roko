@@ -369,6 +369,178 @@ An architect agent proposing a design:
 
 ---
 
+## Industry Research — Agent-Authored UI
+
+### Google A2UI (2025)
+
+Google's Agent-to-UI open project (`github.com/google/A2UI`, v0.8 Public Preview, December 2025) validates the catalog-based security approach that Roko's A2UI shares. Key design convergence:
+
+1. **Catalog-based security:** The client maintains a registry of pre-approved component types. The LLM can only compose from this trusted set — preventing UI injection. The agent describes *what to render*, not *how to execute*. Roko's 12-component type system follows this model.
+
+2. **Flat list with ID references:** Rather than nested trees (which grow the context window with each update), components form a flat list with ID cross-references. Incremental patches are streamed as the conversation progresses.
+
+3. **Framework-agnostic:** The same JSON payload renders to React, ratatui, or CLI text by mapping through the client's catalog.
+
+**Roko differentiation:** ROSEDUST inheritance (Google A2UI has no integrated design language), sandboxed viewport containment (agent-generated UI cannot escape its panel), and multi-renderer parity (TUI, Web, CLI all from the same JSONL).
+
+### Vercel json-render (2026)
+
+Vercel's `json-render` framework (March 2026) demonstrates the catalog-with-Zod-schemas pattern — component types are defined with JSON Schema, and the LLM is constrained to produce valid payloads via a generated system prompt. Roko's A2UI can adopt the same schema-constraint approach:
+
+```rust
+/// A2UI component registry with JSON Schema validation.
+pub struct A2uiCatalog {
+    pub schemas: HashMap<String, serde_json::Value>,  // type → JSON Schema
+}
+
+impl A2uiCatalog {
+    /// Generate system prompt documentation from registered schemas.
+    pub fn generate_system_prompt(&self) -> String {
+        let mut prompt = String::from(
+            "When you want to present structured data, emit A2UI components as JSON:\n\n"
+        );
+        for (name, schema) in &self.schemas {
+            prompt.push_str(&format!("{}: {}\n", name, serde_json::to_string_pretty(schema).unwrap()));
+        }
+        prompt.push_str("\nAvailable colors: primary, success, warning, danger, info, muted.\n");
+        prompt
+    }
+
+    /// Validate an incoming A2UI component against registered schemas.
+    pub fn validate(&self, component: &serde_json::Value) -> Result<(), ValidationError> {
+        let component_type = component.get("a2ui")
+            .and_then(|v| v.as_str())
+            .ok_or(ValidationError::MissingType)?;
+        let schema = self.schemas.get(component_type)
+            .ok_or(ValidationError::UnknownType(component_type.to_string()))?;
+        // Validate against JSON Schema
+        jsonschema::validate(schema, component)
+            .map_err(|e| ValidationError::SchemaViolation(e.to_string()))
+    }
+}
+```
+
+### Incremental Update Protocol
+
+Following Vercel's RFC 6902 JSON Patch approach, Roko's A2UI supports streaming incremental updates without re-sending entire components:
+
+```jsonl
+{"a2ui": "progress", "id": "build-progress", "label": "Building", "value": 0.0}
+{"a2ui_patch": "build-progress", "op": "replace", "path": "/value", "value": 0.25}
+{"a2ui_patch": "build-progress", "op": "replace", "path": "/value", "value": 0.50}
+{"a2ui_patch": "build-progress", "op": "replace", "path": "/value", "value": 0.75}
+{"a2ui_patch": "build-progress", "op": "replace", "path": "/value", "value": 1.0}
+{"a2ui_patch": "build-progress", "op": "replace", "path": "/label", "value": "Build complete"}
+```
+
+This reduces bandwidth for frequently-updating components (progress bars, live tables) from O(component_size) to O(patch_size) per update.
+
+### Automated Accessibility for Generated Components
+
+Every A2UI component type has built-in ARIA mapping rules:
+
+```rust
+/// Automatic ARIA attribute injection for A2UI components.
+pub fn aria_attributes(component: &A2uiComponent) -> HashMap<String, String> {
+    let mut attrs = HashMap::new();
+    match component {
+        A2uiComponent::Table { title, .. } => {
+            attrs.insert("role".into(), "grid".into());
+            if let Some(t) = title { attrs.insert("aria-label".into(), t.clone()); }
+        }
+        A2uiComponent::Progress { label, value, max, .. } => {
+            attrs.insert("role".into(), "progressbar".into());
+            attrs.insert("aria-label".into(), label.clone());
+            attrs.insert("aria-valuenow".into(), value.to_string());
+            attrs.insert("aria-valuemax".into(), max.to_string());
+        }
+        A2uiComponent::Status { .. } => {
+            attrs.insert("role".into(), "status".into());
+            attrs.insert("aria-live".into(), "polite".into());
+        }
+        A2uiComponent::Callout { level, title, .. } => {
+            if *level == "danger" || *level == "warning" {
+                attrs.insert("role".into(), "alert".into());
+                attrs.insert("aria-live".into(), "assertive".into());
+            }
+        }
+        _ => {}
+    }
+    attrs
+}
+```
+
+---
+
+## Test Criteria
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a2ui_table_parses() {
+        let json = r#"{"a2ui":"table","title":"Test","columns":["A","B"],"rows":[["1","2"]]}"#;
+        let component: A2uiComponent = serde_json::from_str(json).unwrap();
+        assert!(matches!(component, A2uiComponent::Table { .. }));
+    }
+
+    #[test]
+    fn a2ui_unknown_type_is_raw_json() {
+        let json = r#"{"a2ui":"unknown_widget","data":"hello"}"#;
+        let component = parse_a2ui_line(json);
+        assert!(matches!(component, A2uiComponent::RawJson { .. }));
+    }
+
+    #[test]
+    fn a2ui_semantic_color_resolves() {
+        let theme = RosedustTheme::default();
+        assert_eq!(semantic_color(&theme, "success"), theme.teal);
+        assert_eq!(semantic_color(&theme, "danger"), theme.danger);
+        assert_eq!(semantic_color(&theme, "primary"), theme.rose);
+    }
+
+    #[test]
+    fn a2ui_table_row_limit_enforced() {
+        let mut rows = Vec::new();
+        for i in 0..100 { rows.push(vec![i.to_string()]); }
+        let table = A2uiComponent::Table {
+            title: None, columns: vec!["N".into()], rows,
+            highlight_row: None, max_rows: Some(50),
+        };
+        let rendered = render_a2ui_text(&table);
+        assert!(rendered.lines().count() <= 55, "Table must respect max_rows");
+    }
+
+    #[test]
+    fn a2ui_catalog_validates_known_types() {
+        let catalog = A2uiCatalog::default();
+        let valid = serde_json::json!({"a2ui": "progress", "label": "Test", "value": 0.5});
+        assert!(catalog.validate(&valid).is_ok());
+    }
+
+    #[test]
+    fn a2ui_catalog_rejects_unknown_types() {
+        let catalog = A2uiCatalog::default();
+        let invalid = serde_json::json!({"a2ui": "evil_script", "code": "rm -rf /"});
+        assert!(catalog.validate(&invalid).is_err());
+    }
+
+    #[test]
+    fn a2ui_aria_progress_has_role() {
+        let component = A2uiComponent::Progress {
+            label: "Build".into(), value: 0.5, max: 1.0, style: "success".into(),
+        };
+        let attrs = aria_attributes(&component);
+        assert_eq!(attrs.get("role"), Some(&"progressbar".to_string()));
+        assert_eq!(attrs.get("aria-label"), Some(&"Build".to_string()));
+    }
+}
+```
+
+---
+
 ## Current Status and Gaps
 
 **Built:**

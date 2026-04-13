@@ -64,35 +64,22 @@ pub struct GitViewData {
 }
 
 /// Render the full git view.
-/// Cached git data to avoid running git commands on every frame.
-static GIT_CACHE: std::sync::Mutex<Option<(std::time::Instant, GitViewData)>> =
-    std::sync::Mutex::new(None);
-
+///
+/// Uses pre-populated git data from `TuiState::git_view_data` (filled by
+/// the background refresh thread) so the render path does zero I/O.
+/// Falls back to an empty `GitViewData` if the background thread hasn't
+/// delivered data yet.
 pub fn render(
     frame: &mut Frame<'_>,
     area: Rect,
     _data: &DashboardData,
-    _tui_state: &TuiState,
+    tui_state: &TuiState,
     view_state: &ViewState,
     theme: &Theme,
 ) {
-    // Cache git data for 5 seconds to avoid lag from git commands every frame
-    let git_data = {
-        let mut cache = GIT_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-        let now = std::time::Instant::now();
-        let needs_refresh = cache
-            .as_ref()
-            .map(|(ts, _)| now.duration_since(*ts).as_secs() >= 5)
-            .unwrap_or(true);
-        if needs_refresh {
-            let data = collect_git_data();
-            *cache = Some((now, data.clone()));
-            data
-        } else {
-            cache.as_ref().unwrap().1.clone()
-        }
-    };
-    render_with_git_data(frame, area, &git_data, view_state, theme);
+    let empty = GitViewData::default();
+    let git_data = tui_state.git_view_data.as_ref().unwrap_or(&empty);
+    render_with_git_data(frame, area, git_data, view_state, theme);
 }
 
 /// Render the git view with explicit git data (for integration layer).
@@ -425,7 +412,10 @@ fn render_branch_info(
 // ---------------------------------------------------------------------------
 
 /// Collect live git data by running git commands.
-fn collect_git_data() -> GitViewData {
+///
+/// This is intentionally expensive (multiple git subprocess calls) and
+/// should only be called from a background thread, never from the render path.
+pub fn collect_git_data() -> GitViewData {
     let current_branch = run_git(&["rev-parse", "--abbrev-ref", "HEAD"])
         .unwrap_or_default()
         .trim()

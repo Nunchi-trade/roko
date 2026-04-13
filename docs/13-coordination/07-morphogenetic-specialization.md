@@ -828,6 +828,359 @@ simultaneously, which would create a new conflict in the target dimension.
 
 ---
 
+## Turing Pattern Stability Analysis
+
+The convergence analysis in the preceding section gives empirical guidance, but a formal stability analysis of the reaction-diffusion dynamics reveals the mathematical conditions under which stable specialization patterns form, oscillate, or collapse. This analysis draws on bifurcation theory applied to activator-inhibitor systems [Cross, M.C. & Hohenberg, P.C. "Pattern Formation Outside of Equilibrium." *Reviews of Modern Physics*, 65(3):851-1112, 1993].
+
+### Linear Stability Analysis
+
+The homogeneous steady state (all agents at baseline concentration s* = 1/STRATEGY_DIMS = 0.125) is a fixed point of the update rule. To analyze its stability, linearize around s*:
+
+```
+δs_k(t+1) = δs_k(t) × (1 + α × R̄_k × ρ - β × P̄_k / N - μ)
+```
+
+Where:
+- `δs_k = s_k - s*` is the perturbation from baseline in dimension k
+- `R̄_k` = expected return in dimension k (assumed positive for active dimensions)
+- `P̄_k` = mean collective pheromone in dimension k
+- `ρ` = resource_pressure_scalar
+- `N` = collective_size
+
+The steady state is **unstable** (patterns form) when the growth rate of perturbations exceeds 1:
+
+```
+1 + α × R̄_k × ρ - β × P̄_k / N - μ > 1
+⟹ α × R̄_k × ρ > β × P̄_k / N + μ
+```
+
+This is the **Turing instability condition for Roko**: activation (returns-driven reinforcement) must exceed inhibition (collective pressure) plus decay for at least one dimension.
+
+```rust
+/// Evaluate the Turing instability condition for each strategy dimension.
+///
+/// Returns a vector of growth rates. Positive values indicate dimensions
+/// where the homogeneous state is unstable (specialization will emerge).
+/// Negative values indicate stable dimensions (suppressed by collective).
+///
+/// # Interpretation
+/// - All negative: system stays at baseline (no specialization)
+/// - Some positive: specialization emerges in positive dimensions
+/// - All strongly positive: alpha too high or beta too low; system may
+///   not converge (all agents race to specialize in everything)
+///
+/// # References
+/// Cross & Hohenberg 1993, "Pattern Formation Outside of Equilibrium"
+/// Turing 1952, "The Chemical Basis of Morphogenesis"
+pub fn turing_growth_rates(
+    params: &MorphogeneticParams,
+    expected_returns: &[f64; STRATEGY_DIMS],
+    collective_pheromone: &[f64; STRATEGY_DIMS],
+    collective_size: usize,
+) -> [f64; STRATEGY_DIMS] {
+    let mut rates = [0.0f64; STRATEGY_DIMS];
+    let n = collective_size.max(1) as f64;
+    for k in 0..STRATEGY_DIMS {
+        let activation = params.alpha
+            * expected_returns[k].max(0.0)
+            * params.resource_pressure_scalar;
+        let inhibition = params.beta * collective_pheromone[k] / n;
+        rates[k] = activation - inhibition - params.mu;
+    }
+    rates
+}
+
+#[cfg(test)]
+mod stability_tests {
+    use super::*;
+
+    #[test]
+    fn default_params_permit_instability() {
+        let params = MorphogeneticParams {
+            alpha: 0.05,
+            beta: 0.15,
+            mu: 0.01,
+            baseline: 0.125,
+            sigma_noise: 0.005,
+            resource_pressure_scalar: 1.0,
+        };
+        // Scenario: one dimension has high returns, collective hasn't specialized yet
+        let returns = [0.5, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1];
+        let pheromone = [0.125; STRATEGY_DIMS]; // uniform (pre-specialization)
+        let rates = turing_growth_rates(&params, &returns, &pheromone, 5);
+        // Dimension 0: alpha * 0.5 * 1.0 - beta * 0.125/5 - mu
+        //            = 0.025 - 0.00375 - 0.01 = 0.01125 > 0
+        assert!(rates[0] > 0.0, "high-return dimension should be unstable");
+        // Dimension 1: 0.05 * 0.1 * 1.0 - 0.00375 - 0.01 = -0.00875 < 0
+        assert!(rates[1] < 0.0, "low-return dimension should be stable");
+    }
+
+    #[test]
+    fn high_collective_pressure_suppresses_all() {
+        let params = MorphogeneticParams {
+            alpha: 0.05,
+            beta: 0.15,
+            mu: 0.01,
+            baseline: 0.125,
+            sigma_noise: 0.005,
+            resource_pressure_scalar: 1.0,
+        };
+        let returns = [0.3; STRATEGY_DIMS];
+        // Heavy collective pheromone in all dimensions (saturated collective)
+        let pheromone = [2.0; STRATEGY_DIMS];
+        let rates = turing_growth_rates(&params, &returns, &pheromone, 5);
+        for k in 0..STRATEGY_DIMS {
+            assert!(rates[k] < 0.0, "all dims suppressed by heavy collective");
+        }
+    }
+}
+```
+
+### Bifurcation Analysis
+
+The system undergoes a **pitchfork bifurcation** as the beta/alpha ratio is varied. The bifurcation diagram reveals three regimes:
+
+| Regime | beta/alpha Ratio | Behavior | Pattern |
+|--------|-----------------|----------|---------|
+| **Sub-critical** | < 1.5 | No stable patterns; all agents lock into the highest-return dimension | Uniform specialization (everyone does the same thing) |
+| **Critical** | 1.5 – 2.5 | Metastable patterns; slow convergence, sensitive to noise | Fragile specialization (patterns form but may break) |
+| **Super-critical** | > 2.5 | Stable patterns emerge reliably from noise | Robust specialization (the target operating regime) |
+| **Over-damped** | > 10.0 | Inhibition dominates; agents cannot specialize | Uniform generalists (no differentiation) |
+
+The default parameter ratio (beta/alpha = 3.0) sits in the super-critical regime, providing robust pattern formation with good noise tolerance.
+
+### Hopf Bifurcation and Oscillatory Instability
+
+When the system parameters cross a **Hopf bifurcation** boundary, the fixed point destabilizes into a limit cycle — agents oscillate between niches rather than settling into stable roles. This occurs when:
+
+```
+(α × R_max × ρ - μ)² < 4 × β² × P_var / N²
+```
+
+Where `P_var` is the variance of collective pheromone across dimensions. High pheromone variance (some dimensions crowded, others empty) combined with strong activation can trigger oscillations.
+
+```rust
+/// Detect potential Hopf bifurcation (oscillatory instability) in
+/// morphogenetic dynamics.
+///
+/// Returns true if the current parameters and collective state are
+/// near the Hopf boundary, indicating risk of oscillatory behavior.
+///
+/// # When This Triggers
+/// - Collective has high pheromone variance (some niches crowded, others empty)
+/// - Activation rate is high relative to decay
+/// - Should prompt the system to increase mu (damping) or reduce alpha
+///
+/// # References
+/// Cross & Hohenberg 1993, section on Hopf bifurcation in R-D systems
+/// Li, Jiang & Shi 2013, "Hopf Bifurcation and Turing Instability"
+pub fn detect_hopf_risk(
+    params: &MorphogeneticParams,
+    max_return: f64,
+    pheromone_variance: f64,
+    collective_size: usize,
+) -> bool {
+    let n = collective_size.max(1) as f64;
+    let activation_term = params.alpha * max_return * params.resource_pressure_scalar
+        - params.mu;
+    let inhibition_term = 4.0 * params.beta.powi(2) * pheromone_variance / (n * n);
+    activation_term.powi(2) < inhibition_term
+}
+
+/// Suggested parameter adjustments to exit the Hopf regime.
+///
+/// Called when `detect_hopf_risk()` returns true.
+pub struct HopfMitigation {
+    /// Increase mu (decay) by this factor to dampen oscillations.
+    /// Default: 1.5. Range: [1.1, 3.0].
+    pub mu_increase_factor: f64,
+
+    /// Decrease alpha (activation) by this factor.
+    /// Default: 0.8. Range: [0.5, 0.95].
+    pub alpha_decrease_factor: f64,
+
+    /// Number of ticks to apply mitigation before re-checking.
+    /// Default: 200 ticks. Range: [50, 1000].
+    pub reevaluation_interval: u64,
+}
+
+impl Default for HopfMitigation {
+    fn default() -> Self {
+        Self {
+            mu_increase_factor: 1.5,
+            alpha_decrease_factor: 0.8,
+            reevaluation_interval: 200,
+        }
+    }
+}
+```
+
+### Lyapunov Stability of Converged Patterns
+
+Once agents have converged to stable specialist patterns, the Lyapunov stability of the converged state determines its resilience to perturbations (agent departures, parameter changes, sudden return shifts).
+
+The **Lyapunov function** for the morphogenetic system is the total deviation from the nearest stable pattern:
+
+```
+V(s) = Σ_agents Σ_k (s_k - s*_k)²
+```
+
+Where `s*_k` is the nearest stable equilibrium for each agent. The system is Lyapunov stable if `V` decreases monotonically along trajectories near the equilibrium — perturbations decay rather than grow.
+
+```rust
+/// Compute the Lyapunov function value for the current Collective state.
+///
+/// The Lyapunov function measures total deviation from the nearest
+/// stable pattern. A monotonically decreasing V(t) indicates the
+/// system is converging; an increasing V(t) indicates instability.
+///
+/// # Parameters
+/// - `current_strategies`: Current strategy vectors for all agents
+/// - `equilibrium_strategies`: Target equilibrium strategies (computed
+///   from the last converged state, or from the dominant eigenvectors
+///   of the linearized system)
+///
+/// # Returns
+/// V = Σ_i Σ_k (s_ik - s*_ik)² (sum of squared deviations)
+/// Range: [0, N * STRATEGY_DIMS] where N = agent count
+///
+/// # Monitoring
+/// Track V(t) over time. If V increases for >100 consecutive ticks,
+/// the system is potentially unstable and should consider parameter
+/// adjustment or partition.
+pub fn lyapunov_value(
+    current_strategies: &[[f64; STRATEGY_DIMS]],
+    equilibrium_strategies: &[[f64; STRATEGY_DIMS]],
+) -> f64 {
+    current_strategies.iter()
+        .zip(equilibrium_strategies.iter())
+        .map(|(curr, eq)| {
+            curr.iter().zip(eq.iter())
+                .map(|(c, e)| (c - e).powi(2))
+                .sum::<f64>()
+        })
+        .sum()
+}
+
+/// Monitor Lyapunov stability over time.
+pub struct LyapunovMonitor {
+    /// History of V values for trend detection.
+    history: Vec<f64>,
+
+    /// Number of consecutive ticks V has been increasing.
+    increasing_streak: u64,
+
+    /// Threshold: if V increases for this many ticks, flag instability.
+    /// Default: 100 ticks. Range: [50, 500].
+    pub instability_threshold: u64,
+}
+
+impl LyapunovMonitor {
+    pub fn new(instability_threshold: u64) -> Self {
+        Self {
+            history: Vec::with_capacity(1000),
+            increasing_streak: 0,
+            instability_threshold,
+        }
+    }
+
+    /// Record a new V value and check for instability.
+    ///
+    /// Returns true if V has been increasing for more than
+    /// `instability_threshold` consecutive ticks.
+    pub fn record(&mut self, v: f64) -> bool {
+        if let Some(&last) = self.history.last() {
+            if v > last + 1e-6 {
+                self.increasing_streak += 1;
+            } else {
+                self.increasing_streak = 0;
+            }
+        }
+        self.history.push(v);
+        self.increasing_streak > self.instability_threshold
+    }
+}
+
+#[cfg(test)]
+mod lyapunov_tests {
+    use super::*;
+
+    #[test]
+    fn converged_state_has_zero_lyapunov() {
+        let strategies = [[0.5, 0.1, 0.1, 0.1, 0.05, 0.05, 0.05, 0.05]; 3];
+        let v = lyapunov_value(&strategies, &strategies);
+        assert!(v.abs() < 1e-10, "identical states → V = 0");
+    }
+
+    #[test]
+    fn perturbed_state_has_positive_lyapunov() {
+        let eq = [[0.5, 0.1, 0.1, 0.1, 0.05, 0.05, 0.05, 0.05]; 3];
+        let mut perturbed = eq;
+        perturbed[0][0] = 0.3; // perturb agent 0
+        perturbed[0][1] = 0.3;
+        let v = lyapunov_value(&perturbed, &eq);
+        assert!(v > 0.0, "perturbation → V > 0");
+    }
+
+    #[test]
+    fn monitor_detects_instability() {
+        let mut monitor = LyapunovMonitor::new(3);
+        assert!(!monitor.record(1.0));
+        assert!(!monitor.record(1.1));
+        assert!(!monitor.record(1.2));
+        assert!(!monitor.record(1.3)); // 3 increases, threshold is 3
+        assert!(monitor.record(1.4));  // 4th increase → flagged
+    }
+}
+```
+
+### Pattern Selection: Which Specializations Emerge?
+
+The linear stability analysis predicts *that* patterns form but not *which* patterns form. Pattern selection depends on the eigenstructure of the inhibition-weighted return matrix and the noise realization. Practically:
+
+1. **Highest-return dimensions attract first specialists** — agents with the strongest initial noise bias toward high-return dimensions specialize there first.
+2. **Inhibition cascades from early specialists** — once one agent specializes, its pheromone broadcast inhibits that dimension for others, pushing them to the next-highest-return dimension.
+3. **Noise breaks ties** — when multiple dimensions have similar returns, the noise term (σ × N(0,1)) determines which agent goes where. The deterministic RNG seeding ensures reproducibility.
+4. **Dimension count bounds pattern complexity** — with 8 dimensions and N agents, at most 8 distinct specialist roles emerge. Collectives with N > 8 will have multiple agents per niche, competing via niche competition (Lotka-Volterra dynamics).
+
+```rust
+/// Predict which dimensions will attract specialists given current
+/// returns and collective state.
+///
+/// Returns dimensions sorted by expected specialization attractiveness
+/// (most attractive first).
+///
+/// # Algorithm
+/// For each dimension k:
+///   attractiveness_k = (alpha * R_k * rho - mu) / (beta * P_k / N + epsilon)
+///
+/// Dimensions with attractiveness > 1.0 are expected to attract specialists.
+/// Higher attractiveness → earlier and deeper specialization.
+pub fn predict_specialization_targets(
+    params: &MorphogeneticParams,
+    expected_returns: &[f64; STRATEGY_DIMS],
+    collective_pheromone: &[f64; STRATEGY_DIMS],
+    collective_size: usize,
+) -> Vec<(usize, f64)> {
+    let n = collective_size.max(1) as f64;
+    let epsilon = 1e-6; // avoid division by zero
+    let mut targets: Vec<(usize, f64)> = (0..STRATEGY_DIMS)
+        .map(|k| {
+            let activation = params.alpha
+                * expected_returns[k].max(0.0)
+                * params.resource_pressure_scalar
+                - params.mu;
+            let inhibition = params.beta * collective_pheromone[k] / n + epsilon;
+            (k, activation / inhibition)
+        })
+        .collect();
+    targets.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    targets
+}
+```
+
+---
+
 ## DeLanda's Assemblage Theory
 
 Manuel DeLanda's assemblage theory provides a philosophical framework for understanding

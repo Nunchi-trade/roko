@@ -599,20 +599,169 @@ confidential computations while keeping the public passport as the identity anch
 
 ---
 
-## 8. Academic Citations
+## 8. W3C DID Integration
+
+### 8.1 Passport-DID Binding
+
+Each Korai Passport is bidirectionally linked to a W3C DID (see
+`01-erc-8004-three-registries.md` §9 for the `did:korai` method). The passport struct
+carries a DID field for cross-ecosystem interoperability:
+
+```rust
+/// Extended passport fields for W3C DID interoperability.
+pub struct PassportDidExtension {
+    /// Primary DID for this passport (did:korai:<chain>:<id>)
+    pub primary_did: String,
+
+    /// Linked DIDs from other methods (did:ethr, did:pkh, did:web)
+    pub linked_dids: Vec<LinkedDid>,
+
+    /// Verifiable Credentials issued to this passport
+    pub credentials: Vec<CredentialReference>,
+
+    /// DID Document service endpoints (synced from Agent Card)
+    pub service_endpoints: Vec<DidServiceEndpoint>,
+}
+
+pub struct LinkedDid {
+    pub did: String,                    // e.g., "did:ethr:0x1234..."
+    pub link_type: DidLinkType,
+    pub verified_at: u64,               // block number of verification
+    pub proof: LinkProof,               // cryptographic proof of control
+}
+
+pub enum DidLinkType {
+    SameOwner,          // same private key controls both
+    Delegation,         // delegated authority from linked DID
+    Recovery,           // linked DID can recover this passport
+}
+
+pub struct CredentialReference {
+    pub credential_type: String,        // e.g., "AgentCapabilityCredential"
+    pub issuer: String,                 // DID of issuer
+    pub issued_at: u64,
+    pub expiry: Option<u64>,
+    pub credential_hash: [u8; 32],      // BLAKE3 hash of full credential
+}
+```
+
+### 8.2 Soulbound Properties Under DID
+
+The soulbound property (§4) extends to the DID layer:
+
+- **DID is not transferable** — The `did:korai` DID is permanently bound to the
+  passport. If the passport is revoked, the DID is deactivated.
+- **Linked DIDs are append-only** — Once a DID link is established, it cannot be
+  removed (only deactivated). This prevents unlinking to hide association.
+- **Credentials survive suspension** — If a passport is suspended, issued credentials
+  remain valid (they represent historical attestation). New credentials cannot be issued
+  until suspension is lifted.
+
+### 8.3 Cross-Framework Agent Discovery via DID
+
+Non-Roko systems can discover Roko agents via standard DID resolution:
+
+```
+1. External system knows: did:korai:1:42
+2. Resolves DID → gets DID Document with service endpoints
+3. Finds "AgentToAgent" service endpoint
+4. Connects via Google A2A protocol or MCP
+5. Verifies agent's capabilities via VC presentation
+```
+
+This enables Roko agents to participate in multi-framework agent ecosystems (ElizaOS,
+AutoGPT, CrewAI) using standardized identity.
+
+---
+
+## 9. Soulbound Token Design Analysis
+
+### 9.1 ERC-5192 vs ERC-6454
+
+Two competing soulbound standards exist. Korai Passport uses ERC-6454 (chosen):
+
+| Property | ERC-5192 | ERC-6454 (chosen) |
+|---|---|---|
+| Standard | Minimal Soulbound Interface | Minimal Transferable NFT |
+| Approach | `locked()` function returns bool | Override `_update()` to block transfers |
+| Granularity | Per-token locked/unlocked | Contract-wide non-transferable |
+| Flexibility | Can unlock tokens later | Permanently non-transferable |
+| Gas overhead | ~100 gas per `locked()` check | 0 (check in `_update()` is free) |
+| Chosen because | — | Simpler, permanent soulbinding, no unlock risk |
+
+### 9.2 Soul Recovery via Social Recovery (Weyl, Ohlhaver & Buterin 2022)
+
+The "Decentralized Society" paper proposes soul recovery through community attestation.
+For Korai Passports, this maps to:
+
+```rust
+/// Soul recovery mechanism allowing passport migration to a new wallet
+/// without losing reputation history. Requires attestation from a
+/// recovery quorum — trusted agents who can vouch that the operator
+/// legitimately lost access to their original key.
+///
+/// Parameters:
+///   quorum_size:       number of recovery guardians (default 5)
+///   quorum_threshold:  minimum attestations needed (default 3)
+///   cooldown_period:   waiting period after initiation (default 7 days)
+///   guardian_min_tier: minimum passport tier for guardians (default Sovereign)
+pub struct SoulRecovery {
+    pub quorum_size: u32,           // default 5
+    pub quorum_threshold: u32,      // default 3
+    pub cooldown_period: u64,       // default 604800 (7 days)
+    pub guardian_min_tier: u8,      // default 1 (Sovereign)
+}
+
+pub struct RecoveryRequest {
+    pub original_passport: u256,
+    pub new_wallet: Address,
+    pub initiated_at: u64,
+    pub attestations: Vec<RecoveryAttestation>,
+    pub status: RecoveryStatus,
+}
+
+pub struct RecoveryAttestation {
+    pub guardian_passport: u256,
+    pub attested_at: u64,
+    pub evidence_hash: [u8; 32],    // BLAKE3 of evidence document
+    pub signature: Signature,
+}
+
+pub enum RecoveryStatus {
+    Pending,            // awaiting attestations
+    QuorumReached,      // threshold met, in cooldown
+    Executed,           // passport migrated
+    Cancelled,          // cancelled by original owner (proves they have access)
+    Expired,            // timeout without quorum (30 days)
+}
+```
+
+**Key difference from §4.3**: Standard key compromise recovery (§4.3) resets reputation.
+Soul recovery preserves reputation because the recovery quorum attests that it is the
+same operator, not a new entity. The 7-day cooldown allows the original owner to cancel
+if the recovery request is fraudulent.
+
+---
+
+## 10. Academic Citations
 
 - Bryan 2025a — ERC-8004 specification
 - ERC-6454 — Minimal Soulbound NFTs
+- ERC-5192 — Minimal Soulbound Interface
 - Douceur 2002 — The Sybil Attack
 - Kanerva 2009 — Hyperdimensional Computing (Cognitive Computation 1(2))
 - Plate 2003 — Holographic Reduced Representations
 - Frady, Kleyko, Sommer 2020 — Theory of Sequence Indexing in Hyperdimensional Computing
 - Kleyko et al. 2022 — Survey: Computing with Vectors of Random Bits (BSC)
 - ERC-4337 — Account Abstraction Using Alt Mempool
+- Weyl, Ohlhaver & Buterin 2022 — Decentralized Society: Finding Web3's Soul (soul
+  recovery, SBTs, DeSoc)
+- W3C DID Core 1.0 (2022) — Decentralized Identifiers specification
+- W3C VC Data Model 2.0 (2025) — Verifiable Credentials specification
 
 ---
 
-## 9. Cross-References
+## 11. Cross-References
 
 | Document | Relevance |
 |---|---|

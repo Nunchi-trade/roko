@@ -378,6 +378,249 @@ For > 8 agents, the TUI reduces rendering detail:
 
 ---
 
+## Emergent Visualization — Swarm Intelligence Patterns
+
+### Boid Flocking for Agent Collectives
+
+When multiple agents share a behavioral state, their Spectres can exhibit emergent flocking behavior (Reynolds, 1986) in the WebGL collective view. The three flocking rules applied per-Spectre per-frame:
+
+```rust
+/// Boid-style flocking for collective Spectre layout.
+pub struct FlockingParams {
+    /// Separation: avoid crowding neighbors (radius, strength)
+    pub separation: (f32, f32),  // default: (2.0, 1.5)
+    /// Alignment: match average velocity of neighbors (radius, strength)
+    pub alignment: (f32, f32),   // default: (5.0, 1.0)
+    /// Cohesion: steer toward average position of neighbors (radius, strength)
+    pub cohesion: (f32, f32),    // default: (8.0, 0.5)
+    /// Maximum speed
+    pub max_speed: f32,          // default: 2.0
+}
+
+/// Per-frame boid update for a single Spectre.
+pub fn boid_update(
+    idx: usize,
+    spectres: &[SpectrePosition],
+    params: &FlockingParams,
+) -> [f32; 2] {
+    let pos = spectres[idx].pos;
+    let vel = spectres[idx].vel;
+    let mut sep = [0.0f32; 2];
+    let mut aln = [0.0f32; 2];
+    let mut coh = [0.0f32; 2];
+    let mut n_sep = 0usize;
+    let mut n_aln = 0usize;
+
+    for (j, other) in spectres.iter().enumerate() {
+        if j == idx { continue; }
+        let d = dist(pos, other.pos);
+        if d < params.separation.0 {
+            sep[0] -= (other.pos[0] - pos[0]) / d;
+            sep[1] -= (other.pos[1] - pos[1]) / d;
+            n_sep += 1;
+        }
+        if d < params.alignment.0 {
+            aln[0] += other.vel[0];
+            aln[1] += other.vel[1];
+            n_aln += 1;
+        }
+        if d < params.cohesion.0 {
+            coh[0] += other.pos[0];
+            coh[1] += other.pos[1];
+        }
+    }
+
+    let w = params;
+    [
+        vel[0] + sep[0] * w.separation.1 + aln[0] * w.alignment.1 + coh[0] * w.cohesion.1,
+        vel[1] + sep[1] * w.separation.1 + aln[1] * w.alignment.1 + coh[1] * w.cohesion.1,
+    ]
+}
+```
+
+**Application:** Agents with similar roles/states flock together. When the orchestrator issues a broadcast, the receiving agents' Spectres visually coalesce. When agents diverge in task assignments, the flock fragments into sub-flocks. The visual topology of the flock IS the coordination topology.
+
+### Stigmergy — Pheromone Trail Persistence
+
+Pheromone fields are modeled as a scalar field `φ(x, y, t)` with exponential evaporation:
+
+```
+∂φ/∂t = −λ·φ + Σᵢ δ(x − xᵢ(t))·sᵢ
+```
+
+Where `λ` is the evaporation rate, `δ` is a Dirac delta at agent position `xᵢ`, and `sᵢ` is the signal strength deposited by agent `i`.
+
+In the TUI gallery, pheromone trails appear as fading character sequences between Spectres — frequently-used communication routes glow brighter (denser `≋` characters), while rarely-used paths fade (sparse `·` characters). This creates a visual "wear pattern" of agent coordination over time, analogous to ant trails worn into grass.
+
+### Kuramoto Phase Synchronization — Extended Model
+
+The breathing synchronization uses the Kuramoto model with the **order parameter** `r` as a real-time readout of collective coherence:
+
+```rust
+/// Kuramoto order parameter — measures collective synchronization.
+/// r ∈ [0, 1]: 0 = fully incoherent, 1 = fully synchronized.
+pub fn kuramoto_order_parameter(phases: &[f32]) -> (f32, f32) {
+    let n = phases.len() as f32;
+    let sum_cos: f32 = phases.iter().map(|&θ| θ.cos()).sum();
+    let sum_sin: f32 = phases.iter().map(|&θ| θ.sin()).sum();
+    let r = ((sum_cos / n).powi(2) + (sum_sin / n).powi(2)).sqrt();
+    let psi = (sum_sin / n).atan2(sum_cos / n); // mean phase
+    (r, psi)
+}
+
+/// Update phase for agent i under Kuramoto coupling.
+pub fn kuramoto_step(
+    phases: &mut [f32],
+    frequencies: &[f32],
+    coupling: f32,
+    dt: f32,
+) {
+    let n = phases.len() as f32;
+    let old_phases = phases.to_vec();
+    for i in 0..phases.len() {
+        let coupling_sum: f32 = old_phases.iter()
+            .map(|&θj| (θj - old_phases[i]).sin())
+            .sum();
+        phases[i] += (frequencies[i] + coupling / n * coupling_sum) * dt;
+        phases[i] %= std::f32::consts::TAU;
+    }
+}
+```
+
+**Critical threshold:** Synchronization emerges when `K > Kc = 2 / (π · g(0))`, where `g(0)` is the frequency distribution density at the mean natural frequency. For agents with similar behavioral states (similar breathing rates), synchronization emerges at lower coupling strengths — visually confirming that coordinated agents "breathe together."
+
+### Network Topology Layout — Spectral Alternative
+
+For large agent collectives (>8 agents), the TUI gallery can use spectral layout instead of grid layout. Spectral layout uses eigendecomposition of the graph Laplacian `L = D − A` to assign positions that reveal community structure:
+
+```rust
+/// Spectral layout for agent mesh topology.
+/// Uses the two smallest non-trivial eigenvectors of the graph Laplacian.
+pub fn spectral_layout(adjacency: &[Vec<bool>], n: usize) -> Vec<[f32; 2]> {
+    // L = D - A (Laplacian matrix)
+    // Compute eigenvalues/eigenvectors of L
+    // Use eigenvectors 1 and 2 (skip trivial 0th) as (x, y) positions
+    // Tightly connected agents cluster; isolated agents drift to periphery
+    let laplacian = compute_laplacian(adjacency, n);
+    let (_eigenvalues, eigenvectors) = eigendecompose(&laplacian, 3); // 3 smallest
+    (0..n).map(|i| [eigenvectors[1][i], eigenvectors[2][i]]).collect()
+}
+```
+
+### Information Cascade Visualization
+
+When a knowledge entry propagates from one agent to others via the Neuro cross-cut, the collective display shows the cascade as an animated "wave front":
+
+1. **Seed agent** (source) glows brighter momentarily
+2. **First-wave recipients** receive growing dots `· → • → ◉` along filaments
+3. **Second-wave recipients** show delayed, dimmer dots
+4. **Unaffected agents** show no change
+
+The temporal cascade reveals the knowledge flow topology — which agents are information hubs vs. which are periphery.
+
+---
+
+## AR/VR Collective Visualization
+
+### Spatial Computing for Agent Collectives
+
+The collective display extends naturally to spatial computing environments (Apple Vision Pro, WebXR headsets):
+
+**visionOS Volumetric Window:**
+```swift
+// Collective agent topology as a 3D volume
+WindowGroup(id: "agent-collective") {
+    RealityView { content in
+        let graphEntity = try await buildAgentGraphEntity(spectres)
+        content.add(graphEntity)
+    }
+}
+.windowStyle(.volumetric)
+.defaultSize(width: 1.5, height: 1.0, depth: 1.0, in: .meters)
+```
+
+**Spatial Interaction:**
+- **Walk closer** to an agent cluster → progressive detail reveal (LOD)
+- **Pinch gesture** on a Spectre → focus agent detail panel
+- **Two-handed pull apart** → zoom into mesh topology
+- **Spatial audio:** agent events emit HRTF-positioned sound from their 3D location
+
+**Proximity-based detail levels:**
+
+| Distance | Geometry | Data Shown |
+|---|---|---|
+| 0–0.5m | Full SDF Spectre with breathing | All telemetry, tool trace, last error |
+| 0.5–2m | Simplified polygon mesh | Name, role, state, last 10 events |
+| 2–5m | Billboard quad | Status color + icon |
+| 5m+ | Instanced colored point | Cluster membership only |
+
+### Shared Monitoring Rooms
+
+Multiple operators can view the same collective display in a shared XR space:
+- **Transport:** WebRTC data channels for low-latency state sync
+- **Co-presence:** Operator avatars visible as hand/head representations
+- **Spatial speech:** Collaborator voice panned to their physical position via Web Audio HRTF
+- **Persistent anchors:** Azure Spatial Anchors or ARCore Cloud Anchors persist dashboard positions across sessions and devices
+
+---
+
+## Test Criteria
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kuramoto_fully_synchronized_gives_r_1() {
+        let phases = vec![0.5, 0.5, 0.5, 0.5];
+        let (r, _) = kuramoto_order_parameter(&phases);
+        assert!((r - 1.0).abs() < 1e-5, "All same phase → r = 1.0");
+    }
+
+    #[test]
+    fn kuramoto_uniformly_distributed_gives_r_near_0() {
+        let n = 100;
+        let phases: Vec<f32> = (0..n).map(|i| i as f32 * std::f32::consts::TAU / n as f32).collect();
+        let (r, _) = kuramoto_order_parameter(&phases);
+        assert!(r < 0.15, "Uniform distribution → r ≈ 0, got {}", r);
+    }
+
+    #[test]
+    fn harmony_score_bounded() {
+        let harmony = compute_harmony(0.8, 0.6, 0.4, 0.3);
+        assert!(harmony >= 0.0 && harmony <= 1.0);
+    }
+
+    #[test]
+    fn collective_display_handles_empty() {
+        let display = CollectiveDisplay {
+            spectres: vec![], mesh: vec![], pheromones: vec![],
+            cfactor: 0.0, harmony: 0.0, sync_phases: vec![],
+            state_counts: HashMap::new(),
+        };
+        // Should not panic
+        let _ = display.update();
+    }
+
+    #[test]
+    fn pheromone_field_decays() {
+        let mut field = [[1.0f32; 32]; 32];
+        let evaporation = 0.995;
+        for _ in 0..100 {
+            for row in field.iter_mut() {
+                for cell in row.iter_mut() {
+                    *cell *= evaporation;
+                }
+            }
+        }
+        assert!(field[16][16] < 0.7, "Field should decay after 100 steps");
+    }
+}
+```
+
+---
+
 ## Current Status and Gaps
 
 **Built:**
@@ -394,6 +637,7 @@ For > 8 agents, the TUI reduces rendering detail:
 - Harmony score computation
 - Collective state aggregation
 - Spectre Gallery screen (Screen 6.4)
+- AR/VR spatial collective display
 
 ---
 

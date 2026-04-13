@@ -993,262 +993,263 @@ State consistency: both mirage-rs simulation and formal verification analyze the
 
 ## Verification-Guided Agent Design
 
-The chain-domain pipeline above verifies smart contracts. But roko is not a smart contract -- it is an agent that reads, plans, writes code, and executes shell commands. The same "fast filter -> medium analysis -> deep proof" pattern applies to agent behavior itself. Recent work on runtime verification for LLM agents provides the theoretical grounding.
+The chain-domain verification pipeline above (Heimdall → Slither → Echidna → hevm → Certora) verifies *smart contracts*. This section extends formal verification to the *agent itself* — proving that the agent's behavior satisfies safety, liveness, completeness, and fairness properties regardless of model outputs.
 
-Three papers form the foundation: Agent Behavioral Contracts (arXiv:2602.22302) adapts Design-by-Contract to autonomous agents with probabilistic satisfaction guarantees. AgentSpec (Wang et al., ICSE '26) defines a runtime enforcement DSL that blocks >90% of unsafe actions before they execute. AgentGuard (Koohestani et al., 2025) builds MDP models of agent behavior and uses probabilistic model checking for runtime assurance.
+### Research foundation
 
-### Agent Behavioral Contracts (ABC)
+Three recent papers establish the theoretical basis:
 
-A behavioral contract specifies what an agent must do, what it must never do, and what happens when it violates those boundaries. The formalism from arXiv:2602.22302 defines a contract as a tuple C = (P, I, G, R):
+**Formalizing Properties of Agentic AI** (arXiv:2510.14133, October 2025). Introduces 17 host-agent properties and 14 task-lifecycle properties expressed in temporal logic. Safety: "no unauthorized tool execution." Liveness: "every task reaches terminal state." Completeness: "all acceptance criteria verified." Fairness: "equitable resource allocation."
 
-- **P** -- Preconditions. State requirements before any action.
-- **I** -- Invariants. Properties that hold throughout execution.
-- **G** -- Governance policies. Authorization and resource constraints.
-- **R** -- Recovery mechanisms. What to do when something breaks.
+**Verifiably Safe Tool Use** (ICSE 2026 NIER, Doshi et al., CMU/Georgia Tech). Applies STPA (System-Theoretic Process Analysis) to derive safety requirements from hazards, formalized as specifications on data flows and tool sequences. Demonstrated with Alloy relational logic.
 
-The contract includes probabilistic satisfaction parameters: an agent satisfies C with probability p, tolerance delta, over k steps. This acknowledges that LLM-based agents are stochastic -- you cannot guarantee deterministic compliance, but you can bound the violation rate.
+**Agent Behavioral Contracts** (arXiv:2602.22302, February 2026). Design-by-Contract for AI agents. Preconditions, invariants, postconditions per tool call. Hard constraints (zero tolerance) vs. soft constraints (bounded recovery). Validated on AgentContract-Bench: contracted agents detect 5.2-6.8 more violations per session.
+
+### Agent safety properties
+
+Properties expressed in temporal logic for the Roko agent system:
 
 ```rust
-/// An Agent Behavioral Contract: formal specification of expected behavior.
-/// Based on Agent Behavioral Contracts (arXiv:2602.22302, 2026).
-///
-/// Contract C = (P, I, G, R) where:
-/// - P = Preconditions (state requirements before action)
-/// - I = Invariants (properties that must hold throughout execution)
-/// - G = Governance policies (authorization constraints)
-/// - R = Recovery mechanisms (violation response)
-pub struct BehavioralContract {
-    /// Unique contract identifier.
-    pub id: String,
-    /// Preconditions that must hold before any action.
-    pub preconditions: Vec<ContractPredicate>,
-    /// Invariants that must hold throughout execution.
-    pub invariants: Vec<ContractPredicate>,
-    /// Governance policies (authorization, resource limits).
-    pub governance: Vec<GovernancePolicy>,
-    /// Recovery mechanisms for contract violations.
-    pub recovery: Vec<RecoveryAction>,
-    /// Satisfaction parameters: (p, delta, k)-satisfaction.
-    /// Agent satisfies contract with probability p, tolerance delta, over k steps.
-    pub satisfaction: SatisfactionParams,
+/// Formal safety properties for agent verification.
+/// Each property can be model-checked (offline, exhaustive)
+/// or runtime-monitored (online, per-event).
+pub struct AgentSafetyProperty {
+    /// Human-readable name.
+    pub name: String,
+    /// The property category.
+    pub category: PropertyCategory,
+    /// Temporal logic formula (LTL or CTL).
+    pub formula: String,
+    /// Verification method: model checking or runtime monitoring.
+    pub verification: VerificationMethod,
+    /// Severity if violated.
+    pub severity: ViolationSeverity,
 }
 
-pub struct SatisfactionParams {
-    /// Minimum probability of contract satisfaction. Range: 0.9..1.0.
-    pub probability: f64,
-    /// Tolerance for transient violations. Range: 0.0..0.1.
-    pub tolerance: f64,
-    /// Horizon steps for satisfaction check. Range: 10..10000.
-    pub horizon: usize,
+pub enum PropertyCategory {
+    /// Something bad never happens.
+    Safety,
+    /// Something good eventually happens.
+    Liveness,
+    /// All required work is covered.
+    Completeness,
+    /// Resources are allocated equitably.
+    Fairness,
+}
+
+pub enum VerificationMethod {
+    /// Exhaustive model checking (offline, pre-execution).
+    ModelChecking,
+    /// Runtime monitoring via Buchi automata.
+    RuntimeMonitoring,
+    /// Both model checking and runtime monitoring.
+    Both,
+}
+```
+
+#### Host-agent properties (from arXiv:2510.14133)
+
+| ID | Property | Category | LTL Formula | Roko Enforcement |
+|---|---|---|---|---|
+| HA-1 | No unauthorized tool execution | Safety | `G(tool_call(T) → authorized(T, role))` | `ToolPermission.satisfied_by()` |
+| HA-2 | No data leakage across namespaces | Safety | `G(¬(data_flow(ns_a, ns_b) ∧ ¬channel(ns_a, ns_b)))` | `CognitiveNamespace` ACL |
+| HA-3 | Tool calls bounded by rate limit | Safety | `G(call_count(role, tool, window) ≤ max)` | `RateLimiter` sliding window |
+| HA-4 | Agent eventually responds | Liveness | `G(request → F(response))` | `ProcessSupervisor` timeout |
+| HA-5 | Paused agent eventually resumes or shuts down | Liveness | `G(paused → F(resumed ∨ shutdown))` | `CognitiveSignal` timeout escalation |
+| HA-6 | All tool outputs are scrubbed | Safety | `G(tool_result → scrubbed(tool_result))` | `ScrubPolicy` in `SafetyLayer` |
+| HA-7 | Files stay within sandbox | Safety | `G(file_op(path) → within_worktree(path))` | `PathPolicy` canonicalization |
+
+#### Task-lifecycle properties
+
+| ID | Property | Category | LTL Formula | Roko Enforcement |
+|---|---|---|---|---|
+| TL-1 | Every task reaches terminal state | Liveness | `G(task_started(T) → F(completed(T) ∨ failed(T)))` | `ProcessSupervisor` + ghost turn detection |
+| TL-2 | DAG ordering respected | Safety | `G(task_started(T) → completed(deps(T)))` | DAG executor in `roko-orchestrator` |
+| TL-3 | Gate runs after every task | Completeness | `G(task_completed(T) → F(gate_verdict(T)))` | Gate pipeline in `orchestrate.rs` |
+| TL-4 | Budget not exceeded | Safety | `G(¬budget_exceeded(session))` | `SafetyBudgetTracker` |
+| TL-5 | Failed tasks trigger recovery | Liveness | `G(task_failed(T) → F(retry(T) ∨ skip(T) ∨ abort))` | Circuit breaker + conductor |
+
+### Tool behavioral contracts
+
+Each tool in the registry carries a contract specifying what must be true before, during, and after invocation:
+
+```rust
+/// Behavioral contract for a tool.
+/// Based on Agent Behavioral Contracts (arXiv:2602.22302).
+pub struct ToolContract {
+    /// Tool this contract applies to.
+    pub tool_name: String,
+    /// Preconditions: must hold before invocation.
+    pub preconditions: Vec<ContractPredicate>,
+    /// Postconditions: must hold after invocation.
+    pub postconditions: Vec<ContractPredicate>,
+    /// Invariants: must hold throughout invocation.
+    pub invariants: Vec<ContractPredicate>,
+    /// Hard constraints: zero-tolerance violations (immediate abort).
+    pub hard_constraints: Vec<ContractPredicate>,
+    /// Soft constraints: bounded recovery window.
+    pub soft_constraints: Vec<SoftConstraint>,
 }
 
 pub struct ContractPredicate {
     /// Human-readable description.
     pub description: String,
-    /// The predicate expression (evaluated against agent state).
-    pub expression: PredicateExpr,
-    /// Whether violation is fatal (abort) or recoverable.
-    pub fatal: bool,
+    /// The predicate function.
+    pub check: Box<dyn Fn(&ToolCallContext) -> bool + Send + Sync>,
+    /// Severity if violated.
+    pub severity: ViolationSeverity,
 }
 
-pub enum PredicateExpr {
-    /// Check a boolean flag in agent state.
-    StateFlag(String),
-    /// Compare a metric against a threshold.
-    MetricThreshold { metric: String, op: CompOp, threshold: f64 },
-    /// LTL formula (compiled to Buchi automaton).
-    TemporalFormula(String),
-    /// Taint label check on a data flow.
-    TaintCheck { data: String, max_label: String },
+pub struct SoftConstraint {
+    pub predicate: ContractPredicate,
+    /// Maximum time to recover from violation.
+    pub recovery_window: Duration,
+    /// Number of violations before escalating to hard constraint.
+    pub max_violations: u32,
 }
 
-pub enum CompOp { Lt, Le, Eq, Ge, Gt }
-
-pub enum GovernancePolicy {
-    /// Maximum tool calls per session.
-    MaxToolCalls(usize),
-    /// Maximum files modified per task.
-    MaxFilesModified(usize),
-    /// Allowed tool set (whitelist).
-    AllowedTools(Vec<String>),
-    /// Required gate pass before specific actions.
-    RequireGatePass { action: String, gate: String },
-    /// Budget limit (tokens, cost, time).
-    BudgetLimit { resource: String, limit: f64 },
+/// Contract-aware tool dispatcher.
+/// Wraps ToolDispatcher to enforce contracts at dispatch time.
+pub struct ContractEnforcingDispatcher {
+    inner: ToolDispatcher,
+    contracts: HashMap<String, ToolContract>,
+    /// Track soft constraint violations per tool.
+    violation_counts: HashMap<String, HashMap<String, u32>>,
 }
 
-pub enum RecoveryAction {
-    /// Log the violation and continue.
-    Log,
-    /// Retry the action with modified parameters.
-    Retry { max_retries: usize },
-    /// Rollback to last known good state.
-    Rollback,
-    /// Pause and request human review.
-    HumanReview,
-    /// Abort the current task.
-    Abort,
-    /// Shutdown the agent gracefully.
-    Shutdown,
-}
-```
+impl ContractEnforcingDispatcher {
+    pub async fn dispatch(&mut self, call: &ToolCall) -> Result<ToolResult> {
+        let contract = self.contracts.get(&call.name);
 
-### Drift bounds theorem
+        if let Some(contract) = contract {
+            // Check preconditions
+            for pre in &contract.preconditions {
+                if !(pre.check)(&call.context) {
+                    return Err(ContractViolation::Precondition(pre.description.clone()));
+                }
+            }
 
-From arXiv:2602.22302: if the recovery rate gamma exceeds the drift rate alpha, behavioral drift converges to a bounded steady state rather than growing without limit.
+            // Check hard constraints
+            for hard in &contract.hard_constraints {
+                if !(hard.check)(&call.context) {
+                    return Err(ContractViolation::HardConstraint(hard.description.clone()));
+                }
+            }
+        }
 
-```
-D* = alpha / gamma    (expected steady-state drift)
+        // Execute through inner dispatcher (includes SafetyLayer)
+        let result = self.inner.dispatch(call).await?;
 
-Where:
-  alpha = natural drift rate (probability of contract violation per step)
-  gamma = recovery rate (probability of returning to compliance per step)
-```
+        if let Some(contract) = contract {
+            // Check postconditions
+            for post in &contract.postconditions {
+                if !(post.check)(&call.context) {
+                    // Log violation but return result (postcondition failure
+                    // is informational unless it's also a hard constraint)
+                    self.log_postcondition_violation(&call.name, &post.description);
+                }
+            }
 
-For an agent with alpha = 0.05 (5% violation rate) and gamma = 0.8 (80% recovery rate):
-D* = 0.05 / 0.8 = 0.0625 -- steady-state drift of 6.25%.
+            // Check soft constraints
+            for soft in &contract.soft_constraints {
+                if !(soft.predicate.check)(&call.context) {
+                    let count = self.violation_counts
+                        .entry(call.name.clone())
+                        .or_default()
+                        .entry(soft.predicate.description.clone())
+                        .or_insert(0);
+                    *count += 1;
+                    if *count >= soft.max_violations {
+                        // Escalate to hard constraint
+                        return Err(ContractViolation::EscalatedSoft(
+                            soft.predicate.description.clone(),
+                        ));
+                    }
+                }
+            }
+        }
 
-The practical takeaway: you do not need perfect compliance. You need recovery mechanisms that activate faster than violations accumulate. An agent that occasionally breaks an invariant but corrects within one step has bounded drift. An agent with slow recovery or no recovery has unbounded drift, and no amount of prompt engineering fixes that.
-
-```rust
-/// Compute the steady-state drift bound.
-/// If recovery_rate > drift_rate, drift is bounded.
-/// If recovery_rate <= drift_rate, drift is unbounded (contract unsatisfiable).
-pub fn drift_bound(drift_rate: f64, recovery_rate: f64) -> Option<f64> {
-    if recovery_rate > drift_rate {
-        Some(drift_rate / recovery_rate)
-    } else {
-        None // Unbounded drift: contract cannot be satisfied
+        Ok(result)
     }
 }
 ```
 
-### AgentSpec runtime enforcement DSL
+### Example contracts for built-in tools
 
-AgentSpec (Wang et al., ICSE '26, arXiv:2503.18666) takes a different approach: rather than specifying contracts and checking satisfaction after the fact, it intercepts actions before execution and enforces rules in real time.
+| Tool | Precondition | Postcondition | Hard Constraint |
+|---|---|---|---|
+| `write_file` | File path within worktree | File exists at path after write | Never write to `.env`, `Cargo.lock` outside plan scope |
+| `bash` | Command passes `BashPolicy` | Exit code logged | Never execute `rm -rf /`, `sudo`, `chmod 777` |
+| `edit_file` | File exists and was previously read | Edit produces valid diff | Net line count change < 500 per call |
+| `git_push` | All gates passed for current task | Remote ref updated | Never force-push to protected branches |
+| `web_fetch` | URL passes `NetworkPolicy` | Response status logged | Never fetch from private networks |
 
-Each rule has a trigger (what activates it), a predicate (when enforcement applies), and an action (what to do). Rules are evaluated before every agent action. If a rule matches and its enforcement says "block," the action never executes. The paper reports >90% prevention of unsafe actions across their benchmark.
+### VeriGuard dual-stage verification
 
-In roko's architecture, AgentSpec-style rules sit in the safety layer between the agent dispatcher and the tool executor. The existing `roko-agent/src/safety/` module already performs role-based authorization and pre/post checks. AgentSpec rules extend that with content-aware, pattern-matched enforcement.
+Adapting VeriGuard (arXiv:2510.05156) for Roko: offline formal proofs establish property guarantees, online runtime monitors enforce them with minimal overhead.
 
-```rust
-/// AgentSpec-style runtime enforcement rule.
-/// Rules are evaluated before each agent action.
-pub struct AgentSpecRule {
-    /// Rule identifier.
-    pub id: String,
-    /// Trigger: which action types activate this rule.
-    pub trigger: RuleTrigger,
-    /// Predicate: condition under which enforcement applies.
-    pub predicate: RulePredicate,
-    /// Enforcement: what to do when the predicate matches.
-    pub enforcement: EnforcementAction,
-    /// Priority: higher priority rules override lower ones.
-    pub priority: u32,
-}
+**Offline stage** (pre-deployment):
+1. Model the agent's state space as a finite transition system
+2. Express safety properties in LTL/CTL
+3. Use model checking (or SMT solving via Z3/CVC5) to prove properties hold
+4. Generate runtime monitors as compiled Buchi automata
 
-pub enum RuleTrigger {
-    /// Any tool call.
-    AnyToolCall,
-    /// Specific tool call by name.
-    ToolCall(String),
-    /// Any file write operation.
-    FileWrite,
-    /// Any network operation.
-    NetworkCall,
-    /// Any git operation.
-    GitOperation,
-    /// Pattern match on action content.
-    ContentPattern(String),
-}
-
-pub enum RulePredicate {
-    /// Always matches.
-    Always,
-    /// Match if the action targets a specific path pattern.
-    PathMatch(String),
-    /// Match if confidence is below threshold.
-    LowConfidence(f64),
-    /// Match if safety budget is exhausted.
-    BudgetExhausted(String),
-    /// Match if taint label exceeds threshold.
-    TaintExceeds { label: String, max_level: String },
-    /// Compound: all predicates must match.
-    All(Vec<RulePredicate>),
-    /// Compound: any predicate matches.
-    Any(Vec<RulePredicate>),
-}
-
-pub enum EnforcementAction {
-    /// Block the action entirely.
-    Block { reason: String },
-    /// Require human confirmation before proceeding.
-    RequireConfirmation,
-    /// Log and proceed.
-    Log { detail_level: String },
-    /// Substitute with a safer alternative.
-    Substitute { replacement: String },
-    /// Modify parameters (e.g., reduce scope).
-    ModifyParams { modifications: HashMap<String, String> },
-}
-```
-
-### Probabilistic model checking (AgentGuard)
-
-AgentGuard (Koohestani et al., 2025, arXiv:2509.23864) treats the agent as a Markov Decision Process. It observes state transitions over time, builds a probabilistic model of agent behavior, and uses PCTL (Probabilistic Computation Tree Logic) to check safety properties against the model.
-
-The key advantage over static rules: the model adapts. As the agent encounters new situations and its behavior shifts, the MDP model updates, and violations that would not have been caught by fixed rules surface through probabilistic analysis.
-
-The cost is observation overhead. The model needs enough data points to be statistically valid, and rebuilding it is not free. The configuration below controls the tradeoff between responsiveness and computational cost.
+**Online stage** (during execution):
+1. Feed each agent event to the compiled monitors
+2. Each monitor runs in O(|formula|) space per event (Havelund & Rosu, 2004)
+3. Violation triggers immediate response (log/alert/pause/abort)
 
 ```rust
-/// Configuration for probabilistic model checking.
-/// Uses an MDP model of agent behavior for runtime assurance.
-pub struct ProbabilisticCheckerConfig {
-    /// Update interval: how often to rebuild the MDP model.
-    pub update_interval_steps: usize,
-    /// Minimum observations before model is considered valid.
-    pub min_observations: usize,
-    /// Property specifications in PCTL (Probabilistic CTL).
-    pub properties: Vec<PctlProperty>,
-    /// Confidence threshold: if P(violation) > threshold, intervene.
-    pub violation_probability_threshold: f64,
+/// VeriGuard dual-stage verification.
+/// Offline proofs + online monitors for agent safety.
+pub struct VeriGuard {
+    /// Offline-verified properties (proved before deployment).
+    pub verified_properties: Vec<VerifiedProperty>,
+    /// Online runtime monitors (compiled from LTL formulas).
+    pub runtime_monitors: Vec<BuchiAutomaton>,
+    /// Current monitor states.
+    pub monitor_states: Vec<AutomatonState>,
 }
 
-pub struct PctlProperty {
+pub struct VerifiedProperty {
+    /// Property name.
     pub name: String,
-    pub formula: String,  // e.g., "P>=0.95 [G (files_modified <= 10)]"
-    pub intervention: EnforcementAction,
+    /// LTL/CTL formula.
+    pub formula: String,
+    /// Verification result.
+    pub result: VerificationResult,
+    /// Timestamp of last verification.
+    pub verified_at: i64,
+    /// Hash of the system model at verification time.
+    pub model_hash: [u8; 32],
 }
-```
 
-### General-purpose verification pipeline
+pub enum VerificationResult {
+    /// Property proved to hold for all reachable states.
+    Proved,
+    /// Property disproved: counterexample found.
+    Disproved { counterexample: Vec<String> },
+    /// Verification timed out (state space too large).
+    Timeout { explored_states: u64 },
+}
 
-The five-stage chain-domain pipeline has a direct analog for code-domain agents. The principle is identical: fast checks first, expensive proofs last, each stage gating the next.
-
-```
-Stage 1: cargo check (type checking)           ~seconds
-    |
-Stage 2: clippy (static analysis)              ~seconds
-    |
-Stage 3: cargo test (property testing)         ~10-60s
-    |
-Stage 4: cargo miri (undefined behavior)       ~1-5min
-    |
-Stage 5: contract verification (kani/prusti)   ~5-30min
-```
-
-Roko already runs stages 1-3 through its gate pipeline (`roko-gate`). Stages 4 and 5 extend the pipeline to memory safety verification (miri) and formal property proofs (kani for bounded model checking, prusti for refinement types). The `CodeVerificationLevel` mirrors `VerificationLevel` from the chain domain.
-
-```rust
-/// Code-domain verification pipeline, mirroring the chain-domain pipeline.
-pub enum CodeVerificationLevel {
-    Unknown,
-    TypeChecked,       // cargo check passes
-    StaticClean,       // clippy passes with no warnings
-    TestsPassed { test_count: usize },
-    MemorySafe,        // miri finds no UB
-    FormallyVerified { properties: Vec<String> }, // kani/prusti proves properties
+impl VeriGuard {
+    /// Process an agent event through all runtime monitors.
+    pub fn check_event(&mut self, event: &EventLabel) -> Vec<SafetyViolation> {
+        let mut violations = Vec::new();
+        for (i, monitor) in self.runtime_monitors.iter().enumerate() {
+            let new_state = monitor.transition(&self.monitor_states[i], event);
+            if monitor.is_rejecting(&new_state) {
+                violations.push(SafetyViolation {
+                    property: self.verified_properties[i].name.clone(),
+                    formula: self.verified_properties[i].formula.clone(),
+                    severity: ViolationSeverity::Critical,
+                });
+            }
+            self.monitor_states[i] = new_state;
+        }
+        violations
+    }
 }
 ```
 
@@ -1256,45 +1257,48 @@ pub enum CodeVerificationLevel {
 
 ```toml
 [safety.verification]
-# Enable behavioral contracts.
+# Enable contract enforcement on tool dispatch.
 contracts_enabled = true
-# Contract satisfaction probability threshold. Range: 0.9..1.0.
-satisfaction_probability = 0.95
-# Contract satisfaction tolerance. Range: 0.0..0.1.
-satisfaction_tolerance = 0.05
-# Contract horizon (steps). Range: 10..10000.
-satisfaction_horizon = 100
-
-[safety.verification.agentspec]
-# Enable AgentSpec-style runtime rules.
-enabled = true
-# Rule files to load (one rule per TOML entry).
-rule_files = [".roko/safety-rules.toml"]
-# Default enforcement for unmatched actions.
-default_enforcement = "log"    # "block" | "confirm" | "log" | "allow"
-
-[safety.verification.probabilistic]
-# Enable probabilistic model checking.
-enabled = false
-# MDP update interval. Range: 10..1000.
-update_interval_steps = 50
-# Minimum observations before model checking begins. Range: 20..500.
-min_observations = 50
-# Violation probability threshold. Range: 0.01..0.5.
-violation_threshold = 0.1
+# Enable VeriGuard runtime monitoring.
+veriguard_enabled = true
+# Path to verified properties file.
+verified_properties_path = ".roko/verified-properties.json"
+# Maximum soft constraint violations before escalation.
+# Range: 1..100. Default: 3.
+default_max_soft_violations = 3
+# Soft constraint recovery window in seconds.
+# Range: 10..3600. Default: 300.
+default_recovery_window_secs = 300
+# Online monitor check interval (events).
+# Range: 1..100. Default: 1 (every event).
+monitor_check_interval = 1
 ```
 
 ### Test criteria
 
-- BehavioralContract with precondition violation triggers RecoveryAction::Abort when fatal=true
-- BehavioralContract with invariant violation triggers RecoveryAction::HumanReview
-- drift_bound(0.05, 0.8) returns Some(0.0625)
-- drift_bound(0.5, 0.3) returns None (unbounded drift)
-- AgentSpecRule with trigger=FileWrite and predicate=PathMatch("*.rs") matches Rust file writes
-- AgentSpecRule enforcement=Block prevents the action from executing
-- CodeVerificationLevel ordering: Unknown < TypeChecked < StaticClean < TestsPassed < MemorySafe < FormallyVerified
-- PctlProperty violation triggers the configured enforcement action
-- Contract satisfaction check over k steps correctly identifies violations
+- `ToolContract` precondition failure blocks tool execution
+- `ToolContract` hard constraint failure triggers immediate abort
+- `ToolContract` soft constraint violation increments counter; escalates at max_violations
+- `ContractEnforcingDispatcher` correctly chains with inner `ToolDispatcher` and `SafetyLayer`
+- `VeriGuard::check_event()` detects violations matching compiled Buchi automaton
+- `VerifiedProperty` with `Proved` result enables corresponding runtime monitor
+- `VerifiedProperty` with `Disproved` result raises alert at startup
+- Host-agent property HA-1 (no unauthorized tool execution) correctly rejects calls from unauthorized roles
+- Task-lifecycle property TL-2 (DAG ordering) correctly rejects out-of-order task execution
+- Contract for `write_file` blocks writes to `.env` files
+
+### Academic references
+
+| Paper | Contribution |
+|---|---|
+| Formalizing Properties of Agentic AI (arXiv:2510.14133, 2025) | 17 host-agent + 14 task-lifecycle properties |
+| Verifiably Safe Tool Use (ICSE 2026, Doshi et al.) | STPA-derived safety requirements for agents |
+| Agent Behavioral Contracts (arXiv:2602.22302, 2026) | Design-by-Contract for AI agents |
+| VeriGuard (arXiv:2510.05156) | Dual-stage offline proof + online monitor |
+| Pro2Guard | Probabilistic model checking via DTMC |
+| Agent-C | DSL for temporal safety constraints with SMT |
+| Flyvy (VMware Research) | Rust framework for FO-LTL verification |
+| Havelund & Rosu (2004, FMSD) | O(|formula|) runtime monitoring |
 
 ---
 

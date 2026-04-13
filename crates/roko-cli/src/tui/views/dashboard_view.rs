@@ -125,7 +125,7 @@ fn render_right_panel(
         1 => render_output_panel(frame, sections[1], data, tui_state, view_state, focused, theme),
         2 => render_sub_diff(frame, sections[1], data, tui_state, theme),
         3 => render_sub_errors(frame, sections[1], data, theme),
-        4 => render_sub_git(frame, sections[1], theme),
+        4 => render_sub_git(frame, sections[1], tui_state, theme),
         5 => render_sub_mcp(frame, sections[1], data, theme),
         6 => render_sub_processes(frame, sections[1], data, focused, theme),
         _ => {}
@@ -379,11 +379,7 @@ fn render_sub_errors(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, th
 // Sub-tab: Git — inline summary from git commands
 // ---------------------------------------------------------------------------
 
-/// Cached git summary for the dashboard sub-tab (refreshed every 5s).
-static GIT_SUB_CACHE: std::sync::Mutex<Option<(std::time::Instant, Vec<String>)>> =
-    std::sync::Mutex::new(None);
-
-fn render_sub_git(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+fn render_sub_git(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, theme: &Theme) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Git ")
@@ -391,22 +387,17 @@ fn render_sub_git(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Use cached git data to avoid blocking the render loop
-    let cached_lines = {
-        let mut cache = GIT_SUB_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-        let now = std::time::Instant::now();
-        let needs_refresh = cache
-            .as_ref()
-            .map(|(ts, _)| now.duration_since(*ts).as_secs() >= 5)
-            .unwrap_or(true);
-        if needs_refresh {
-            let data = collect_git_summary();
-            *cache = Some((now, data.clone()));
-            data
-        } else {
-            cache.as_ref().unwrap().1.clone()
-        }
-    };
+    // Use pre-populated git summary from TuiState (filled by background thread).
+    // Zero I/O in the render path.
+    let cached_lines = &tui_state.git_summary_lines;
+
+    if cached_lines.is_empty() {
+        frame.render_widget(
+            Paragraph::new(" loading git data...").style(theme.muted()),
+            inner,
+        );
+        return;
+    }
 
     let lines: Vec<Line<'_>> = cached_lines
         .iter()
@@ -419,8 +410,11 @@ fn render_sub_git(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
     );
 }
 
-/// Collect git summary data as plain strings (called at most every 5s).
-fn collect_git_summary() -> Vec<String> {
+/// Collect git summary data as plain strings.
+///
+/// This runs multiple git subprocess calls and should only be called from
+/// a background thread, never from the render path.
+pub fn collect_git_summary() -> Vec<String> {
     let mut lines = Vec::new();
 
     let branch = git_cmd(&["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();

@@ -392,7 +392,164 @@ performance for multiple testing).
 
 ---
 
-## 9. Academic Citations
+## 9. Dynamic Pricing Engine
+
+### 9.1 Multi-Factor Pricing
+
+Beyond alpha-decay (§3.1), the marketplace supports a multi-factor dynamic pricing
+engine that adjusts prices in real-time based on market conditions:
+
+```rust
+/// Multi-factor dynamic pricing engine for knowledge listings.
+/// Combines time decay, demand signals, competitive pressure, and
+/// buyer-specific value estimation.
+pub struct DynamicPricingEngine {
+    /// Base price set by seller (USDC, 6 decimals)
+    pub base_price: u64,
+    /// Alpha-decay parameters (see §3.1)
+    pub decay_lambda: f64,
+    pub regime_multiplier: f64,
+    /// Demand adjustment: price increases with purchase velocity
+    pub demand_sensitivity: f64,     // default 0.1, range [0.0, 0.5]
+    /// Competition adjustment: price decreases if similar listings exist
+    pub competition_sensitivity: f64, // default 0.05, range [0.0, 0.3]
+    /// Minimum price floor (seller-configured)
+    pub price_floor: u64,
+    /// Maximum price ceiling
+    pub price_ceiling: u64,
+}
+
+impl DynamicPricingEngine {
+    /// Compute current price given market conditions.
+    pub fn current_price(
+        &self,
+        time_since_listing: Duration,
+        purchases_last_hour: u32,
+        similar_listings_count: u32,
+        buyer_reputation: f64,
+    ) -> u64 {
+        let base = self.base_price as f64;
+        let rep_mult = rep_multiplier(buyer_reputation);
+
+        // Time decay (alpha-decay from §3.1)
+        let time_factor = (-self.decay_lambda
+            * self.regime_multiplier
+            * time_since_listing.as_secs_f64() / 86400.0)
+            .exp();
+
+        // Demand surge pricing
+        let demand_factor = 1.0
+            + self.demand_sensitivity * (purchases_last_hour as f64).ln().max(0.0);
+
+        // Competition pressure
+        let competition_factor = 1.0
+            - self.competition_sensitivity
+              * (similar_listings_count as f64).ln().max(0.0);
+
+        let price = base * time_factor * demand_factor * competition_factor.max(0.5);
+        let price = price.clamp(self.price_floor as f64, self.price_ceiling as f64);
+        price as u64
+    }
+}
+```
+
+### 9.2 Dutch Auction for Premium Knowledge
+
+High-value knowledge (alpha signals, competitive analyses) can be sold via a Dutch
+auction variant where the price descends from a maximum over a configurable period:
+
+```rust
+/// Dutch auction for premium knowledge listings.
+/// Price descends linearly from start_price to reserve_price.
+/// First buyer wins at the current price.
+pub struct KnowledgeDutchAuction {
+    pub listing_hash: Blake3Hash,
+    pub start_price: u64,           // starting high price (USDC)
+    pub reserve_price: u64,         // minimum acceptable price
+    pub auction_duration: Duration, // total time for descent
+    pub started_at: u64,            // unix timestamp
+}
+
+impl KnowledgeDutchAuction {
+    /// Current price at time t.
+    pub fn price_at(&self, now: u64) -> u64 {
+        let elapsed = now.saturating_sub(self.started_at);
+        let duration = self.auction_duration.as_secs();
+        if elapsed >= duration {
+            return self.reserve_price;
+        }
+        let fraction = elapsed as f64 / duration as f64;
+        let range = self.start_price - self.reserve_price;
+        self.start_price - (range as f64 * fraction) as u64
+    }
+}
+```
+
+### 9.3 Subscription Pricing with Commitment Discounts
+
+Sellers can offer domain subscriptions with commitment-based discounts:
+
+```rust
+pub struct SubscriptionPlan {
+    pub seller_passport: u256,
+    pub domain: String,
+    pub monthly_price: u64,         // USDC base units
+    pub commitment_months: u32,     // 0 = month-to-month
+    pub discount_schedule: Vec<(u32, f64)>, // (months, discount_fraction)
+    pub included_skills_per_month: u32,     // 0 = unlimited
+}
+
+// Default discount schedule:
+// 1 month: 0% discount
+// 3 months: 10% discount
+// 6 months: 20% discount
+// 12 months: 30% discount
+```
+
+---
+
+## 10. Prediction-Market Verification
+
+### 10.1 Concept: Crowdsourced Quality via Prediction Markets
+
+Instead of relying solely on blind verification (§4), the marketplace can use prediction
+markets (see `14-knowledge-futures-market.md` §10) to crowdsource quality assessment:
+
+```
+For each marketplace listing:
+  1. Create binary prediction market:
+     "Will buyers rate this listing above 0.7 quality?"
+  2. Market runs for 7 days after first purchase
+  3. Resolution: average buyer quality rating after 30 days
+  4. Traders with superior prediction accuracy earn KORAI
+  5. Market price signals quality to potential buyers
+```
+
+### 10.2 Futarchy-Inspired Quality Signals
+
+Drawing from Hanson's Futarchy (2013), marketplace quality can be governed by prediction
+markets on knowledge effectiveness:
+
+```rust
+/// Futarchy-style quality governance for knowledge listings.
+/// Market participants bet on whether a listing will achieve
+/// measurable accuracy improvements for buyers.
+pub struct QualityPredictionMarket {
+    pub listing_hash: Blake3Hash,
+    pub market: LmsrMarketMaker,     // from knowledge-futures §10.2
+    pub question: String,             // "Accuracy delta > +2%?"
+    pub resolution_period: Duration,  // time after purchase to measure
+    pub min_sample_size: u32,         // minimum buyers for resolution
+}
+```
+
+**Research foundation**: Hanson 2013 (Shall We Vote on Values, But Bet on Beliefs? —
+Futarchy governance via prediction markets), Wolfers & Zitzewitz 2004 (Prediction
+Markets — NBER working paper on market accuracy).
+
+---
+
+## 11. Academic Citations
 
 - Arrow 1962 — Economic Welfare and the Allocation of Resources for Invention
 - Nelson 1970 — Information and Consumer Behavior
@@ -402,6 +559,12 @@ performance for multiple testing).
 - Harvey, Liu, Zhu 2016 — ... and the Cross-Section of Expected Returns
 - Bailey & López de Prado — The Deflated Sharpe Ratio
 - Morpho 2024 — DeFi marketplace primitives
+- Hanson 2013 — Shall We Vote on Values, But Bet on Beliefs? (Futarchy)
+- Wolfers & Zitzewitz 2004 — Prediction Markets (NBER working paper)
+- Varian 1997 — Versioning Information Goods (optimal pricing for digital goods)
+- Shapley 1953 — A Value for n-person Games (credit attribution)
+- Bergemann & Välimäki 2010 — Dynamic Pricing of New Experience Goods (Journal of
+  Political Economy)
 
 ---
 

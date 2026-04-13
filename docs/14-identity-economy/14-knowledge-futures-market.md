@@ -512,10 +512,273 @@ This allows buyers to de-risk large research commitments by paying incrementally
 
 ---
 
-## 10. Academic Citations
+## 10. LMSR Prediction Market for Knowledge Demand
+
+### 10.1 The Insight: Futures as Prediction Markets
+
+Knowledge Futures can be enhanced with a full prediction market mechanism that reveals
+not just whether knowledge will be produced, but the collective belief about its quality
+and timeliness. This uses Hanson's Logarithmic Market Scoring Rule (LMSR) — the same
+mechanism powering Polymarket and Gnosis conditional tokens.
+
+### 10.2 LMSR Market Maker
+
+Each Knowledge Future gets an automated market maker that prices outcome shares:
+
+```
+cost(q) = b × ln(Σ_i e^(q_i / b))
+
+Where:
+  q_i — outstanding shares of outcome i
+  b   — liquidity parameter (controls price sensitivity)
+```
+
+For a Knowledge Future, two outcomes:
+- **Deliver**: producer delivers quality ≥ expected by deadline
+- **Default**: producer fails to deliver
+
+```rust
+/// LMSR (Logarithmic Market Scoring Rule) automated market maker
+/// for Knowledge Future outcome prediction.
+///
+/// Parameters:
+///   b: liquidity parameter (default 100.0, range [10, 1000])
+///      Higher b = more liquidity, lower price impact per trade
+///      Lower b = less liquidity, prices move faster (more responsive)
+pub struct LmsrMarketMaker {
+    pub future_id: Blake3Hash,
+    pub b: f64,                     // liquidity parameter
+    pub shares_deliver: f64,        // outstanding "Deliver" shares
+    pub shares_default: f64,        // outstanding "Default" shares
+    pub total_subsidy: f64,         // KORAI committed by market maker
+}
+
+impl LmsrMarketMaker {
+    /// Cost function: total cost of current outstanding shares.
+    pub fn cost(&self) -> f64 {
+        self.b * (
+            (self.shares_deliver / self.b).exp()
+            + (self.shares_default / self.b).exp()
+        ).ln()
+    }
+
+    /// Price of one "Deliver" share (probability of delivery).
+    /// p_deliver = e^(q_deliver / b) / (e^(q_deliver / b) + e^(q_default / b))
+    pub fn price_deliver(&self) -> f64 {
+        let exp_d = (self.shares_deliver / self.b).exp();
+        let exp_f = (self.shares_default / self.b).exp();
+        exp_d / (exp_d + exp_f)
+    }
+
+    /// Price of one "Default" share.
+    pub fn price_default(&self) -> f64 {
+        1.0 - self.price_deliver()
+    }
+
+    /// Buy `amount` shares of an outcome. Returns cost in KORAI.
+    pub fn buy(&mut self, outcome: Outcome, amount: f64) -> f64 {
+        let cost_before = self.cost();
+        match outcome {
+            Outcome::Deliver => self.shares_deliver += amount,
+            Outcome::Default => self.shares_default += amount,
+        }
+        let cost_after = self.cost();
+        cost_after - cost_before // cost to buyer
+    }
+
+    /// Sell `amount` shares. Returns KORAI refund.
+    pub fn sell(&mut self, outcome: Outcome, amount: f64) -> f64 {
+        let cost_before = self.cost();
+        match outcome {
+            Outcome::Deliver => {
+                self.shares_deliver = (self.shares_deliver - amount).max(0.0);
+            }
+            Outcome::Default => {
+                self.shares_default = (self.shares_default - amount).max(0.0);
+            }
+        }
+        let cost_after = self.cost();
+        cost_before - cost_after // refund to seller
+    }
+}
+
+pub enum Outcome {
+    Deliver,
+    Default,
+}
+```
+
+### 10.3 Market Dynamics
+
+The LMSR market reveals collective intelligence about knowledge production:
+
+```
+Interpretation of prices:
+
+p_deliver = 0.85 → market believes 85% chance of delivery
+  → Research agent is trusted, topic is within their expertise
+  → Buyers can purchase the future with high confidence
+
+p_deliver = 0.40 → market believes only 40% chance of delivery
+  → Research agent may be overcommitting or topic is very hard
+  → Buyers may wait or look for alternative producers
+  → High default share price creates incentive for bearish bets
+
+p_deliver drops from 0.80 to 0.50 mid-way through deadline
+  → Market is signaling trouble — producer may be struggling
+  → Creates early warning for buyers to seek alternatives
+```
+
+### 10.4 Conditional Token Framework
+
+Extending the binary outcome to multi-dimensional outcomes using the Gnosis conditional
+token framework (Ommer & Lu 2019):
+
+```rust
+/// Conditional outcome tokens for multi-dimensional Knowledge Futures.
+/// Example: predict both delivery AND quality level.
+pub struct ConditionalOutcomes {
+    pub future_id: Blake3Hash,
+    pub conditions: Vec<Condition>,
+    pub outcome_slots: Vec<OutcomeSlot>,
+}
+
+pub struct Condition {
+    pub condition_id: Blake3Hash,
+    pub oracle: u256,               // passport ID of resolution oracle
+    pub question: String,           // e.g., "Quality score ≥ 0.8?"
+    pub outcome_count: u32,         // number of possible outcomes
+}
+
+pub struct OutcomeSlot {
+    pub slot_index: u32,
+    pub description: String,        // e.g., "Delivered with quality ≥ 0.9"
+    pub shares: f64,
+    pub resolved: bool,
+    pub winning: bool,
+}
+```
+
+Example conditional market for a DeFi analysis future:
+
+```
+Condition 1: Delivery timing
+  - Early (before 50% of deadline)   → slot 0
+  - On time (before deadline)        → slot 1
+  - Late/Default                     → slot 2
+
+Condition 2: Quality level
+  - Elite (quality ≥ 0.9)           → slot 0
+  - Good (0.75 ≤ quality < 0.9)    → slot 1
+  - Acceptable (0.5 ≤ quality < 0.75) → slot 2
+  - Poor (quality < 0.5)            → slot 3
+
+Combined outcomes (3 × 4 = 12 outcome slots):
+  "Early delivery + Elite quality"   → most valuable
+  "On time + Good quality"           → standard
+  "Late + Poor quality"              → least valuable (near-default)
+```
+
+### 10.5 Market Resolution
+
+```rust
+/// Resolution of a Knowledge Future prediction market.
+/// Called when the future is delivered or defaults.
+pub struct MarketResolution {
+    pub future_id: Blake3Hash,
+    pub resolved_at: u64,
+    pub winning_outcome: Outcome,
+    pub quality_score: Option<f64>,      // gate-verified quality
+    pub delivery_timing: DeliveryTiming,
+    pub total_volume: f64,               // total KORAI traded
+    pub final_price_deliver: f64,        // last market price for "Deliver"
+    pub calibration_error: f64,          // |final_price - actual_outcome|
+}
+
+pub enum DeliveryTiming {
+    Early,     // before 50% of deadline
+    OnTime,    // before deadline
+    Default,   // missed deadline
+}
+```
+
+### 10.6 LMSR Parameter Configuration
+
+| Parameter | Default | Range | Effect |
+|---|---|---|---|
+| `b` (liquidity) | 100 | [10, 1000] | Higher = more stable prices, higher subsidy |
+| Market duration | deadline - 1h | — | Market closes 1h before delivery deadline |
+| Min trade | 0.1 KORAI | [0.01, 1.0] | Minimum share purchase |
+| Resolution oracle | Gate pipeline | — | Automated via gate verdicts |
+| Subsidy source | Protocol treasury | — | Initial liquidity from 20% fee allocation |
+| Trading fee | 1% | [0.5%, 2%] | Goes to 40/40/20 fee split |
+
+### 10.7 Test Criteria
+
+```rust
+#[cfg(test)]
+mod lmsr_tests {
+    #[test]
+    fn test_lmsr_prices_sum_to_one() {
+        let mm = LmsrMarketMaker {
+            future_id: Blake3Hash::zero(),
+            b: 100.0,
+            shares_deliver: 50.0,
+            shares_default: 30.0,
+            total_subsidy: 200.0,
+        };
+        let sum = mm.price_deliver() + mm.price_default();
+        assert!((sum - 1.0).abs() < 1e-10, "Prices must sum to 1.0");
+    }
+
+    #[test]
+    fn test_lmsr_buying_moves_price() {
+        let mut mm = LmsrMarketMaker::new(Blake3Hash::zero(), 100.0);
+        let price_before = mm.price_deliver();
+        mm.buy(Outcome::Deliver, 10.0);
+        let price_after = mm.price_deliver();
+        assert!(price_after > price_before, "Buying Deliver shares raises price");
+    }
+
+    #[test]
+    fn test_lmsr_cost_bounded_by_b() {
+        // Maximum loss for the market maker is b × ln(n) where n = outcomes
+        let mm = LmsrMarketMaker::new(Blake3Hash::zero(), 100.0);
+        let max_loss = 100.0 * (2.0_f64).ln(); // ~69.3 KORAI
+        assert!(mm.cost() <= max_loss + 1.0);
+    }
+
+    #[test]
+    fn test_market_calibration() {
+        // After resolution, check that market price was close to outcome
+        let mut mm = LmsrMarketMaker::new(Blake3Hash::zero(), 100.0);
+        // Simulate: lots of "Deliver" buying → price goes to 0.9
+        for _ in 0..50 { mm.buy(Outcome::Deliver, 5.0); }
+        let final_price = mm.price_deliver();
+        // If the future actually delivers, calibration error should be small
+        let error = (final_price - 1.0).abs();
+        assert!(error < 0.2, "Well-traded market should be calibrated");
+    }
+}
+```
+
+**Research foundation**: Hanson 2003 (Logarithmic Market Scoring Rule for prediction
+markets — bounded loss, infinite liquidity), Hanson 2007 (Logarithmic Market Scoring
+Rules for Modular Combinatorial Information Aggregation — conditional markets), Ommer &
+Lu 2019 (Gnosis Conditional Token Framework — composable outcome tokens), Chen & Pennock
+2007 (A Utility Framework for Bounded-Loss Market Makers — LMSR loss bounds), Abernethy
+et al. 2013 (Efficient Market Making via Convex Optimization — cost function approach),
+Othman et al. 2013 (A Practical Liquidity-Sensitive AMM for Prediction Markets —
+adaptive liquidity).
+
+---
+
+## 11. Academic Citations
 
 - Hanson 2003 — Combinatorial Information Markets for Decision Support (prediction
   markets for knowledge allocation)
+- Hanson 2007 — Logarithmic Market Scoring Rules for Modular Combinatorial Information
+  Aggregation (LMSR — conditional markets)
 - Arrow 1963 — Uncertainty and the Welfare Economics of Medical Care (information
   asymmetry in markets)
 - Akerlof 1970 — The Market for "Lemons" (quality uncertainty and market mechanisms)
@@ -525,6 +788,11 @@ This allows buyers to de-risk large research commitments by paying incrementally
 - Ostrom 1990 — Governing the Commons (design principles for knowledge commons)
 - Woolley et al. 2010 — Evidence for a Collective Intelligence Factor in the
   Performance of Human Groups (Science 330(6004))
+- Ommer & Lu 2019 — Gnosis Conditional Token Framework (composable outcome tokens)
+- Chen & Pennock 2007 — A Utility Framework for Bounded-Loss Market Makers
+- Abernethy, Chen & Vaughan 2013 — Efficient Market Making via Convex Optimization
+- Othman, Sandholm, Pennock & Reeves 2013 — A Practical Liquidity-Sensitive AMM for
+  Prediction Markets
 
 ---
 

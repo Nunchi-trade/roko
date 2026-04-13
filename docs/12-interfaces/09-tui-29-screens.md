@@ -1245,6 +1245,312 @@ Region 6 (System)       ──Esc──▸ Region 1, Agent List
 
 ---
 
+## Screen Navigation State Machine
+
+### Hierarchical State Machine (Harel Statecharts)
+
+The 29-screen navigation is modeled as a hierarchical state machine with superstates for each region. Using the Harel statechart model, each region is a superstate containing its screens, and the `Esc` key always transitions to the parent superstate:
+
+```rust
+/// Screen identifier — carries context for parameterized screens.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Screen {
+    // Region 1: Navigation
+    AgentList,
+    PlanList,
+    MeshOverview,
+    HealthDashboard,
+    EpisodeTimeline,
+    ConfigPanel,
+    // Region 2: Agent Detail (parameterized by agent ID)
+    AgentOutput(String),
+    AgentGates(String),
+    AgentDaimon(String),
+    AgentNeuro(String),
+    AgentPredictions(String),
+    AgentCost(String),
+    // Region 3: Plan Detail (parameterized by plan ID)
+    PlanDag(String),
+    PlanTasks(String),
+    PlanMerge(String),
+    PlanTimeline(String),
+    PlanWorktrees(String),
+    // Region 4: Knowledge
+    KnowledgeBrowser,
+    KnowledgeDetail(String),
+    KnowledgeTierFlow,
+    KnowledgeGraph,
+    // Region 5: Collective
+    CFactorDashboard,
+    AgentComparison,
+    PheromoneLandscape,
+    SpectreGallery,
+    // Region 6: System
+    ProviderHealth,
+    ResourceMonitor,
+    EventLog,
+    ConfigEditor,
+}
+
+/// Navigation state machine with history and modal overlay.
+pub struct NavigationState {
+    pub current: Screen,
+    pub history: Vec<Screen>,     // for Esc/back navigation
+    pub modal: Option<Modal>,     // overlay layer (captures input)
+    pub breadcrumbs: Vec<BreadcrumbEntry>,
+}
+
+pub struct BreadcrumbEntry {
+    pub label: String,
+    pub screen: Screen,
+}
+
+impl NavigationState {
+    pub fn navigate_to(&mut self, screen: Screen) {
+        let prev = std::mem::replace(&mut self.current, screen.clone());
+        self.history.push(prev);
+        self.breadcrumbs.push(BreadcrumbEntry {
+            label: screen_label(&screen),
+            screen,
+        });
+    }
+
+    pub fn navigate_back(&mut self) {
+        if let Some(prev) = self.history.pop() {
+            self.current = prev;
+            self.breadcrumbs.pop();
+        }
+    }
+
+    /// Region-based jump — clears sub-region history.
+    pub fn jump_to_region(&mut self, region: u8) {
+        let target = match region {
+            1 => Screen::AgentList,
+            2 => return, // requires agent selection first
+            3 => return, // requires plan selection first
+            4 => Screen::KnowledgeBrowser,
+            5 => Screen::CFactorDashboard,
+            6 => Screen::ProviderHealth,
+            _ => return,
+        };
+        self.history.clear();
+        self.breadcrumbs.clear();
+        self.current = target;
+    }
+}
+```
+
+### Superstate Event Handling
+
+The hierarchical model uses superstate fallthrough — unhandled events in a screen are passed to the region superstate, then to the global level:
+
+```rust
+/// Handle input event with hierarchical fallthrough.
+pub fn handle_navigation_event(
+    state: &mut NavigationState,
+    key: KeyEvent,
+) -> Option<Action> {
+    // 1. Modal captures ALL input when active (focus trap)
+    if let Some(modal) = &mut state.modal {
+        return match key.code {
+            KeyCode::Esc => { state.modal = None; None }
+            _ => handle_modal_input(modal, key),
+        };
+    }
+
+    // 2. Screen-specific handling
+    if let Some(action) = handle_screen_input(&state.current, key) {
+        return Some(action);
+    }
+
+    // 3. Region superstate handling (shared across screens in same region)
+    if let Some(action) = handle_region_input(&state.current, key) {
+        return Some(action);
+    }
+
+    // 4. Global handling (always available)
+    match key.code {
+        KeyCode::Esc => { state.navigate_back(); None }
+        KeyCode::Char('?') => { state.modal = Some(Modal::Help); None }
+        KeyCode::Char('q') => Some(Action::Quit),
+        KeyCode::Char('/') => { state.modal = Some(Modal::CommandPalette(Default::default())); None }
+        KeyCode::Char(c) if c.is_ascii_digit() => {
+            state.jump_to_region(c.to_digit(10).unwrap() as u8);
+            None
+        }
+        _ => None,
+    }
+}
+```
+
+### Command Palette
+
+The `/` key opens a VS Code-style command palette with fuzzy matching:
+
+```rust
+/// Command palette state — fuzzy-filtered command list.
+pub struct CommandPaletteState {
+    pub query: String,
+    pub filtered: Vec<usize>,  // indices into registered commands
+    pub selected: usize,
+}
+
+pub struct PaletteCommand {
+    pub id: &'static str,
+    pub title: &'static str,
+    pub keybind: Option<&'static str>,  // display hint
+    pub action: fn(&mut App),
+}
+
+/// Built-in palette commands.
+pub fn register_commands() -> Vec<PaletteCommand> {
+    vec![
+        PaletteCommand { id: "agents", title: "Go to Agent List", keybind: Some("1"), action: |app| app.nav.jump_to_region(1) },
+        PaletteCommand { id: "plans", title: "Go to Plan List", keybind: Some("1,Tab"), action: |app| app.nav.navigate_to(Screen::PlanList) },
+        PaletteCommand { id: "cfactor", title: "Go to C-Factor Dashboard", keybind: Some("5"), action: |app| app.nav.jump_to_region(5) },
+        PaletteCommand { id: "gallery", title: "Open Spectre Gallery", keybind: None, action: |app| app.nav.navigate_to(Screen::SpectreGallery) },
+        PaletteCommand { id: "health", title: "Provider Health", keybind: Some("6"), action: |app| app.nav.jump_to_region(6) },
+        PaletteCommand { id: "help", title: "Show Help", keybind: Some("?"), action: |app| app.nav.modal = Some(Modal::Help) },
+    ]
+}
+```
+
+### Modal Overlay Rendering
+
+Modals render on top of the base screen using ratatui's `Clear` widget:
+
+```rust
+fn render_modal(modal: &Modal, frame: &mut Frame, theme: &RosedustTheme) {
+    let area = centered_rect(60, 50, frame.area());
+    frame.render_widget(Clear, area);  // erase background
+    let block = Block::bordered()
+        .title(modal_title(modal))
+        .border_style(Style::default().fg(theme.rose))
+        .style(Style::default().bg(theme.bg_alt));
+    // Render modal content inside block
+    match modal {
+        Modal::Help => render_help_modal(frame, area, theme),
+        Modal::CommandPalette(state) => render_palette(frame, area, state, theme),
+        Modal::TaskDetail(task) => render_task_detail(frame, area, task, theme),
+        Modal::Confirm { message, .. } => render_confirm(frame, area, message, theme),
+    }
+}
+
+fn centered_rect(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
+    let [_, center_y, _] = Layout::vertical([
+        Constraint::Percentage((100 - pct_y) / 2),
+        Constraint::Percentage(pct_y),
+        Constraint::Percentage((100 - pct_y) / 2),
+    ]).areas(area);
+    let [_, center, _] = Layout::horizontal([
+        Constraint::Percentage((100 - pct_x) / 2),
+        Constraint::Percentage(pct_x),
+        Constraint::Percentage((100 - pct_x) / 2),
+    ]).areas(center_y);
+    center
+}
+```
+
+### Context-Sensitive Key Hints
+
+The status bar displays context-sensitive key hints that change based on the active screen, mode, and focus:
+
+```rust
+fn render_key_hints(screen: &Screen, mode: InputMode, frame: &mut Frame, area: Rect, theme: &RosedustTheme) {
+    let hints = match (screen, mode) {
+        (_, InputMode::Filter) => vec![
+            ("↑/↓", "results"), ("Enter", "select"), ("Esc", "cancel"),
+        ],
+        (Screen::AgentList, _) => vec![
+            ("j/k", "navigate"), ("Enter", "detail"), ("Tab", "plans"), ("/", "filter"), ("?", "help"),
+        ],
+        (Screen::PlanDag(_), _) => vec![
+            ("j/k", "navigate"), ("Enter", "task"), ("Esc", "back"), ("t", "timeline"),
+        ],
+        (Screen::SpectreGallery, _) => vec![
+            ("←/→", "select"), ("Enter", "focus"), ("+/-", "zoom"), ("Esc", "back"),
+        ],
+        _ => vec![
+            ("j/k", "navigate"), ("Enter", "select"), ("Esc", "back"), ("?", "help"),
+        ],
+    };
+    let spans: Vec<Span> = hints.iter().flat_map(|(key, desc)| vec![
+        Span::styled(format!("[{}]", key), Style::default().fg(theme.rose).bold()),
+        Span::raw(format!(" {} ", desc)),
+    ]).collect();
+    frame.render_widget(Line::from(spans), area);
+}
+```
+
+---
+
+## Test Criteria
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn navigation_back_returns_to_previous() {
+        let mut nav = NavigationState::new(Screen::AgentList);
+        nav.navigate_to(Screen::PlanList);
+        nav.navigate_to(Screen::HealthDashboard);
+        assert_eq!(nav.current, Screen::HealthDashboard);
+        nav.navigate_back();
+        assert_eq!(nav.current, Screen::PlanList);
+        nav.navigate_back();
+        assert_eq!(nav.current, Screen::AgentList);
+    }
+
+    #[test]
+    fn region_jump_clears_history() {
+        let mut nav = NavigationState::new(Screen::AgentList);
+        nav.navigate_to(Screen::PlanList);
+        nav.navigate_to(Screen::HealthDashboard);
+        nav.jump_to_region(5);
+        assert_eq!(nav.current, Screen::CFactorDashboard);
+        assert!(nav.history.is_empty(), "Region jump should clear history");
+    }
+
+    #[test]
+    fn modal_captures_all_input() {
+        let mut nav = NavigationState::new(Screen::AgentList);
+        nav.modal = Some(Modal::Help);
+        // Non-Esc input should be consumed by modal, not navigate
+        let action = handle_navigation_event(&mut nav, KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty()));
+        assert!(action.is_none(), "Modal should capture 'q' instead of quitting");
+        assert!(nav.modal.is_some());
+    }
+
+    #[test]
+    fn esc_closes_modal_before_navigating_back() {
+        let mut nav = NavigationState::new(Screen::AgentList);
+        nav.navigate_to(Screen::PlanList);
+        nav.modal = Some(Modal::Help);
+        handle_navigation_event(&mut nav, KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        assert!(nav.modal.is_none(), "Esc should close modal first");
+        assert_eq!(nav.current, Screen::PlanList, "Should NOT navigate back yet");
+    }
+
+    #[test]
+    fn all_29_screens_have_labels() {
+        let screens = vec![
+            Screen::AgentList, Screen::PlanList, Screen::MeshOverview,
+            Screen::HealthDashboard, Screen::EpisodeTimeline, Screen::ConfigPanel,
+            Screen::AgentOutput("test".into()), Screen::AgentGates("test".into()),
+            // ... all 29 variants
+        ];
+        for screen in &screens {
+            let label = screen_label(screen);
+            assert!(!label.is_empty(), "Screen {:?} must have a label", screen);
+        }
+    }
+}
+```
+
+---
+
 ## Current Status and Gaps
 
 **Built (in `roko-cli/src/tui/`):**

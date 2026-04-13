@@ -434,6 +434,10 @@ pub struct TuiState {
     pub git_worktree_list: Vec<String>,
     /// Cursor position in the git branch tree.
     pub git_branch_cursor: usize,
+    /// Cached git summary lines for the dashboard sub-tab (populated by background thread).
+    pub git_summary_lines: Vec<String>,
+    /// Cached full git view data for F4 Git tab (populated by background thread).
+    pub git_view_data: Option<super::views::git_view::GitViewData>,
 
     // -- notifications --
     /// Active notification messages.
@@ -569,6 +573,8 @@ impl Default for TuiState {
             git_commit_graph: Vec::new(),
             git_worktree_list: Vec::new(),
             git_branch_cursor: 0,
+            git_summary_lines: Vec::new(),
+            git_view_data: None,
 
             notifications: Vec::new(),
             log_messages: Vec::new(),
