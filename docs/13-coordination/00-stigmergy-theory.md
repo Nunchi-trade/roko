@@ -376,6 +376,217 @@ The theoretical foundations of stigmergy draw from multiple disciplines:
 
 ---
 
+## Information-Theoretic Analysis of Stigmergy
+
+Understanding stigmergy through the lens of information theory reveals fundamental limits and design principles for digital pheromone systems. Shannon's framework [Shannon, C.E. "A Mathematical Theory of Communication." *Bell System Technical Journal*, 27(3):379-423, 1948] provides the tools to quantify how much coordination information can flow through a stigmergic medium and how to maximize that throughput.
+
+### The Stigmergic Channel
+
+A stigmergic system can be modeled as a noisy communication channel where agents are both transmitters and receivers, and the shared environment is the channel medium. The channel has properties fundamentally different from point-to-point communication:
+
+| Property | Point-to-Point Channel | Stigmergic Channel |
+|----------|----------------------|-------------------|
+| Transmitter | One sender | N concurrent senders |
+| Receiver | One receiver | N concurrent receivers |
+| Medium | Dedicated wire/spectrum | Shared environment (Substrate) |
+| Interference | External noise | Other agents' deposits (crosstalk) |
+| Memory | Memoryless (typically) | Persistent with decay (exponential) |
+| Capacity | Shannon limit: C = B log₂(1 + SNR) | Bounded by field saturation and decay rate |
+
+### Channel Capacity of a Pheromone Field
+
+The effective channel capacity of a pheromone field — the maximum rate at which coordination information can be reliably transmitted — is bounded by three factors:
+
+1. **Field saturation**: When too many pheromones are active simultaneously, the signal-to-noise ratio (SNR) degrades. The "noise floor" is the aggregate intensity of pheromones irrelevant to the sensing agent's current task.
+
+2. **Decay rate**: Faster decay clears the channel faster (higher throughput) but reduces persistence (less time for agents to sense signals). This is analogous to bandwidth allocation in radio systems.
+
+3. **Confirmation overhead**: Each confirmation extends half-life, which consumes channel capacity by keeping old signals alive longer.
+
+The capacity can be approximated as:
+
+```
+C_stigmergy ≈ M × R_gc × log₂(1 + I_signal / I_noise)
+```
+
+Where:
+- `M` = number of distinguishable pheromone kinds (channel multiplexing)
+- `R_gc` = effective garbage collection rate (channel clearing rate)
+- `I_signal` = intensity of the target pheromone
+- `I_noise` = aggregate intensity of non-target pheromones at the same scope
+
+```rust
+/// Estimate the effective information throughput of a pheromone field.
+///
+/// Models the field as a multi-channel communication medium where each
+/// PheromoneKind is an independent sub-channel (frequency-division analogy).
+///
+/// Returns bits per tick of coordination information capacity.
+///
+/// # Parameters
+/// - `kind_count`: Number of active pheromone kinds (channel count)
+/// - `avg_signal_intensity`: Mean intensity of target pheromones
+/// - `avg_noise_intensity`: Mean intensity of non-target pheromones
+/// - `gc_rate_per_tick`: Fraction of field cleared per tick by decay
+///
+/// # References
+/// Shannon, C.E. "A Mathematical Theory of Communication." 1948.
+pub fn stigmergic_channel_capacity(
+    kind_count: usize,
+    avg_signal_intensity: f64,
+    avg_noise_intensity: f64,
+    gc_rate_per_tick: f64,
+) -> f64 {
+    if avg_noise_intensity <= 0.0 || gc_rate_per_tick <= 0.0 {
+        return 0.0;
+    }
+    let snr = avg_signal_intensity / avg_noise_intensity;
+    kind_count as f64 * gc_rate_per_tick * (1.0 + snr).log2()
+}
+
+#[cfg(test)]
+mod channel_tests {
+    use super::*;
+
+    #[test]
+    fn capacity_scales_with_kinds() {
+        let c1 = stigmergic_channel_capacity(4, 0.8, 0.2, 0.1);
+        let c2 = stigmergic_channel_capacity(8, 0.8, 0.2, 0.1);
+        assert!((c2 / c1 - 2.0).abs() < 0.01, "doubling kinds doubles capacity");
+    }
+
+    #[test]
+    fn capacity_zero_when_all_noise() {
+        let c = stigmergic_channel_capacity(4, 0.0, 0.5, 0.1);
+        // SNR = 0 → log₂(1) = 0
+        assert!(c.abs() < 1e-10);
+    }
+
+    #[test]
+    fn capacity_increases_with_gc_rate() {
+        let c_slow = stigmergic_channel_capacity(4, 0.8, 0.2, 0.05);
+        let c_fast = stigmergic_channel_capacity(4, 0.8, 0.2, 0.20);
+        assert!(c_fast > c_slow);
+    }
+}
+```
+
+### Entropy Rate of the Pheromone Field
+
+The **entropy rate** of the pheromone field measures the information content generated per unit time. A healthy stigmergic system should have a moderate entropy rate:
+
+- **Too low**: The field is static — either no agents are depositing, or all agents are depositing the same signals (echo chamber). No new coordination information is being generated.
+- **Too high**: The field is chaotic — signals change too rapidly for agents to sense and respond. Coordination breaks down because the environment is unstable.
+- **Optimal**: The field evolves at a rate matched to the agents' sensing and response timescales.
+
+```rust
+/// Compute the entropy rate of pheromone field state transitions.
+///
+/// Measures how much new information appears in the pheromone field
+/// per tick. Uses the conditional entropy H(X_t | X_{t-1}) where X_t
+/// is the discretized field state at tick t.
+///
+/// A sliding window of `window_size` ticks is used to estimate
+/// transition probabilities.
+///
+/// # Returns
+/// Entropy rate in bits per tick. Typical healthy range: [0.3, 2.0].
+///
+/// # Parameters
+/// - `field_snapshots`: Sequence of discretized field states (kind → intensity bucket)
+/// - `window_size`: Number of ticks for transition probability estimation
+///   Default: 100. Range: [20, 1000].
+pub struct FieldEntropyEstimator {
+    /// Number of intensity buckets for discretization.
+    /// Default: 10 (deciles). Range: [4, 100].
+    pub intensity_buckets: usize,
+
+    /// Sliding window size for transition probability estimation.
+    /// Default: 100 ticks. Range: [20, 1000].
+    pub window_size: usize,
+}
+
+impl Default for FieldEntropyEstimator {
+    fn default() -> Self {
+        Self {
+            intensity_buckets: 10,
+            window_size: 100,
+        }
+    }
+}
+```
+
+The entropy rate connects to the edge-of-chaos operating point described by Kauffman (1993): systems at the boundary between order and chaos have maximal computational capacity, which corresponds to an entropy rate that is neither minimal (frozen) nor maximal (random) [Langton, C.G. "Computation at the Edge of Chaos: Phase Transitions and Emergent Computation." *Physica D*, 42(1-3):12-37, 1990].
+
+### Transfer Entropy: Measuring Causal Information Flow
+
+**Transfer entropy** [Schreiber, T. "Measuring Information Transfer." *Physical Review Letters*, 85(2):461-464, 2000] quantifies the directed information flow between agents through the stigmergic medium. Unlike mutual information (which is symmetric), transfer entropy captures the *causal* direction of influence:
+
+```
+T_{A→B} = Σ p(b_{t+1}, b_t, a_t) × log₂( p(b_{t+1} | b_t, a_t) / p(b_{t+1} | b_t) )
+```
+
+Where:
+- `a_t` = Agent A's pheromone deposit at time t
+- `b_t` = Agent B's state at time t
+- `b_{t+1}` = Agent B's state at time t+1
+
+High `T_{A→B}` indicates that Agent A's pheromone deposits causally influence Agent B's behavior — the stigmergic loop is working. Low transfer entropy in both directions indicates that agents are operating independently despite sharing an environment.
+
+```rust
+/// Configuration for transfer entropy estimation between agent pairs.
+///
+/// Transfer entropy T_{A→B} measures the reduction in uncertainty about
+/// Agent B's next state given knowledge of Agent A's current pheromone
+/// deposits, beyond what B's own history provides.
+///
+/// # Interpretation
+/// - T ≈ 0: No causal influence (agents independent)
+/// - T > 0.1: Moderate influence (stigmergic coordination active)
+/// - T > 0.5: Strong influence (tight coupling via pheromones)
+///
+/// # References
+/// Schreiber, T. "Measuring Information Transfer." PRL 85(2), 2000.
+pub struct TransferEntropyConfig {
+    /// History length for conditioning (number of past ticks).
+    /// Default: 5. Range: [1, 20].
+    pub history_length: usize,
+
+    /// Minimum number of samples before producing an estimate.
+    /// Default: 200. Range: [50, 10000].
+    pub min_samples: usize,
+
+    /// Significance threshold (shuffle test p-value).
+    /// Default: 0.05. Range: [0.001, 0.1].
+    pub significance_threshold: f64,
+}
+
+impl Default for TransferEntropyConfig {
+    fn default() -> Self {
+        Self {
+            history_length: 5,
+            min_samples: 200,
+            significance_threshold: 0.05,
+        }
+    }
+}
+```
+
+### Design Implications
+
+The information-theoretic analysis yields concrete design principles for Roko's pheromone system:
+
+| Principle | Rationale | Implementation |
+|-----------|-----------|----------------|
+| **Kind multiplexing** | Each kind is an independent sub-channel; more kinds = more capacity | 7 universal + Custom(String) kinds |
+| **Decay = bandwidth** | Faster decay clears the channel for new signals | Kind-specific half-lives tuned to coordination tempo |
+| **Confirmation = coding gain** | Confirmation extends signals, acting like error-correcting codes | Reputation-weighted confirmation mechanics |
+| **Scope = frequency reuse** | Local/Mesh/Global scopes reuse the same kind namespace without interference | Three-level scope hierarchy |
+| **Sensing threshold = noise floor** | The 0.01 intensity threshold filters noise | Configurable per agent role |
+| **Field entropy monitoring** | Tracks whether the system is frozen, healthy, or chaotic | `FieldEntropyEstimator` in the dashboard |
+
+---
+
 ## Summary
 
 Stigmergy is Roko's primary coordination mechanism because it provides:

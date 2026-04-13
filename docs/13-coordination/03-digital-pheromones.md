@@ -479,6 +479,212 @@ implementation.
 
 ---
 
+## Pheromone Interference and Crosstalk
+
+In biological ant colonies, multiple pheromone types can interfere with each other — alarm pheromones disrupt trail-following, heterospecific trail pheromones create cross-species confusion, and environmental chemicals mask signals [Hölldobler, B. & Wilson, E.O. *The Superorganism*. W.W. Norton, 2008]. Digital pheromone systems face analogous interference challenges that must be explicitly modeled and mitigated.
+
+### Types of Pheromone Interference
+
+| Interference Type | Biological Analog | Digital Manifestation | Impact |
+|------------------|------------------|----------------------|--------|
+| **Intra-kind saturation** | Trail pheromone over-concentration causes confusion in ants | Too many Threat pheromones at once make prioritization impossible | Agents cannot distinguish high-priority from low-priority signals |
+| **Cross-kind masking** | Alarm pheromone overrides foraging pheromone | High-intensity Threat suppresses all Opportunity sensing | Agents miss valuable opportunities during threat response |
+| **Temporal aliasing** | Old pheromone trails mislead ants to depleted food sources | Stale confirmations extend signals past their useful life | Agents act on outdated information |
+| **Spatial flooding** | Nest-vicinity pheromone saturation in dense colonies | Popular code modules accumulate excessive pheromone density | Hot modules become navigation hazards rather than coordination aids |
+| **Sybil amplification** | N/A (biological colonies have physical identity) | Multiple low-reputation agents confirm a false signal | False signals persist with artificially extended half-lives |
+
+### The Interference Model
+
+Pheromone interference is modeled as a signal-to-interference-plus-noise ratio (SINR), adapted from wireless communications [Tse, D. & Viswanath, P. *Fundamentals of Wireless Communication*. Cambridge University Press, 2005]:
+
+```
+SINR_k = I_target_k / (Σ_{j≠k} α_{jk} × I_j + N₀)
+```
+
+Where:
+- `I_target_k` = intensity of the target pheromone of kind k
+- `I_j` = intensity of interfering pheromones of kind j
+- `α_{jk}` = cross-kind interference coefficient (how much kind j interferes with sensing kind k)
+- `N₀` = background noise floor (environmental noise, sensing imprecision)
+
+```rust
+/// Cross-kind interference coefficients.
+///
+/// Models how pheromone kinds interfere with each other's sensing.
+/// A coefficient of 0.0 means no interference; 1.0 means full masking.
+///
+/// The default matrix encodes biological precedent:
+/// - Threat has high cross-kind interference (alarm overrides foraging)
+/// - Wisdom has low cross-kind interference (knowledge persists through noise)
+/// - Alpha has near-zero interference (ephemeral, doesn't accumulate)
+///
+/// # References
+/// Wilson, E.O. "The Insect Societies." 1971 — pheromone type interactions.
+/// Tse & Viswanath 2005 — SINR framework from wireless communications.
+pub struct InterferenceMatrix {
+    /// NxN matrix where entry [j][k] = how much kind j interferes with sensing kind k.
+    /// N = number of PheromoneKind variants (7 universal + custom).
+    /// Range per entry: [0.0, 1.0].
+    pub coefficients: Vec<Vec<f64>>,
+}
+
+impl InterferenceMatrix {
+    /// Default interference matrix for the 7 universal kinds.
+    ///
+    /// Key design choices:
+    /// - Threat → Opportunity: 0.6 (alarm suppresses foraging, per Wilson 1971)
+    /// - Threat → Wisdom: 0.1 (knowledge is resistant to alarm)
+    /// - Opportunity → Threat: 0.0 (opportunities don't mask threats)
+    /// - Consensus → all: 0.05 (consensus is highly resistant to interference)
+    pub fn default_universal() -> Self {
+        //         Thr  Opp  Wis  Alp  Pat  Ano  Con
+        let m = vec![
+            vec![0.0, 0.6, 0.1, 0.3, 0.2, 0.1, 0.05], // Threat interferes with...
+            vec![0.0, 0.0, 0.0, 0.1, 0.05, 0.0, 0.0],  // Opportunity
+            vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],   // Wisdom (low interference)
+            vec![0.1, 0.1, 0.0, 0.0, 0.05, 0.0, 0.0],  // Alpha
+            vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],   // Pattern
+            vec![0.2, 0.1, 0.0, 0.1, 0.1, 0.0, 0.0],   // Anomaly
+            vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],   // Consensus
+        ];
+        Self { coefficients: m }
+    }
+}
+
+/// Compute the effective sensed intensity of a target pheromone,
+/// accounting for cross-kind interference from other active pheromones.
+///
+/// Returns the SINR-adjusted intensity. If the SINR falls below
+/// `min_sinr`, returns 0.0 (signal is undetectable in the noise).
+///
+/// # Parameters
+/// - `target_kind_idx`: Index of the target pheromone kind
+/// - `target_intensity`: Raw intensity of the target pheromone
+/// - `active_intensities`: Aggregate intensity per kind (vector of length N)
+/// - `matrix`: Cross-kind interference coefficients
+/// - `noise_floor`: Background noise level. Default: 0.01.
+/// - `min_sinr`: Minimum SINR for detection. Default: 1.0 (0 dB).
+pub fn sinr_adjusted_intensity(
+    target_kind_idx: usize,
+    target_intensity: f64,
+    active_intensities: &[f64],
+    matrix: &InterferenceMatrix,
+    noise_floor: f64,
+    min_sinr: f64,
+) -> f64 {
+    let interference: f64 = active_intensities.iter()
+        .enumerate()
+        .filter(|&(j, _)| j != target_kind_idx)
+        .map(|(j, &intensity)| {
+            matrix.coefficients[j][target_kind_idx] * intensity
+        })
+        .sum();
+
+    let sinr = target_intensity / (interference + noise_floor);
+    if sinr < min_sinr {
+        0.0
+    } else {
+        target_intensity * (sinr / (1.0 + sinr)) // graceful degradation
+    }
+}
+
+#[cfg(test)]
+mod interference_tests {
+    use super::*;
+
+    #[test]
+    fn threat_suppresses_opportunity() {
+        let matrix = InterferenceMatrix::default_universal();
+        let active = vec![0.9, 0.8, 0.0, 0.0, 0.0, 0.0, 0.0]; // Threat=0.9, Opp=0.8
+        let opp_effective = sinr_adjusted_intensity(
+            1, 0.8, &active, &matrix, 0.01, 1.0,
+        );
+        // Threat interferes with Opportunity at coefficient 0.6
+        // Interference = 0.9 * 0.6 = 0.54; SINR = 0.8 / (0.54 + 0.01) ≈ 1.45
+        assert!(opp_effective < 0.8, "opportunity suppressed by threat");
+        assert!(opp_effective > 0.0, "opportunity not fully masked");
+    }
+
+    #[test]
+    fn consensus_resists_interference() {
+        let matrix = InterferenceMatrix::default_universal();
+        let active = vec![0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9]; // all maxed
+        let con_effective = sinr_adjusted_intensity(
+            6, 0.9, &active, &matrix, 0.01, 1.0,
+        );
+        // All interference coefficients into Consensus are ≤ 0.05
+        // Total interference ≤ 6 * 0.9 * 0.05 = 0.27; SINR = 0.9 / 0.28 ≈ 3.2
+        assert!(con_effective > 0.5, "consensus resists interference");
+    }
+
+    #[test]
+    fn zero_interference_passes_through() {
+        let matrix = InterferenceMatrix::default_universal();
+        let active = vec![0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0]; // only Pattern
+        let pat_effective = sinr_adjusted_intensity(
+            4, 0.5, &active, &matrix, 0.01, 1.0,
+        );
+        // No other kinds active → interference = 0
+        // SINR = 0.5 / 0.01 = 50 → effective ≈ 0.5 * (50/51) ≈ 0.49
+        assert!((pat_effective - 0.5).abs() < 0.02);
+    }
+}
+```
+
+### Anti-Saturation Mechanisms
+
+When a pheromone field becomes saturated (too many active signals), the system applies anti-saturation countermeasures:
+
+```rust
+/// Anti-saturation configuration for the pheromone field.
+///
+/// Prevents field saturation from degrading coordination quality.
+/// When the total active pheromone count exceeds thresholds, the
+/// system applies progressively stronger countermeasures.
+pub struct AntiSaturationConfig {
+    /// Soft threshold: above this count, low-intensity pheromones
+    /// decay 2× faster. Default: 500. Range: [100, 10000].
+    pub soft_threshold: usize,
+
+    /// Hard threshold: above this count, only pheromones with
+    /// intensity > `hard_min_intensity` are retained.
+    /// Default: 2000. Range: [500, 50000].
+    pub hard_threshold: usize,
+
+    /// Minimum intensity to survive hard threshold GC.
+    /// Default: 0.1. Range: [0.01, 0.5].
+    pub hard_min_intensity: f64,
+
+    /// Maximum pheromones per kind per scope. Prevents any single
+    /// kind from monopolizing the field.
+    /// Default: 100. Range: [10, 1000].
+    pub max_per_kind_per_scope: usize,
+}
+
+impl Default for AntiSaturationConfig {
+    fn default() -> Self {
+        Self {
+            soft_threshold: 500,
+            hard_threshold: 2000,
+            hard_min_intensity: 0.1,
+            max_per_kind_per_scope: 100,
+        }
+    }
+}
+```
+
+### Interference Mitigation Strategies
+
+| Strategy | Mechanism | When to Use |
+|----------|-----------|-------------|
+| **Kind isolation** | Pheromone kinds with zero mutual interference operate independently | Default for orthogonal signal types (Wisdom vs Alpha) |
+| **Priority preemption** | High-priority kinds (Threat) temporarily mask lower-priority kinds | During active threat response |
+| **Temporal separation** | Fast-decaying kinds (Alpha, 1h) naturally clear before slow kinds (Consensus, 48h) peak | Automatic via decay profile design |
+| **Scope partitioning** | Signals at different scopes don't interfere (Local doesn't mask Mesh) | Inherent in the three-scope architecture |
+| **Adaptive thresholds** | Raise sensing threshold when field is saturated | Via `AntiSaturationConfig` |
+
+---
+
 ## Comparison with Other Coordination Mechanisms
 
 | Mechanism | Latency | Scalability | Robustness | Information Persistence | Roko Usage |

@@ -379,6 +379,10 @@ fn render_sub_errors(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, th
 // Sub-tab: Git — inline summary from git commands
 // ---------------------------------------------------------------------------
 
+/// Cached git summary for the dashboard sub-tab (refreshed every 5s).
+static GIT_SUB_CACHE: std::sync::Mutex<Option<(std::time::Instant, Vec<String>)>> =
+    std::sync::Mutex::new(None);
+
 fn render_sub_git(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -387,78 +391,79 @@ fn render_sub_git(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let mut lines: Vec<Line<'_>> = Vec::new();
+    // Use cached git data to avoid blocking the render loop
+    let cached_lines = {
+        let mut cache = GIT_SUB_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        let now = std::time::Instant::now();
+        let needs_refresh = cache
+            .as_ref()
+            .map(|(ts, _)| now.duration_since(*ts).as_secs() >= 5)
+            .unwrap_or(true);
+        if needs_refresh {
+            let data = collect_git_summary();
+            *cache = Some((now, data.clone()));
+            data
+        } else {
+            cache.as_ref().unwrap().1.clone()
+        }
+    };
 
-    // Current branch
+    let lines: Vec<Line<'_>> = cached_lines
+        .iter()
+        .map(|s| Line::from(Span::styled(s.as_str(), theme.text())))
+        .collect();
+
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        inner,
+    );
+}
+
+/// Collect git summary data as plain strings (called at most every 5s).
+fn collect_git_summary() -> Vec<String> {
+    let mut lines = Vec::new();
+
     let branch = git_cmd(&["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
     let commit = git_cmd(&["rev-parse", "--short", "HEAD"]).unwrap_or_default();
     let age = git_cmd(&["log", "-1", "--format=%cr"]).unwrap_or_default();
 
     if !branch.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled(" branch: ", theme.muted()),
-            Span::styled(branch.clone(), theme.accent()),
-            Span::styled(format!("  {commit}"), theme.muted()),
-            Span::styled(format!("  {age}"), theme.muted()),
-        ]));
+        lines.push(format!(" branch: {branch}  {commit}  {age}"));
     }
 
-    // Status summary
     if let Some(status) = git_cmd(&["status", "--short"]) {
         let modified = status.lines().filter(|l| l.starts_with(" M") || l.starts_with("M ")).count();
         let added = status.lines().filter(|l| l.starts_with("A ") || l.starts_with("??")).count();
         let deleted = status.lines().filter(|l| l.starts_with(" D") || l.starts_with("D ")).count();
         let total = status.lines().filter(|l| !l.is_empty()).count();
         if total > 0 {
-            lines.push(Line::from(vec![
-                Span::styled(" status: ", theme.muted()),
-                Span::styled(format!("{total} changed"), theme.warning()),
-                Span::raw("  "),
-                Span::styled(format!("M:{modified}"), theme.warning()),
-                Span::raw(" "),
-                Span::styled(format!("A:{added}"), theme.success()),
-                Span::raw(" "),
-                Span::styled(format!("D:{deleted}"), theme.danger()),
-            ]));
+            lines.push(format!(" status: {total} changed  M:{modified} A:{added} D:{deleted}"));
         } else {
-            lines.push(Line::from(Span::styled(" status: clean", theme.success())));
+            lines.push(" status: clean".to_string());
         }
     }
 
-    // Recent commits (last 8)
     if let Some(log) = git_cmd(&["log", "--oneline", "--graph", "-8"]) {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(" recent commits:", theme.accent())));
+        lines.push(String::new());
+        lines.push(" recent commits:".to_string());
         for line in log.lines().take(8) {
-            let style = if line.contains('*') {
-                theme.text()
-            } else {
-                theme.muted()
-            };
-            lines.push(Line::from(Span::styled(format!("  {line}"), style)));
+            lines.push(format!("  {line}"));
         }
     }
 
-    // Worktrees
     if let Some(wt) = git_cmd(&["worktree", "list", "--porcelain"]) {
         let count = wt.lines().filter(|l| l.starts_with("worktree ")).count();
         if count > 1 {
-            lines.push(Line::from(""));
-            lines.push(Line::from(vec![
-                Span::styled(" worktrees: ", theme.muted()),
-                Span::styled(format!("{count}"), theme.accent()),
-            ]));
+            lines.push(String::new());
+            lines.push(format!(" worktrees: {count}"));
         }
     }
 
     if lines.is_empty() {
-        lines.push(Line::from(Span::styled(" not a git repository", theme.muted())));
+        lines.push(" not a git repository".to_string());
     }
 
-    frame.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }),
-        inner,
-    );
+    lines
 }
 
 fn git_cmd(args: &[&str]) -> Option<String> {

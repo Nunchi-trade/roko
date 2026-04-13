@@ -64,6 +64,10 @@ pub struct GitViewData {
 }
 
 /// Render the full git view.
+/// Cached git data to avoid running git commands on every frame.
+static GIT_CACHE: std::sync::Mutex<Option<(std::time::Instant, GitViewData)>> =
+    std::sync::Mutex::new(None);
+
 pub fn render(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -72,7 +76,22 @@ pub fn render(
     view_state: &ViewState,
     theme: &Theme,
 ) {
-    let git_data = collect_git_data();
+    // Cache git data for 5 seconds to avoid lag from git commands every frame
+    let git_data = {
+        let mut cache = GIT_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        let now = std::time::Instant::now();
+        let needs_refresh = cache
+            .as_ref()
+            .map(|(ts, _)| now.duration_since(*ts).as_secs() >= 5)
+            .unwrap_or(true);
+        if needs_refresh {
+            let data = collect_git_data();
+            *cache = Some((now, data.clone()));
+            data
+        } else {
+            cache.as_ref().unwrap().1.clone()
+        }
+    };
     render_with_git_data(frame, area, &git_data, view_state, theme);
 }
 

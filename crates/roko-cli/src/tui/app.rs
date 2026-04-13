@@ -72,6 +72,8 @@ pub struct App {
     pub running: bool,
     /// Timestamp of the last data refresh.
     pub last_refresh: Instant,
+    /// Last time sys metrics (CPU/MEM) were updated (expensive, runs every 10s).
+    pub last_sys_update: Instant,
     /// Per-page scroll position (legacy).
     pub scroll_offset: HashMap<PageId, u16>,
     /// Selected signal row on the Signals page (legacy).
@@ -155,6 +157,7 @@ impl App {
             scaffold,
             running: true,
             last_refresh: Instant::now(),
+            last_sys_update: Instant::now(),
             scroll_offset: HashMap::new(),
             signal_selection: 0,
             gate_failure_selection: 0,
@@ -1080,8 +1083,12 @@ impl App {
     }
 
     fn refresh_snapshot_if_needed(&mut self) {
-        if self.last_refresh.elapsed() >= Duration::from_millis(250) {
+        if self.last_refresh.elapsed() >= Duration::from_millis(500) {
             self.refresh_snapshot();
+        }
+        // Sys metrics are expensive (top takes ~1s) — only update every 10 seconds
+        if self.last_sys_update.elapsed() >= Duration::from_secs(10) {
+            self.last_sys_update = Instant::now();
             self.update_sys_metrics();
         }
     }

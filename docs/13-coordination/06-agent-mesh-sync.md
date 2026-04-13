@@ -630,6 +630,204 @@ for coordination but not essential for individual agent operation.
 
 ---
 
+## Partition Tolerance and Byzantine Resilience
+
+Real-world mesh networks face network partitions, Byzantine agents, and asymmetric connectivity. Roko's Agent Mesh must maintain useful coordination even when the network is degraded, drawing on CAP theorem analysis [Brewer, E. "CAP Twelve Years Later: How the 'Rules' Have Changed." *Computer*, 45(2):23-29, IEEE, 2012] and Byzantine fault tolerance research.
+
+### Network Partition Model
+
+Network partitions split a Collective into isolated subgroups that cannot communicate. The Agent Mesh explicitly chooses **Availability + Partition tolerance (AP)** over Consistency, because:
+
+1. Pheromone signals are inherently fuzzy — eventual consistency is sufficient
+2. Agents must continue operating during partitions (availability)
+3. Reconciliation after partition healing is straightforward (merge pheromone fields)
+
+| Partition Scenario | Behavior | Recovery |
+|-------------------|----------|----------|
+| **Clean split** (two halves, no overlap) | Each partition runs independent pheromone fields; morphogenetic specialization re-converges within each partition | Merge: union of pheromone fields with dedup via version vectors; re-run morphogenetic update |
+| **Asymmetric partition** (one large, one small) | Large partition operates normally; small partition has reduced collective intelligence | Small partition rejoins via delta sync; its local pheromones merge into the field |
+| **Intermittent connectivity** | Messages arrive with high latency and reordering | Version vectors handle reordering; decay handles staleness; priority queue handles bursts |
+| **Single-agent isolation** | Agent operates in local-only mode (~95% capability) | Reconnection triggers delta sync; agent receives missed pheromones and morphogenetic updates |
+
+### Partition-Aware Morphogenetic Dynamics
+
+During a network partition, the morphogenetic specialization system adjusts:
+
+```rust
+/// Adjustments to morphogenetic parameters during detected network partitions.
+///
+/// When an agent detects that it can no longer reach a subset of its
+/// Collective, it adjusts the reaction-diffusion parameters to account
+/// for the reduced information about the Collective's role structure.
+pub struct PartitionAwareMorphogenetics {
+    /// When the visible Collective size drops below this fraction of
+    /// the known total, enter partition mode.
+    /// Default: 0.6 (partition detected when <60% of peers visible).
+    /// Range: [0.3, 0.9].
+    pub partition_detection_threshold: f64,
+
+    /// In partition mode, reduce inhibition rate (beta) by this factor.
+    /// Rationale: inhibition is based on collective pheromone signals,
+    /// which are incomplete during partition. Over-inhibiting based on
+    /// partial data would push agents toward incorrect niches.
+    /// Default: 0.5 (halve beta). Range: [0.2, 0.8].
+    pub beta_reduction_factor: f64,
+
+    /// In partition mode, increase noise (sigma) by this factor.
+    /// Rationale: more exploration helps when the information landscape
+    /// is incomplete.
+    /// Default: 2.0 (double sigma). Range: [1.0, 5.0].
+    pub sigma_amplification_factor: f64,
+
+    /// Ticks to wait after full connectivity restores before exiting
+    /// partition mode. Prevents oscillation if connectivity is flapping.
+    /// Default: 200 ticks. Range: [50, 1000].
+    pub recovery_cooldown_ticks: u64,
+}
+
+impl Default for PartitionAwareMorphogenetics {
+    fn default() -> Self {
+        Self {
+            partition_detection_threshold: 0.6,
+            beta_reduction_factor: 0.5,
+            sigma_amplification_factor: 2.0,
+            recovery_cooldown_ticks: 200,
+        }
+    }
+}
+```
+
+### Post-Partition Reconciliation
+
+When a partition heals, the two halves must merge their pheromone fields:
+
+```rust
+/// Reconcile two pheromone fields after a network partition heals.
+///
+/// Strategy: union merge with conflict resolution.
+///
+/// For pheromones that exist in both partitions:
+/// - Take the one with higher effective intensity (accounting for decay)
+/// - Merge confirmation sets (union of confirmers)
+/// - Use the earlier deposit timestamp (preserves lineage)
+///
+/// For pheromones unique to one partition:
+/// - Accept if intensity > evaporation threshold
+/// - Apply trust discount (partition-sourced pheromones start at ×0.7)
+///
+/// # Parameters
+/// - `partition_duration`: How long the partitions were separated
+/// - `trust_discount`: Discount applied to cross-partition pheromones.
+///   Default: 0.7. Range: [0.3, 1.0]. Longer partitions → lower trust.
+pub struct PartitionReconciliation {
+    /// Base trust discount for cross-partition pheromones.
+    /// Default: 0.7 (30% discount). Range: [0.3, 1.0].
+    pub base_trust_discount: f64,
+
+    /// Additional discount per hour of partition duration.
+    /// Default: 0.05 per hour. Range: [0.0, 0.2].
+    pub per_hour_discount: f64,
+
+    /// Maximum total discount (minimum trust).
+    /// Default: 0.3 (70% discount cap). Range: [0.1, 0.5].
+    pub max_discount: f64,
+
+    /// Whether to re-trigger morphogenetic update immediately after merge.
+    /// Default: true.
+    pub retrigger_morphogenetic: bool,
+}
+
+impl Default for PartitionReconciliation {
+    fn default() -> Self {
+        Self {
+            base_trust_discount: 0.7,
+            per_hour_discount: 0.05,
+            max_discount: 0.3,
+            retrigger_morphogenetic: true,
+        }
+    }
+}
+```
+
+### Byzantine Agent Detection
+
+A Byzantine agent is one that deviates from the protocol — depositing false pheromones, amplifying noise, or refusing to relay messages. The Agent Mesh detects Byzantine behavior through reputation-based anomaly detection:
+
+```rust
+/// Byzantine behavior detection for mesh agents.
+///
+/// Monitors agent behavior patterns and flags deviations from expected
+/// protocol behavior. Does not require BFT consensus (which is O(N²));
+/// instead uses statistical anomaly detection on pheromone patterns.
+///
+/// # Detection Heuristics
+///
+/// 1. **False deposit rate**: Agent deposits pheromones that are
+///    contradicted by >70% of subsequent observations
+/// 2. **Confirmation flooding**: Agent confirms at >5× the median
+///    confirmation rate (Sybil-like behavior)
+/// 3. **Signal suppression**: Agent receives but never relays messages
+///    (gossip protocol violation, detectable via missing seq numbers)
+/// 4. **Contradiction oscillation**: Agent alternates between confirming
+///    and contradicting the same pheromone (disruptive noise)
+///
+/// # Response
+///
+/// Flagged agents have their pheromones discounted (reputation → 0.1)
+/// and are eventually excluded from gossip peer lists. Exclusion is
+/// reversible if behavior normalizes over a probation period.
+pub struct ByzantineDetector {
+    /// Window size for behavior analysis (ticks).
+    /// Default: 500. Range: [100, 5000].
+    pub analysis_window: u64,
+
+    /// False deposit rate threshold for flagging.
+    /// Default: 0.3 (30% of deposits contradicted). Range: [0.1, 0.5].
+    pub false_deposit_threshold: f64,
+
+    /// Confirmation rate multiplier threshold.
+    /// Default: 5.0 (5× median). Range: [2.0, 20.0].
+    pub confirmation_flood_multiplier: f64,
+
+    /// Probation duration before reputation can recover.
+    /// Default: 2000 ticks. Range: [500, 10000].
+    pub probation_duration: u64,
+
+    /// Minimum reputation during probation.
+    /// Default: 0.1. Range: [0.0, 0.3].
+    pub probation_reputation: f64,
+}
+
+impl Default for ByzantineDetector {
+    fn default() -> Self {
+        Self {
+            analysis_window: 500,
+            false_deposit_threshold: 0.3,
+            confirmation_flood_multiplier: 5.0,
+            probation_duration: 2000,
+            probation_reputation: 0.1,
+        }
+    }
+}
+```
+
+### Consistency Guarantees
+
+The Agent Mesh provides different consistency levels for different message types:
+
+| Message Type | Consistency Level | Rationale |
+|-------------|------------------|-----------|
+| Pheromone deposits | Eventual | Fuzzy signals; delays are tolerable |
+| Morphogenetic broadcasts | Eventual | Role vectors converge over many ticks |
+| Niche vacancy alerts | Best-effort immediate | Time-sensitive but not catastrophic if delayed |
+| Threat pheromones (critical) | Best-effort immediate | Urgent but agents can also detect threats locally |
+| Version vector exchange | Strong (per-session) | Required for correct deduplication |
+| Knowledge blobs | Content-addressed (BLAKE3) | Integrity via hash; availability via retry |
+
+The explicit choice of eventual consistency over strong consistency is what enables the Agent Mesh to scale linearly (O(N)) rather than quadratically (O(N²) for consensus-based approaches) while maintaining partition tolerance.
+
+---
+
 ## Security Model
 
 ### Transport-Level Security
