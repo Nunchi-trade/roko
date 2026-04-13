@@ -557,6 +557,242 @@ orchestrate.rs: PlanRunner::run_task()
 | MemoryGraft (Li et al., 2024) | Gradual behavioral drift via subtle memory bias |
 | TrustRAG (Jiang et al., 2025) | Anomaly detection for RAG retrieval poisoning |
 | A-MemGuard (Wang et al., 2025) | Memory integrity verification for persistent agents |
+| Denning (1976, CACM 19(5):236-243) | Security lattice for information flow control |
+| Myers & Liskov (1997, SOSP '97) | Decentralized label model for IFC |
+| Costa & Kopf (2025, arXiv:2505.23643) | FIDES -- IFC for agentic systems, zero policy-violating injections |
+| Zhong et al. (2025, arXiv:2502.08966) | RTBAS -- dynamic taint tracking, 100% attack prevention |
+| Kim et al. (2025, arXiv:2503.15547) | Prompt Flow Integrity -- privilege escalation prevention |
+| Palumbo et al. (2026, arXiv:2602.16708) | PCAS -- Datalog policy compiler for agent systems |
+
+---
+
+## Taint Propagation Algebra
+
+Taint tracking in Roko formalizes as lattice-theoretic information flow control. The core result: when labeled data flows through tool call chains, the output label is the join (least upper bound) of all input labels. This guarantees that taint never decreases -- it only accumulates.
+
+The formalization draws on two foundational models:
+
+- **Denning's lattice model** (1976, CACM 19(5):236-243) established that information flow policies form a lattice, with a can-flow-to partial order over security classes. If class A <= class B, data labeled A may flow to a sink labeled B. The join operator computes the least upper bound when data from multiple classes combines.
+
+- **Myers & Liskov's decentralized label model** (1997, SOSP '97) extended Denning's centralized lattice with per-principal ownership. Each label has an owner who controls declassification. This matters for multi-tenant agent deployments where different owners have different confidentiality policies.
+
+### Security lattice
+
+Define Roko's security lattice L = (SC, <=, join) where:
+- SC = set of security classes
+- <= = can-flow-to partial order
+- join = least upper bound operator
+
+```rust
+/// Security lattice for information flow control.
+/// Based on Denning (1976, CACM 19(5):236-243).
+///
+/// The lattice defines a partial order over security classes.
+/// Information may only flow from class A to class B if A <= B.
+/// When data from multiple sources is combined, the result is
+/// labeled with the join of all input labels.
+pub struct SecurityLattice {
+    /// Ordered security levels from lowest to highest.
+    pub levels: Vec<SecurityLevel>,
+    /// The can-flow-to relation: (from, to) pairs.
+    pub flow_relation: HashSet<(SecurityLevel, SecurityLevel)>,
+}
+
+/// A two-dimensional security label following Denning's model.
+/// Confidentiality restricts who can read; integrity restricts who can write.
+pub struct SecurityLabel {
+    /// Confidentiality level: restricts read access.
+    /// Higher = more restricted.
+    pub confidentiality: LatticeLevel,
+    /// Integrity level: restricts trust in the data.
+    /// Higher = more trusted.
+    pub integrity: LatticeLevel,
+    /// Owner principal (for DLM-style declassification).
+    /// Only the owner can declassify their own data.
+    pub owner: Option<Principal>,
+}
+
+/// Lattice levels ordered by restrictiveness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum LatticeLevel {
+    /// Public / untrusted. Lowest restriction.
+    Public = 0,
+    /// Internal / semi-trusted.
+    Internal = 1,
+    /// Confidential / trusted.
+    Confidential = 2,
+    /// Secret / highly trusted.
+    Secret = 3,
+}
+```
+
+The two dimensions serve complementary purposes. Confidentiality tracks *who can read* the data -- a `Secret` value must not leak to a `Public` sink. Integrity tracks *how much to trust* the data -- a `Public`-integrity value (untrusted external input) must not flow to a `Secret`-integrity sink (safety-critical configuration) without validation.
+
+### Join operator (label combination)
+
+When two labeled values combine (concatenation, function application, tool pipeline), the result carries the join of both labels:
+
+```rust
+impl SecurityLabel {
+    /// Join operator: combines two labels into the least upper bound.
+    /// Result has max(confidentiality) and min(integrity).
+    /// This is the fundamental propagation rule.
+    pub fn join(&self, other: &SecurityLabel) -> SecurityLabel {
+        SecurityLabel {
+            confidentiality: self.confidentiality.max(other.confidentiality),
+            integrity: self.integrity.min(other.integrity),
+            owner: None, // joined data has no single owner
+        }
+    }
+
+    /// Can data with this label flow to a sink with the given label?
+    /// Requires: self.confidentiality <= sink.confidentiality
+    ///       AND self.integrity >= sink.integrity
+    pub fn can_flow_to(&self, sink: &SecurityLabel) -> bool {
+        self.confidentiality <= sink.confidentiality
+            && self.integrity >= sink.integrity
+    }
+}
+```
+
+The join follows standard lattice IFC semantics: confidentiality rises to the maximum (most restrictive wins), integrity drops to the minimum (least trusted wins). This means mixing a `Secret`-confidentiality value with a `Public`-confidentiality value produces `Secret` -- the combined data inherits the strictest read restriction. Mixing a `Trusted`-integrity value with an `Untrusted`-integrity value produces `Untrusted` -- the combined data is only as trustworthy as its least trusted component.
+
+### Tool call taint propagation
+
+Taint propagates through agent tool call chains by the same join rule. Each tool call takes labeled inputs and produces a labeled output. The output label is the join of all input labels:
+
+```
+For each tool call T with inputs I_1, I_2, ..., I_n:
+    label(output(T)) = join_i label(I_i)    // join of all input labels
+
+For an agent turn with tool calls T_1 -> T_2 -> ... -> T_k:
+    label(context_window) = join_j label(output(T_j))
+```
+
+This means a single tainted input taints the entire downstream chain. If tool T_1 reads a `Secret`-confidentiality file, and T_2 uses T_1's output, T_2's output is also `Secret`. The context window accumulates taint from every tool call in the turn.
+
+```rust
+/// Taint-propagating tool call wrapper.
+/// Tracks security labels through the tool dispatch pipeline.
+pub struct TaintedToolCall {
+    pub tool_name: String,
+    pub arguments: serde_json::Value,
+    /// Labels of all inputs to this tool call.
+    pub input_labels: Vec<SecurityLabel>,
+    /// Computed output label: join of all input labels.
+    pub output_label: SecurityLabel,
+}
+
+impl TaintedToolCall {
+    /// Compute the output label from input labels.
+    pub fn compute_output_label(inputs: &[SecurityLabel]) -> SecurityLabel {
+        inputs.iter().fold(
+            SecurityLabel {
+                confidentiality: LatticeLevel::Public,
+                integrity: LatticeLevel::Secret,
+                owner: None,
+            },
+            |acc, label| acc.join(label),
+        )
+    }
+}
+```
+
+The fold starts from the lattice bottom for confidentiality (`Public`) and lattice top for integrity (`Secret`). This identity element ensures that a single input produces its own label unchanged, while multiple inputs accumulate via join.
+
+### FIDES integration
+
+Costa & Kopf (2025, arXiv:2505.23643) introduced FIDES, an information flow control planner for agentic systems. FIDES assigns confidentiality and integrity labels to every data source and tool, then plans agent actions to avoid policy violations. Two results are directly applicable to Roko:
+
+- **Zero policy-violating injections on AgentDojo.** FIDES reduced injection attack success to 0% by constraining the LLM's output schema based on the label of its inputs. When the context window contains low-integrity data (e.g., web-scraped content), the planner restricts the LLM to Boolean or enum outputs -- formats too constrained to carry injection payloads.
+
+- **Constrained decoding for quarantined LLM.** When the LLM processes untrusted input, FIDES routes it through a "quarantined LLM" instance with constrained decoding. The output grammar is limited to a predefined schema, preventing free-text generation that could propagate injected instructions.
+
+Roko's `TaintedToolCall` pipeline implements the same principle: tool calls with low-integrity inputs have their output schemas validated against tighter constraints before the output enters the context window.
+
+### RTBAS dynamic taint tracking
+
+Zhong et al. (2025, arXiv:2502.08966) proposed RTBAS (Runtime Taint-Based Access Control), a dynamic taint tracking system for LLM agents. Three design decisions align with Roko's approach:
+
+- **Taint labels at ingestion.** Every piece of data receives a taint label when it enters the system. External API responses, tool outputs, and user inputs each get labels reflecting their trust level. This matches Roko's `TaintLabel` enum and the ingestion pipeline's quarantine stage.
+
+- **Two novel screeners.** RTBAS introduces an LM-Judge screener (a secondary LLM that evaluates whether a proposed action violates taint policy) and an Attention-Based screener (which analyzes the primary LLM's attention patterns to detect when tainted tokens disproportionately influence the output). The Attention-Based screener is particularly interesting -- it detects prompt injection by measuring whether untrusted tokens receive anomalous attention weight.
+
+- **100% attack prevention with <2% utility degradation.** On their benchmark, RTBAS blocked all tested injection attacks while degrading legitimate task completion by less than 2%. This suggests that taint tracking imposes minimal overhead on normal agent operation.
+
+### Prompt Flow Integrity (PFI)
+
+Kim et al. (2025, arXiv:2503.15547) addressed the STRIDE threat category "Elevation of Privilege" in multi-agent systems. Their Prompt Flow Integrity (PFI) framework:
+
+- **Separates agents by trust level.** Trusted agents with access to sensitive tools (file write, code execution) are isolated from untrusted agents that process external input. Data flows between agents are labeled and checked at every boundary.
+
+- **Tracks inter-agent data flow.** When Agent A sends a message to Agent B, PFI tracks which of A's inputs influenced the message. If A processed untrusted web content, the message to B carries that taint. B's safety layer can then decide whether to accept the message for use in privileged operations.
+
+- **Raises alerts on unsafe flow.** PFI detects when tainted data from an untrusted agent reaches a privileged tool call through an intermediate trusted agent. This catches "confused deputy" attacks where a trusted agent is tricked into executing actions on behalf of an attacker.
+
+This maps to Roko's multi-agent topology: when `roko plan run` spawns multiple agents for parallel task execution, inter-agent messages must carry taint labels. An agent processing untrusted external data should not influence a peer agent's safety-critical decisions without explicit declassification.
+
+### PCAS Datalog policy language
+
+Palumbo et al. (2026, arXiv:2602.16708) proposed PCAS, a Datalog-derived policy language for expressing taint rules over agent tool call graphs. Instead of hard-coding flow rules in Rust match statements, PCAS expresses policies as declarative rules that a solver evaluates at runtime.
+
+The advantage: policies can be updated without recompiling the agent. A new taint rule (e.g., "data from source X must not reach tool Y") becomes a Datalog fact, not a code change.
+
+```
+% A tool call is tainted if any input is tainted.
+tainted(Call) :- input(Call, Data), tainted(Data).
+
+% Transitive taint propagation through tool chains.
+tainted(Result) :- generated_by(Result, Call), tainted(Call).
+
+% Policy: block tainted calls to sensitive resources.
+blocked(Call) :- tainted(Call), accesses_sensitive(Call).
+
+% Declassification: owner can remove taint from their own data.
+declassified(Data) :- owner(Data, Principal), authorizes(Principal, Data).
+not_tainted(Data) :- declassified(Data).
+```
+
+PCAS also maintains a fine-grained dependency graph over tool calls. When a taint violation is detected, the graph traces the violation back to its origin -- which external input, through which tool chain, caused the tainted data to reach the forbidden sink. This provenance is valuable for debugging and for the causal rollback mechanism described in the ingestion pipeline section above.
+
+### Configuration
+
+```toml
+[safety.taint]
+# Lattice model: "denning" (centralized) or "dlm" (decentralized label model).
+lattice_model = "denning"
+# Default confidentiality level for external data. Options: "public", "internal", "confidential", "secret".
+external_data_confidentiality = "public"
+# Default integrity level for external data. Options: "public", "internal", "confidential", "secret".
+external_data_integrity = "public"
+# Default integrity level for tool results. Options: "public", "internal", "confidential", "secret".
+tool_result_integrity = "internal"
+# Whether to block or log taint violations. Options: "enforce" | "monitor" | "off".
+enforcement_mode = "monitor"
+# Propagation mode: "strict" (always join) or "selective" (per-tool rules).
+propagation_mode = "strict"
+# Policy backend: "rust" (compiled match statements) or "datalog" (PCAS-style rules).
+policy_backend = "rust"
+# Path to Datalog policy file (used when policy_backend = "datalog").
+datalog_policy_path = ".roko/policies/taint.dl"
+```
+
+### Test criteria
+
+- `SecurityLabel::join()` produces `max(confidentiality)`, `min(integrity)` for all level combinations
+- `SecurityLabel::can_flow_to()` blocks `Secret` -> `Public` confidentiality flow
+- `SecurityLabel::can_flow_to()` blocks `Public` -> `Secret` integrity flow (low-integrity data to high-integrity sink)
+- `SecurityLabel::can_flow_to()` allows `Public` -> `Secret` confidentiality flow (reading up is fine)
+- `SecurityLabel::can_flow_to()` allows `Secret` -> `Public` integrity flow (trusted data to untrusted sink is fine)
+- `TaintedToolCall::compute_output_label()` with mixed inputs produces the correct join
+- `TaintedToolCall::compute_output_label()` with empty inputs returns the identity element (`Public` confidentiality, `Secret` integrity)
+- Tool chain T1 -> T2 -> T3 propagates taint transitively: if T1's input is `Secret`, T3's output is `Secret`
+- Declassification only succeeds when the caller matches the `owner` principal on the label
+- Declassification by a non-owner principal is rejected
+- PCAS-style transitive taint rule correctly identifies multi-hop taint propagation across 5+ tool calls
+- Join is commutative: `a.join(b) == b.join(a)` for all label pairs
+- Join is associative: `a.join(b.join(c)) == a.join(b).join(c)` for all label triples
+- Join is idempotent: `a.join(a) == a` for all labels
 
 ---
 

@@ -643,6 +643,192 @@ Formalizing these as LTL and compiling to Buchi automata (Tier 3) would make the
 | Vardi & Wolper (1986) | Automata-theoretic approach to LTL verification |
 | Bartocci et al. (2018) | Runtime verification — survey and perspectives |
 | Havelund & Rosu (2001) | Monitoring Java programs with temporal logic |
+| Havelund & Rosu (2004, FMSD) | Past-time LTL monitoring with O(\|formula\|) space |
+| Maler & Nickovic (2004) | Signal temporal logic (STL) for real-valued signals |
+| AgentSpec (Wang et al., 2025/2026, ICSE '26, arXiv:2503.18666) | Customizable runtime enforcement DSL for LLM agents |
+| AgentGuard (Koohestani et al., 2025, arXiv:2509.23864) | Dynamic probabilistic assurance via MDP model checking |
+
+---
+
+## Extended Temporal Pattern Library
+
+Beyond the existing DeFi patterns, this section defines a comprehensive pattern library for general-purpose coding agents. These are LTL formulas that can be compiled to Buchi automata and loaded into the TemporalMonitor.
+
+### Code agent safety patterns
+
+```
+% P1: No write without prior read (understand before modifying)
+G(write_file(F) -> P(read_file(F)))
+    "Every file write was preceded by reading the same file"
+
+% P2: No git push without passing gates
+G(git_push -> P(compile_gate_passed /\ test_gate_passed /\ clippy_gate_passed))
+    "Every push was preceded by passing all three gates"
+
+% P3: No concurrent writes to same file
+G(write_file(F) -> -X(write_file(F) /\ different_agent))
+    "Two agents never write the same file in consecutive steps"
+
+% P4: Monotonic progress -- task state only moves forward
+G(task_state(T, completed) -> G(task_state(T, completed)))
+    "A completed task stays completed (no regression)"
+
+% P5: Budget enforcement
+G(cost_budget_exceeded -> F<=3(pause \/ shutdown))
+    "Budget exceeded leads to pause or shutdown within 3 steps"
+
+% P6: Escalation chain -- failures trigger review
+G(gate_failed(T) /\ gate_failed(T) /\ gate_failed(T) -> F(human_review(T)))
+    "Three consecutive gate failures trigger human review"
+
+% P7: Sandbox containment
+G(-(file_access /\ outside_worktree))
+    "No file access targets paths outside the worktree -- ever"
+
+% P8: Secret non-disclosure
+G(scrub_policy_match -> -X(content_in_llm_context(matched_content)))
+    "Scrubbed content never appears in subsequent LLM context"
+```
+
+### Multi-agent coordination patterns
+
+```
+% P9: No conflicting concurrent modifications
+G(agent_a_modifies(F) /\ agent_b_modifies(F) -> same_worktree(a, b) = false)
+    "Concurrent modifications to the same file only happen in separate worktrees"
+
+% P10: Task ordering respects DAG dependencies
+G(task_started(T2) -> P(task_completed(dep(T2))))
+    "A task starts only after all its dependencies have completed"
+
+% P11: Merge conflict resolution
+G(merge_conflict(B) -> F<=10(conflict_resolved(B) \/ merge_aborted(B)))
+    "Every merge conflict is resolved or aborted within 10 steps"
+```
+
+### Pattern library registry
+
+```rust
+/// A temporal pattern in the library.
+pub struct TemporalPattern {
+    /// Unique identifier for this pattern.
+    pub id: String,
+    /// Human-readable description.
+    pub description: String,
+    /// The LTL formula source string.
+    pub formula: String,
+    /// Category: safety, liveness, fairness, coordination.
+    pub category: PatternCategory,
+    /// Whether this pattern is enabled by default.
+    pub enabled_by_default: bool,
+    /// Domain: general, code, chain, research.
+    pub domain: PatternDomain,
+    /// Severity of a violation.
+    pub violation_severity: ViolationSeverity,
+}
+
+pub enum PatternCategory {
+    Safety,       // G(-bad) -- something bad never happens
+    Liveness,     // G(started -> F(completed)) -- something good eventually happens
+    Fairness,     // GF(condition) -- something happens infinitely often
+    Coordination, // Multi-agent ordering constraints
+}
+
+pub enum PatternDomain { General, Code, Chain, Research }
+pub enum ViolationSeverity { Info, Warning, Error, Critical }
+
+/// The pattern library: a registry of all temporal patterns.
+pub struct PatternLibrary {
+    patterns: Vec<TemporalPattern>,
+}
+
+impl PatternLibrary {
+    /// Load the default pattern library for a given domain.
+    pub fn default_for_domain(domain: PatternDomain) -> Self {
+        let mut lib = Self { patterns: Vec::new() };
+        // Always include general safety patterns
+        lib.add_general_patterns();
+        match domain {
+            PatternDomain::Code => lib.add_code_patterns(),
+            PatternDomain::Chain => lib.add_chain_patterns(),
+            _ => {}
+        }
+        lib
+    }
+
+    /// Compile all enabled patterns into Buchi automata.
+    pub fn compile_enabled(&self) -> Vec<BuchiAutomaton> {
+        self.patterns
+            .iter()
+            .filter(|p| p.enabled_by_default)
+            .map(|p| ltl_to_buchi(&parse_ltl(&p.formula)))
+            .collect()
+    }
+}
+```
+
+### Past-time LTL (ptLTL) extensions
+
+Standard LTL looks forward in time (G, F, X, U). Past-time LTL adds backward-looking operators that are essential for safety patterns like "every write was preceded by a read."
+
+```rust
+/// Past-time LTL operators.
+/// These extend the LtlAst with backward-looking operators.
+pub enum PtLtlOp {
+    /// Previously: the formula held at some past step.
+    Previously(Box<LtlAst>),
+    /// Once: the formula held at some past step (past-time F).
+    Once(Box<LtlAst>),
+    /// Historically: the formula held at every past step (past-time G).
+    Historically(Box<LtlAst>),
+    /// Since: phi held since psi was true (past-time U).
+    Since(Box<LtlAst>, Box<LtlAst>),
+}
+```
+
+Past-time LTL formulas can be monitored in O(|formula|) space per step (Havelund & Rosu, 2004), making them efficient for real-time monitoring.
+
+### Bounded temporal operators
+
+Many safety patterns use bounded temporal operators (F<=k, G<=k) for practical monitoring:
+
+```rust
+/// Bounded temporal operators: F<=k and G<=k.
+/// These convert liveness properties to bounded-liveness safety properties.
+pub enum BoundedOp {
+    /// Eventually within k steps.
+    EventuallyBounded { formula: Box<LtlAst>, bound: u64 },
+    /// Globally for the next k steps.
+    GloballyBounded { formula: Box<LtlAst>, bound: u64 },
+}
+```
+
+### Configuration
+
+```toml
+[safety.temporal.patterns]
+# Domain for pattern library selection.
+domain = "code"    # "general" | "code" | "chain" | "research"
+# Additional custom pattern files (LTL formulas, one per line).
+custom_pattern_files = [".roko/temporal-patterns.ltl"]
+# Enable past-time LTL operators.
+enable_ptltl = true
+# Maximum bound for bounded temporal operators.
+max_bounded_horizon = 100    # Range: 10..10000.
+# Pattern violation response.
+violation_response = "alert"  # "log" | "alert" | "pause" | "abort"
+```
+
+### Test criteria
+
+- Pattern P1 (write-after-read) rejects trace [{write_file("a.rs")}, ...] without prior read_file("a.rs")
+- Pattern P2 (push-after-gates) rejects trace with git_push but no prior gate passes
+- Pattern P7 (sandbox containment) rejects any trace containing file_access + outside_worktree
+- PatternLibrary::default_for_domain(Code) includes all code patterns
+- PatternLibrary::compile_enabled() produces valid Buchi automata for each pattern
+- Past-time Once(phi) is satisfied iff phi held at some earlier step
+- Bounded F<=5(phi) is violated if phi does not hold within 5 steps
+- Pattern violation severity is correctly propagated to the TemporalMonitor's violation Engrams
 
 ---
 

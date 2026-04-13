@@ -48,7 +48,7 @@ pub fn render(
     view_state: &ViewState,
     theme: &Theme,
 ) {
-    let outer = Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).split(area);
+    let outer = Layout::vertical([Constraint::Min(0), Constraint::Length(6)]).split(area);
     let main = Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)])
         .split(outer[0]);
 
@@ -69,21 +69,36 @@ fn render_left_panel(
     _view_state: &ViewState,
     _theme: &Theme,
 ) {
+    // Content-aware sizing: phase gets a fixed 4 lines, plan tree and task
+    // progress split the rest proportionally based on content.
+    let plan_count = tui_state.plans.len();
+    let task_count = tui_state.current_task_checklist.len();
+    let has_content = plan_count > 0 || task_count > 0;
+
+    let (plan_pct, phase_h, task_pct) = if has_content {
+        // Content-aware: plan tree gets more space when plans exist
+        let plan_lines = (plan_count + 3).min(20) as u16; // header + plans + padding
+        let task_lines = (task_count + 3).min(15) as u16;
+        let total = plan_lines + task_lines;
+        let plan_frac = if total > 0 { plan_lines * 100 / total } else { 50 };
+        (plan_frac.max(30).min(70), 4u16, (100 - plan_frac.max(30).min(70)))
+    } else {
+        // Idle: compact layout — give more room to plan tree for column headers
+        (45, 4, 51)
+    };
+
     let sections = Layout::vertical([
-        Constraint::Percentage(50),
-        Constraint::Percentage(15),
-        Constraint::Percentage(35),
+        Constraint::Percentage(plan_pct),
+        Constraint::Length(phase_h),
+        Constraint::Percentage(task_pct),
     ])
     .split(area);
 
     let plan_focused = matches!(tui_state.focus, FocusZone::PlanTree);
     let task_focused = matches!(tui_state.focus, FocusZone::TaskProgress);
 
-    // Use the full Mori plan_tree widget (wave groups, sparklines, data-rain)
     widgets::plan_tree::render_plan_tree(frame, sections[0], tui_state, plan_focused);
-    // Use the Mori phase_compact widget (segmented bar with spinner)
     widgets::phase_compact::render_phase_compact(frame, sections[1], tui_state, false);
-    // Use the Mori task_progress widget (semantic checklist)
     widgets::task_progress::render_task_progress(frame, sections[2], tui_state, task_focused);
 }
 

@@ -530,6 +530,272 @@ orchestrate.rs: PlanRunner::run_task()
 | Berkenkamp et al. (2017) | Safe exploration with Gaussian process models |
 | Milionis, Moallemi, Roughgarden, Zhang (2022) | LVR — Loss-Versus-Rebalancing for LP sizing |
 | Loesch et al. (2021) | Empirical LP losses across 17 Uniswap v3 pools |
+| NASA UAS Risk Assessment | Risk budgets for autonomous aircraft — safety margins per maneuver |
+| FAA AI Safety Assurance Roadmap (2025) | Phased AI integration with safety budget tiers |
+| CSA Securing Agentic Control Plane (2026) | Kill switches and blast-radius limits as first-class primitives |
+| Agent-SafetyBench (arXiv:2412.14470, 2024) | 349 environments, 2000 tests — no agent scored >60% safety compliance |
+
+---
+
+## Safety Budgets: Risk Allocation Framework
+
+A safety budget is a hard limit on how much uncertainty, autonomy, and irreversibility an agent is permitted to consume before requiring human review or triggering a halt. Inspired by NASA UAS risk budgets and FAA AI Safety Assurance Roadmap (2025).
+
+### Budget Dimensions
+
+Define five orthogonal budget dimensions:
+
+```rust
+/// Safety budget: hard limits on agent risk consumption per session.
+/// Each dimension tracks a different axis of risk.
+///
+/// Inspired by NASA UAS risk budgets and CSA agentic safety
+/// recommendations (2026).
+pub struct SafetyBudget {
+    /// Irreversibility budget: sum of irreversibility scores.
+    /// Read operations score 0.0; permanent deletions score 1.0.
+    /// Range for limit: 0.1..100.0. Default: 10.0.
+    pub irreversibility_limit: f64,
+
+    /// Blast radius budget: maximum files modified per session.
+    /// Prevents a single agent run from touching too much code.
+    /// Range: 1..1000. Default: 50.
+    pub blast_radius_file_limit: usize,
+
+    /// Footprint budget: maximum external interactions.
+    /// Counts tool calls, API requests, process spawns.
+    /// Range: 10..10000. Default: 500.
+    pub footprint_limit: usize,
+
+    /// Uncertainty budget: tokens for low-confidence decisions.
+    /// Each decision with confidence < uncertainty_threshold consumes one token.
+    /// When exhausted, agent must escalate to human.
+    /// Range: 1..100. Default: 10.
+    pub uncertainty_tokens: usize,
+
+    /// Cost budget: maximum spend (USD) on inference + tools.
+    /// Range: 0.01..10000.0. Default: 50.0.
+    pub cost_limit_usd: f64,
+}
+
+/// Tracks budget consumption during a session.
+pub struct SafetyBudgetTracker {
+    pub budget: SafetyBudget,
+    pub usage: SafetyBudgetUsage,
+    /// Threshold below which a decision is "uncertain".
+    pub uncertainty_threshold: f64,
+}
+
+pub struct SafetyBudgetUsage {
+    pub irreversibility_consumed: f64,
+    pub files_touched: HashSet<String>,
+    pub footprint_count: usize,
+    pub uncertainty_tokens_used: usize,
+    pub cost_consumed_usd: f64,
+}
+
+impl SafetyBudgetTracker {
+    /// Check whether a proposed action is within budget.
+    /// Returns the limiting dimension if budget would be exceeded.
+    pub fn check(&self, action: &ProposedAction) -> BudgetCheckResult {
+        let usage = &self.usage;
+        let budget = &self.budget;
+
+        if usage.irreversibility_consumed + action.irreversibility_score
+            > budget.irreversibility_limit
+        {
+            return BudgetCheckResult::Exceeded(BudgetDimension::Irreversibility);
+        }
+
+        let new_file_count = {
+            let mut files = usage.files_touched.clone();
+            files.extend(action.files_modified.iter().cloned());
+            files.len()
+        };
+        if new_file_count > budget.blast_radius_file_limit {
+            return BudgetCheckResult::Exceeded(BudgetDimension::BlastRadius);
+        }
+
+        if usage.footprint_count + action.tool_calls > budget.footprint_limit {
+            return BudgetCheckResult::Exceeded(BudgetDimension::Footprint);
+        }
+
+        if action.confidence < self.uncertainty_threshold
+            && usage.uncertainty_tokens_used >= budget.uncertainty_tokens
+        {
+            return BudgetCheckResult::Exceeded(BudgetDimension::Uncertainty);
+        }
+
+        if usage.cost_consumed_usd + action.estimated_cost > budget.cost_limit_usd {
+            return BudgetCheckResult::Exceeded(BudgetDimension::Cost);
+        }
+
+        BudgetCheckResult::WithinBudget
+    }
+
+    /// Record an action's consumption against the budget.
+    pub fn consume(&mut self, action: &CompletedAction) {
+        self.usage.irreversibility_consumed += action.irreversibility_score;
+        self.usage.files_touched.extend(action.files_modified.iter().cloned());
+        self.usage.footprint_count += action.tool_calls;
+        if action.confidence < self.uncertainty_threshold {
+            self.usage.uncertainty_tokens_used += 1;
+        }
+        self.usage.cost_consumed_usd += action.actual_cost;
+    }
+}
+
+pub enum BudgetCheckResult {
+    WithinBudget,
+    Exceeded(BudgetDimension),
+}
+
+pub enum BudgetDimension {
+    Irreversibility,
+    BlastRadius,
+    Footprint,
+    Uncertainty,
+    Cost,
+}
+```
+
+### Irreversibility Scoring
+
+Actions are scored on a 0.0-1.0 irreversibility scale:
+
+| Action | Score | Rationale |
+|--------|-------|-----------|
+| read_file, glob, grep | 0.0 | Pure observation, no side effects |
+| write_file (new file) | 0.2 | Reversible: delete the file |
+| edit_file | 0.3 | Reversible via git: but requires manual intervention |
+| bash (read-only: ls, cat) | 0.0 | No side effects |
+| bash (build: cargo build) | 0.1 | Artifacts can be cleaned |
+| bash (destructive: rm) | 0.8 | Hard to reverse without backup |
+| git commit | 0.3 | Reversible via revert |
+| git push | 0.6 | Affects shared state, requires force-push to undo |
+| Network API call (GET) | 0.0 | Read-only |
+| Network API call (POST) | 0.5 | May have irreversible side effects |
+
+```rust
+/// Compute irreversibility score for a tool call.
+pub fn irreversibility_score(tool: &str, args: &serde_json::Value) -> f64 {
+    match tool {
+        "read_file" | "glob" | "grep" => 0.0,
+        "write_file" => 0.2,
+        "edit_file" => 0.3,
+        "bash" => score_bash_irreversibility(args),
+        "git_commit" => 0.3,
+        "git_push" => 0.6,
+        "web_fetch" => 0.0,
+        "web_search" => 0.0,
+        _ => 0.5, // Unknown tools get moderate score
+    }
+}
+
+fn score_bash_irreversibility(args: &serde_json::Value) -> f64 {
+    let command = args.get("command")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if command.starts_with("ls") || command.starts_with("cat")
+        || command.starts_with("echo") || command.starts_with("grep") {
+        0.0
+    } else if command.contains("rm ") || command.contains("rmdir") {
+        0.8
+    } else if command.starts_with("cargo build") || command.starts_with("cargo test") {
+        0.1
+    } else if command.starts_with("cargo publish") {
+        0.9
+    } else {
+        0.4 // Unknown bash commands get moderate score
+    }
+}
+```
+
+### Budget Tiers
+
+Different task types receive different budgets:
+
+| Task Type | Irreversibility | Files | Footprint | Uncertainty | Cost |
+|-----------|----------------|-------|-----------|-------------|------|
+| Read-only audit | 0.0 | 0 | 100 | 5 | $5 |
+| Single-file fix | 3.0 | 3 | 200 | 5 | $10 |
+| Multi-file implementation | 15.0 | 20 | 500 | 10 | $50 |
+| Architectural refactor | 50.0 | 100 | 2000 | 20 | $200 |
+| Full plan execution | 100.0 | 500 | 5000 | 50 | $500 |
+
+### Integration with Adaptive Risk
+
+Safety budgets compose with the existing five-layer adaptive risk system:
+
+```
+effective_budget = base_budget * confidence_multiplier * daimon_modifier
+
+Where:
+  base_budget = task-type default from the tier table
+  confidence_multiplier = from OperationalConfidenceTracker (Layer 3)
+  daimon_modifier = from Daimon behavioral state (0.3 for Resting, 1.2 for Exploring)
+```
+
+A new agent (low confidence, 0.2 multiplier) working on a multi-file task gets:
+- Irreversibility: 15.0 x 0.2 = 3.0 (equivalent to a single-file fix)
+- Files: 20 x 0.2 = 4
+- Footprint: 500 x 0.2 = 100
+
+### Budget Exhaustion Response
+
+When any budget dimension is exhausted:
+
+```rust
+/// Response to budget exhaustion.
+pub fn on_budget_exhausted(
+    dimension: BudgetDimension,
+    usage: &SafetyBudgetUsage,
+    budget: &SafetyBudget,
+) -> CognitiveSignal {
+    match dimension {
+        BudgetDimension::Irreversibility => CognitiveSignal::Pause,
+        BudgetDimension::BlastRadius => CognitiveSignal::Pause,
+        BudgetDimension::Footprint => CognitiveSignal::Cooldown,
+        BudgetDimension::Uncertainty => CognitiveSignal::Escalate,
+        BudgetDimension::Cost => CognitiveSignal::Shutdown,
+    }
+}
+```
+
+### Configuration
+
+```toml
+[agent.risk.budget]
+# Enable safety budgets. Default: true.
+enabled = true
+# Default task type (determines base budget tier).
+default_task_type = "multi_file"   # "read_only" | "single_file" | "multi_file" | "refactor" | "plan_execution"
+# Uncertainty threshold: decisions below this confidence consume uncertainty tokens.
+uncertainty_threshold = 0.5    # Range: 0.1..0.9.
+# Whether budget scales with confidence. Default: true.
+confidence_scaling = true
+
+[agent.risk.budget.overrides]
+# Per-dimension overrides (override the tier defaults).
+# irreversibility_limit = 20.0
+# blast_radius_file_limit = 30
+# footprint_limit = 1000
+# uncertainty_tokens = 15
+# cost_limit_usd = 100.0
+```
+
+### Test Criteria
+
+- SafetyBudgetTracker::check() returns WithinBudget for a read-only action with full budget
+- SafetyBudgetTracker::check() returns Exceeded(Irreversibility) when irreversibility_consumed + action > limit
+- SafetyBudgetTracker::check() returns Exceeded(Uncertainty) when tokens exhausted and confidence < threshold
+- SafetyBudgetTracker::consume() correctly increments all usage counters
+- irreversibility_score("read_file", _) returns 0.0
+- irreversibility_score("bash", rm_command) returns 0.8
+- Budget tier "read_only" has 0.0 irreversibility limit (no writes allowed)
+- confidence_scaling correctly reduces budget for low-confidence agents
+- on_budget_exhausted returns Escalate for Uncertainty (to involve human)
+- Budget composition: effective_budget = base x confidence x daimon correctly computes for all states
 
 ---
 

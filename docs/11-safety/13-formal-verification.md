@@ -982,6 +982,319 @@ State consistency: both mirage-rs simulation and formal verification analyze the
 | Babel et al. (2023), "Clockwork Finance: Automated Analysis of Economic Security in Smart Contracts," IEEE S&P 2023 | Epsilon-composability and MEV formal analysis |
 | Tolmach et al. (2021), "Formal Analysis of Composable DeFi Protocols," FC Workshops 2021 | Process algebra (CSP#) for cross-protocol reasoning |
 | Permenev et al. (2020), "VerX: Safety Verification of Smart Contracts," IEEE S&P 2020 | Temporal safety specifications with always/once operators |
+| Agent Behavioral Contracts (arXiv:2602.22302, 2026) | Design-by-Contract for agents, drift bounds theorem |
+| AgentSpec (Wang et al., ICSE '26, arXiv:2503.18666) | Customizable runtime enforcement DSL, >90% unsafe action prevention |
+| AgentGuard (Koohestani et al., 2025, arXiv:2509.23864) | Dynamic probabilistic assurance via MDP model checking |
+| Pro2Guard (arXiv:2508.00500, 2025) | Proactive enforcement via probabilistic model checking |
+| VeriGuard (arXiv:2510.05156, 2025) | Verified code generation with pre/post-conditions |
+| Agent Contracts (arXiv:2601.08815, 2026) | Resource-bounded formal framework for agents |
+
+---
+
+## Verification-Guided Agent Design
+
+The chain-domain pipeline above verifies smart contracts. But roko is not a smart contract -- it is an agent that reads, plans, writes code, and executes shell commands. The same "fast filter -> medium analysis -> deep proof" pattern applies to agent behavior itself. Recent work on runtime verification for LLM agents provides the theoretical grounding.
+
+Three papers form the foundation: Agent Behavioral Contracts (arXiv:2602.22302) adapts Design-by-Contract to autonomous agents with probabilistic satisfaction guarantees. AgentSpec (Wang et al., ICSE '26) defines a runtime enforcement DSL that blocks >90% of unsafe actions before they execute. AgentGuard (Koohestani et al., 2025) builds MDP models of agent behavior and uses probabilistic model checking for runtime assurance.
+
+### Agent Behavioral Contracts (ABC)
+
+A behavioral contract specifies what an agent must do, what it must never do, and what happens when it violates those boundaries. The formalism from arXiv:2602.22302 defines a contract as a tuple C = (P, I, G, R):
+
+- **P** -- Preconditions. State requirements before any action.
+- **I** -- Invariants. Properties that hold throughout execution.
+- **G** -- Governance policies. Authorization and resource constraints.
+- **R** -- Recovery mechanisms. What to do when something breaks.
+
+The contract includes probabilistic satisfaction parameters: an agent satisfies C with probability p, tolerance delta, over k steps. This acknowledges that LLM-based agents are stochastic -- you cannot guarantee deterministic compliance, but you can bound the violation rate.
+
+```rust
+/// An Agent Behavioral Contract: formal specification of expected behavior.
+/// Based on Agent Behavioral Contracts (arXiv:2602.22302, 2026).
+///
+/// Contract C = (P, I, G, R) where:
+/// - P = Preconditions (state requirements before action)
+/// - I = Invariants (properties that must hold throughout execution)
+/// - G = Governance policies (authorization constraints)
+/// - R = Recovery mechanisms (violation response)
+pub struct BehavioralContract {
+    /// Unique contract identifier.
+    pub id: String,
+    /// Preconditions that must hold before any action.
+    pub preconditions: Vec<ContractPredicate>,
+    /// Invariants that must hold throughout execution.
+    pub invariants: Vec<ContractPredicate>,
+    /// Governance policies (authorization, resource limits).
+    pub governance: Vec<GovernancePolicy>,
+    /// Recovery mechanisms for contract violations.
+    pub recovery: Vec<RecoveryAction>,
+    /// Satisfaction parameters: (p, delta, k)-satisfaction.
+    /// Agent satisfies contract with probability p, tolerance delta, over k steps.
+    pub satisfaction: SatisfactionParams,
+}
+
+pub struct SatisfactionParams {
+    /// Minimum probability of contract satisfaction. Range: 0.9..1.0.
+    pub probability: f64,
+    /// Tolerance for transient violations. Range: 0.0..0.1.
+    pub tolerance: f64,
+    /// Horizon steps for satisfaction check. Range: 10..10000.
+    pub horizon: usize,
+}
+
+pub struct ContractPredicate {
+    /// Human-readable description.
+    pub description: String,
+    /// The predicate expression (evaluated against agent state).
+    pub expression: PredicateExpr,
+    /// Whether violation is fatal (abort) or recoverable.
+    pub fatal: bool,
+}
+
+pub enum PredicateExpr {
+    /// Check a boolean flag in agent state.
+    StateFlag(String),
+    /// Compare a metric against a threshold.
+    MetricThreshold { metric: String, op: CompOp, threshold: f64 },
+    /// LTL formula (compiled to Buchi automaton).
+    TemporalFormula(String),
+    /// Taint label check on a data flow.
+    TaintCheck { data: String, max_label: String },
+}
+
+pub enum CompOp { Lt, Le, Eq, Ge, Gt }
+
+pub enum GovernancePolicy {
+    /// Maximum tool calls per session.
+    MaxToolCalls(usize),
+    /// Maximum files modified per task.
+    MaxFilesModified(usize),
+    /// Allowed tool set (whitelist).
+    AllowedTools(Vec<String>),
+    /// Required gate pass before specific actions.
+    RequireGatePass { action: String, gate: String },
+    /// Budget limit (tokens, cost, time).
+    BudgetLimit { resource: String, limit: f64 },
+}
+
+pub enum RecoveryAction {
+    /// Log the violation and continue.
+    Log,
+    /// Retry the action with modified parameters.
+    Retry { max_retries: usize },
+    /// Rollback to last known good state.
+    Rollback,
+    /// Pause and request human review.
+    HumanReview,
+    /// Abort the current task.
+    Abort,
+    /// Shutdown the agent gracefully.
+    Shutdown,
+}
+```
+
+### Drift bounds theorem
+
+From arXiv:2602.22302: if the recovery rate gamma exceeds the drift rate alpha, behavioral drift converges to a bounded steady state rather than growing without limit.
+
+```
+D* = alpha / gamma    (expected steady-state drift)
+
+Where:
+  alpha = natural drift rate (probability of contract violation per step)
+  gamma = recovery rate (probability of returning to compliance per step)
+```
+
+For an agent with alpha = 0.05 (5% violation rate) and gamma = 0.8 (80% recovery rate):
+D* = 0.05 / 0.8 = 0.0625 -- steady-state drift of 6.25%.
+
+The practical takeaway: you do not need perfect compliance. You need recovery mechanisms that activate faster than violations accumulate. An agent that occasionally breaks an invariant but corrects within one step has bounded drift. An agent with slow recovery or no recovery has unbounded drift, and no amount of prompt engineering fixes that.
+
+```rust
+/// Compute the steady-state drift bound.
+/// If recovery_rate > drift_rate, drift is bounded.
+/// If recovery_rate <= drift_rate, drift is unbounded (contract unsatisfiable).
+pub fn drift_bound(drift_rate: f64, recovery_rate: f64) -> Option<f64> {
+    if recovery_rate > drift_rate {
+        Some(drift_rate / recovery_rate)
+    } else {
+        None // Unbounded drift: contract cannot be satisfied
+    }
+}
+```
+
+### AgentSpec runtime enforcement DSL
+
+AgentSpec (Wang et al., ICSE '26, arXiv:2503.18666) takes a different approach: rather than specifying contracts and checking satisfaction after the fact, it intercepts actions before execution and enforces rules in real time.
+
+Each rule has a trigger (what activates it), a predicate (when enforcement applies), and an action (what to do). Rules are evaluated before every agent action. If a rule matches and its enforcement says "block," the action never executes. The paper reports >90% prevention of unsafe actions across their benchmark.
+
+In roko's architecture, AgentSpec-style rules sit in the safety layer between the agent dispatcher and the tool executor. The existing `roko-agent/src/safety/` module already performs role-based authorization and pre/post checks. AgentSpec rules extend that with content-aware, pattern-matched enforcement.
+
+```rust
+/// AgentSpec-style runtime enforcement rule.
+/// Rules are evaluated before each agent action.
+pub struct AgentSpecRule {
+    /// Rule identifier.
+    pub id: String,
+    /// Trigger: which action types activate this rule.
+    pub trigger: RuleTrigger,
+    /// Predicate: condition under which enforcement applies.
+    pub predicate: RulePredicate,
+    /// Enforcement: what to do when the predicate matches.
+    pub enforcement: EnforcementAction,
+    /// Priority: higher priority rules override lower ones.
+    pub priority: u32,
+}
+
+pub enum RuleTrigger {
+    /// Any tool call.
+    AnyToolCall,
+    /// Specific tool call by name.
+    ToolCall(String),
+    /// Any file write operation.
+    FileWrite,
+    /// Any network operation.
+    NetworkCall,
+    /// Any git operation.
+    GitOperation,
+    /// Pattern match on action content.
+    ContentPattern(String),
+}
+
+pub enum RulePredicate {
+    /// Always matches.
+    Always,
+    /// Match if the action targets a specific path pattern.
+    PathMatch(String),
+    /// Match if confidence is below threshold.
+    LowConfidence(f64),
+    /// Match if safety budget is exhausted.
+    BudgetExhausted(String),
+    /// Match if taint label exceeds threshold.
+    TaintExceeds { label: String, max_level: String },
+    /// Compound: all predicates must match.
+    All(Vec<RulePredicate>),
+    /// Compound: any predicate matches.
+    Any(Vec<RulePredicate>),
+}
+
+pub enum EnforcementAction {
+    /// Block the action entirely.
+    Block { reason: String },
+    /// Require human confirmation before proceeding.
+    RequireConfirmation,
+    /// Log and proceed.
+    Log { detail_level: String },
+    /// Substitute with a safer alternative.
+    Substitute { replacement: String },
+    /// Modify parameters (e.g., reduce scope).
+    ModifyParams { modifications: HashMap<String, String> },
+}
+```
+
+### Probabilistic model checking (AgentGuard)
+
+AgentGuard (Koohestani et al., 2025, arXiv:2509.23864) treats the agent as a Markov Decision Process. It observes state transitions over time, builds a probabilistic model of agent behavior, and uses PCTL (Probabilistic Computation Tree Logic) to check safety properties against the model.
+
+The key advantage over static rules: the model adapts. As the agent encounters new situations and its behavior shifts, the MDP model updates, and violations that would not have been caught by fixed rules surface through probabilistic analysis.
+
+The cost is observation overhead. The model needs enough data points to be statistically valid, and rebuilding it is not free. The configuration below controls the tradeoff between responsiveness and computational cost.
+
+```rust
+/// Configuration for probabilistic model checking.
+/// Uses an MDP model of agent behavior for runtime assurance.
+pub struct ProbabilisticCheckerConfig {
+    /// Update interval: how often to rebuild the MDP model.
+    pub update_interval_steps: usize,
+    /// Minimum observations before model is considered valid.
+    pub min_observations: usize,
+    /// Property specifications in PCTL (Probabilistic CTL).
+    pub properties: Vec<PctlProperty>,
+    /// Confidence threshold: if P(violation) > threshold, intervene.
+    pub violation_probability_threshold: f64,
+}
+
+pub struct PctlProperty {
+    pub name: String,
+    pub formula: String,  // e.g., "P>=0.95 [G (files_modified <= 10)]"
+    pub intervention: EnforcementAction,
+}
+```
+
+### General-purpose verification pipeline
+
+The five-stage chain-domain pipeline has a direct analog for code-domain agents. The principle is identical: fast checks first, expensive proofs last, each stage gating the next.
+
+```
+Stage 1: cargo check (type checking)           ~seconds
+    |
+Stage 2: clippy (static analysis)              ~seconds
+    |
+Stage 3: cargo test (property testing)         ~10-60s
+    |
+Stage 4: cargo miri (undefined behavior)       ~1-5min
+    |
+Stage 5: contract verification (kani/prusti)   ~5-30min
+```
+
+Roko already runs stages 1-3 through its gate pipeline (`roko-gate`). Stages 4 and 5 extend the pipeline to memory safety verification (miri) and formal property proofs (kani for bounded model checking, prusti for refinement types). The `CodeVerificationLevel` mirrors `VerificationLevel` from the chain domain.
+
+```rust
+/// Code-domain verification pipeline, mirroring the chain-domain pipeline.
+pub enum CodeVerificationLevel {
+    Unknown,
+    TypeChecked,       // cargo check passes
+    StaticClean,       // clippy passes with no warnings
+    TestsPassed { test_count: usize },
+    MemorySafe,        // miri finds no UB
+    FormallyVerified { properties: Vec<String> }, // kani/prusti proves properties
+}
+```
+
+### Configuration
+
+```toml
+[safety.verification]
+# Enable behavioral contracts.
+contracts_enabled = true
+# Contract satisfaction probability threshold. Range: 0.9..1.0.
+satisfaction_probability = 0.95
+# Contract satisfaction tolerance. Range: 0.0..0.1.
+satisfaction_tolerance = 0.05
+# Contract horizon (steps). Range: 10..10000.
+satisfaction_horizon = 100
+
+[safety.verification.agentspec]
+# Enable AgentSpec-style runtime rules.
+enabled = true
+# Rule files to load (one rule per TOML entry).
+rule_files = [".roko/safety-rules.toml"]
+# Default enforcement for unmatched actions.
+default_enforcement = "log"    # "block" | "confirm" | "log" | "allow"
+
+[safety.verification.probabilistic]
+# Enable probabilistic model checking.
+enabled = false
+# MDP update interval. Range: 10..1000.
+update_interval_steps = 50
+# Minimum observations before model checking begins. Range: 20..500.
+min_observations = 50
+# Violation probability threshold. Range: 0.01..0.5.
+violation_threshold = 0.1
+```
+
+### Test criteria
+
+- BehavioralContract with precondition violation triggers RecoveryAction::Abort when fatal=true
+- BehavioralContract with invariant violation triggers RecoveryAction::HumanReview
+- drift_bound(0.05, 0.8) returns Some(0.0625)
+- drift_bound(0.5, 0.3) returns None (unbounded drift)
+- AgentSpecRule with trigger=FileWrite and predicate=PathMatch("*.rs") matches Rust file writes
+- AgentSpecRule enforcement=Block prevents the action from executing
+- CodeVerificationLevel ordering: Unknown < TypeChecked < StaticClean < TestsPassed < MemorySafe < FormallyVerified
+- PctlProperty violation triggers the configured enforcement action
+- Contract satisfaction check over k steps correctly identifies violations
 
 ---
 
