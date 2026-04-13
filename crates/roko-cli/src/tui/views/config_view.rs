@@ -59,46 +59,43 @@ pub fn render(
     frame: &mut Frame<'_>,
     area: Rect,
     data: &DashboardData,
-    _tui_state: &TuiState,
-    view_state: &ViewState,
+    tui_state: &TuiState,
+    _view_state: &ViewState,
     theme: &Theme,
 ) {
-    let sections = build_config_sections(data);
-    render_with_sections(frame, area, &sections, view_state, theme);
-}
+    let mut sections = build_config_sections(data);
 
-/// Render the config view with explicit sections (for integration layer).
-pub fn render_with_sections(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    sections: &[ConfigSection],
-    view_state: &ViewState,
-    theme: &Theme,
-) {
+    // Apply expansion state from TuiState
+    for (i, section) in sections.iter_mut().enumerate() {
+        section.expanded = tui_state.config_expanded.contains(&i);
+    }
+
+    let selected = tui_state.config_selected;
+
     let panels =
         Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)]).split(area);
 
-    render_section_list(frame, panels[0], sections, view_state, theme);
-    render_section_detail(frame, panels[1], sections, view_state, theme);
+    render_section_list(frame, panels[0], &sections, selected, theme);
+    render_section_detail(frame, panels[1], &sections, selected, theme);
 }
 
-/// Left panel: section list.
+/// Left panel: section list with selection cursor.
 fn render_section_list(
     frame: &mut Frame<'_>,
     area: Rect,
     sections: &[ConfigSection],
-    view_state: &ViewState,
+    selected: usize,
     theme: &Theme,
 ) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Sections ")
+        .title(" Sections (j/k:nav Enter:toggle) ")
         .border_style(theme.accent());
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     if sections.is_empty() {
-        let empty = Paragraph::new("no config loaded")
+        let empty = Paragraph::new("no config loaded — run `roko init`")
             .style(theme.muted())
             .wrap(Wrap { trim: false });
         frame.render_widget(empty, inner);
@@ -109,15 +106,18 @@ fn render_section_list(
         .iter()
         .enumerate()
         .map(|(i, section)| {
-            let marker = if section.expanded { "[-]" } else { "[+]" };
-            let style = if i == view_state.selected {
+            let marker = if section.expanded { "\u{25bc}" } else { "\u{25b6}" }; // ▼ / ▶
+            let is_selected = i == selected;
+            let cursor = if is_selected { "\u{25b8} " } else { "  " }; // ▸
+            let name_style = if is_selected {
                 theme.selection()
             } else {
                 theme.text()
             };
             ListItem::new(Line::from(vec![
-                Span::raw(format!("{marker} ")),
-                Span::styled(&section.name, style),
+                Span::styled(cursor, if is_selected { theme.accent() } else { theme.muted() }),
+                Span::styled(format!("{marker} "), theme.muted()),
+                Span::styled(&section.name, name_style),
                 Span::styled(
                     format!("  ({} keys)", section.entries.len()),
                     theme.muted(),
@@ -135,23 +135,35 @@ fn render_section_detail(
     frame: &mut Frame<'_>,
     area: Rect,
     sections: &[ConfigSection],
-    view_state: &ViewState,
+    selected: usize,
     theme: &Theme,
 ) {
+    let section_name = sections
+        .get(selected)
+        .map(|s| s.name.as_str())
+        .unwrap_or("config");
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Config Values ")
+        .title(format!(" {section_name} "))
         .border_style(theme.accent());
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let Some(section) = sections.get(view_state.selected) else {
-        let empty = Paragraph::new("select a section from the left panel")
+    let Some(section) = sections.get(selected) else {
+        let empty = Paragraph::new("select a section with j/k")
             .style(theme.muted())
             .wrap(Wrap { trim: false });
         frame.render_widget(empty, inner);
         return;
     };
+
+    if !section.expanded {
+        let hint = Paragraph::new("press Enter to expand this section")
+            .style(theme.muted())
+            .wrap(Wrap { trim: false });
+        frame.render_widget(hint, inner);
+        return;
+    }
 
     if section.entries.is_empty() {
         let empty = Paragraph::new("no entries in this section")

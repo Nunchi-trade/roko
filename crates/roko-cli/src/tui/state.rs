@@ -496,6 +496,10 @@ pub struct TuiState {
     pub config_selected: usize,
     /// Scroll offset in the config view.
     pub config_scroll: usize,
+    /// Flag to toggle expand/collapse on the selected config section (consumed each frame).
+    pub config_toggle_expand: bool,
+    /// Which config sections are expanded (indices).
+    pub config_expanded: std::collections::HashSet<usize>,
 
     // -- agent pane --
     /// Active agent pane display group (cycles through available groups).
@@ -596,6 +600,8 @@ impl Default for TuiState {
 
             config_selected: 0,
             config_scroll: 0,
+            config_toggle_expand: false,
+            config_expanded: std::collections::HashSet::new(),
 
             agent_pane_group: 0,
         }

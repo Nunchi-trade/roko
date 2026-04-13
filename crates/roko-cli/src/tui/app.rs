@@ -225,6 +225,17 @@ impl App {
                 }
             }
 
+            // Process deferred state changes before drawing
+            if self.tui_state.config_toggle_expand {
+                self.tui_state.config_toggle_expand = false;
+                let idx = self.tui_state.config_selected;
+                if self.tui_state.config_expanded.contains(&idx) {
+                    self.tui_state.config_expanded.remove(&idx);
+                } else {
+                    self.tui_state.config_expanded.insert(idx);
+                }
+            }
+
             terminal
                 .draw(|frame| self.draw(frame))
                 .context("TUI redraw")?;
@@ -715,31 +726,16 @@ impl App {
                 self.tui_state.config_selected = self.tui_state.config_selected.saturating_sub(1);
             }
             TuiAction::ConfigDown => {
+                // ConfigDown clamped in draw (we don't know section count here)
                 self.tui_state.config_selected = self.tui_state.config_selected.saturating_add(1);
             }
             TuiAction::ConfigLeft => {
-                // Collapse selected section in config view
-                self.tui_state.config_scroll = self.tui_state.config_scroll.saturating_sub(1);
+                // Collapse selected section
+                self.tui_state.config_expanded.remove(&self.tui_state.config_selected);
             }
-            TuiAction::ConfigRight => {
-                // Expand selected section in config view
-                self.tui_state.config_scroll = self.tui_state.config_scroll.saturating_add(1);
-            }
-            TuiAction::ConfigSelect => {
-                // Open config in $EDITOR
-                let config_path = self.workdir.join("roko.toml");
-                if config_path.exists() {
-                    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
-                    // Can't open editor from TUI without leaving alternate screen.
-                    // Write a signal so the user can run `roko config edit` instead.
-                    self.notifications.push(super::modals::Notification::info(
-                        format!("Run `roko config edit` to edit {}", config_path.display()),
-                    ));
-                } else {
-                    self.notifications.push(super::modals::Notification::info(
-                        "No roko.toml found. Run `roko config init` first.".to_string(),
-                    ));
-                }
+            TuiAction::ConfigRight | TuiAction::ConfigSelect => {
+                // Toggle expand/collapse
+                self.tui_state.config_toggle_expand = true;
             }
             TuiAction::MouseClick { x, y } => {
                 // Use hit_test to determine zone
