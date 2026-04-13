@@ -538,4 +538,21 @@ mod tests {
         assert_close(stats.p95_ms(), 300.0);
         assert_close(stats.p99_ms(), 300.0);
     }
+
+    #[test]
+    fn latency_registry_aggregates_provider_percentiles() {
+        let registry = LatencyRegistry::new();
+
+        registry.record("glm-5.1", "zai", 10.0, 100.0, 1);
+        registry.record("glm-5.1", "zai", 20.0, 200.0, 1);
+        registry.record("glm-4.6", "zai", 30.0, 300.0, 1);
+        registry.record("gpt-4o", "openai", 40.0, 400.0, 1);
+
+        let stats = registry.get_all_for_provider("zai");
+        assert_eq!(stats.provider_id, "zai");
+        assert_eq!(stats.observations, 3);
+        assert_close(stats.p50_ms(), 200.0);
+        assert_close(stats.p95_ms(), 300.0);
+        assert_close(stats.p99_ms(), 300.0);
+    }
 }

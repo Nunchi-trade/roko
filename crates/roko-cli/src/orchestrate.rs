@@ -8315,10 +8315,27 @@ impl PlanRunner {
 
         // ── Adaptive model selection via CascadeRouter ───────────────
         let mut selected_model_experiment = None;
-        if let Some(td) = task_def.as_ref() {
+        if let Some(forced_model) = pending_force_model_override {
+            tracing::warn!(
+                forced_model = %forced_model,
+                "applying pending cost-anomaly model override before routing"
+            );
+            selected_model = forced_model;
+        } else if let Some(td) = task_def.as_ref() {
             let cascade_router = self.learning.cascade_router();
             let routing_ctx = cascade_routing_context(self, plan_id, task, role, Some(td));
             let agent_id = format!("{role:?}");
+            let all_model_slugs = cascade_router
+                .linucb()
+                .arm_stats()
+                .into_iter()
+                .map(|arm| arm.slug)
+                .collect::<Vec<_>>();
+            let healthy_models =
+                self.learning
+                    .healthy_model_slugs(&all_model_slugs, |model_slug| {
+                        provider_id_for_routing_model(&roko_config, &model_providers, model_slug)
+                    });
             routing_explanation = Some(cascade_router.explain_route(&routing_ctx, None));
             if let Some(explanation) = routing_explanation.as_ref() {
                 routing_stage = explanation.stage.label().to_string();
@@ -8359,17 +8376,19 @@ impl PlanRunner {
                 selected_model = variant.slug;
                 routing_reason = "experiment_override".to_string();
             } else {
-                match cascade_router.select_for_frequency(
+                match cascade_router.select_for_frequency_among(
                     frequency,
                     Some(&routing_ctx),
                     cfactor_snapshot.as_ref(),
                     Some(agent_id.as_str()),
+                    &healthy_models,
                 ) {
                     Some(model) => {
                         tracing::info!(
-                            "[orchestrate] frequency={} model={} (selected via cascade)",
+                            "[orchestrate] frequency={} model={} healthy_candidates={} (selected via cascade)",
                             frequency_label(frequency),
-                            model.slug
+                            model.slug,
+                            healthy_models.len()
                         );
                         selected_model = model.slug;
                     }
@@ -8448,7 +8467,8 @@ impl PlanRunner {
         };
 
         // ── Provider health check ────────────────────────────────────
-        let selected_provider = self.provider_id_for_model(&selected_model);
+        let selected_provider =
+            provider_id_for_routing_model(&roko_config, &model_providers, &selected_model);
         let selected_model = if !self
             .learning
             .provider_health()
@@ -8504,14 +8524,21 @@ impl PlanRunner {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let mut model_providers = candidate_models
+        let mut routing_model_providers = candidate_models
             .iter()
-            .map(|model| (model.clone(), self.provider_id_for_model(model)))
+            .map(|model| {
+                (
+                    model.clone(),
+                    provider_id_for_routing_model(&roko_config, &model_providers, model),
+                )
+            })
             .collect::<HashMap<_, _>>();
-        model_providers
+        routing_model_providers
             .entry(selected_model.clone())
-            .or_insert_with(|| self.provider_id_for_model(&selected_model));
-        let disqualifications = model_providers
+            .or_insert_with(|| {
+                provider_id_for_routing_model(&roko_config, &model_providers, &selected_model)
+            });
+        let disqualifications = routing_model_providers
             .iter()
             .filter_map(|(model, provider)| {
                 (!self.learning.provider_health().is_healthy(provider))
@@ -8533,7 +8560,7 @@ impl PlanRunner {
         match RoutingLogger::open_creating(routing_log_path(&self.workdir)) {
             Ok(logger) => {
                 let logger = logger
-                    .with_model_providers(model_providers)
+                    .with_model_providers(routing_model_providers)
                     .with_disqualifications(disqualifications);
                 match self.learning.cascade_router().append_routing_log(
                     &logger,

@@ -389,6 +389,10 @@ impl ProviderAdapter for OpenAiCompatAdapter {
             agent = agent.with_provider_semaphores(model.provider.clone(), provider_semaphores);
         }
 
+        if let Some(provider_semaphores) = options.provider_semaphores.clone() {
+            agent = agent.with_provider_semaphores(model.provider.clone(), provider_semaphores);
+        }
+
         Ok(Box::new(agent))
     }
 

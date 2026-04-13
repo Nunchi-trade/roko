@@ -41,7 +41,6 @@ use crate::model_router::{
     COLD_START_THRESHOLD, CONTEXT_DIM, CandidateArmScore, LinUCBRouter, RoutingContext,
     compute_routing_reward_v2,
 };
-
 use crate::pareto::{ModelObservation, compute_pareto_frontier};
 use crate::provider_health::ProviderHealthRegistry;
 use crate::routing_log::{CandidateEntry, RoutingDecisionLog, RoutingDecisionMeta, RoutingLogger};
