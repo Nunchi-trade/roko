@@ -1572,6 +1572,7 @@ mod tests {
                 half_life_days: 30.0,
                 tier: KnowledgeTier::Consolidated,
                 emotional_tag: None,
+                emotional_provenance: None,
                 hdc_vector: None,
             })
             .expect("add knowledge");
@@ -1667,6 +1668,7 @@ mod tests {
                 half_life_days: 30.0,
                 tier: KnowledgeTier::Consolidated,
                 emotional_tag: None,
+                emotional_provenance: None,
                 hdc_vector: None,
             })
             .expect("add strategy fragment");
@@ -1688,6 +1690,7 @@ mod tests {
                 half_life_days: 30.0,
                 tier: KnowledgeTier::Working,
                 emotional_tag: None,
+                emotional_provenance: None,
                 hdc_vector: None,
             })
             .expect("add anti-knowledge");
@@ -1709,6 +1712,7 @@ mod tests {
                 half_life_days: 30.0,
                 tier: KnowledgeTier::Consolidated,
                 emotional_tag: None,
+                emotional_provenance: None,
                 hdc_vector: None,
             })
             .expect("add insight");
@@ -1843,6 +1847,7 @@ mod tests {
                     half_life_days: KnowledgeKind::AntiKnowledge.default_half_life_days(),
                     tier: KnowledgeTier::Working,
                     emotional_tag: None,
+                    emotional_provenance: None,
                     hdc_vector: None,
                 })
                 .expect("add anti-knowledge");
@@ -1866,6 +1871,7 @@ mod tests {
                 half_life_days: KnowledgeKind::StrategyFragment.default_half_life_days(),
                 tier: KnowledgeTier::Consolidated,
                 emotional_tag: None,
+                emotional_provenance: None,
                 hdc_vector: None,
             })
             .expect("add strategy");
@@ -1936,6 +1942,7 @@ mod tests {
                     half_life_days: KnowledgeKind::Heuristic.default_half_life_days(),
                     tier: KnowledgeTier::Consolidated,
                     emotional_tag: None,
+                    emotional_provenance: None,
                     hdc_vector: None,
                 })
                 .expect("add heuristic");
@@ -1959,6 +1966,7 @@ mod tests {
                 half_life_days: KnowledgeKind::Warning.default_half_life_days(),
                 tier: KnowledgeTier::Consolidated,
                 emotional_tag: None,
+                emotional_provenance: None,
                 hdc_vector: None,
             })
             .expect("add warning");

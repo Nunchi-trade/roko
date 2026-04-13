@@ -265,6 +265,7 @@ mod tests {
             created_at: Utc::now(),
             half_life_days: kind.default_half_life_days(),
             tier: KnowledgeTier::Working,
+            emotional_provenance: None,
             hdc_vector: None,
         }
     }

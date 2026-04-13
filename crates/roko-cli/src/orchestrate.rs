@@ -80,7 +80,9 @@ use roko_learn::skill_library::Skill;
 use roko_learn::skill_library::{
     SkillExtractionRequest, SkillGateResult, SkillLibrary, SkillQuery,
 };
-use roko_neuro::{KnowledgeEntry, KnowledgeKind, KnowledgeStore, KnowledgeTier, NeuroStore};
+use roko_neuro::{
+    EmotionalProvenance, KnowledgeEntry, KnowledgeKind, KnowledgeStore, KnowledgeTier, NeuroStore,
+};
 use roko_orchestrator::worktree::{WorktreeConfig, WorktreeManager};
 use roko_orchestrator::{
     EventKind, EventLog, EventLogSnapshot, ExecutorAction, ExecutorEvent, ExecutorSnapshot,
@@ -4294,6 +4296,7 @@ impl PlanRunner {
                                     "Gate '{phase}' failed for task {anti_task_id} in plan {plan_id}: {snippet}"
                                 )
                             };
+                            let gate_failure_tag = self.daimon.emotional_tag("gate_failure");
                             let anti_entry = KnowledgeEntry {
                                 id: format!("anti-gate-{plan_id}-{anti_task_id}-{rung}"),
                                 kind: KnowledgeKind::AntiKnowledge,
@@ -4315,7 +4318,10 @@ impl PlanRunner {
                                 half_life_days: KnowledgeKind::AntiKnowledge
                                     .default_half_life_days(),
                                 tier: KnowledgeTier::Working,
-                                emotional_tag: Some(self.daimon.emotional_tag("gate_failure")),
+                                emotional_tag: Some(gate_failure_tag.clone()),
+                                emotional_provenance: Some(EmotionalProvenance::from_tag(
+                                    &gate_failure_tag,
+                                )),
                                 hdc_vector: None,
                             };
                             if let Err(e) = self.knowledge_store.add(anti_entry) {
@@ -10546,6 +10552,11 @@ fn build_success_knowledge_entry(
         half_life_days: kind.default_half_life_days(),
         tier: KnowledgeTier::Transient,
         emotional_tag: result.output.emotional_tag.clone(),
+        emotional_provenance: result
+            .output
+            .emotional_tag
+            .as_ref()
+            .map(EmotionalProvenance::from_tag),
         hdc_vector: None,
     }
 }

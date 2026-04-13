@@ -794,7 +794,7 @@ fn effective_half_life_days(entry: &KnowledgeEntry) -> f64 {
 }
 
 fn effective_confidence(entry: &KnowledgeEntry) -> f64 {
-    bounded_confidence(entry) * confirmation_boost(entry)
+    bounded_confidence(entry) * confirmation_boost(entry) * entry.emotional_reliability_boost()
 }
 
 fn bounded_confidence(entry: &KnowledgeEntry) -> f64 {
@@ -923,6 +923,7 @@ mod tests {
     use super::*;
     use crate::{KnowledgeKind, KnowledgeTier};
     use chrono::Duration;
+    use roko_core::PadVector;
     use tempfile::TempDir;
 
     fn entry(
@@ -954,6 +955,7 @@ mod tests {
             half_life_days: kind.default_half_life_days(),
             tier: KnowledgeTier::Consolidated,
             emotional_tag: None,
+            emotional_provenance: None,
             hdc_vector: None,
         }
     }
@@ -1034,6 +1036,55 @@ mod tests {
     }
 
     #[test]
+    fn query_prefers_entries_validated_across_diverse_emotional_states() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let now = Utc::now();
+
+        let mut high_diversity = entry(
+            KnowledgeKind::Warning,
+            "k-diverse",
+            "Check rollback health before retrying a failed rollout",
+            &["deploy", "rollback"],
+            0.8,
+            &["ep-a", "ep-b"],
+            now,
+        );
+        high_diversity.emotional_provenance = Some(crate::EmotionalProvenance {
+            average_pad: PadVector::new(-0.2, 0.3, 0.0),
+            discovery_emotion: "negative_high_arousal".to_string(),
+            validation_arc: Some(crate::ValidationArc::Redemptive),
+            emotional_diversity: 1.0,
+        });
+
+        let mut low_diversity = entry(
+            KnowledgeKind::Warning,
+            "k-narrow",
+            "Check rollback health before retrying a failed rollout",
+            &["deploy", "rollback"],
+            0.8,
+            &["ep-c", "ep-d"],
+            now,
+        );
+        low_diversity.emotional_provenance = Some(crate::EmotionalProvenance {
+            average_pad: PadVector::new(-0.2, 0.3, 0.0),
+            discovery_emotion: "negative_high_arousal".to_string(),
+            validation_arc: Some(crate::ValidationArc::Stable),
+            emotional_diversity: 0.0,
+        });
+
+        store.add(low_diversity).expect("add narrow");
+        store.add(high_diversity).expect("add diverse");
+
+        let results = store
+            .query("retry failed rollout rollback health", 2)
+            .expect("query");
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].id, "k-diverse");
+        assert_eq!(results[1].id, "k-narrow");
+    }
+
+    #[test]
     fn decay_preserves_antiknowledge_confidence_floor() {
         let tmp = TempDir::new().expect("tempdir");
         let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
@@ -1057,6 +1108,7 @@ mod tests {
                 half_life_days: KnowledgeKind::AntiKnowledge.default_half_life_days(),
                 tier: KnowledgeTier::Working,
                 emotional_tag: None,
+                emotional_provenance: None,
                 hdc_vector: None,
             })
             .expect("add anti knowledge");
@@ -1122,10 +1174,10 @@ mod tests {
             .find(|entry| entry.id == "heuristic")
             .expect("heuristic");
 
-        assert!(heuristic.confidence > strategy.confidence);
-        assert!(strategy.confidence > insight.confidence);
+        assert!(heuristic.confidence > insight.confidence);
+        assert!(insight.confidence > strategy.confidence);
         assert!((insight.confidence - 0.5).abs() < 0.05);
-        assert!((strategy.confidence - 0.71).abs() < 0.05);
+        assert!((strategy.confidence - 0.22).abs() < 0.05);
         assert!((heuristic.confidence - 0.79).abs() < 0.05);
     }
 
@@ -1217,6 +1269,7 @@ mod tests {
                 half_life_days: KnowledgeKind::AntiKnowledge.default_half_life_days(),
                 tier: KnowledgeTier::Working,
                 emotional_tag: None,
+                emotional_provenance: None,
                 hdc_vector: None,
             })
             .expect("add anti knowledge");
@@ -1266,6 +1319,7 @@ mod tests {
                 half_life_days: KnowledgeKind::AntiKnowledge.default_half_life_days(),
                 tier: KnowledgeTier::Working,
                 emotional_tag: None,
+                emotional_provenance: None,
                 hdc_vector: None,
             })
             .expect("add anti knowledge");
@@ -1305,6 +1359,7 @@ mod tests {
                 half_life_days: KnowledgeKind::Insight.default_half_life_days(),
                 tier: KnowledgeTier::Consolidated,
                 emotional_tag: None,
+                emotional_provenance: None,
                 hdc_vector: None,
             })
             .expect("add oldest");
@@ -1326,6 +1381,7 @@ mod tests {
                 half_life_days: KnowledgeKind::StrategyFragment.default_half_life_days(),
                 tier: KnowledgeTier::Consolidated,
                 emotional_tag: None,
+                emotional_provenance: None,
                 hdc_vector: None,
             })
             .expect("add middle");
@@ -1347,6 +1403,7 @@ mod tests {
                 half_life_days: KnowledgeKind::Insight.default_half_life_days(),
                 tier: KnowledgeTier::Consolidated,
                 emotional_tag: None,
+                emotional_provenance: None,
                 hdc_vector: None,
             })
             .expect("add newest");
@@ -1592,6 +1649,7 @@ mod tests {
             half_life_days: KnowledgeKind::AntiKnowledge.default_half_life_days(),
             tier: KnowledgeTier::Working,
             emotional_tag: None,
+            emotional_provenance: None,
             hdc_vector: None,
         };
 

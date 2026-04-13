@@ -5,7 +5,7 @@
 //! fragments, then
 //! normalizes the structured response into [`KnowledgeEntry`] values.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -20,7 +20,7 @@ use roko_learn::episode_logger::Episode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{KnowledgeEntry, KnowledgeKind};
+use crate::{EmotionalProvenance, KnowledgeEntry, KnowledgeKind, ValidationArc};
 
 const DEFAULT_MODEL: &str = "claude-haiku-3-5";
 const DEFAULT_MAX_TOKENS: u32 = 2_048;
@@ -188,7 +188,7 @@ impl DistillationCandidate {
         mut self,
         fallback_source: Option<&[String]>,
         episode_models: &BTreeMap<String, String>,
-        episode_affect: &BTreeMap<String, EmotionalTag>,
+        episode_affect: &BTreeMap<String, EpisodeAffectSnapshot>,
     ) -> Option<KnowledgeEntry> {
         let content = self.content.trim();
         if content.is_empty() {
@@ -224,8 +224,8 @@ impl DistillationCandidate {
             .half_life_days
             .filter(|value| value.is_finite() && *value > 0.0)
             .unwrap_or_else(|| self.kind.default_half_life_days());
-        let emotional_tag =
-            aggregate_emotional_tag(&self.source_episodes, episode_affect, self.kind);
+        let (emotional_tag, emotional_provenance) =
+            aggregate_emotional_metadata(&self.source_episodes, episode_affect, self.kind);
 
         Some(KnowledgeEntry {
             id: derive_knowledge_id(self.kind, content, &self.source_episodes, &self.tags),
@@ -244,9 +244,17 @@ impl DistillationCandidate {
             half_life_days,
             tier: Default::default(),
             emotional_tag,
+            emotional_provenance,
             hdc_vector: None,
         })
     }
+}
+
+#[derive(Debug, Clone)]
+struct EpisodeAffectSnapshot {
+    tag: EmotionalTag,
+    success: bool,
+    completed_at: chrono::DateTime<Utc>,
 }
 
 #[derive(Debug, Serialize)]
@@ -449,49 +457,70 @@ fn episode_models_by_source(episodes: &[Episode]) -> BTreeMap<String, String> {
     models
 }
 
-fn episode_affect_by_source(episodes: &[Episode]) -> BTreeMap<String, EmotionalTag> {
+fn episode_affect_by_source(episodes: &[Episode]) -> BTreeMap<String, EpisodeAffectSnapshot> {
     let mut affect = BTreeMap::new();
     for episode in episodes {
         let Some(tag) = episode.emotional_tag.clone() else {
             continue;
         };
-        affect.insert(episode_source_id(episode).to_string(), tag);
+        affect.insert(
+            episode_source_id(episode).to_string(),
+            EpisodeAffectSnapshot {
+                tag,
+                success: episode.success,
+                completed_at: episode.completed_at,
+            },
+        );
     }
     affect
 }
 
-fn aggregate_emotional_tag(
+fn aggregate_emotional_metadata(
     source_episodes: &[String],
-    episode_affect: &BTreeMap<String, EmotionalTag>,
+    episode_affect: &BTreeMap<String, EpisodeAffectSnapshot>,
     kind: KnowledgeKind,
-) -> Option<EmotionalTag> {
+) -> (Option<EmotionalTag>, Option<EmotionalProvenance>) {
+    let mut snapshots = Vec::new();
     let mut pads = Vec::new();
     let mut moods = Vec::new();
     let mut intensity_sum = 0.0_f64;
 
     for source in source_episodes {
-        let Some(tag) = episode_affect.get(source) else {
+        let Some(snapshot) = episode_affect.get(source) else {
             continue;
         };
-        pads.push(tag.pad);
-        moods.push(tag.mood_snapshot);
-        intensity_sum += f64::from(tag.intensity).clamp(0.0, 1.0);
+        pads.push(snapshot.tag.pad);
+        moods.push(snapshot.tag.mood_snapshot);
+        intensity_sum += f64::from(snapshot.tag.intensity).clamp(0.0, 1.0);
+        snapshots.push(snapshot.clone());
     }
 
     if pads.is_empty() {
-        return None;
+        return (None, None);
     }
 
     let average_pad = average_pad_vector(&pads);
     let average_mood = average_pad_vector(&moods);
     let mean_intensity = (intensity_sum / pads.len() as f64).clamp(0.0, 1.0) as f32;
+    snapshots.sort_by_key(|snapshot| snapshot.completed_at);
 
-    Some(EmotionalTag::new(
+    let emotional_tag = EmotionalTag::new(
         average_pad,
         mean_intensity,
         format!("distilled:{}", kind.as_str()),
         average_mood,
-    ))
+    );
+    let emotional_provenance = EmotionalProvenance {
+        average_pad,
+        discovery_emotion: snapshots
+            .first()
+            .map(|snapshot| EmotionalProvenance::coarse_emotion_label(snapshot.tag.pad))
+            .unwrap_or_else(|| "neutral_mid_arousal".to_string()),
+        validation_arc: infer_validation_arc(&snapshots),
+        emotional_diversity: emotional_diversity(&snapshots),
+    };
+
+    (Some(emotional_tag), Some(emotional_provenance))
 }
 
 fn average_pad_vector(vectors: &[PadVector]) -> PadVector {
@@ -504,6 +533,71 @@ fn average_pad_vector(vectors: &[PadVector]) -> PadVector {
     let arousal = vectors.iter().map(|pad| pad.arousal).sum::<f64>() / len;
     let dominance = vectors.iter().map(|pad| pad.dominance).sum::<f64>() / len;
     PadVector::new(pleasure, arousal, dominance).clamped()
+}
+
+fn emotional_diversity(snapshots: &[EpisodeAffectSnapshot]) -> f64 {
+    if snapshots.is_empty() {
+        return 0.0;
+    }
+
+    let mut counts: HashMap<String, u32> = HashMap::new();
+    for snapshot in snapshots {
+        *counts
+            .entry(EmotionalProvenance::coarse_emotion_label(snapshot.tag.pad))
+            .or_insert(0) += 1;
+    }
+
+    let total = counts.values().copied().sum::<u32>() as f64;
+    if total <= 0.0 {
+        return 0.0;
+    }
+
+    let mut entropy = 0.0_f64;
+    for count in counts.values().copied() {
+        let p = count as f64 / total;
+        if p > 0.0 {
+            entropy -= p * p.log2();
+        }
+    }
+
+    let max_entropy = (counts.len() as f64).log2();
+    if max_entropy > 0.0 {
+        (entropy / max_entropy).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn infer_validation_arc(snapshots: &[EpisodeAffectSnapshot]) -> Option<ValidationArc> {
+    if snapshots.len() < 2 {
+        return None;
+    }
+
+    let first = episode_sentiment(snapshots.first()?);
+    let last = episode_sentiment(snapshots.last()?);
+    let all_same_outcome = snapshots
+        .windows(2)
+        .all(|pair| pair[0].success == pair[1].success);
+
+    if first <= -0.15 && last >= 0.15 {
+        return Some(ValidationArc::Redemptive);
+    }
+    if first >= 0.15 && last <= -0.15 {
+        return Some(ValidationArc::Contaminating);
+    }
+    if last > first + 0.20 {
+        return Some(ValidationArc::Progressive);
+    }
+    if all_same_outcome {
+        return Some(ValidationArc::Stable);
+    }
+
+    Some(ValidationArc::Stable)
+}
+
+fn episode_sentiment(snapshot: &EpisodeAffectSnapshot) -> f64 {
+    let outcome_bias = if snapshot.success { 0.20 } else { -0.20 };
+    (snapshot.tag.pad.pleasure + outcome_bias).clamp(-1.0, 1.0)
 }
 
 fn inferred_model_scope(
@@ -690,6 +784,7 @@ mod tests {
         );
         let distiller = Distiller::with_backend(backend);
         let mut first = episode("signal-a", "ep-a", false);
+        first.completed_at = Utc::now() - chrono::Duration::minutes(10);
         first.emotional_tag = Some(EmotionalTag::new(
             PadVector::new(-0.8, 0.7, -0.1),
             0.9,
@@ -697,12 +792,14 @@ mod tests {
             PadVector::new(-0.7, 0.6, -0.1),
         ));
         let mut second = episode("signal-b", "ep-b", false);
+        second.completed_at = Utc::now();
         second.emotional_tag = Some(EmotionalTag::new(
-            PadVector::new(-0.6, 0.5, 0.0),
+            PadVector::new(0.7, 0.2, 0.4),
             0.7,
-            "rollback_alarm",
-            PadVector::new(-0.5, 0.4, 0.0),
+            "rollback_recovered",
+            PadVector::new(0.6, 0.1, 0.3),
         ));
+        second.success = true;
 
         let entries = distiller.distill(&[first, second]).await.expect("distill");
         assert_eq!(entries.len(), 1);
@@ -712,10 +809,19 @@ mod tests {
             .expect("emotional provenance");
         assert_eq!(tag.trigger, "distilled:warning");
         assert!((f64::from(tag.intensity) - 0.8).abs() < 0.001);
-        assert!(tag.pad.pleasure < -0.65);
-        assert!(tag.pad.arousal > 0.55);
-        assert!(tag.mood_snapshot.pleasure < -0.55);
-        assert!(tag.mood_snapshot.arousal > 0.45);
+        assert!((tag.pad.pleasure + 0.05).abs() < 0.001);
+        assert!(tag.pad.arousal > 0.44);
+        assert!((tag.mood_snapshot.pleasure + 0.05).abs() < 0.001);
+        assert!(tag.mood_snapshot.arousal > 0.34);
+
+        let provenance = entries[0]
+            .emotional_provenance
+            .as_ref()
+            .expect("emotional provenance metadata");
+        assert_eq!(provenance.discovery_emotion, "negative_high_arousal");
+        assert_eq!(provenance.validation_arc, Some(ValidationArc::Redemptive));
+        assert!((provenance.emotional_diversity - 1.0).abs() < 0.001);
+        assert!((provenance.average_pad.pleasure + 0.05).abs() < 0.001);
     }
 
     #[test]

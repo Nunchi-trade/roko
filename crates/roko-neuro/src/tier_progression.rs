@@ -403,6 +403,7 @@ impl From<&InsightRecord> for KnowledgeEntry {
             half_life_days: KnowledgeKind::Insight.default_half_life_days(),
             tier: KnowledgeTier::Consolidated,
             emotional_tag: None,
+            emotional_provenance: None,
             hdc_vector: None,
         }
     }
@@ -431,6 +432,7 @@ impl From<&HeuristicRule> for KnowledgeEntry {
             half_life_days: KnowledgeKind::Heuristic.default_half_life_days(),
             tier: KnowledgeTier::Consolidated,
             emotional_tag: None,
+            emotional_provenance: None,
             hdc_vector: None,
         }
     }
@@ -465,6 +467,7 @@ impl From<&PlaybookCompilation> for KnowledgeEntry {
             half_life_days: DEFAULT_HALF_LIFE_DAYS,
             tier: KnowledgeTier::Persistent,
             emotional_tag: None,
+            emotional_provenance: None,
             hdc_vector: None,
         }
     }

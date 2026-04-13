@@ -120,6 +120,67 @@ impl KnowledgeTier {
     }
 }
 
+/// Narrative shape of how emotionally tagged evidence evolved over time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationArc {
+    /// Negative or failure-heavy evidence that later resolved positively.
+    Redemptive,
+    /// Initially positive evidence that degraded into a negative outcome.
+    Contaminating,
+    /// Mostly steady evidence without a strong directional change.
+    Stable,
+    /// Gradual improvement without a sharp redemption boundary.
+    Progressive,
+}
+
+/// Emotional reliability metadata derived from the supporting episodes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EmotionalProvenance {
+    /// Mean PAD signal across the supporting episodes.
+    pub average_pad: PadVector,
+    /// Coarse PAD-derived emotional label at first discovery.
+    pub discovery_emotion: String,
+    /// Narrative arc inferred from the emotional trajectory over time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation_arc: Option<ValidationArc>,
+    /// Normalized Shannon entropy across coarse emotional labels.
+    pub emotional_diversity: f64,
+}
+
+impl EmotionalProvenance {
+    /// Build provenance metadata from a single emotional observation.
+    #[must_use]
+    pub fn from_tag(tag: &EmotionalTag) -> Self {
+        Self {
+            average_pad: tag.pad,
+            discovery_emotion: Self::coarse_emotion_label(tag.pad),
+            validation_arc: None,
+            emotional_diversity: 0.0,
+        }
+    }
+
+    /// Derive a coarse PAD-based emotional bucket.
+    #[must_use]
+    pub fn coarse_emotion_label(pad: PadVector) -> String {
+        let valence = if pad.pleasure >= 0.2 {
+            "positive"
+        } else if pad.pleasure <= -0.2 {
+            "negative"
+        } else {
+            "neutral"
+        };
+        let arousal = if pad.arousal >= 0.35 {
+            "high_arousal"
+        } else if pad.arousal <= -0.35 {
+            "low_arousal"
+        } else {
+            "mid_arousal"
+        };
+        format!("{valence}_{arousal}")
+    }
+}
+
 /// A durable unit of knowledge used for retrieval and memory.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KnowledgeEntry {
@@ -173,6 +234,9 @@ pub struct KnowledgeEntry {
     /// Optional affect provenance transferred from supporting episodes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emotional_tag: Option<EmotionalTag>,
+    /// Optional emotional reliability metadata derived from the support set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emotional_provenance: Option<EmotionalProvenance>,
     /// Optional HDC fingerprint for similarity search.
     #[serde(default)]
     pub hdc_vector: Option<Vec<u8>>,
@@ -230,6 +294,15 @@ impl KnowledgeEntry {
             .as_ref()
             .map(|tag| tag.mood_snapshot)
             .unwrap_or_else(PadVector::neutral)
+    }
+
+    /// Modest retrieval multiplier derived from emotional diversity.
+    #[must_use]
+    pub fn emotional_reliability_boost(&self) -> f64 {
+        self.emotional_provenance
+            .as_ref()
+            .map(|provenance| 1.0 + provenance.emotional_diversity.clamp(0.0, 1.0) * 0.15)
+            .unwrap_or(1.0)
     }
 }
 
@@ -305,6 +378,7 @@ mod tests {
             half_life_days: 20.0,
             tier: KnowledgeTier::Persistent,
             emotional_tag: None,
+            emotional_provenance: None,
             hdc_vector: None,
         };
 
