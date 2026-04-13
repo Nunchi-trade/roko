@@ -42,6 +42,7 @@ use crate::skill_library::{SkillLibrary, SkillLibraryError, TemplatePatternGener
 use roko_core::ConductorDecision;
 use roko_core::agent::AgentRole;
 use roko_core::task::{TaskCategory, TaskComplexityBand};
+use roko_core::DaimonPolicy;
 use roko_daimon::{AffectEngine as _, AffectEvent, DaimonState, queue_wait_arousal};
 
 type EpisodeCompletionHook = Arc<dyn Fn(Episode) + Send + Sync>;
@@ -981,8 +982,10 @@ impl LearningRuntime {
             role,
             crate_familiarity,
             has_prior_failure: !episode.success,
-            affect_confidence: extra_f64(episode, "affect_confidence").unwrap_or(0.5),
-            behavioral_state: roko_core::BehavioralState::Engaged,
+            daimon_policy: DaimonPolicy::new(
+                extra_f64(episode, "affect_confidence").unwrap_or(0.5),
+                roko_core::BehavioralState::Engaged,
+            ),
             thinking_level: None,
             previous_model: None,
             plan_context_tokens: None,
@@ -2055,8 +2058,7 @@ mod tests {
             role: roko_core::agent::AgentRole::Implementer,
             crate_familiarity: 0.5,
             has_prior_failure: false,
-            affect_confidence: 0.5,
-            behavioral_state: roko_core::BehavioralState::Engaged,
+            daimon_policy: DaimonPolicy::default(),
             thinking_level: None,
             previous_model: None,
             plan_context_tokens: None,
@@ -2182,8 +2184,7 @@ mod tests {
             role: AgentRole::Implementer,
             crate_familiarity: 0.5,
             has_prior_failure: false,
-            affect_confidence: 0.5,
-            behavioral_state: roko_core::BehavioralState::Engaged,
+            daimon_policy: DaimonPolicy::default(),
             thinking_level: None,
             previous_model: None,
             plan_context_tokens: None,
@@ -2387,8 +2388,7 @@ mod tests {
             role: AgentRole::Implementer,
             crate_familiarity: 0.5,
             has_prior_failure: false,
-            affect_confidence: 0.5,
-            behavioral_state: roko_core::BehavioralState::Engaged,
+            daimon_policy: DaimonPolicy::default(),
             thinking_level: None,
             previous_model: None,
             plan_context_tokens: None,
@@ -2425,8 +2425,7 @@ mod tests {
             role: AgentRole::Implementer,
             crate_familiarity: 0.5,
             has_prior_failure: false,
-            affect_confidence: 0.5,
-            behavioral_state: roko_core::BehavioralState::Engaged,
+            daimon_policy: DaimonPolicy::default(),
             thinking_level: None,
             previous_model: None,
             plan_context_tokens: None,

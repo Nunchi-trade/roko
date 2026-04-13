@@ -30,7 +30,7 @@ use roko_core::agent::{AgentRole, ProviderKind};
 use roko_core::config::ServeDeployWebhookConfig;
 use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
 use roko_core::task::{TaskCategory, TaskComplexityBand};
-use roko_core::{ContentHash, Context, Kind, Query, Substrate};
+use roko_core::{ContentHash, Context, DaimonPolicy, Kind, Query, Substrate};
 use roko_core::{Headlines, TaskMetric, compute_headlines};
 use roko_dreams::{DreamAgentConfig, DreamEngine, DreamLoopConfig, DreamRunner};
 use roko_fs::{FileSubstrate, FsObservabilitySinks, RokoLayout};
@@ -1706,8 +1706,7 @@ fn cmd_model_route(
         role,
         crate_familiarity: 0.0,
         has_prior_failure: false,
-        affect_confidence: 0.5,
-        behavioral_state: roko_core::BehavioralState::Engaged,
+        daimon_policy: DaimonPolicy::default(),
         thinking_level: None,
         previous_model: Some(requested_slug.clone()),
         plan_context_tokens: None,

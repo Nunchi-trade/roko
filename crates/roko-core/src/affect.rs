@@ -131,6 +131,32 @@ impl BehavioralState {
     }
 }
 
+/// First-class affect policy payload consumed by routing and other online decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct DaimonPolicy {
+    /// Affect-derived confidence hint in `[0.0, 1.0]`.
+    pub affect_confidence: f64,
+    /// Current discrete behavioral state from the Daimon.
+    pub behavioral_state: BehavioralState,
+}
+
+impl Default for DaimonPolicy {
+    fn default() -> Self {
+        Self::new(0.5, BehavioralState::Engaged)
+    }
+}
+
+impl DaimonPolicy {
+    /// Construct a normalized policy snapshot.
+    #[must_use]
+    pub fn new(affect_confidence: f64, behavioral_state: BehavioralState) -> Self {
+        Self {
+            affect_confidence: affect_confidence.clamp(0.0, 1.0),
+            behavioral_state,
+        }
+    }
+}
+
 /// Optional emotional metadata attached to an Engram.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EmotionalTag {
@@ -213,5 +239,12 @@ mod tests {
         assert_eq!(tag.pad, PadVector::new(1.0, -1.0, 0.5));
         assert_eq!(tag.intensity, 1.0);
         assert_eq!(tag.mood_snapshot, PadVector::new(0.1, 0.2, 1.0));
+    }
+
+    #[test]
+    fn daimon_policy_clamps_confidence() {
+        let policy = DaimonPolicy::new(1.5, BehavioralState::Focused);
+        assert_eq!(policy.affect_confidence, 1.0);
+        assert_eq!(policy.behavioral_state, BehavioralState::Focused);
     }
 }

@@ -38,6 +38,7 @@ use roko_conductor::{Conductor, ConductorDecision};
 use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::config::schema::RokoConfig;
 use roko_core::metric::{ConfigHash, TaskMetric};
+use roko_core::DaimonPolicy;
 use roko_core::obs::health::{AlwaysUpProbe, ProbeRegistry};
 use roko_core::obs::{LabelSet, MetricRegistry};
 use roko_core::tool::TraceId;
@@ -1669,8 +1670,7 @@ fn cascade_routing_context(
         role,
         crate_familiarity,
         has_prior_failure,
-        affect_confidence: affect.confidence,
-        behavioral_state: affect.behavioral_state,
+        daimon_policy: DaimonPolicy::new(affect.confidence, affect.behavioral_state),
         thinking_level: Some(runner.config.agent.effort.clone()),
         previous_model: None,
         plan_context_tokens: None,

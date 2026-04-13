@@ -76,7 +76,7 @@ These are fully specified in the legacy PRDs and/or `refactoring-prd` but have n
 | F5 | Behavior modulation table | **Done** (both crates) |
 | F6 | Affect signatures on episodes | **Partial** — Engrams, episodes, Neuro distillation, and direct knowledge emission now carry emotional tags plus derived emotional provenance; the remaining gap is the fuller somatic-landscape path and broader cross-subsystem weighting |
 | F7 | Affect → SystemPromptBuilder | **Done** — live Daimon PAD now feeds affect guidance in the system prompt |
-| F8 | Affect → CascadeRouter | **Done** — live Daimon behavioral state and confidence now bias routing decisions |
+| F8 | Affect → CascadeRouter | **Done** — live Daimon behavioral state and confidence now arrive as a first-class `DaimonPolicy` in routing decisions |
 | F9 | Persistence (autosave + load) | **Done** |
 
 ### Unimplemented Features by Category
@@ -155,7 +155,7 @@ Based on `refactoring-prd/07-implementation-priorities.md`:
 | **0C** | Dissolve roko-golem, consolidate affect logic into roko-daimon | **Complete** |
 | **2D** | Daimon PAD tracking (F1-F5, F9) — core appraisal and modulation | **Complete** |
 | **2E** | Behavioral modulation (F5) — behavioral states and dispatch strategy | **Complete** |
-| **2D+** | Affect on episodes (F6), affect→SystemPromptBuilder (F7), affect→CascadeRouter (F8) | Mostly complete; somatic-landscape-backed retrieval and broader cross-subsystem weighting remain |
+| **2D+** | Affect on episodes (F6), affect→SystemPromptBuilder (F7), affect→CascadeRouter (F8) | Mostly complete; routing now has an explicit `DaimonPolicy`, and the remaining gap is somatic-landscape-backed retrieval plus broader cross-subsystem weighting |
 | **2G** | Somatic landscape, 8D strategy space, k-d tree | Partial |
 | **2H** | Emotional memory integration (EmotionalTag, four-factor retrieval) | Partial |
 | **2I** | Dream-daimon bridge (emotional load, depotentiation) | Not started |

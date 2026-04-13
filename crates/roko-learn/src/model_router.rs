@@ -45,10 +45,10 @@
 use crate::cost_table::CostTable;
 use parking_lot::RwLock;
 use rand::Rng;
+use roko_core::DaimonPolicy;
 use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
 pub use roko_core::config::schema::RewardWeights;
 use roko_core::task::{TaskCategory, TaskComplexityBand};
-use roko_core::BehavioralState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -91,10 +91,8 @@ pub struct RoutingContext {
     pub crate_familiarity: f64,
     /// Whether a prior attempt at this task has failed.
     pub has_prior_failure: bool,
-    /// Affect-derived confidence hint in `[0.0, 1.0]`.
-    pub affect_confidence: f64,
-    /// Current discrete behavioral state from the Daimon.
-    pub behavioral_state: BehavioralState,
+    /// First-class affect policy snapshot from the Daimon.
+    pub daimon_policy: DaimonPolicy,
     /// Requested thinking / reasoning level for this task, if any.
     pub thinking_level: Option<String>,
     /// Model used for the previous task in the same plan.
@@ -1271,8 +1269,7 @@ mod tests {
             role: AgentRole::Implementer,
             crate_familiarity: 0.5,
             has_prior_failure: false,
-            affect_confidence: 0.5,
-            behavioral_state: BehavioralState::Engaged,
+            daimon_policy: DaimonPolicy::new(0.5, roko_core::BehavioralState::Engaged),
             thinking_level: None,
             previous_model: None,
             plan_context_tokens: None,

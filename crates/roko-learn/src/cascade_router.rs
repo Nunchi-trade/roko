@@ -25,11 +25,11 @@ use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use roko_agent::provider::ProviderError;
 use roko_agent::{AgentResult, gemini::GeminiMetadata};
+use roko_core::{BehavioralState, DaimonPolicy};
 use roko_core::OperatingFrequency;
 use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
 use roko_core::config::schema::RewardWeights;
 use roko_core::task::{TaskCategory, TaskComplexityBand};
-use roko_core::BehavioralState;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -699,7 +699,7 @@ fn low_confidence_tier_bonus(tier: ModelTier) -> f64 {
 }
 
 fn behavioral_state_tier_shift(ctx: &RoutingContext) -> i8 {
-    match ctx.behavioral_state {
+    match ctx.daimon_policy.behavioral_state {
         BehavioralState::Struggling => 1,
         BehavioralState::Coasting | BehavioralState::Resting | BehavioralState::Focused => -1,
         BehavioralState::Exploring => {
@@ -2265,9 +2265,11 @@ impl CascadeRouter {
         agent_id: Option<&str>,
     ) -> CascadeModel {
         let route = self.route_static_filtered(ctx, candidates);
-        let primary = self.bias_model_for_behavioral_state_among(route.primary.clone(), ctx, candidates);
+        let primary =
+            self.bias_model_for_behavioral_state_among(route.primary.clone(), ctx, candidates);
         let route = self.retarget_route_primary(route, candidates, primary);
-        let primary = self.bias_model_for_cfactor_among(route.primary.clone(), cfactor, agent_id, candidates);
+        let primary =
+            self.bias_model_for_cfactor_among(route.primary.clone(), cfactor, agent_id, candidates);
         self.retarget_route_primary(route, candidates, primary)
     }
 
@@ -2333,9 +2335,11 @@ impl CascadeRouter {
         agent_id: Option<&str>,
     ) -> CascadeModel {
         let route = self.route_confidence_filtered(ctx, candidates);
-        let primary = self.bias_model_for_behavioral_state_among(route.primary.clone(), ctx, candidates);
+        let primary =
+            self.bias_model_for_behavioral_state_among(route.primary.clone(), ctx, candidates);
         let route = self.retarget_route_primary(route, candidates, primary);
-        let primary = self.bias_model_for_cfactor_among(route.primary.clone(), cfactor, agent_id, candidates);
+        let primary =
+            self.bias_model_for_cfactor_among(route.primary.clone(), cfactor, agent_id, candidates);
         self.retarget_route_primary(route, candidates, primary)
     }
 
@@ -2347,8 +2351,7 @@ impl CascadeRouter {
     ) -> CascadeModel {
         let thinking_candidates = thinking_filtered_candidates(&self.model_slugs, ctx);
         let model = self.select_ucb_model(ctx, &thinking_candidates);
-        let selected =
-            self.bias_model_for_behavioral_state_among(model, ctx, &self.model_slugs);
+        let selected = self.bias_model_for_behavioral_state_among(model, ctx, &self.model_slugs);
         let selected = self.bias_model_for_cfactor(selected, cfactor, agent_id);
         let tier = slug_to_tier(&selected.slug);
         let fallback_chain = fallback_chain_for_model(&self.model_slugs, &selected.slug);
@@ -2390,9 +2393,11 @@ impl CascadeRouter {
         agent_id: Option<&str>,
     ) -> CascadeModel {
         let route = self.route_ucb_filtered(ctx, candidates);
-        let primary = self.bias_model_for_behavioral_state_among(route.primary.clone(), ctx, candidates);
+        let primary =
+            self.bias_model_for_behavioral_state_among(route.primary.clone(), ctx, candidates);
         let route = self.retarget_route_primary(route, candidates, primary);
-        let primary = self.bias_model_for_cfactor_among(route.primary.clone(), cfactor, agent_id, candidates);
+        let primary =
+            self.bias_model_for_cfactor_among(route.primary.clone(), cfactor, agent_id, candidates);
         self.retarget_route_primary(route, candidates, primary)
     }
 
@@ -2454,7 +2459,8 @@ impl CascadeRouter {
 
     fn confidence_scores(&self, candidates: &[String], ctx: &RoutingContext) -> Vec<(String, f64)> {
         let stats = self.confidence_stats.lock();
-        let low_confidence = ctx.affect_confidence < LOW_AFFECT_CONFIDENCE_THRESHOLD;
+        let low_confidence =
+            ctx.daimon_policy.affect_confidence < LOW_AFFECT_CONFIDENCE_THRESHOLD;
 
         let mut scores: Vec<(String, f64)> = candidates
             .iter()
@@ -2673,8 +2679,7 @@ fn infer_shadow_routing_context(prompt: &str, primary_result: &AgentResult) -> R
         // Shadow evaluation should compare alternate models against a neutral
         // routing baseline. Reusing the primary outcome's affective state here
         // would leak live dispatch bias into offline evaluation.
-        affect_confidence: 0.5,
-        behavioral_state: BehavioralState::Engaged,
+        daimon_policy: DaimonPolicy::new(0.5, BehavioralState::Engaged),
         thinking_level: None,
         previous_model: primary_result.output.tag("model").map(str::to_string),
         plan_context_tokens: Some((prompt.len() as u64).div_ceil(4)),
@@ -3047,8 +3052,7 @@ mod tests {
             role: AgentRole::Implementer,
             crate_familiarity: 0.5,
             has_prior_failure: false,
-            affect_confidence: 0.5,
-            behavioral_state: BehavioralState::Engaged,
+            daimon_policy: DaimonPolicy::new(0.5, BehavioralState::Engaged),
             thinking_level: None,
             previous_model: None,
             plan_context_tokens: None,
@@ -3339,14 +3343,14 @@ mod tests {
 
         assert_eq!(cascade.current_stage(), CascadeStage::Confidence);
 
-        ctx.affect_confidence = 0.2;
+        ctx.daimon_policy.affect_confidence = 0.2;
         let low_confidence = cascade.route(&ctx);
         assert_eq!(
             low_confidence.primary.slug, "claude-opus-4",
             "low affect confidence should bias toward the stronger premium model"
         );
 
-        ctx.affect_confidence = 0.9;
+        ctx.daimon_policy.affect_confidence = 0.9;
         let high_confidence = cascade.route(&ctx);
         // High confidence allows routing to cheaper models
         assert!(
@@ -3362,11 +3366,11 @@ mod tests {
         let cascade = CascadeRouter::new(test_slugs());
         let mut ctx = default_ctx();
 
-        ctx.behavioral_state = BehavioralState::Struggling;
+        ctx.daimon_policy.behavioral_state = BehavioralState::Struggling;
         let struggling = cascade.route(&ctx);
         assert_eq!(struggling.primary.slug, "claude-opus-4");
 
-        ctx.behavioral_state = BehavioralState::Coasting;
+        ctx.daimon_policy.behavioral_state = BehavioralState::Coasting;
         let coasting = cascade.route(&ctx);
         assert_eq!(coasting.primary.slug, "claude-haiku-3-5");
     }
@@ -4056,8 +4060,8 @@ mod tests {
         let primary = agent_result("done", false, "claude-sonnet-4-5", 800);
         let ctx = infer_shadow_routing_context(prompt, &primary);
 
-        assert_eq!(ctx.behavioral_state, BehavioralState::Engaged);
-        assert!((ctx.affect_confidence - 0.5).abs() < f64::EPSILON);
+        assert_eq!(ctx.daimon_policy.behavioral_state, BehavioralState::Engaged);
+        assert!((ctx.daimon_policy.affect_confidence - 0.5).abs() < f64::EPSILON);
         assert!(ctx.has_prior_failure);
     }
 

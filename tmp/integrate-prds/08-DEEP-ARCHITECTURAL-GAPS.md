@@ -184,9 +184,9 @@ pub struct EmotionalTag {
 - The full Vickrey-Clarke-Groves mechanism is still not wired across subsystems: Neuro, Daimon, iteration memory, code intelligence, playbooks, research, task context, and oracles are not yet bidding in one shared market
 
 ### Daimon → CascadeRouter Integration — PARTIAL
-- Affect state already modulates dispatch through `DispatchParams` and `RoutingContext.affect_confidence`
-- CascadeRouter already biases toward stronger models at low affect confidence
-- **Remaining gap**: deeper behavioral-state-aware routing is still not explicit, and Daimon state is not modeled as a first-class routing policy object
+- Affect state already modulates dispatch through `DispatchParams`, and routing now receives a first-class `RoutingContext.daimon_policy`
+- CascadeRouter already uses explicit Daimon policy inputs for both low-confidence escalation and behavioral-state tier biasing
+- **Remaining gap**: the policy object is currently used in routing, but broader policy consumers such as cross-subsystem VCG bidding and other runtime decision layers are still not unified around it
 
 ---
 
