@@ -224,8 +224,8 @@ benchmarked. False positive threshold derivation (Z-score 5.26, Bonferroni for 1
 
 **Critical gaps:**
 - Tier field / PRD-native types have landed, directional causal encoding is now implemented, and the remaining lag is mostly in higher-order retrieval/runtime features plus status docs
-- `ContextAssembler` base retrieval is implemented and now uses an internal auction-style allocator; cross-subsystem allocation and somatic retrieval remain open
-- Somatic integration is still largely unimplemented: there is no k-d tree, but PAD-biased retrieval plus a contrarian slice now exist in `ContextAssembler`, and emotional tags now flow through Engrams, episodes, and Neuro distillation provenance
+- `ContextAssembler` base retrieval is implemented and now uses an internal auction-style allocator; cross-subsystem allocation and direct somatic retrieval fusion remain open
+- Somatic integration is now partial rather than absent: `roko-daimon` has a real 8D k-d-tree-backed somatic landscape wired into routing, while `ContextAssembler` already provides PAD-biased retrieval plus a contrarian slice; the remaining work is direct fusion into knowledge ranking plus dream-managed emotional maintenance
 - Cross-domain HDC transfer entirely unimplemented
 - Half-life constants now match the PRD for CausalLink (60d) and StrategyFragment (14d)
 

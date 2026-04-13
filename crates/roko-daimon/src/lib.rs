@@ -1,18 +1,29 @@
-//! Daimon affect state and dispatch modulation.
+//! Daimon affect state, somatic markers, and dispatch modulation.
 //!
 //! This crate provides a standalone affect engine for Roko's plan runner.
 //! It owns the current PAD state, appraises task events into that state,
-//! and modulates dispatch parameters for future task runs.
+//! stores situation-specific somatic markers, and modulates dispatch
+//! parameters for future task runs.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use roko_core::{
-    BehavioralState, EmotionalTag, OperatingFrequencyAffect, PadVector,
-};
+use kiddo::{KdTree, SquaredEuclidean};
+use roko_core::{BehavioralState, ContentHash, EmotionalTag, OperatingFrequencyAffect, PadVector};
 use serde::{Deserialize, Serialize};
+
+const STRATEGY_DIMENSIONS: usize = 8;
+const DEFAULT_SOMATIC_NEIGHBORS: usize = 5;
+const CONTRARIAN_FRACTION: f64 = 0.15;
+const SOMATIC_MERGE_DISTANCE_SQUARED: f64 = 0.25;
+
+type SomaticTree = KdTree<f64, STRATEGY_DIMENSIONS>;
+
+fn default_somatic_tree() -> SomaticTree {
+    KdTree::new()
+}
 
 /// Current affect snapshot.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -102,6 +113,362 @@ impl OperatingFrequencyAffect for AffectState {
 
     fn dominance(&self) -> f64 {
         self.pad.dominance
+    }
+}
+
+/// Coordinates in the coding-oriented 8D strategy space.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct StrategyCoordinates {
+    /// Structural difficulty of the change.
+    pub complexity: f64,
+    /// Blast radius and failure cost.
+    pub risk: f64,
+    /// How unfamiliar the task is.
+    pub novelty: f64,
+    /// Local confidence for this attempt.
+    pub confidence: f64,
+    /// Deadline / blockage pressure.
+    pub time_pressure: f64,
+    /// Spatial extent of the change.
+    pub scope: f64,
+    /// Ease of undoing the work.
+    pub reversibility: f64,
+    /// Reverse-dependency or dependency-chain depth.
+    pub dependency_depth: f64,
+}
+
+impl Default for StrategyCoordinates {
+    fn default() -> Self {
+        Self::neutral()
+    }
+}
+
+impl StrategyCoordinates {
+    /// Construct coordinates and clamp them into `[0.0, 1.0]`.
+    #[must_use]
+    pub fn new(
+        complexity: f64,
+        risk: f64,
+        novelty: f64,
+        confidence: f64,
+        time_pressure: f64,
+        scope: f64,
+        reversibility: f64,
+        dependency_depth: f64,
+    ) -> Self {
+        Self {
+            complexity,
+            risk,
+            novelty,
+            confidence,
+            time_pressure,
+            scope,
+            reversibility,
+            dependency_depth,
+        }
+        .clamped()
+    }
+
+    /// A neutral mid-space point.
+    #[must_use]
+    pub const fn neutral() -> Self {
+        Self {
+            complexity: 0.5,
+            risk: 0.5,
+            novelty: 0.5,
+            confidence: 0.5,
+            time_pressure: 0.5,
+            scope: 0.5,
+            reversibility: 0.5,
+            dependency_depth: 0.5,
+        }
+    }
+
+    /// Return the coordinates as an array for k-d tree queries.
+    #[must_use]
+    pub const fn as_array(self) -> [f64; STRATEGY_DIMENSIONS] {
+        [
+            self.complexity,
+            self.risk,
+            self.novelty,
+            self.confidence,
+            self.time_pressure,
+            self.scope,
+            self.reversibility,
+            self.dependency_depth,
+        ]
+    }
+
+    /// Clamp all dimensions into `[0.0, 1.0]`.
+    #[must_use]
+    pub fn clamped(mut self) -> Self {
+        self.complexity = clamp_unit(self.complexity);
+        self.risk = clamp_unit(self.risk);
+        self.novelty = clamp_unit(self.novelty);
+        self.confidence = clamp_unit(self.confidence);
+        self.time_pressure = clamp_unit(self.time_pressure);
+        self.scope = clamp_unit(self.scope);
+        self.reversibility = clamp_unit(self.reversibility);
+        self.dependency_depth = clamp_unit(self.dependency_depth);
+        self
+    }
+}
+
+/// Situation-specific emotional memory stored in the somatic landscape.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SomaticMarker {
+    /// Coordinates of the strategy region that produced this marker.
+    pub strategy_coords: StrategyCoordinates,
+    /// Aggregate valence in `[-1.0, 1.0]`.
+    pub valence: f64,
+    /// Marker strength in `[0.0, 1.0]`.
+    pub intensity: f64,
+    /// Supporting episodes that formed the marker.
+    pub episodes: Vec<ContentHash>,
+    /// Last time the marker was reinforced or updated.
+    pub updated_at: DateTime<Utc>,
+}
+
+impl SomaticMarker {
+    fn clamped(mut self) -> Self {
+        self.strategy_coords = self.strategy_coords.clamped();
+        self.valence = self.valence.clamp(-1.0, 1.0);
+        self.intensity = clamp_unit(self.intensity);
+        self
+    }
+}
+
+/// Aggregate signal returned by the somatic landscape.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SomaticSignal {
+    /// Weighted average valence after contrarian blending.
+    pub valence: f64,
+    /// Aggregate signal strength in `[0.0, 1.0]`.
+    pub intensity: f64,
+    /// Number of same-valence neighbours used.
+    pub neighbor_count: usize,
+    /// Number of contrarian neighbours mixed in.
+    pub contrarian_count: usize,
+    /// Episodes that contributed to the signal.
+    pub source_episodes: Vec<ContentHash>,
+}
+
+impl Default for SomaticSignal {
+    fn default() -> Self {
+        Self {
+            valence: 0.0,
+            intensity: 0.0,
+            neighbor_count: 0,
+            contrarian_count: 0,
+            source_episodes: Vec::new(),
+        }
+    }
+}
+
+impl SomaticSignal {
+    /// Whether the signal is strong enough to modulate dispatch.
+    #[must_use]
+    pub fn is_actionable(&self) -> bool {
+        self.intensity >= 0.15 && self.valence.abs() >= 0.10
+    }
+}
+
+/// Mutable store of somatic markers indexed by a k-d tree.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SomaticLandscape {
+    /// Persisted marker payloads.
+    #[serde(default)]
+    pub markers: Vec<SomaticMarker>,
+    #[serde(skip, default = "default_somatic_tree")]
+    tree: SomaticTree,
+}
+
+impl Default for SomaticLandscape {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PartialEq for SomaticLandscape {
+    fn eq(&self, other: &Self) -> bool {
+        self.markers == other.markers
+    }
+}
+
+impl SomaticLandscape {
+    /// Construct an empty landscape.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            markers: Vec::new(),
+            tree: default_somatic_tree(),
+        }
+    }
+
+    /// Rebuild the in-memory k-d tree from persisted markers.
+    pub fn rebuild_index(&mut self) {
+        self.tree = default_somatic_tree();
+        for (idx, marker) in self.markers.iter().enumerate() {
+            self.tree
+                .add(&marker.strategy_coords.as_array(), idx as u64);
+        }
+    }
+
+    /// Record a new live outcome into the landscape.
+    pub fn record_outcome(
+        &mut self,
+        strategy_coords: StrategyCoordinates,
+        pleasure: f64,
+        arousal: f64,
+        episode_hash: ContentHash,
+        now: DateTime<Utc>,
+    ) {
+        let marker = SomaticMarker {
+            strategy_coords: strategy_coords.clamped(),
+            valence: pleasure.clamp(-1.0, 1.0),
+            intensity: arousal.abs().clamp(0.0, 1.0),
+            episodes: vec![episode_hash],
+            updated_at: now,
+        };
+        self.record_marker(marker);
+    }
+
+    /// Insert or reinforce a marker.
+    pub fn record_marker(&mut self, marker: SomaticMarker) {
+        let marker = marker.clamped();
+        if marker.intensity <= 0.0 {
+            return;
+        }
+
+        let coords = marker.strategy_coords.as_array();
+        if !self.markers.is_empty() {
+            let nearest = self.tree.nearest_one::<SquaredEuclidean>(&coords);
+            if nearest.distance <= SOMATIC_MERGE_DISTANCE_SQUARED {
+                let idx = nearest.item as usize;
+                if let Some(existing) = self.markers.get_mut(idx) {
+                    let same_valence_family = existing.valence.signum() == marker.valence.signum()
+                        || existing.valence.abs() < 0.10
+                        || marker.valence.abs() < 0.10;
+                    if same_valence_family {
+                        merge_markers(existing, &marker);
+                        self.rebuild_index();
+                        return;
+                    }
+                }
+            }
+        }
+
+        let item = self.markers.len() as u64;
+        self.markers.push(marker);
+        self.tree.add(&coords, item);
+    }
+
+    /// Query the landscape for the emotional shape of a strategy region.
+    #[must_use]
+    pub fn query(&self, strategy_coords: StrategyCoordinates, k: usize) -> SomaticSignal {
+        if self.markers.is_empty() {
+            return SomaticSignal::default();
+        }
+
+        let coords = strategy_coords.clamped().as_array();
+        let neighbor_count = k.max(1).min(self.markers.len());
+        let neighbors = self
+            .tree
+            .nearest_n::<SquaredEuclidean>(&coords, neighbor_count);
+        let dominant_sign = dominant_valence_sign(&neighbors, &self.markers);
+        let congruent = self.aggregate_signal(neighbors.iter().filter_map(|neighbor| {
+            let idx = neighbor.item as usize;
+            let marker = self.markers.get(idx)?;
+            (marker.valence.signum() == dominant_sign
+                || (dominant_sign == 0.0 && marker.valence.abs() < 0.10))
+                .then_some((neighbor.distance, idx))
+        }));
+
+        let contrarian_target = ((neighbor_count as f64) * CONTRARIAN_FRACTION).ceil() as usize;
+        let contrarian_target = contrarian_target.min(self.markers.len());
+        if contrarian_target == 0 || congruent.valence.abs() < 0.05 {
+            return SomaticSignal {
+                neighbor_count,
+                ..congruent
+            };
+        }
+
+        let congruent_sign = if congruent.valence.abs() >= 0.05 {
+            congruent.valence.signum()
+        } else {
+            dominant_sign
+        };
+        let mut contrarian_candidates = self
+            .markers
+            .iter()
+            .enumerate()
+            .filter(|(_, marker)| {
+                marker.valence.signum() != 0.0 && marker.valence.signum() != congruent_sign
+            })
+            .map(|(idx, marker)| {
+                (
+                    squared_euclidean(&coords, &marker.strategy_coords.as_array()),
+                    idx,
+                )
+            })
+            .collect::<Vec<_>>();
+        contrarian_candidates.sort_by(|left, right| left.0.total_cmp(&right.0));
+        contrarian_candidates.truncate(contrarian_target);
+
+        if contrarian_candidates.is_empty() {
+            return SomaticSignal {
+                neighbor_count,
+                ..congruent
+            };
+        }
+
+        let contrarian = self.aggregate_signal(contrarian_candidates.into_iter());
+        SomaticSignal {
+            valence: (0.85 * congruent.valence + 0.15 * contrarian.valence).clamp(-1.0, 1.0),
+            intensity: (0.85 * congruent.intensity + 0.15 * contrarian.intensity).clamp(0.0, 1.0),
+            neighbor_count,
+            contrarian_count: contrarian.neighbor_count,
+            source_episodes: union_hashes(
+                congruent.source_episodes.into_iter(),
+                contrarian.source_episodes.into_iter(),
+            ),
+        }
+    }
+
+    fn aggregate_signal<I>(&self, items: I) -> SomaticSignal
+    where
+        I: IntoIterator<Item = (f64, usize)>,
+    {
+        let mut total_valence = 0.0;
+        let mut total_intensity = 0.0;
+        let mut total_weight = 0.0;
+        let mut count = 0_usize;
+        let mut episodes = Vec::new();
+
+        for (distance_sq, idx) in items {
+            let Some(marker) = self.markers.get(idx) else {
+                continue;
+            };
+            let distance_weight = 1.0 / (1.0 + distance_sq.max(0.0));
+            let weight = distance_weight * marker.intensity.max(0.05);
+            total_valence += weight * marker.valence;
+            total_intensity += weight * marker.intensity;
+            total_weight += weight;
+            count += 1;
+            extend_unique_hashes(&mut episodes, marker.episodes.iter().copied());
+        }
+
+        if total_weight <= 0.0 || count == 0 {
+            return SomaticSignal::default();
+        }
+
+        SomaticSignal {
+            valence: (total_valence / total_weight).clamp(-1.0, 1.0),
+            intensity: (total_intensity / total_weight).clamp(0.0, 1.0),
+            neighbor_count: count,
+            contrarian_count: 0,
+            source_episodes: episodes,
+        }
     }
 }
 
@@ -221,6 +588,9 @@ pub struct DaimonState {
     /// Half-life in hours for state decay.
     #[serde(default = "default_half_life_hours")]
     pub half_life_hours: f64,
+    /// Situation-specific somatic markers.
+    #[serde(default)]
+    pub somatic_landscape: SomaticLandscape,
     /// Optional persistence path for best-effort autosaves.
     #[serde(skip, default)]
     persistence_path: Option<PathBuf>,
@@ -239,6 +609,7 @@ impl DaimonState {
         Self {
             state: AffectState::default(),
             half_life_hours: default_half_life_hours(),
+            somatic_landscape: SomaticLandscape::new(),
             persistence_path: None,
         }
     }
@@ -260,6 +631,7 @@ impl DaimonState {
             .ok()
             .and_then(|json| serde_json::from_str::<Self>(&json).ok())
             .unwrap_or_default();
+        state.rebuild_indexes();
         state.persistence_path = Some(path.to_path_buf());
         state
     }
@@ -283,10 +655,52 @@ impl DaimonState {
         self.state.emotional_tag(trigger)
     }
 
+    /// Query the somatic landscape for a strategy region.
+    #[must_use]
+    pub fn query_somatic(&self, strategy_coords: StrategyCoordinates) -> SomaticSignal {
+        self.somatic_landscape
+            .query(strategy_coords, DEFAULT_SOMATIC_NEIGHBORS)
+    }
+
+    /// Record a task outcome into the somatic landscape using the current affect state.
+    pub fn record_somatic_outcome(
+        &mut self,
+        strategy_coords: StrategyCoordinates,
+        episode_hash: ContentHash,
+    ) {
+        let now = Utc::now();
+        self.somatic_landscape.record_outcome(
+            strategy_coords,
+            self.state.pad.pleasure,
+            self.state.pad.arousal,
+            episode_hash,
+            now,
+        );
+        self.autosave();
+    }
+
+    /// Modulate dispatch parameters using both the global affect state and the
+    /// situation-specific somatic landscape.
+    pub fn modulate_with_strategy(
+        &self,
+        params: &mut DispatchParams,
+        strategy_coords: StrategyCoordinates,
+    ) {
+        self.modulate(params);
+        let state = self.query();
+        let signal = self.query_somatic(strategy_coords);
+        apply_somatic_bias(params, &state, &signal);
+    }
+
     fn autosave(&self) {
         if let Some(path) = self.persistence_path.as_ref() {
             let _ = self.persist(path);
         }
+    }
+
+    fn rebuild_indexes(&mut self) {
+        self.somatic_landscape.rebuild_index();
+        self.state.refresh_behavioral_state();
     }
 }
 
@@ -451,6 +865,133 @@ fn decay_factor(delta_hours: f64, half_life_hours: f64) -> f64 {
     0.5_f64.powf(delta_hours / half_life_hours)
 }
 
+fn clamp_unit(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.5
+    }
+}
+
+fn squared_euclidean(left: &[f64; STRATEGY_DIMENSIONS], right: &[f64; STRATEGY_DIMENSIONS]) -> f64 {
+    left.iter()
+        .zip(right.iter())
+        .map(|(a, b)| {
+            let delta = a - b;
+            delta * delta
+        })
+        .sum()
+}
+
+fn dominant_valence_sign(
+    neighbors: &[kiddo::NearestNeighbour<f64, u64>],
+    markers: &[SomaticMarker],
+) -> f64 {
+    let mut weighted_valence = 0.0;
+    for neighbor in neighbors {
+        let Some(marker) = markers.get(neighbor.item as usize) else {
+            continue;
+        };
+        let distance_weight = 1.0 / (1.0 + neighbor.distance.max(0.0));
+        weighted_valence += distance_weight * marker.intensity.max(0.05) * marker.valence;
+    }
+    let sign = weighted_valence.signum();
+    if sign != 0.0 {
+        return sign;
+    }
+    neighbors
+        .iter()
+        .find_map(|neighbor| {
+            markers
+                .get(neighbor.item as usize)
+                .map(|marker| marker.valence.signum())
+                .filter(|sign| *sign != 0.0)
+        })
+        .unwrap_or(0.0)
+}
+
+fn merge_markers(existing: &mut SomaticMarker, incoming: &SomaticMarker) {
+    let total_intensity = existing.intensity + incoming.intensity;
+    let existing_weight = if total_intensity > 0.0 {
+        existing.intensity / total_intensity
+    } else {
+        0.5
+    };
+    let incoming_weight = 1.0 - existing_weight;
+
+    let left = existing.strategy_coords.as_array();
+    let right = incoming.strategy_coords.as_array();
+    existing.strategy_coords = StrategyCoordinates::new(
+        left[0] * existing_weight + right[0] * incoming_weight,
+        left[1] * existing_weight + right[1] * incoming_weight,
+        left[2] * existing_weight + right[2] * incoming_weight,
+        left[3] * existing_weight + right[3] * incoming_weight,
+        left[4] * existing_weight + right[4] * incoming_weight,
+        left[5] * existing_weight + right[5] * incoming_weight,
+        left[6] * existing_weight + right[6] * incoming_weight,
+        left[7] * existing_weight + right[7] * incoming_weight,
+    );
+    existing.valence =
+        (existing.valence * existing_weight + incoming.valence * incoming_weight).clamp(-1.0, 1.0);
+    existing.intensity = (total_intensity).min(1.0);
+    existing.updated_at = existing.updated_at.max(incoming.updated_at);
+    extend_unique_hashes(&mut existing.episodes, incoming.episodes.iter().copied());
+}
+
+fn union_hashes<I, J>(left: I, right: J) -> Vec<ContentHash>
+where
+    I: IntoIterator<Item = ContentHash>,
+    J: IntoIterator<Item = ContentHash>,
+{
+    let mut hashes = Vec::new();
+    extend_unique_hashes(&mut hashes, left);
+    extend_unique_hashes(&mut hashes, right);
+    hashes
+}
+
+fn extend_unique_hashes<I>(hashes: &mut Vec<ContentHash>, incoming: I)
+where
+    I: IntoIterator<Item = ContentHash>,
+{
+    for hash in incoming {
+        if !hashes.contains(&hash) {
+            hashes.push(hash);
+        }
+    }
+}
+
+fn apply_somatic_bias(params: &mut DispatchParams, state: &AffectState, signal: &SomaticSignal) {
+    if !signal.is_actionable() {
+        return;
+    }
+
+    if signal.valence <= -0.35 {
+        params.model = promote_model(&params.model);
+        params.turn_limit = params.turn_limit.saturating_add(6);
+        if state.behavioral_state != BehavioralState::Struggling {
+            params.strategy = DispatchStrategy::Conservative;
+        }
+    } else if signal.valence <= -0.15 {
+        params.turn_limit = params.turn_limit.saturating_add(3);
+        if matches!(
+            params.strategy,
+            DispatchStrategy::Balanced | DispatchStrategy::Exploratory
+        ) {
+            params.strategy = DispatchStrategy::Conservative;
+        }
+    } else if signal.valence >= 0.35 {
+        if state.behavioral_state != BehavioralState::Struggling {
+            params.model = demote_model(&params.model);
+            params.turn_limit = params.turn_limit.saturating_sub(3);
+            params.strategy = DispatchStrategy::Exploratory;
+        }
+    } else if signal.valence >= 0.15 && state.behavioral_state != BehavioralState::Struggling {
+        params.turn_limit = params.turn_limit.saturating_sub(1);
+    }
+
+    params.effort = params.strategy.effort_label().to_string();
+}
+
 /// Queue-wait arousal bump used by runtime feedback and dispatch heuristics.
 #[must_use]
 pub fn queue_wait_arousal(wait_hours: f64) -> f64 {
@@ -495,6 +1036,10 @@ mod tests {
 
     fn temp_state_path(tmp: &TempDir) -> PathBuf {
         tmp.path().join(".roko").join("daimon").join("affect.json")
+    }
+
+    fn strategy(complexity: f64, risk: f64, novelty: f64) -> StrategyCoordinates {
+        StrategyCoordinates::new(complexity, risk, novelty, 0.5, 0.5, complexity, 0.5, risk)
     }
 
     #[test]
@@ -592,5 +1137,93 @@ mod tests {
         assert_eq!(tag.trigger, "task_outcome");
         assert!(tag.intensity > 0.0);
         assert_eq!(tag.pad, state.query().pad);
+    }
+
+    #[test]
+    fn somatic_landscape_merges_nearby_markers() {
+        let mut landscape = SomaticLandscape::new();
+        let first = ContentHash::of(b"episode-a");
+        let second = ContentHash::of(b"episode-b");
+
+        landscape.record_outcome(strategy(0.7, 0.8, 0.6), -0.7, 0.8, first, Utc::now());
+        landscape.record_outcome(strategy(0.72, 0.82, 0.58), -0.5, 0.6, second, Utc::now());
+
+        assert_eq!(landscape.markers.len(), 1);
+        assert_eq!(landscape.markers[0].episodes.len(), 2);
+        assert!(landscape.markers[0].valence < -0.55);
+    }
+
+    #[test]
+    fn somatic_query_blends_contrarian_markers() {
+        let mut landscape = SomaticLandscape::new();
+        landscape.record_outcome(
+            strategy(0.8, 0.8, 0.6),
+            -0.8,
+            0.9,
+            ContentHash::of(b"negative-near"),
+            Utc::now(),
+        );
+        landscape.record_outcome(
+            strategy(0.82, 0.78, 0.62),
+            -0.6,
+            0.8,
+            ContentHash::of(b"negative-near-2"),
+            Utc::now(),
+        );
+        landscape.record_outcome(
+            strategy(0.79, 0.81, 0.59),
+            0.9,
+            0.7,
+            ContentHash::of(b"positive-contrarian"),
+            Utc::now(),
+        );
+
+        let signal = landscape.query(strategy(0.8, 0.8, 0.6), 5);
+
+        assert!(signal.valence < 0.0);
+        assert!(signal.valence > -0.8);
+        assert_eq!(signal.contrarian_count, 1);
+        assert_eq!(signal.source_episodes.len(), 3);
+    }
+
+    #[test]
+    fn modulate_with_strategy_uses_negative_somatic_signal() {
+        let mut state = DaimonState::new();
+        state.somatic_landscape.record_outcome(
+            strategy(0.8, 0.8, 0.7),
+            -0.9,
+            0.9,
+            ContentHash::of(b"negative-marker"),
+            Utc::now(),
+        );
+
+        let mut params = DispatchParams::new("claude-haiku-4-5", 20);
+        state.modulate_with_strategy(&mut params, strategy(0.8, 0.8, 0.7));
+
+        assert!(params.model.contains("sonnet") || params.model.contains("opus"));
+        assert!(params.turn_limit >= 26);
+        assert_eq!(params.strategy, DispatchStrategy::Conservative);
+    }
+
+    #[test]
+    fn load_or_new_rebuilds_somatic_index() {
+        let tmp = TempDir::new().unwrap_or_else(|err| panic!("tempdir: {err}"));
+        let path = temp_state_path(&tmp);
+        let mut state = DaimonState::new().with_persistence_path(&path);
+        state.somatic_landscape.record_outcome(
+            strategy(0.3, 0.2, 0.4),
+            0.7,
+            0.6,
+            ContentHash::of(b"persisted-marker"),
+            Utc::now(),
+        );
+        state.persist(&path).expect("persist daimon");
+
+        let reloaded = DaimonState::load_or_new(&path);
+        let signal = reloaded.query_somatic(strategy(0.3, 0.2, 0.4));
+
+        assert_eq!(reloaded.somatic_landscape.markers.len(), 1);
+        assert!(signal.valence > 0.5);
+        assert!(signal.intensity > 0.5);
     }
 }

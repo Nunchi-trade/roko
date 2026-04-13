@@ -290,7 +290,7 @@ This ensures that an agent with no recent events settles at "uncertain" rather t
 
 **Implemented**: shared `PadVector` in `roko-core`, `AffectState` and explicit `BehavioralState` in `roko-daimon`, decay mechanics, appraisal rules, persistence, emotion-tag generation on live Daimon output paths, and live PAD injection into prompt assembly and cascade routing.
 
-**Gaps**: The golem implementation still needs to be fully absorbed into the standalone crate per the dissolution plan. PAD cosine similarity / mood-congruent retrieval is now wired into context assembly, but the richer somatic landscape and full VCG auction integration are still missing.
+**Gaps**: The old golem split is no longer the blocker: `roko-daimon` is the canonical affect crate, and Daimon-backed PAD state is already wired into context assembly, prompting, routing, and somatic modulation. The remaining gaps are the richer layers on top of that base: direct somatic scoring inside Neuro retrieval, dream-managed emotional maintenance, and full VCG auction integration.
 
 ---
 

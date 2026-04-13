@@ -44,10 +44,12 @@ use roko_core::tool::TraceId;
 use roko_core::tool::trace::{FailureKind, FailureTrace, TraceStep};
 use roko_core::tool::{FormatBandit, ProfileBandit, ToolTraceEvent, TraceSink};
 use roko_core::{
-    AgentRole, Body, Budget, Composer, Context, Engram, Gate, Kind, OperatingFrequency, PhaseKind,
-    Provenance, Substrate, TaskCategory, Verdict,
+    AgentRole, Body, Budget, Composer, ContentHash, Context, Engram, Gate, Kind,
+    OperatingFrequency, PhaseKind, Provenance, Substrate, TaskCategory, Verdict,
 };
-use roko_daimon::{AffectEngine as _, AffectEvent, DaimonState, DispatchParams};
+use roko_daimon::{
+    AffectEngine as _, AffectEvent, DaimonState, DispatchParams, StrategyCoordinates,
+};
 use roko_dreams::{DreamAgentConfig, DreamLoopConfig, DreamRunner};
 use roko_fs::FileSubstrate;
 use roko_fs::RokoLayout;
@@ -1673,6 +1675,76 @@ fn cascade_routing_context(
         previous_model: None,
         plan_context_tokens: None,
     }
+}
+
+fn coding_strategy_coordinates(
+    runner: &PlanRunner,
+    plan_id: &str,
+    task_id: &str,
+    task_def: Option<&crate::task_parser::TaskDef>,
+) -> StrategyCoordinates {
+    let affect = runner.daimon.query();
+    let familiarity = runner.crate_familiarity_tracker.score_for_task(task_def);
+    let tracker = runner.task_trackers.get(plan_id);
+    let gate_failure_pressure = tracker
+        .map(|tracker| f64::from(tracker.gate_failure_count.min(5)) / 5.0)
+        .unwrap_or(0.0);
+    let is_current_impl_task =
+        tracker.and_then(|tracker| tracker.last_impl_task_id.as_deref()) == Some(task_id);
+
+    let complexity = match task_def.map(|task| task.tier.as_str()).unwrap_or("focused") {
+        "mechanical" | "fast" => 0.15,
+        "focused" | "standard" => 0.35,
+        "integrative" => 0.60,
+        "architectural" | "complex" => 0.85,
+        "premium" => 0.95,
+        _ => 0.50,
+    };
+    let file_count = task_def.map_or(0.0, |task| task.files.len() as f64);
+    let verify_count = task_def.map_or(0.0, |task| task.verify.len() as f64);
+    let dependency_count = task_def.map_or(0.0, |task| task.depends_on.len() as f64);
+    let max_loc = task_def
+        .and_then(|task| task.max_loc)
+        .map(f64::from)
+        .unwrap_or(50.0);
+
+    let scope = (0.55 * complexity
+        + 0.30 * (file_count / 8.0).min(1.0)
+        + 0.15 * (max_loc / 400.0).min(1.0))
+    .clamp(0.0, 1.0);
+    let novelty = (1.0 - familiarity).clamp(0.0, 1.0);
+    let risk = (0.40 * complexity
+        + 0.25 * novelty
+        + 0.20 * (verify_count / 4.0).min(1.0)
+        + 0.15 * gate_failure_pressure)
+        .clamp(0.0, 1.0);
+    let time_pressure =
+        (0.70 * gate_failure_pressure + 0.30 * f64::from(is_current_impl_task)).clamp(0.0, 1.0);
+    let reversibility = (1.0
+        - (0.60 * scope + 0.20 * (dependency_count / 6.0).min(1.0) + 0.20 * gate_failure_pressure))
+        .clamp(0.0, 1.0);
+    let dependency_depth =
+        (0.60 * (dependency_count / 6.0).min(1.0) + 0.40 * complexity).clamp(0.0, 1.0);
+
+    StrategyCoordinates::new(
+        complexity,
+        risk,
+        novelty,
+        affect.confidence,
+        time_pressure,
+        scope,
+        reversibility,
+        dependency_depth,
+    )
+}
+
+fn somatic_episode_hash(
+    plan_id: &str,
+    task_id: &str,
+    outcome: &str,
+    discriminator: &str,
+) -> ContentHash {
+    ContentHash::of(format!("somatic:{plan_id}:{task_id}:{outcome}:{discriminator}").as_bytes())
 }
 
 fn cascade_context_vec(
@@ -6177,6 +6249,10 @@ impl PlanRunner {
             task_id: task_id.to_string(),
             succeeded: true,
         });
+        self.daimon.record_somatic_outcome(
+            coding_strategy_coordinates(self, plan_id, task_id, task_def.as_ref()),
+            somatic_episode_hash(plan_id, task_id, "success", &success_episode_id),
+        );
 
         // Emit observability trace event for the successful agent dispatch.
         self.emit_agent_trace(plan_id, task_id, true, wall_ms);
@@ -7498,6 +7574,10 @@ impl PlanRunner {
             task_id: task_id.to_string(),
             succeeded: false,
         });
+        self.daimon.record_somatic_outcome(
+            coding_strategy_coordinates(self, plan_id, task_id, task_def.as_ref()),
+            somatic_episode_hash(plan_id, task_id, "failure", &error.to_string()),
+        );
 
         tracing::error!(
             plan_id = %plan_id,
@@ -8623,7 +8703,10 @@ impl PlanRunner {
         let mut dispatch_params =
             DispatchParams::new(selected_model.clone(), frequency.turn_limit());
         dispatch_params.effort = self.config.agent.effort.clone();
-        self.daimon.modulate(&mut dispatch_params);
+        self.daimon.modulate_with_strategy(
+            &mut dispatch_params,
+            coding_strategy_coordinates(self, plan_id, task, task_def.as_ref()),
+        );
         let selected_model = dispatch_params.model;
         let dispatch_turn_limit = dispatch_params.turn_limit;
         let dispatch_effort = dispatch_params.effort.clone();

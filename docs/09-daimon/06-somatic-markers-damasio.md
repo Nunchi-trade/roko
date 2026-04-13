@@ -547,11 +547,11 @@ The weak valence (+0.11) signals that this region of strategy space has produced
 
 ## Current Status and Gaps
 
-**Specified**: Full `SomaticLandscape` and `SomaticMarker` structs in `refactoring-prd/09-innovations.md` §III. Query protocol, contrarian retrieval, response mapping, event emission.
+**Implemented**: `roko-daimon` now has a persisted `SomaticLandscape` backed by `kiddo`, with `SomaticMarker`, `SomaticSignal`, nearest-neighbor queries, marker merging, contrarian blending, persistence/restore, and live routing modulation through `DaimonState::modulate_with_strategy(...)`. `roko-cli` projects coding tasks into the 8D strategy space and records task outcomes into the landscape.
 
-**Not implemented**: The somatic landscape is not yet built in `roko-daimon`. The legacy `golem-daimon` crate specified `kiddo` as the k-d tree dependency, but no code exists for the landscape data structure or query methods. This is the Daimon's largest implementation gap.
+**Still missing**: Dream-created marker consolidation, emotional depotentiation, explicit `SomaticMarkerFired` event emission, externally configurable domain axis sets, and direct fusion of somatic scores into Neuro knowledge retrieval rather than only dispatch modulation.
 
-**Dependencies**: Requires the 8-dimensional strategy space definition (see [08-8-dimensional-strategy-space.md](./08-8-dimensional-strategy-space.md)) and dream consolidation infrastructure (see topic [03-dreams](../10-dreams/INDEX.md)).
+**Dependencies**: The live coding-domain path no longer depends on Dreams to exist, but fuller PRD parity still requires the 8-dimensional strategy-space definitions to become domain-extensible and the Dreams subsystem to maintain markers over time.
 
 ---
 

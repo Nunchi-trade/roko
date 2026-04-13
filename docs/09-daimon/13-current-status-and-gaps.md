@@ -13,7 +13,7 @@
 
 ## Abstract
 
-The Daimon affect engine still has two conceptual lineages in the docs, but the active codebase has already moved much of the shared affect vocabulary into `roko-core`. The core PAD vector, appraisal pipeline, explicit behavioral-state classification, and baseline behavioral modulation are functional. The somatic landscape, collective contagion, VCG bidding integration, and several appraisal triggers are still specified but not built. This document catalogs the exact state of each component, references the implementation priority tiers, and lists the legacy source files that were deliberately skipped during migration.
+The Daimon affect engine has moved the shared emotional vocabulary into `roko-core`, while `roko-daimon` now owns the live PAD state, explicit behavioral-state classification, baseline behavioral modulation, and a real somatic landscape for coding-task routing. The largest remaining gaps are no longer the existence of a fast affective path, but the richer PRD control surfaces layered on top of it: dream-maintained marker consolidation, collective contagion, VCG bidding integration, and several frontier appraisal triggers. This document catalogs the exact state of each component, references the implementation priority tiers, and lists the legacy source files that were deliberately skipped during migration.
 
 ---
 
@@ -34,53 +34,20 @@ The Daimon affect engine still has two conceptual lineages in the docs, but the 
 | Temporal decay | **Complete** | Exponential decay: `factor = 0.5 ^ (elapsed_hours / half_life_hours)` |
 | Behavioral state classification | **Complete** | Explicit `BehavioralState::classify(pad, confidence)` stored on affect state |
 | Behavioral modulation | **Complete** | Model promotion/demotion (haiku↔sonnet↔opus), turn limit adjustment, strategy selection keyed off behavioral state |
+| `SomaticLandscape` | **Partial** | Persisted `SomaticMarker` store backed by a `kiddo` k-d tree over the 8D coding strategy space |
+| Somatic query + modulation | **Partial** | `query_somatic()` and `modulate_with_strategy()` blend nearby and contrarian markers to bias dispatch before task execution |
+| Somatic persistence / restore | **Complete** | Marker payloads persist with Daimon state, and `load_or_new()` rebuilds the in-memory index |
 | Persistence | **Complete** | Atomic file write (write to .tmp, rename) with auto-save on appraise |
 | Load/restore | **Complete** | `load_or_new()` loads from disk or creates fresh neutral state |
 | `DispatchStrategy` enum | **Complete** | 5 variants with effort labels: Conservative, Balanced, Exploratory, Escalating, Proactive |
 | `DispatchParams` struct | **Complete** | model + turn_limit + strategy + effort |
 | `queue_wait_arousal()` | **Complete** | Public function for queue-wait arousal computation |
 | `EmotionalTag` generation | **Partial** | Daimon derives emotional tags, the orchestrator stamps conductor engrams and episodes with them, and Neuro now preserves both emotional tags and derived emotional provenance metadata during consolidation and direct knowledge emission |
-| Tests | **Complete** | Appraisal, persistence, modulation, behavioral-state, and emotional-tag coverage |
+| Tests | **Complete** | Appraisal, persistence, modulation, behavioral-state, emotional-tag, and somatic-landscape coverage |
 
-### roko-golem/daimon.rs (per-task affect engine)
+### Removed legacy affect implementation
 
-**File**: `crates/roko-golem/src/daimon.rs` (972 lines)
-
-| Component | Status | Description |
-|---|---|---|
-| `AffectState` struct | **Complete** | 4 f64 fields (pleasure, arousal, dominance, confidence) + timestamp |
-| `AffectEngine` struct | **Complete** | Per-task HashMap<String, AffectState> + half_life + persistence |
-| `AffectOctant` enum | **Complete** | 8 octants with `from_pad()` classification and `label()` |
-| `AffectBehaviorModulation` struct | **Complete** | 7 behavioral parameters (strategy, exploration_rate, prefer_proven_playbooks, model_tier_escalation, extra_retries, trigger_dream_cycles, run_maintenance_tasks) |
-| 5 behavior factory methods | **Complete** | balanced(), anxious(), confident(), angry(), bored() |
-| Per-task appraisal methods | **Complete** | on_task_success(), on_task_failure(), on_dream_failure(), on_gate_pass(), on_gate_fail(), on_time_pressure(), on_blocked(), queue_wait_arousal() |
-| Signal emission | **Complete** | Emits affect signals to JSONL when confidence drops below 0.3 or valence crosses extremes |
-| Atomic persistence | **Complete** | save_to() with tmp+rename pattern |
-| Tests | **Complete** | 13 tests covering all appraisal methods, octant classification, behavior modulation, decay, persistence |
-
-### Overlap Between the Two Implementations
-
-| Feature | roko-daimon | roko-golem/daimon.rs | Notes |
-|---|---|---|---|
-| PAD vector | Shared `roko_core::PadVector` | 4 inline f64 fields | Canonical shared type now exists; older docs still mention the legacy split |
-| Appraisal rules | Via `AffectEvent` enum match | Via named methods (on_gate_pass, etc.) | Same deltas, different API surface |
-| Behavioral modulation | `modulate()` on DispatchParams | `behavior_modulation()` on AffectOctant | Different output types |
-| Octant classification | Not present | `AffectOctant::from_pad()` | roko-golem only |
-| Per-task tracking | Not present (single global state) | `HashMap<String, AffectState>` | roko-golem only |
-| Signal emission | Not present | Emits to JSONL | roko-golem only |
-| Persistence | Atomic file write | Atomic file write | Same pattern |
-| Half-life | 4.0 hours | 4.0 hours | Same value |
-
-### Consolidation Plan (Tier 0C)
-
-The plan (from `refactoring-prd/07-implementation-priorities.md` Tier 0C) is to dissolve `roko-golem` and move affect logic into `roko-daimon`. The consolidated crate should:
-
-1. Keep `roko-daimon`'s clean `AffectEngine` trait interface
-2. Add `roko-golem`'s per-task tracking (`HashMap<String, AffectState>`)
-3. Add `roko-golem`'s octant classification (`AffectOctant::from_pad()`)
-4. Add `roko-golem`'s behavior modulation struct (`AffectBehaviorModulation`)
-5. Add `roko-golem`'s signal emission
-6. Remove `roko-golem/src/daimon.rs` after migration
+The old `roko-golem/src/daimon.rs` path has been removed from the active codebase. The migration outcome is narrower than the historical per-task design: `roko-daimon` is now the canonical affect engine, with a single persisted affect state plus a persisted somatic landscape used to bias dispatch. The remaining work is feature depth, not crate consolidation.
 
 ---
 
@@ -115,16 +82,11 @@ These are fully specified in the legacy PRDs and/or `refactoring-prd` but have n
 ### Unimplemented Features by Category
 
 **Somatic Landscape**:
-- `SomaticLandscape` struct with k-d tree over 8D strategy space
-- `SomaticMarker` struct with valence, intensity, episode provenance
-- Pre-action query protocol (nearest-neighbor search)
-- Marker creation from significant outcomes
-- Marker consolidation during dream cycles
+- Dream-time marker consolidation and emotional depotentiation
 - `SomaticMarkerFired` event emission
-- 15% contrarian retrieval within somatic queries
-- Strategy space computer (`StrategySpaceComputer` trait)
-- 8D dimension computation for coding domain
-- `kiddo` crate dependency
+- Strategy-space abstractions beyond the current coding-task coordinate projection
+- External configuration for alternate domain axis sets
+- Direct use of somatic scores inside Neuro retrieval and context bidding, not just dispatch modulation
 
 **Emotional Memory Integration**:
 - Retrieval-time use of `EmotionalTag` is now partially implemented in `ContextAssembler`
@@ -190,24 +152,24 @@ Based on `refactoring-prd/07-implementation-priorities.md`:
 
 | Tier | Tasks | Status |
 |---|---|---|
-| **0C** | Dissolve roko-golem, consolidate affect logic into roko-daimon | Not started |
+| **0C** | Dissolve roko-golem, consolidate affect logic into roko-daimon | **Complete** |
 | **2D** | Daimon PAD tracking (F1-F5, F9) — core appraisal and modulation | **Complete** |
 | **2E** | Behavioral modulation (F5) — behavioral states and dispatch strategy | **Complete** |
 | **2D+** | Affect on episodes (F6), affect→SystemPromptBuilder (F7), affect→CascadeRouter (F8) | Mostly complete; somatic-landscape-backed retrieval and broader cross-subsystem weighting remain |
-| **2G** | Somatic landscape, 8D strategy space, k-d tree | Not started |
+| **2G** | Somatic landscape, 8D strategy space, k-d tree | Partial |
 | **2H** | Emotional memory integration (EmotionalTag, four-factor retrieval) | Partial |
 | **2I** | Dream-daimon bridge (emotional load, depotentiation) | Not started |
 | **2M** | Collective contagion, somatic field, C-Factor | Not started |
 
 ### Recommended Next Steps
 
-1. **Consolidate crates** (Tier 0C): Move roko-golem/daimon.rs into roko-daimon. This unblocks all subsequent work by providing a single canonical implementation.
+1. **Deepen somatic-landscape semantics**: add dream-driven consolidation / depotentiation, explicit events, and domain-extensible coordinate strategies on top of the now-working routing path.
 
-2. **Finish emotional-memory scoring** (F6 follow-through): retrieval weighting now uses emotional provenance and emotional diversity in Neuro; the remaining work is consolidation priority and somatic-landscape-backed retrieval.
+2. **Finish emotional-memory scoring**: retrieval weighting now uses emotional provenance and emotional diversity in Neuro; the remaining work is direct somatic-landscape-backed knowledge selection and consolidation priority.
 
-3. **Implement SomaticLandscape** (F9): build the 8D marker space and fast query path so Daimon has a real System 1 pre-filter rather than PAD-only modulation.
+3. **Implement VCG affect bidding**: connect PAD urgency / affect-weight multipliers into the cross-subsystem context budget auction.
 
-4. **Implement VCG affect bidding** (F10): connect PAD urgency / affect-weight multipliers into the cross-subsystem context budget auction.
+4. **Layer in collective contagion and frontier appraisal triggers** once the single-agent affect path is fully exploited.
 
 ---
 
